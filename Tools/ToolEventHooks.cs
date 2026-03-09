@@ -71,6 +71,52 @@ public delegate Task SkillErrorHook(string skillName, string error);
 public delegate Task SkillDisabledHook(string skillName);
 
 /// <summary>
+/// Hook event triggered when a heartbeat is added
+/// </summary>
+/// <param name="beatName">Name of the heartbeat</param>
+/// <param name="task">Task/command for the heartbeat</param>
+/// <param name="executionId">Unique ID for this operation</param>
+public delegate Task HeartbeatAddedHook(string beatName, string task, string executionId);
+
+/// <summary>
+/// Hook event triggered when a heartbeat is removed
+/// </summary>
+/// <param name="beatName">Name of the heartbeat</param>
+/// <param name="executionId">Unique ID for this operation</param>
+public delegate Task HeartbeatRemovedHook(string beatName, string executionId);
+
+/// <summary>
+/// Hook event triggered when a heartbeat is paused
+/// </summary>
+/// <param name="beatName">Name of the heartbeat</param>
+/// <param name="executionId">Unique ID for this operation</param>
+public delegate Task HeartbeatPausedHook(string beatName, string executionId);
+
+/// <summary>
+/// Hook event triggered when a heartbeat is resumed
+/// </summary>
+/// <param name="beatName">Name of the heartbeat</param>
+/// <param name="executionId">Unique ID for this operation</param>
+public delegate Task HeartbeatResumedHook(string beatName, string executionId);
+
+/// <summary>
+/// Hook event triggered when a heartbeat executes successfully
+/// </summary>
+/// <param name="beatName">Name of the heartbeat</param>
+/// <param name="success">Whether the heartbeat succeeded</param>
+/// <param name="timestamp">Timestamp of execution</param>
+public delegate Task HeartbeatExecutedHook(string beatName, bool success, string timestamp);
+
+/// <summary>
+/// Hook event triggered when a heartbeat is missed
+/// </summary>
+/// <param name="beatName">Name of the heartbeat</param>
+/// <param name="missedCount">Number of consecutive misses</param>
+/// <param name="maxMissed">Maximum allowed misses</param>
+/// <param name="error">Error message if any</param>
+public delegate Task HeartbeatMissedHook(string beatName, int missedCount, int maxMissed, string error);
+
+/// <summary>
 /// Central event hook registry for OpenClaw-inspired lifecycle events
 /// Allows agents to subscribe to tool and skill events for observability and customization
 /// </summary>
@@ -90,6 +136,14 @@ public class ToolEventHookRegistry
     public event SkillPostEnableHook? OnSkillPostEnable;
     public event SkillErrorHook? OnSkillError;
     public event SkillDisabledHook? OnSkillDisabled;
+    
+    // Heartbeat hooks
+    public event HeartbeatAddedHook? OnHeartbeatAdded;
+    public event HeartbeatRemovedHook? OnHeartbeatRemoved;
+    public event HeartbeatPausedHook? OnHeartbeatPaused;
+    public event HeartbeatResumedHook? OnHeartbeatResumed;
+    public event HeartbeatExecutedHook? OnHeartbeatExecuted;
+    public event HeartbeatMissedHook? OnHeartbeatMissed;
     
     /// <summary>
     /// Invoke pre-execute hook for a tool
@@ -245,6 +299,114 @@ public class ToolEventHookRegistry
             try
             {
                 await OnSkillDisabled(skillName);
+            }
+            catch
+            {
+                // Silently swallow hook errors
+            }
+        }
+    }
+    
+    /// <summary>
+    /// Invoke heartbeat added hook
+    /// </summary>
+    public async Task InvokeHeartbeatAddedAsync(string beatName, string task, string executionId)
+    {
+        if (OnHeartbeatAdded != null)
+        {
+            try
+            {
+                await OnHeartbeatAdded(beatName, task, executionId);
+            }
+            catch
+            {
+                // Silently swallow hook errors
+            }
+        }
+    }
+    
+    /// <summary>
+    /// Invoke heartbeat removed hook
+    /// </summary>
+    public async Task InvokeHeartbeatRemovedAsync(string beatName, string executionId)
+    {
+        if (OnHeartbeatRemoved != null)
+        {
+            try
+            {
+                await OnHeartbeatRemoved(beatName, executionId);
+            }
+            catch
+            {
+                // Silently swallow hook errors
+            }
+        }
+    }
+    
+    /// <summary>
+    /// Invoke heartbeat paused hook
+    /// </summary>
+    public async Task InvokeHeartbeatPausedAsync(string beatName, string executionId)
+    {
+        if (OnHeartbeatPaused != null)
+        {
+            try
+            {
+                await OnHeartbeatPaused(beatName, executionId);
+            }
+            catch
+            {
+                // Silently swallow hook errors
+            }
+        }
+    }
+    
+    /// <summary>
+    /// Invoke heartbeat resumed hook
+    /// </summary>
+    public async Task InvokeHeartbeatResumedAsync(string beatName, string executionId)
+    {
+        if (OnHeartbeatResumed != null)
+        {
+            try
+            {
+                await OnHeartbeatResumed(beatName, executionId);
+            }
+            catch
+            {
+                // Silently swallow hook errors
+            }
+        }
+    }
+    
+    /// <summary>
+    /// Invoke heartbeat executed hook
+    /// </summary>
+    public async Task InvokeHeartbeatExecutedAsync(string beatName, bool success, string timestamp)
+    {
+        if (OnHeartbeatExecuted != null)
+        {
+            try
+            {
+                await OnHeartbeatExecuted(beatName, success, timestamp);
+            }
+            catch
+            {
+                // Silently swallow hook errors
+            }
+        }
+    }
+    
+    /// <summary>
+    /// Invoke heartbeat missed hook
+    /// </summary>
+    public async Task InvokeHeartbeatMissedAsync(string beatName, int missedCount, int maxMissed, string error)
+    {
+        if (OnHeartbeatMissed != null)
+        {
+            try
+            {
+                await OnHeartbeatMissed(beatName, missedCount, maxMissed, error);
             }
             catch
             {
