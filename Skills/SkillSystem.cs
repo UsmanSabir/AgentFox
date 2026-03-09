@@ -1,3 +1,4 @@
+using AgentFox.LLM;
 using AgentFox.Tools;
 
 namespace AgentFox.Skills;
@@ -281,6 +282,14 @@ public class GitSkill : Skill
             new GitLogTool()
         };
     }
+    
+    public override List<string> GetSystemPrompts()
+    {
+        return new List<string>
+        {
+            SystemPromptConfig.SkillPrompts.GitExpert
+        };
+    }
 }
 
 /// <summary>
@@ -303,6 +312,14 @@ public class DockerSkill : Skill
             new DockerStopTool(),
             new DockerLogsTool(),
             new DockerPSTool()
+        };
+    }
+    
+    public override List<string> GetSystemPrompts()
+    {
+        return new List<string>
+        {
+            SystemPromptConfig.SkillPrompts.DockerExpert
         };
     }
 }
