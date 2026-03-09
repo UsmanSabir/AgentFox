@@ -286,7 +286,7 @@ public class DefaultAgentExecutor : IAgentExecutor
         return tools;
     }
     
-    private async Task<AgentResponse> SimulateAgentResponse(Agent agent, List<ToolDefinition> availableTools)
+    private async Task<AgentResponse?> SimulateAgentResponse(Agent agent, List<ToolDefinition> availableTools)
     {
         // This is a simulation - in a real implementation, this would call an LLM
         // For demonstration, we'll parse the last user message and make decisions

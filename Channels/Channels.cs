@@ -1,6 +1,7 @@
 using AgentFox.Models;
 using AgentFox.Agents;
 using Newtonsoft.Json;
+using Microsoft.Extensions.Logging;
 
 namespace AgentFox.Channels;
 
@@ -38,7 +39,10 @@ public abstract class Channel
     /// </summary>
     public event EventHandler<ChannelMessage>? OnMessageReceived;
     
-    protected void RaiseMessageReceived(ChannelMessage message)
+    /// <summary>
+    /// Raise message received event (for testing and internal use)
+    /// </summary>
+    public void RaiseMessageReceived(ChannelMessage message)
     {
         OnMessageReceived?.Invoke(this, message);
     }
@@ -72,17 +76,32 @@ public enum MessageType
 
 /// <summary>
 /// Channel manager for handling multiple channel integrations
+/// Supports both direct agent execution and gateway-based lane processing
 /// </summary>
 public class ChannelManager
 {
     private readonly Dictionary<string, Channel> _channels = new();
     private readonly FoxAgent _agent;
+    private ChannelMessageGateway? _gateway;
+    private readonly ILogger? _logger;
     
     public IReadOnlyDictionary<string, Channel> Channels => _channels;
+    public ChannelMessageGateway? Gateway => _gateway;
     
-    public ChannelManager(FoxAgent agent)
+    public ChannelManager(FoxAgent agent, ILogger? logger = null)
     {
         _agent = agent;
+        _logger = logger;
+    }
+    
+    /// <summary>
+    /// Set the channel message gateway for lane-based processing
+    /// When set, channel messages will be routed through the gateway instead of direct execution
+    /// </summary>
+    public void SetGateway(ChannelMessageGateway gateway)
+    {
+        _gateway = gateway;
+        _logger?.LogInformation("ChannelMessageGateway set for channel manager");
     }
     
     /// <summary>
@@ -91,7 +110,7 @@ public class ChannelManager
     public void AddChannel(Channel channel)
     {
         _channels[channel.ChannelId] = channel;
-        channel.OnMessageReceived += async (s, msg) => await HandleMessage(msg);
+        channel.OnMessageReceived += async (s, msg) => await HandleMessage(channel, msg);
     }
     
     /// <summary>
@@ -128,14 +147,46 @@ public class ChannelManager
         }
     }
     
-    private async Task HandleMessage(ChannelMessage message)
+    /// <summary>
+    /// Handle incoming message from a channel
+    /// Routes through gateway if available, otherwise direct execution (legacy mode)
+    /// </summary>
+    private async Task HandleMessage(Channel channel, ChannelMessage message)
     {
-        // Process message with agent
-        var result = await _agent.ExecuteAsync(message.Content);
-        
-        // Send response back to channel
-        var channel = _channels[message.ChannelId];
-        await channel.SendMessageAsync(result.Output);
+        try
+        {
+            if (_gateway != null)
+            {
+                // Gateway-based processing (lane system)
+                var task = await _gateway.ProcessChannelMessageAsync(
+                    message,
+                    channel,
+                    _agent.Id);
+                
+                _logger?.LogInformation(
+                    "Channel message routed through gateway: MessageId={MessageId}, State={State}",
+                    message.Id, task.State);
+            }
+            else
+            {
+                // Legacy direct execution mode
+                _logger?.LogInformation("Processing channel message in legacy mode: {MessageId}", message.Id);
+                var result = await _agent.ExecuteAsync(message.Content);
+                await channel.SendMessageAsync(result.Output);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Error handling channel message: {MessageId}", message.Id);
+            try
+            {
+                await channel.SendMessageAsync($"❌ Error processing request: {ex.Message}");
+            }
+            catch (Exception sendEx)
+            {
+                _logger?.LogError(sendEx, "Error sending error message to channel");
+            }
+        }
     }
 }
 
