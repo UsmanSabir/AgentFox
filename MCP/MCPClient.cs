@@ -1,11 +1,63 @@
 using AgentFox.Models;
 using AgentFox.Tools;
 using Newtonsoft.Json;
+using System.Text;
 
 namespace AgentFox.MCP;
 
 /// <summary>
-/// MCP (Model Context Protocol) Server implementation
+/// JSON-RPC Request for MCP
+/// </summary>
+public class JsonRpcRequest
+{
+    [JsonProperty("jsonrpc")]
+    public string JsonRpc { get; set; } = "2.0";
+    
+    [JsonProperty("method")]
+    public string Method { get; set; } = string.Empty;
+    
+    [JsonProperty("params")]
+    public Dictionary<string, object?> Params { get; set; } = new();
+    
+    [JsonProperty("id")]
+    public string Id { get; set; } = Guid.NewGuid().ToString();
+}
+
+/// <summary>
+/// JSON-RPC Response for MCP
+/// </summary>
+public class JsonRpcResponse<T>
+{
+    [JsonProperty("jsonrpc")]
+    public string JsonRpc { get; set; } = "2.0";
+    
+    [JsonProperty("result")]
+    public T? Result { get; set; }
+    
+    [JsonProperty("error")]
+    public JsonRpcError? Error { get; set; }
+    
+    [JsonProperty("id")]
+    public string Id { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// JSON-RPC Error
+/// </summary>
+public class JsonRpcError
+{
+    [JsonProperty("code")]
+    public int Code { get; set; }
+    
+    [JsonProperty("message")]
+    public string Message { get; set; } = string.Empty;
+    
+    [JsonProperty("data")]
+    public dynamic? Data { get; set; }
+}
+
+/// <summary>
+/// MCP (Model Context Protocol) Server implementation with real HTTP support
 /// Allows agents to connect to external MCP servers for additional tools
 /// </summary>
 public class MCPServer
@@ -15,31 +67,57 @@ public class MCPServer
     public Dictionary<string, string> Headers { get; set; } = new();
     public bool IsConnected { get; private set; }
     public List<ToolDefinition> AvailableTools { get; private set; } = new();
+    public string? ServerVersion { get; private set; }
     
     private readonly HttpClient _httpClient;
+    private readonly int _timeoutSeconds;
     
-    public MCPServer(string name, string url)
+    public MCPServer(string name, string url, int timeoutSeconds = 30)
     {
         Name = name;
         Url = url;
+        _timeoutSeconds = timeoutSeconds;
         _httpClient = new HttpClient();
+        _httpClient.Timeout = TimeSpan.FromSeconds(timeoutSeconds);
     }
     
     /// <summary>
-    /// Initialize connection to MCP server
+    /// Initialize connection to MCP server with real protocol
     /// </summary>
     public async Task<bool> InitializeAsync()
     {
         try
         {
-            // In a real implementation, this would call the MCP server's initialize endpoint
-            // For now, we'll simulate the connection
-            await Task.Delay(100);
-            IsConnected = true;
-            return true;
+            var request = new JsonRpcRequest
+            {
+                Method = MCPProtocol.Initialize,
+                Params = new Dictionary<string, object?>
+                {
+                    ["protocolVersion"] = "2024-11-05",
+                    ["capabilities"] = new { tools = true, resources = true, prompts = true },
+                    ["clientInfo"] = new { name = "CSharpClaw", version = "1.0.0" }
+                }
+            };
+            
+            var response = await SendJsonRpcRequestAsync(request);
+            
+            if (response?.Result != null)
+            {
+                var resultDict = (Dictionary<string, object?>)response.Result;
+                ServerVersion = resultDict.ContainsKey("serverInfo") 
+                    ? resultDict["serverInfo"]?.ToString() 
+                    : "Unknown";
+                
+                IsConnected = true;
+                return true;
+            }
+            
+            IsConnected = false;
+            return false;
         }
-        catch
+        catch (Exception ex)
         {
+            System.Diagnostics.Debug.WriteLine($"MCP Initialize failed: {ex.Message}");
             IsConnected = false;
             return false;
         }
@@ -55,19 +133,36 @@ public class MCPServer
             
         try
         {
-            // In a real implementation, this would call the MCP server's tools/list endpoint
-            // Simulated response
-            await Task.Delay(50);
-            return AvailableTools;
+            var request = new JsonRpcRequest
+            {
+                Method = MCPProtocol.ToolsList,
+                Params = new Dictionary<string, object?>()
+            };
+            
+            var response = await SendJsonRpcRequestAsync(request);
+            
+            if (response?.Result != null)
+            {
+                var resultDict = (Dictionary<string, object?>)response.Result;
+                if (resultDict.TryGetValue("tools", out var value))
+                {
+                    AvailableTools = JsonConvert.DeserializeObject<List<ToolDefinition>>(
+                        JsonConvert.SerializeObject(value)) ?? new();
+                    return AvailableTools;
+                }
+            }
+            
+            return new List<ToolDefinition>();
         }
-        catch
+        catch (Exception ex)
         {
+            System.Diagnostics.Debug.WriteLine($"MCP ListTools failed: {ex.Message}");
             return new List<ToolDefinition>();
         }
     }
     
     /// <summary>
-    /// Execute a tool on the MCP server
+    /// Execute a tool on the MCP server using real JSON-RPC protocol
     /// </summary>
     public async Task<MCPResponse> ExecuteToolAsync(string toolName, Dictionary<string, object?> arguments)
     {
@@ -76,20 +171,38 @@ public class MCPServer
             
         try
         {
-            // In a real implementation, this would call the MCP server's tools/call endpoint
-            var request = new
+            var request = new JsonRpcRequest
             {
-                name = toolName,
-                arguments = arguments
+                Method = MCPProtocol.ToolsCall,
+                Params = new Dictionary<string, object?>
+                {
+                    ["name"] = toolName,
+                    ["arguments"] = arguments
+                }
             };
             
-            // Simulated response
-            await Task.Delay(100);
-            return new MCPResponse 
-            { 
-                Success = true, 
-                Result = JsonConvert.SerializeObject(new { message = "Tool executed successfully" }) 
-            };
+            var response = await SendJsonRpcRequestAsync(request);
+            
+            if (response?.Error != null)
+            {
+                return new MCPResponse 
+                { 
+                    Success = false, 
+                    Error = response.Error.Message 
+                };
+            }
+            
+            if (response?.Result != null)
+            {
+                var resultJson = JsonConvert.SerializeObject(response.Result);
+                return new MCPResponse 
+                { 
+                    Success = true, 
+                    Result = resultJson
+                };
+            }
+            
+            return new MCPResponse { Success = false, Error = "No result from MCP server" };
         }
         catch (Exception ex)
         {
@@ -104,6 +217,32 @@ public class MCPServer
     {
         IsConnected = false;
         AvailableTools.Clear();
+        ServerVersion = null;
+    }
+    
+    /// <summary>
+    /// Send a JSON-RPC request to the MCP server
+    /// </summary>
+    private async Task<JsonRpcResponse<dynamic>?> SendJsonRpcRequestAsync(JsonRpcRequest request)
+    {
+        try
+        {
+            var json = JsonConvert.SerializeObject(request);
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+            
+            var httpResponse = await _httpClient.PostAsync(Url, content);
+            httpResponse.EnsureSuccessStatusCode();
+            
+            var responseJson = await httpResponse.Content.ReadAsStringAsync();
+            var response = JsonConvert.DeserializeObject<JsonRpcResponse<dynamic>>(responseJson);
+            
+            return response;
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"JSON-RPC request failed: {ex.Message}");
+            throw;
+        }
     }
 }
 

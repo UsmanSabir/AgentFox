@@ -3,13 +3,14 @@ using AgentFox.Tools;
 namespace AgentFox.Skills;
 
 /// <summary>
-/// Base class for all skills
+/// Base class for all skills with dependency support
 /// </summary>
 public abstract class Skill
 {
     public string Name { get; protected set; } = string.Empty;
     public string Description { get; protected set; } = string.Empty;
     public List<string> Dependencies { get; protected set; } = new();
+    public string? Version { get; protected set; } = null;
     
     /// <summary>
     /// Initialize the skill
@@ -28,12 +29,19 @@ public abstract class Skill
 }
 
 /// <summary>
-/// Skill registry for managing available skills
+/// Skill registry for managing available skills with dependency resolution
 /// </summary>
 public class SkillRegistry
 {
     private readonly Dictionary<string, Skill> _skills = new();
+    private readonly HashSet<string> _enabledSkills = new();
     private readonly ToolRegistry _toolRegistry;
+    private readonly object _lock = new();
+    
+    /// <summary>
+    /// Event hooks for skill lifecycle
+    /// </summary>
+    public ToolEventHookRegistry HookRegistry { get; } = new();
     
     public SkillRegistry(ToolRegistry toolRegistry)
     {
@@ -56,37 +64,156 @@ public class SkillRegistry
     
     public void Register(Skill skill)
     {
-        _skills[skill.Name] = skill;
+        lock (_lock)
+        {
+            _skills[skill.Name] = skill;
+        }
     }
     
     public void Unregister(string name)
     {
-        _skills.Remove(name);
+        lock (_lock)
+        {
+            _skills.Remove(name);
+            _enabledSkills.Remove(name);
+        }
     }
     
     public Skill? Get(string name)
     {
-        return _skills.TryGetValue(name, out var skill) ? skill : null;
+        lock (_lock)
+        {
+            return _skills.TryGetValue(name, out var skill) ? skill : null;
+        }
     }
     
     public List<Skill> GetAll()
     {
-        return _skills.Values.ToList();
-    }
-    
-    public async Task EnableSkillAsync(string name)
-    {
-        var skill = Get(name);
-        if (skill != null)
+        lock (_lock)
         {
-            await skill.InitializeAsync();
-            foreach (var tool in skill.GetTools())
-            {
-                _toolRegistry.Register(tool);
-            }
+            return _skills.Values.ToList();
         }
     }
     
+    /// <summary>
+    /// Get all currently enabled skills
+    /// </summary>
+    public List<Skill> GetEnabledSkills()
+    {
+        lock (_lock)
+        {
+            return _skills.Where(kv => _enabledSkills.Contains(kv.Key))
+                          .Select(kv => kv.Value)
+                          .ToList();
+        }
+    }
+    
+    /// <summary>
+    /// Check if a skill is currently enabled
+    /// </summary>
+    public bool IsSkillEnabled(string name)
+    {
+        lock (_lock)
+        {
+            return _enabledSkills.Contains(name);
+        }
+    }
+    
+    /// <summary>
+    /// Enable a skill with automatic dependency resolution
+    /// </summary>
+    public async Task EnableSkillAsync(string name)
+    {
+        lock (_lock)
+        {
+            if (_enabledSkills.Contains(name))
+                return;  // Already enabled
+        }
+        
+        var skill = Get(name);
+        if (skill == null)
+            throw new InvalidOperationException($"Skill '{name}' not found");
+        
+        // Invoke pre-enable hook
+        await HookRegistry.InvokeSkillPreEnableAsync(name);
+        
+        try
+        {
+            // Resolve and enable dependencies first
+            foreach (var depName in skill.Dependencies)
+            {
+                if (!IsSkillEnabled(depName))
+                {
+                    await EnableSkillAsync(depName);  // Recursive dependency resolution
+                }
+            }
+            
+            // Initialize the skill
+            await skill.InitializeAsync();
+            
+            // Register the skill's tools
+            var tools = skill.GetTools();
+            foreach (var tool in tools)
+            {
+                _toolRegistry.Register(tool);
+            }
+            
+            // Mark as enabled
+            lock (_lock)
+            {
+                _enabledSkills.Add(name);
+            }
+            
+            // Invoke post-enable hook
+            await HookRegistry.InvokeSkillPostEnableAsync(name, tools.Count);
+        }
+        catch (Exception ex)
+        {
+            await HookRegistry.InvokeSkillErrorAsync(name, ex.Message);
+            throw;
+        }
+    }
+    
+    /// <summary>
+    /// Disable a skill and optionally its dependents
+    /// </summary>
+    public async Task DisableSkillAsync(string name, bool disableDependents = false)
+    {
+        var skill = Get(name);
+        if (skill == null)
+            return;
+        
+        // If disableDependents is true, find and disable skills that depend on this one
+        if (disableDependents)
+        {
+            var dependents = _skills.Values
+                .Where(s => s.Dependencies.Contains(name))
+                .ToList();
+            
+            foreach (var dependent in dependents)
+            {
+                await DisableSkillAsync(dependent.Name, true);
+            }
+        }
+        
+        // Unregister tools
+        foreach (var tool in skill.GetTools())
+        {
+            _toolRegistry.Unregister(tool.Name);
+        }
+        
+        lock (_lock)
+        {
+            _enabledSkills.Remove(name);
+        }
+        
+        // Invoke disabled hook
+        await HookRegistry.InvokeSkillDisabledAsync(name);
+    }
+    
+    /// <summary>
+    /// Disable a skill (synchronous, for backward compatibility)
+    /// </summary>
     public void DisableSkill(string name)
     {
         var skill = Get(name);
@@ -96,7 +223,38 @@ public class SkillRegistry
             {
                 _toolRegistry.Unregister(tool.Name);
             }
+            
+            lock (_lock)
+            {
+                _enabledSkills.Remove(name);
+            }
         }
+    }
+    
+    /// <summary>
+    /// Get dependency tree for a skill
+    /// </summary>
+    public List<string> GetDependencyTree(string skillName)
+    {
+        var result = new HashSet<string> { skillName };
+        var queue = new Queue<string>(new[] { skillName });
+        
+        while (queue.Count > 0)
+        {
+            var current = queue.Dequeue();
+            var skill = Get(current);
+            
+            if (skill != null)
+            {
+                foreach (var dep in skill.Dependencies)
+                {
+                    if (result.Add(dep))
+                        queue.Enqueue(dep);
+                }
+            }
+        }
+        
+        return result.ToList();
     }
 }
 

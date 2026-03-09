@@ -53,6 +53,15 @@ public class ToolParameter
     public string Description { get; set; } = string.Empty;
     public bool Required { get; set; }
     public object? Default { get; set; }
+    
+    // Enhanced schema support
+    public string? JsonSchema { get; set; }        // Full JSON Schema (optional)
+    public object? Example { get; set; }           // Example value for documentation
+    public string? Pattern { get; set; }           // Regex pattern (for string validation)
+    public int? MinLength { get; set; }            // Min string length
+    public int? MaxLength { get; set; }            // Max string length
+    public decimal? Minimum { get; set; }          // Min numeric value
+    public decimal? Maximum { get; set; }          // Max numeric value
 }
 
 /// <summary>
