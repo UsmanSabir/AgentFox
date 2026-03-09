@@ -1,6 +1,7 @@
 using AgentFox.Models;
 using AgentFox.Memory;
 using AgentFox.Tools;
+using AgentFox.LLM;
 
 namespace AgentFox.Agents;
 
@@ -246,19 +247,22 @@ public class DefaultAgentExecutor : IAgentExecutor
     
     private string BuildSystemMessage(Agent agent)
     {
-        var systemPrompt = agent.Config.SystemPrompt ?? "You are a helpful AI assistant.";
+        // Get base prompt or use default
+        var basePrompt = agent.Config.SystemPrompt ?? "You are a helpful AI assistant.";
         
-        // Add tool descriptions
+        var builder = new SystemPromptBuilder()
+            .WithPersona(basePrompt);
+        
+        // Add available tools if any
         if (agent.Config.Tools.Count > 0)
         {
-            systemPrompt += "\n\nAvailable tools:\n";
-            foreach (var tool in agent.Config.Tools)
-            {
-                systemPrompt += $"- {tool.Name}: {tool.Description}\n";
-            }
+            var toolNames = agent.Config.Tools
+                .Select(t => $"{t.Name}: {t.Description}")
+                .ToArray();
+            builder.WithTools(toolNames);
         }
         
-        return systemPrompt;
+        return builder.Build();
     }
     
     private List<ToolDefinition> GetAvailableTools(Agent agent)

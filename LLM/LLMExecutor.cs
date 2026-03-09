@@ -100,20 +100,23 @@ public class LLMExecutor : IAgentExecutor
     
     private string BuildSystemMessage(Agent agent)
     {
-        var systemPrompt = agent.Config.SystemPrompt ?? "You are a helpful AI assistant.";
+        // Get base prompt depending on agent configuration or use default
+        var basePrompt = agent.Config.SystemPrompt ?? SystemPromptConfig.AgentPrompts.BaseAssistant;
         
+        var builder = new SystemPromptBuilder()
+            .WithPersona(basePrompt);
+        
+        // Add available tools if any
         if (agent.Config.Tools.Count > 0)
         {
-            systemPrompt += "\n\nAvailable tools:\n";
-            foreach (var tool in agent.Config.Tools)
-            {
-                systemPrompt += $"- {tool.Name}: {tool.Description}\n";
-            }
-            systemPrompt += "\nWhen you need to use a tool, respond in JSON format:\n";
-            systemPrompt += @"{""tool_calls"": [{""name"": ""tool_name"", ""arguments"": {""arg1"": ""value1""}}]}";
+            var toolNames = agent.Config.Tools
+                .Select(t => $"{t.Name}: {t.Description}")
+                .ToArray();
+            builder.WithTools(toolNames);
+            builder.WithToolInstructions(true);
         }
         
-        return systemPrompt;
+        return builder.Build();
     }
     
     private List<ToolDefinition> GetAvailableTools(Agent agent)

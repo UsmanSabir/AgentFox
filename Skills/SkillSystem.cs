@@ -347,7 +347,7 @@ public class CodeReviewSkill : Skill
     {
         return new List<string>
         {
-            "You are an expert code reviewer. Analyze code for: bugs, security vulnerabilities, performance issues, code smells, and best practices."
+            SystemPromptConfig.SkillPrompts.CodeReviewExpert
         };
     }
 }
@@ -372,6 +372,14 @@ public class DebuggingSkill : Skill
             new ProfileTool()
         };
     }
+    
+    public override List<string> GetSystemPrompts()
+    {
+        return new List<string>
+        {
+            SystemPromptConfig.SkillPrompts.DebuggingExpert
+        };
+    }
 }
 
 /// <summary>
@@ -391,6 +399,14 @@ public class APIIntegrationSkill : Skill
         {
             new RESTClientTool(),
             new GraphQLTool()
+        };
+    }
+    
+    public override List<string> GetSystemPrompts()
+    {
+        return new List<string>
+        {
+            SystemPromptConfig.SkillPrompts.APIIntegrationExpert
         };
     }
 }
@@ -414,6 +430,14 @@ public class DatabaseSkill : Skill
             new DBMigrationTool()
         };
     }
+    
+    public override List<string> GetSystemPrompts()
+    {
+        return new List<string>
+        {
+            SystemPromptConfig.SkillPrompts.DatabaseExpert
+        };
+    }
 }
 
 /// <summary>
@@ -435,6 +459,14 @@ public class TestingSkill : Skill
             new CoverageTool()
         };
     }
+    
+    public override List<string> GetSystemPrompts()
+    {
+        return new List<string>
+        {
+            SystemPromptConfig.SkillPrompts.TestingExpert
+        };
+    }
 }
 
 /// <summary>
@@ -454,6 +486,14 @@ public class DeploymentSkill : Skill
         {
             new DeployTool(),
             new CICDPipelineTool()
+        };
+    }
+    
+    public override List<string> GetSystemPrompts()
+    {
+        return new List<string>
+        {
+            SystemPromptConfig.SkillPrompts.DeploymentExpert
         };
     }
 }

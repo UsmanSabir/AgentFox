@@ -1,4 +1,5 @@
 using AgentFox.Agents;
+using AgentFox.LLM;
 using AgentFox.Memory;
 using AgentFox.Models;
 using AgentFox.Tools;
@@ -32,9 +33,21 @@ class Program
     static async Task<int> RunCommandLineMode(string[] args)
     {
         var toolRegistry = CreateToolRegistry();
+        
+        // Build system prompt with dynamic builder
+        var systemPrompt = new SystemPromptBuilder()
+            .WithPersona(SystemPromptConfig.AgentPrompts.DeveloperAssistant)
+            .WithTools("shell", "read_file", "write_file", "list_files", "search_files", "make_directory", "delete")
+            .WithConstraints(
+                "Always verify changes before executing destructive operations",
+                "Prioritize security and best practices",
+                "Ask for clarification when requirements are ambiguous"
+            )
+            .Build();
+        
         var agent = new AgentBuilder(toolRegistry)
             .WithName("AgentFox")
-            .WithSystemPrompt("You are AgentFox, a helpful AI assistant with access to various tools.")
+            .WithSystemPrompt(systemPrompt)
             .WithHybridMemory(100, "memory.json")
             .Build();
         
@@ -59,21 +72,40 @@ class Program
     static async Task<int> RunInteractiveMode()
     {
         var toolRegistry = CreateToolRegistry();
+        
+        // Build comprehensive system prompt with all available tools and context
+        var systemPrompt = new SystemPromptBuilder()
+            .WithPersona(SystemPromptConfig.AgentPrompts.DeveloperAssistant)
+            .WithTools(
+                "shell: Execute shell commands",
+                "read_file: Read file contents",
+                "write_file: Write content to files",
+                "list_files: List files in a directory",
+                "search_files: Search for text in files",
+                "make_directory: Create directories",
+                "delete: Delete files or directories",
+                "get_env_info: Get environment information",
+                "spawn_subagent: Spawn a sub-agent for complex tasks"
+            )
+            .WithExecutionContext(
+                "You are running in interactive mode and can help with:\n" +
+                "- Code development and debugging\n" +
+                "- File system operations\n" +
+                "- System administration\n" +
+                "- Architecture and design consultation"
+            )
+            .WithConstraints(
+                "Always verify changes before executing destructive operations",
+                "Protect sensitive information (API keys, credentials, etc.)",
+                "Test code in isolated environments when possible",
+                "Explain your reasoning and approach clearly",
+                "Ask for confirmation for high-risk operations"
+            )
+            .Build();
+        
         var agent = new AgentBuilder(toolRegistry)
             .WithName("AgentFox")
-            .WithSystemPrompt(@"You are AgentFox, a helpful AI assistant with access to various tools.
-            
-Available tools:
-- shell: Execute shell commands
-- read_file: Read file contents
-- write_file: Write content to files
-- list_files: List files in a directory
-- search_files: Search for text in files
-- make_directory: Create directories
-- delete: Delete files or directories
-- get_env_info: Get environment information
-
-You can also spawn sub-agents to handle complex tasks by asking to 'spawn a sub-agent'.")
+            .WithSystemPrompt(systemPrompt)
             .WithHybridMemory(100, "memory.json")
             .Build();
         
