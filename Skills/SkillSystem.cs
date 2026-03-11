@@ -115,6 +115,34 @@ public class SkillRegistry
         Register(new TestingSkill());
         Register(new DeploymentSkill());
     }
+
+    /// <summary>
+    /// Register Composio.dev skills provider
+    /// </summary>
+    public async Task RegisterComposioSkillsAsync(
+        string composioApiKey,
+        IEnumerable<string>? filterIntegrationIds = null)
+    {
+        try
+        {
+            _logger?.LogInformation("Registering Composio.dev skills");
+            
+            var composioProvider = new ComposioSkillProvider(
+                apiKey: composioApiKey,
+                skillRegistry: this,
+                logger: _logger as ILogger<ComposioSkillProvider>
+            );
+            
+            await composioProvider.InitializeAsync(filterIntegrationIds);
+            
+            _logger?.LogInformation("Composio.dev skills registered successfully");
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Failed to register Composio.dev skills");
+            throw;
+        }
+    }
     
     /// <summary>
     /// Register a skill
@@ -306,7 +334,8 @@ public class SkillRegistry
             // If skill is a plugin, call registration hook
             if (skill is ISkillPlugin plugin)
             {
-                var context = new SkillRegistrationContext(logger, HookRegistry, _promptBuilder);
+                var loggerForContext = logger ?? (_logger ?? new DummyLogger<SkillRegistrationContext>() as ILogger);
+                var context = new SkillRegistrationContext(loggerForContext, HookRegistry, _promptBuilder);
                 await plugin.OnRegisterAsync(context);
             }
             
@@ -422,7 +451,7 @@ public class SkillRegistry
     /// <summary>
     /// Get resilient executor
     /// </summary>
-    public ResilientSkillExecutor GetResilientExecutor() => _resilientExecutor;
+    public ResilientSkillExecutor GetResilientExecutor() => _resilientExecutor!;
 }
 
 /// <summary>
