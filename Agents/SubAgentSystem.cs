@@ -45,6 +45,26 @@ public class AgentSpawnConfig
     public int MaxIterations { get; set; } = 10;
     public bool InheritMemory { get; set; } = true;
     public bool InheritTools { get; set; } = true;
+    
+    /// <summary>
+    /// Inherit enabled skills from parent agent (for capability-based routing)
+    /// </summary>
+    public bool InheritEnabledSkills { get; set; } = true;
+    
+    /// <summary>
+    /// Role for the spawned agent (defaults to parent role)
+    /// </summary>
+    public string? Role { get; set; }
+    
+    /// <summary>
+    /// Additional skills to enable on the spawned agent
+    /// </summary>
+    public List<string>? AdditionalSkills { get; set; }
+    
+    /// <summary>
+    /// Skills that should NOT be enabled (override inherited skills)
+    /// </summary>
+    public List<string>? ForbiddenSkills { get; set; }
 }
 
 /// <summary>

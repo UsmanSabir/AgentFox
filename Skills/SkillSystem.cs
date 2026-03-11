@@ -1,17 +1,33 @@
 using AgentFox.LLM;
 using AgentFox.Tools;
+using Microsoft.Extensions.Logging;
 
 namespace AgentFox.Skills;
 
 /// <summary>
-/// Base class for all skills with dependency support
+/// Dummy logger for when no real logger is available
+/// </summary>
+internal class DummyLogger<T> : ILogger<T>
+{
+    public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+    public bool IsEnabled(LogLevel logLevel) => false;
+    public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) { }
+}
+
+/// <summary>
+/// Base class for all skills with dependency support and metadata
 /// </summary>
 public abstract class Skill
 {
     public string Name { get; protected set; } = string.Empty;
     public string Description { get; protected set; } = string.Empty;
     public List<string> Dependencies { get; protected set; } = new();
-    public string? Version { get; protected set; } = null;
+    public string? Version { get; protected set; } = "1.0.0";
+    
+    /// <summary>
+    /// Metadata about this skill's capabilities
+    /// </summary>
+    public virtual SkillMetadata? Metadata { get; protected set; }
     
     /// <summary>
     /// Initialize the skill
@@ -27,16 +43,37 @@ public abstract class Skill
     /// Get system prompts provided by this skill
     /// </summary>
     public virtual List<string> GetSystemPrompts() => new();
+    
+    /// <summary>
+    /// Execute a skill with the given parameters
+    /// </summary>
+    public virtual async Task<SkillExecutionResult> Execute(
+        EnhancedSkillExecutionContext context,
+        Dictionary<string, object> parameters)
+    {
+        // Default implementation - subclasses can override
+        return await Task.FromResult(new SkillExecutionResult
+        {
+            Success = false,
+            Message = "Skill execution not implemented"
+        });
+    }
 }
 
 /// <summary>
-/// Skill registry for managing available skills with dependency resolution
+/// Skill registry for managing available skills with dependency resolution,
+/// permissions, metrics, and plugin support
 /// </summary>
 public class SkillRegistry
 {
     private readonly Dictionary<string, Skill> _skills = new();
+    private readonly Dictionary<string, SkillPermission> _permissions = new();
     private readonly HashSet<string> _enabledSkills = new();
     private readonly ToolRegistry _toolRegistry;
+    private readonly SkillMetricsCollector _metricsCollector;
+    private readonly SystemPromptBuilder? _promptBuilder;
+    private readonly ILogger<SkillRegistry>? _logger;
+    private readonly ResilientSkillExecutor? _resilientExecutor;
     private readonly object _lock = new();
     
     /// <summary>
@@ -44,9 +81,25 @@ public class SkillRegistry
     /// </summary>
     public ToolEventHookRegistry HookRegistry { get; } = new();
     
-    public SkillRegistry(ToolRegistry toolRegistry)
+    public SkillRegistry(
+        ToolRegistry toolRegistry,
+        SystemPromptBuilder? promptBuilder = null,
+        ILogger<SkillRegistry>? logger = null,
+        int? maxMetricsToStore = null)
     {
         _toolRegistry = toolRegistry;
+        _promptBuilder = promptBuilder;
+        _logger = logger;
+        _metricsCollector = new SkillMetricsCollector(maxMetricsToStore);
+        
+        // Create resilient executor with a dummy logger if none provided
+        ILogger<ResilientSkillExecutor>? loggerForExecutor = null;
+        if (logger is ILogger<ResilientSkillExecutor> typedLogger)
+        {
+            loggerForExecutor = typedLogger;
+        }
+        _resilientExecutor = new ResilientSkillExecutor(loggerForExecutor ?? new DummyLogger<ResilientSkillExecutor>());
+        
         RegisterBuiltInSkills();
     }
     
@@ -63,23 +116,54 @@ public class SkillRegistry
         Register(new DeploymentSkill());
     }
     
+    /// <summary>
+    /// Register a skill
+    /// </summary>
     public void Register(Skill skill)
     {
         lock (_lock)
         {
             _skills[skill.Name] = skill;
+            
+            // Create default permission if not exists
+            if (!_permissions.ContainsKey(skill.Name))
+            {
+                _permissions[skill.Name] = new SkillPermission
+                {
+                    SkillName = skill.Name,
+                    AllowedAgentRoles = new[] { "default", "admin" }.ToList()
+                };
+            }
         }
     }
     
+    /// <summary>
+    /// Register a skill permission
+    /// </summary>
+    public void RegisterPermission(SkillPermission permission)
+    {
+        lock (_lock)
+        {
+            _permissions[permission.SkillName] = permission;
+        }
+    }
+    
+    /// <summary>
+    /// Unregister a skill
+    /// </summary>
     public void Unregister(string name)
     {
         lock (_lock)
         {
             _skills.Remove(name);
+            _permissions.Remove(name);
             _enabledSkills.Remove(name);
         }
     }
     
+    /// <summary>
+    /// Get a skill by name
+    /// </summary>
     public Skill? Get(string name)
     {
         lock (_lock)
@@ -88,6 +172,9 @@ public class SkillRegistry
         }
     }
     
+    /// <summary>
+    /// Get all registered skills
+    /// </summary>
     public List<Skill> GetAll()
     {
         lock (_lock)
@@ -110,6 +197,60 @@ public class SkillRegistry
     }
     
     /// <summary>
+    /// Get available skills for an agent (with permission checks)
+    /// </summary>
+    public List<Skill> GetAvailableSkillsFor(AgentFox.Models.Agent agent)
+    {
+        // Default role when not specified in agent config
+        var agentRole = "default";
+        
+        lock (_lock)
+        {
+            return _skills
+                .Where(kv => _enabledSkills.Contains(kv.Key) &&  // Must be enabled
+                    _permissions[kv.Key].AllowedAgentRoles.Contains(agentRole))  // Must have permission
+                .Select(kv => kv.Value)
+                .ToList();
+        }
+    }
+    
+    /// <summary>
+    /// Get skills by capability (semantic discovery)
+    /// </summary>
+    public List<Skill> DiscoverSkillsByCapability(string capability)
+    {
+        var lowerCapability = capability.ToLower();
+        
+        lock (_lock)
+        {
+            return _skills
+                .Where(kv => _enabledSkills.Contains(kv.Key) &&
+                    (kv.Value.Metadata?.Capabilities.Any(c => 
+                        c.Contains(lowerCapability, StringComparison.OrdinalIgnoreCase)) ?? false))
+                .Select(kv => kv.Value)
+                .ToList();
+        }
+    }
+    
+    /// <summary>
+    /// Get skills by tag
+    /// </summary>
+    public List<Skill> DiscoverSkillsByTag(string tag)
+    {
+        var lowerTag = tag.ToLower();
+        
+        lock (_lock)
+        {
+            return _skills
+                .Where(kv => _enabledSkills.Contains(kv.Key) &&
+                    (kv.Value.Metadata?.Tags.Any(t => 
+                        t.Contains(lowerTag, StringComparison.OrdinalIgnoreCase)) ?? false))
+                .Select(kv => kv.Value)
+                .ToList();
+        }
+    }
+    
+    /// <summary>
     /// Check if a skill is currently enabled
     /// </summary>
     public bool IsSkillEnabled(string name)
@@ -123,7 +264,7 @@ public class SkillRegistry
     /// <summary>
     /// Enable a skill with automatic dependency resolution
     /// </summary>
-    public async Task EnableSkillAsync(string name)
+    public async Task EnableSkillAsync(string name, ILogger? logger = null)
     {
         lock (_lock)
         {
@@ -135,6 +276,9 @@ public class SkillRegistry
         if (skill == null)
             throw new InvalidOperationException($"Skill '{name}' not found");
         
+        logger ??= _logger;
+        logger?.LogInformation($"Enabling skill: {name}");
+        
         // Invoke pre-enable hook
         await HookRegistry.InvokeSkillPreEnableAsync(name);
         
@@ -145,7 +289,7 @@ public class SkillRegistry
             {
                 if (!IsSkillEnabled(depName))
                 {
-                    await EnableSkillAsync(depName);  // Recursive dependency resolution
+                    await EnableSkillAsync(depName, logger);  // Recursive dependency resolution
                 }
             }
             
@@ -159,6 +303,13 @@ public class SkillRegistry
                 _toolRegistry.Register(tool);
             }
             
+            // If skill is a plugin, call registration hook
+            if (skill is ISkillPlugin plugin)
+            {
+                var context = new SkillRegistrationContext(logger, HookRegistry, _promptBuilder);
+                await plugin.OnRegisterAsync(context);
+            }
+            
             // Mark as enabled
             lock (_lock)
             {
@@ -167,10 +318,12 @@ public class SkillRegistry
             
             // Invoke post-enable hook
             await HookRegistry.InvokeSkillPostEnableAsync(name, tools.Count);
+            logger?.LogInformation($"Skill enabled successfully: {name} with {tools.Count} tools");
         }
         catch (Exception ex)
         {
             await HookRegistry.InvokeSkillErrorAsync(name, ex.Message);
+            logger?.LogError($"Failed to enable skill {name}: {ex.Message}");
             throw;
         }
     }
@@ -178,11 +331,14 @@ public class SkillRegistry
     /// <summary>
     /// Disable a skill and optionally its dependents
     /// </summary>
-    public async Task DisableSkillAsync(string name, bool disableDependents = false)
+    public async Task DisableSkillAsync(string name, bool disableDependents = false, ILogger? logger = null)
     {
         var skill = Get(name);
         if (skill == null)
             return;
+        
+        logger ??= _logger;
+        logger?.LogInformation($"Disabling skill: {name}");
         
         // If disableDependents is true, find and disable skills that depend on this one
         if (disableDependents)
@@ -193,7 +349,7 @@ public class SkillRegistry
             
             foreach (var dependent in dependents)
             {
-                await DisableSkillAsync(dependent.Name, true);
+                await DisableSkillAsync(dependent.Name, true, logger);
             }
         }
         
@@ -257,17 +413,41 @@ public class SkillRegistry
         
         return result.ToList();
     }
+    
+    /// <summary>
+    /// Get metrics collector
+    /// </summary>
+    public SkillMetricsCollector GetMetricsCollector() => _metricsCollector;
+    
+    /// <summary>
+    /// Get resilient executor
+    /// </summary>
+    public ResilientSkillExecutor GetResilientExecutor() => _resilientExecutor;
 }
 
 /// <summary>
 /// Git operations skill (Composio dev skill)
 /// </summary>
-public class GitSkill : Skill
+public class GitSkill : Skill, ISkillPlugin
 {
     public GitSkill()
     {
         Name = "git";
         Description = "Git version control operations - commit, push, pull, branch, merge, etc.";
+        Version = "1.0.0";
+        
+        Metadata = new SkillMetadata
+        {
+            SkillName = "git",
+            Version = "1.0.0",
+            Capabilities = new[] { "vcs", "versioning", "version-control" }.ToList(),
+            Tags = new[] { "devops", "required" }.ToList(),
+            InputType = "code",
+            OutputType = "status",
+            ComplexityScore = 6,
+            IsCompositional = true,
+            RelatedSkills = new[] { "docker", "deployment" }.ToList()
+        };
     }
     
     public override List<ITool> GetTools()
@@ -290,17 +470,55 @@ public class GitSkill : Skill
             SystemPromptConfig.SkillPrompts.GitExpert
         };
     }
+    
+    public async Task OnRegisterAsync(ISkillRegistrationContext context)
+    {
+        // Register all git tools
+        foreach (var tool in GetTools())
+        {
+            context.RegisterTool(tool);
+        }
+        
+        // Inject git usage guidance into agent's system prompt
+        context.PrependSystemContext(@"
+## Git Workflow Best Practices
+
+When using Git tools:
+1. Always create feature branches before making changes: `git_branch create feature-name`
+2. Check current status before committing: `git_status`
+3. Use descriptive commit messages (format: type(scope): description): `git_commit message:""type(scope): description""`
+4. Pull before pushing to avoid conflicts: `git_pull`
+5. Group related changes into a single commit when possible
+6. For important releases, create and checkout appropriate branches
+7. Review git log to track changes: `git_log count:10`
+        ");
+    }
 }
 
 /// <summary>
 /// Docker operations skill
 /// </summary>
-public class DockerSkill : Skill
+public class DockerSkill : Skill, ISkillPlugin
 {
     public DockerSkill()
     {
         Name = "docker";
         Description = "Docker container operations - build, run, stop, logs, etc.";
+        Version = "1.0.0";
+        Dependencies = new[] { "git" }.ToList();  // Often used with git
+        
+        Metadata = new SkillMetadata
+        {
+            SkillName = "docker",
+            Version = "1.0.0",
+            Capabilities = new[] { "container", "deployment", "devops" }.ToList(),
+            Tags = new[] { "docker", "containers", "devops" }.ToList(),
+            InputType = "container",
+            OutputType = "container-status",
+            ComplexityScore = 7,
+            IsCompositional = true,
+            RelatedSkills = new[] { "git", "deployment" }.ToList()
+        };
     }
     
     public override List<ITool> GetTools()
@@ -322,6 +540,27 @@ public class DockerSkill : Skill
             SystemPromptConfig.SkillPrompts.DockerExpert
         };
     }
+    
+    public async Task OnRegisterAsync(ISkillRegistrationContext context)
+    {
+        foreach (var tool in GetTools())
+        {
+            context.RegisterTool(tool);
+        }
+        
+        context.PrependSystemContext(@"
+## Docker Best Practices
+
+When using Docker tools:
+1. Always build with descriptive tags: `docker_build tag:""myapp:v1.0""`
+2. Use meaningful container names for tracking: `docker_run name:""my-container""`
+3. Check running containers before operations: `docker_ps all:true`
+4. Monitor logs for debugging: `docker_logs tail:100`
+5. Stop containers gracefully before removing
+6. Use environment-specific tags for deployment artifacts
+7. Keep images small and focused on single responsibilities
+        ");
+    }
 }
 
 /// <summary>
@@ -333,6 +572,16 @@ public class CodeReviewSkill : Skill
     {
         Name = "code_review";
         Description = "Automated code review and quality analysis";
+        Version = "1.0.0";
+        
+        Metadata = new SkillMetadata
+        {
+            SkillName = "code_review",
+            Version = "1.0.0",
+            Capabilities = new[] { "code_review", "quality", "analysis" }.ToList(),
+            Tags = new[] { "code-quality", "review", "standards" }.ToList(),
+            ComplexityScore = 5
+        };
     }
     
     public override List<ITool> GetTools()
@@ -361,6 +610,16 @@ public class DebuggingSkill : Skill
     {
         Name = "debugging";
         Description = "Debug and diagnose application issues";
+        Version = "1.0.0";
+        
+        Metadata = new SkillMetadata
+        {
+            SkillName = "debugging",
+            Version = "1.0.0",
+            Capabilities = new[] { "debugging", "diagnostics", "tracing", "profiling" }.ToList(),
+            Tags = new[] { "debugging", "troubleshooting", "performance" }.ToList(),
+            ComplexityScore = 7
+        };
     }
     
     public override List<ITool> GetTools()
@@ -385,12 +644,25 @@ public class DebuggingSkill : Skill
 /// <summary>
 /// API integration skill
 /// </summary>
-public class APIIntegrationSkill : Skill
+public class APIIntegrationSkill : Skill, ISkillPlugin
 {
     public APIIntegrationSkill()
     {
         Name = "api_integration";
         Description = "API integration and REST/GraphQL operations";
+        Version = "1.0.0";
+        
+        Metadata = new SkillMetadata
+        {
+            SkillName = "api_integration",
+            Version = "1.0.0",
+            Capabilities = new[] { "api_integration", "rest", "graphql", "http" }.ToList(),
+            Tags = new[] { "api", "integration", "external-services" }.ToList(),
+            InputType = "api",
+            OutputType = "json",
+            ComplexityScore = 6,
+            IsCompositional = true
+        };
     }
     
     public override List<ITool> GetTools()
@@ -409,6 +681,28 @@ public class APIIntegrationSkill : Skill
             SystemPromptConfig.SkillPrompts.APIIntegrationExpert
         };
     }
+    
+    public async Task OnRegisterAsync(ISkillRegistrationContext context)
+    {
+        foreach (var tool in GetTools())
+        {
+            context.RegisterTool(tool);
+        }
+        
+        context.PrependSystemContext(@"
+## API Integration Best Practices
+
+When using API tools:
+1. Always validate the endpoint URL before making the call
+2. Include required authentication headers and tokens
+3. For POST/PUT requests, validate JSON body structure
+4. Check response status codes before processing data
+5. Implement appropriate error handling and retry logic
+6. Rate-limit API calls to respect service quotas
+7. For paginated results, implement proper next-page logic
+8. Cache results when appropriate to reduce API calls
+        ");
+    }
 }
 
 /// <summary>
@@ -420,6 +714,16 @@ public class DatabaseSkill : Skill
     {
         Name = "database";
         Description = "Database operations and migrations";
+        Version = "1.0.0";
+        
+        Metadata = new SkillMetadata
+        {
+            SkillName = "database",
+            Version = "1.0.0",
+            Capabilities = new[] { "database", "sql", "migrations", "queries" }.ToList(),
+            Tags = new[] { "database", "persistence", "data" }.ToList(),
+            ComplexityScore = 6
+        };
     }
     
     public override List<ITool> GetTools()
@@ -449,6 +753,16 @@ public class TestingSkill : Skill
     {
         Name = "testing";
         Description = "Test creation and execution";
+        Version = "1.0.0";
+        
+        Metadata = new SkillMetadata
+        {
+            SkillName = "testing",
+            Version = "1.0.0",
+            Capabilities = new[] { "testing", "quality", "coverage" }.ToList(),
+            Tags = new[] { "testing", "qa", "quality-assurance" }.ToList(),
+            ComplexityScore = 5
+        };
     }
     
     public override List<ITool> GetTools()
@@ -472,12 +786,27 @@ public class TestingSkill : Skill
 /// <summary>
 /// Deployment skill
 /// </summary>
-public class DeploymentSkill : Skill
+public class DeploymentSkill : Skill, ISkillPlugin
 {
     public DeploymentSkill()
     {
         Name = "deployment";
         Description = "Application deployment and CI/CD";
+        Version = "1.0.0";
+        Dependencies = new[] { "git", "docker" }.ToList();  // Requires git and docker
+        
+        Metadata = new SkillMetadata
+        {
+            SkillName = "deployment",
+            Version = "1.0.0",
+            Capabilities = new[] { "deployment", "devops", "cicd", "release" }.ToList(),
+            Tags = new[] { "deployment", "ci-cd", "production" }.ToList(),
+            InputType = "application",
+            OutputType = "deployment-status",
+            ComplexityScore = 8,
+            IsCompositional = true,
+            RelatedSkills = new[] { "git", "docker", "testing" }.ToList()
+        };
     }
     
     public override List<ITool> GetTools()
@@ -495,6 +824,28 @@ public class DeploymentSkill : Skill
         {
             SystemPromptConfig.SkillPrompts.DeploymentExpert
         };
+    }
+    
+    public async Task OnRegisterAsync(ISkillRegistrationContext context)
+    {
+        foreach (var tool in GetTools())
+        {
+            context.RegisterTool(tool);
+        }
+        
+        context.PrependSystemContext(@"
+## Deployment Best Practices
+
+When using Deployment tools:
+1. Always ensure all tests pass before deploying: `run_tests coverage:true`
+2. Create a release commit before deployment
+3. Use appropriate environment-specific settings
+4. Verify that dependencies (git, docker) are working first
+5. Run CI/CD pipeline in dry-run mode before actual deployment
+6. Monitor deployment status and rollback if needed
+7. Document deployment steps and create runbooks
+8. Use blue-green or canary deployment strategies when possible
+        ");
     }
 }
 
