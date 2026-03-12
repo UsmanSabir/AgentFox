@@ -30,24 +30,69 @@ public class LLMConfig
 }
 
 /// <summary>
+/// Base class for LLM providers offering common functionality like HTTP client creation
+/// </summary>
+public abstract class BaseLLMProvider : ILLMProvider
+{
+    protected readonly TimeSpan? _timeout;
+    protected readonly Dictionary<string, string> _customHeaders;
+
+    public abstract string Name { get; }
+
+    protected BaseLLMProvider(TimeSpan? timeout = null, Dictionary<string, string>? customHeaders = null)
+    {
+        _timeout = timeout;
+        _customHeaders = customHeaders ?? new Dictionary<string, string>();
+    }
+
+    protected HttpClient CreateClient(LLMConfig? config = null)
+    {
+        var client = new HttpClient();
+        if (_timeout.HasValue) 
+        {
+            client.Timeout = _timeout.Value;
+        }
+
+        foreach (var header in _customHeaders)
+        {
+            client.DefaultRequestHeaders.TryAddWithoutValidation(header.Key, header.Value);
+        }
+
+        if (config?.Headers != null)
+        {
+            foreach (var header in config.Headers)
+            {
+                client.DefaultRequestHeaders.TryAddWithoutValidation(header.Key, header.Value);
+            }
+        }
+
+        return client;
+    }
+
+    public abstract Task<string> GenerateAsync(List<Message> messages, List<ToolDefinition>? tools = null, LLMConfig? config = null);
+    public abstract Task GenerateStreamingAsync(List<Message> messages, Func<string, Task> onChunk, List<ToolDefinition>? tools = null, LLMConfig? config = null);
+}
+
+/// <summary>
 /// OpenAI LLM Provider
 /// </summary>
-public class OpenAIProvider : ILLMProvider
+public class OpenAIProvider : BaseLLMProvider
 {
     private readonly string _apiKey;
     private readonly string _baseUrl;
     
-    public string Name => "OpenAI";
+    public override string Name => "OpenAI";
     
-    public OpenAIProvider(string apiKey, string? baseUrl = null)
+    public OpenAIProvider(string apiKey, string? baseUrl = null, TimeSpan? timeout = null, Dictionary<string, string>? customHeaders = null)
+        : base(timeout, customHeaders)
     {
         _apiKey = apiKey;
         _baseUrl = baseUrl ?? "https://api.openai.com/v1";
     }
     
-    public async Task<string> GenerateAsync(List<Message> messages, List<ToolDefinition>? tools = null, LLMConfig? config = null)
+    public override async Task<string> GenerateAsync(List<Message> messages, List<ToolDefinition>? tools = null, LLMConfig? config = null)
     {
-        var client = new HttpClient();
+        var client = CreateClient(config);
         client.DefaultRequestHeaders.Add("Authorization", $"Bearer {_apiKey}");
         
         var requestBody = new
@@ -80,9 +125,9 @@ public class OpenAIProvider : ILLMProvider
         return result["choices"]?[0]?["message"]?["content"]?.ToString() ?? "";
     }
     
-    public async Task GenerateStreamingAsync(List<Message> messages, Func<string, Task> onChunk, List<ToolDefinition>? tools = null, LLMConfig? config = null)
+    public override async Task GenerateStreamingAsync(List<Message> messages, Func<string, Task> onChunk, List<ToolDefinition>? tools = null, LLMConfig? config = null)
     {
-        var client = new HttpClient();
+        var client = CreateClient(config);
         client.DefaultRequestHeaders.Add("Authorization", $"Bearer {_apiKey}");
         
         var requestBody = new
@@ -136,22 +181,23 @@ public class OpenAIProvider : ILLMProvider
 /// <summary>
 /// Anthropic Claude LLM Provider
 /// </summary>
-public class AnthropicProvider : ILLMProvider
+public class AnthropicProvider : BaseLLMProvider
 {
     private readonly string _apiKey;
     private readonly string _baseUrl;
     
-    public string Name => "Anthropic Claude";
+    public override string Name => "Anthropic Claude";
     
-    public AnthropicProvider(string apiKey, string? baseUrl = null)
+    public AnthropicProvider(string apiKey, string? baseUrl = null, TimeSpan? timeout = null, Dictionary<string, string>? customHeaders = null)
+        : base(timeout, customHeaders)
     {
         _apiKey = apiKey;
         _baseUrl = baseUrl ?? "https://api.anthropic.com/v1";
     }
     
-    public async Task<string> GenerateAsync(List<Message> messages, List<ToolDefinition>? tools = null, LLMConfig? config = null)
+    public override async Task<string> GenerateAsync(List<Message> messages, List<ToolDefinition>? tools = null, LLMConfig? config = null)
     {
-        var client = new HttpClient();
+        var client = CreateClient(config);
         client.DefaultRequestHeaders.Add("x-api-key", _apiKey);
         client.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
         
@@ -185,9 +231,9 @@ public class AnthropicProvider : ILLMProvider
         return result["content"]?[0]?["text"]?.ToString() ?? "";
     }
     
-    public async Task GenerateStreamingAsync(List<Message> messages, Func<string, Task> onChunk, List<ToolDefinition>? tools = null, LLMConfig? config = null)
+    public override async Task GenerateStreamingAsync(List<Message> messages, Func<string, Task> onChunk, List<ToolDefinition>? tools = null, LLMConfig? config = null)
     {
-        var client = new HttpClient();
+        var client = CreateClient(config);
         client.DefaultRequestHeaders.Add("x-api-key", _apiKey);
         client.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
         
@@ -231,22 +277,23 @@ public class AnthropicProvider : ILLMProvider
 /// <summary>
 /// Ollama LLM Provider (local models)
 /// </summary>
-public class OllamaProvider : ILLMProvider
+public class OllamaProvider : BaseLLMProvider
 {
     private readonly string _baseUrl;
     private readonly string _model;
     
-    public string Name => "Ollama";
+    public override string Name => "Ollama";
     
-    public OllamaProvider(string? baseUrl = null, string model = "llama2")
+    public OllamaProvider(string? baseUrl = null, string model = "llama2", TimeSpan? timeout = null, Dictionary<string, string>? customHeaders = null)
+        : base(timeout, customHeaders)
     {
         _baseUrl = baseUrl ?? "http://localhost:11434";
         _model = model;
     }
     
-    public async Task<string> GenerateAsync(List<Message> messages, List<ToolDefinition>? tools = null, LLMConfig? config = null)
+    public override async Task<string> GenerateAsync(List<Message> messages, List<ToolDefinition>? tools = null, LLMConfig? config = null)
     {
-        var client = new HttpClient();
+        var client = CreateClient(config);
         
         var requestBody = new
         {
@@ -267,9 +314,9 @@ public class OllamaProvider : ILLMProvider
         return result["message"]?["content"]?.ToString() ?? "";
     }
     
-    public async Task GenerateStreamingAsync(List<Message> messages, Func<string, Task> onChunk, List<ToolDefinition>? tools = null, LLMConfig? config = null)
+    public override async Task GenerateStreamingAsync(List<Message> messages, Func<string, Task> onChunk, List<ToolDefinition>? tools = null, LLMConfig? config = null)
     {
-        var client = new HttpClient();
+        var client = CreateClient(config);
         
         var requestBody = new
         {
@@ -310,7 +357,7 @@ public class OllamaProvider : ILLMProvider
     /// </summary>
     public async Task<List<string>> ListModelsAsync()
     {
-        var client = new HttpClient();
+        var client = CreateClient();
         var response = await client.GetAsync($"{_baseUrl}/api/tags");
         var json = await response.Content.ReadAsStringAsync();
         
@@ -324,14 +371,14 @@ public class OllamaProvider : ILLMProvider
 /// </summary>
 public class LLMFactory
 {
-    public static ILLMProvider CreateOpenAI(string apiKey, string? baseUrl = null)
-        => new OpenAIProvider(apiKey, baseUrl);
+    public static ILLMProvider CreateOpenAI(string apiKey, string? baseUrl = null, TimeSpan? timeout = null, Dictionary<string, string>? customHeaders = null)
+        => new OpenAIProvider(apiKey, baseUrl, timeout, customHeaders);
     
-    public static ILLMProvider CreateAnthropic(string apiKey, string? baseUrl = null)
-        => new AnthropicProvider(apiKey, baseUrl);
+    public static ILLMProvider CreateAnthropic(string apiKey, string? baseUrl = null, TimeSpan? timeout = null, Dictionary<string, string>? customHeaders = null)
+        => new AnthropicProvider(apiKey, baseUrl, timeout, customHeaders);
     
-    public static ILLMProvider CreateOllama(string? baseUrl = null, string model = "llama2")
-        => new OllamaProvider(baseUrl, model);
+    public static ILLMProvider CreateOllama(string? baseUrl = null, string model = "llama2", TimeSpan? timeout = null, Dictionary<string, string>? customHeaders = null)
+        => new OllamaProvider(baseUrl, model, timeout, customHeaders);
     
     public static ILLMProvider CreateFromEnvironment()
     {
@@ -350,6 +397,22 @@ public class LLMFactory
     {
         var providerType = configuration["LLM:Provider"]?.ToLowerInvariant();
         
+        TimeSpan? timeout = null;
+        if (int.TryParse(configuration["LLM:TimeoutSeconds"], out int timeoutSeconds))
+        {
+            timeout = TimeSpan.FromSeconds(timeoutSeconds);
+        }
+
+        var customHeaders = new Dictionary<string, string>();
+        var headersSection = configuration.GetSection("LLM:Headers");
+        foreach (var child in headersSection.GetChildren())
+        {
+            if (!string.IsNullOrEmpty(child.Key) && !string.IsNullOrEmpty(child.Value))
+            {
+                customHeaders[child.Key] = child.Value;
+            }
+        }
+        
         switch (providerType)
         {
             case "openai":
@@ -358,7 +421,7 @@ public class LLMFactory
                     var baseUrl = configuration["LLM:BaseUrl"];
                     if (string.IsNullOrEmpty(apiKey))
                         throw new InvalidOperationException("OpenAI Provider requires an API key in configuration or OPENAI_API_KEY environment variable.");
-                    return CreateOpenAI(apiKey, baseUrl);
+                    return CreateOpenAI(apiKey, baseUrl, timeout, customHeaders);
                 }
             case "anthropic":
                 {
@@ -366,14 +429,14 @@ public class LLMFactory
                     var baseUrl = configuration["LLM:BaseUrl"];
                     if (string.IsNullOrEmpty(apiKey))
                         throw new InvalidOperationException("Anthropic Provider requires an API key in configuration or ANTHROPIC_API_KEY environment variable.");
-                    return CreateAnthropic(apiKey, baseUrl);
+                    return CreateAnthropic(apiKey, baseUrl, timeout, customHeaders);
                 }
             case "ollama":
             default:
                 {
                     var baseUrl = configuration["LLM:BaseUrl"];
                     var model = configuration["LLM:Model"] ?? "llama2";
-                    return CreateOllama(baseUrl, model);
+                    return CreateOllama(baseUrl, model, timeout, customHeaders);
                 }
         }
     }
