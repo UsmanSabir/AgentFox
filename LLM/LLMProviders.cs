@@ -12,6 +12,7 @@ namespace AgentFox.LLM;
 public interface ILLMProvider
 {
     string Name { get; }
+    LLMConfig? DefaultConfig { get; set; }
     Task<string> GenerateAsync(List<Message> messages, List<ToolDefinition>? tools = null, LLMConfig? config = null);
     Task GenerateStreamingAsync(List<Message> messages, Func<string, Task> onChunk, List<ToolDefinition>? tools = null, LLMConfig? config = null);
 }
@@ -22,6 +23,7 @@ public interface ILLMProvider
 public class LLMConfig
 {
     public string? Model { get; set; }
+    public string? BaseUrl { get; set; }
     public double Temperature { get; set; } = 0.7;
     public int MaxTokens { get; set; } = 4096;
     public List<string>? Stop { get; set; }
@@ -38,6 +40,7 @@ public abstract class BaseLLMProvider : ILLMProvider
     protected readonly Dictionary<string, string> _customHeaders;
 
     public abstract string Name { get; }
+    public LLMConfig? DefaultConfig { get; set; }
 
     protected BaseLLMProvider(TimeSpan? timeout = null, Dictionary<string, string>? customHeaders = null)
     {
@@ -88,19 +91,21 @@ public class OpenAIProvider : BaseLLMProvider
     {
         _apiKey = apiKey;
         _baseUrl = baseUrl ?? "https://api.openai.com/v1";
+        // Ensure API key is added to headers
+        _customHeaders["Authorization"] = $"Bearer {apiKey}";
     }
     
     public override async Task<string> GenerateAsync(List<Message> messages, List<ToolDefinition>? tools = null, LLMConfig? config = null)
     {
-        var client = CreateClient(config);
-        client.DefaultRequestHeaders.Add("Authorization", $"Bearer {_apiKey}");
+        var effectiveConfig = config ?? DefaultConfig;
+        var client = CreateClient(effectiveConfig);
         
         var requestBody = new
-        {
-            model = config?.Model ?? "gpt-4",
+        {            
+            model = effectiveConfig?.Model ?? "gpt-4",
             messages = messages.Select(m => new { role = m.Role.ToString().ToLower(), m.Content }),
-            temperature = config?.Temperature ?? 0.7,
-            max_tokens = config?.MaxTokens ?? 4096,
+            temperature = effectiveConfig?.Temperature ?? 0.7,
+            max_tokens = effectiveConfig?.MaxTokens ?? 4096,
             tools = tools?.Select(t => new
             {
                 type = "function",
@@ -119,23 +124,42 @@ public class OpenAIProvider : BaseLLMProvider
         };
         
         var response = await client.PostAsJsonAsync($"{_baseUrl}/chat/completions", requestBody);
+        
+        if (!response.IsSuccessStatusCode)
+        {
+            var errorContent = await response.Content.ReadAsStringAsync();
+            throw new HttpRequestException($"OpenAI API request failed with status {response.StatusCode}: {errorContent}");
+        }
+        
         var json = await response.Content.ReadAsStringAsync();
         
-        var result = JObject.Parse(json);
-        return result["choices"]?[0]?["message"]?["content"]?.ToString() ?? "";
+        if (string.IsNullOrEmpty(json))
+            throw new InvalidOperationException("OpenAI API returned empty response");
+        
+        try
+        {
+            var result = JObject.Parse(json);
+            var content = result["choices"]?[0]?["message"]?["content"]?.ToString();
+            if (string.IsNullOrEmpty(content))
+                throw new InvalidOperationException($"OpenAI API returned no content: {json}");
+            return content;
+        }
+        catch (JsonReaderException ex)
+        {
+            throw new InvalidOperationException($"Failed to parse OpenAI response: {json}", ex);
+        }
     }
     
     public override async Task GenerateStreamingAsync(List<Message> messages, Func<string, Task> onChunk, List<ToolDefinition>? tools = null, LLMConfig? config = null)
     {
-        var client = CreateClient(config);
-        client.DefaultRequestHeaders.Add("Authorization", $"Bearer {_apiKey}");
-        
+        var effectiveConfig = config ?? DefaultConfig;
+        var client = CreateClient(effectiveConfig);
         var requestBody = new
         {
-            model = config?.Model ?? "gpt-4",
+            model = effectiveConfig?.Model ?? "gpt-4",
             messages = messages.Select(m => new { role = m.Role.ToString().ToLower(), m.Content }),
-            temperature = config?.Temperature ?? 0.7,
-            max_tokens = config?.MaxTokens ?? 4096,
+            temperature = effectiveConfig?.Temperature ?? 0.7,
+            max_tokens = effectiveConfig?.MaxTokens ?? 4096,
             stream = true,
             tools = tools?.Select(t => new
             {
@@ -155,6 +179,13 @@ public class OpenAIProvider : BaseLLMProvider
         };
         
         var response = await client.PostAsJsonAsync($"{_baseUrl}/chat/completions", requestBody);
+        
+        if (!response.IsSuccessStatusCode)
+        {
+            var errorContent = await response.Content.ReadAsStringAsync();
+            throw new HttpRequestException($"OpenAI streaming API request failed with status {response.StatusCode}: {errorContent}");
+        }
+        
         using var reader = new StreamReader(await response.Content.ReadAsStreamAsync());
         
         while (!reader.EndOfStream)
@@ -172,7 +203,10 @@ public class OpenAIProvider : BaseLLMProvider
                         await onChunk(chunk);
                     }
                 }
-                catch { }
+                catch (JsonReaderException)
+                {
+                    // Malformed stream data, skip
+                }
             }
         }
     }
@@ -193,22 +227,23 @@ public class AnthropicProvider : BaseLLMProvider
     {
         _apiKey = apiKey;
         _baseUrl = baseUrl ?? "https://api.anthropic.com/v1";
+        // Ensure API key is added to headers
+        _customHeaders["x-api-key"] = apiKey;
+        _customHeaders["anthropic-version"] = "2023-06-01";
     }
     
     public override async Task<string> GenerateAsync(List<Message> messages, List<ToolDefinition>? tools = null, LLMConfig? config = null)
     {
-        var client = CreateClient(config);
-        client.DefaultRequestHeaders.Add("x-api-key", _apiKey);
-        client.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
-        
+        var effectiveConfig = config ?? DefaultConfig;
+        var client = CreateClient(effectiveConfig);
         var systemMessage = messages.FirstOrDefault(m => m.Role == MessageRole.System)?.Content ?? "";
         var userMessages = messages.Where(m => m.Role != MessageRole.System).ToList();
         
         var requestBody = new
         {
-            model = config?.Model ?? "claude-3-opus-20240229",
-            max_tokens = config?.MaxTokens ?? 4096,
-            temperature = config?.Temperature ?? 0.7,
+            model = effectiveConfig?.Model ?? "claude-3-opus-20240229",
+            max_tokens = effectiveConfig?.MaxTokens ?? 4096,
+            temperature = effectiveConfig?.Temperature ?? 0.7,
             system = systemMessage,
             messages = userMessages.Select(m => new { role = m.Role.ToString().ToLower(), content = m.Content }),
             tools = tools?.Select(t => new
@@ -225,32 +260,57 @@ public class AnthropicProvider : BaseLLMProvider
         };
         
         var response = await client.PostAsJsonAsync($"{_baseUrl}/messages", requestBody);
+        
+        if (!response.IsSuccessStatusCode)
+        {
+            var errorContent = await response.Content.ReadAsStringAsync();
+            throw new HttpRequestException($"Anthropic API request failed with status {response.StatusCode}: {errorContent}");
+        }
+        
         var json = await response.Content.ReadAsStringAsync();
         
-        var result = JObject.Parse(json);
-        return result["content"]?[0]?["text"]?.ToString() ?? "";
+        if (string.IsNullOrEmpty(json))
+            throw new InvalidOperationException("Anthropic API returned empty response");
+        
+        try
+        {
+            var result = JObject.Parse(json);
+            var content = result["content"]?[0]?["text"]?.ToString();
+            if (string.IsNullOrEmpty(content))
+                throw new InvalidOperationException($"Anthropic API returned no content: {json}");
+            return content;
+        }
+        catch (JsonReaderException ex)
+        {
+            throw new InvalidOperationException($"Failed to parse Anthropic response: {json}", ex);
+        }
     }
     
     public override async Task GenerateStreamingAsync(List<Message> messages, Func<string, Task> onChunk, List<ToolDefinition>? tools = null, LLMConfig? config = null)
     {
-        var client = CreateClient(config);
-        client.DefaultRequestHeaders.Add("x-api-key", _apiKey);
-        client.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
-        
+        var effectiveConfig = config ?? DefaultConfig;
+        var client = CreateClient(effectiveConfig);
         var systemMessage = messages.FirstOrDefault(m => m.Role == MessageRole.System)?.Content ?? "";
         var userMessages = messages.Where(m => m.Role != MessageRole.System).ToList();
         
         var requestBody = new
         {
-            model = config?.Model ?? "claude-3-opus-20240229",
-            max_tokens = 1024,
-            temperature = config?.Temperature ?? 0.7,
+            model = effectiveConfig?.Model ?? "claude-3-opus-20240229",
+            max_tokens = effectiveConfig?.MaxTokens ?? 1024,
+            temperature = effectiveConfig?.Temperature ?? 0.7,
             system = systemMessage,
             messages = userMessages.Select(m => new { role = m.Role.ToString().ToLower(), content = m.Content }),
             stream = true
         };
         
         var response = await client.PostAsJsonAsync($"{_baseUrl}/messages", requestBody);
+        
+        if (!response.IsSuccessStatusCode)
+        {
+            var errorContent = await response.Content.ReadAsStringAsync();
+            throw new HttpRequestException($"Anthropic streaming API request failed with status {response.StatusCode}: {errorContent}");
+        }
+        
         using var reader = new StreamReader(await response.Content.ReadAsStreamAsync());
         
         while (!reader.EndOfStream)
@@ -268,7 +328,10 @@ public class AnthropicProvider : BaseLLMProvider
                         await onChunk(chunk);
                     }
                 }
-                catch { }
+                catch (JsonReaderException)
+                {
+                    // Malformed stream data, skip
+                }
             }
         }
     }
@@ -293,44 +356,73 @@ public class OllamaProvider : BaseLLMProvider
     
     public override async Task<string> GenerateAsync(List<Message> messages, List<ToolDefinition>? tools = null, LLMConfig? config = null)
     {
-        var client = CreateClient(config);
+        var effectiveConfig = config ?? DefaultConfig;
+        var client = CreateClient(effectiveConfig);
         
         var requestBody = new
         {
-            model = config?.Model ?? _model,
+            model = effectiveConfig?.Model ?? _model,
             messages = messages.Select(m => new { role = m.Role.ToString().ToLower(), content = m.Content }),
             stream = false,
             options = new
             {
-                temperature = config?.Temperature ?? 0.7,
-                num_predict = config?.MaxTokens ?? 4096
+                temperature = effectiveConfig?.Temperature ?? 0.7,
+                num_predict = effectiveConfig?.MaxTokens ?? 4096
             }
         };
         
         var response = await client.PostAsJsonAsync($"{_baseUrl}/api/chat", requestBody);
+        
+        if (!response.IsSuccessStatusCode)
+        {
+            var errorContent = await response.Content.ReadAsStringAsync();
+            throw new HttpRequestException($"Ollama API request failed with status {response.StatusCode}: {errorContent}");
+        }
+        
         var json = await response.Content.ReadAsStringAsync();
         
-        var result = JObject.Parse(json);
-        return result["message"]?["content"]?.ToString() ?? "";
+        if (string.IsNullOrEmpty(json))
+            throw new InvalidOperationException("Ollama API returned empty response");
+        
+        try
+        {
+            var result = JObject.Parse(json);
+            var content = result["message"]?["content"]?.ToString();
+            if (string.IsNullOrEmpty(content))
+                throw new InvalidOperationException($"Ollama API returned no content: {json}");
+            return content;
+        }
+        catch (JsonReaderException ex)
+        {
+            throw new InvalidOperationException($"Failed to parse Ollama response: {json}", ex);
+        }
     }
     
     public override async Task GenerateStreamingAsync(List<Message> messages, Func<string, Task> onChunk, List<ToolDefinition>? tools = null, LLMConfig? config = null)
     {
-        var client = CreateClient(config);
+        var effectiveConfig = config ?? DefaultConfig;
+        var client = CreateClient(effectiveConfig);
         
         var requestBody = new
         {
-            model = config?.Model ?? _model,
+            model = effectiveConfig?.Model ?? _model,
             messages = messages.Select(m => new { role = m.Role.ToString().ToLower(), content = m.Content }),
             stream = true,
             options = new
             {
-                temperature = config?.Temperature ?? 0.7,
-                num_predict = config?.MaxTokens ?? 4096
+                temperature = effectiveConfig?.Temperature ?? 0.7,
+                num_predict = effectiveConfig?.MaxTokens ?? 4096
             }
         };
         
         var response = await client.PostAsJsonAsync($"{_baseUrl}/api/chat", requestBody);
+        
+        if (!response.IsSuccessStatusCode)
+        {
+            var errorContent = await response.Content.ReadAsStringAsync();
+            throw new HttpRequestException($"Ollama streaming API request failed with status {response.StatusCode}: {errorContent}");
+        }
+        
         using var reader = new StreamReader(await response.Content.ReadAsStreamAsync());
         
         while (!reader.EndOfStream)
@@ -347,7 +439,10 @@ public class OllamaProvider : BaseLLMProvider
                         await onChunk(chunk);
                     }
                 }
-                catch { }
+                catch (JsonReaderException)
+                {
+                    // Malformed stream data, skip
+                }
             }
         }
     }
@@ -413,6 +508,16 @@ public class LLMFactory
             }
         }
         
+        var defaultConfig = new LLMConfig
+        {
+            Model = configuration["LLM:Model"],
+            BaseUrl = configuration["LLM:BaseUrl"],
+            Temperature = double.TryParse(configuration["LLM:Temperature"], out double temp) ? temp : 0.7,
+            MaxTokens = int.TryParse(configuration["LLM:MaxTokens"], out int tokens) ? tokens : 4096,
+            Stop = configuration.GetSection("LLM:Stop").Get<List<string>>()
+        };
+
+        ILLMProvider provider;
         switch (providerType)
         {
             case "openai":
@@ -421,7 +526,12 @@ public class LLMFactory
                     var baseUrl = configuration["LLM:BaseUrl"];
                     if (string.IsNullOrEmpty(apiKey))
                         throw new InvalidOperationException("OpenAI Provider requires an API key in configuration or OPENAI_API_KEY environment variable.");
-                    return CreateOpenAI(apiKey, baseUrl, timeout, customHeaders);
+                    //if (string.IsNullOrEmpty(baseUrl))
+                    //   throw new InvalidOperationException("OpenAI Provider requires a BaseUrl in configuration under LLM:BaseUrl.");
+                    
+                    defaultConfig.Headers["Authorization"] = $"Bearer {apiKey}";
+                    provider = CreateOpenAI(apiKey, baseUrl, timeout, customHeaders);
+                    break;
                 }
             case "anthropic":
                 {
@@ -429,15 +539,28 @@ public class LLMFactory
                     var baseUrl = configuration["LLM:BaseUrl"];
                     if (string.IsNullOrEmpty(apiKey))
                         throw new InvalidOperationException("Anthropic Provider requires an API key in configuration or ANTHROPIC_API_KEY environment variable.");
-                    return CreateAnthropic(apiKey, baseUrl, timeout, customHeaders);
+                    //if (string.IsNullOrEmpty(baseUrl))
+                    //    throw new InvalidOperationException("Anthropic Provider requires a BaseUrl in configuration under LLM:BaseUrl.");
+                    
+                    defaultConfig.Headers["x-api-key"] = apiKey;
+                    defaultConfig.Headers["anthropic-version"] = "2023-06-01";
+                    provider = CreateAnthropic(apiKey, baseUrl, timeout, customHeaders);
+                    break;
                 }
             case "ollama":
             default:
                 {
                     var baseUrl = configuration["LLM:BaseUrl"];
+                    if (string.IsNullOrEmpty(baseUrl))
+                        baseUrl = "http://localhost:11434"; // Ollama default only
+                    
                     var model = configuration["LLM:Model"] ?? "llama2";
-                    return CreateOllama(baseUrl, model, timeout, customHeaders);
+                    provider = CreateOllama(baseUrl, model, timeout, customHeaders);
+                    break;
                 }
         }
+
+        provider.DefaultConfig = defaultConfig;
+        return provider;
     }
 }

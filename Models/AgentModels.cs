@@ -86,6 +86,7 @@ public class AgentConfig
     public string Name { get; set; } = string.Empty;
     public string Description { get; set; } = string.Empty;
     public string? SystemPrompt { get; set; }
+    public string? Model { get; set; }
     public int MaxTokens { get; set; } = 4096;
     public double Temperature { get; set; } = 0.7;
     public List<ToolDefinition> Tools { get; set; } = new();

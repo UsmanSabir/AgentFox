@@ -39,8 +39,16 @@ public class LLMExecutor : IAgentExecutor
             // Get available tools
             var availableTools = GetAvailableTools(agent);
             
+            // Build LLM config
+            var llmConfig = new LLMConfig
+            {
+                Model = agent.Config.Model ?? _llm.DefaultConfig?.Model,
+                Temperature = agent.Config.Temperature,
+                MaxTokens = agent.Config.MaxTokens
+            };
+            
             // Call LLM
-            var response = await _llm.GenerateAsync(messages, availableTools);
+            var response = await _llm.GenerateAsync(messages, availableTools, llmConfig);
             
             // Add assistant message
             agent.ConversationHistory.Add(new Message(MessageRole.Assistant, response));
@@ -73,7 +81,8 @@ public class LLMExecutor : IAgentExecutor
                 messagesWithResult.Add(new Message(MessageRole.System, "Based on the tool results, provide your final answer."));
                 var finalResponse = await _llm.GenerateAsync(
                     messagesWithResult,
-                    null
+                    null,
+                    llmConfig
                 );
                 
                 result.Output = finalResponse;
