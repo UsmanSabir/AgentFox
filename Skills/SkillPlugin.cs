@@ -8,6 +8,16 @@ using AgentFox.Tools;
 namespace AgentFox.Skills;
 
 /// <summary>
+/// Lightweight descriptor for a skill, used in the agent's system prompt skills index.
+/// Only name + description are included — full guidance is lazy-loaded on demand.
+/// </summary>
+public record SkillManifest(
+    string Name,
+    string Description,
+    int ToolCount,
+    string SkillType);   // "local" | "composio"
+
+/// <summary>
 /// Metadata about a skill's capabilities and usage
 /// </summary>
 public class SkillMetadata
@@ -92,6 +102,12 @@ public interface ISkillPlugin
     /// Called when skill is registered - plugins can inject tools and guidance
     /// </summary>
     Task OnRegisterAsync(ISkillRegistrationContext context);
+
+    /// <summary>
+    /// Returns a lightweight manifest for the skills index in the system prompt.
+    /// Override to provide a custom short description.
+    /// </summary>
+    SkillManifest GetManifest();
 }
 
 /// <summary>

@@ -2,7 +2,9 @@ using AgentFox.Agents;
 using AgentFox.LLM;
 using AgentFox.Memory;
 using AgentFox.Models;
+using AgentFox.Skills;
 using AgentFox.Tools;
+using SystemPromptBuilder = AgentFox.LLM.SystemPromptBuilder;
 
 namespace AgentFox;
 
@@ -33,11 +35,13 @@ class Program
     static async Task<int> RunCommandLineMode(string[] args)
     {
         var toolRegistry = CreateToolRegistry();
+        var skillRegistry = CreateSkillRegistry(toolRegistry);
         
-        // Build system prompt with dynamic builder
+        // Build system prompt with dynamic builder + skills index
         var systemPrompt = new SystemPromptBuilder()
             .WithPersona(SystemPromptConfig.AgentPrompts.DeveloperAssistant)
             .WithTools("shell", "read_file", "write_file", "list_files", "search_files", "make_directory", "delete")
+            .WithSkillsIndex(skillRegistry.GetSkillManifests())
             .WithConstraints(
                 "Always verify changes before executing destructive operations",
                 "Prioritize security and best practices",
@@ -72,8 +76,14 @@ class Program
     static async Task<int> RunInteractiveMode()
     {
         var toolRegistry = CreateToolRegistry();
+        var skillRegistry = CreateSkillRegistry(toolRegistry);
         
-        // Build comprehensive system prompt with all available tools and context
+        // Print skills summary at startup
+        var manifests = skillRegistry.GetSkillManifests();
+        Console.WriteLine($"Skills loaded: {manifests.Count} skill(s) registered.");
+        Console.WriteLine();
+        
+        // Build comprehensive system prompt with all available tools and a compact skills index
         var systemPrompt = new SystemPromptBuilder()
             .WithPersona(SystemPromptConfig.AgentPrompts.DeveloperAssistant)
             .WithTools(
@@ -85,21 +95,25 @@ class Program
                 "make_directory: Create directories",
                 "delete: Delete files or directories",
                 "get_env_info: Get environment information",
-                "spawn_subagent: Spawn a sub-agent for complex tasks"
+                "spawn_subagent: Spawn a sub-agent for complex tasks",
+                "load_skill: Load a skill's full guidance on demand"
             )
+            .WithSkillsIndex(manifests)
             .WithExecutionContext(
                 "You are running in interactive mode and can help with:\n" +
                 "- Code development and debugging\n" +
                 "- File system operations\n" +
                 "- System administration\n" +
-                "- Architecture and design consultation"
+                "- Architecture and design consultation\n" +
+                "- Git, Docker, deployment, testing, and more via skills"
             )
             .WithConstraints(
                 "Always verify changes before executing destructive operations",
                 "Protect sensitive information (API keys, credentials, etc.)",
                 "Test code in isolated environments when possible",
                 "Explain your reasoning and approach clearly",
-                "Ask for confirmation for high-risk operations"
+                "Ask for confirmation for high-risk operations",
+                "Before using a skill's tools, always call load_skill to load the skill's guidance"
             )
             .Build();
         
@@ -120,52 +134,70 @@ class Program
             if (string.IsNullOrWhiteSpace(input))
                 continue;
             
-            if (input.Trim().ToLower() == "exit")
+            var trimmed = input.Trim();
+            var lower = trimmed.ToLower();
+            
+            if (lower == "exit")
             {
                 Console.WriteLine("Goodbye!");
                 break;
             }
             
-            if (input.Trim().ToLower() == "help")
+            if (lower == "help")
             {
                 ShowHelp();
                 continue;
             }
             
-            if (input.Trim().ToLower() == "status")
+            if (lower == "status")
             {
                 ShowStatus(agent);
                 continue;
             }
             
-            if (input.Trim().ToLower() == "history")
+            if (lower == "history")
             {
                 ShowHistory(agent);
                 continue;
             }
             
-            if (input.Trim().ToLower() == "clear")
+            if (lower == "clear")
             {
                 agent.ClearHistory();
                 Console.WriteLine("History cleared.");
                 continue;
             }
             
-            if (input.Trim().ToLower() == "memory")
+            if (lower == "memory")
             {
                 await ShowMemory(agent);
                 continue;
             }
             
-            if (input.Trim().ToLower() == "tools")
+            if (lower == "tools")
             {
                 ShowTools(toolRegistry);
                 continue;
             }
             
+            // skills — list all registered skills
+            if (lower == "skills")
+            {
+                ShowSkills(skillRegistry);
+                continue;
+            }
+            
+            // skill <name> — show detail for a specific skill
+            if (lower.StartsWith("skill "))
+            {
+                var skillName = trimmed.Substring("skill ".Length).Trim();
+                ShowSkillDetail(skillRegistry, skillName);
+                continue;
+            }
+            
             // Execute task
             Console.WriteLine();
-            var result = await agent.ExecuteAsync(input);
+            var result = await agent.ExecuteAsync(trimmed);
             
             Console.WriteLine(result.Output);
             Console.WriteLine();
@@ -202,18 +234,29 @@ class Program
         
         return registry;
     }
+
+    static SkillRegistry CreateSkillRegistry(ToolRegistry toolRegistry)
+    {
+        // SkillRegistry auto-registers all built-in skills (git, docker, code_review,
+        // debugging, api_integration, database, testing, deployment) and also
+        // registers LoadSkillTool into the toolRegistry for lazy on-demand loading.
+        var skillRegistry = new SkillRegistry(toolRegistry);
+        return skillRegistry;
+    }
     
     static void ShowHelp()
     {
         Console.WriteLine(@"
 Available commands:
-  help     - Show this help message
-  status   - Show agent status
-  history  - Show conversation history
-  memory   - Show agent memory
-  tools    - List available tools
-  clear    - Clear conversation history
-  exit     - Exit the program
+  help           - Show this help message
+  status         - Show agent status
+  history        - Show conversation history
+  memory         - Show agent memory
+  tools          - List available tools
+  skills         - List all registered skills (name, type, tool count, description)
+  skill <name>   - Show detailed info for a specific skill
+  clear          - Clear conversation history
+  exit           - Exit the program
 
 You can also ask the agent to:
   - Execute shell commands
@@ -221,6 +264,8 @@ You can also ask the agent to:
   - Search for text in files
   - Spawn sub-agents for complex tasks
   - Remember information for later
+  - Use skills: git, docker, deployment, testing, api_integration, etc.
+    (ask the agent to 'load the git skill and help me commit my changes')
 ");
     }
     
@@ -285,5 +330,92 @@ You can also ask the agent to:
             Console.WriteLine($"    {tool.Description}");
             Console.WriteLine();
         }
+    }
+
+    /// <summary>
+    /// Show all registered skills in a compact table
+    /// </summary>
+    static void ShowSkills(SkillRegistry skillRegistry)
+    {
+        var manifests = skillRegistry.GetSkillManifests();
+        
+        if (manifests.Count == 0)
+        {
+            Console.WriteLine("No skills registered.");
+            return;
+        }
+
+        Console.WriteLine($"Registered Skills ({manifests.Count}):");
+        Console.WriteLine(new string('─', 80));
+        Console.WriteLine($"  {"Skill",-20} {"Type",-10} {"Tools",5}  Description");
+        Console.WriteLine(new string('─', 80));
+
+        foreach (var m in manifests)
+        {
+            var desc = m.Description.Length > 44 ? m.Description[..41] + "..." : m.Description;
+            Console.WriteLine($"  {m.Name,-20} {m.SkillType,-10} {m.ToolCount,5}  {desc}");
+        }
+
+        Console.WriteLine(new string('─', 80));
+        Console.WriteLine();
+        Console.WriteLine("Use 'skill <name>' for detailed skill info.");
+        Console.WriteLine("Ask the agent: \"load the <skill> skill\" to activate it during a conversation.");
+        Console.WriteLine();
+    }
+
+    /// <summary>
+    /// Show detailed info for a specific skill
+    /// </summary>
+    static void ShowSkillDetail(SkillRegistry skillRegistry, string skillName)
+    {
+        var skill = skillRegistry.Get(skillName);
+        if (skill == null)
+        {
+            // Try case-insensitive
+            skill = skillRegistry.GetAll()
+                .FirstOrDefault(s => s.Name.Equals(skillName, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (skill == null)
+        {
+            Console.WriteLine($"Skill '{skillName}' not found.");
+            Console.WriteLine("Use 'skills' to list all registered skills.");
+            return;
+        }
+
+        Console.WriteLine();
+        Console.WriteLine($"  Skill: {skill.Name}  (v{skill.Version})");
+        Console.WriteLine(new string('─', 60));
+        Console.WriteLine($"  Description : {skill.Description}");
+
+        if (skill.Dependencies.Count > 0)
+            Console.WriteLine($"  Dependencies: {string.Join(", ", skill.Dependencies)}");
+
+        if (skill.Metadata != null)
+        {
+            if (skill.Metadata.Capabilities.Count > 0)
+                Console.WriteLine($"  Capabilities: {string.Join(", ", skill.Metadata.Capabilities)}");
+            if (skill.Metadata.Tags.Count > 0)
+                Console.WriteLine($"  Tags        : {string.Join(", ", skill.Metadata.Tags)}");
+            Console.WriteLine($"  Complexity  : {skill.Metadata.ComplexityScore}/10");
+        }
+
+        var tools = skill.GetTools();
+        if (tools.Count > 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine($"  Tools ({tools.Count}):");
+            foreach (var tool in tools)
+            {
+                Console.WriteLine($"    • {tool.Name,-25} {tool.Description}");
+            }
+        }
+
+        var isPlugin = skill is ISkillPlugin;
+        Console.WriteLine();
+        Console.WriteLine($"  Type: {(isPlugin ? "local" : "generic")} skill");
+        Console.WriteLine();
+        Console.WriteLine($"  To load full guidance: load_skill(skill_name: \"{skill.Name}\")");
+        Console.WriteLine();
     }
 }

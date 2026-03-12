@@ -101,6 +101,9 @@ public class SkillRegistry
         _resilientExecutor = new ResilientSkillExecutor(loggerForExecutor ?? new DummyLogger<ResilientSkillExecutor>());
         
         RegisterBuiltInSkills();
+        
+        // Register the lazy skill loader tool so the LLM can load skill guidance on demand
+        _toolRegistry.Register(new LoadSkillTool(this));
     }
     
     private void RegisterBuiltInSkills()
@@ -452,6 +455,30 @@ public class SkillRegistry
     /// Get resilient executor
     /// </summary>
     public ResilientSkillExecutor GetResilientExecutor() => _resilientExecutor!;
+
+    /// <summary>
+    /// Get lightweight manifests for all registered skills (used for system prompt skills index).
+    /// Does NOT load full skill content.
+    /// </summary>
+    public List<SkillManifest> GetSkillManifests()
+    {
+        lock (_lock)
+        {
+            return _skills.Values.Select(s =>
+            {
+                // If skill implements ISkillPlugin it can return a custom manifest
+                if (s is ISkillPlugin plugin)
+                    return plugin.GetManifest();
+
+                // Fallback for skills that don't implement ISkillPlugin
+                return new SkillManifest(
+                    s.Name,
+                    s.Description,
+                    s.GetTools().Count,
+                    "local");
+            }).ToList();
+        }
+    }
 }
 
 /// <summary>
@@ -478,6 +505,8 @@ public class GitSkill : Skill, ISkillPlugin
             RelatedSkills = new[] { "docker", "deployment" }.ToList()
         };
     }
+
+    public SkillManifest GetManifest() => new(Name, Description, 6, "local");
     
     public override List<ITool> GetTools()
     {
@@ -502,25 +531,26 @@ public class GitSkill : Skill, ISkillPlugin
     
     public async Task OnRegisterAsync(ISkillRegistrationContext context)
     {
-        // Register all git tools
+        // Register all git tools (NOTE: full system prompt is NOT injected here;
+        // the LLM loads it on-demand via load_skill tool)
         foreach (var tool in GetTools())
         {
             context.RegisterTool(tool);
         }
-        
-        // Inject git usage guidance into agent's system prompt
-        context.PrependSystemContext(@"
-## Git Workflow Best Practices
 
-When using Git tools:
-1. Always create feature branches before making changes: `git_branch create feature-name`
-2. Check current status before committing: `git_status`
-3. Use descriptive commit messages (format: type(scope): description): `git_commit message:""type(scope): description""`
-4. Pull before pushing to avoid conflicts: `git_pull`
-5. Group related changes into a single commit when possible
-6. For important releases, create and checkout appropriate branches
-7. Review git log to track changes: `git_log count:10`
-        ");
+//         // Inject git usage guidance into agent's system prompt
+//         context.PrependSystemContext(@"
+// ## Git Workflow Best Practices
+
+// When using Git tools:
+// 1. Always create feature branches before making changes: `git_branch create feature-name`
+// 2. Check current status before committing: `git_status`
+// 3. Use descriptive commit messages (format: type(scope): description): `git_commit message:""type(scope): description""`
+// 4. Pull before pushing to avoid conflicts: `git_pull`
+// 5. Group related changes into a single commit when possible
+// 6. For important releases, create and checkout appropriate branches
+// 7. Review git log to track changes: `git_log count:10`
+//         ");
     }
 }
 
@@ -549,6 +579,8 @@ public class DockerSkill : Skill, ISkillPlugin
             RelatedSkills = new[] { "git", "deployment" }.ToList()
         };
     }
+
+    public SkillManifest GetManifest() => new(Name, Description, 5, "local");
     
     public override List<ITool> GetTools()
     {
@@ -576,19 +608,19 @@ public class DockerSkill : Skill, ISkillPlugin
         {
             context.RegisterTool(tool);
         }
-        
-        context.PrependSystemContext(@"
-## Docker Best Practices
+        // Full guidance loaded on-demand via load_skill tool
+//         context.PrependSystemContext(@"
+// ## Docker Best Practices
 
-When using Docker tools:
-1. Always build with descriptive tags: `docker_build tag:""myapp:v1.0""`
-2. Use meaningful container names for tracking: `docker_run name:""my-container""`
-3. Check running containers before operations: `docker_ps all:true`
-4. Monitor logs for debugging: `docker_logs tail:100`
-5. Stop containers gracefully before removing
-6. Use environment-specific tags for deployment artifacts
-7. Keep images small and focused on single responsibilities
-        ");
+// When using Docker tools:
+// 1. Always build with descriptive tags: `docker_build tag:""myapp:v1.0""`
+// 2. Use meaningful container names for tracking: `docker_run name:""my-container""`
+// 3. Check running containers before operations: `docker_ps all:true`
+// 4. Monitor logs for debugging: `docker_logs tail:100`
+// 5. Stop containers gracefully before removing
+// 6. Use environment-specific tags for deployment artifacts
+// 7. Keep images small and focused on single responsibilities
+//         ");
     }
 }
 
@@ -693,6 +725,8 @@ public class APIIntegrationSkill : Skill, ISkillPlugin
             IsCompositional = true
         };
     }
+
+    public SkillManifest GetManifest() => new(Name, Description, 2, "local");
     
     public override List<ITool> GetTools()
     {
@@ -717,20 +751,20 @@ public class APIIntegrationSkill : Skill, ISkillPlugin
         {
             context.RegisterTool(tool);
         }
-        
-        context.PrependSystemContext(@"
-## API Integration Best Practices
+        // Full guidance loaded on-demand via load_skill tool
+//         context.PrependSystemContext(@"
+// ## API Integration Best Practices
 
-When using API tools:
-1. Always validate the endpoint URL before making the call
-2. Include required authentication headers and tokens
-3. For POST/PUT requests, validate JSON body structure
-4. Check response status codes before processing data
-5. Implement appropriate error handling and retry logic
-6. Rate-limit API calls to respect service quotas
-7. For paginated results, implement proper next-page logic
-8. Cache results when appropriate to reduce API calls
-        ");
+// When using API tools:
+// 1. Always validate the endpoint URL before making the call
+// 2. Include required authentication headers and tokens
+// 3. For POST/PUT requests, validate JSON body structure
+// 4. Check response status codes before processing data
+// 5. Implement appropriate error handling and retry logic
+// 6. Rate-limit API calls to respect service quotas
+// 7. For paginated results, implement proper next-page logic
+// 8. Cache results when appropriate to reduce API calls
+//         ");
     }
 }
 
@@ -837,6 +871,8 @@ public class DeploymentSkill : Skill, ISkillPlugin
             RelatedSkills = new[] { "git", "docker", "testing" }.ToList()
         };
     }
+
+    public SkillManifest GetManifest() => new(Name, Description, 2, "local");
     
     public override List<ITool> GetTools()
     {
@@ -861,20 +897,20 @@ public class DeploymentSkill : Skill, ISkillPlugin
         {
             context.RegisterTool(tool);
         }
-        
-        context.PrependSystemContext(@"
-## Deployment Best Practices
+        // Full guidance loaded on-demand via load_skill tool
+//         context.PrependSystemContext(@"
+// ## Deployment Best Practices
 
-When using Deployment tools:
-1. Always ensure all tests pass before deploying: `run_tests coverage:true`
-2. Create a release commit before deployment
-3. Use appropriate environment-specific settings
-4. Verify that dependencies (git, docker) are working first
-5. Run CI/CD pipeline in dry-run mode before actual deployment
-6. Monitor deployment status and rollback if needed
-7. Document deployment steps and create runbooks
-8. Use blue-green or canary deployment strategies when possible
-        ");
+// When using Deployment tools:
+// 1. Always ensure all tests pass before deploying: `run_tests coverage:true`
+// 2. Create a release commit before deployment
+// 3. Use appropriate environment-specific settings
+// 4. Verify that dependencies (git, docker) are working first
+// 5. Run CI/CD pipeline in dry-run mode before actual deployment
+// 6. Monitor deployment status and rollback if needed
+// 7. Document deployment steps and create runbooks
+// 8. Use blue-green or canary deployment strategies when possible
+//         ");
     }
 }
 

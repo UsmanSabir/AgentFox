@@ -243,18 +243,24 @@ When using these actions:
         return new List<string> { systemPrompt };
     }
 
+    public SkillManifest GetManifest() => new(
+        Name,
+        $"{_integration.Name}: {_integration.Description}",
+        _actions.Count,
+        "composio");
+
     public async Task OnRegisterAsync(ISkillRegistrationContext context)
     {
         foreach (var tool in GetTools())
         {
             context.RegisterTool(tool);
         }
-
-        var systemPrompts = GetSystemPrompts();
-        foreach (var prompt in systemPrompts)
-        {
-            context.PrependSystemContext(prompt);
-        }
+        // Full guidance loaded on-demand via load_skill tool; skip injecting here
+        //  var systemPrompts = GetSystemPrompts();
+        // foreach (var prompt in systemPrompts)
+        // {
+        //     context.PrependSystemContext(prompt);
+        // }
 
         _logger?.LogInformation("Registered Composio skill {SkillName}", Name);
     }
