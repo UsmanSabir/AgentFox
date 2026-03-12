@@ -1,5 +1,6 @@
 using AgentFox.Memory;
 using AgentFox.Models;
+using AgentFox.Skills;
 using AgentFox.Tools;
 
 namespace AgentFox.Agents;
@@ -17,6 +18,16 @@ public class FoxAgent
     public AgentStatus Status => _agent.Status;
     public List<Agent> SubAgents => _agent.SubAgents;
     public IMemory? Memory => _agent.Memory;
+    
+    /// <summary>
+    /// Skills enabled for this agent (used for capability-based routing)
+    /// </summary>
+    public List<Skill> EnabledSkills { get; set; } = new();
+    
+    /// <summary>
+    /// Agent role for permission and resource limit checking
+    /// </summary>
+    public string Role { get; set; } = "default";
     
     public FoxAgent(IAgentRuntime runtime, AgentConfig config)
     {
@@ -78,7 +89,34 @@ public class FoxAgent
         };
         
         var subAgent = _runtime.SpawnSubAgent(_agent, agentConfig);
-        return new FoxAgent(_runtime, subAgent.Config);
+        var foxSubAgent = new FoxAgent(_runtime, subAgent.Config)
+        {
+            Role = config.Role ?? Role  // Inherit role from parent by default
+        };
+        
+        // Handle skill inheritance
+        if (config.InheritEnabledSkills && EnabledSkills.Any())
+        {
+            // Copy parent skills
+            foxSubAgent.EnabledSkills.AddRange(EnabledSkills);
+            
+            // Add additional skills if specified
+            if (config.AdditionalSkills?.Any() == true)
+            {
+                // TODO: Load additional skills from SkillRegistry
+            }
+            
+            // Remove forbidden skills
+            if (config.ForbiddenSkills?.Any() == true)
+            {
+                foreach (var forbidden in config.ForbiddenSkills)
+                {
+                    foxSubAgent.DisableSkill(forbidden);
+                }
+            }
+        }
+        
+        return foxSubAgent;
     }
     
     /// <summary>
@@ -121,8 +159,69 @@ public class FoxAgent
             CreatedAt = _agent.CreatedAt,
             LastActiveAt = _agent.LastActiveAt,
             HasMemory = _agent.Memory != null,
-            ToolCount = _agent.Config.Tools.Count
+            ToolCount = _agent.Config.Tools.Count,
+            EnabledSkillCount = EnabledSkills.Count,
+            Role = Role
         };
+    }
+    
+    /// <summary>
+    /// Get supported skills as a filter for routing
+    /// </summary>
+    public SkillFilter GetSupportedSkills()
+    {
+        var skillNames = EnabledSkills.Select(s => s.Name).ToList();
+        var capabilities = EnabledSkills
+            .Where(s => s.Metadata != null)
+            .SelectMany(s => s.Metadata!.Capabilities)
+            .Distinct()
+            .ToList();
+        
+        return new SkillFilter
+        {
+            RequiredSkills = skillNames,
+            RequiredCapabilities = capabilities
+        };
+    }
+    
+    /// <summary>
+    /// Enable a skill for this agent
+    /// </summary>
+    public async Task EnableSkillAsync(Skill skill)
+    {
+        if (!EnabledSkills.Any(s => s.Name == skill.Name))
+        {
+            EnabledSkills.Add(skill);
+            // Trigger any skill registration hooks
+            if (skill is ISkillPlugin plugin)
+            {
+                var context = new SkillRegistrationContext(
+                    new DummyLogger<Skill>(),
+                    null,
+                    null);
+                await plugin.OnRegisterAsync(context);
+            }
+        }
+    }
+    
+    /// <summary>
+    /// Disable a skill for this agent
+    /// </summary>
+    public void DisableSkill(string skillName)
+    {
+        EnabledSkills.RemoveAll(s => s.Name == skillName);
+    }
+    
+    /// <summary>
+    /// Get all skill capabilities for this agent
+    /// </summary>
+    public List<string> GetSkillCapabilities()
+    {
+        return EnabledSkills
+            .Where(s => s.Metadata != null)
+            .SelectMany(s => s.Metadata!.Capabilities)
+            .Distinct()
+            .ToList();
     }
 }
 
@@ -141,6 +240,8 @@ public class AgentInfo
     public DateTime? LastActiveAt { get; set; }
     public bool HasMemory { get; set; }
     public int ToolCount { get; set; }
+    public int EnabledSkillCount { get; set; }
+    public string Role { get; set; } = "default";
 }
 
 /// <summary>

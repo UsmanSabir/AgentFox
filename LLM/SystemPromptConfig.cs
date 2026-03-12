@@ -378,6 +378,42 @@ public class SystemPromptBuilder
     }
 
     /// <summary>
+    /// Add a skills awareness index to the system prompt.
+    /// Injects a compact table of skill name + description so the agent knows what skills exist,
+    /// but does NOT include full skill guidance (kept lean for context efficiency).
+    /// The agent must call load_skill(skill_name: "name") to load full guidance on demand.
+    /// </summary>
+    public SystemPromptBuilder WithSkillsIndex(IEnumerable<AgentFox.Skills.SkillManifest> manifests)
+    {
+        var list = manifests.ToList();
+        if (list.Count == 0)
+            return this;
+
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine();
+        sb.AppendLine("## Available Skills");
+        sb.AppendLine();
+        sb.AppendLine("You have access to the following skills. Each skill provides tools and expert guidance.");
+        sb.AppendLine("If exactly one skill clearly applies, load it. If multiple could apply: choose the most specific one, then load it. If none clearly apply: do not load any.");
+        sb.AppendLine("To load a skill's full guidance and usage instructions, call: `load_skill(skill_name: \"<name>\")`");
+        sb.AppendLine("You can also call `load_skill(skill_name: \"list\")` to see all skills.");
+        sb.AppendLine();
+        sb.AppendLine("| Skill | Type | Tools | Description |");
+        sb.AppendLine("|-------|------|-------|-------------|");
+        foreach (var m in list)
+        {
+            // Truncate description to keep system prompt compact
+            var desc = m.Description.Length > 80 ? m.Description[..77] + "..." : m.Description;
+            sb.AppendLine($"| `{m.Name}` | {m.SkillType} | {m.ToolCount} | {desc} |");
+        }
+        sb.AppendLine();
+        sb.AppendLine("**IMPORTANT**: Before using a skill's tools, always call `load_skill` first to understand how to use them correctly.");
+
+        _prompt.AppendLine(sb.ToString());
+        return this;
+    }
+
+    /// <summary>
     /// Include tool calling instructions
     /// </summary>
     public SystemPromptBuilder WithToolInstructions(bool include = true)
@@ -412,6 +448,26 @@ public class SystemPromptBuilder
             _prompt.AppendLine($"- {constraint}");
         }
         return this;
+    }
+
+    /// <summary>
+    /// Prepend context to the prompt (used by skill plugins)
+    /// </summary>
+    public void PrependSystemContext(string context)
+    {
+        var existing = _prompt.ToString();
+        _prompt.Clear();
+        _prompt.AppendLine(context);
+        _prompt.Append(existing);
+    }
+
+    /// <summary>
+    /// Append context to the prompt (used by skill plugins)
+    /// </summary>
+    public void AppendSystemContext(string context)
+    {
+        _prompt.AppendLine();
+        _prompt.AppendLine(context);
     }
 
     /// <summary>
