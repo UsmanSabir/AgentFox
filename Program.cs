@@ -5,6 +5,7 @@ using AgentFox.Models;
 using AgentFox.Skills;
 using AgentFox.Tools;
 using SystemPromptBuilder = AgentFox.LLM.SystemPromptBuilder;
+using Microsoft.Extensions.Configuration;
 
 namespace AgentFox;
 
@@ -22,17 +23,24 @@ class Program
         Console.WriteLine("╚════════════════════════════════════════════════════════════╝");
         Console.WriteLine();
         
+        // Build configuration
+        var configuration = new ConfigurationBuilder()
+            .SetBasePath(Directory.GetCurrentDirectory())
+            .AddJsonFile("appsettings.json", optional: true, reloadOnChange: true)
+            .AddEnvironmentVariables()
+            .Build();
+
         // Check for command line mode
         if (args.Length > 0)
         {
-            return await RunCommandLineMode(args);
+            return await RunCommandLineMode(args, configuration);
         }
         
         // Interactive mode
-        return await RunInteractiveMode();
+        return await RunInteractiveMode(configuration);
     }
     
-    static async Task<int> RunCommandLineMode(string[] args)
+    static async Task<int> RunCommandLineMode(string[] args, IConfiguration configuration)
     {
         var toolRegistry = CreateToolRegistry();
         var skillRegistry = CreateSkillRegistry(toolRegistry);
@@ -49,10 +57,13 @@ class Program
             )
             .Build();
         
+        var llmProvider = LLMFactory.CreateFromConfiguration(configuration);
+        
         var agent = new AgentBuilder(toolRegistry)
             .WithName("AgentFox")
             .WithSystemPrompt(systemPrompt)
             .WithHybridMemory(100, "memory.json")
+            .WithLLMProvider(llmProvider)
             .Build();
         
         var task = string.Join(" ", args);
@@ -73,7 +84,7 @@ class Program
         return result.Success ? 0 : 1;
     }
     
-    static async Task<int> RunInteractiveMode()
+    static async Task<int> RunInteractiveMode(IConfiguration configuration)
     {
         var toolRegistry = CreateToolRegistry();
         var skillRegistry = CreateSkillRegistry(toolRegistry);
@@ -117,10 +128,13 @@ class Program
             )
             .Build();
         
+        var llmProvider = LLMFactory.CreateFromConfiguration(configuration);
+        
         var agent = new AgentBuilder(toolRegistry)
             .WithName("AgentFox")
             .WithSystemPrompt(systemPrompt)
             .WithHybridMemory(100, "memory.json")
+            .WithLLMProvider(llmProvider)
             .Build();
         
         Console.WriteLine("Type 'help' for available commands, 'exit' to quit.");

@@ -94,6 +94,9 @@ dotnet run -- status
 
 # List available tools
 dotnet run -- list tools
+
+# Say hello
+dotnet run -- "say hello"
 ```
 
 ### Interactive Mode

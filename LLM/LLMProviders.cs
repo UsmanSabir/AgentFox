@@ -2,6 +2,7 @@ using System.Net.Http.Json;
 using AgentFox.Models;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using Microsoft.Extensions.Configuration;
 
 namespace AgentFox.LLM;
 
@@ -343,5 +344,37 @@ public class LLMFactory
             return CreateAnthropic(anthropicKey);
         
         return CreateOllama();
+    }
+    
+    public static ILLMProvider CreateFromConfiguration(IConfiguration configuration)
+    {
+        var providerType = configuration["LLM:Provider"]?.ToLowerInvariant();
+        
+        switch (providerType)
+        {
+            case "openai":
+                {
+                    var apiKey = configuration["LLM:ApiKey"] ?? Environment.GetEnvironmentVariable("OPENAI_API_KEY");
+                    var baseUrl = configuration["LLM:BaseUrl"];
+                    if (string.IsNullOrEmpty(apiKey))
+                        throw new InvalidOperationException("OpenAI Provider requires an API key in configuration or OPENAI_API_KEY environment variable.");
+                    return CreateOpenAI(apiKey, baseUrl);
+                }
+            case "anthropic":
+                {
+                    var apiKey = configuration["LLM:ApiKey"] ?? Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY");
+                    var baseUrl = configuration["LLM:BaseUrl"];
+                    if (string.IsNullOrEmpty(apiKey))
+                        throw new InvalidOperationException("Anthropic Provider requires an API key in configuration or ANTHROPIC_API_KEY environment variable.");
+                    return CreateAnthropic(apiKey, baseUrl);
+                }
+            case "ollama":
+            default:
+                {
+                    var baseUrl = configuration["LLM:BaseUrl"];
+                    var model = configuration["LLM:Model"] ?? "llama2";
+                    return CreateOllama(baseUrl, model);
+                }
+        }
     }
 }

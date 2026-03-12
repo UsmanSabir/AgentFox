@@ -2,6 +2,7 @@ using AgentFox.Memory;
 using AgentFox.Models;
 using AgentFox.Skills;
 using AgentFox.Tools;
+using AgentFox.LLM;
 
 namespace AgentFox.Agents;
 
@@ -250,7 +251,7 @@ public class AgentInfo
 public class AgentBuilder
 {
     private readonly ToolRegistry _toolRegistry;
-    private readonly IAgentRuntime _runtime;
+    private IAgentRuntime _runtime;
     private AgentConfig _config = new();
     private IMemory? _memory;
     
@@ -301,6 +302,12 @@ public class AgentBuilder
         _memory = new HybridMemory(shortTermSize, longTermPath);
         return this;
     }
+
+    public AgentBuilder WithLLMProvider(ILLMProvider provider)
+    {
+        _runtime = new LLMEnabledRuntime(_toolRegistry, provider);
+        return this;
+    }
     
     public FoxAgent Build()
     {
@@ -319,3 +326,4 @@ public class AgentBuilder
         return agent;
     }
 }
+
