@@ -8,6 +8,13 @@ namespace AgentFox.Tools;
 /// </summary>
 public class ShellCommandTool : BaseTool
 {
+    private readonly WorkspaceManager _workspaceManager;
+
+    public ShellCommandTool(WorkspaceManager workspaceManager)
+    {
+        _workspaceManager = workspaceManager;
+    }
+
     public override string Name => "shell";
     public override string Description => "Execute a shell command and return the output";
     public override Dictionary<string, ToolParameter> Parameters { get; } = new()
@@ -22,7 +29,15 @@ public class ShellCommandTool : BaseTool
         if (string.IsNullOrEmpty(command))
             return ToolResult.Fail("No command provided");
 
-        var workingDir = arguments["working_directory"]?.ToString() ?? Directory.GetCurrentDirectory();
+        var workingDir = arguments["working_directory"]?.ToString();
+        var resolvedDir = string.IsNullOrEmpty(workingDir) 
+            ? _workspaceManager.ResolvePath(".") 
+            : _workspaceManager.ResolvePath(workingDir);
+
+        if (!_workspaceManager.IsPathAllowed(resolvedDir))
+        {
+            return ToolResult.Fail($"Access to working directory '{resolvedDir}' is denied by workspace configuration.");
+        }
 
         try
         {
@@ -32,7 +47,7 @@ public class ShellCommandTool : BaseTool
                 {
                     FileName = "cmd.exe",
                     Arguments = $"/c {command}",
-                    WorkingDirectory = workingDir,
+                    WorkingDirectory = resolvedDir,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     UseShellExecute = false,
@@ -63,6 +78,13 @@ public class ShellCommandTool : BaseTool
 /// </summary>
 public class ReadFileTool : BaseTool
 {
+    private readonly WorkspaceManager _workspaceManager;
+
+    public ReadFileTool(WorkspaceManager workspaceManager)
+    {
+        _workspaceManager = workspaceManager;
+    }
+
     public override string Name => "read_file";
     public override string Description => "Read the contents of a file";
     public override Dictionary<string, ToolParameter> Parameters { get; } = new()
@@ -74,9 +96,13 @@ public class ReadFileTool : BaseTool
 
     protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
     {
-        var path = arguments["path"]?.ToString();
-        if (string.IsNullOrEmpty(path))
+        var rawPath = arguments["path"]?.ToString();
+        if (string.IsNullOrEmpty(rawPath))
             return ToolResult.Fail("No file path provided");
+
+        var path = _workspaceManager.ResolvePath(rawPath);
+        if (!_workspaceManager.IsPathAllowed(path))
+            return ToolResult.Fail($"Access to path '{path}' is denied by workspace configuration.");
 
         try
         {
@@ -105,6 +131,13 @@ public class ReadFileTool : BaseTool
 /// </summary>
 public class WriteFileTool : BaseTool
 {
+    private readonly WorkspaceManager _workspaceManager;
+
+    public WriteFileTool(WorkspaceManager workspaceManager)
+    {
+        _workspaceManager = workspaceManager;
+    }
+
     public override string Name => "write_file";
     public override string Description => "Write content to a file";
     public override Dictionary<string, ToolParameter> Parameters { get; } = new()
@@ -116,11 +149,15 @@ public class WriteFileTool : BaseTool
 
     protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
     {
-        var path = arguments["path"]?.ToString();
+        var rawPath = arguments["path"]?.ToString();
         var content = arguments["content"]?.ToString();
         
-        if (string.IsNullOrEmpty(path))
+        if (string.IsNullOrEmpty(rawPath))
             return Task.FromResult(ToolResult.Fail("No file path provided"));
+        
+        var path = _workspaceManager.ResolvePath(rawPath);
+        if (!_workspaceManager.IsPathAllowed(path))
+            return Task.FromResult(ToolResult.Fail($"Access to path '{path}' is denied by workspace configuration."));
         if (content == null)
             return Task.FromResult(ToolResult.Fail("No content provided"));
 
@@ -157,6 +194,13 @@ public class WriteFileTool : BaseTool
 /// </summary>
 public class ListFilesTool : BaseTool
 {
+    private readonly WorkspaceManager _workspaceManager;
+
+    public ListFilesTool(WorkspaceManager workspaceManager)
+    {
+        _workspaceManager = workspaceManager;
+    }
+
     public override string Name => "list_files";
     public override string Description => "List files in a directory";
     public override Dictionary<string, ToolParameter> Parameters { get; } = new()
@@ -167,8 +211,12 @@ public class ListFilesTool : BaseTool
 
     protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
     {
-        var path = arguments["path"]?.ToString() ?? ".";
+        var rawPath = arguments["path"]?.ToString() ?? ".";
         var recursive = Convert.ToBoolean(arguments.GetValueOrDefault("recursive") ?? false);
+
+        var path = _workspaceManager.ResolvePath(rawPath);
+        if (!_workspaceManager.IsPathAllowed(path))
+            return Task.FromResult(ToolResult.Fail($"Access to path '{path}' is denied by workspace configuration."));
 
         try
         {
@@ -192,6 +240,13 @@ public class ListFilesTool : BaseTool
 /// </summary>
 public class SearchFilesTool : BaseTool
 {
+    private readonly WorkspaceManager _workspaceManager;
+
+    public SearchFilesTool(WorkspaceManager workspaceManager)
+    {
+        _workspaceManager = workspaceManager;
+    }
+
     public override string Name => "search_files";
     public override string Description => "Search for text in files";
     public override Dictionary<string, ToolParameter> Parameters { get; } = new()
@@ -203,12 +258,16 @@ public class SearchFilesTool : BaseTool
 
     protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
     {
-        var path = arguments["path"]?.ToString() ?? ".";
+        var rawPath = arguments["path"]?.ToString() ?? ".";
         var pattern = arguments["pattern"]?.ToString();
         var filePattern = arguments["file_pattern"]?.ToString() ?? "*";
 
         if (string.IsNullOrEmpty(pattern))
             return Task.FromResult(ToolResult.Fail("No search pattern provided"));
+
+        var path = _workspaceManager.ResolvePath(rawPath);
+        if (!_workspaceManager.IsPathAllowed(path))
+            return Task.FromResult(ToolResult.Fail($"Access to path '{path}' is denied by workspace configuration."));
 
         try
         {
@@ -248,6 +307,13 @@ public class SearchFilesTool : BaseTool
 /// </summary>
 public class MakeDirectoryTool : BaseTool
 {
+    private readonly WorkspaceManager _workspaceManager;
+
+    public MakeDirectoryTool(WorkspaceManager workspaceManager)
+    {
+        _workspaceManager = workspaceManager;
+    }
+
     public override string Name => "make_directory";
     public override string Description => "Create a new directory";
     public override Dictionary<string, ToolParameter> Parameters { get; } = new()
@@ -257,10 +323,14 @@ public class MakeDirectoryTool : BaseTool
 
     protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
     {
-        var path = arguments["path"]?.ToString();
+        var rawPath = arguments["path"]?.ToString();
         
-        if (string.IsNullOrEmpty(path))
+        if (string.IsNullOrEmpty(rawPath))
             return Task.FromResult(ToolResult.Fail("No directory path provided"));
+
+        var path = _workspaceManager.ResolvePath(rawPath);
+        if (!_workspaceManager.IsPathAllowed(path))
+            return Task.FromResult(ToolResult.Fail($"Access to path '{path}' is denied by workspace configuration."));
 
         try
         {
@@ -279,6 +349,13 @@ public class MakeDirectoryTool : BaseTool
 /// </summary>
 public class DeleteTool : BaseTool
 {
+    private readonly WorkspaceManager _workspaceManager;
+
+    public DeleteTool(WorkspaceManager workspaceManager)
+    {
+        _workspaceManager = workspaceManager;
+    }
+
     public override string Name => "delete";
     public override string Description => "Delete a file or directory";
     public override Dictionary<string, ToolParameter> Parameters { get; } = new()
@@ -289,10 +366,14 @@ public class DeleteTool : BaseTool
 
     protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
     {
-        var path = arguments["path"]?.ToString();
+        var rawPath = arguments["path"]?.ToString();
         
-        if (string.IsNullOrEmpty(path))
+        if (string.IsNullOrEmpty(rawPath))
             return Task.FromResult(ToolResult.Fail("No path provided"));
+
+        var path = _workspaceManager.ResolvePath(rawPath);
+        if (!_workspaceManager.IsPathAllowed(path))
+             return Task.FromResult(ToolResult.Fail($"Access to path '{path}' is denied by workspace configuration."));
 
         try
         {

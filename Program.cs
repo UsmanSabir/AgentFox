@@ -42,27 +42,35 @@ class Program
     
     static async Task<int> RunCommandLineMode(string[] args, IConfiguration configuration)
     {
-        var toolRegistry = CreateToolRegistry();
+        var workspaceManager = new WorkspaceManager(configuration);
+        var toolRegistry = CreateToolRegistry(workspaceManager);
         var skillRegistry = CreateSkillRegistry(toolRegistry);
         
         // Build system prompt with dynamic builder + skills index
         var systemPrompt = new SystemPromptBuilder()
             .WithPersona(SystemPromptConfig.AgentPrompts.DeveloperAssistant)
-            .WithTools("shell", "read_file", "write_file", "list_files", "search_files", "make_directory", "delete")
+            .WithTools("shell", "read_file", "write_file", "list_files", "search_files", "make_directory", "delete", "add_memory", "search_memory")
             .WithSkillsIndex(skillRegistry.GetSkillManifests())
             .WithConstraints(
                 "Always verify changes before executing destructive operations",
                 "Prioritize security and best practices",
-                "Ask for clarification when requirements are ambiguous"
+                "Ask for clarification when requirements are ambiguous",
+                "Use add_memory to save important user facts or preferences to long-term memory.",
+                "Use search_memory to recall past information or facts when requested."
             )
             .Build();
         
         var llmProvider = LLMFactory.CreateFromConfiguration(configuration);
+        var memory = new HybridMemory(100, "memory.json");
+        
+        // Register memory tools into the registry specifically for this agent's memory
+        toolRegistry.Register(new AddMemoryTool(memory));
+        toolRegistry.Register(new SearchMemoryTool(memory));
         
         var agent = new AgentBuilder(toolRegistry)
             .WithName("AgentFox")
             .WithSystemPrompt(systemPrompt)
-            .WithHybridMemory(100, "memory.json")
+            .WithMemory(memory)
             .WithLLMProvider(llmProvider)
             .Build();
         
@@ -86,7 +94,8 @@ class Program
     
     static async Task<int> RunInteractiveMode(IConfiguration configuration)
     {
-        var toolRegistry = CreateToolRegistry();
+        var workspaceManager = new WorkspaceManager(configuration);
+        var toolRegistry = CreateToolRegistry(workspaceManager);
         var skillRegistry = CreateSkillRegistry(toolRegistry);
         
         // Print skills summary at startup
@@ -107,7 +116,9 @@ class Program
                 "delete: Delete files or directories",
                 "get_env_info: Get environment information",
                 "spawn_subagent: Spawn a sub-agent for complex tasks",
-                "load_skill: Load a skill's full guidance on demand"
+                "load_skill: Load a skill's full guidance on demand",
+                "add_memory: Save an important fact to memory",
+                "search_memory: Search memory for a fact"
             )
             .WithSkillsIndex(manifests)
             .WithExecutionContext(
@@ -124,16 +135,23 @@ class Program
                 "Test code in isolated environments when possible",
                 "Explain your reasoning and approach clearly",
                 "Ask for confirmation for high-risk operations",
-                "Before using a skill's tools, always call load_skill to load the skill's guidance"
+                "Before using a skill's tools, always call load_skill to load the skill's guidance",
+                "Use add_memory to save important user facts or preferences to long-term memory.",
+                "Use search_memory to recall past information or facts when requested."
             )
             .Build();
         
         var llmProvider = LLMFactory.CreateFromConfiguration(configuration);
+        var memory = new HybridMemory(100, "memory.json");
+        
+        // Register memory tools into the registry specifically for this agent's memory
+        toolRegistry.Register(new AddMemoryTool(memory));
+        toolRegistry.Register(new SearchMemoryTool(memory));
         
         var agent = new AgentBuilder(toolRegistry)
             .WithName("AgentFox")
             .WithSystemPrompt(systemPrompt)
-            .WithHybridMemory(100, "memory.json")
+            .WithMemory(memory)
             .WithLLMProvider(llmProvider)
             .Build();
         
@@ -225,18 +243,18 @@ class Program
         return 0;
     }
     
-    static ToolRegistry CreateToolRegistry()
+    static ToolRegistry CreateToolRegistry(WorkspaceManager workspaceManager)
     {
         var registry = new ToolRegistry();
         
         // Register built-in tools
-        registry.Register(new ShellCommandTool());
-        registry.Register(new ReadFileTool());
-        registry.Register(new WriteFileTool());
-        registry.Register(new ListFilesTool());
-        registry.Register(new SearchFilesTool());
-        registry.Register(new MakeDirectoryTool());
-        registry.Register(new DeleteTool());
+        registry.Register(new ShellCommandTool(workspaceManager));
+        registry.Register(new ReadFileTool(workspaceManager));
+        registry.Register(new WriteFileTool(workspaceManager));
+        registry.Register(new ListFilesTool(workspaceManager));
+        registry.Register(new SearchFilesTool(workspaceManager));
+        registry.Register(new MakeDirectoryTool(workspaceManager));
+        registry.Register(new DeleteTool(workspaceManager));
         registry.Register(new GetEnvironmentInfoTool());
         
         // Register custom tools
