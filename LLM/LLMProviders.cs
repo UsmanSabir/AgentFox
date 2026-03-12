@@ -139,7 +139,21 @@ public class OpenAIProvider : BaseLLMProvider
         try
         {
             var result = JObject.Parse(json);
-            var content = result["choices"]?[0]?["message"]?["content"]?.ToString();
+            var message = result["choices"]?[0]?["message"];
+            if (message == null)
+                throw new InvalidOperationException($"OpenAI API returned no message: {json}");
+            
+            var content = message["content"]?.ToString();
+            var toolCalls = message["tool_calls"];
+            
+            // If there are tool calls, return them as JSON so the caller can process them
+            if (toolCalls != null && toolCalls.HasValues)
+            {
+                var responseObj = new { content, tool_calls = toolCalls };
+                return JsonConvert.SerializeObject(responseObj);
+            }
+            
+            // Otherwise return the content (or throw if neither exists)
             if (string.IsNullOrEmpty(content))
                 throw new InvalidOperationException($"OpenAI API returned no content: {json}");
             return content;
@@ -187,6 +201,8 @@ public class OpenAIProvider : BaseLLMProvider
         }
         
         using var reader = new StreamReader(await response.Content.ReadAsStreamAsync());
+        var sb = new System.Text.StringBuilder();
+        var toolCallChunks = new System.Collections.Generic.List<JObject>();
         
         while (!reader.EndOfStream)
         {
@@ -197,10 +213,26 @@ public class OpenAIProvider : BaseLLMProvider
                 try
                 {
                     var json = JObject.Parse(data);
-                    var chunk = json["choices"]?[0]?["delta"]?["content"]?.ToString();
-                    if (!string.IsNullOrEmpty(chunk))
+                    var delta = json["choices"]?[0]?["delta"];
+                    
+                    // Handle content chunks
+                    var contentChunk = delta?["content"]?.ToString();
+                    if (!string.IsNullOrEmpty(contentChunk))
                     {
-                        await onChunk(chunk);
+                        sb.Append(contentChunk);
+                        await onChunk(contentChunk);
+                    }
+                    
+                    // Handle tool calls in streaming (accumulate partial tool calls)
+                    var toolCallDelta = delta?["tool_calls"];
+                    if (toolCallDelta != null && toolCallDelta.HasValues)
+                    {
+                        // Store the tool call delta for later processing
+                        foreach (var tc in toolCallDelta)
+                        {
+                            toolCallChunks.Add(JObject.FromObject(tc));
+                        }
+                        await onChunk(JsonConvert.SerializeObject(new { tool_calls = toolCallDelta }));
                     }
                 }
                 catch (JsonReaderException)
@@ -208,6 +240,12 @@ public class OpenAIProvider : BaseLLMProvider
                     // Malformed stream data, skip
                 }
             }
+        }
+        
+        // After stream completes, if we have accumulated tool calls, send them as a complete result
+        if (toolCallChunks.Count > 0)
+        {
+            await onChunk(JsonConvert.SerializeObject(new { tool_calls = toolCallChunks, done = true }));
         }
     }
 }
@@ -275,10 +313,39 @@ public class AnthropicProvider : BaseLLMProvider
         try
         {
             var result = JObject.Parse(json);
-            var content = result["content"]?[0]?["text"]?.ToString();
-            if (string.IsNullOrEmpty(content))
+            var contentArray = result["content"] as JArray;
+            if (contentArray == null || contentArray.Count == 0)
                 throw new InvalidOperationException($"Anthropic API returned no content: {json}");
-            return content;
+            
+            var responseObj = new System.Collections.Generic.Dictionary<string, object>();
+            var text = new System.Text.StringBuilder();
+            var toolUses = new System.Collections.Generic.List<object>();
+            
+            // Process each content block
+            foreach (var item in contentArray)
+            {
+                var type = item["type"]?.ToString();
+                if (type == "text")
+                {
+                    text.Append(item["text"]?.ToString() ?? "");
+                }
+                else if (type == "tool_use")
+                {
+                    toolUses.Add(item);
+                }
+            }
+            
+            // Build response with both text and tool_use blocks if present
+            if (!string.IsNullOrEmpty(text.ToString()))
+                responseObj["content"] = text.ToString();
+            
+            if (toolUses.Count > 0)
+                responseObj["tool_uses"] = toolUses;
+            
+            if (responseObj.Count == 0)
+                throw new InvalidOperationException($"Anthropic API returned no usable content: {json}");
+            
+            return JsonConvert.SerializeObject(responseObj);
         }
         catch (JsonReaderException ex)
         {
@@ -300,7 +367,18 @@ public class AnthropicProvider : BaseLLMProvider
             temperature = effectiveConfig?.Temperature ?? 0.7,
             system = systemMessage,
             messages = userMessages.Select(m => new { role = m.Role.ToString().ToLower(), content = m.Content }),
-            stream = true
+            stream = true,
+            tools = tools?.Select(t => new
+            {
+                name = t.Name,
+                description = t.Description,
+                input_schema = new
+                {
+                    type = "object",
+                    properties = t.Parameters.ToDictionary(p => p.Key, p => new { type = p.Value.Type, description = p.Value.Description }),
+                    required = t.Parameters.Where(p => p.Value.Required).Select(p => p.Key)
+                }
+            })
         };
         
         var response = await client.PostAsJsonAsync($"{_baseUrl}/messages", requestBody);
@@ -312,6 +390,8 @@ public class AnthropicProvider : BaseLLMProvider
         }
         
         using var reader = new StreamReader(await response.Content.ReadAsStreamAsync());
+        var toolUseBuilder = new System.Collections.Generic.List<JObject>();
+        var currentToolUse = default(JObject);
         
         while (!reader.EndOfStream)
         {
@@ -322,10 +402,45 @@ public class AnthropicProvider : BaseLLMProvider
                 try
                 {
                     var json = JObject.Parse(data);
-                    var chunk = json["delta"]?["text"]?.ToString();
-                    if (!string.IsNullOrEmpty(chunk))
+                    var eventType = json["type"]?.ToString();
+                    
+                    // Handle content_block_delta events with text
+                    var contentDelta = json["delta"]?["text"]?.ToString();
+                    if (!string.IsNullOrEmpty(contentDelta))
                     {
-                        await onChunk(chunk);
+                        await onChunk(contentDelta);
+                    }
+                    
+                    // Handle content_block_start events for tool_use
+                    var contentBlock = json["content_block"];
+                    if (contentBlock != null && contentBlock["type"]?.ToString() == "tool_use")
+                    {
+                        currentToolUse = JObject.FromObject(contentBlock);
+                        await onChunk(JsonConvert.SerializeObject(new { tool_uses = new[] { contentBlock } }));
+                    }
+                    
+                    // Handle content_block_delta events for tool_use input
+                    if (eventType == "content_block_delta" && currentToolUse != null)
+                    {
+                        var delta = json["delta"];
+                        if (delta?["type"]?.ToString() == "input_delta")
+                        {
+                            var inputDelta = delta["text"]?.ToString();
+                            if (!string.IsNullOrEmpty(inputDelta))
+                            {
+                                // Append to current tool_use input
+                                var currentInput = currentToolUse["input"]?.ToString() ?? "";
+                                currentToolUse["input"] = currentInput + inputDelta;
+                                await onChunk(JsonConvert.SerializeObject(new { tool_uses = new[] { currentToolUse }, partial = true }));
+                            }
+                        }
+                    }
+                    
+                    // Handle content_block_stop events
+                    if (eventType == "content_block_stop" && currentToolUse != null)
+                    {
+                        toolUseBuilder.Add(currentToolUse);
+                        currentToolUse = null;
                     }
                 }
                 catch (JsonReaderException)
@@ -333,6 +448,12 @@ public class AnthropicProvider : BaseLLMProvider
                     // Malformed stream data, skip
                 }
             }
+        }
+        
+        // After stream completes, if we have accumulated tool uses, send them as complete
+        if (toolUseBuilder.Count > 0)
+        {
+            await onChunk(JsonConvert.SerializeObject(new { tool_uses = toolUseBuilder, done = true }));
         }
     }
 }
@@ -359,10 +480,28 @@ public class OllamaProvider : BaseLLMProvider
         var effectiveConfig = config ?? DefaultConfig;
         var client = CreateClient(effectiveConfig);
         
+        // Build tools into the prompt if provided (Ollama doesn't support tools natively)
+        var toolsPrompt = "";
+        if (tools != null && tools.Count > 0)
+        {
+            var toolDefs = string.Join("\n", tools.Select(t => $"- {t.Name}: {t.Description}\n  Parameters: {string.Join(", ", t.Parameters.Keys)}"));
+            toolsPrompt = $"\n\nYou have access to the following tools:\n{toolDefs}\n\nIf you need to use a tool, respond with JSON in this format:\n{{\"name\": \"tool_name\", \"arguments\": {{\"param1\": \"value1\"}}}}\n";
+        }
+        
+        // Add tools context to the last user message if tools are available
+        var modifiedMessages = messages.Select(m =>
+        {
+            if (m.Role == MessageRole.User && !string.IsNullOrEmpty(toolsPrompt))
+            {
+                return new { role = m.Role.ToString().ToLower(), content = m.Content + toolsPrompt };
+            }
+            return new { role = m.Role.ToString().ToLower(), content = m.Content };
+        }).ToList();
+        
         var requestBody = new
         {
             model = effectiveConfig?.Model ?? _model,
-            messages = messages.Select(m => new { role = m.Role.ToString().ToLower(), content = m.Content }),
+            messages = modifiedMessages,
             stream = false,
             options = new
             {
@@ -387,7 +526,38 @@ public class OllamaProvider : BaseLLMProvider
         try
         {
             var result = JObject.Parse(json);
-            var content = result["message"]?["content"]?.ToString();
+            var messageObj = result["message"];
+            if (messageObj == null)
+                throw new InvalidOperationException($"Ollama API returned no message: {json}");
+            
+            var content = messageObj["content"]?.ToString();
+            var toolCall = messageObj["tool_call"];
+            
+            // If there's a tool call, return it in the same format as other providers
+            if (toolCall != null)
+            {
+                var responseObj = new { content = "", tool_calls = new[] { toolCall } };
+                return JsonConvert.SerializeObject(responseObj);
+            }
+            
+            // Try to detect JSON in the response that looks like a tool call
+            if (!string.IsNullOrEmpty(content) && content.TrimStart().StartsWith("{"))
+            {
+                try
+                {
+                    var potentialCall = JObject.Parse(content);
+                    if (potentialCall["name"] != null || potentialCall["function"] != null)
+                    {
+                        var responseObj = new { content = "", tool_calls = new[] { potentialCall } };
+                        return JsonConvert.SerializeObject(responseObj);
+                    }
+                }
+                catch
+                {
+                    // Not valid JSON, return as content
+                }
+            }
+            
             if (string.IsNullOrEmpty(content))
                 throw new InvalidOperationException($"Ollama API returned no content: {json}");
             return content;
@@ -403,10 +573,28 @@ public class OllamaProvider : BaseLLMProvider
         var effectiveConfig = config ?? DefaultConfig;
         var client = CreateClient(effectiveConfig);
         
+        // Build tools into the prompt if provided (Ollama doesn't support tools natively)
+        var toolsPrompt = "";
+        if (tools != null && tools.Count > 0)
+        {
+            var toolDefs = string.Join("\n", tools.Select(t => $"- {t.Name}: {t.Description}\n  Parameters: {string.Join(", ", t.Parameters.Keys)}"));
+            toolsPrompt = $"\n\nYou have access to the following tools:\n{toolDefs}\n\nIf you need to use a tool, respond with JSON in this format:\n{{\"name\": \"tool_name\", \"arguments\": {{\"param1\": \"value1\"}}}}\n";
+        }
+        
+        // Add tools context to the last user message if tools are available
+        var modifiedMessages = messages.Select(m =>
+        {
+            if (m.Role == MessageRole.User && !string.IsNullOrEmpty(toolsPrompt))
+            {
+                return new { role = m.Role.ToString().ToLower(), content = m.Content + toolsPrompt };
+            }
+            return new { role = m.Role.ToString().ToLower(), content = m.Content };
+        }).ToList();
+        
         var requestBody = new
         {
             model = effectiveConfig?.Model ?? _model,
-            messages = messages.Select(m => new { role = m.Role.ToString().ToLower(), content = m.Content }),
+            messages = modifiedMessages,
             stream = true,
             options = new
             {
@@ -424,6 +612,7 @@ public class OllamaProvider : BaseLLMProvider
         }
         
         using var reader = new StreamReader(await response.Content.ReadAsStreamAsync());
+        var contentBuilder = new System.Text.StringBuilder();
         
         while (!reader.EndOfStream)
         {
@@ -433,16 +622,48 @@ public class OllamaProvider : BaseLLMProvider
                 try
                 {
                     var json = JObject.Parse(line);
-                    var chunk = json["message"]?["content"]?.ToString();
+                    var message = json["message"];
+                    if (message == null) continue;
+                    
+                    // Check for content chunk
+                    var chunk = message["content"]?.ToString();
                     if (!string.IsNullOrEmpty(chunk))
                     {
+                        contentBuilder.Append(chunk);
                         await onChunk(chunk);
+                    }
+                    
+                    // Check for tool call (Ollama may return this in different formats)
+                    var toolCall = message["tool_call"];
+                    if (toolCall != null)
+                    {
+                        var toolCallJson = new { tool_calls = new[] { toolCall } };
+                        await onChunk(JsonConvert.SerializeObject(toolCallJson));
                     }
                 }
                 catch (JsonReaderException)
                 {
                     // Malformed stream data, skip
                 }
+            }
+        }
+        
+        // After stream completes, check if the full response looks like a tool call
+        var fullContent = contentBuilder.ToString();
+        if (!string.IsNullOrEmpty(fullContent) && fullContent.TrimStart().StartsWith("{"))
+        {
+            try
+            {
+                var potentialCall = JObject.Parse(fullContent);
+                if (potentialCall["name"] != null || potentialCall["function"] != null)
+                {
+                    var toolCallJson = new { tool_calls = new[] { potentialCall } };
+                    await onChunk(JsonConvert.SerializeObject(toolCallJson));
+                }
+            }
+            catch
+            {
+                // Not valid JSON, ignore
             }
         }
     }

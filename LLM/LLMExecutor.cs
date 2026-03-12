@@ -158,30 +158,106 @@ public class LLMExecutor : IAgentExecutor
         try
         {
             // Try to parse JSON response
-            if (response.Contains("tool_calls"))
+            if (response.Contains("tool_calls") || response.Contains("tool_uses"))
             {
                 var json = JObject.Parse(response);
+                
+                // Try OpenAI format: tool_calls[].function.name and tool_calls[].function.arguments
                 var calls = json["tool_calls"]?.ToArray();
                 
                 if (calls != null)
                 {
                     foreach (var call in calls)
                     {
-                        var toolCall = new ToolCall
-                        {
-                            ToolName = call["name"]?.ToString() ?? ""
-                        };
+                        var toolCall = new ToolCall();
                         
-                        var args = call["arguments"] as JObject;
-                        if (args != null)
+                        // OpenAI format: function.name
+                        var functionObj = call["function"];
+                        if (functionObj != null)
                         {
-                            foreach (var prop in args.Properties())
+                            toolCall.ToolName = functionObj["name"]?.ToString() ?? "";
+                            
+                            // Arguments come as a JSON string, need to parse it
+                            var argsString = functionObj["arguments"]?.ToString();
+                            if (!string.IsNullOrEmpty(argsString))
                             {
-                                toolCall.Arguments[prop.Name] = prop.Value?.ToString();
+                                try
+                                {
+                                    var argsJson = JObject.Parse(argsString);
+                                    foreach (var prop in argsJson.Properties())
+                                    {
+                                        toolCall.Arguments[prop.Name] = prop.Value?.ToString();
+                                    }
+                                }
+                                catch
+                                {
+                                    // If not valid JSON, treat as single string argument
+                                    toolCall.Arguments["input"] = argsString;
+                                }
+                            }
+                        }
+                        else
+                        {
+                            // Fallback: direct name/arguments (some providers use this)
+                            toolCall.ToolName = call["name"]?.ToString() ?? "";
+                            
+                            var args = call["arguments"] as JObject;
+                            if (args != null)
+                            {
+                                foreach (var prop in args.Properties())
+                                {
+                                    toolCall.Arguments[prop.Name] = prop.Value?.ToString();
+                                }
                             }
                         }
                         
-                        toolCalls.Add(toolCall);
+                        // Get tool call ID if present
+                        var id = call["id"]?.ToString();
+                        if (!string.IsNullOrEmpty(id))
+                        {
+                            toolCall.Id = id;
+                        }
+                        
+                        if (!string.IsNullOrEmpty(toolCall.ToolName))
+                        {
+                            toolCalls.Add(toolCall);
+                        }
+                    }
+                }
+                
+                // Try Anthropic format: tool_uses[].name and tool_uses[].input
+                if (toolCalls.Count == 0)
+                {
+                    var toolUses = json["tool_uses"]?.ToArray();
+                    if (toolUses != null)
+                    {
+                        foreach (var toolUse in toolUses)
+                        {
+                            var toolCall = new ToolCall
+                            {
+                                ToolName = toolUse["name"]?.ToString() ?? ""
+                            };
+                            
+                            var input = toolUse["input"] as JObject;
+                            if (input != null)
+                            {
+                                foreach (var prop in input.Properties())
+                                {
+                                    toolCall.Arguments[prop.Name] = prop.Value?.ToString();
+                                }
+                            }
+                            
+                            var id = toolUse["id"]?.ToString();
+                            if (!string.IsNullOrEmpty(id))
+                            {
+                                toolCall.Id = id;
+                            }
+                            
+                            if (!string.IsNullOrEmpty(toolCall.ToolName))
+                            {
+                                toolCalls.Add(toolCall);
+                            }
+                        }
                     }
                 }
             }
