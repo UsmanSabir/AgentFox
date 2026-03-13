@@ -18,15 +18,18 @@ class Program
     static async Task<int> Main(string[] args)
     {
         Console.WriteLine("╔════════════════════════════════════════════════════════════╗");
-        Console.WriteLine("║                  AgentFox - AI Agent Framework               ║");
-        Console.WriteLine("║         Multi-agent system with memory & channels            ║");
+        Console.WriteLine("║                  AgentFox - AI Agent Framework             ║");
+        Console.WriteLine("║         Multi-agent system with memory & channels          ║");
         Console.WriteLine("╚════════════════════════════════════════════════════════════╝");
         Console.WriteLine();
         
+        var envName = Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT") ?? "Production"; // Default to Production if not set
+
         // Build configuration
         var configuration = new ConfigurationBuilder()
             .SetBasePath(Directory.GetCurrentDirectory())
             .AddJsonFile("appsettings.json", optional: true, reloadOnChange: true)
+            .AddJsonFile($"appsettings.{envName}.json", optional: true, reloadOnChange: true)
             .AddEnvironmentVariables()
             .Build();
 
