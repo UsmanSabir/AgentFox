@@ -29,7 +29,7 @@ public class ShellCommandTool : BaseTool
         if (string.IsNullOrEmpty(command))
             return ToolResult.Fail("No command provided");
 
-        var workingDir = arguments["working_directory"]?.ToString();
+        var workingDir = arguments.GetValueOrDefault("working_directory")?.ToString();
         var resolvedDir = string.IsNullOrEmpty(workingDir) 
             ? _workspaceManager.ResolvePath(".") 
             : _workspaceManager.ResolvePath(workingDir);

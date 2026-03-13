@@ -58,33 +58,8 @@ public class LLMExecutor : IAgentExecutor
             
             if (toolCalls.Count > 0)
             {
-                foreach (var toolCall in toolCalls)
-                {
-                    agent.Status = AgentStatus.ExecutingTool;
-                    _runtime.Logger?.LogInformation($"Executing tool: {toolCall.ToolName}");
-                    
-                    var toolResult = await ExecuteToolAsync(toolCall);
-                    result.ToolCalls.Add(toolCall);
-                    
-                    agent.ConversationHistory.Add(new Message
-                    {
-                        Role = MessageRole.Tool,
-                        Content = toolResult.Output,
-                        ToolCallId = toolCall.Id,
-                        ToolName = toolCall.ToolName
-                    });
-                }
-                
-                // Continue conversation with tool results
-                agent.Status = AgentStatus.Thinking;
-                var messagesWithResult = new List<Message>(agent.ConversationHistory);
-                messagesWithResult.Add(new Message(MessageRole.System, "Based on the tool results, provide your final answer."));
-                var finalResponse = await _llm.GenerateAsync(
-                    messagesWithResult,
-                    null,
-                    llmConfig
-                );
-                
+                // Continue executing tool calls in a loop until we get a response without tools
+                var finalResponse = await ExecuteToolCallsLoop(agent, toolCalls, result, llmConfig);
                 result.Output = finalResponse;
                 result.Success = true;
             }
@@ -105,6 +80,55 @@ public class LLMExecutor : IAgentExecutor
         agent.Status = result.Success ? AgentStatus.Completed : AgentStatus.Error;
         
         return result;
+    }
+    
+    private async Task<string> ExecuteToolCallsLoop(Agent agent, List<ToolCall> toolCalls, AgentResult result, LLMConfig llmConfig)
+    {
+        while (toolCalls.Count > 0)
+        {
+            // Execute all tool calls
+            foreach (var toolCall in toolCalls)
+            {
+                agent.Status = AgentStatus.ExecutingTool;
+                _runtime.Logger?.LogInformation($"Executing tool: {toolCall.ToolName}");
+                
+                var toolResult = await ExecuteToolAsync(toolCall);
+                result.ToolCalls.Add(toolCall);
+                
+                agent.ConversationHistory.Add(new Message
+                {
+                    Role = MessageRole.Tool,
+                    Content = toolResult.Output,
+                    ToolCallId = toolCall.Id,
+                    ToolName = toolCall.ToolName
+                });
+            }
+            
+            // Continue conversation with tool results
+            agent.Status = AgentStatus.Thinking;
+            var messagesWithResult = new List<Message>(agent.ConversationHistory);
+            messagesWithResult.Add(new Message(MessageRole.System, "Based on the tool results, provide your final answer."));
+            var response = await _llm.GenerateAsync(
+                messagesWithResult,
+                null,
+                llmConfig
+            );
+            
+            // Add assistant message
+            agent.ConversationHistory.Add(new Message(MessageRole.Assistant, response));
+            
+            // Check if the response contains more tool calls
+            toolCalls = ParseToolCalls(response);
+            
+            if (toolCalls.Count == 0)
+            {
+                // No more tool calls, return the final response
+                return response;
+            }
+        }
+        
+        // Should not reach here, but return empty string as fallback
+        return string.Empty;
     }
     
     private string BuildSystemMessage(Agent agent)

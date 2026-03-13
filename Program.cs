@@ -6,8 +6,36 @@ using AgentFox.Skills;
 using AgentFox.Tools;
 using SystemPromptBuilder = AgentFox.LLM.SystemPromptBuilder;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 
 namespace AgentFox;
+
+/// <summary>
+/// Simple console-based logger for Composio initialization
+/// </summary>
+internal class ConsoleLogger : ILogger
+{
+    public IDisposable BeginScope<TState>(TState state) where TState : notnull => null!;
+    public bool IsEnabled(LogLevel logLevel) => true;
+    
+    public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+    {
+        var message = formatter(state, exception);
+        var prefix = logLevel switch
+        {
+            LogLevel.Error => "[ERROR]",
+            LogLevel.Warning => "[WARN]",
+            LogLevel.Information => "[INFO]",
+            LogLevel.Debug => "[DEBUG]",
+            _ => "[LOG]"
+        };
+        Console.WriteLine($"{prefix} {message}");
+        if (exception != null)
+            Console.WriteLine($"  Exception: {exception.Message}");
+    }
+}
+
+internal class ConsoleLogger<T> : ConsoleLogger, ILogger<T> where T : class { }
 
 /// <summary>
 /// AgentFox - Multi-agent framework in C#
@@ -47,7 +75,7 @@ class Program
     {
         var workspaceManager = new WorkspaceManager(configuration);
         var toolRegistry = CreateToolRegistry(workspaceManager);
-        var skillRegistry = CreateSkillRegistry(toolRegistry);
+        var skillRegistry = await CreateSkillRegistryAsync(toolRegistry, configuration);
         
         // Build system prompt with dynamic builder + skills index
         var systemPrompt = new SystemPromptBuilder()
@@ -99,7 +127,7 @@ class Program
     {
         var workspaceManager = new WorkspaceManager(configuration);
         var toolRegistry = CreateToolRegistry(workspaceManager);
-        var skillRegistry = CreateSkillRegistry(toolRegistry);
+        var skillRegistry = await CreateSkillRegistryAsync(toolRegistry, configuration);
         
         // Print skills summary at startup
         var manifests = skillRegistry.GetSkillManifests();
@@ -130,6 +158,7 @@ class Program
                 "- File system operations\n" +
                 "- System administration\n" +
                 "- Architecture and design consultation\n" +
+                "- Composio.dev integrations (GitHub, Slack, Jira, etc.)\n" +
                 "- Git, Docker, deployment, testing, and more via skills"
             )
             .WithConstraints(
@@ -140,7 +169,8 @@ class Program
                 "Ask for confirmation for high-risk operations",
                 "Before using a skill's tools, always call load_skill to load the skill's guidance",
                 "Use add_memory to save important user facts or preferences to long-term memory.",
-                "Use search_memory to recall past information or facts when requested."
+                "Use search_memory to recall past information or facts when requested.",
+                "For Composio integrations, provide clear examples and documentation on usage"
             )
             .Build();
         
@@ -270,12 +300,48 @@ class Program
         return registry;
     }
 
-    static SkillRegistry CreateSkillRegistry(ToolRegistry toolRegistry)
+    static async Task<SkillRegistry> CreateSkillRegistryAsync(ToolRegistry toolRegistry, IConfiguration configuration)
     {
         // SkillRegistry auto-registers all built-in skills (git, docker, code_review,
         // debugging, api_integration, database, testing, deployment) and also
         // registers LoadSkillTool into the toolRegistry for lazy on-demand loading.
         var skillRegistry = new SkillRegistry(toolRegistry);
+        
+        // Initialize Composio skills if API key is configured
+        var composioApiKey = configuration["Composio:ApiKey"];
+        if (!string.IsNullOrEmpty(composioApiKey) && !composioApiKey.Contains("your-composio"))
+        {
+            try
+            {
+                var logger = new ConsoleLogger<ComposioSkillProvider>();
+                var composioProvider = new ComposioSkillProvider(
+                    apiKey: composioApiKey,
+                    skillRegistry: skillRegistry,
+                    logger: logger
+                );
+                
+                // Get integration filter if specified
+                var integrations = configuration.GetSection("Composio:Integrations")
+                    .Get<List<string>>() ?? new();
+                
+                if (integrations.Any())
+                {
+                    await composioProvider.InitializeAsync(filterIntegrationIds: integrations.ToArray());
+                }
+                else
+                {
+                    await composioProvider.InitializeAsync();
+                }
+                
+                Console.WriteLine("✓ Composio skills initialized successfully");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠ Warning: Failed to initialize Composio skills: {ex.Message}");
+                // Continue without Composio rather than failing startup
+            }
+        }
+        
         return skillRegistry;
     }
     
@@ -301,6 +367,15 @@ You can also ask the agent to:
   - Remember information for later
   - Use skills: git, docker, deployment, testing, api_integration, etc.
     (ask the agent to 'load the git skill and help me commit my changes')
+  - Use Composio.dev integrations: GitHub, Slack, Jira, Asana, etc.
+    (e.g., 'load the github skill and help me create a repository')
+
+Composio Integration:
+  If COMPOSIO_API_KEY is configured, the agent has access to:
+  - GitHub (create repos, manage issues, view code)
+  - Slack (send messages, create channels)
+  - Jira (manage tasks, create issues)
+  - And many more integrations...
 ");
     }
     

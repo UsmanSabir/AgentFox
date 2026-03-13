@@ -19,7 +19,9 @@ public class ComposioClient
     private readonly string _apiKey;
     private readonly string _baseUrl;
     private readonly ILogger<ComposioClient>? _logger;
-    private const string DefaultBaseUrl = "https://api.composio.dev/api/v1";
+    //private const string DefaultBaseUrl = "https://api.composio.dev/api/v1";
+    private const string DefaultBaseUrl = "https://backend.composio.dev/api/v3/";
+    //https://docs.composio.dev/reference
 
     public ComposioClient(string apiKey, ILogger<ComposioClient>? logger = null, string? baseUrl = null)
     {
@@ -27,8 +29,9 @@ public class ComposioClient
         _baseUrl = baseUrl ?? DefaultBaseUrl;
         _logger = logger;
         _httpClient = new HttpClient();
-        _httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {apiKey}");
+        //_httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {apiKey}");
         _httpClient.DefaultRequestHeaders.Add("Accept", "application/json");
+        _httpClient.DefaultRequestHeaders.Add("x-api-key", apiKey);
     }
 
     /// <summary>
@@ -38,7 +41,8 @@ public class ComposioClient
     {
         try
         {
-            var response = await _httpClient.GetAsync($"{_baseUrl}/integrations");
+            //var response = await _httpClient.GetAsync($"{_baseUrl}/integrations");
+            var response = await _httpClient.GetAsync($"{_baseUrl}/tools");
             response.EnsureSuccessStatusCode();
             var content = await response.Content.ReadAsStringAsync();
             var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };

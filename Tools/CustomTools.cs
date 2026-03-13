@@ -1,4 +1,5 @@
 using AgentFox.Models;
+using System.Net.Http;
 
 namespace AgentFox.Tools;
 
@@ -47,40 +48,97 @@ public class WebSearchTool : BaseTool
 }
 
 /// <summary>
-/// Tool for fetching URLs (simulated)
+/// Tool for fetching URLs with HttpClient, error handling, and retry logic
 /// </summary>
 public class FetchUrlTool : BaseTool
 {
+    private static readonly HttpClient _httpClient = new()
+    {
+        Timeout = TimeSpan.FromSeconds(30)
+    };
+    
+    private const int MaxRetries = 3;
+    private const int InitialDelayMs = 1000;
+
     public override string Name => "fetch_url";
     public override string Description => "Fetch content from a URL";
     public override Dictionary<string, ToolParameter> Parameters { get; } = new()
     {
-        ["url"] = new() { Type = "string", Description = "URL to fetch", Required = true }
+        ["url"] = new() { Type = "string", Description = "URL to fetch", Required = true },
+        ["timeout_seconds"] = new() { Type = "number", Description = "Timeout in seconds (optional)", Required = false, Default = 30 }
     };
 
-    protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
+    protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
     {
+        //TODO: use html to markdown converter like https://github.com/mysticmind/reversemarkdown-net or https://github.com/baynezy/Html2Markdown
         var url = arguments["url"]?.ToString();
         if (string.IsNullOrEmpty(url))
-            return Task.FromResult(ToolResult.Fail("No URL provided"));
+            return ToolResult.Fail("No URL provided");
         
-        // Simulated fetch
-        var result = $"""
-            Fetched: {url}
-            ═════════════════════════════════════
-            
-            <html>
-                <body>
-                    <h1>Simulated Page Content</h1>
-                    <p>This is a placeholder for actual URL content.</p>
-                </body>
-            </html>
-            
-            Note: This is a simulated URL fetch.
-            Integrate with HttpClient for actual fetching.
-            """;
+        // Validate URL format
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+            return ToolResult.Fail($"Invalid URL format: {url}");
         
-        return Task.FromResult(ToolResult.Ok(result));
+        // Get optional timeout
+        var timeoutSeconds = arguments.GetValueOrDefault("timeout_seconds") is double timeout 
+            ? (int)timeout 
+            : 30;
+        timeoutSeconds = Math.Max(5, Math.Min(300, timeoutSeconds));
+
+        // Retry logic with exponential backoff
+        int delayMs = InitialDelayMs;
+        Exception? lastException = null;
+
+        for (int attempt = 1; attempt <= MaxRetries; attempt++)
+        {
+            try
+            {
+                using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds)))
+                using (var response = await _httpClient.GetAsync(uri, cts.Token))
+                {
+                    if (!response.IsSuccessStatusCode)
+                        return ToolResult.Fail($"HTTP Error {(int)response.StatusCode}: {response.ReasonPhrase}");
+                    
+                    // Read content with size limit (10MB max)
+                    var content = await response.Content.ReadAsStringAsync(cts.Token);
+                    
+                    if (content.Length > 10 * 1024 * 1024)
+                        content = content[..(10 * 1024 * 1024)] + "\n... (content truncated - exceeds 10MB limit)";
+                    
+                    return ToolResult.Ok($"""
+                        Fetched: {url}
+                        Status: {(int)response.StatusCode} {response.ReasonPhrase}
+                        Content-Type: {response.Content.Headers.ContentType}
+                        ═════════════════════════════════════
+                        
+                        {content}
+                        """);
+                }
+            }
+            catch (HttpRequestException ex)
+            {
+                lastException = ex;
+                if (attempt < MaxRetries)
+                {
+                    await Task.Delay(delayMs);
+                    delayMs *= 2; // Exponential backoff
+                }
+            }
+            catch (TaskCanceledException)
+            {
+                return ToolResult.Fail($"Request timeout after {timeoutSeconds} seconds");
+            }
+            catch (OperationCanceledException)
+            {
+                return ToolResult.Fail("Request was cancelled");
+            }
+            catch (Exception ex)
+            {
+                return ToolResult.Fail($"Unexpected error: {ex.GetType().Name} - {ex.Message}");
+            }
+        }
+
+        return ToolResult.Fail($"Failed to fetch URL after {MaxRetries} retries: {lastException?.Message}");
     }
 }
 
