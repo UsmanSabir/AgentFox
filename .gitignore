@@ -52,4 +52,7 @@ CodeCoverage/
 *.VisualState.xml
 TestResult.xml
 nunit-*.xml
+
+# Vstudio Code workspace settings
+.vscode/
 appsettings.*.json
