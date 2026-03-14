@@ -1,7 +1,3 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using AgentFox.Tools;
 
@@ -31,25 +27,50 @@ public class ComposioSkillProvider
     /// <summary>
     /// Initialize and register authorized toolkits from auth configs as skills
     /// </summary>
-    public async Task InitializeAsync(bool useOnlyAuthorizedToolkits = true, IEnumerable<string>? filterToolkitIds = null)
+    public async Task InitializeAsync(IEnumerable<string>? filterToolkitIds = null)
     {
+        bool useOnlyAuthorizedToolkits = true; //todo
         try
         {
             _logger?.LogInformation("Initializing Composio.dev skill provider");
 
             List<ComposioToolkit> toolkits;
-            
+
             if (useOnlyAuthorizedToolkits)
             {
-                toolkits = await _client.GetEnabledToolkitsAsync();
-                _logger?.LogInformation("Using only authorized toolkits from auth configs");
+                var activeAccounts = await _client.GetActiveConnectedAccountsAsync();
+                var toolkitDict = new Dictionary<string, ComposioToolkit>();
+
+                foreach (var account in activeAccounts)
+                {
+                    if (account.Toolkit != null && !string.IsNullOrEmpty(account.Toolkit.Slug))
+                    {
+                        var slug = account.Toolkit.Slug;
+                        if (!toolkitDict.ContainsKey(slug))
+                        {
+                            toolkitDict[slug] = new ComposioToolkit
+                            {
+                                Id = slug,
+                                Name = account.Toolkit.Name ?? slug,
+                                Slug = slug,
+                                ConnectedAccountId = account.Id,
+                                UserId = account.UserId,
+                                IsAvailable = true,
+                                Logo = account.Toolkit.Logo
+                            };
+                        }
+                    }
+                }
+
+                toolkits = toolkitDict.Values.ToList();
+                _logger?.LogInformation("Using toolkits from {Count} active connected accounts", activeAccounts.Count);
             }
             else
             {
                 toolkits = await _client.GetToolkitsAsync();
                 _logger?.LogInformation("Using all available toolkits");
             }
-            
+
             if (filterToolkitIds != null)
             {
                 var filterSet = filterToolkitIds.ToHashSet();
@@ -70,7 +91,7 @@ public class ComposioSkillProvider
                 }
             }
 
-            _logger?.LogInformation("Composio.dev skill provider initialized with {Count} skills", 
+            _logger?.LogInformation("Composio.dev skill provider initialized with {Count} skills",
                 _composioSkills.Count);
         }
         catch (Exception ex)
@@ -80,13 +101,6 @@ public class ComposioSkillProvider
         }
     }
 
-    /// <summary>
-    /// Initialize with specific toolkit IDs (backward compatibility overload)
-    /// </summary>
-    public async Task InitializeAsync(IEnumerable<string>? filterToolkitIds)
-    {
-        await InitializeAsync(useOnlyAuthorizedToolkits: true, filterToolkitIds);
-    }
 
     /// <summary>
     /// Register a single toolkit as a skill
@@ -97,7 +111,7 @@ public class ComposioSkillProvider
         {
             var toolkitSlug = toolkit.Slug ?? toolkit.Id;
             var tools = await _client.GetToolsAsync(toolkitSlug);
-            
+
             var skillAdapter = new ComposioSkillAdapter(
                 toolkit,
                 tools,
@@ -171,20 +185,44 @@ public class ComposioSkillProvider
     {
         return await _client.GetToolsAsync(toolkitSlug);
     }
-
+    
     /// <summary>
-    /// Execute a Composio tool directly
+    /// Execute a Composio tool with connected account context
     /// </summary>
     public async Task<Dictionary<string, object>> ExecuteToolAsync(
         string toolSlug,
-        Dictionary<string, object> parameters)
+        Dictionary<string, object> parameters,
+        string connectedAccountId,
+        string userId)
     {
         _logger?.LogInformation(
-            "Executing Composio tool {ToolSlug}",
-            toolSlug
+            "Executing Composio tool {ToolSlug} with account {AccountId}",
+            toolSlug,
+            connectedAccountId
         );
 
-        return await _client.ExecuteToolAsync(toolSlug, parameters);
+        return await _client.ExecuteToolAsync(
+            toolSlug,
+            parameters,
+            connectedAccountId,
+            userId
+        );
+    }
+
+    /// <summary>
+    /// Get all connected accounts
+    /// </summary>
+    public async Task<List<ComposioConnectedAccount>> GetConnectedAccountsAsync()
+    {
+        return await _client.GetConnectedAccountsAsync();
+    }
+
+    /// <summary>
+    /// Get active connected accounts for a specific toolkit
+    /// </summary>
+    public async Task<List<ComposioConnectedAccount>> GetActiveConnectedAccountsAsync()
+    {
+        return await _client.GetActiveConnectedAccountsAsync();
     }
 
     /// <summary>
@@ -193,12 +231,12 @@ public class ComposioSkillProvider
     public async Task<List<ComposioToolkit>> SearchToolkitsAsync(string? name = null, string? category = null)
     {
         var toolkits = await _client.GetToolkitsAsync();
-        
+
         return toolkits.Where(t =>
         {
-            bool matchName = string.IsNullOrEmpty(name) || 
+            bool matchName = string.IsNullOrEmpty(name) ||
                 t.Name.Contains(name, StringComparison.OrdinalIgnoreCase);
-            bool matchCategory = string.IsNullOrEmpty(category) || 
+            bool matchCategory = string.IsNullOrEmpty(category) ||
                 t.Category?.Equals(category, StringComparison.OrdinalIgnoreCase) == true;
             return matchName && matchCategory && t.IsAvailable;
         }).ToList();
@@ -228,8 +266,8 @@ public class ComposioSkillAdapter : Skill, ISkillPlugin
 
         Name = toolkit.Slug ?? toolkit.Id;
         // Fallback if description is missing
-        Description = !string.IsNullOrWhiteSpace(toolkit.Description) 
-            ? $"{toolkit.Name}: {toolkit.Description}" 
+        Description = !string.IsNullOrWhiteSpace(toolkit.Description)
+            ? $"{toolkit.Name}: {toolkit.Description}"
             : toolkit.Name;
         Version = "1.0.0";
 
@@ -262,13 +300,13 @@ public class ComposioSkillAdapter : Skill, ISkillPlugin
 
     public override List<string> GetSystemPrompts()
     {
-        var toolDescriptions = string.Join("\n", _tools.Select(t => 
+        var toolDescriptions = string.Join("\n", _tools.Select(t =>
         {
             var displayName = !string.IsNullOrWhiteSpace(t.DisplayName) ? t.DisplayName : t.Name;
             var description = !string.IsNullOrWhiteSpace(t.Description) ? t.Description : "(no description available)";
             return $"- {displayName}: {description}";
         }));
-        
+
         var systemPrompt = $@"
 ## {_toolkit.Name} Toolkit
 
@@ -324,8 +362,8 @@ public class ComposioToolWrapper : ITool
     public string Description => _tool.Description;
     public List<string> Tags => _tool.Tags;
 
-    public Dictionary<string, ToolParameter> Parameters 
-    { 
+    public Dictionary<string, ToolParameter> Parameters
+    {
         get
         {
             if (_parameters == null)
@@ -391,10 +429,61 @@ public class ComposioToolWrapper : ITool
                 }
             }
 
-            var result = await _client.ExecuteToolAsync(
-                _toolSlug,
-                cleanParams
-            );
+            Dictionary<string, object> result;
+
+            // Try to get active connected accounts for this tool's toolkit
+            // This allows execution with proper authentication context
+            try
+            {
+                // Extract toolkit slug from tool metadata if available
+                // For Composio tools, we need to determine the toolkit
+                var toolkitSlug = ExtractToolkitSlug();
+
+                if (!string.IsNullOrEmpty(toolkitSlug))
+                {
+                    var activeAccounts = await _client.GetActiveConnectedAccountsAsync(toolkitSlug);
+
+                    if (activeAccounts.Any())
+                    {
+                        // Use first active account
+                        var account = activeAccounts.First();
+
+                        _logger?.LogInformation(
+                            "Using active account {AccountId} for user {UserId}",
+                            account.Id,
+                            account.UserId
+                        );
+
+                        result = await _client.ExecuteToolAsync(
+                            _toolSlug,
+                            cleanParams,
+                            account.Id,
+                            account.UserId
+                        );
+                    }
+                    else
+                    {
+                        _logger?.LogWarning(
+                            "No active connected account found for toolkit {ToolkitSlug}. Using unauthenticated execution.",
+                            toolkitSlug
+                        );
+
+                        return ToolResult.Fail($"No active connected account found for toolkit {toolkitSlug}. Cannot proceed with tool call");
+                    }
+                }
+                else
+                {
+                    return ToolResult.Fail($"No active connected account found for toolkit {toolkitSlug}. Cannot proceed with tool call");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(
+                    ex,
+                    "Failed to get active accounts, falling back to unauthenticated execution"
+                );
+                return ToolResult.Fail($"Failed to get active accounts");
+            }
 
             return ToolResult.Ok(System.Text.Json.JsonSerializer.Serialize(result));
         }
@@ -402,6 +491,36 @@ public class ComposioToolWrapper : ITool
         {
             _logger?.LogError(ex, "Failed to execute Composio tool {ToolName}", _tool.Name);
             return ToolResult.Fail($"Error executing tool: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Extract toolkit slug from tool slug (format: TOOLKIT_ACTION or toolkit_slug:action)
+    /// </summary>
+    private string? ExtractToolkitSlug()
+    {
+        try
+        {
+            // If tool slug contains a colon, extract the toolkit part
+            if (_toolSlug.Contains(':'))
+            {
+                return _toolSlug.Split(':')[0].ToLower();
+            }
+
+            // For UPPERCASE_UNDERSCORE format, convert to lowercase slug
+            // Example: GMAIL_FETCH_EMAILS -> gmail
+            var parts = _toolSlug.Split('_');
+            if (parts.Length > 0)
+            {
+                return parts[0].ToLower();
+            }
+
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Failed to extract toolkit slug from tool slug {ToolSlug}", _toolSlug);
+            return null;
         }
     }
 }

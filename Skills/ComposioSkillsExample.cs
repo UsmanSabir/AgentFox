@@ -99,7 +99,7 @@ public class ComposioSkillsExample
         }
 
         // Initialize with only authorized toolkits
-        await composioProvider.InitializeAsync(useOnlyAuthorizedToolkits: true);
+        await composioProvider.InitializeAsync();
 
         var allComposioSkills = composioProvider.GetAllSkills();
         _logger.LogInformation("Registered {Count} authorized Composio skills", allComposioSkills.Count);
@@ -139,7 +139,7 @@ public class ComposioSkillsExample
         }
 
         // Initialize (register all)
-        await composioProvider.InitializeAsync(useOnlyAuthorizedToolkits: false);
+        await composioProvider.InitializeAsync();
 
         // Get all registered skills
         var allComposioSkills = composioProvider.GetAllSkills();
@@ -284,7 +284,9 @@ public class ComposioSkillsExample
                 {
                     { "owner", "your-github-username" },
                     { "repo", "your-repo-name" }
-                }
+                },
+                "accoutId",
+                "userId"
             );
 
             _logger.LogInformation("Tool result: {Result}",

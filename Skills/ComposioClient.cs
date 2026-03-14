@@ -116,6 +116,74 @@ public class ComposioClient
     }
 
     /// <summary>
+    /// Get all connected accounts
+    /// </summary>
+    public async Task<List<ComposioConnectedAccount>> GetConnectedAccountsAsync()
+    {
+        try
+        {
+            var response = await _httpClient.GetAsync($"{_baseUrl}connected_accounts");
+            response.EnsureSuccessStatusCode();
+            var content = await response.Content.ReadAsStringAsync();
+            var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+            var result = JsonSerializer.Deserialize<ComposioConnectedAccountsResponse>(content, options);
+            
+            _logger?.LogInformation("Retrieved {Count} connected accounts", result?.Items?.Count ?? 0);
+            return result?.Items ?? new();
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Failed to get connected accounts");
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Get active connected accounts for a specific toolkit
+    /// </summary>
+    public async Task<List<ComposioConnectedAccount>> GetActiveConnectedAccountsAsync()
+    {
+        try
+        {
+            var allAccounts = await GetConnectedAccountsAsync();
+            var activeAccounts = allAccounts
+                .Where(a => a.Status == "ACTIVE")
+                .ToList();
+            
+            _logger?.LogInformation("Found {Count} active connected accounts", activeAccounts.Count);
+            return activeAccounts;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Failed to get active connected accounts");
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Get active connected accounts for a specific toolkit
+    /// </summary>
+    public async Task<List<ComposioConnectedAccount>> GetActiveConnectedAccountsAsync(string toolkitSlug)
+    {
+        try
+        {
+            var allAccounts = await GetActiveConnectedAccountsAsync();
+            var toolkitAccounts = allAccounts
+                .Where(a => a.Toolkit?.Slug == toolkitSlug)
+                .ToList();
+            
+            _logger?.LogInformation("Found {Count} active connected accounts for toolkit {ToolkitSlug}", 
+                toolkitAccounts.Count, toolkitSlug);
+            return toolkitAccounts;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Failed to get active connected accounts for toolkit {ToolkitSlug}", toolkitSlug);
+            throw;
+        }
+    }
+
+    /// <summary>
     /// Get all enabled toolkits from auth configs
     /// </summary>
     public async Task<List<ComposioToolkit>> GetEnabledToolkitsAsync()
@@ -154,17 +222,21 @@ public class ComposioClient
     }
 
     /// <summary>
-    /// Execute a tool through Composio.dev
+    /// Execute a tool through Composio.dev using a specific connected account
     /// </summary>
     public async Task<Dictionary<string, object>> ExecuteToolAsync(
         string toolSlug,
-        Dictionary<string, object> parameters)
+        Dictionary<string, object> parameters,
+        string connectedAccountId,
+        string userId)
     {
         try
         {
             var payload = new
             {
-                input = parameters
+                connected_account_id = connectedAccountId,
+                user_id = userId,
+                arguments = parameters
             };
 
             var json = JsonSerializer.Serialize(payload);
@@ -174,14 +246,16 @@ public class ComposioClient
             response.EnsureSuccessStatusCode();
             var responseContent = await response.Content.ReadAsStringAsync();
             var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
-            var result = JsonSerializer.Deserialize<Dictionary<string, object>>(responseContent, options);
+            var result = JsonSerializer.Deserialize<ComposioExecutionResponse>(responseContent, options);
             
-            _logger?.LogInformation("Executed tool {ToolSlug}", toolSlug);
-            return result ?? new();
+            _logger?.LogInformation("Executed tool {ToolSlug} with account {ConnectedAccountId}", 
+                toolSlug, connectedAccountId);
+            return result?.Data ?? new();
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "Failed to execute tool {ToolSlug}", toolSlug);
+            _logger?.LogError(ex, "Failed to execute tool {ToolSlug} with account {ConnectedAccountId}", 
+                toolSlug, connectedAccountId);
             throw;
         }
     }
@@ -279,6 +353,11 @@ public class ComposioToolkit
 
     [JsonPropertyName("slug")]
     public string? Slug { get; set; }
+    
+    public string? ConnectedAccountId { get; set; }
+
+    [JsonPropertyName("user_id")]
+    public string? UserId { get; set; }
 }
 
 /// <summary>
@@ -578,4 +657,89 @@ public class ComposioApiResponse<T>
 
     [JsonPropertyName("error")]
     public string? Error { get; set; }
+}
+
+/// <summary>
+/// Represents a connected account (OAuth or other auth scheme)
+/// </summary>
+public class ComposioConnectedAccount
+{
+    [JsonPropertyName("id")]
+    public string Id { get; set; } = string.Empty;
+
+    [JsonPropertyName("user_id")]
+    public string UserId { get; set; } = string.Empty;
+
+    [JsonPropertyName("toolkit")]
+    public ComposioToolkitReference? Toolkit { get; set; }
+
+    [JsonPropertyName("status")]
+    public string Status { get; set; } = string.Empty;
+
+    [JsonPropertyName("auth_scheme")]
+    public string AuthScheme { get; set; } = string.Empty;
+
+    [JsonPropertyName("auth_config")]
+    public ComposioAuthConfigInfo? AuthConfig { get; set; }
+
+    [JsonPropertyName("created_at")]
+    public string? CreatedAt { get; set; }
+
+    [JsonPropertyName("updated_at")]
+    public string? UpdatedAt { get; set; }
+
+    [JsonPropertyName("data")]
+    public Dictionary<string, object>? Data { get; set; }
+
+    [JsonPropertyName("is_disabled")]
+    public bool IsDisabled { get; set; }
+
+    [JsonPropertyName("status_reason")]
+    public string? StatusReason { get; set; }
+
+    [JsonPropertyName("uuid")]
+    public string? Uuid { get; set; }
+}
+
+/// <summary>
+/// Represents authentication configuration information
+/// </summary>
+public class ComposioAuthConfigInfo
+{
+    [JsonPropertyName("id")]
+    public string Id { get; set; } = string.Empty;
+
+    [JsonPropertyName("auth_scheme")]
+    public string AuthScheme { get; set; } = string.Empty;
+
+    [JsonPropertyName("is_composio_managed")]
+    public bool IsComposioManaged { get; set; }
+
+    [JsonPropertyName("is_disabled")]
+    public bool IsDisabled { get; set; }
+}
+
+/// <summary>
+/// API response wrapper for connected accounts
+/// </summary>
+public class ComposioConnectedAccountsResponse : ComposioApiResponseWithItems<ComposioConnectedAccount>
+{
+}
+
+/// <summary>
+/// Response wrapper for tool execution
+/// </summary>
+public class ComposioExecutionResponse
+{
+    [JsonPropertyName("data")]
+    public Dictionary<string, object> Data { get; set; } = new();
+
+    [JsonPropertyName("successful")]
+    public bool Successful { get; set; }
+
+    [JsonPropertyName("error")]
+    public string? Error { get; set; }
+
+    [JsonPropertyName("log_id")]
+    public string? LogId { get; set; }
 }

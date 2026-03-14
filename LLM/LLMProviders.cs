@@ -91,8 +91,9 @@ public class OpenAIProvider : BaseLLMProvider
     {
         _apiKey = apiKey;
         _baseUrl = baseUrl ?? "https://api.openai.com/v1";
-        // Ensure API key is added to headers
-        _customHeaders["Authorization"] = $"Bearer {apiKey}";
+
+        if(!string.IsNullOrWhiteSpace(apiKey))
+            _customHeaders["Authorization"] = $"Bearer {apiKey}";
     }
     
     public override async Task<string> GenerateAsync(List<Message> messages, List<ToolDefinition>? tools = null, LLMConfig? config = null)
@@ -745,10 +746,6 @@ public class LLMFactory
                 {
                     var apiKey = configuration["LLM:ApiKey"] ?? Environment.GetEnvironmentVariable("OPENAI_API_KEY");
                     var baseUrl = configuration["LLM:BaseUrl"];
-                    if (string.IsNullOrEmpty(apiKey))
-                        throw new InvalidOperationException("OpenAI Provider requires an API key in configuration or OPENAI_API_KEY environment variable.");
-                    //if (string.IsNullOrEmpty(baseUrl))
-                    //   throw new InvalidOperationException("OpenAI Provider requires a BaseUrl in configuration under LLM:BaseUrl.");
                     
                     defaultConfig.Headers["Authorization"] = $"Bearer {apiKey}";
                     provider = CreateOpenAI(apiKey, baseUrl, timeout, customHeaders);

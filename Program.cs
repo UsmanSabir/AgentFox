@@ -102,6 +102,7 @@ class Program
             .WithName("AgentFox")
             .WithSystemPrompt(systemPrompt)
             .WithMemory(memory)
+            .WithSkillsRegistry(skillRegistry)
             .WithLLMProvider(llmProvider)
             .Build();
         
@@ -185,6 +186,7 @@ class Program
             .WithName("AgentFox")
             .WithSystemPrompt(systemPrompt)
             .WithMemory(memory)
+            .WithSkillsRegistry(skillRegistry)
             .WithLLMProvider(llmProvider)
             .Build();
         
