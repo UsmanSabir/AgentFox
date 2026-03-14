@@ -1,6 +1,7 @@
 using AgentFox.Agents;
 using AgentFox.Models;
 using AgentFox.Tools;
+using AgentFox.Skills;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -14,11 +15,13 @@ public class LLMExecutor : IAgentExecutor
 {
     private readonly IAgentRuntime _runtime;
     private readonly ILLMProvider _llm;
+    private readonly SkillRegistry? _skillRegistry;
     
-    public LLMExecutor(IAgentRuntime runtime, ILLMProvider llm)
+    public LLMExecutor(IAgentRuntime runtime, ILLMProvider llm, SkillRegistry? skillRegistry = null)
     {
         _runtime = runtime;
         _llm = llm;
+        _skillRegistry = skillRegistry;
     }
     
     public async Task<AgentResult> ExecuteAsync(Agent agent, string task)
@@ -28,6 +31,13 @@ public class LLMExecutor : IAgentExecutor
         
         try
         {
+            // Populate agent's enabled skills if empty
+            if (agent.EnabledSkills.Count == 0 && _skillRegistry != null)
+            {
+                agent.EnabledSkills.AddRange(_skillRegistry.GetAll());
+                _runtime.Logger?.LogInformation($"Auto-populated agent with {agent.EnabledSkills.Count} available skills");
+            }
+            
             agent.ConversationHistory.Add(new Message(MessageRole.User, task));
             agent.Status = AgentStatus.Thinking;
             
@@ -36,7 +46,7 @@ public class LLMExecutor : IAgentExecutor
             var messages = new List<Message> { new(MessageRole.System, systemMessage) };
             messages.AddRange(agent.ConversationHistory.Where(m => m.Role != MessageRole.System));
             
-            // Get available tools
+            // Get available tools including skill-based tools
             var availableTools = GetAvailableTools(agent);
             
             // Build LLM config
@@ -92,7 +102,7 @@ public class LLMExecutor : IAgentExecutor
                 agent.Status = AgentStatus.ExecutingTool;
                 _runtime.Logger?.LogInformation($"Executing tool: {toolCall.ToolName}");
                 
-                var toolResult = await ExecuteToolAsync(toolCall);
+                var toolResult = await ExecuteToolAsync(toolCall, agent);
                 result.ToolCalls.Add(toolCall);
                 
                 agent.ConversationHistory.Add(new Message
@@ -159,6 +169,46 @@ public class LLMExecutor : IAgentExecutor
         // Add configured tools
         tools.AddRange(agent.Config.Tools);
         
+        // Add tools from enabled skills (including Composio toolkit tools)
+        foreach (var skill in agent.EnabledSkills)
+        {
+            try
+            {
+                var skillTools = skill.GetTools();
+                foreach (var tool in skillTools)
+                {
+                    // Convert skill tool to tool definition for the LLM
+                    var parameters = new Dictionary<string, Models.ToolParameter>();
+                    foreach (var kv in tool.Parameters)
+                    {
+                        parameters[kv.Key] = new Models.ToolParameter
+                        {
+                            Type = kv.Value.Type,
+                            Description = kv.Value.Description,
+                            Required = kv.Value.Required,
+                            Default = kv.Value.Default,
+                            Pattern = kv.Value.Pattern,
+                            MinLength = kv.Value.MinLength,
+                            MaxLength = kv.Value.MaxLength,
+                            Minimum = kv.Value.Minimum,
+                            Maximum = kv.Value.Maximum
+                        };
+                    }
+                    
+                    tools.Add(new ToolDefinition
+                    {
+                        Name = tool.Name,
+                        Description = tool.Description,
+                        Parameters = parameters
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                _runtime.Logger?.LogWarning(ex, $"Failed to get tools from skill {skill.Name}");
+            }
+        }
+        
         // Add spawn agent tool
         tools.Add(new ToolDefinition
         {
@@ -184,7 +234,37 @@ public class LLMExecutor : IAgentExecutor
             // Try to parse JSON response
             if (response.Contains("tool_calls") || response.Contains("tool_uses"))
             {
-                var json = JObject.Parse(response);
+                // Extract JSON from response (response may contain text before/after JSON)
+                string jsonToParse = response;
+                
+                // If response contains text and JSON, try to extract just the JSON object
+                int jsonStart = response.IndexOf('{');
+                if (jsonStart > 0)
+                {
+                    // Find the matching closing brace
+                    int braceCount = 0;
+                    int jsonEnd = -1;
+                    for (int i = jsonStart; i < response.Length; i++)
+                    {
+                        if (response[i] == '{') braceCount++;
+                        else if (response[i] == '}') 
+                        {
+                            braceCount--;
+                            if (braceCount == 0)
+                            {
+                                jsonEnd = i;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    if (jsonEnd > jsonStart)
+                    {
+                        jsonToParse = response.Substring(jsonStart, jsonEnd - jsonStart + 1);
+                    }
+                }
+                
+                var json = JObject.Parse(jsonToParse);
                 
                 // Try OpenAI format: tool_calls[].function.name and tool_calls[].function.arguments
                 var calls = json["tool_calls"]?.ToArray();
@@ -286,15 +366,15 @@ public class LLMExecutor : IAgentExecutor
                 }
             }
         }
-        catch
+        catch (Exception ex)
         {
-            // Not JSON, no tool calls
+            _runtime.Logger?.LogWarning(ex, $"Failed to parse tool calls from response: {response}");
         }
         
         return toolCalls;
     }
     
-    private async Task<ToolResult> ExecuteToolAsync(ToolCall toolCall)
+    private async Task<ToolResult> ExecuteToolAsync(ToolCall toolCall, Agent agent)
     {
         // Handle spawn_agent specially
         if (toolCall.ToolName == "spawn_agent")
@@ -302,10 +382,23 @@ public class LLMExecutor : IAgentExecutor
             return ToolResult.Ok("Sub-agent spawning is handled by the runtime.");
         }
         
+        // First, try to get tool from global registry
         var tool = _runtime.ToolRegistry.Get(toolCall.ToolName);
+        
+        // If not found, search in agent's enabled skills (for Composio and other skill-based tools)
+        if (tool == null)
+        {
+            tool = FindToolInAgentSkills(agent, toolCall.ToolName);
+        }
         
         if (tool == null)
         {
+            // Log available tools for debugging
+            var availableTools = _runtime.ToolRegistry.GetAll();
+            var toolNames = string.Join(", ", availableTools.Select(t => t.Name));
+            var skillToolsInfo = string.Join(", ", agent.EnabledSkills.SelectMany(s => s.GetTools()).Select(t => t.Name));
+            _runtime.Logger?.LogWarning($"Tool '{toolCall.ToolName}' not found. Global tools: {toolNames}. Skill tools: {skillToolsInfo}");
+            
             return ToolResult.Fail($"Tool not found: {toolCall.ToolName}");
         }
         
@@ -318,8 +411,41 @@ public class LLMExecutor : IAgentExecutor
         }
         catch (Exception ex)
         {
+            _runtime.Logger?.LogError(ex, $"Error executing tool {toolCall.ToolName}");
             return ToolResult.Fail(ex.Message);
         }
+    }
+
+    /// <summary>
+    /// Search for a tool in the agent's enabled skills by name
+    /// </summary>
+    private ITool? FindToolInAgentSkills(Agent agent, string toolName)
+    {
+        try
+        {
+            // Search each enabled skill's tools for a match
+            foreach (var skill in agent.EnabledSkills)
+            {
+                var skillTools = skill.GetTools();
+                var matchedTool = skillTools.FirstOrDefault(t => 
+                    t.Name.Equals(toolName, StringComparison.OrdinalIgnoreCase) ||
+                    t.Name.EndsWith($":{toolName}") || // Handle toolkit:tool format
+                    toolName.EndsWith($":{t.Name}")    // Handle reverse format
+                );
+                
+                if (matchedTool != null)
+                {
+                    _runtime.Logger?.LogInformation($"Found tool '{toolName}' in skill '{skill.Name}'");
+                    return matchedTool;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _runtime.Logger?.LogWarning(ex, "Error searching for tool in agent skills");
+        }
+
+        return null;
     }
 }
 
@@ -329,6 +455,7 @@ public class LLMExecutor : IAgentExecutor
 public class LLMEnabledRuntime : IAgentRuntime
 {
     private readonly ToolRegistry _toolRegistry;
+    private readonly SkillRegistry? _skillRegistry;
     private readonly ILogger? _logger;
     private readonly ILLMProvider _llm;
     private readonly IAgentExecutor _executor;
@@ -336,12 +463,13 @@ public class LLMEnabledRuntime : IAgentRuntime
     public ToolRegistry ToolRegistry => _toolRegistry;
     public ILogger? Logger { get; set; }
     
-    public LLMEnabledRuntime(ToolRegistry toolRegistry, ILLMProvider llm, ILogger? logger = null)
+    public LLMEnabledRuntime(ToolRegistry toolRegistry, ILLMProvider llm, ILogger? logger = null, SkillRegistry? skillRegistry = null)
     {
         _toolRegistry = toolRegistry;
+        _skillRegistry = skillRegistry;
         _llm = llm;
         _logger = logger;
-        _executor = new LLMExecutor(this, llm);
+        _executor = new LLMExecutor(this, llm, skillRegistry);
     }
     
     public async Task<AgentResult> ExecuteAsync(Agent agent, string task)

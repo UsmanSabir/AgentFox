@@ -254,7 +254,8 @@ public class AgentBuilder
     private IAgentRuntime _runtime;
     private AgentConfig _config = new();
     private IMemory? _memory;
-    
+    private SkillRegistry? _skillRegistry = null;
+
     public AgentBuilder(ToolRegistry toolRegistry)
     {
         _toolRegistry = toolRegistry;
@@ -303,9 +304,15 @@ public class AgentBuilder
         return this;
     }
 
+    public AgentBuilder WithSkillsRegistry(SkillRegistry skillRegistry)
+    {
+        _skillRegistry = skillRegistry;
+        return this;
+    }
+
     public AgentBuilder WithLLMProvider(ILLMProvider provider)
     {
-        _runtime = new LLMEnabledRuntime(_toolRegistry, provider);
+        _runtime = new LLMEnabledRuntime(_toolRegistry, provider, skillRegistry: _skillRegistry);
         return this;
     }
     
