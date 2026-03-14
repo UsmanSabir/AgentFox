@@ -320,13 +320,13 @@ class Program
                     logger: logger
                 );
                 
-                // Get integration filter if specified
-                var integrations = configuration.GetSection("Composio:Integrations")
+                // Get toolkit filter if specified
+                var toolkits = configuration.GetSection("Composio:Toolkits")
                     .Get<List<string>>() ?? new();
                 
-                if (integrations.Any())
+                if (toolkits.Any())
                 {
-                    await composioProvider.InitializeAsync(filterIntegrationIds: integrations.ToArray());
+                    await composioProvider.InitializeAsync(filterToolkitIds: toolkits.ToArray());
                 }
                 else
                 {

@@ -16,7 +16,7 @@ public class ComposioSkillProvider
     private readonly ILogger<ComposioSkillProvider>? _logger;
     private readonly SkillRegistry _skillRegistry;
     private readonly Dictionary<string, ComposioSkillAdapter> _composioSkills = new();
-    private readonly Dictionary<string, ComposioAction> _cachedActions = new();
+    private readonly Dictionary<string, ComposioTool> _cachedActions = new();
 
     public ComposioSkillProvider(
         string apiKey,
@@ -29,33 +29,44 @@ public class ComposioSkillProvider
     }
 
     /// <summary>
-    /// Initialize and register all available Composio.dev integrations as skills
+    /// Initialize and register authorized toolkits from auth configs as skills
     /// </summary>
-    public async Task InitializeAsync(IEnumerable<string>? filterIntegrationIds = null)
+    public async Task InitializeAsync(bool useOnlyAuthorizedToolkits = true, IEnumerable<string>? filterToolkitIds = null)
     {
         try
         {
             _logger?.LogInformation("Initializing Composio.dev skill provider");
 
-            var integrations = await _client.GetIntegrationsAsync();
+            List<ComposioToolkit> toolkits;
             
-            if (filterIntegrationIds != null)
+            if (useOnlyAuthorizedToolkits)
             {
-                var filterSet = filterIntegrationIds.ToHashSet();
-                integrations = integrations.Where(i => filterSet.Contains(i.Id)).ToList();
+                toolkits = await _client.GetEnabledToolkitsAsync();
+                _logger?.LogInformation("Using only authorized toolkits from auth configs");
+            }
+            else
+            {
+                toolkits = await _client.GetToolkitsAsync();
+                _logger?.LogInformation("Using all available toolkits");
+            }
+            
+            if (filterToolkitIds != null)
+            {
+                var filterSet = filterToolkitIds.ToHashSet();
+                toolkits = toolkits.Where(t => filterSet.Contains(t.Slug ?? t.Id)).ToList();
             }
 
-            _logger?.LogInformation("Found {Count} available integrations", integrations.Count);
+            _logger?.LogInformation("Found {Count} available toolkits", toolkits.Count);
 
-            foreach (var integration in integrations.Where(i => i.IsAvailable))
+            foreach (var toolkit in toolkits.Where(t => t.IsAvailable))
             {
                 try
                 {
-                    await RegisterIntegrationSkillAsync(integration);
+                    await RegisterToolkitSkillAsync(toolkit);
                 }
                 catch (Exception ex)
                 {
-                    _logger?.LogError(ex, "Failed to register skill for integration {IntegrationId}", integration.Id);
+                    _logger?.LogError(ex, "Failed to register skill for toolkit {ToolkitId}", toolkit.Id);
                 }
             }
 
@@ -70,49 +81,62 @@ public class ComposioSkillProvider
     }
 
     /// <summary>
-    /// Register a single integration as a skill
+    /// Initialize with specific toolkit IDs (backward compatibility overload)
     /// </summary>
-    private async Task RegisterIntegrationSkillAsync(ComposioIntegration integration)
+    public async Task InitializeAsync(IEnumerable<string>? filterToolkitIds)
+    {
+        await InitializeAsync(useOnlyAuthorizedToolkits: true, filterToolkitIds);
+    }
+
+    /// <summary>
+    /// Register a single toolkit as a skill
+    /// </summary>
+    private async Task RegisterToolkitSkillAsync(ComposioToolkit toolkit)
     {
         try
         {
-            var actions = await _client.GetActionsAsync(integration.Id);
+            var toolkitSlug = toolkit.Slug ?? toolkit.Id;
+            var tools = await _client.GetToolsAsync(toolkitSlug);
             
             var skillAdapter = new ComposioSkillAdapter(
-                integration,
-                actions,
+                toolkit,
+                tools,
                 _client,
                 _logger
             );
 
             _skillRegistry.Register(skillAdapter);
-            _composioSkills[integration.Id] = skillAdapter;
+            _composioSkills[toolkit.Id] = skillAdapter;
 
-            // Cache actions for quick lookup
-            foreach (var action in actions)
+            // Cache tools for quick lookup using slug (ID may be empty)
+            foreach (var tool in tools)
             {
-                _cachedActions[$"{integration.Id}:{action.Id}"] = action;
+                var toolKey = tool.Slug ?? tool.Id ?? tool.Name;
+                if (!string.IsNullOrEmpty(toolKey))
+                {
+                    _cachedActions[$"{toolkit.Slug ?? toolkit.Id}:{toolKey}"] = tool;
+                }
             }
 
             _logger?.LogInformation(
-                "Registered Composio.dev skill {IntegrationName} with {ActionCount} actions",
-                integration.Name,
-                actions.Count
+                "Registered Composio.dev skill {ToolkitName} with {ToolCount} tools",
+                toolkit.Name,
+                tools.Count
             );
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "Failed to register integration {IntegrationId} as skill", integration.Id);
+            _logger?.LogError(ex, "Failed to register toolkit {ToolkitId} as skill", toolkit.Id);
             throw;
         }
     }
 
     /// <summary>
-    /// Get a specific Composio skill by integration ID
+    /// Get a specific Composio skill by toolkit ID
     /// </summary>
-    public ComposioSkillAdapter? GetSkill(string integrationId)
+    public ComposioSkillAdapter? GetSkill(string toolkitId)
     {
-        return _composioSkills.TryGetValue(integrationId, out var skill) ? skill : null;
+        return _composioSkills.TryGetValue(toolkitId, out var skill) ? skill : null;
     }
 
     /// <summary>
@@ -124,89 +148,98 @@ public class ComposioSkillProvider
     }
 
     /// <summary>
-    /// Get all available integrations from Composio.dev
+    /// Get all authorized toolkits from auth configs
     /// </summary>
-    public async Task<List<ComposioIntegration>> GetAvailableIntegrationsAsync()
+    public async Task<List<ComposioToolkit>> GetAuthorizedToolkitsAsync()
     {
-        var integrations = await _client.GetIntegrationsAsync();
-        return integrations.Where(i => i.IsAvailable).ToList();
+        return await _client.GetEnabledToolkitsAsync();
     }
 
     /// <summary>
-    /// Get actions for a specific integration
+    /// Get all available toolkits from Composio.dev
     /// </summary>
-    public async Task<List<ComposioAction>> GetActionsAsync(string integrationId)
+    public async Task<List<ComposioToolkit>> GetAvailableToolkitsAsync()
     {
-        return await _client.GetActionsAsync(integrationId);
+        var toolkits = await _client.GetToolkitsAsync();
+        return toolkits.Where(t => t.IsAvailable).ToList();
     }
 
     /// <summary>
-    /// Execute a Composio action directly
+    /// Get tools for a specific toolkit
     /// </summary>
-    public async Task<Dictionary<string, object>> ExecuteActionAsync(
-        string integrationId,
-        string actionId,
+    public async Task<List<ComposioTool>> GetToolsAsync(string toolkitSlug)
+    {
+        return await _client.GetToolsAsync(toolkitSlug);
+    }
+
+    /// <summary>
+    /// Execute a Composio tool directly
+    /// </summary>
+    public async Task<Dictionary<string, object>> ExecuteToolAsync(
+        string toolSlug,
         Dictionary<string, object> parameters)
     {
         _logger?.LogInformation(
-            "Executing Composio action {ActionId} on integration {IntegrationId}",
-            actionId,
-            integrationId
+            "Executing Composio tool {ToolSlug}",
+            toolSlug
         );
 
-        return await _client.ExecuteActionAsync(integrationId, actionId, parameters);
+        return await _client.ExecuteToolAsync(toolSlug, parameters);
     }
 
     /// <summary>
-    /// Search for integrations by name or category
+    /// Search for toolkits by name or category
     /// </summary>
-    public async Task<List<ComposioIntegration>> SearchIntegrationsAsync(string? name = null, string? category = null)
+    public async Task<List<ComposioToolkit>> SearchToolkitsAsync(string? name = null, string? category = null)
     {
-        var integrations = await _client.GetIntegrationsAsync();
+        var toolkits = await _client.GetToolkitsAsync();
         
-        return integrations.Where(i =>
+        return toolkits.Where(t =>
         {
             bool matchName = string.IsNullOrEmpty(name) || 
-                i.Name.Contains(name, StringComparison.OrdinalIgnoreCase);
+                t.Name.Contains(name, StringComparison.OrdinalIgnoreCase);
             bool matchCategory = string.IsNullOrEmpty(category) || 
-                i.Category?.Equals(category, StringComparison.OrdinalIgnoreCase) == true;
-            return matchName && matchCategory && i.IsAvailable;
+                t.Category?.Equals(category, StringComparison.OrdinalIgnoreCase) == true;
+            return matchName && matchCategory && t.IsAvailable;
         }).ToList();
     }
 }
 
 /// <summary>
-/// Skill adapter that wraps a Composio.dev integration as a Skill
+/// Skill adapter that wraps a Composio.dev toolkit as a Skill
 /// </summary>
 public class ComposioSkillAdapter : Skill, ISkillPlugin
 {
-    private readonly ComposioIntegration _integration;
-    private readonly List<ComposioAction> _actions;
+    private readonly ComposioToolkit _toolkit;
+    private readonly List<ComposioTool> _tools;
     private readonly ComposioClient _client;
     private readonly ILogger? _logger;
 
     public ComposioSkillAdapter(
-        ComposioIntegration integration,
-        List<ComposioAction> actions,
+        ComposioToolkit toolkit,
+        List<ComposioTool> tools,
         ComposioClient client,
         ILogger? logger = null)
     {
-        _integration = integration;
-        _actions = actions;
+        _toolkit = toolkit;
+        _tools = tools;
         _client = client;
         _logger = logger;
 
-        Name = integration.Id;
-        Description = $"{integration.Name}: {integration.Description}";
+        Name = toolkit.Slug ?? toolkit.Id;
+        // Fallback if description is missing
+        Description = !string.IsNullOrWhiteSpace(toolkit.Description) 
+            ? $"{toolkit.Name}: {toolkit.Description}" 
+            : toolkit.Name;
         Version = "1.0.0";
 
         Metadata = new SkillMetadata
         {
-            SkillName = integration.Name,
+            SkillName = toolkit.Name,
             Version = "1.0.0",
-            Capabilities = _actions.Select(a => a.Name).ToList(),
-            Tags = _actions.SelectMany(a => a.Tags).Distinct().ToList(),
-            ComplexityScore = Math.Min(10, _actions.Count / 2),
+            Capabilities = _tools.Select(t => t.Name).ToList(),
+            Tags = _tools.SelectMany(t => t.Tags).Distinct().ToList(),
+            ComplexityScore = Math.Min(10, _tools.Count / 2),
             IsCompositional = true,
             RelatedSkills = new()
         };
@@ -214,39 +247,49 @@ public class ComposioSkillAdapter : Skill, ISkillPlugin
 
     public override List<ITool> GetTools()
     {
-        return _actions.Select(action =>
-            new ComposioActionTool(
-                _integration.Id,
-                action,
+        return _tools.Select(tool =>
+        {
+            // Use slug as the primary identifier since ID may be empty
+            var toolId = tool.Slug ?? tool.Id ?? tool.Name;
+            return new ComposioToolWrapper(
+                toolId,
+                tool,
                 _client,
-                _logger as ILogger<ComposioActionTool>
-            ) as ITool
-        ).ToList();
+                _logger as ILogger<ComposioToolWrapper>
+            ) as ITool;
+        }).ToList();
     }
 
     public override List<string> GetSystemPrompts()
     {
+        var toolDescriptions = string.Join("\n", _tools.Select(t => 
+        {
+            var displayName = !string.IsNullOrWhiteSpace(t.DisplayName) ? t.DisplayName : t.Name;
+            var description = !string.IsNullOrWhiteSpace(t.Description) ? t.Description : "(no description available)";
+            return $"- {displayName}: {description}";
+        }));
+        
         var systemPrompt = $@"
-## {_integration.Name} Integration
+## {_toolkit.Name} Toolkit
 
-You have access to the {_integration.Name} integration through various actions:
+You have access to the {_toolkit.Name} toolkit through various tools:
 
-Available Actions:
-{string.Join("\n", _actions.Select(a => $"- {a.DisplayName}: {a.Description}"))}
+Available Tools:
+{toolDescriptions}
 
-When using these actions:
-1. Understand the input parameters required for each action
+When using these tools:
+1. Understand the input parameters required for each tool
 2. Provide all required parameters
 3. Handle the output appropriately
-4. Use these actions to automate {_integration.Category ?? "integration"} tasks
+4. Use these tools to automate {_toolkit.Category ?? "toolkit"} tasks
 ";
         return new List<string> { systemPrompt };
     }
 
     public SkillManifest GetManifest() => new(
         Name,
-        $"{_integration.Name}: {_integration.Description}",
-        _actions.Count,
+        $"{_toolkit.Name}: {_toolkit.Description ?? ""}",
+        _tools.Count,
         "composio");
 
     public async Task OnRegisterAsync(ISkillRegistrationContext context)
@@ -267,19 +310,19 @@ When using these actions:
 }
 
 /// <summary>
-/// Tool wrapper for a Composio.dev action
+/// Tool wrapper for a Composio.dev tool
 /// </summary>
-public class ComposioActionTool : ITool
+public class ComposioToolWrapper : ITool
 {
-    private readonly string _integrationId;
-    private readonly ComposioAction _action;
+    private readonly string _toolSlug;
+    private readonly ComposioTool _tool;
     private readonly ComposioClient _client;
-    private readonly ILogger<ComposioActionTool>? _logger;
+    private readonly ILogger<ComposioToolWrapper>? _logger;
     private Dictionary<string, ToolParameter>? _parameters;
 
-    public string Name => _action.Name;
-    public string Description => _action.Description;
-    public List<string> Tags => _action.Tags;
+    public string Name => _tool.Name;
+    public string Description => _tool.Description;
+    public List<string> Tags => _tool.Tags;
 
     public Dictionary<string, ToolParameter> Parameters 
     { 
@@ -287,7 +330,7 @@ public class ComposioActionTool : ITool
         {
             if (_parameters == null)
             {
-                _parameters = _action.InputParams.ToDictionary(
+                _parameters = _tool.InputParams.ToDictionary(
                     p => p.Name,
                     p => new ToolParameter
                     {
@@ -303,14 +346,14 @@ public class ComposioActionTool : ITool
         }
     }
 
-    public ComposioActionTool(
-        string integrationId,
-        ComposioAction action,
+    public ComposioToolWrapper(
+        string toolSlug,
+        ComposioTool tool,
         ComposioClient client,
-        ILogger<ComposioActionTool>? logger = null)
+        ILogger<ComposioToolWrapper>? logger = null)
     {
-        _integrationId = integrationId;
-        _action = action;
+        _toolSlug = toolSlug;
+        _tool = tool;
         _client = client;
         _logger = logger;
     }
@@ -320,15 +363,15 @@ public class ComposioActionTool : ITool
         try
         {
             _logger?.LogInformation(
-                "Executing Composio action {ActionName} with parameters {ParameterCount}",
-                _action.Name,
+                "Executing Composio tool {ToolName} with parameters {ParameterCount}",
+                _tool.Name,
                 arguments?.Count ?? 0
             );
 
             var parameters = arguments ?? new Dictionary<string, object?>();
 
             // Validate required parameters
-            var missingParams = _action.InputParams
+            var missingParams = _tool.InputParams
                 .Where(p => p.Required && !parameters.ContainsKey(p.Name))
                 .Select(p => p.Name)
                 .ToList();
@@ -348,9 +391,8 @@ public class ComposioActionTool : ITool
                 }
             }
 
-            var result = await _client.ExecuteActionAsync(
-                _integrationId,
-                _action.Id,
+            var result = await _client.ExecuteToolAsync(
+                _toolSlug,
                 cleanParams
             );
 
@@ -358,8 +400,8 @@ public class ComposioActionTool : ITool
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "Failed to execute Composio action {ActionName}", _action.Name);
-            return ToolResult.Fail($"Error executing action: {ex.Message}");
+            _logger?.LogError(ex, "Failed to execute Composio tool {ToolName}", _tool.Name);
+            return ToolResult.Fail($"Error executing tool: {ex.Message}");
         }
     }
 }

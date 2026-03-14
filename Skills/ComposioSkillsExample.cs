@@ -68,7 +68,45 @@ public class ComposioSkillsExample
     }
 
     /// <summary>
-    /// Example 3: Use the Composio skill provider directly
+    /// Example 3a: Initialize with only authorized toolkits from auth configs
+    /// </summary>
+    public async Task Example3a_InitializeAuthorizedToolkitsAsync()
+    {
+        _logger.LogInformation("Example 3a: Initialize with authorized toolkits only");
+
+        var toolRegistry = new ToolRegistry();
+        var skillRegistry = new SkillRegistry(toolRegistry, logger: _logger as ILogger<SkillRegistry>);
+
+        var composioApiKey = Environment.GetEnvironmentVariable("COMPOSIO_API_KEY")
+            ?? throw new InvalidOperationException("COMPOSIO_API_KEY environment variable not set");
+
+        var composioProvider = new ComposioSkillProvider(
+            apiKey: composioApiKey,
+            skillRegistry: skillRegistry,
+            logger: _logger as ILogger<ComposioSkillProvider>
+        );
+
+        // Get authorized toolkits from auth configs
+        var authorizedToolkits = await composioProvider.GetAuthorizedToolkitsAsync();
+        _logger.LogInformation("Found {Count} authorized toolkits:", authorizedToolkits.Count);
+
+        foreach (var toolkit in authorizedToolkits)
+        {
+            _logger.LogInformation("  - {Name} (Slug: {Slug})",
+                toolkit.Name,
+                toolkit.Slug ?? toolkit.Id
+            );
+        }
+
+        // Initialize with only authorized toolkits
+        await composioProvider.InitializeAsync(useOnlyAuthorizedToolkits: true);
+
+        var allComposioSkills = composioProvider.GetAllSkills();
+        _logger.LogInformation("Registered {Count} authorized Composio skills", allComposioSkills.Count);
+    }
+
+    /// <summary>
+    /// Example 3b: Use the Composio skill provider directly
     /// </summary>
     public async Task Example3_UseSkillProviderDirectlyAsync()
     {
@@ -87,21 +125,21 @@ public class ComposioSkillsExample
             logger: _logger as ILogger<ComposioSkillProvider>
         );
 
-        // Get available integrations before initializing
-        var availableIntegrations = await composioProvider.GetAvailableIntegrationsAsync();
-        _logger.LogInformation("Available integrations from Composio.dev:");
+        // Get available toolkits before initializing
+        var availableToolkits = await composioProvider.GetAvailableToolkitsAsync();
+        _logger.LogInformation("Available toolkits from Composio.dev:");
 
-        foreach (var integration in availableIntegrations.Take(10))
+        foreach (var toolkit in availableToolkits.Take(10))
         {
-            _logger.LogInformation("  - {Name} ({Category}): {ActionsCount} actions",
-                integration.Name,
-                integration.Category ?? "N/A",
-                integration.ActionsCount
+            _logger.LogInformation("  - {Name} ({Category}): {ToolsCount} tools",
+                toolkit.Name,
+                toolkit.Category ?? "N/A",
+                toolkit.ToolsCount
             );
         }
 
         // Initialize (register all)
-        await composioProvider.InitializeAsync();
+        await composioProvider.InitializeAsync(useOnlyAuthorizedToolkits: false);
 
         // Get all registered skills
         var allComposioSkills = composioProvider.GetAllSkills();
@@ -109,11 +147,11 @@ public class ComposioSkillsExample
     }
 
     /// <summary>
-    /// Example 4: Search for specific integrations
+    /// Example 4: Search for specific toolkits
     /// </summary>
-    public async Task Example4_SearchIntegrationsAsync()
+    public async Task Example4_SearchToolkitsAsync()
     {
-        _logger.LogInformation("Example 4: Search integrations");
+        _logger.LogInformation("Example 4: Search toolkits");
 
         var toolRegistry = new ToolRegistry();
         var skillRegistry = new SkillRegistry(toolRegistry, logger: _logger as ILogger<SkillRegistry>);
@@ -127,26 +165,26 @@ public class ComposioSkillsExample
             logger: _logger as ILogger<ComposioSkillProvider>
         );
 
-        // Search for GitHub integrations
-        var githubIntegrations = await composioProvider.SearchIntegrationsAsync(name: "github");
-        _logger.LogInformation("Found {Count} integrations matching 'github'", githubIntegrations.Count);
+        // Search for GitHub toolkits
+        var githubToolkits = await composioProvider.SearchToolkitsAsync(name: "github");
+        _logger.LogInformation("Found {Count} toolkits matching 'github'", githubToolkits.Count);
 
-        foreach (var integration in githubIntegrations)
+        foreach (var toolkit in githubToolkits)
         {
-            _logger.LogInformation("  - {Name}: {Description}", integration.Name, integration.Description);
+            _logger.LogInformation("  - {Name}: {Description}", toolkit.Name, toolkit.Description);
         }
 
         // Search by category
-        var communicationTools = await composioProvider.SearchIntegrationsAsync(category: "communication");
-        _logger.LogInformation("Found {Count} communication integrations", communicationTools.Count);
+        var communicationTools = await composioProvider.SearchToolkitsAsync(category: "communication");
+        _logger.LogInformation("Found {Count} communication toolkits", communicationTools.Count);
     }
 
     /// <summary>
-    /// Example 5: Get and examine actions for an integration
+    /// Example 5: Get and examine tools for a toolkit
     /// </summary>
-    public async Task Example5_ExamineIntegrationActionsAsync()
+    public async Task Example5_ExamineToolkitToolsAsync()
     {
-        _logger.LogInformation("Example 5: Examine integration actions");
+        _logger.LogInformation("Example 5: Examine toolkit tools");
 
         var toolRegistry = new ToolRegistry();
         var skillRegistry = new SkillRegistry(toolRegistry, logger: _logger as ILogger<SkillRegistry>);
@@ -160,50 +198,69 @@ public class ComposioSkillsExample
             logger: _logger as ILogger<ComposioSkillProvider>
         );
 
-        // Get actions for GitHub integration
+        // Get tools for Gmail toolkit (using slug)
         try
         {
-            var actions = await composioProvider.GetActionsAsync("github");
-            _logger.LogInformation("GitHub integration has {Count} actions:", actions.Count);
+            var tools = await composioProvider.GetToolsAsync("gmail");
+            _logger.LogInformation("Gmail toolkit has {Count} tools:", tools.Count);
 
-            // Show first 5 actions with details
-            foreach (var action in actions.Take(5))
+            // Show first 3 tools with details
+            foreach (var tool in tools.Take(3))
             {
-                _logger.LogInformation("  Action: {DisplayName}", action.DisplayName);
-                _logger.LogInformation("    Description: {Description}", action.Description);
-                _logger.LogInformation("    Input Parameters:");
-
-                foreach (var param in action.InputParams.Take(3))
+                _logger.LogInformation("  Tool: {DisplayName}", tool.DisplayName);
+                _logger.LogInformation("    Slug: {Slug}", tool.Slug);
+                _logger.LogInformation("    Description: {Description}", tool.Description);
+                _logger.LogInformation("    Human Description: {HumanDescription}", tool.HumanDescription);
+                
+                if (tool.InputParameters?.Properties != null && tool.InputParameters.Properties.Count > 0)
                 {
-                    var required = param.Required ? "[REQUIRED]" : "[optional]";
-                    _logger.LogInformation("      - {Name} ({Type}) {Required}: {Description}",
-                        param.Name,
-                        param.Type,
-                        required,
-                        param.Description
-                    );
+                    _logger.LogInformation("    Input Parameters:");
+                    foreach (var (paramName, paramDef) in tool.InputParameters.Properties.Take(3))
+                    {
+                        var isRequired = tool.InputParameters.Required?.Contains(paramName) ?? false;
+                        var required = isRequired ? "[REQUIRED]" : "[optional]";
+                        _logger.LogInformation("      - {Name} ({Type}) {Required}: {Description}",
+                            paramName,
+                            paramDef.Type ?? "string",
+                            required,
+                            paramDef.Description ?? ""
+                        );
+                    }
+
+                    if (tool.InputParameters.Properties.Count > 3)
+                    {
+                        _logger.LogInformation("      ... and {Count} more parameters",
+                            tool.InputParameters.Properties.Count - 3
+                        );
+                    }
                 }
-
-                if (action.InputParams.Count > 3)
+                
+                if (tool.Scopes.Count > 0)
                 {
-                    _logger.LogInformation("      ... and {Count} more parameters",
-                        action.InputParams.Count - 3
-                    );
+                    _logger.LogInformation("    Required Scopes:");
+                    foreach (var scope in tool.Scopes.Take(2))
+                    {
+                        _logger.LogInformation("      - {Scope}", scope);
+                    }
+                    if (tool.Scopes.Count > 2)
+                    {
+                        _logger.LogInformation("      ... and {Count} more scopes", tool.Scopes.Count - 2);
+                    }
                 }
             }
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to get actions for GitHub integration");
+            _logger.LogError(ex, "Failed to get tools for Gmail toolkit");
         }
     }
 
     /// <summary>
-    /// Example 6: Execute a Composio action directly
+    /// Example 6: Execute a Composio tool directly
     /// </summary>
-    public async Task Example6_ExecuteComposioActionAsync()
+    public async Task Example6_ExecuteComposioToolAsync()
     {
-        _logger.LogInformation("Example 6: Execute Composio action");
+        _logger.LogInformation("Example 6: Execute Composio tool");
 
         var toolRegistry = new ToolRegistry();
         var skillRegistry = new SkillRegistry(toolRegistry, logger: _logger as ILogger<SkillRegistry>);
@@ -219,11 +276,10 @@ public class ComposioSkillsExample
 
         try
         {
-            // Execute an action on GitHub (example: get repository info)
+            // Execute a tool (example: get repository info)
             // This requires proper authentication setup in Composio.dev
-            var result = await composioProvider.ExecuteActionAsync(
-                integrationId: "github",
-                actionId: "get_repository",
+            var result = await composioProvider.ExecuteToolAsync(
+                toolSlug: "github_get_repository",
                 parameters: new Dictionary<string, object>
                 {
                     { "owner", "your-github-username" },
@@ -231,13 +287,13 @@ public class ComposioSkillsExample
                 }
             );
 
-            _logger.LogInformation("Action result: {Result}",
+            _logger.LogInformation("Tool result: {Result}",
                 System.Text.Json.JsonSerializer.Serialize(result, new System.Text.Json.JsonSerializerOptions { WriteIndented = true })
             );
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to execute action (this is expected if authentication is not set up)");
+            _logger.LogWarning(ex, "Failed to execute tool (this is expected if authentication is not set up)");
         }
     }
 

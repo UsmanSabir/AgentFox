@@ -1,6 +1,7 @@
 namespace AgentFox.Models;
 
 using AgentFox.Memory;
+using AgentFox.Skills;
 
 /// <summary>
 /// Represents the role of a message in a conversation
@@ -107,6 +108,11 @@ public class Agent
     public AgentStatus Status { get; set; } = AgentStatus.Idle;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime? LastActiveAt { get; set; }
+    
+    /// <summary>
+    /// Skills enabled for this agent (used for tool lookup and execution)
+    /// </summary>
+    public List<Skill> EnabledSkills { get; set; } = new();
 }
 
 /// <summary>
