@@ -1,3 +1,4 @@
+using AgentFox.MCP;
 using AgentFox.Memory;
 using AgentFox.Models;
 using AgentFox.Skills;
@@ -13,12 +14,14 @@ public class FoxAgent
 {
     private readonly IAgentRuntime _runtime;
     private readonly Agent _agent;
+    private readonly MCPClient? _mcpClient;
     
     public string Id => _agent.Config.Id;
     public string Name => _agent.Config.Name;
     public AgentStatus Status => _agent.Status;
     public List<Agent> SubAgents => _agent.SubAgents;
     public IMemory? Memory => _agent.Memory;
+    public MCPClient? McpClient => _mcpClient;
     
     /// <summary>
     /// Skills enabled for this agent (used for capability-based routing)
@@ -30,9 +33,10 @@ public class FoxAgent
     /// </summary>
     public string Role { get; set; } = "default";
     
-    public FoxAgent(IAgentRuntime runtime, AgentConfig config)
+    public FoxAgent(IAgentRuntime runtime, AgentConfig config, MCPClient? mcpClient = null)
     {
         _runtime = runtime;
+        _mcpClient = mcpClient;
         _agent = new Agent
         {
             Config = config,
@@ -255,6 +259,7 @@ public class AgentBuilder
     private AgentConfig _config = new();
     private IMemory? _memory;
     private SkillRegistry? _skillRegistry = null;
+    private MCPClient? _mcpClient;
 
     public AgentBuilder(ToolRegistry toolRegistry)
     {
@@ -310,6 +315,12 @@ public class AgentBuilder
         return this;
     }
 
+    public AgentBuilder WithMCPClient(MCPClient mcpClient)
+    {
+        _mcpClient = mcpClient;
+        return this;
+    }
+
     public AgentBuilder WithLLMProvider(ILLMProvider provider)
     {
         _runtime = new LLMEnabledRuntime(_toolRegistry, provider, skillRegistry: _skillRegistry);
@@ -323,7 +334,7 @@ public class AgentBuilder
             _config.Name = "AgentFox-" + Guid.NewGuid().ToString("N")[..8];
         }
         
-        var agent = new FoxAgent(_runtime, _config);
+        var agent = new FoxAgent(_runtime, _config, _mcpClient);
         
         if (_memory != null)
         {

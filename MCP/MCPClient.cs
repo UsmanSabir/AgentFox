@@ -1,7 +1,10 @@
 using AgentFox.Models;
 using AgentFox.Tools;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using System.Text;
+using System.Net.Http.Headers;
+using System.Linq;
 
 namespace AgentFox.MCP;
 
@@ -103,11 +106,37 @@ public class MCPServer
             
             if (response?.Result != null)
             {
-                var resultDict = (Dictionary<string, object?>)response.Result;
-                ServerVersion = resultDict.ContainsKey("serverInfo") 
-                    ? resultDict["serverInfo"]?.ToString() 
-                    : "Unknown";
-                
+                // Normalize the result object into a dictionary so we can
+                // safely access properties regardless of whether it's a JObject
+                // or already a Dictionary.
+                Dictionary<string, object?> resultDict;
+
+                if (response.Result is Newtonsoft.Json.Linq.JObject jObject)
+                {
+                    resultDict = jObject.ToObject<Dictionary<string, object?>>() ?? new Dictionary<string, object?>();
+                }
+                else if (response.Result is Dictionary<string, object?> dict)
+                {
+                    resultDict = dict;
+                }
+                else
+                {
+                    // Fallback: serialize and deserialize into the expected shape
+                    var normalizedJson = JsonConvert.SerializeObject(response.Result);
+                    resultDict = JsonConvert.DeserializeObject<Dictionary<string, object?>>(normalizedJson)
+                                 ?? new Dictionary<string, object?>();
+                }
+
+                if (resultDict.TryGetValue("serverInfo", out var serverInfoObj) && serverInfoObj != null)
+                {
+                    // serverInfo is often an object with name/version – store a readable representation
+                    ServerVersion = serverInfoObj.ToString();
+                }
+                else
+                {
+                    ServerVersion = "Unknown";
+                }
+
                 IsConnected = true;
                 return true;
             }
@@ -143,11 +172,90 @@ public class MCPServer
             
             if (response?.Result != null)
             {
-                var resultDict = (Dictionary<string, object?>)response.Result;
-                if (resultDict.TryGetValue("tools", out var value))
+                // Normalize the result object into a dictionary so we can safely
+                // access properties regardless of whether it's a JObject or a Dictionary.
+                Dictionary<string, object?> resultDict;
+
+                if (response.Result is Newtonsoft.Json.Linq.JObject jObject)
                 {
-                    AvailableTools = JsonConvert.DeserializeObject<List<ToolDefinition>>(
-                        JsonConvert.SerializeObject(value)) ?? new();
+                    resultDict = jObject.ToObject<Dictionary<string, object?>>() ?? new Dictionary<string, object?>();
+                }
+                else if (response.Result is Dictionary<string, object?> dict)
+                {
+                    resultDict = dict;
+                }
+                else
+                {
+                    var normalizedJson = JsonConvert.SerializeObject(response.Result);
+                    resultDict = JsonConvert.DeserializeObject<Dictionary<string, object?>>(normalizedJson)
+                                 ?? new Dictionary<string, object?>();
+                }
+
+                if (resultDict.TryGetValue("tools", out var value) && value != null)
+                {
+                    // MCP tool schema: each tool typically has
+                    // - name
+                    // - description
+                    // - inputSchema: { type: "object", properties: { ... }, required: [...] }
+                    // We translate this into our internal ToolDefinition/ToolParameter model.
+                    var toolsToken = value as JToken ?? JToken.FromObject(value);
+                    var parsedTools = new List<ToolDefinition>();
+
+                    if (toolsToken is JArray toolsArray)
+                    {
+                        foreach (var toolItem in toolsArray.OfType<JObject>())
+                        {
+                            var name = toolItem["name"]?.ToString() ?? string.Empty;
+                            var description = toolItem["description"]?.ToString() ?? string.Empty;
+
+                            var toolDef = new ToolDefinition
+                            {
+                                Name = name,
+                                Description = description,
+                                Parameters = new Dictionary<string, AgentFox.Models.ToolParameter>()
+                            };
+
+                            var inputSchema = toolItem["inputSchema"] as JObject;
+                            if (inputSchema != null)
+                            {
+                                var properties = inputSchema["properties"] as JObject;
+                                var requiredArray = inputSchema["required"] as JArray;
+                                var requiredNames = requiredArray != null
+                                    ? new HashSet<string>(requiredArray.Values<string>().Where(n => n != null)!)
+                                    : new HashSet<string>();
+
+                                if (properties != null)
+                                {
+                                    foreach (var prop in properties.Properties())
+                                    {
+                                        var propName = prop.Name;
+                                        var propSchema = prop.Value as JObject ?? new JObject();
+
+                                        var param = new AgentFox.Models.ToolParameter
+                                        {
+                                            Type = propSchema["type"]?.ToString() ?? "string",
+                                            Description = propSchema["description"]?.ToString() ?? string.Empty,
+                                            Required = requiredNames.Contains(propName),
+                                            Default = propSchema["default"]?.ToObject<object?>(),
+                                            JsonSchema = propSchema.ToString(Formatting.None),
+                                            Example = propSchema["example"]?.ToObject<object?>(),
+                                            Pattern = propSchema["pattern"]?.ToString(),
+                                            MinLength = propSchema["minLength"]?.ToObject<int?>(),
+                                            MaxLength = propSchema["maxLength"]?.ToObject<int?>(),
+                                            Minimum = propSchema["minimum"]?.ToObject<decimal?>(),
+                                            Maximum = propSchema["maximum"]?.ToObject<decimal?>()
+                                        };
+
+                                        toolDef.Parameters[propName] = param;
+                                    }
+                                }
+                            }
+
+                            parsedTools.Add(toolDef);
+                        }
+                    }
+
+                    AvailableTools = parsedTools;
                     return AvailableTools;
                 }
             }
@@ -229,13 +337,73 @@ public class MCPServer
         {
             var json = JsonConvert.SerializeObject(request);
             var content = new StringContent(json, Encoding.UTF8, "application/json");
-            
-            var httpResponse = await _httpClient.PostAsync(Url, content);
+
+            var httpRequest = new HttpRequestMessage(HttpMethod.Post, Url)
+            {
+                Content = content
+            };
+
+            // Apply any configured headers for this MCP server
+            foreach (var header in Headers)
+            {
+                if (!httpRequest.Headers.TryAddWithoutValidation(header.Key, header.Value))
+                {
+                    httpRequest.Content?.Headers.TryAddWithoutValidation(header.Key, header.Value);
+                }
+            }
+
+            // Ensure Accept header is compatible with MCP streamable HTTP servers.
+            // According to the MCP spec, clients must advertise support for both
+            // application/json and text/event-stream to avoid 406 responses.
+            if (!httpRequest.Headers.Accept.Any(h => string.Equals(h.MediaType, "application/json", StringComparison.OrdinalIgnoreCase)))
+            {
+                httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+            }
+            if (!httpRequest.Headers.Accept.Any(h => string.Equals(h.MediaType, "text/event-stream", StringComparison.OrdinalIgnoreCase)))
+            {
+                httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
+            }
+
+            var httpResponse = await _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead);
             httpResponse.EnsureSuccessStatusCode();
-            
-            var responseJson = await httpResponse.Content.ReadAsStringAsync();
+
+            // Handle both standard JSON responses and streamable HTTP (text/event-stream)
+            var mediaType = httpResponse.Content.Headers.ContentType?.MediaType;
+            string responseJson;
+
+            if (string.Equals(mediaType, "text/event-stream", StringComparison.OrdinalIgnoreCase))
+            {
+                // Read SSE stream until we get the first "data:" line with JSON
+                await using var stream = await httpResponse.Content.ReadAsStreamAsync();
+                using var reader = new StreamReader(stream, Encoding.UTF8);
+
+                string? line;
+                StringBuilder dataBuilder = new StringBuilder();
+
+                while ((line = await reader.ReadLineAsync()) != null)
+                {
+                    // SSE comments or empty lines
+                    if (string.IsNullOrWhiteSpace(line) || line.StartsWith(":", StringComparison.Ordinal))
+                        continue;
+
+                    // Data line: accumulate payload (may be split across multiple data: lines)
+                    if (line.StartsWith("data:", StringComparison.Ordinal))
+                    {
+                        var dataPart = line.Substring("data:".Length).TrimStart();
+                        dataBuilder.Append(dataPart);
+                        // Many MCP servers send a single JSON object in one event; break on first.
+                        break;
+                    }
+                }
+
+                responseJson = dataBuilder.Length > 0 ? dataBuilder.ToString() : "{}";
+            }
+            else
+            {
+                responseJson = await httpResponse.Content.ReadAsStringAsync();
+            }
+
             var response = JsonConvert.DeserializeObject<JsonRpcResponse<dynamic>>(responseJson);
-            
             return response;
         }
         catch (Exception ex)
@@ -272,11 +440,18 @@ public class MCPClient
     }
     
     /// <summary>
-    /// Add and connect to an MCP server
+    /// Add and connect to an MCP server with optional timeout and headers.
     /// </summary>
-    public async Task<bool> AddServerAsync(string name, string url)
+    public async Task<bool> AddServerAsync(string name, string url, int timeoutSeconds = 30, Dictionary<string, string>? headers = null)
     {
-        var server = new MCPServer(name, url);
+        var server = new MCPServer(name, url, timeoutSeconds);
+        if (headers != null && headers.Count > 0)
+        {
+            foreach (var kvp in headers)
+            {
+                server.Headers[kvp.Key] = kvp.Value;
+            }
+        }
         var success = await server.InitializeAsync();
         
         if (success)
@@ -295,6 +470,12 @@ public class MCPClient
         
         return success;
     }
+    
+    /// <summary>
+    /// Backwards-compatible overload for adding an MCP server without extra options.
+    /// </summary>
+    public Task<bool> AddServerAsync(string name, string url)
+        => AddServerAsync(name, url, 30, null);
     
     /// <summary>
     /// Remove an MCP server

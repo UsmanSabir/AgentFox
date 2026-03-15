@@ -63,8 +63,8 @@ public class LLMExecutor : IAgentExecutor
             // Add assistant message
             agent.ConversationHistory.Add(new Message(MessageRole.Assistant, response));
             
-            // Parse tool calls from response
-            var toolCalls = ParseToolCalls(response);
+            // Parse tool calls from response (may trigger a single JSON-fix retry)
+            var toolCalls = await ParseToolCallsAsync(agent, response, llmConfig);
             
             if (toolCalls.Count > 0)
             {
@@ -127,8 +127,8 @@ public class LLMExecutor : IAgentExecutor
             // Add assistant message
             agent.ConversationHistory.Add(new Message(MessageRole.Assistant, response));
             
-            // Check if the response contains more tool calls
-            toolCalls = ParseToolCalls(response);
+            // Check if the response contains more tool calls (may trigger a single JSON-fix retry)
+            toolCalls = await ParseToolCallsAsync(agent, response, llmConfig);
             
             if (toolCalls.Count == 0)
             {
@@ -225,7 +225,10 @@ public class LLMExecutor : IAgentExecutor
         return tools;
     }
     
-    private List<ToolCall> ParseToolCalls(string response)
+    private Task<List<ToolCall>> ParseToolCallsAsync(Agent agent, string response, LLMConfig llmConfig)
+        => ParseToolCallsInternalAsync(agent, response, llmConfig, isRetry: false);
+
+    private async Task<List<ToolCall>> ParseToolCallsInternalAsync(Agent agent, string response, LLMConfig llmConfig, bool isRetry)
     {
         var toolCalls = new List<ToolCall>();
         
@@ -369,8 +372,30 @@ public class LLMExecutor : IAgentExecutor
         catch (Exception ex)
         {
             _runtime.Logger?.LogWarning(ex, $"Failed to parse tool calls from response: {response}");
+
+            // If the assistant attempted tool calls but JSON was invalid, immediately
+            // ask the LLM to fix the JSON and retry ONCE synchronously.
+            if (!isRetry && (response.Contains("tool_calls") || response.Contains("tool_uses")))
+            {
+                var repairMessages = new List<Message>(agent.ConversationHistory)
+                {
+                    new(MessageRole.System,
+                        "Your previous response attempted to call tools but the JSON was invalid and could not be parsed. " +
+                        "You must now respond with ONLY a single valid JSON object containing the corrected tool_calls/tool_uses, " +
+                        "with no natural language, no comments, and no text before or after the JSON."),
+                    new(MessageRole.Assistant, response)
+                };
+
+                var fixedResponse = await _llm.GenerateAsync(repairMessages, null, llmConfig);
+
+                // Record the fixed response in the conversation
+                agent.ConversationHistory.Add(new Message(MessageRole.Assistant, fixedResponse));
+
+                // Retry parsing once with the fixed response
+                return await ParseToolCallsInternalAsync(agent, fixedResponse, llmConfig, isRetry: true);
+            }
         }
-        
+
         return toolCalls;
     }
     

@@ -1,5 +1,6 @@
 using AgentFox.Agents;
 using AgentFox.LLM;
+using AgentFox.MCP;
 using AgentFox.Memory;
 using AgentFox.Models;
 using AgentFox.Skills;
@@ -76,6 +77,7 @@ class Program
         var workspaceManager = new WorkspaceManager(configuration);
         var toolRegistry = CreateToolRegistry(workspaceManager);
         var skillRegistry = await CreateSkillRegistryAsync(toolRegistry, configuration);
+        var mcpClient = await CreateAndInitializeMcpClientAsync(toolRegistry, configuration);
         
         // Build system prompt with dynamic builder + skills index
         var systemPrompt = new SystemPromptBuilder()
@@ -103,6 +105,7 @@ class Program
             .WithSystemPrompt(systemPrompt)
             .WithMemory(memory)
             .WithSkillsRegistry(skillRegistry)
+            .WithMCPClient(mcpClient)
             .WithLLMProvider(llmProvider)
             .Build();
         
@@ -129,6 +132,7 @@ class Program
         var workspaceManager = new WorkspaceManager(configuration);
         var toolRegistry = CreateToolRegistry(workspaceManager);
         var skillRegistry = await CreateSkillRegistryAsync(toolRegistry, configuration);
+        var mcpClient = await CreateAndInitializeMcpClientAsync(toolRegistry, configuration);
         
         // Print skills summary at startup
         var manifests = skillRegistry.GetSkillManifests();
@@ -187,6 +191,7 @@ class Program
             .WithSystemPrompt(systemPrompt)
             .WithMemory(memory)
             .WithSkillsRegistry(skillRegistry)
+            .WithMCPClient(mcpClient)
             .WithLLMProvider(llmProvider)
             .Build();
         
@@ -300,6 +305,50 @@ class Program
         registry.Register(new TimestampTool());
         
         return registry;
+    }
+
+    private sealed class McpServerConfig
+    {
+        public string Name { get; set; } = string.Empty;
+        public string Url { get; set; } = string.Empty;
+        public int TimeoutSeconds { get; set; } = 30;
+        public Dictionary<string, string> Headers { get; set; } = new();
+    }
+
+    static async Task<MCPClient> CreateAndInitializeMcpClientAsync(ToolRegistry toolRegistry, IConfiguration configuration)
+    {
+        var mcpClient = new MCPClient(toolRegistry);
+
+        var servers = configuration
+            .GetSection("MCP:Servers")
+            .Get<List<McpServerConfig>>() ?? new List<McpServerConfig>();
+
+        foreach (var serverConfig in servers.Where(s => !string.IsNullOrWhiteSpace(s.Name) && !string.IsNullOrWhiteSpace(s.Url)))
+        {
+            try
+            {
+                var success = await mcpClient.AddServerAsync(
+                    serverConfig.Name,
+                    serverConfig.Url,
+                    serverConfig.TimeoutSeconds <= 0 ? 30 : serverConfig.TimeoutSeconds,
+                    serverConfig.Headers);
+                if (!success)
+                {
+                    Console.WriteLine($"⚠ Warning: Failed to connect to MCP server '{serverConfig.Name}' at '{serverConfig.Url}'.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠ Warning: Exception while initializing MCP server '{serverConfig.Name}': {ex.Message}");
+            }
+        }
+
+        if (servers.Count > 0)
+        {
+            Console.WriteLine($"MCP: Loaded configuration for {servers.Count} server(s).");
+        }
+
+        return mcpClient;
     }
 
     static async Task<SkillRegistry> CreateSkillRegistryAsync(ToolRegistry toolRegistry, IConfiguration configuration)
