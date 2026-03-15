@@ -807,16 +807,35 @@ public class AgentBuilder
             new AIFunctionFactoryOptions
             {
                 Name = toolName,
-                Description = toolDescription+$"\nParameters (JSON Schema): {schema}",
-                
+                //Description = toolDescription+$"\nParameters (JSON Schema): {schema}",
+                Description = toolDescription, //if using DynamicSchemaFunction
+                //JsonSchemaCreateOptions = new AIJsonSchemaCreateOptions()
+                //{
+                //    // Dynamically provide descriptions for parameters
+                //    ParameterDescriptionProvider=  (parameter) =>
+                //    {
+                //        if (parameter.Name == "dynamic_id") return "The unique ID from your external system";
+                //        return toolDescription; // Fallback to default
+                //    }
+                //}
             });
+        AIFunction executableDynamicFunc = new DynamicSchemaFunction(tool, schema);
+        return executableDynamicFunc;
+        //return AIFunctionFactory.CreateDeclaration(toolName, toolDescription, schema);
+        //chat  history
+        //https://github.com/microsoft/agent-framework/blob/1b7940c91e045c563faafe11d5b03067f4ea7b16/docs/decisions/0015-agent-run-context.md?plain=1#L36
 
         //_logger.LogInformation("Created Agent Framework tool for MCP tool: {ToolName}", toolName);
 
         return tool;
     }
 
-
+    public sealed class DynamicSchemaFunction(AIFunction inner, JsonElement customSchema) : DelegatingAIFunction(inner)
+    {
+        // Return the dynamic schema instead of the one inferred from the delegate
+        public override JsonElement JsonSchema => customSchema;
+    }
+    
     public FoxAgent Build(string apiKey, string? baseUrl = null)
     {
         if (string.IsNullOrEmpty(_config.Name))
