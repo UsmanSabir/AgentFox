@@ -754,6 +754,26 @@ public class AgentBuilder
         return JsonSerializer.SerializeToElement(root);
     }
 
+    static object? ConvertJsonValue(object? value)
+    {
+        if (value is JsonElement el)
+        {
+            return el.ValueKind switch
+            {
+                JsonValueKind.String => el.GetString(),
+                JsonValueKind.Number => el.TryGetInt64(out var l) ? l : el.GetDouble(),
+                JsonValueKind.True => true,
+                JsonValueKind.False => false,
+                JsonValueKind.Null => null,
+                JsonValueKind.Object => JsonSerializer.Deserialize<Dictionary<string, object?>>(el.GetRawText()),
+                JsonValueKind.Array => JsonSerializer.Deserialize<List<object?>>(el.GetRawText()),
+                _ => el.GetRawText()
+            };
+        }
+
+        return value;
+    }
+
     private AITool CreateAgentTool(ToolDefinition toolDefinition)
     {
         var toolName = toolDefinition.Name;
@@ -771,11 +791,11 @@ public class AgentBuilder
         var tool = AIFunctionFactory.Create(
             async (AIFunctionArguments? args, CancellationToken ct) =>
             {
-                var jsonArgs = args is null or { Count: 0 }
-                    ? "{}"
-                    : JsonSerializer.Serialize(args);
+                //var jsonArgs = args is null or { Count: 0 }
+                //    ? "{}"
+                //    : JsonSerializer.Serialize(args);
 
-                var dict = args?.ToDictionary(k => k.Key, v => v.Value)
+                var dict = args?.ToDictionary(k => k.Key, v => ConvertJsonValue(v.Value))
                            ?? new Dictionary<string, object?>();
 
                 var res = await ExecuteToolAsync(toolDefinition.Name, dict, ct);
