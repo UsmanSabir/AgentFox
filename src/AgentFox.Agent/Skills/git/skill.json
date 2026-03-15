@@ -1,0 +1,23 @@
+{
+  "name": "git",
+  "version": "1.0.0",
+  "description": "Git version control operations - commit, push, pull, branch, merge, etc.",
+  "dependencies": [],
+  "capabilities": [
+    "vcs",
+    "versioning",
+    "version-control",
+    "collaboration"
+  ],
+  "tags": [
+    "devops",
+    "required",
+    "version-control"
+  ],
+  "skillAssemblyType": "AgentFox.Skills.GitSkill",
+  "configuration": {
+    "defaultRemote": "origin",
+    "enableAutoFetch": true,
+    "enableAutoMerge": false
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "deployment",
+  "version": "1.0.0",
+  "description": "Application deployment and CI/CD",
+  "dependencies": ["git", "docker"],
+  "capabilities": [
+    "deployment",
+    "devops",
+    "cicd",
+    "release"
+  ],
+  "tags": [
+    "deployment",
+    "ci-cd",
+    "production",
+    "releases"
+  ],
+  "skillAssemblyType": "AgentFox.Skills.DeploymentSkill",
+  "configuration": {
+    "defaultEnvironment": "staging",
+    "enableBlueGreenDeploy": true,
+    "enableCanaryDeploy": false,
+    "deploymentTimeout": 3600
+  }
+}

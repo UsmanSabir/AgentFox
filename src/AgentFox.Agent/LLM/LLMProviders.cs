@@ -1,8 +1,10 @@
+using System.ClientModel;
 using System.Net.Http.Json;
 using AgentFox.Models;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Microsoft.Extensions.Configuration;
+using OpenAI;
 
 namespace AgentFox.LLM;
 
@@ -29,6 +31,37 @@ public class LLMConfig
     public List<string>? Stop { get; set; }
     public double? TopP { get; set; }
     public Dictionary<string, string> Headers { get; set; } = new();
+}
+
+
+public class PackageProvider : ILLMProvider
+{
+    private readonly string _apiKey;
+    private readonly string _baseUrl;
+    
+    public PackageProvider(string name, string apiKey, string? baseUrl=null, LLMConfig? defaultConfig=null)
+    {
+        _apiKey = apiKey;
+        Name = name;
+        _baseUrl = baseUrl ?? "https://api.openai.com/v1";
+        DefaultConfig = defaultConfig;
+    }
+
+    public string Name { get; private set; }
+
+    public LLMConfig? DefaultConfig { get; set; }
+    public Task<string> GenerateAsync(List<Message> messages, List<ToolDefinition>? tools = null, LLMConfig? config = null)
+    {
+        var effectiveConfig = config ?? DefaultConfig;
+        var openAiClient = new OpenAIClient(new ApiKeyCredential(_apiKey), new OpenAIClientOptions() { Endpoint = new Uri(effectiveConfig?.BaseUrl ??_baseUrl) });
+        var client = openAiClient.GetChatClient(effectiveConfig.Model);
+        throw new NotImplementedException("This provider is only for tool definitions, not for generating text");
+    }
+
+    public Task GenerateStreamingAsync(List<Message> messages, Func<string, Task> onChunk, List<ToolDefinition>? tools = null, LLMConfig? config = null)
+    {
+        throw new NotImplementedException("This provider is only for tool definitions, not for generating text");
+    }
 }
 
 /// <summary>

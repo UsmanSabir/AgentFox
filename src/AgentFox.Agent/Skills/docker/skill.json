@@ -1,0 +1,24 @@
+{
+  "name": "docker",
+  "version": "1.0.0",
+  "description": "Docker container operations - build, run, stop, logs, etc.",
+  "dependencies": ["git"],
+  "capabilities": [
+    "container",
+    "deployment",
+    "devops",
+    "docker"
+  ],
+  "tags": [
+    "docker",
+    "containers",
+    "devops",
+    "containerization"
+  ],
+  "skillAssemblyType": "AgentFox.Skills.DockerSkill",
+  "configuration": {
+    "defaultRegistry": "docker.io",
+    "enableAutoCleanup": false,
+    "enableBuildCache": true
+  }
+}
