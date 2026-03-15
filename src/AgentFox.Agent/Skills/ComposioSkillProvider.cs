@@ -120,6 +120,7 @@ public class ComposioSkillProvider
             );
 
             _skillRegistry.Register(skillAdapter);
+            await _skillRegistry.EnableSkillAsync(skillAdapter.Name);
             _composioSkills[toolkit.Id] = skillAdapter;
 
             // Cache tools for quick lookup using slug (ID may be empty)

@@ -13,6 +13,7 @@ using OpenAI.Chat;
 using OpenAI.Responses;
 using System.ClientModel;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using SystemPromptBuilder = AgentFox.LLM.SystemPromptBuilder;
 
 namespace AgentFox.Agents;
@@ -24,24 +25,24 @@ public class FoxAgent
 {
     private readonly Agent _agent;
     private readonly ChatClientAgent _chatAgent;
-    
+
     public string Id => _agent.Config.Id;
     public string Name => _agent.Config.Name;
     public IMemory Memory => _agent.Memory;
     public IConversationStore ConversationStore => _agent.ConversationStore;
     public AgentStatus Status => _agent.Status;
     public List<Agent> SubAgents => _agent.SubAgents;
-    
+
     /// <summary>
     /// Skills enabled for this agent (used for capability-based routing)
     /// </summary>
     public List<Skill> EnabledSkills { get; set; } = new();
-    
+
     /// <summary>
     /// Agent role for permission and resource limit checking
     /// </summary>
     public string Role { get; set; } = "default";
-    
+
 
     public FoxAgent(ChatClientAgent agent, AgentConfig config, IConversationStore store)
     {
@@ -71,7 +72,7 @@ public class FoxAgent
         _agent.Memory = memory;
         return this;
     }
-    
+
     /// <summary>
     /// Configure hybrid memory (short-term + long-term)
     /// </summary>
@@ -80,7 +81,7 @@ public class FoxAgent
         _agent.Memory = new HybridMemory(shortTermSize, longTermPath);
         return this;
     }
-    
+
     /// <summary>
     /// Execute a task with the agent
     /// </summary>
@@ -95,12 +96,12 @@ public class FoxAgent
         return await ProcessAsync(task, _agent.DefaultConversationId);
     }
 
-    public async Task<AgentResult> ProcessAsync(string task, string? conversationId=null, CancellationToken cancellationToken = default)
+    public async Task<AgentResult> ProcessAsync(string task, string? conversationId = null, CancellationToken cancellationToken = default)
     {
         conversationId ??= Guid.NewGuid().ToString("N");
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        double TimeoutSeconds=3600;
+        double TimeoutSeconds = 3600;
         cts.CancelAfter(TimeSpan.FromSeconds(TimeoutSeconds));
         var timeoutToken = cts.Token;
 
@@ -119,7 +120,7 @@ public class FoxAgent
             var response = await agent.RunAsync(task, thread, options: runOptions, cancellationToken: timeoutToken);
 
             var responseText = response.Text ?? "I apologize, but I wasn't able to generate a response.";
-            var result = new AgentResult { Success = true, Output = responseText};
+            var result = new AgentResult { Success = true, Output = responseText };
             return result;
             //_logger.LogInformation(
             //    "Agent completed. Response: {Response}",
@@ -140,7 +141,7 @@ public class FoxAgent
     }
 
 
-    
+
 
     /// <summary>
     /// Spawn a sub-agent
@@ -156,25 +157,25 @@ public class FoxAgent
             Tools = config.Tools ?? new List<ToolDefinition>(),
             SkillRegistry = _agent.Config.SkillRegistry
         };
-        
+
         var subAgent = SpawnSubAgentInternal(_agent, agentConfig);
         var foxSubAgent = new FoxAgent(_chatAgent, subAgent.Config, ConversationStore)
         {
             Role = config.Role ?? Role  // Inherit role from parent by default
         };
-        
+
         // Handle skill inheritance
         if (config.InheritEnabledSkills && EnabledSkills.Any())
         {
             // Copy parent skills
             foxSubAgent.EnabledSkills.AddRange(EnabledSkills);
-            
+
             // Add additional skills if specified
             if (config.AdditionalSkills?.Any() == true)
             {
                 // TODO: Load additional skills from SkillRegistry
             }
-            
+
             // Remove forbidden skills
             if (config.ForbiddenSkills?.Any() == true)
             {
@@ -184,7 +185,7 @@ public class FoxAgent
                 }
             }
         }
-        
+
         return foxSubAgent;
     }
 
@@ -223,7 +224,7 @@ public class FoxAgent
     //{
     //    return _conversationStore.GetThread(_agent.DefaultConversationId).StateBag  // _agent.ConversationHistory.ToList();
     //}
-    
+
     /// <summary>
     /// Clear conversation history
     /// </summary>
@@ -231,7 +232,7 @@ public class FoxAgent
     {
         _agent.ConversationHistory.Clear();
     }
-    
+
     /// <summary>
     /// Add a system message to the conversation
     /// </summary>
@@ -239,7 +240,7 @@ public class FoxAgent
     //{
     //    _agent.ConversationHistory.Insert(0, new Message(MessageRole.System, content));
     //}
-    
+
     /// <summary>
     /// Get agent info
     /// </summary>
@@ -261,7 +262,7 @@ public class FoxAgent
             Role = Role
         };
     }
-    
+
     /// <summary>
     /// Get supported skills as a filter for routing
     /// </summary>
@@ -273,14 +274,14 @@ public class FoxAgent
             .SelectMany(s => s.Metadata!.Capabilities)
             .Distinct()
             .ToList();
-        
+
         return new SkillFilter
         {
             RequiredSkills = skillNames,
             RequiredCapabilities = capabilities
         };
     }
-    
+
     /// <summary>
     /// Enable a skill for this agent
     /// </summary>
@@ -300,7 +301,7 @@ public class FoxAgent
             }
         }
     }
-    
+
     /// <summary>
     /// Disable a skill for this agent
     /// </summary>
@@ -308,7 +309,7 @@ public class FoxAgent
     {
         EnabledSkills.RemoveAll(s => s.Name == skillName);
     }
-    
+
     /// <summary>
     /// Get all skill capabilities for this agent
     /// </summary>
@@ -359,37 +360,37 @@ public class AgentBuilder
         _toolRegistry = toolRegistry;
         _runtime = new DefaultAgentRuntime(toolRegistry);
     }
-    
+
     public AgentBuilder WithName(string name)
     {
         _config.Name = name;
         return this;
     }
-    
+
     public AgentBuilder WithDescription(string description)
     {
         _config.Description = description;
         return this;
     }
-    
+
     public AgentBuilder WithSystemPrompt(string systemPrompt)
     {
         _config.SystemPrompt = systemPrompt;
         return this;
     }
-    
+
     public AgentBuilder WithMaxIterations(int maxIterations)
     {
         _config.MaxIterations = maxIterations;
         return this;
     }
-    
+
     public AgentBuilder WithTemperature(double temperature)
     {
         _config.Temperature = temperature;
         return this;
     }
-    
+
     public AgentBuilder WithMemory(IMemory memory)
     {
         _memory = memory;
@@ -458,7 +459,7 @@ public class AgentBuilder
         tools.AddRange(_toolRegistry.GetDefinitions());
 
         // Add tools from enabled skills (including Composio toolkit tools)
-        var enabledSkills = _skillRegistry?.GetAll();
+        var enabledSkills = _skillRegistry?.GetEnabledSkills();
         if (enabledSkills != null)
             foreach (var skill in enabledSkills)
             {
@@ -467,6 +468,9 @@ public class AgentBuilder
                     var skillTools = skill.GetTools();
                     foreach (var tool in skillTools)
                     {
+                        if (tools.Any(t => t.Name.Equals(tool.Name, StringComparison.OrdinalIgnoreCase)))
+                            continue;
+
                         // Convert skill tool to tool definition for the LLM
                         var parameters = new Dictionary<string, Models.ToolParameter>();
                         foreach (var kv in tool.Parameters)
@@ -638,6 +642,117 @@ public class AgentBuilder
         }
     }
 
+    private static JsonNode BuildJsonSchema1(ToolDefinition tool)
+    {
+        var properties = new JsonObject();
+        var required = new JsonArray();
+
+        foreach (var (name, param) in tool.Parameters)
+        {
+            JsonObject schema;
+
+            // If full schema already provided
+            if (!string.IsNullOrEmpty(param.JsonSchema))
+            {
+                schema = JsonNode.Parse(param.JsonSchema)!.AsObject();
+            }
+            else
+            {
+                schema = new JsonObject
+                {
+                    ["type"] = param.Type
+                };
+
+                if (!string.IsNullOrEmpty(param.Description))
+                    schema["description"] = param.Description;
+
+                if (param.Pattern != null)
+                    schema["pattern"] = param.Pattern;
+
+                if (param.MinLength.HasValue)
+                    schema["minLength"] = param.MinLength.Value;
+
+                if (param.MaxLength.HasValue)
+                    schema["maxLength"] = param.MaxLength.Value;
+
+                if (param.Minimum.HasValue)
+                    schema["minimum"] = param.Minimum.Value;
+
+                if (param.Maximum.HasValue)
+                    schema["maximum"] = param.Maximum.Value;
+
+                if (param.Default != null)
+                    schema["default"] = JsonSerializer.SerializeToNode(param.Default);
+
+                if (param.Example != null)
+                    schema["example"] = JsonSerializer.SerializeToNode(param.Example);
+            }
+
+            properties[name] = schema;
+
+            if (param.Required)
+                required.Add(name);
+        }
+
+        var root = new JsonObject
+        {
+            ["type"] = "object",
+            ["properties"] = properties
+        };
+
+        if (required.Count > 0)
+            root["required"] = required;
+
+        return root;
+    }
+
+    public static JsonElement BuildJsonSchema(ToolDefinition tool)
+    {
+        var properties = new JsonObject();
+        var required = new JsonArray();
+
+        foreach (var (name, param) in tool.Parameters)
+        {
+            JsonObject prop = new()
+            {
+                ["type"] = param.Type
+            };
+
+            if (!string.IsNullOrEmpty(param.Description))
+                prop["description"] = param.Description;
+
+            if (param.Pattern != null)
+                prop["pattern"] = param.Pattern;
+
+            if (param.MinLength.HasValue)
+                prop["minLength"] = param.MinLength;
+
+            if (param.MaxLength.HasValue)
+                prop["maxLength"] = param.MaxLength;
+
+            if (param.Minimum.HasValue)
+                prop["minimum"] = param.Minimum;
+
+            if (param.Maximum.HasValue)
+                prop["maximum"] = param.Maximum;
+
+            properties[name] = prop;
+
+            if (param.Required)
+                required.Add(name);
+        }
+
+        var root = new JsonObject
+        {
+            ["type"] = "object",
+            ["properties"] = properties
+        };
+
+        if (required.Count > 0)
+            root["required"] = required;
+
+        return JsonSerializer.SerializeToElement(root);
+    }
 
     private AITool CreateAgentTool(ToolDefinition toolDefinition)
     {
@@ -649,7 +764,10 @@ public class AgentBuilder
         //    var schemaJson = JsonSerializer.Serialize(toolDefinition.JsonSchema, new JsonSerializerOptions { WriteIndented = false });
         //    toolDescription += $"\nParameters (JSON Schema): {schemaJson}";
         //}
+
+        var schema = BuildJsonSchema(toolDefinition);
         
+
         var tool = AIFunctionFactory.Create(
             async (AIFunctionArguments? args, CancellationToken ct) =>
             {
@@ -657,17 +775,20 @@ public class AgentBuilder
                     ? "{}"
                     : JsonSerializer.Serialize(args);
 
-                Dictionary<string, object?> dict = new Dictionary<string, object?>(args);
-                var dict2 = args.ToDictionary(kv => kv.Key, kv => kv.Value);
+                var dict = args?.ToDictionary(k => k.Key, v => v.Value)
+                           ?? new Dictionary<string, object?>();
+
                 var res = await ExecuteToolAsync(toolDefinition.Name, dict, ct);
-                    return res;
-                
+                return res;
+                //return JsonSerializer.Serialize(res);
+
                 //return await InvokeMcpToolAsync(toolName, jsonArgs, ct);
             },
             new AIFunctionFactoryOptions
             {
                 Name = toolName,
-                Description = toolDescription
+                Description = toolDescription+$"\nParameters (JSON Schema): {schema}",
+                
             });
 
         //_logger.LogInformation("Created Agent Framework tool for MCP tool: {ToolName}", toolName);
@@ -676,7 +797,7 @@ public class AgentBuilder
     }
 
 
-    public FoxAgent Build(string apiKey, string? baseUrl=null)
+    public FoxAgent Build(string apiKey, string? baseUrl = null)
     {
         if (string.IsNullOrEmpty(_config.Name))
         {
@@ -685,11 +806,11 @@ public class AgentBuilder
 
 
         var keyCredential = new ApiKeyCredential(apiKey);
-        var openAiClient = new OpenAIClient(keyCredential, new OpenAIClientOptions(){Endpoint = new Uri(baseUrl)});
+        var openAiClient = new OpenAIClient(keyCredential, new OpenAIClientOptions() { Endpoint = new Uri(baseUrl) });
         var chatClient = openAiClient.GetChatClient(_config.Model);
 
         var tools = GetAvailableTools();
-        if (_config.Tools.Count==0)
+        if (_config.Tools.Count == 0)
         {
             _config.Tools.AddRange(tools);
         }
@@ -721,7 +842,7 @@ public class AgentBuilder
             }
             catch (Exception ex)
             {
-                 _runtime.Logger.LogWarning(ex, "Failed to create Agent Framework tool for MCP tool: {ToolName}", toolDefinition.Name);
+                _runtime.Logger.LogWarning(ex, "Failed to create Agent Framework tool for MCP tool: {ToolName}", toolDefinition.Name);
             }
         }
 
@@ -733,7 +854,7 @@ public class AgentBuilder
         //{
         //    agent.WithMemory(_memory);
         //}
-        
+
         return foxAgent;
     }
 }

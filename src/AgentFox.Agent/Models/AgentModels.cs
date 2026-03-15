@@ -2,6 +2,7 @@ namespace AgentFox.Models;
 
 using AgentFox.Memory;
 using AgentFox.Skills;
+using System.Diagnostics;
 
 /// <summary>
 /// Represents the role of a message in a conversation
@@ -38,6 +39,7 @@ public class Message
 /// <summary>
 /// Represents a tool that can be called by the agent
 /// </summary>
+[DebuggerDisplay("{Name}")]
 public class ToolDefinition
 {
     public string Name { get; set; } = string.Empty;
