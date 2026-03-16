@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using AgentFox.LLM;
 using AgentFox.MCP;
 using AgentFox.Memory;
@@ -5,6 +6,7 @@ using AgentFox.Models;
 using AgentFox.Skills;
 using AgentFox.Tools;
 using Microsoft.Agents.AI;
+using Microsoft.Agents.AI.Compaction;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 using System.Text.Json;
@@ -724,6 +726,7 @@ public class AgentBuilder
         public override JsonElement JsonSchema => customSchema;
     }
     
+    
     public FoxAgent Build()
     {
         if (string.IsNullOrEmpty(_config.Name))
@@ -771,8 +774,46 @@ public class AgentBuilder
         }
 
         var systemPrompt = BuildSystemMessage();
-        var agent = chatClient.AsAIAgent(systemPrompt, tools: agentTools);
-        
+
+        //var agent = chatClient.AsAIAgent(systemPrompt, tools: agentTools);
+
+        // Define a pipeline with multiple strategies
+#pragma warning disable MAAI001
+        //https://learn.microsoft.com/en-us/agent-framework/agents/conversations/compaction?pivots=programming-language-csharp
+        PipelineCompactionStrategy compactionPipeline = new([
+
+            new ToolResultCompactionStrategy(CompactionTriggers.TokensExceed(1000)),
+            new SummarizationCompactionStrategy(chatClient, //or custom chat client for summarization to reduce costs while maintaining summary quality.
+                CompactionTriggers.TokensExceed(6000)),
+            new TruncationCompactionStrategy(CompactionTriggers.TokensExceed(8000))
+        ]);
+        // Compact only when there are tool calls AND tokens exceed 2000
+        CompactionTrigger trigger = CompactionTriggers.All(
+            CompactionTriggers.HasToolCalls(),
+            CompactionTriggers.TokensExceed(2000));
+
+        //// 1. Define your compaction pipeline
+        //var compactionPipeline = new PipelineCompactionStrategy(
+        //    new SummarizationCompactionStrategy(chatClient, CompactionTriggers.TokensExceed(2000)),
+        //    new TruncationCompactionStrategy(CompactionTriggers.TokensExceed(8000))
+        //);
+
+        // 2. Build the agent with nested ChatOptions
+        var agent = chatClient
+            .AsBuilder()
+            .UseAIContextProviders(new CompactionProvider(compactionPipeline))
+            .BuildAIAgent(new ChatClientAgentOptions
+            {
+                Name = _config.Name,
+                ChatOptions = new ChatOptions // Tools must go here
+                {
+                    Tools = agentTools,
+                    Instructions = systemPrompt
+                }
+            });
+
+#pragma warning restore MAAI001
+
         _logger?.LogInformation("Building FoxAgent '{AgentName}' with {ToolCount} tools", _config.Name, tools.Count);
         
         var foxAgent = new FoxAgent(agent, _config, _conversationStore!, _logger);
