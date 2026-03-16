@@ -7,11 +7,6 @@ using AgentFox.Tools;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
-using OllamaSharp.Models.Chat;
-using OpenAI;
-using OpenAI.Chat;
-using OpenAI.Responses;
-using System.ClientModel;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using SystemPromptBuilder = AgentFox.LLM.SystemPromptBuilder;
@@ -134,8 +129,6 @@ public class FoxAgent
             throw;
         }
     }
-
-
 
 
     /// <summary>
@@ -346,7 +339,7 @@ public class AgentInfo
 public class AgentBuilder
 {
     private readonly ToolRegistry _toolRegistry;
-    private AgentConfig _config = new();
+    private readonly AgentConfig _config = new();
     private IMemory? _memory;
     private SkillRegistry? _skillRegistry = null;
     private MCPClient? _mcpClient;
@@ -432,6 +425,7 @@ public class AgentBuilder
         return this;
     }
 
+    #region Helpers
 
     private string BuildSystemMessage()
     {
@@ -600,7 +594,7 @@ public class AgentBuilder
         }
     }
 
-    public static JsonElement BuildJsonSchema(ToolDefinition tool)
+    private static JsonElement BuildJsonSchema(ToolDefinition tool)
     {
         var properties = new JsonObject();
         var required = new JsonArray();
@@ -648,7 +642,7 @@ public class AgentBuilder
         return JsonSerializer.SerializeToElement(root);
     }
 
-    static object? ConvertJsonValue(object? value)
+    private static object? ConvertJsonValue(object? value)
     {
         if (value is JsonElement el)
         {
@@ -680,7 +674,7 @@ public class AgentBuilder
         //}
 
         var schema = BuildJsonSchema(toolDefinition);
-        
+
 
         var tool = AIFunctionFactory.Create(
             async (AIFunctionArguments? args, CancellationToken ct) =>
@@ -722,13 +716,15 @@ public class AgentBuilder
         return tool;
     }
 
+    #endregion
+
     public sealed class DynamicSchemaFunction(AIFunction inner, JsonElement customSchema) : DelegatingAIFunction(inner)
     {
         // Return the dynamic schema instead of the one inferred from the delegate
         public override JsonElement JsonSchema => customSchema;
     }
     
-    public FoxAgent Build(string apiKey, string? baseUrl = null)
+    public FoxAgent Build()
     {
         if (string.IsNullOrEmpty(_config.Name))
         {

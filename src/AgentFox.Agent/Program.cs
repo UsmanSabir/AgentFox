@@ -62,7 +62,6 @@ class Program
             .AddEnvironmentVariables()
             .Build();
         
-
         // Interactive mode
         return await RunInteractiveMode(configuration);
     }
@@ -122,9 +121,7 @@ class Program
         var chatClient = LLMFactory.CreateFromConfiguration(configuration);
         var memory = new HybridMemory(100, "memory.json");
         IConversationStore conversationStore = new InMemoryConversationStore(); // For simplicity, using in-memory store for conversation history
-        var apiKey = configuration["LLM:ApiKey"] ?? Environment.GetEnvironmentVariable("OPENAI_API_KEY");
-        var baseUrl = configuration["LLM:BaseUrl"] ?? "https://api.openai.com/v1";
-
+        
         // Register memory tools into the registry specifically for this agent's memory
         toolRegistry.Register(new AddMemoryTool(memory));
         toolRegistry.Register(new SearchMemoryTool(memory));
@@ -138,7 +135,7 @@ class Program
             .WithSkillsRegistry(skillRegistry)
             .WithMCPClient(mcpClient)
             .WithChatClient(chatClient)
-            .Build(apiKey, baseUrl);
+            .Build();
 
         Console.WriteLine("Type 'help' for available commands, 'exit' to quit.");
         Console.WriteLine();

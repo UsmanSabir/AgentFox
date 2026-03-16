@@ -1,30 +1,12 @@
-using AgentFox.Models;
 using Anthropic;
 using Google.GenAI;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
-using Newtonsoft.Json;
-using Newtonsoft.Json.Linq;
 using OllamaSharp;
 using OpenAI;
 using System.ClientModel;
-using System.Net.Http.Json;
 
 namespace AgentFox.LLM;
-
-/// <summary>
-/// LLM Configuration
-/// </summary>
-public class LLMConfig
-{
-    public string? Model { get; set; }
-    public string? BaseUrl { get; set; }
-    public double Temperature { get; set; } = 0.7;
-    public int MaxTokens { get; set; } = 4096;
-    public List<string>? Stop { get; set; }
-    public double? TopP { get; set; }
-    public Dictionary<string, string> Headers { get; set; } = new();
-}
 
 /// <summary>
 /// LLM Factory
