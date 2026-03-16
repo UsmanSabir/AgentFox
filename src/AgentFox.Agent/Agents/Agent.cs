@@ -774,7 +774,7 @@ public class AgentBuilder
             }
             catch (Exception ex)
             {
-                _runtime.Logger.LogWarning(ex, "Failed to create Agent Framework tool for MCP tool: {ToolName}", toolDefinition.Name);
+                _logger?.LogWarning(ex, "Failed to create Agent Framework tool for MCP tool: {ToolName}", toolDefinition.Name);
             }
         }
 

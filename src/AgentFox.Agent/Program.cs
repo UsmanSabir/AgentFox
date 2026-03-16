@@ -133,6 +133,7 @@ class Program
             .WithName("AgentFox")
             .WithSystemPrompt(systemPrompt)
             .WithMemory(memory)
+            .WithLogger(new ConsoleLogger<FoxAgent>())
             .WithConversationStore(conversationStore)
             .WithSkillsRegistry(skillRegistry)
             .WithMCPClient(mcpClient)
