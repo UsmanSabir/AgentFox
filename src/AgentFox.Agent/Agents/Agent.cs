@@ -346,18 +346,17 @@ public class AgentInfo
 public class AgentBuilder
 {
     private readonly ToolRegistry _toolRegistry;
-    private IAgentRuntime _runtime;
     private AgentConfig _config = new();
     private IMemory? _memory;
     private SkillRegistry? _skillRegistry = null;
     private MCPClient? _mcpClient;
     private IConversationStore? _conversationStore;
     private ILogger<FoxAgent>? _logger;
+    private IChatClient? _chatClient;
 
     public AgentBuilder(ToolRegistry toolRegistry)
     {
         _toolRegistry = toolRegistry;
-        _runtime = new DefaultAgentRuntime(toolRegistry);
     }
 
     public AgentBuilder WithName(string name)
@@ -402,6 +401,12 @@ public class AgentBuilder
         return this;
     }
 
+    public AgentBuilder WithChatClient(IChatClient chatClient)
+    {
+        _chatClient = chatClient;
+        return this;
+    }
+
     public AgentBuilder WithHybridMemory(int shortTermSize = 50, string? longTermPath = null)
     {
         _memory = new HybridMemory(shortTermSize, longTermPath);
@@ -420,14 +425,7 @@ public class AgentBuilder
         _mcpClient = mcpClient;
         return this;
     }
-
-    public AgentBuilder WithLLMProvider(ILLMProvider provider)
-    {
-        _config.Model = provider.DefaultConfig.Model;
-        _runtime = new LLMEnabledRuntime(_toolRegistry, provider, skillRegistry: _skillRegistry);
-        return this;
-    }
-
+    
     public AgentBuilder WithLogger(ILogger<FoxAgent> logger)
     {
         _logger = logger;
@@ -545,14 +543,14 @@ public class AgentBuilder
 
                     if (matchedTool != null)
                     {
-                        _runtime.Logger?.LogInformation($"Found tool '{toolName}' in skill '{skill.Name}'");
+                        _logger?.LogInformation($"Found tool '{toolName}' in skill '{skill.Name}'");
                         return matchedTool;
                     }
                 }
         }
         catch (Exception ex)
         {
-            _runtime.Logger?.LogWarning(ex, "Error searching for tool in agent skills");
+            _logger?.LogWarning(ex, "Error searching for tool in agent skills");
         }
 
         return null;
@@ -567,7 +565,7 @@ public class AgentBuilder
         }
 
         // First, try to get tool from global registry
-        var tool = _runtime.ToolRegistry.Get(toolName);
+        var tool = _toolRegistry.Get(toolName);
 
         // If not found, search in agent's enabled skills (for Composio and other skill-based tools)
         if (tool == null)
@@ -578,13 +576,13 @@ public class AgentBuilder
         if (tool == null)
         {
             // Log available tools for debugging
-            var availableTools = _runtime.ToolRegistry.GetAll();
+            var availableTools = _toolRegistry.GetAll();
             var toolNames = string.Join(", ", availableTools.Select(t => t.Name));
             var enabledSkills = _skillRegistry?.GetEnabledSkills();
             if (enabledSkills != null)
             {
                 var skillToolsInfo = string.Join(", ", enabledSkills.SelectMany(s => s.GetTools()).Select(t => t.Name));
-                _runtime.Logger?.LogWarning($"Tool '{toolName}' not found. Global tools: {toolNames}. Skill tools: {skillToolsInfo}");
+                _logger?.LogWarning($"Tool '{toolName}' not found. Global tools: {toolNames}. Skill tools: {skillToolsInfo}");
             }
 
             return ToolResult.Fail($"Tool not found: {toolName}");
@@ -737,9 +735,7 @@ public class AgentBuilder
             _config.Name = "AgentFox-" + Guid.NewGuid().ToString("N")[..8];
         }
 
-        var keyCredential = new ApiKeyCredential(apiKey);
-        var openAiClient = new OpenAIClient(keyCredential, new OpenAIClientOptions() { Endpoint = new Uri(baseUrl) });
-        var chatClient = openAiClient.GetChatClient(_config.Model);
+        var chatClient = _chatClient;
 
         var tools = GetAvailableTools();
         if (_config.Tools.Count == 0)

@@ -119,7 +119,7 @@ class Program
             )
             .Build();
 
-        var llmProvider = LLMFactory.CreateFromConfiguration(configuration);
+        var chatClient = LLMFactory.CreateFromConfiguration(configuration);
         var memory = new HybridMemory(100, "memory.json");
         IConversationStore conversationStore = new InMemoryConversationStore(); // For simplicity, using in-memory store for conversation history
         var apiKey = configuration["LLM:ApiKey"] ?? Environment.GetEnvironmentVariable("OPENAI_API_KEY");
@@ -137,7 +137,7 @@ class Program
             .WithConversationStore(conversationStore)
             .WithSkillsRegistry(skillRegistry)
             .WithMCPClient(mcpClient)
-            .WithLLMProvider(llmProvider)
+            .WithChatClient(chatClient)
             .Build(apiKey, baseUrl);
 
         Console.WriteLine("Type 'help' for available commands, 'exit' to quit.");
