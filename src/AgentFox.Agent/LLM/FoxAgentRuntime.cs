@@ -16,36 +16,45 @@ public class FoxAgentRuntime : IAgentRuntime
 {
     private readonly ToolRegistry _toolRegistry;
     private readonly SkillRegistry? _skillRegistry;
-    private readonly ILogger? _logger;
     private readonly ILLMProvider _llm;
     private readonly IAgentExecutor _executor;
+    private readonly ILogger<FoxAgentRuntime>? _logger;
     
     public ToolRegistry ToolRegistry => _toolRegistry;
     public ILogger? Logger { get; set; }
     
-    public FoxAgentRuntime(ToolRegistry toolRegistry, ILLMProvider llm, ILogger? logger = null, SkillRegistry? skillRegistry = null)
+    public FoxAgentRuntime(ToolRegistry toolRegistry, ILLMProvider llm, ILogger<FoxAgentRuntime>? logger = null, SkillRegistry? skillRegistry = null)
     {
         _toolRegistry = toolRegistry;
         _skillRegistry = skillRegistry;
         _llm = llm;
         _logger = logger;
         _executor = new LLMExecutor(this, llm, skillRegistry);
+        
+        _logger?.LogInformation("FoxAgentRuntime initialized with LLM provider: {ProviderName}", llm.Name);
     }
     
     public async Task<AgentResult> ExecuteAsync(Agent agent, string task)
     {
-        //Logger?.LogInformation($"Executing agent '{agent.Config.Name}' with LLM: {_llm.Name}");
-        //var baseUrl = _llm.DefaultConfig?.BaseUrl;
-        //var apiKeyCredential = new ApiKeyCredential("key");
-        //var openAiClient = new OpenAIClient(apiKeyCredential, new OpenAIClientOptions() { Endpoint = new Uri(baseUrl) });
-        //var client = openAiClient.GetChatClient(_llm.DefaultConfig.Model);
-        //client.AsAIAgent()
-
-        return await _executor.ExecuteAsync(agent, task);
+        _logger?.LogInformation("Executing agent '{AgentName}' with task: {Task}", agent.Config.Name, task.Length > 100 ? task[..100] + "..." : task);
+        
+        try
+        {
+            var result = await _executor.ExecuteAsync(agent, task);
+            _logger?.LogInformation("Agent '{AgentName}' completed successfully", agent.Config.Name);
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Agent '{AgentName}' failed to execute", agent.Config.Name);
+            throw;
+        }
     }
     
     public Agent SpawnSubAgent(Agent parent, AgentConfig config)
     {
+        _logger?.LogInformation("Spawning sub-agent '{SubAgentName}' from parent '{ParentName}'", config.Name, parent.Config.Name);
+        
         var agent = new Agent
         {
             Config = config,
@@ -56,6 +65,7 @@ public class FoxAgentRuntime : IAgentRuntime
         if (parent.Memory != null)
         {
             agent.Memory = new Memory.ShortTermMemory();
+            _logger?.LogDebug("Sub-agent '{SubAgentName}' inherited memory from parent", config.Name);
         }
         
         foreach (var tool in parent.Config.Tools)
@@ -67,7 +77,7 @@ public class FoxAgentRuntime : IAgentRuntime
         }
         
         parent.SubAgents.Add(agent);
-        Logger?.LogInformation($"Spawned sub-agent '{config.Name}' from parent '{parent.Config.Name}'");
+        _logger?.LogInformation("Sub-agent '{SubAgentName}' spawned successfully with {ToolCount} tools", config.Name, agent.Config.Tools.Count);
         
         return agent;
     }

@@ -25,6 +25,7 @@ public class FoxAgent
 {
     private readonly Agent _agent;
     private readonly ChatClientAgent _chatAgent;
+    private readonly ILogger<FoxAgent>? _logger;
 
     public string Id => _agent.Config.Id;
     public string Name => _agent.Config.Name;
@@ -32,7 +33,7 @@ public class FoxAgent
     public IConversationStore ConversationStore => _agent.ConversationStore;
     public AgentStatus Status => _agent.Status;
     public List<Agent> SubAgents => _agent.SubAgents;
-
+    
     /// <summary>
     /// Skills enabled for this agent (used for capability-based routing)
     /// </summary>
@@ -44,7 +45,7 @@ public class FoxAgent
     public string Role { get; set; } = "default";
 
 
-    public FoxAgent(ChatClientAgent agent, AgentConfig config, IConversationStore store)
+    public FoxAgent(ChatClientAgent agent, AgentConfig config, IConversationStore store, ILogger<FoxAgent>? logger = null)
     {
         _agent = new Agent
         {
@@ -53,15 +54,7 @@ public class FoxAgent
             ConversationStore = store
         };
         _chatAgent = agent;
-
-        //// Add tool definitions from registry
-        //foreach (var toolDef in runtime.ToolRegistry.GetDefinitions())
-        //{
-        //    if (!_agent.Config.Tools.Any(t => t.Name == toolDef.Name))
-        //    {
-        //        _agent.Config.Tools.Add(toolDef);
-        //    }
-        //}
+        _logger = logger;        
     }
 
     /// <summary>
@@ -87,11 +80,13 @@ public class FoxAgent
     /// </summary>
     public async Task<AgentResult> ExecuteAsync(string task)
     {
+        _logger?.LogInformation("Agent '{AgentName}' executing task: {Task}", Name, task.Length > 100 ? task[..100] + "..." : task);
+        
         // Populate agent's enabled skills if empty
         if (EnabledSkills.Count == 0 && _agent.Config.SkillRegistry != null)
         {
             _agent.EnabledSkills.AddRange(_agent.Config.SkillRegistry.GetAll());
-            //Logger?.LogInformation($"Auto-populated agent with {agent.EnabledSkills.Count} available skills");
+            _logger?.LogInformation("Auto-populated agent '{AgentName}' with {SkillCount} available skills", Name, _agent.EnabledSkills.Count);
         }
         return await ProcessAsync(task, _agent.DefaultConversationId);
     }
@@ -99,6 +94,8 @@ public class FoxAgent
     public async Task<AgentResult> ProcessAsync(string task, string? conversationId = null, CancellationToken cancellationToken = default)
     {
         conversationId ??= Guid.NewGuid().ToString("N");
+
+        _logger?.LogInformation("Agent '{AgentName}' processing task in conversation {ConversationId}", Name, conversationId);
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         double TimeoutSeconds = 3600;
@@ -112,6 +109,7 @@ public class FoxAgent
             var thread = ConversationStore.GetThread(conversationId);
             if (thread == null)
             {
+                _logger?.LogDebug("Creating new conversation thread for {ConversationId}", conversationId);
                 thread = await agent.CreateSessionAsync(timeoutToken);
                 ConversationStore.SaveThread(conversationId, thread);
             }
@@ -120,22 +118,19 @@ public class FoxAgent
             var response = await agent.RunAsync(task, thread, options: runOptions, cancellationToken: timeoutToken);
 
             var responseText = response.Text ?? "I apologize, but I wasn't able to generate a response.";
+            _logger?.LogInformation("Agent '{AgentName}' completed task in conversation {ConversationId}", Name, conversationId);
+            
             var result = new AgentResult { Success = true, Output = responseText };
             return result;
-            //_logger.LogInformation(
-            //    "Agent completed. Response: {Response}",
-            //    responseText);
-
-            //return new Dtos.ChatResponse
-            //{
-            //    Answer = responseText,
-            //    ConversationId = conversationId,
-
-            //};
+        }
+        catch (OperationCanceledException)
+        {
+            _logger?.LogWarning("Agent '{AgentName}' task timed out after {Timeout} seconds", Name, TimeoutSeconds);
+            throw;
         }
         catch (Exception ex)
         {
-            //_logger.LogError(ex, "Error processing chat request");
+            _logger?.LogError(ex, "Agent '{AgentName}' failed to process task in conversation {ConversationId}", Name, conversationId);
             throw;
         }
     }
@@ -191,6 +186,8 @@ public class FoxAgent
 
     private Agent SpawnSubAgentInternal(Agent parent, AgentConfig config)
     {
+        _logger?.LogInformation("Spawning sub-agent '{SubAgentName}' from parent '{ParentName}'", config.Name, parent.Config.Name);
+        
         var agent = new Agent
         {
             Config = config,
@@ -201,6 +198,7 @@ public class FoxAgent
         if (parent.Memory != null)
         {
             agent.Memory = new Memory.ShortTermMemory();
+            _logger?.LogDebug("Sub-agent '{SubAgentName}' inherited memory from parent", config.Name);
         }
 
         foreach (var tool in parent.Config.Tools)
@@ -212,7 +210,7 @@ public class FoxAgent
         }
 
         parent.SubAgents.Add(agent);
-        //Logger?.LogInformation($"Spawned sub-agent '{config.Name}' from parent '{parent.Config.Name}'");
+        _logger?.LogInformation("Sub-agent '{SubAgentName}' spawned successfully with {ToolCount} tools", config.Name, agent.Config.Tools.Count);
 
         return agent;
     }
@@ -353,7 +351,8 @@ public class AgentBuilder
     private IMemory? _memory;
     private SkillRegistry? _skillRegistry = null;
     private MCPClient? _mcpClient;
-    private IConversationStore _conversationStore;
+    private IConversationStore? _conversationStore;
+    private ILogger<FoxAgent>? _logger;
 
     public AgentBuilder(ToolRegistry toolRegistry)
     {
@@ -429,6 +428,12 @@ public class AgentBuilder
         return this;
     }
 
+    public AgentBuilder WithLogger(ILogger<FoxAgent> logger)
+    {
+        _logger = logger;
+        return this;
+    }
+
 
     private string BuildSystemMessage()
     {
@@ -499,7 +504,7 @@ public class AgentBuilder
                 }
                 catch (Exception ex)
                 {
-                    //_runtime.Logger?.LogWarning(ex, $"Failed to get tools from skill {skill.Name}");
+                    _logger?.LogWarning(ex, "Failed to get tools from skill {SkillName}", skill.Name);
                 }
             }
 
@@ -553,49 +558,6 @@ public class AgentBuilder
         return null;
     }
 
-    private async Task<ToolResult> ExecuteToolAsync2(ToolCall toolCall, Agent agent)
-    {
-        // Handle spawn_agent specially
-        if (toolCall.ToolName == "spawn_agent")
-        {
-            return ToolResult.Ok("Sub-agent spawning is handled by the runtime.");
-        }
-
-        // First, try to get tool from global registry
-        var tool = _runtime.ToolRegistry.Get(toolCall.ToolName);
-
-        // If not found, search in agent's enabled skills (for Composio and other skill-based tools)
-        if (tool == null)
-        {
-            tool = FindToolInAgentSkills(toolCall.ToolName);
-        }
-
-
-        if (tool == null)
-        {
-            // Log available tools for debugging
-            var availableTools = _runtime.ToolRegistry.GetAll();
-            var toolNames = string.Join(", ", availableTools.Select(t => t.Name));
-            var skillToolsInfo = string.Join(", ", agent.EnabledSkills.SelectMany(s => s.GetTools()).Select(t => t.Name));
-            _runtime.Logger?.LogWarning($"Tool '{toolCall.ToolName}' not found. Global tools: {toolNames}. Skill tools: {skillToolsInfo}");
-
-            return ToolResult.Fail($"Tool not found: {toolCall.ToolName}");
-        }
-
-        try
-        {
-            var result = await tool.ExecuteAsync(toolCall.Arguments);
-            toolCall.IsCompleted = true;
-            toolCall.Result = result.Output;
-            return result;
-        }
-        catch (Exception ex)
-        {
-            _runtime.Logger?.LogError(ex, $"Error executing tool {toolCall.ToolName}");
-            return ToolResult.Fail(ex.Message);
-        }
-    }
-
     private async Task<ToolResult> ExecuteToolAsync(string toolName, Dictionary<string, object?> arguments, CancellationToken ct)
     {
         // Handle spawn_agent specially
@@ -612,7 +574,6 @@ public class AgentBuilder
         {
             tool = FindToolInAgentSkills(toolName);
         }
-
 
         if (tool == null)
         {
@@ -632,78 +593,13 @@ public class AgentBuilder
         try
         {
             var result = await tool.ExecuteAsync(arguments);
-            return result;//.Output;
+            return result;
         }
         catch (Exception ex)
         {
-            _runtime.Logger?.LogError(ex, $"Error executing tool {toolName}");
-            throw;
-            return ToolResult.Fail("Error: " + ex.Message);
+            _logger?.LogError(ex, $"Error executing tool {toolName}");
+            return ToolResult.Fail($"Error: {ex.Message}");
         }
-    }
-
-    private static JsonNode BuildJsonSchema1(ToolDefinition tool)
-    {
-        var properties = new JsonObject();
-        var required = new JsonArray();
-
-        foreach (var (name, param) in tool.Parameters)
-        {
-            JsonObject schema;
-
-            // If full schema already provided
-            if (!string.IsNullOrEmpty(param.JsonSchema))
-            {
-                schema = JsonNode.Parse(param.JsonSchema)!.AsObject();
-            }
-            else
-            {
-                schema = new JsonObject
-                {
-                    ["type"] = param.Type
-                };
-
-                if (!string.IsNullOrEmpty(param.Description))
-                    schema["description"] = param.Description;
-
-                if (param.Pattern != null)
-                    schema["pattern"] = param.Pattern;
-
-                if (param.MinLength.HasValue)
-                    schema["minLength"] = param.MinLength.Value;
-
-                if (param.MaxLength.HasValue)
-                    schema["maxLength"] = param.MaxLength.Value;
-
-                if (param.Minimum.HasValue)
-                    schema["minimum"] = param.Minimum.Value;
-
-                if (param.Maximum.HasValue)
-                    schema["maximum"] = param.Maximum.Value;
-
-                if (param.Default != null)
-                    schema["default"] = JsonSerializer.SerializeToNode(param.Default);
-
-                if (param.Example != null)
-                    schema["example"] = JsonSerializer.SerializeToNode(param.Example);
-            }
-
-            properties[name] = schema;
-
-            if (param.Required)
-                required.Add(name);
-        }
-
-        var root = new JsonObject
-        {
-            ["type"] = "object",
-            ["properties"] = properties
-        };
-
-        if (required.Count > 0)
-            root["required"] = required;
-
-        return root;
     }
 
     public static JsonElement BuildJsonSchema(ToolDefinition tool)
@@ -820,13 +716,11 @@ public class AgentBuilder
                 //}
             });
         AIFunction executableDynamicFunc = new DynamicSchemaFunction(tool, schema);
+        _logger?.LogDebug("Created Agent Framework tool: {ToolName}", toolName);
         return executableDynamicFunc;
         //return AIFunctionFactory.CreateDeclaration(toolName, toolDescription, schema);
         //chat  history
         //https://github.com/microsoft/agent-framework/blob/1b7940c91e045c563faafe11d5b03067f4ea7b16/docs/decisions/0015-agent-run-context.md?plain=1#L36
-
-        //_logger.LogInformation("Created Agent Framework tool for MCP tool: {ToolName}", toolName);
-
         return tool;
     }
 
@@ -842,7 +736,6 @@ public class AgentBuilder
         {
             _config.Name = "AgentFox-" + Guid.NewGuid().ToString("N")[..8];
         }
-
 
         var keyCredential = new ApiKeyCredential(apiKey);
         var openAiClient = new OpenAIClient(keyCredential, new OpenAIClientOptions() { Endpoint = new Uri(baseUrl) });
@@ -885,15 +778,21 @@ public class AgentBuilder
             }
         }
 
-
         var systemPrompt = BuildSystemMessage();
         var agent = chatClient.AsAIAgent(systemPrompt, tools: agentTools);
-        var foxAgent = new FoxAgent(agent, _config, _conversationStore);
-        //if (_memory != null)
-        //{
-        //    agent.WithMemory(_memory);
-        //}
+        
+        _logger?.LogInformation("Building FoxAgent '{AgentName}' with {ToolCount} tools", _config.Name, tools.Count);
+        
+        var foxAgent = new FoxAgent(agent, _config, _conversationStore!, _logger);
 
+        // Apply memory configuration if set
+        if (_memory != null)
+        {
+            foxAgent.WithMemory(_memory);
+        }
+
+        _logger?.LogInformation("FoxAgent '{AgentName}' built successfully", _config.Name);
+        
         return foxAgent;
     }
 }
