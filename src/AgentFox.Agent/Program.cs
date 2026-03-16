@@ -90,7 +90,8 @@ class Program
                 "make_directory: Create directories",
                 "delete: Delete files or directories",
                 "get_env_info: Get environment information",
-                "spawn_subagent: Spawn a sub-agent for complex tasks",
+                "spawn_subagent: Spawn a sub-agent for complex tasks (waits for result)",
+                "spawn_background_subagent: Spawn a background sub-agent that runs in a separate lane and announces results back",
                 "load_skill: Load a skill's full guidance on demand",
                 "add_memory: Save an important fact to memory",
                 "search_memory: Search memory for a fact"
@@ -136,6 +137,46 @@ class Program
             .WithMCPClient(mcpClient)
             .WithChatClient(chatClient)
             .Build();
+        
+        // Register spawn sub-agent tool (requires the agent instance)
+        toolRegistry.Register(new SpawnSubAgentTool(agent));
+        
+        // Set up SubAgentManager for background/long-running sub-agents
+        var subAgentConfig = new SubAgentConfiguration
+        {
+            MaxSpawnDepth = 3,
+            MaxConcurrentSubAgents = 10,
+            MaxChildrenPerAgent = 5,
+            DefaultRunTimeoutSeconds = 300,
+            DefaultModel = "gpt-4",
+            DefaultThinkingLevel = "high",
+            AutoCleanupCompleted = true,
+            CleanupDelayMilliseconds = 5000
+        };
+        
+        // Create command queue and agent runtime for sub-agent management
+        var commandQueue = new CommandQueue();
+        var agentRuntime = new DefaultAgentRuntime(toolRegistry, null, new ConsoleLogger<DefaultAgentRuntime>());
+        var subAgentManager = new SubAgentManager(commandQueue, agentRuntime, subAgentConfig, new ConsoleLogger<SubAgentManager>());
+        
+        // Register callback for background sub-agent result announcements
+        subAgentManager.RegisterResultCallback(async (task, result) =>
+        {
+            Console.WriteLine($"\n[BACKGROUND] Sub-agent '{task.SessionKey}' completed with status: {result.Status}");
+            
+            // Create a result announcement command to report back to the main agent
+            // For now, just log the result - the full channel announcement system can be enhanced later
+            return null; // Returning null since we're not wiring up the full command queue processing yet
+        });
+        
+        // Register background sub-agent tool
+        toolRegistry.Register(new SpawnBackgroundSubAgentTool(
+            subAgentManager,
+            parentAgentId: agent.Id,
+            parentSessionKey: $"agent:{agent.Id}:main",
+            parentSpawnDepth: 0,
+            logger: new ConsoleLogger<SpawnBackgroundSubAgentTool>()
+        ));
 
         Console.WriteLine("Type 'help' for available commands, 'exit' to quit.");
         Console.WriteLine();
