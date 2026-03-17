@@ -2,6 +2,7 @@ namespace AgentFox.Models;
 
 using AgentFox.Memory;
 using AgentFox.Skills;
+using System.Diagnostics;
 
 /// <summary>
 /// Represents the role of a message in a conversation
@@ -38,6 +39,7 @@ public class Message
 /// <summary>
 /// Represents a tool that can be called by the agent
 /// </summary>
+[DebuggerDisplay("{Name}")]
 public class ToolDefinition
 {
     public string Name { get; set; } = string.Empty;
@@ -91,6 +93,7 @@ public class AgentConfig
     public int MaxTokens { get; set; } = 4096;
     public double Temperature { get; set; } = 0.7;
     public List<ToolDefinition> Tools { get; set; } = new();
+    public SkillRegistry? SkillRegistry { get; set; }
     public int MaxIterations { get; set; } = 10;
     public Dictionary<string, string> Metadata { get; set; } = new();
 }
@@ -102,6 +105,8 @@ public class Agent
 {
     public AgentConfig Config { get; set; } = new();
     public List<Message> ConversationHistory { get; set; } = new();
+    public IConversationStore ConversationStore { get; set; }
+    public string DefaultConversationId { get; set; }= Guid.NewGuid().ToString("N");
     public IMemory? Memory { get; set; }
     public Agent? Parent { get; set; }
     public List<Agent> SubAgents { get; set; } = new();

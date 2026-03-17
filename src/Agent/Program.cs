@@ -2,7 +2,6 @@ using AgentFox.Agents;
 using AgentFox.LLM;
 using AgentFox.MCP;
 using AgentFox.Memory;
-using AgentFox.Models;
 using AgentFox.Skills;
 using AgentFox.Tools;
 using SystemPromptBuilder = AgentFox.LLM.SystemPromptBuilder;
@@ -18,7 +17,7 @@ internal class ConsoleLogger : ILogger
 {
     public IDisposable BeginScope<TState>(TState state) where TState : notnull => null!;
     public bool IsEnabled(LogLevel logLevel) => true;
-    
+
     public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
     {
         var message = formatter(state, exception);
@@ -51,7 +50,7 @@ class Program
         Console.WriteLine("║         Multi-agent system with memory & channels          ║");
         Console.WriteLine("╚════════════════════════════════════════════════════════════╝");
         Console.WriteLine();
-        
+
         var envName = Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT") ?? "Production"; // Default to Production if not set
 
         // Build configuration
@@ -67,18 +66,18 @@ class Program
         {
             return await RunCommandLineMode(args, configuration);
         }
-        
+
         // Interactive mode
         return await RunInteractiveMode(configuration);
     }
-    
+
     static async Task<int> RunCommandLineMode(string[] args, IConfiguration configuration)
     {
         var workspaceManager = new WorkspaceManager(configuration);
         var toolRegistry = CreateToolRegistry(workspaceManager);
         var skillRegistry = await CreateSkillRegistryAsync(toolRegistry, configuration);
         var mcpClient = await CreateAndInitializeMcpClientAsync(toolRegistry, configuration);
-        
+
         // Build system prompt with dynamic builder + skills index
         var systemPrompt = new SystemPromptBuilder()
             .WithPersona(SystemPromptConfig.AgentPrompts.DeveloperAssistant)
@@ -92,53 +91,57 @@ class Program
                 "Use search_memory to recall past information or facts when requested."
             )
             .Build();
-        
-        var llmProvider = LLMFactory.CreateFromConfiguration(configuration);
+
+        var chatClient = LLMFactory.CreateFromConfiguration(configuration);
+        IConversationStore conversationStore = new InMemoryConversationStore(); // For simplicity, using in-memory store for conversation history
         var memory = new HybridMemory(100, "memory.json");
-        
+
         // Register memory tools into the registry specifically for this agent's memory
         toolRegistry.Register(new AddMemoryTool(memory));
         toolRegistry.Register(new SearchMemoryTool(memory));
-        
+
+
         var agent = new AgentBuilder(toolRegistry)
             .WithName("AgentFox")
             .WithSystemPrompt(systemPrompt)
             .WithMemory(memory)
             .WithSkillsRegistry(skillRegistry)
             .WithMCPClient(mcpClient)
-            .WithLLMProvider(llmProvider)
+            .WithConversationStore(conversationStore)
+            .WithChatClient(chatClient)
             .Build();
-        
+
         var task = string.Join(" ", args);
         Console.WriteLine($"Executing: {task}");
         Console.WriteLine(new string('-', 50));
-        
+
         var result = await agent.ExecuteAsync(task);
-        
+
         Console.WriteLine("Result:");
         Console.WriteLine(result.Output);
-        
+
         if (!string.IsNullOrEmpty(result.Error))
         {
             Console.WriteLine($"Error: {result.Error}");
             return 1;
         }
-        
+
         return result.Success ? 0 : 1;
     }
-    
+
+
     static async Task<int> RunInteractiveMode(IConfiguration configuration)
     {
         var workspaceManager = new WorkspaceManager(configuration);
         var toolRegistry = CreateToolRegistry(workspaceManager);
         var skillRegistry = await CreateSkillRegistryAsync(toolRegistry, configuration);
         var mcpClient = await CreateAndInitializeMcpClientAsync(toolRegistry, configuration);
-        
+
         // Print skills summary at startup
         var manifests = skillRegistry.GetSkillManifests();
         Console.WriteLine($"Skills loaded: {manifests.Count} skill(s) registered.");
         Console.WriteLine();
-        
+
         // Build comprehensive system prompt with all available tools and a compact skills index
         var systemPrompt = new SystemPromptBuilder()
             .WithPersona(SystemPromptConfig.AgentPrompts.DeveloperAssistant)
@@ -151,7 +154,8 @@ class Program
                 "make_directory: Create directories",
                 "delete: Delete files or directories",
                 "get_env_info: Get environment information",
-                "spawn_subagent: Spawn a sub-agent for complex tasks",
+                "spawn_subagent: Spawn a sub-agent for complex tasks (waits for result)",
+                "spawn_background_subagent: Spawn a background sub-agent that runs in a separate lane and announces results back",
                 "load_skill: Load a skill's full guidance on demand",
                 "add_memory: Save an important fact to memory",
                 "search_memory: Search memory for a fact"
@@ -178,115 +182,107 @@ class Program
                 "For Composio integrations, provide clear examples and documentation on usage"
             )
             .Build();
-        
-        var llmProvider = LLMFactory.CreateFromConfiguration(configuration);
+
+        var chatClient = LLMFactory.CreateFromConfiguration(configuration);
         var memory = new HybridMemory(100, "memory.json");
-        
+        IConversationStore conversationStore = new InMemoryConversationStore(); // For simplicity, using in-memory store for conversation history
+
         // Register memory tools into the registry specifically for this agent's memory
         toolRegistry.Register(new AddMemoryTool(memory));
         toolRegistry.Register(new SearchMemoryTool(memory));
-        
+
         var agent = new AgentBuilder(toolRegistry)
             .WithName("AgentFox")
             .WithSystemPrompt(systemPrompt)
             .WithMemory(memory)
+            .WithLogger(new ConsoleLogger<FoxAgent>())
+            .WithConversationStore(conversationStore)
+            .WithCompactionFromConfig(configuration)
             .WithSkillsRegistry(skillRegistry)
             .WithMCPClient(mcpClient)
-            .WithLLMProvider(llmProvider)
+            .WithChatClient(chatClient)
             .Build();
-        
+
+        // Register spawn sub-agent tool (requires the agent instance)
+        toolRegistry.Register(new SpawnSubAgentTool(agent));
+
+        // Set up SubAgentManager for background/long-running sub-agents
+        var subAgentConfig = new SubAgentConfiguration
+        {
+            MaxSpawnDepth = 3,
+            MaxConcurrentSubAgents = 10,
+            MaxChildrenPerAgent = 5,
+            DefaultRunTimeoutSeconds = 300,
+            DefaultModel = "gpt-4",
+            DefaultThinkingLevel = "high",
+            AutoCleanupCompleted = true,
+            CleanupDelayMilliseconds = 5000
+        };
+
+        // Create command queue and agent runtime for sub-agent management
+        var commandQueue = new CommandQueue();
+        var agentRuntime = new DefaultAgentRuntime(toolRegistry, null, new ConsoleLogger<DefaultAgentRuntime>());
+        var subAgentManager = new SubAgentManager(commandQueue, agentRuntime, subAgentConfig, new ConsoleLogger<SubAgentManager>());
+
+        // Register callback for background sub-agent result announcements
+        subAgentManager.RegisterResultCallback(async (task, result) =>
+        {
+            Console.WriteLine($"\n[BACKGROUND] Sub-agent '{task.SessionKey}' completed with status: {result.Status}");
+
+            // Create a result announcement command to report back to the main agent
+            // For now, just log the result - the full channel announcement system can be enhanced later
+            return null; // Returning null since we're not wiring up the full command queue processing yet
+        });
+
+        // Register background sub-agent tool
+        toolRegistry.Register(new SpawnBackgroundSubAgentTool(
+            subAgentManager,
+            parentAgentId: agent.Id,
+            parentSessionKey: $"agent:{agent.Id}:main",
+            parentSpawnDepth: 0,
+            logger: new ConsoleLogger<SpawnBackgroundSubAgentTool>()
+        ));
+
         Console.WriteLine("Type 'help' for available commands, 'exit' to quit.");
         Console.WriteLine();
-        
+
         while (true)
         {
             Console.Write("> ");
             var input = Console.ReadLine();
-            
+
             if (string.IsNullOrWhiteSpace(input))
                 continue;
-            
+
             var trimmed = input.Trim();
             var lower = trimmed.ToLower();
-            
+
             if (lower == "exit")
             {
                 Console.WriteLine("Goodbye!");
                 break;
             }
-            
-            if (lower == "help")
-            {
-                ShowHelp();
-                continue;
-            }
-            
-            if (lower == "status")
-            {
-                ShowStatus(agent);
-                continue;
-            }
-            
-            if (lower == "history")
-            {
-                ShowHistory(agent);
-                continue;
-            }
-            
-            if (lower == "clear")
-            {
-                agent.ClearHistory();
-                Console.WriteLine("History cleared.");
-                continue;
-            }
-            
-            if (lower == "memory")
-            {
-                await ShowMemory(agent);
-                continue;
-            }
-            
-            if (lower == "tools")
-            {
-                ShowTools(toolRegistry);
-                continue;
-            }
-            
-            // skills — list all registered skills
-            if (lower == "skills")
-            {
-                ShowSkills(skillRegistry);
-                continue;
-            }
-            
-            // skill <name> — show detail for a specific skill
-            if (lower.StartsWith("skill "))
-            {
-                var skillName = trimmed.Substring("skill ".Length).Trim();
-                ShowSkillDetail(skillRegistry, skillName);
-                continue;
-            }
-            
+
             // Execute task
             Console.WriteLine();
             var result = await agent.ExecuteAsync(trimmed);
-            
+
             Console.WriteLine(result.Output);
             Console.WriteLine();
-            
+
             if (result.SpawnedSubAgents.Count > 0)
             {
                 Console.WriteLine($"Spawned {result.SpawnedSubAgents.Count} sub-agent(s)");
             }
         }
-        
+
         return 0;
     }
-    
+
     static ToolRegistry CreateToolRegistry(WorkspaceManager workspaceManager)
     {
         var registry = new ToolRegistry();
-        
+
         // Register built-in tools
         registry.Register(new ShellCommandTool(workspaceManager));
         registry.Register(new ReadFileTool(workspaceManager));
@@ -296,14 +292,14 @@ class Program
         registry.Register(new MakeDirectoryTool(workspaceManager));
         registry.Register(new DeleteTool(workspaceManager));
         registry.Register(new GetEnvironmentInfoTool());
-        
+
         // Register custom tools
         registry.Register(new WebSearchTool());
         registry.Register(new FetchUrlTool());
         registry.Register(new CalculatorTool());
         registry.Register(new UuidTool());
         registry.Register(new TimestampTool());
-        
+
         return registry;
     }
 
@@ -357,7 +353,7 @@ class Program
         // debugging, api_integration, database, testing, deployment) and also
         // registers LoadSkillTool into the toolRegistry for lazy on-demand loading.
         var skillRegistry = new SkillRegistry(toolRegistry);
-        
+
         // Initialize Composio skills if API key is configured
         var composioApiKey = configuration["Composio:ApiKey"];
         if (!string.IsNullOrEmpty(composioApiKey) && !composioApiKey.Contains("your-composio"))
@@ -370,11 +366,11 @@ class Program
                     skillRegistry: skillRegistry,
                     logger: logger
                 );
-                
+
                 // Get toolkit filter if specified
                 var toolkits = configuration.GetSection("Composio:Toolkits")
                     .Get<List<string>>() ?? new();
-                
+
                 if (toolkits.Any())
                 {
                     await composioProvider.InitializeAsync(filterToolkitIds: toolkits.ToArray());
@@ -383,7 +379,7 @@ class Program
                 {
                     await composioProvider.InitializeAsync();
                 }
-                
+
                 Console.WriteLine("✓ Composio skills initialized successfully");
             }
             catch (Exception ex)
@@ -392,10 +388,10 @@ class Program
                 // Continue without Composio rather than failing startup
             }
         }
-        
+
         return skillRegistry;
     }
-    
+
     static void ShowHelp()
     {
         Console.WriteLine(@"
@@ -429,7 +425,7 @@ Composio Integration:
   - And many more integrations...
 ");
     }
-    
+
     static void ShowStatus(FoxAgent agent)
     {
         var info = agent.GetInfo();
@@ -447,44 +443,13 @@ Composio Integration:
             Last Active: {info.LastActiveAt:yyyy-MM-dd HH:mm:ss}
             """);
     }
-    
-    static void ShowHistory(FoxAgent agent)
-    {
-        var history = agent.GetHistory();
-        Console.WriteLine($"Conversation History ({history.Count} messages):");
-        Console.WriteLine(new string('-', 50));
-        
-        foreach (var msg in history)
-        {
-            Console.WriteLine($"[{msg.Timestamp:HH:mm:ss}] {msg.Role}: {msg.Content}");
-            Console.WriteLine();
-        }
-    }
-    
-    static async Task ShowMemory(FoxAgent agent)
-    {
-        if (agent.Memory == null)
-        {
-            Console.WriteLine("No memory configured.");
-            return;
-        }
-        
-        var memories = await agent.Memory.GetRecentAsync(10);
-        Console.WriteLine($"Agent Memory ({memories.Count} recent entries):");
-        Console.WriteLine(new string('-', 50));
-        
-        foreach (var mem in memories)
-        {
-            Console.WriteLine($"[{mem.Timestamp:HH:mm:ss}] {mem.Type}: {mem.Content}");
-        }
-    }
-    
+
     static void ShowTools(ToolRegistry registry)
     {
         var tools = registry.GetAll();
         Console.WriteLine($"Available Tools ({tools.Count}):");
         Console.WriteLine(new string('-', 50));
-        
+
         foreach (var tool in tools)
         {
             Console.WriteLine($"  {tool.Name}");
@@ -499,7 +464,7 @@ Composio Integration:
     static void ShowSkills(SkillRegistry skillRegistry)
     {
         var manifests = skillRegistry.GetSkillManifests();
-        
+
         if (manifests.Count == 0)
         {
             Console.WriteLine("No skills registered.");

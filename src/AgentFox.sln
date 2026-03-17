@@ -1,8 +1,8 @@
 Microsoft Visual Studio Solution File, Format Version 12.00
-# Visual Studio Version 17
-VisualStudioVersion = 17.5.2.0
+# Visual Studio Version 18
+VisualStudioVersion = 18.5.11605.296 insiders
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AgentFox", "AgentFox.csproj", "{BDC49E80-C5E9-F870-9E5F-F4A8B9900BB1}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AgentFox", "Agent\AgentFox.csproj", "{BDC49E80-C5E9-F870-9E5F-F4A8B9900BB1}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
