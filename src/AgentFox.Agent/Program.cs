@@ -2,7 +2,6 @@
 using AgentFox.LLM;
 using AgentFox.MCP;
 using AgentFox.Memory;
-using AgentFox.Models;
 using AgentFox.Skills;
 using AgentFox.Tools;
 using SystemPromptBuilder = AgentFox.LLM.SystemPromptBuilder;
@@ -133,6 +132,7 @@ class Program
             .WithMemory(memory)
             .WithLogger(new ConsoleLogger<FoxAgent>())
             .WithConversationStore(conversationStore)
+            .WithCompactionFromConfig(configuration)
             .WithSkillsRegistry(skillRegistry)
             .WithMCPClient(mcpClient)
             .WithChatClient(chatClient)

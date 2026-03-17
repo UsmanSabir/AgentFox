@@ -34,7 +34,7 @@
       <Content Update="appsettings.json">
           <CopyToOutputDirectory>Always</CopyToOutputDirectory>
       </Content>
-      <Content Update="appsettings.*.json">
+      <Content Update="appsettings.*.json" Condition="Exists('appsettings.*.json')">
           <CopyToOutputDirectory>Always</CopyToOutputDirectory>
           <DependentUpon>appsettings.json</DependentUpon>
       </Content>

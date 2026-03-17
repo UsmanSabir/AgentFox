@@ -1,4 +1,3 @@
-using System.Diagnostics.CodeAnalysis;
 using AgentFox.LLM;
 using AgentFox.MCP;
 using AgentFox.Memory;
@@ -595,11 +594,9 @@ public class AgentBuilder
         {
             _logger?.LogInformation("Creating summarization chat client: Provider={Provider}, Model={Model}, BaseUrl={BaseUrl}",
                 modelConfig.Provider, modelConfig.Model, modelConfig.BaseUrl);
-            
-            // Note: In a full implementation, this would create the actual chat client
-            // using LLMFactory or similar. For now, return null to fall back to main client.
-            // The actual implementation would use: return LLMFactory.CreateChatClient(...)
-            return null;
+
+            var chatClient = LLMFactory.CreateChatClient(modelConfig);
+            return chatClient;
         }
         catch (Exception ex)
         {
