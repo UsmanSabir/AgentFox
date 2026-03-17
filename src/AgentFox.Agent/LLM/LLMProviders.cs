@@ -51,6 +51,20 @@ public class LLMFactory
                     //provider = CreateOpenAI(apiKey, baseUrl, timeout, customHeaders);
                     break;
                 }
+            case "openrouter":
+            {
+                var apiKey = configuration["LLM:ApiKey"] ?? Environment.GetEnvironmentVariable("OPENROUTER_API_KEY");
+                var baseUrl = configuration["LLM:BaseUrl"] ?? "https://openrouter.ai/api/v1";
+                var model = configuration["LLM:Model"];
+
+                var keyCredential = new ApiKeyCredential(apiKey);
+                var openAiClient = new OpenAIClient(keyCredential, new OpenAIClientOptions() { Endpoint = new Uri(baseUrl), NetworkTimeout = timeout });
+                var chatClient = openAiClient.GetChatClient(model);
+
+                provider = chatClient.AsIChatClient();
+                //provider = CreateOpenAI(apiKey, baseUrl, timeout, customHeaders);
+                break;
+            }
             case "anthropic":
                 {
                     var apiKey = configuration["LLM:ApiKey"] ?? Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY");
@@ -66,23 +80,6 @@ public class LLMFactory
                         client = new() { ApiKey = apiKey, Timeout = timeout };
 
                     provider = client.AsIChatClient(model);
-                    break;
-                }
-            case "ollama":
-                {
-                    var baseUrl = configuration["LLM:BaseUrl"] ?? "http://localhost:11434";
-                    var model = configuration["LLM:Model"];
-                    var apiKey = configuration["LLM:ApiKey"] ?? Environment.GetEnvironmentVariable("OLLAMA_API_KEY");
-
-                    if (string.IsNullOrEmpty(model))
-                        throw new InvalidOperationException("Ollama Provider requires Model name.");
-                    
-                    var ollamaApiClient = new OllamaApiClient(new OllamaApiClient.Configuration()
-                    {
-                        Model = model,
-                        Uri = new Uri(baseUrl)
-                    });
-                    provider = ollamaApiClient;
                     break;
                 }
             case "azureopenai":
@@ -119,13 +116,19 @@ public class LLMFactory
                     provider = client.AsIChatClient(model);
                     break;
                 }
+            case "ollama":
             default:
                 {
-                    var baseUrl = configuration["LLM:BaseUrl"];
+                    var baseUrl = configuration["LLM:BaseUrl"] ?? "http://localhost:11434";
                     if (string.IsNullOrEmpty(baseUrl))
                         baseUrl = "http://localhost:11434"; // Ollama default only
 
-                    var model = configuration["LLM:Model"] ?? "llama2";
+                    var model = configuration["LLM:Model"] ?? "qwen3.5:4b";
+                    //var apiKey = configuration["LLM:ApiKey"] ?? Environment.GetEnvironmentVariable("OLLAMA_API_KEY");
+
+                    if (string.IsNullOrEmpty(model))
+                        throw new InvalidOperationException("Ollama Provider requires Model name.");
+
                     var ollamaApiClient = new OllamaApiClient(new OllamaApiClient.Configuration()
                     {
                         Model = model,
