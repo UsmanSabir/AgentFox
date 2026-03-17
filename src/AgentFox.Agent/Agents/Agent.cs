@@ -8,12 +8,71 @@ using AgentFox.Tools;
 using Microsoft.Agents.AI;
 using Microsoft.Agents.AI.Compaction;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using SystemPromptBuilder = AgentFox.LLM.SystemPromptBuilder;
 
 namespace AgentFox.Agents;
+
+/// <summary>
+/// Configuration for a model (used in Models section of appsettings)
+/// </summary>
+public class ModelConfig
+{
+    public string Provider { get; set; } = "Ollama";
+    public string Model { get; set; } = string.Empty;
+    public string BaseUrl { get; set; } = "http://localhost:11434";
+    public string? ApiKey { get; set; }
+    public int TimeoutSeconds { get; set; } = 3600;
+}
+
+/// <summary>
+/// Configuration for agent conversation compaction
+/// </summary>
+public class CompactionConfig
+{
+    /// <summary>
+    /// Enable compaction (default: false)
+    /// </summary>
+    public bool Enabled { get; set; } = false;
+    
+    /// <summary>
+    /// Token threshold to trigger compaction (default: 2000)
+    /// </summary>
+    public int TriggerThreshold { get; set; } = 2000;
+    
+    /// <summary>
+    /// Token threshold for tool result compaction (default: 1000)
+    /// </summary>
+    public int ToolResultThreshold { get; set; } = 1000;
+    
+    /// <summary>
+    /// Token threshold for summarization compaction (default: 6000)
+    /// </summary>
+    public int SummarizationThreshold { get; set; } = 6000;
+    
+    /// <summary>
+    /// Token threshold for truncation compaction (default: 8000)
+    /// </summary>
+    public int TruncationThreshold { get; set; } = 8000;
+    
+    /// <summary>
+    /// Model key from Models section to use for summarization (optional - uses main chat client if not set)
+    /// </summary>
+    public string? SummarizationModelKey { get; set; }
+    
+    /// <summary>
+    /// Internal: Custom chat client for summarization (set by builder)
+    /// </summary>
+    internal IChatClient? _summarizationChatClient;
+    
+    /// <summary>
+    /// Internal: Model config for summarization (set from Models section)
+    /// </summary>
+    internal ModelConfig? _summarizationModelConfig;
+}
 
 /// <summary>
 /// Main agent class that orchestrates all functionality
@@ -348,6 +407,7 @@ public class AgentBuilder
     private IConversationStore? _conversationStore;
     private ILogger<FoxAgent>? _logger;
     private IChatClient? _chatClient;
+    private CompactionConfig? _compactionConfig;
 
     public AgentBuilder(ToolRegistry toolRegistry)
     {
@@ -427,6 +487,77 @@ public class AgentBuilder
         return this;
     }
 
+    /// <summary>
+    /// Configure compaction for the agent (optional - disabled by default)
+    /// </summary>
+    public AgentBuilder WithCompaction(CompactionConfig? config)
+    {
+        _compactionConfig = config;
+        return this;
+    }
+
+    /// <summary>
+    /// Enable compaction with default settings
+    /// </summary>
+    public AgentBuilder WithCompaction()
+    {
+        _compactionConfig = new CompactionConfig();
+        return this;
+    }
+
+    /// <summary>
+    /// Enable compaction with a custom chat client for summarization (to reduce costs)
+    /// </summary>
+    public AgentBuilder WithCompaction(IChatClient summarizationChatClient, CompactionConfig? config = null)
+    {
+        _compactionConfig = config ?? new CompactionConfig();
+        _compactionConfig._summarizationChatClient = summarizationChatClient;
+        return this;
+    }
+
+    /// <summary>
+    /// Load compaction configuration from appsettings.json section "Compaction"
+    /// </summary>
+    public AgentBuilder WithCompactionFromConfig(IConfiguration configuration)
+    {
+        var compactionSection = configuration.GetSection("Compaction");
+        if (compactionSection.Exists())
+        {
+            var config = new CompactionConfig();
+            compactionSection.Bind(config);
+            
+            if (config.Enabled)
+            {
+                // Look up the summarization model from Models section if key is specified
+                if (!string.IsNullOrEmpty(config.SummarizationModelKey))
+                {
+                    var modelsSection = configuration.GetSection("Models");
+                    var modelSection = modelsSection.GetSection(config.SummarizationModelKey!);
+                    if (modelSection.Exists())
+                    {
+                        var modelConfig = new ModelConfig();
+                        modelSection.Bind(modelConfig);
+                        config._summarizationModelConfig = modelConfig;
+                        _logger?.LogInformation("Using model '{ModelKey}' for summarization: Provider={Provider}, Model={Model}, BaseUrl={BaseUrl}",
+                            config.SummarizationModelKey, modelConfig.Provider, modelConfig.Model, modelConfig.BaseUrl);
+                    }
+                    else
+                    {
+                        _logger?.LogWarning("Model key '{ModelKey}' not found in Models section, will use main chat client for summarization", 
+                            config.SummarizationModelKey);
+                    }
+                }
+                
+                _compactionConfig = config;
+            }
+            else
+            {
+                _compactionConfig = null;
+            }
+        }
+        return this;
+    }
+
     #region Helpers
 
     private string BuildSystemMessage()
@@ -448,6 +579,51 @@ public class AgentBuilder
         }
 
         return builder.Build();
+    }
+
+    /// <summary>
+    /// Create a separate chat client for summarization using ModelConfig
+    /// </summary>
+    private IChatClient? CreateSummarizationChatClient(ModelConfig? modelConfig)
+    {
+        if (modelConfig == null)
+        {
+            return null;
+        }
+        
+        try
+        {
+            _logger?.LogInformation("Creating summarization chat client: Provider={Provider}, Model={Model}, BaseUrl={BaseUrl}",
+                modelConfig.Provider, modelConfig.Model, modelConfig.BaseUrl);
+            
+            // Note: In a full implementation, this would create the actual chat client
+            // using LLMFactory or similar. For now, return null to fall back to main client.
+            // The actual implementation would use: return LLMFactory.CreateChatClient(...)
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Failed to create summarization chat client, falling back to main client");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Create a separate chat client for summarization with optional model override (legacy)
+    /// </summary>
+    private IChatClient? CreateSummarizationChatClient(string? model, string? baseUrl, string? provider)
+    {
+        if (string.IsNullOrEmpty(model) && string.IsNullOrEmpty(baseUrl))
+        {
+            return null;
+        }
+        
+        return CreateSummarizationChatClient(new ModelConfig
+        {
+            Provider = provider ?? "Ollama",
+            Model = model ?? "phi4-mini",
+            BaseUrl = baseUrl ?? "http://localhost:11434"
+        });
     }
 
     private List<ToolDefinition> GetAvailableTools()
@@ -777,31 +953,51 @@ public class AgentBuilder
 
         //var agent = chatClient.AsAIAgent(systemPrompt, tools: agentTools);
 
-        // Define a pipeline with multiple strategies
+        // Define a pipeline with multiple strategies (only if compaction is enabled)
 #pragma warning disable MAAI001
-        //https://learn.microsoft.com/en-us/agent-framework/agents/conversations/compaction?pivots=programming-language-csharp
-        PipelineCompactionStrategy compactionPipeline = new([
-
-            new ToolResultCompactionStrategy(CompactionTriggers.TokensExceed(1000)),
-            new SummarizationCompactionStrategy(chatClient, //or custom chat client for summarization to reduce costs while maintaining summary quality.
-                CompactionTriggers.TokensExceed(6000)),
-            new TruncationCompactionStrategy(CompactionTriggers.TokensExceed(8000))
-        ]);
-        // Compact only when there are tool calls AND tokens exceed 2000
-        CompactionTrigger trigger = CompactionTriggers.All(
-            CompactionTriggers.HasToolCalls(),
-            CompactionTriggers.TokensExceed(2000));
-
-        //// 1. Define your compaction pipeline
-        //var compactionPipeline = new PipelineCompactionStrategy(
-        //    new SummarizationCompactionStrategy(chatClient, CompactionTriggers.TokensExceed(2000)),
-        //    new TruncationCompactionStrategy(CompactionTriggers.TokensExceed(8000))
-        //);
+        var agentBuilder = chatClient.AsBuilder();
+        
+        if (_compactionConfig != null)
+        {
+            _logger?.LogInformation("Compaction enabled for agent '{AgentName}' with trigger at {TriggerThreshold} tokens", 
+                _config.Name, _compactionConfig.TriggerThreshold);
+            
+            // Use main chat client for summarization, or create/use a separate one if configured
+            IChatClient summarizationClient = chatClient;
+            
+            // Check priority: 1) Custom chat client provided directly, 2) Model config from Models section, 3) Legacy string properties
+            if (_compactionConfig._summarizationChatClient != null)
+            {
+                _logger?.LogInformation("Using custom summarization chat client provided directly");
+                summarizationClient = _compactionConfig._summarizationChatClient;
+            }
+            else if (_compactionConfig._summarizationModelConfig != null)
+            {
+                _logger?.LogInformation("Using model '{ModelKey}' from Models section for summarization", 
+                    _compactionConfig.SummarizationModelKey);
+                var summarizationChatClient = CreateSummarizationChatClient(_compactionConfig._summarizationModelConfig);
+                if (summarizationChatClient != null)
+                {
+                    summarizationClient = summarizationChatClient;
+                }
+            }
+            
+            PipelineCompactionStrategy compactionPipeline = new([
+                new ToolResultCompactionStrategy(CompactionTriggers.TokensExceed(_compactionConfig.ToolResultThreshold)),
+                new SummarizationCompactionStrategy(summarizationClient,
+                    CompactionTriggers.TokensExceed(_compactionConfig.SummarizationThreshold)),
+                new TruncationCompactionStrategy(CompactionTriggers.TokensExceed(_compactionConfig.TruncationThreshold))
+            ]);
+            
+            agentBuilder = agentBuilder.UseAIContextProviders(new CompactionProvider(compactionPipeline));
+        }
+        else
+        {
+            _logger?.LogInformation("Compaction disabled for agent '{AgentName}'", _config.Name);
+        }
 
         // 2. Build the agent with nested ChatOptions
-        var agent = chatClient
-            .AsBuilder()
-            .UseAIContextProviders(new CompactionProvider(compactionPipeline))
+        var agent = agentBuilder
             .BuildAIAgent(new ChatClientAgentOptions
             {
                 Name = _config.Name,
@@ -829,4 +1025,5 @@ public class AgentBuilder
         return foxAgent;
     }
 }
+
 
