@@ -18,22 +18,28 @@ public static class MarkdownSessionReader
         string? line;
 
         bool inYaml = false;
-        long bodyStart = 0;
+        long bytesRead = 0;
+
+        // We need to account for the encoding's preamble (BOM) if it exists
+        var preamble = Encoding.UTF8.GetPreamble();
+        bytesRead += preamble.Length;
 
         while ((line = await reader.ReadLineAsync()) != null)
         {
+            // Calculate the length of the line in bytes including the newline character
+            // Note: Using UTF8.GetByteCount to handle special characters correctly
+            int lineByteCount = Encoding.UTF8.GetByteCount(line + Environment.NewLine);
+            bytesRead += lineByteCount;
+
             if (!inYaml)
             {
-                if (line.Trim() == "---")
-                {
-                    inYaml = true;
-                }
+                if (line.Trim() == "---") inYaml = true;
                 continue;
             }
 
             if (line.Trim() == "---")
             {
-                bodyStart = fs.Position; // 👈 critical: where body starts
+                // Now bytesRead points exactly to the start of the next line (the body)
                 break;
             }
 
@@ -46,8 +52,9 @@ public static class MarkdownSessionReader
 
         var metadata = deserializer.Deserialize<T>(yamlBuilder.ToString());
 
-        return (metadata, bodyStart);
+        return (metadata, bytesRead);
     }
+
 
     public static async IAsyncEnumerable<string> ReadBodyLinesAsync(string filePath, long startPosition)
     {

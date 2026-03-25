@@ -101,13 +101,15 @@ public class FoxAgent
     public string Role { get; set; } = "default";
 
 
-    public FoxAgent(ChatClientAgent agent, AgentConfig config, IConversationStore store, ILogger<FoxAgent>? logger = null)
+    public FoxAgent(ChatClientAgent agent, AgentConfig config, IConversationStore store, string defaultConversationId,
+        ILogger<FoxAgent>? logger = null)
     {
         _agent = new Agent
         {
             Config = config,
             Status = AgentStatus.Idle,
-            ConversationStore = store
+            ConversationStore = store,
+            DefaultConversationId = defaultConversationId
         };
         _chatAgent = agent;
         _logger = logger;
@@ -173,17 +175,17 @@ public class FoxAgent
             //append immediately (no full save)
             //await _sessionStore.AppendMessageAsync(conversationId, task);
 
-            var thread = ConversationStore.GetThread(conversationId);
+            var session = ConversationStore.GetSession(conversationId);
 
-            if (thread == null)
+            if (session == null)
             {
                 _logger?.LogDebug("Creating new conversation thread for {ConversationId}", conversationId);
-                thread = await agent.CreateSessionAsync(timeoutToken);
-                ConversationStore.SaveThread(conversationId, thread);
+                session = await agent.CreateSessionAsync(timeoutToken);
+                ConversationStore.SaveSession(conversationId, session);
             }
 
             var runOptions = new AgentRunOptions();
-            var response = await agent.RunAsync(task, thread, options: runOptions, cancellationToken: timeoutToken);
+            var response = await agent.RunAsync(task, session, options: runOptions, cancellationToken: timeoutToken);
 
             var responseText = response.Text ?? "I apologize, but I wasn't able to generate a response.";
             _logger?.LogInformation("Agent '{AgentName}' completed task in conversation {ConversationId}", Name, conversationId);
@@ -195,7 +197,7 @@ public class FoxAgent
             //};
 
             //session.Messages.Add(assistantMsg);
-            JsonElement jsonElement = await agent.SerializeSessionAsync(thread);
+            //JsonElement jsonElement = await agent.SerializeSessionAsync(thread);
             // 🔥 append response
             //await _sessionStore.AppendMessageAsync(conversationId, assistantMsg);
 
@@ -238,7 +240,7 @@ public class FoxAgent
         };
 
         var subAgent = SpawnSubAgentInternal(_agent, agentConfig);
-        var foxSubAgent = new FoxAgent(_chatAgent, subAgent.Config, ConversationStore)
+        var foxSubAgent = new FoxAgent(_chatAgent, subAgent.Config, ConversationStore, Guid.NewGuid().ToString("N"))
         {
             Role = config.Role ?? Role  // Inherit role from parent by default
         };
@@ -304,7 +306,7 @@ public class FoxAgent
     /// </summary>
     //public List<Message> GetHistory()
     //{
-    //    return _conversationStore.GetThread(_agent.DefaultConversationId).StateBag  // _agent.ConversationHistory.ToList();
+    //    return _conversationStore.GetSession(_agent.DefaultConversationId).StateBag  // _agent.ConversationHistory.ToList();
     //}
 
     /// <summary>
@@ -937,9 +939,7 @@ public class AgentBuilder
         // Return the dynamic schema instead of the one inferred from the delegate
         public override JsonElement JsonSchema => customSchema;
     }
-
-    const string GlobalMainSessionDefaultKey = "Main";
-
+    
     private async Task LoadMainSession(ChatClientAgent agent)
     {
         //// 1. Try to find the existing JSON state in your DB for this fixed key
@@ -1077,7 +1077,8 @@ public class AgentBuilder
 
         _logger?.LogInformation("Building FoxAgent '{AgentName}' with {ToolCount} tools", _config.Name, tools.Count);
 
-        var foxAgent = new FoxAgent(agent, _config, _conversationStore!, _logger);
+        
+        var foxAgent = new FoxAgent(agent, _config, _conversationStore!, "main", _logger);
 
         // Apply memory configuration if set
         if (_memory != null)
