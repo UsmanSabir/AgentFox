@@ -185,7 +185,10 @@ public class FoxAgent
             if (session == null)
             {
                 _logger?.LogDebug("Creating new conversation thread for {ConversationId}", conversationId);
-                session = await agent.CreateSessionAsync(conversationId, cancellationToken);
+                session = await agent.CreateSessionAsync(cancellationToken);
+                session.StateBag.SetValue("ConversationId", conversationId);
+                session.StateBag.SetValue("CreatedAt", DateTime.UtcNow.ToString("O")); //ISO format
+
                 ConversationStore.SaveSession(conversationId, session);
             }
 

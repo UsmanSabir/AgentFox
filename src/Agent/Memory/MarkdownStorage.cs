@@ -33,7 +33,16 @@ public class MarkdownChatHistoryProvider : ChatHistoryProvider
         _sessionState = new ProviderSessionState<MarkdownStorageState>(
             stateInitializer: session =>
             {
-                var id = Guid.NewGuid().ToString();
+                string? id=null;
+                if (session.StateBag.TryGetValue<string>("ConversationId", out var sessionId))
+                {
+                    id = sessionId;
+                }
+
+                if (string.IsNullOrWhiteSpace(id))
+                {
+                    id = Guid.NewGuid().ToString();
+                }
                 //session.StateBag.SetValue("ConversationId", id);
                 //session.StateBag.SetValue("CreatedAt", DateTime.UtcNow.ToString("O")); //ISO format
                 var stateExist = session.StateBag.TryGetValue<MarkdownStorageState>("MarkdownHistory", out var state);
