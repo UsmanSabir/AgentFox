@@ -5,7 +5,9 @@ namespace AgentFox.Memory;
 
 public interface IConversationStore
 {
+    [Obsolete]
     AgentSession? GetSession(string conversationId);
+    [Obsolete]
     void SaveSession(string conversationId, AgentSession thread);
 }
 

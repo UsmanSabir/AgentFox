@@ -114,6 +114,7 @@ class Program
             .WithConversationStore(conversationStore)
             .WithHistoryProvider(chatHistoryProvider)
             .WithChatClient(chatClient)
+            .WithWorkspaceManager(workspaceManager)
             .Build();
 
         var task = string.Join(" ", args);
@@ -209,6 +210,7 @@ class Program
             .WithCompactionFromConfig(configuration)
             .WithSkillsRegistry(skillRegistry)
             .WithMCPClient(mcpClient)
+            .WithWorkspaceManager(workspaceManager)
             .WithChatClient(chatClient)
             .Build();
 

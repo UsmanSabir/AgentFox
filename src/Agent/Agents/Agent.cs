@@ -82,6 +82,7 @@ public class FoxAgent
     private readonly Agent _agent;
     private readonly ChatClientAgent _chatAgent;
     private readonly ILogger<FoxAgent>? _logger;
+    private WorkspaceManager _workspaceManager;
 
     public string Id => _agent.Config.Id;
     public string Name => _agent.Config.Name;
@@ -101,8 +102,7 @@ public class FoxAgent
     public string Role { get; set; } = "default";
 
 
-    public FoxAgent(ChatClientAgent agent, AgentConfig config, IConversationStore store, string defaultConversationId,
-        ILogger<FoxAgent>? logger = null)
+    public FoxAgent(ChatClientAgent agent, AgentConfig config, IConversationStore store, string defaultConversationId, WorkspaceManager workspaceManager, ILogger<FoxAgent>? logger = null)
     {
         _agent = new Agent
         {
@@ -112,6 +112,7 @@ public class FoxAgent
             DefaultConversationId = defaultConversationId
         };
         _chatAgent = agent;
+        _workspaceManager = workspaceManager;
         _logger = logger;
     }
 
@@ -176,11 +177,15 @@ public class FoxAgent
             //await _sessionStore.AppendMessageAsync(conversationId, task);
 
             var session = ConversationStore.GetSession(conversationId);
+            var path = _workspaceManager.ResolvePath($"{conversationId}.md");
+            AgentSession agentSession;
+            if (File.Exists(path))
+                session = await MarkdownSessionReader.LoadSessionAsync(path, agent);
 
             if (session == null)
             {
                 _logger?.LogDebug("Creating new conversation thread for {ConversationId}", conversationId);
-                session = await agent.CreateSessionAsync(timeoutToken);
+                session = await agent.CreateSessionAsync(conversationId, cancellationToken);
                 ConversationStore.SaveSession(conversationId, session);
             }
 
@@ -240,7 +245,7 @@ public class FoxAgent
         };
 
         var subAgent = SpawnSubAgentInternal(_agent, agentConfig);
-        var foxSubAgent = new FoxAgent(_chatAgent, subAgent.Config, ConversationStore, Guid.NewGuid().ToString("N"))
+        var foxSubAgent = new FoxAgent(_chatAgent, subAgent.Config, ConversationStore, Guid.NewGuid().ToString("N"), _workspaceManager)
         {
             Role = config.Role ?? Role  // Inherit role from parent by default
         };
@@ -441,6 +446,7 @@ public class AgentBuilder
     private IChatClient? _chatClient;
     private CompactionConfig? _compactionConfig;
     private MarkdownChatHistoryProvider _chatHistoryProvider;
+    private WorkspaceManager _workspaceManager;
 
     public AgentBuilder(ToolRegistry toolRegistry)
     {
@@ -518,6 +524,12 @@ public class AgentBuilder
     public AgentBuilder WithLogger(ILogger<FoxAgent> logger)
     {
         _logger = logger;
+        return this;
+    }
+
+    public AgentBuilder WithWorkspaceManager(WorkspaceManager workspaceManager)
+    {
+        _workspaceManager = workspaceManager;
         return this;
     }
 
@@ -1078,7 +1090,7 @@ public class AgentBuilder
         _logger?.LogInformation("Building FoxAgent '{AgentName}' with {ToolCount} tools", _config.Name, tools.Count);
 
         
-        var foxAgent = new FoxAgent(agent, _config, _conversationStore!, "main", _logger);
+        var foxAgent = new FoxAgent(agent, _config, _conversationStore!, "main", _workspaceManager, _logger);
 
         // Apply memory configuration if set
         if (_memory != null)
@@ -1090,5 +1102,7 @@ public class AgentBuilder
 
         return foxAgent;
     }
+
+    
 }
 
