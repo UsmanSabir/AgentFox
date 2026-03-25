@@ -43,6 +43,8 @@ internal class ConsoleLogger<T> : ConsoleLogger, ILogger<T> where T : class { }
 /// </summary>
 class Program
 {
+    
+
     static async Task<int> Main(string[] args)
     {
         Console.WriteLine("╔════════════════════════════════════════════════════════════╗");
@@ -95,6 +97,8 @@ class Program
         var chatClient = LLMFactory.CreateFromConfiguration(configuration);
         IConversationStore conversationStore = new InMemoryConversationStore(); // For simplicity, using in-memory store for conversation history
         var memory = new HybridMemory(100, "memory.json");
+        var chatHistoryPath = workspaceManager.ResolvePath("ChatHistory");
+        var chatHistoryProvider = new MarkdownChatHistoryProvider(chatHistoryPath);
 
         // Register memory tools into the registry specifically for this agent's memory
         toolRegistry.Register(new AddMemoryTool(memory));
@@ -108,6 +112,7 @@ class Program
             .WithSkillsRegistry(skillRegistry)
             .WithMCPClient(mcpClient)
             .WithConversationStore(conversationStore)
+            .WithHistoryProvider(chatHistoryProvider)
             .WithChatClient(chatClient)
             .Build();
 
@@ -186,6 +191,9 @@ class Program
         var chatClient = LLMFactory.CreateFromConfiguration(configuration);
         var memory = new HybridMemory(100, "memory.json");
         IConversationStore conversationStore = new InMemoryConversationStore(); // For simplicity, using in-memory store for conversation history
+        var chatHistoryPath = workspaceManager.ResolvePath("ChatHistory");
+        var chatHistoryProvider = new MarkdownChatHistoryProvider(chatHistoryPath);
+
 
         // Register memory tools into the registry specifically for this agent's memory
         toolRegistry.Register(new AddMemoryTool(memory));
@@ -197,6 +205,7 @@ class Program
             .WithMemory(memory)
             .WithLogger(new ConsoleLogger<FoxAgent>())
             .WithConversationStore(conversationStore)
+            .WithHistoryProvider(chatHistoryProvider)
             .WithCompactionFromConfig(configuration)
             .WithSkillsRegistry(skillRegistry)
             .WithMCPClient(mcpClient)

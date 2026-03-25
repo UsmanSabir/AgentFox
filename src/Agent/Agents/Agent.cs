@@ -9,6 +9,7 @@ using Microsoft.Agents.AI.Compaction;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using OpenAI.Chat;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using SystemPromptBuilder = AgentFox.LLM.SystemPromptBuilder;
@@ -161,7 +162,19 @@ public class FoxAgent
         {
             var agent = _chatAgent;
 
+            // 1. Load session (streamed)
+            //var session = await _sessionStore.LoadAsync(conversationId);
+            //var userMsg = new AgentMessage
+            //{
+            //    Role = AgentRole.User,
+            //    Content = userInput
+            //};
+            //session.Messages.Add(userMsg);
+            //append immediately (no full save)
+            //await _sessionStore.AppendMessageAsync(conversationId, task);
+
             var thread = ConversationStore.GetThread(conversationId);
+
             if (thread == null)
             {
                 _logger?.LogDebug("Creating new conversation thread for {ConversationId}", conversationId);
@@ -174,6 +187,24 @@ public class FoxAgent
 
             var responseText = response.Text ?? "I apologize, but I wasn't able to generate a response.";
             _logger?.LogInformation("Agent '{AgentName}' completed task in conversation {ConversationId}", Name, conversationId);
+
+            //var assistantMsg = new AgentMessage
+            //{
+            //    Role = AgentRole.Assistant,
+            //    Content = responseText
+            //};
+
+            //session.Messages.Add(assistantMsg);
+            JsonElement jsonElement = await agent.SerializeSessionAsync(thread);
+            // 🔥 append response
+            //await _sessionStore.AppendMessageAsync(conversationId, assistantMsg);
+
+            //TODO: run compaction and write file(full) if compaction performed
+            //bool compacted = await _compaction.ExecuteAsync(session);
+            //if (compacted)
+            //{
+            //    await _sessionStore.SaveAsync(session);
+            //}
 
             var result = new AgentResult { Success = true, Output = responseText };
             return result;
@@ -407,6 +438,7 @@ public class AgentBuilder
     private ILogger<FoxAgent>? _logger;
     private IChatClient? _chatClient;
     private CompactionConfig? _compactionConfig;
+    private MarkdownChatHistoryProvider _chatHistoryProvider;
 
     public AgentBuilder(ToolRegistry toolRegistry)
     {
@@ -449,12 +481,13 @@ public class AgentBuilder
         return this;
     }
 
+    [Obsolete]
     public AgentBuilder WithConversationStore(IConversationStore conversationStore)
     {
         _conversationStore = conversationStore;
         return this;
     }
-
+    
     public AgentBuilder WithChatClient(IChatClient chatClient)
     {
         _chatClient = chatClient;
@@ -483,6 +516,12 @@ public class AgentBuilder
     public AgentBuilder WithLogger(ILogger<FoxAgent> logger)
     {
         _logger = logger;
+        return this;
+    }
+
+    public AgentBuilder WithHistoryProvider(MarkdownChatHistoryProvider chatHistoryProvider)
+    {
+        _chatHistoryProvider = chatHistoryProvider;
         return this;
     }
 
@@ -899,6 +938,27 @@ public class AgentBuilder
         public override JsonElement JsonSchema => customSchema;
     }
 
+    const string GlobalMainSessionDefaultKey = "Main";
+
+    private async Task LoadMainSession(ChatClientAgent agent)
+    {
+        //// 1. Try to find the existing JSON state in your DB for this fixed key
+        //string savedJson = await _myDb.GetSessionByFixedKeyAsync(DefaultKey);
+
+        //if (!string.IsNullOrEmpty(savedJson))
+        //{
+        //    // 2. Hydrate the session from the saved state
+        //    return await agent.DeserializeSessionAsync(savedJson);
+        //}
+
+        //// 3. Fallback: If it's the very first run, create a fresh session
+        //var newSession = await agent.CreateSessionAsync();
+
+        //// Save the initial state immediately so it's ready for the next restart
+        //string initialState = await agent.SerializeSessionAsync(newSession);
+        //await _myDb.SaveSessionAsync(DefaultKey, initialState);
+
+    }
 
     public FoxAgent Build()
     {
@@ -993,12 +1053,19 @@ public class AgentBuilder
             _logger?.LogInformation("Compaction disabled for agent '{AgentName}'", _config.Name);
         }
 
+        ChatHistoryProvider? chatHistoryProvider = _chatHistoryProvider;
+        if (chatHistoryProvider == null)
+        {
+            chatHistoryProvider = new InMemoryChatHistoryProvider();
+        }
+
         // 2. Build the agent with nested ChatOptions
         //TODO: Incorporate AgentToolkit https://github.com/microsoft/agent-governance-toolkit
         var agent = agentBuilder
             .BuildAIAgent(new ChatClientAgentOptions
             {
                 Name = _config.Name,
+                ChatHistoryProvider = chatHistoryProvider,
                 ChatOptions = new ChatOptions // Tools must go here
                 {
                     Tools = agentTools,
