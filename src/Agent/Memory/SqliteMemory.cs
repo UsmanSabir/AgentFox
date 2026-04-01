@@ -28,34 +28,43 @@ public static class MemoryBackendFactory
     public static IMemory CreateLongTermStorage(IConfiguration configuration, WorkspaceManager workspaceManager)
     {
         var config = configuration.GetSection("Memory").Get<MemoryConfig>() ?? new MemoryConfig();
+        var embeddingService = EmbeddingServiceFactory.Create(configuration);
 
         return config.LongTermStorage.Trim().ToLowerInvariant() switch
         {
-            "sqlite" => new SqliteLongTermMemory(workspaceManager.ResolvePath(config.SqlitePath)),
-            _        => new MarkdownLongTermMemory(workspaceManager.ResolvePath(config.MarkdownPath))
+            "sqlite" => new SqliteLongTermMemory(
+                workspaceManager.ResolvePath(config.SqlitePath),
+                embeddingService),
+            _ => new MarkdownLongTermMemory(workspaceManager.ResolvePath(config.MarkdownPath))
         };
     }
 }
 
 /// <summary>
-/// SQLite-backed long-term memory with hybrid search.
+/// SQLite-backed long-term memory with hybrid BM25 + vector search.
 ///
 /// Schema:
-///   memories       — canonical store (id, content, type, timestamp, importance, metadata)
-///   memories_fts   — FTS5 virtual table mirroring content, kept in sync via triggers
+///   memories        — canonical store (id, content, type, timestamp, importance, metadata)
+///   memories_fts    — FTS5 virtual table mirroring content, kept in sync via triggers
+///   memory_vectors  — per-entry float32 embedding stored as BLOB; populated when an
+///                     IEmbeddingService is configured
 ///
-/// Hybrid search score = BM25 relevance × 0.5 + importance × 0.4 + recency bonus × 0.1
-/// Falls back to LIKE search if the FTS query cannot be parsed.
+/// Search priority:
+///   1. Vector cosine similarity (when embedding service is configured and entry has a vector)
+///   2. Hybrid BM25 score = BM25 relevance × 0.5 + importance × 0.4 + recency bonus × 0.1
+///   3. LIKE fallback if FTS5 query cannot be parsed
 /// </summary>
 public class SqliteLongTermMemory : IMemory, IDisposable
 {
     private readonly string _connectionString;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
+    private readonly IEmbeddingService _embedding;
 
-    public SqliteLongTermMemory(string? dbPath = null)
+    public SqliteLongTermMemory(string? dbPath = null, IEmbeddingService? embeddingService = null)
     {
         var path = dbPath ?? "long_term_memory.db";
         _connectionString = $"Data Source={path};Mode=ReadWriteCreate;Cache=Shared";
+        _embedding = embeddingService ?? new NullEmbeddingService();
         InitializeSchema();
     }
 
@@ -65,13 +74,18 @@ public class SqliteLongTermMemory : IMemory, IDisposable
 
     public async Task AddAsync(MemoryEntry entry)
     {
+        // Generate embedding before acquiring the write lock to keep critical section short.
+        var vector = await _embedding.GenerateAsync(entry.Content);
+
         await _writeLock.WaitAsync();
         try
         {
             await using var conn = OpenConnection();
-            await using var cmd = conn.CreateCommand();
+            await using var tx = conn.BeginTransaction();
 
-            // Upsert — fires AFTER UPDATE trigger on conflict (keeps FTS in sync)
+            // Upsert canonical row (fires AFTER UPDATE trigger — keeps FTS in sync)
+            await using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
             cmd.CommandText = @"
                 INSERT INTO memories (id, content, type, timestamp, importance, metadata)
                 VALUES (@id, @content, @type, @timestamp, @importance, @metadata)
@@ -87,6 +101,26 @@ public class SqliteLongTermMemory : IMemory, IDisposable
             cmd.Parameters.AddWithValue("@importance", entry.Importance);
             cmd.Parameters.AddWithValue("@metadata",   System.Text.Json.JsonSerializer.Serialize(entry.Metadata));
             await cmd.ExecuteNonQueryAsync();
+
+            // Store embedding when available
+            if (vector is { Length: > 0 })
+            {
+                await using var vecCmd = conn.CreateCommand();
+                vecCmd.Transaction = tx;
+                vecCmd.CommandText = @"
+                    INSERT INTO memory_vectors (id, embedding, dims)
+                    VALUES (@id, @embedding, @dims)
+                    ON CONFLICT(id) DO UPDATE SET
+                        embedding = excluded.embedding,
+                        dims      = excluded.dims;
+                ";
+                vecCmd.Parameters.AddWithValue("@id",        entry.Id);
+                vecCmd.Parameters.AddWithValue("@embedding", FloatsToBlob(vector));
+                vecCmd.Parameters.AddWithValue("@dims",      vector.Length);
+                await vecCmd.ExecuteNonQueryAsync();
+            }
+
+            await tx.CommitAsync();
         }
         finally
         {
@@ -96,6 +130,16 @@ public class SqliteLongTermMemory : IMemory, IDisposable
 
     public async Task<List<MemoryEntry>> SearchAsync(string query, int limit = 10)
     {
+        // Try vector search first when embedding service is configured.
+        var queryVector = await _embedding.GenerateAsync(query);
+        if (queryVector is { Length: > 0 })
+        {
+            var vectorResults = await SearchByVectorAsync(queryVector, limit);
+            if (vectorResults.Count > 0)
+                return vectorResults;
+        }
+
+        // Fall back to BM25 / LIKE search.
         await using var conn = OpenConnection();
         try
         {
@@ -103,7 +147,6 @@ public class SqliteLongTermMemory : IMemory, IDisposable
         }
         catch
         {
-            // FTS5 query parse error — fall back to substring match
             return await SearchFallbackAsync(conn, query, limit);
         }
     }
@@ -141,9 +184,9 @@ public class SqliteLongTermMemory : IMemory, IDisposable
         {
             await using var conn = OpenConnection();
             await using var cmd = conn.CreateCommand();
-            // Delete all rows, then rebuild FTS index
             cmd.CommandText = @"
                 DELETE FROM memories;
+                DELETE FROM memory_vectors;
                 INSERT INTO memories_fts(memories_fts) VALUES('rebuild');
             ";
             await cmd.ExecuteNonQueryAsync();
@@ -178,13 +221,13 @@ public class SqliteLongTermMemory : IMemory, IDisposable
         cmd.CommandText = @"
             -- Canonical memory store
             CREATE TABLE IF NOT EXISTS memories (
-                rowid     INTEGER PRIMARY KEY AUTOINCREMENT,
-                id        TEXT    NOT NULL UNIQUE,
-                content   TEXT    NOT NULL,
-                type      TEXT    NOT NULL DEFAULT 'Fact',
-                timestamp TEXT    NOT NULL,
-                importance REAL   NOT NULL DEFAULT 0.5,
-                metadata  TEXT    NOT NULL DEFAULT '{}'
+                rowid      INTEGER PRIMARY KEY AUTOINCREMENT,
+                id         TEXT    NOT NULL UNIQUE,
+                content    TEXT    NOT NULL,
+                type       TEXT    NOT NULL DEFAULT 'Fact',
+                timestamp  TEXT    NOT NULL,
+                importance REAL    NOT NULL DEFAULT 0.5,
+                metadata   TEXT    NOT NULL DEFAULT '{}'
             );
 
             -- FTS5 virtual table (mirrors 'content' column of memories)
@@ -192,6 +235,13 @@ public class SqliteLongTermMemory : IMemory, IDisposable
                 content,
                 content='memories',
                 content_rowid='rowid'
+            );
+
+            -- Per-entry vector embeddings (float32 stored as BLOB)
+            CREATE TABLE IF NOT EXISTS memory_vectors (
+                id        TEXT  NOT NULL PRIMARY KEY,
+                embedding BLOB  NOT NULL,
+                dims      INTEGER NOT NULL
             );
 
             -- Keep FTS5 in sync with the base table
@@ -205,6 +255,7 @@ public class SqliteLongTermMemory : IMemory, IDisposable
                 AFTER DELETE ON memories BEGIN
                     INSERT INTO memories_fts(memories_fts, rowid, content)
                     VALUES ('delete', old.rowid, old.content);
+                    DELETE FROM memory_vectors WHERE id = old.id;
                 END;
 
             CREATE TRIGGER IF NOT EXISTS memories_au
@@ -219,7 +270,58 @@ public class SqliteLongTermMemory : IMemory, IDisposable
     }
 
     /// <summary>
-    /// Hybrid search: BM25 text relevance (50%) + importance (40%) + recency bonus (10%).
+    /// Loads all stored vectors, computes cosine similarity against the query vector in C#,
+    /// and returns the top-k entries ranked by:
+    ///   score = cosine_similarity × 0.6 + importance × 0.3 + recency_bonus × 0.1
+    /// </summary>
+    private async Task<List<MemoryEntry>> SearchByVectorAsync(float[] queryVector, int limit)
+    {
+        // Load all vectors in one query (typically < a few thousand rows for a personal agent).
+        var vectors = new Dictionary<string, float[]>();
+        await using var conn = OpenConnection();
+        await using var vecCmd = conn.CreateCommand();
+        vecCmd.CommandText = "SELECT id, embedding FROM memory_vectors;";
+        await using var vecReader = await vecCmd.ExecuteReaderAsync();
+        while (await vecReader.ReadAsync())
+        {
+            var id   = vecReader.GetString(0);
+            var blob = (byte[])vecReader["embedding"];
+            vectors[id] = BlobToFloats(blob);
+        }
+
+        if (vectors.Count == 0)
+            return [];
+
+        // Load all memory entries so we can join with scores.
+        await using var memCmd = conn.CreateCommand();
+        memCmd.CommandText = @"
+            SELECT id, content, type, timestamp, importance, metadata
+            FROM memories
+            WHERE id IN (SELECT id FROM memory_vectors);
+        ";
+        var entries = await ReadEntriesAsync(memCmd);
+
+        // Score and rank.
+        var now = DateTime.UtcNow;
+        var scored = entries
+            .Where(e => vectors.ContainsKey(e.Id))
+            .Select(e =>
+            {
+                var cosine   = CosineSimilarity(queryVector, vectors[e.Id]);
+                var recency  = (now - e.Timestamp).TotalDays < 30 ? 0.1f : 0f;
+                var score    = cosine * 0.6f + (float)e.Importance * 0.3f + recency;
+                return (entry: e, score);
+            })
+            .OrderByDescending(x => x.score)
+            .Take(limit)
+            .Select(x => x.entry)
+            .ToList();
+
+        return scored;
+    }
+
+    /// <summary>
+    /// Hybrid BM25 search: BM25 text relevance (50%) + importance (40%) + recency bonus (10%).
     /// BM25 rank in FTS5 is negative — more negative = better match, so we negate it.
     /// </summary>
     private static async Task<List<MemoryEntry>> SearchFts5Async(
@@ -295,12 +397,43 @@ public class SqliteLongTermMemory : IMemory, IDisposable
     /// <summary>
     /// Converts a plain-text search phrase into a safe FTS5 query.
     /// Each word is quoted so special FTS5 operators are treated as literals.
-    /// Example: "user python" → "user" "python"
     /// </summary>
     private static string BuildFtsQuery(string query)
     {
         var terms = query.Split(' ', StringSplitOptions.RemoveEmptyEntries)
             .Select(w => $"\"{w.Replace("\"", "\"\"")}\"");
         return string.Join(" ", terms);
+    }
+
+    // -------------------------------------------------------------------------
+    // Vector helpers
+    // -------------------------------------------------------------------------
+
+    private static byte[] FloatsToBlob(float[] floats)
+    {
+        var bytes = new byte[floats.Length * sizeof(float)];
+        Buffer.BlockCopy(floats, 0, bytes, 0, bytes.Length);
+        return bytes;
+    }
+
+    private static float[] BlobToFloats(byte[] blob)
+    {
+        var floats = new float[blob.Length / sizeof(float)];
+        Buffer.BlockCopy(blob, 0, floats, 0, blob.Length);
+        return floats;
+    }
+
+    private static float CosineSimilarity(float[] a, float[] b)
+    {
+        int len = Math.Min(a.Length, b.Length);
+        float dot = 0f, normA = 0f, normB = 0f;
+        for (int i = 0; i < len; i++)
+        {
+            dot   += a[i] * b[i];
+            normA += a[i] * a[i];
+            normB += b[i] * b[i];
+        }
+        float denom = MathF.Sqrt(normA) * MathF.Sqrt(normB);
+        return denom < 1e-8f ? 0f : dot / denom;
     }
 }

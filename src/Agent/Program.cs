@@ -83,14 +83,15 @@ class Program
         // Build system prompt with dynamic builder + skills index
         var systemPrompt = new SystemPromptBuilder()
             .WithPersona(SystemPromptConfig.AgentPrompts.DeveloperAssistant)
-            .WithTools("shell", "read_file", "write_file", "list_files", "search_files", "make_directory", "delete", "add_memory", "search_memory")
+            .WithTools("shell", "read_file", "write_file", "list_files", "search_files", "make_directory", "delete", "add_memory", "search_memory", "get_all_memories")
             .WithSkillsIndex(skillRegistry.GetSkillManifests())
             .WithConstraints(
                 "Always verify changes before executing destructive operations",
                 "Prioritize security and best practices",
                 "Ask for clarification when requirements are ambiguous",
                 "Use add_memory to save important user facts or preferences to long-term memory.",
-                "Use search_memory to recall past information or facts when requested."
+                "Use search_memory to recall past information or facts when requested.",
+                "Use get_all_memories to retrieve everything stored in long-term memory."
             )
             .Build();
 
@@ -104,6 +105,7 @@ class Program
         // Register memory tools into the registry specifically for this agent's memory
         toolRegistry.Register(new AddMemoryTool(memory));
         toolRegistry.Register(new SearchMemoryTool(memory));
+        toolRegistry.Register(new GetAllMemoriesTool(memory));
 
 
         var agent = new AgentBuilder(toolRegistry)
@@ -165,7 +167,8 @@ class Program
                 "spawn_background_subagent: Spawn a background sub-agent that runs in a separate lane and announces results back",
                 "load_skill: Load a skill's full guidance on demand",
                 "add_memory: Save an important fact to memory",
-                "search_memory: Search memory for a fact"
+                "search_memory: Search memory for a fact",
+                "get_all_memories: Retrieve all stored long-term memories"
             )
             .WithSkillsIndex(manifests)
             .WithExecutionContext(
@@ -186,6 +189,7 @@ class Program
                 "Before using a skill's tools, always call load_skill to load the skill's guidance",
                 "Use add_memory to save important user facts or preferences to long-term memory.",
                 "Use search_memory to recall past information or facts when requested.",
+                "Use get_all_memories to retrieve everything stored in long-term memory.",
                 "For Composio integrations, provide clear examples and documentation on usage"
             )
             .Build();
@@ -200,6 +204,7 @@ class Program
         // Register memory tools into the registry specifically for this agent's memory
         toolRegistry.Register(new AddMemoryTool(memory));
         toolRegistry.Register(new SearchMemoryTool(memory));
+        toolRegistry.Register(new GetAllMemoriesTool(memory));
 
         var agent = new AgentBuilder(toolRegistry)
             .WithName("AgentFox")

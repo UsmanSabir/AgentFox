@@ -57,6 +57,42 @@ public class AddMemoryTool : BaseTool
 }
 
 /// <summary>
+/// Tool that returns every entry stored in long-term memory.
+/// Useful when the agent needs a full picture of what has been remembered.
+/// </summary>
+public class GetAllMemoriesTool : BaseTool
+{
+    private readonly IMemory _memory;
+
+    public override string Name => "get_all_memories";
+    public override string Description => "Retrieve every entry stored in long-term memory. Use this to get a complete picture of all remembered facts, preferences, and observations.";
+    public override Dictionary<string, ToolParameter> Parameters { get; } = new();
+
+    public GetAllMemoriesTool(IMemory memory)
+    {
+        _memory = memory;
+    }
+
+    protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
+    {
+        try
+        {
+            var memories = await _memory.GetAllAsync();
+            if (memories.Count == 0)
+                return ToolResult.Ok("No memories stored yet.");
+
+            var lines = memories.Select((m, i) =>
+                $"{i + 1}. [{m.Type}] [{m.Timestamp:yyyy-MM-dd HH:mm}] (imp:{m.Importance:F1}): {m.Content}");
+            return ToolResult.Ok($"{memories.Count} stored memories:\n{string.Join("\n", lines)}");
+        }
+        catch (Exception ex)
+        {
+            return ToolResult.Fail($"Failed to retrieve memories: {ex.Message}");
+        }
+    }
+}
+
+/// <summary>
 /// Tool for explicitly searching memory
 /// </summary>
 public class SearchMemoryTool : BaseTool

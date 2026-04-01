@@ -285,9 +285,11 @@ public class HybridMemory : IMemory
         return combined;
     }
 
-    public Task<List<MemoryEntry>> GetAllAsync()
+    public async Task<List<MemoryEntry>> GetAllAsync()
     {
-        return _shortTerm.GetAllAsync();
+        var shortMem = await _shortTerm.GetAllAsync();
+        var longMem = await _longTerm.GetAllAsync();
+        return shortMem.Concat(longMem).ToList();
     }
 
     public async Task ClearAsync()
