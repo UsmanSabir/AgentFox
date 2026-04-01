@@ -95,11 +95,11 @@ class Program
             .Build();
 
         var chatClient = LLMFactory.CreateFromConfiguration(configuration);
-        IConversationStore conversationStore = new InMemoryConversationStore();
         var longTermMemory = MemoryBackendFactory.CreateLongTermStorage(configuration, workspaceManager);
-        var memory = new HybridMemory(100, longTermMemory);
+        var memory = new HybridMemory(80, longTermMemory);
         var chatHistoryPath = workspaceManager.ResolvePath("ChatHistory");
-        var chatHistoryProvider = new MarkdownChatHistoryProvider(chatHistoryPath);
+        // MarkdownSessionStore: append-only markdown store with full message history (incl. tool calls).
+        var sessionStore = new MarkdownSessionStore(chatHistoryPath);
 
         // Register memory tools into the registry specifically for this agent's memory
         toolRegistry.Register(new AddMemoryTool(memory));
@@ -112,8 +112,8 @@ class Program
             .WithMemory(memory)
             .WithSkillsRegistry(skillRegistry)
             .WithMCPClient(mcpClient)
-            .WithConversationStore(conversationStore)
-            .WithHistoryProvider(chatHistoryProvider)
+            .WithConversationStore(sessionStore)
+            .WithHistoryProvider(sessionStore.HistoryProvider)
             .WithChatClient(chatClient)
             .WithWorkspaceManager(workspaceManager)
             .Build();
@@ -193,10 +193,9 @@ class Program
         var chatClient = LLMFactory.CreateFromConfiguration(configuration);
         var longTermMemory = MemoryBackendFactory.CreateLongTermStorage(configuration, workspaceManager);
         var memory = new HybridMemory(100, longTermMemory);
-        IConversationStore conversationStore = new InMemoryConversationStore();
         var chatHistoryPath = workspaceManager.ResolvePath("ChatHistory");
-        var chatHistoryProvider = new MarkdownChatHistoryProvider(chatHistoryPath);
-
+        // MarkdownSessionStore: append-only markdown store with full message history (incl. tool calls).
+        var sessionStore = new MarkdownSessionStore(chatHistoryPath);
 
         // Register memory tools into the registry specifically for this agent's memory
         toolRegistry.Register(new AddMemoryTool(memory));
@@ -207,8 +206,8 @@ class Program
             .WithSystemPrompt(systemPrompt)
             .WithMemory(memory)
             .WithLogger(new ConsoleLogger<FoxAgent>())
-            .WithConversationStore(conversationStore)
-            .WithHistoryProvider(chatHistoryProvider)
+            .WithConversationStore(sessionStore)
+            .WithHistoryProvider(sessionStore.HistoryProvider)
             .WithCompactionFromConfig(configuration)
             .WithSkillsRegistry(skillRegistry)
             .WithMCPClient(mcpClient)

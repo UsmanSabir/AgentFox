@@ -166,34 +166,17 @@ public class FoxAgent
         {
             var agent = _chatAgent;
 
-            // 1. Load session (streamed)
-            //var session = await _sessionStore.LoadAsync(conversationId);
-            //var userMsg = new AgentMessage
-            //{
-            //    Role = AgentRole.User,
-            //    Content = userInput
-            //};
-            //session.Messages.Add(userMsg);
-            //append immediately (no full save)
-            //await _sessionStore.AppendMessageAsync(conversationId, task);
-
+            // Retrieve the cached session. On a cache miss (first call or after restart),
+            // create a fresh session and restore any persisted messages from disk so the
+            // ChatHistoryProvider sees the full prior history before RunAsync is called.
             var session = ConversationStore.GetSession(conversationId);
-            //todo path
-            var path = _workspaceManager.ResolvePath($"ChatHistory\\{conversationId}.md");
-            AgentSession agentSession;
-            if (File.Exists(path))
-            {
-                session = await MarkdownSessionReader.LoadSessionAsync(path, agent);
-                session.StateBag.SetValue("ConversationId", conversationId);
-            }
-
             if (session == null)
             {
-                _logger?.LogDebug("Creating new conversation thread for {ConversationId}", conversationId);
+                _logger?.LogDebug("Creating new conversation session for {ConversationId}", conversationId);
                 session = await agent.CreateSessionAsync(cancellationToken);
                 session.StateBag.SetValue("ConversationId", conversationId);
-                session.StateBag.SetValue("CreatedAt", DateTime.UtcNow.ToString("O")); //ISO format
-
+                session.StateBag.SetValue("CreatedAt", DateTime.UtcNow.ToString("O"));
+                await ConversationStore.RestoreAsync(conversationId, session);
                 ConversationStore.SaveSession(conversationId, session);
             }
 
@@ -205,26 +188,11 @@ public class FoxAgent
 
             var response = await agent.RunAsync(augmentedTask, session, options: runOptions, cancellationToken: timeoutToken);
 
+            // Persist updated session metadata (e.g. lastActiveAt) after each turn.
+            ConversationStore.SaveSession(conversationId, session);
+
             var responseText = response.Text ?? "I apologize, but I wasn't able to generate a response.";
             _logger?.LogInformation("Agent '{AgentName}' completed task in conversation {ConversationId}", Name, conversationId);
-
-            //var assistantMsg = new AgentMessage
-            //{
-            //    Role = AgentRole.Assistant,
-            //    Content = responseText
-            //};
-
-            //session.Messages.Add(assistantMsg);
-            //JsonElement jsonElement = await agent.SerializeSessionAsync(thread);
-            // 🔥 append response
-            //await _sessionStore.AppendMessageAsync(conversationId, assistantMsg);
-
-            //TODO: run compaction and write file(full) if compaction performed
-            //bool compacted = await _compaction.ExecuteAsync(session);
-            //if (compacted)
-            //{
-            //    await _sessionStore.SaveAsync(session);
-            //}
 
             var result = new AgentResult { Success = true, Output = responseText };
             return result;
@@ -477,7 +445,7 @@ public class AgentBuilder
     private ILogger<FoxAgent>? _logger;
     private IChatClient? _chatClient;
     private CompactionConfig? _compactionConfig;
-    private MarkdownChatHistoryProvider _chatHistoryProvider;
+    private ChatHistoryProvider? _chatHistoryProvider;
     private WorkspaceManager _workspaceManager;
 
     public AgentBuilder(ToolRegistry toolRegistry)
@@ -521,7 +489,6 @@ public class AgentBuilder
         return this;
     }
 
-    [Obsolete]
     public AgentBuilder WithConversationStore(IConversationStore conversationStore)
     {
         _conversationStore = conversationStore;
@@ -565,7 +532,7 @@ public class AgentBuilder
         return this;
     }
 
-    public AgentBuilder WithHistoryProvider(MarkdownChatHistoryProvider chatHistoryProvider)
+    public AgentBuilder WithHistoryProvider(ChatHistoryProvider chatHistoryProvider)
     {
         _chatHistoryProvider = chatHistoryProvider;
         return this;
@@ -1097,11 +1064,8 @@ public class AgentBuilder
             _logger?.LogInformation("Compaction disabled for agent '{AgentName}'", _config.Name);
         }
 
-        ChatHistoryProvider? chatHistoryProvider = _chatHistoryProvider;
-        if (chatHistoryProvider == null)
-        {
-            chatHistoryProvider = new InMemoryChatHistoryProvider();
-        }
+        ChatHistoryProvider chatHistoryProvider =
+            _chatHistoryProvider ?? new InMemoryChatHistoryProvider();
 
         // 2. Build the agent with nested ChatOptions
         //TODO: Incorporate AgentToolkit https://github.com/microsoft/agent-governance-toolkit
