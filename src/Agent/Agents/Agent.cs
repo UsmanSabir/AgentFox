@@ -177,10 +177,14 @@ public class FoxAgent
             //await _sessionStore.AppendMessageAsync(conversationId, task);
 
             var session = ConversationStore.GetSession(conversationId);
-            var path = _workspaceManager.ResolvePath($"{conversationId}.md");
+            //todo path
+            var path = _workspaceManager.ResolvePath($"ChatHistory\\{conversationId}.md");
             AgentSession agentSession;
             if (File.Exists(path))
+            {
                 session = await MarkdownSessionReader.LoadSessionAsync(path, agent);
+                session.StateBag.SetValue("ConversationId", conversationId);
+            }
 
             if (session == null)
             {

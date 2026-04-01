@@ -60,6 +60,8 @@ public class MarkdownChatHistoryProvider : ChatHistoryProvider
             stateKey: "MarkdownHistory");
     }
 
+    public string BaseDirectory => _baseDirectory;
+
     protected override async ValueTask<IEnumerable<ChatMessage>> ProvideChatHistoryAsync(
         InvokingContext context,
         CancellationToken cancellationToken)
