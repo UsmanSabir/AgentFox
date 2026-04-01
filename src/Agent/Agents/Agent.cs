@@ -10,6 +10,7 @@ using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using OpenAI.Chat;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using SystemPromptBuilder = AgentFox.LLM.SystemPromptBuilder;
@@ -197,7 +198,12 @@ public class FoxAgent
             }
 
             var runOptions = new AgentRunOptions();
-            var response = await agent.RunAsync(task, session, options: runOptions, cancellationToken: timeoutToken);
+
+            // Proactive recall: inject relevant long-term memories as context preamble
+            var memoryContext = await BuildMemoryContextAsync(_agent.Memory, task);
+            var augmentedTask = string.IsNullOrEmpty(memoryContext) ? task : memoryContext + task;
+
+            var response = await agent.RunAsync(augmentedTask, session, options: runOptions, cancellationToken: timeoutToken);
 
             var responseText = response.Text ?? "I apologize, but I wasn't able to generate a response.";
             _logger?.LogInformation("Agent '{AgentName}' completed task in conversation {ConversationId}", Name, conversationId);
@@ -235,6 +241,25 @@ public class FoxAgent
         }
     }
 
+
+    /// <summary>
+    /// Search long-term memory for entries relevant to the current task and format
+    /// them as a context preamble to prepend to the user message.
+    /// </summary>
+    private static async Task<string> BuildMemoryContextAsync(IMemory? memory, string task)
+    {
+        if (memory == null) return string.Empty;
+
+        var memories = await memory.SearchAsync(task, limit: 5);
+        if (memories.Count == 0) return string.Empty;
+
+        var sb = new StringBuilder();
+        sb.AppendLine("[Relevant context from long-term memory:]");
+        foreach (var mem in memories)
+            sb.AppendLine($"- [{mem.Type}] {mem.Content}");
+        sb.AppendLine();
+        return sb.ToString();
+    }
 
     /// <summary>
     /// Spawn a sub-agent

@@ -95,8 +95,9 @@ class Program
             .Build();
 
         var chatClient = LLMFactory.CreateFromConfiguration(configuration);
-        IConversationStore conversationStore = new InMemoryConversationStore(); // For simplicity, using in-memory store for conversation history
-        var memory = new HybridMemory(100, "memory.json");
+        IConversationStore conversationStore = new InMemoryConversationStore();
+        var longTermMemory = MemoryBackendFactory.CreateLongTermStorage(configuration, workspaceManager);
+        var memory = new HybridMemory(100, longTermMemory);
         var chatHistoryPath = workspaceManager.ResolvePath("ChatHistory");
         var chatHistoryProvider = new MarkdownChatHistoryProvider(chatHistoryPath);
 
@@ -190,8 +191,9 @@ class Program
             .Build();
 
         var chatClient = LLMFactory.CreateFromConfiguration(configuration);
-        var memory = new HybridMemory(100, "memory.json");
-        IConversationStore conversationStore = new InMemoryConversationStore(); // For simplicity, using in-memory store for conversation history
+        var longTermMemory = MemoryBackendFactory.CreateLongTermStorage(configuration, workspaceManager);
+        var memory = new HybridMemory(100, longTermMemory);
+        IConversationStore conversationStore = new InMemoryConversationStore();
         var chatHistoryPath = workspaceManager.ResolvePath("ChatHistory");
         var chatHistoryProvider = new MarkdownChatHistoryProvider(chatHistoryPath);
 
