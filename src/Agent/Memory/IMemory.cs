@@ -1,3 +1,5 @@
+using System.Text.RegularExpressions;
+
 namespace AgentFox.Memory;
 
 /// <summary>
@@ -235,13 +237,23 @@ public class LongTermMemory : IMemory
 public class HybridMemory : IMemory
 {
     private readonly ShortTermMemory _shortTerm;
-    private readonly LongTermMemory _longTerm;
+    private readonly IMemory _longTerm;
     private readonly double _importanceThreshold;
 
     public HybridMemory(int shortTermSize = 50, string? longTermPath = null, double importanceThreshold = 0.7)
     {
         _shortTerm = new ShortTermMemory(shortTermSize);
         _longTerm = new LongTermMemory(longTermPath);
+        _importanceThreshold = importanceThreshold;
+    }
+
+    /// <summary>
+    /// Create a HybridMemory with a custom long-term storage backend (e.g. MarkdownLongTermMemory)
+    /// </summary>
+    public HybridMemory(int shortTermSize, IMemory longTermStorage, double importanceThreshold = 0.7)
+    {
+        _shortTerm = new ShortTermMemory(shortTermSize);
+        _longTerm = longTermStorage;
         _importanceThreshold = importanceThreshold;
     }
 
@@ -273,9 +285,11 @@ public class HybridMemory : IMemory
         return combined;
     }
 
-    public Task<List<MemoryEntry>> GetAllAsync()
+    public async Task<List<MemoryEntry>> GetAllAsync()
     {
-        return _shortTerm.GetAllAsync();
+        var shortMem = await _shortTerm.GetAllAsync();
+        var longMem = await _longTerm.GetAllAsync();
+        return shortMem.Concat(longMem).ToList();
     }
 
     public async Task ClearAsync()
@@ -297,6 +311,190 @@ public class HybridMemory : IMemory
         foreach (var entry in recent.Where(e => e.Importance >= _importanceThreshold))
         {
             await _longTerm.AddAsync(entry);
+        }
+    }
+}
+
+/// <summary>
+/// Markdown file-based long-term memory.
+/// Human-readable, append-efficient. One file per workspace.
+///
+/// Entry format:
+///   ## [Type] 2024-01-15T10:30:00Z | id:guid | imp:0.85
+///   Content text here
+///
+///   ---
+/// </summary>
+public class MarkdownLongTermMemory : IMemory
+{
+    private readonly string _storagePath;
+    private readonly SemaphoreSlim _fileLock = new(1, 1);
+    private List<MemoryEntry>? _cache;
+
+    private static readonly Regex EntryHeaderRegex = new(
+        @"^## \[(\w+)\] (\S+) \| id:(\S+) \| imp:(\S+)",
+        RegexOptions.Compiled);
+
+    public MarkdownLongTermMemory(string? storagePath = null)
+    {
+        _storagePath = storagePath ?? "long_term_memory.md";
+    }
+
+    public async Task AddAsync(MemoryEntry entry)
+    {
+        await _fileLock.WaitAsync();
+        try
+        {
+            EnsureCache();
+            _cache!.Add(entry);
+
+            bool isNew = !File.Exists(_storagePath);
+            using var stream = new FileStream(_storagePath, FileMode.Append, FileAccess.Write, FileShare.None);
+            using var writer = new StreamWriter(stream, System.Text.Encoding.UTF8);
+
+            if (isNew)
+            {
+                await writer.WriteLineAsync("# AgentFox Long-Term Memory");
+                await writer.WriteLineAsync();
+            }
+
+            await writer.WriteLineAsync($"## [{entry.Type}] {entry.Timestamp:O} | id:{entry.Id} | imp:{entry.Importance:F2}");
+            await writer.WriteLineAsync(entry.Content);
+            await writer.WriteLineAsync();
+            await writer.WriteLineAsync("---");
+            await writer.WriteLineAsync();
+        }
+        finally
+        {
+            _fileLock.Release();
+        }
+    }
+
+    public async Task<List<MemoryEntry>> SearchAsync(string query, int limit = 10)
+    {
+        await _fileLock.WaitAsync();
+        try
+        {
+            EnsureCache();
+            return _cache!
+                .Where(m => m.Content.Contains(query, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(m => m.Importance)
+                .ThenByDescending(m => m.Timestamp)
+                .Take(limit)
+                .ToList();
+        }
+        finally
+        {
+            _fileLock.Release();
+        }
+    }
+
+    public async Task<List<MemoryEntry>> GetAllAsync()
+    {
+        await _fileLock.WaitAsync();
+        try
+        {
+            EnsureCache();
+            return _cache!.ToList();
+        }
+        finally
+        {
+            _fileLock.Release();
+        }
+    }
+
+    public async Task ClearAsync()
+    {
+        await _fileLock.WaitAsync();
+        try
+        {
+            _cache = new List<MemoryEntry>();
+            if (File.Exists(_storagePath))
+                File.Delete(_storagePath);
+        }
+        finally
+        {
+            _fileLock.Release();
+        }
+    }
+
+    public async Task<List<MemoryEntry>> GetRecentAsync(int count = 10)
+    {
+        await _fileLock.WaitAsync();
+        try
+        {
+            EnsureCache();
+            return _cache!
+                .OrderByDescending(m => m.Timestamp)
+                .Take(count)
+                .ToList();
+        }
+        finally
+        {
+            _fileLock.Release();
+        }
+    }
+
+    private void EnsureCache()
+    {
+        if (_cache != null) return;
+        _cache = new List<MemoryEntry>();
+
+        if (!File.Exists(_storagePath)) return;
+
+        try
+        {
+            var lines = File.ReadAllLines(_storagePath);
+            MemoryEntry? current = null;
+            var contentLines = new List<string>();
+
+            foreach (var line in lines)
+            {
+                if (line == "---")
+                {
+                    if (current != null)
+                    {
+                        current.Content = string.Join("\n", contentLines).Trim();
+                        if (!string.IsNullOrWhiteSpace(current.Content))
+                            _cache.Add(current);
+                        current = null;
+                        contentLines.Clear();
+                    }
+                    continue;
+                }
+
+                var headerMatch = EntryHeaderRegex.Match(line);
+                if (headerMatch.Success)
+                {
+                    current = new MemoryEntry
+                    {
+                        Type = Enum.TryParse<MemoryType>(headerMatch.Groups[1].Value, true, out var t) ? t : MemoryType.Fact,
+                        Timestamp = DateTime.TryParse(headerMatch.Groups[2].Value, null,
+                            System.Globalization.DateTimeStyles.RoundtripKind, out var ts) ? ts : DateTime.UtcNow,
+                        Id = headerMatch.Groups[3].Value,
+                        Importance = double.TryParse(headerMatch.Groups[4].Value,
+                            System.Globalization.NumberStyles.Float,
+                            System.Globalization.CultureInfo.InvariantCulture, out var imp) ? imp : 0.5
+                    };
+                    contentLines.Clear();
+                    continue;
+                }
+
+                if (current != null && !line.StartsWith("# "))
+                    contentLines.Add(line);
+            }
+
+            // Handle last entry without trailing ---
+            if (current != null)
+            {
+                current.Content = string.Join("\n", contentLines).Trim();
+                if (!string.IsNullOrWhiteSpace(current.Content))
+                    _cache.Add(current);
+            }
+        }
+        catch
+        {
+            _cache = new List<MemoryEntry>();
         }
     }
 }
