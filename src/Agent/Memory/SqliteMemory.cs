@@ -18,6 +18,9 @@ public class MemoryConfig
 
     /// <summary>Relative path for the SQLite database (resolved against workspace)</summary>
     public string SqlitePath { get; set; } = "LongTermMemory.db";
+
+    /// <summary>Name of a model entry under the top-level "Models" section to use for embeddings.</summary>
+    public string? ModelRef { get; set; }
 }
 
 /// <summary>
@@ -303,9 +306,8 @@ public class SqliteLongTermMemory : IMemory, IDisposable
 
         // Score and rank.
         var now = DateTime.UtcNow;
-        var minCosine = 0.65f; // safe default
-        var cosineWeight = 0.7f;
-
+        var minCosine = 0.55f; //0.65f; // safe default
+        
         //var scored = entries
         //    .Where(e => vectors.ContainsKey(e.Id))
         //    .Select(e =>

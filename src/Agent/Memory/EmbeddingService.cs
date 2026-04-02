@@ -100,9 +100,13 @@ public static class EmbeddingServiceFactory
 {
     public static IEmbeddingService Create(IConfiguration configuration)
     {
-        var config = configuration
-            .GetSection("Memory:Embedding")
-            .Get<EmbeddingConfig>() ?? new EmbeddingConfig();
+        // Resolve config: prefer a named model from Models:{ModelRef}, fall back to Memory:Embedding.
+        var modelRef = configuration["Memory:ModelRef"];
+        EmbeddingConfig config;
+        if (!string.IsNullOrWhiteSpace(modelRef))
+            config = configuration.GetSection($"Models:{modelRef}").Get<EmbeddingConfig>() ?? new EmbeddingConfig();
+        else
+            config = configuration.GetSection("Memory:Embedding").Get<EmbeddingConfig>() ?? new EmbeddingConfig();
 
         return config.Provider.Trim().ToLowerInvariant() switch
         {
