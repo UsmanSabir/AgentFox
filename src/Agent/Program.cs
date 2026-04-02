@@ -5,6 +5,7 @@ using AgentFox.Memory;
 using AgentFox.Sessions;
 using AgentFox.Skills;
 using AgentFox.Tools;
+using Microsoft.Extensions.AI;
 using SystemPromptBuilder = AgentFox.LLM.SystemPromptBuilder;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -74,21 +75,106 @@ class Program
         return await RunInteractiveMode(configuration);
     }
 
-    static async Task<int> RunCommandLineMode(string[] args, IConfiguration configuration)
+    // -------------------------------------------------------------------------
+    // Shared infrastructure
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// All services that are identical between command-line and interactive modes.
+    /// </summary>
+    private sealed class AgentServices(
+        WorkspaceManager workspaceManager,
+        SessionManager sessionManager,
+        ToolRegistry toolRegistry,
+        SkillRegistry skillRegistry,
+        MCPClient mcpClient,
+        IChatClient chatClient,
+        HybridMemory memory,
+        MarkdownSessionStore sessionStore)
+    {
+        public WorkspaceManager WorkspaceManager { get; } = workspaceManager;
+        public SessionManager SessionManager { get; } = sessionManager;
+        public ToolRegistry ToolRegistry { get; } = toolRegistry;
+        public SkillRegistry SkillRegistry { get; } = skillRegistry;
+        public MCPClient McpClient { get; } = mcpClient;
+        public IChatClient ChatClient { get; } = chatClient;
+        public HybridMemory Memory { get; } = memory;
+        public MarkdownSessionStore SessionStore { get; } = sessionStore;
+    }
+
+    /// <summary>
+    /// Builds the shared infrastructure used by both execution modes.
+    /// Memory tools are registered here so neither mode needs to repeat it.
+    /// </summary>
+    static async Task<AgentServices> CreateServicesAsync(IConfiguration configuration)
     {
         var workspaceManager = new WorkspaceManager(configuration);
+
         var sessionConfig = new SessionConfig();
         configuration.GetSection("Sessions").Bind(sessionConfig);
         var sessionManager = new SessionManager(sessionConfig, workspaceManager);
+
         var toolRegistry = CreateToolRegistry(workspaceManager);
         var skillRegistry = await CreateSkillRegistryAsync(toolRegistry, configuration);
         var mcpClient = await CreateAndInitializeMcpClientAsync(toolRegistry, configuration);
 
-        // Build system prompt with dynamic builder + skills index
+        var chatClient = LLMFactory.CreateFromConfiguration(configuration);
+        var longTermMemory = MemoryBackendFactory.CreateLongTermStorage(configuration, workspaceManager);
+        var memory = new HybridMemory(100, longTermMemory);
+        // MarkdownSessionStore: append-only store with full message history (incl. tool calls).
+        // Root it at the SessionManager's directory so all session files land in one place.
+        var sessionStore = new MarkdownSessionStore(sessionManager.SessionDirectory);
+
+        toolRegistry.Register(new AddMemoryTool(memory));
+        toolRegistry.Register(new SearchMemoryTool(memory));
+        toolRegistry.Register(new GetAllMemoriesTool(memory));
+
+        return new AgentServices(workspaceManager, sessionManager, toolRegistry,
+            skillRegistry, mcpClient, chatClient, memory, sessionStore);
+    }
+
+    /// <summary>
+    /// Builds a FoxAgent from shared services and a pre-built system prompt.
+    /// Pass <paramref name="configuration"/> to opt into compaction from config.
+    /// </summary>
+    static FoxAgent BuildAgent(
+        AgentServices svc,
+        string systemPrompt,
+        IConfiguration configuration,
+        bool withLogger = false)
+    {
+        var builder = new AgentBuilder(svc.ToolRegistry)
+            .WithName("AgentFox")
+            .WithSystemPrompt(systemPrompt)
+            .WithMemory(svc.Memory)
+            .WithSkillsRegistry(svc.SkillRegistry)
+            .WithMCPClient(svc.McpClient)
+            .WithConversationStore(svc.SessionStore)
+            .WithHistoryProvider(svc.SessionStore.HistoryProvider)
+            .WithChatClient(svc.ChatClient)
+            .WithWorkspaceManager(svc.WorkspaceManager)
+            .WithSessionManager(svc.SessionManager)
+            .WithCompactionFromConfig(configuration);
+
+        if (withLogger)
+            builder = builder.WithLogger(new ConsoleLogger<FoxAgent>());
+
+        return builder.Build();
+    }
+
+    // -------------------------------------------------------------------------
+    // Execution modes
+    // -------------------------------------------------------------------------
+
+    static async Task<int> RunCommandLineMode(string[] args, IConfiguration configuration)
+    {
+        var svc = await CreateServicesAsync(configuration);
+
         var systemPrompt = new SystemPromptBuilder()
             .WithPersona(SystemPromptConfig.AgentPrompts.DeveloperAssistant)
-            .WithTools("shell", "read_file", "write_file", "list_files", "search_files", "make_directory", "delete", "add_memory", "search_memory", "get_all_memories")
-            .WithSkillsIndex(skillRegistry.GetSkillManifests())
+            .WithTools("shell", "read_file", "write_file", "list_files", "search_files",
+                       "make_directory", "delete", "add_memory", "search_memory", "get_all_memories")
+            .WithSkillsIndex(svc.SkillRegistry.GetSkillManifests())
             .WithConstraints(
                 "Always verify changes before executing destructive operations",
                 "Prioritize security and best practices",
@@ -99,31 +185,7 @@ class Program
             )
             .Build();
 
-        var chatClient = LLMFactory.CreateFromConfiguration(configuration);
-        var longTermMemory = MemoryBackendFactory.CreateLongTermStorage(configuration, workspaceManager);
-        var memory = new HybridMemory(80, longTermMemory);
-        var chatHistoryPath = workspaceManager.ResolvePath("ChatHistory");
-        // MarkdownSessionStore: append-only markdown store with full message history (incl. tool calls).
-        var sessionStore = new MarkdownSessionStore(chatHistoryPath);
-
-        // Register memory tools into the registry specifically for this agent's memory
-        toolRegistry.Register(new AddMemoryTool(memory));
-        toolRegistry.Register(new SearchMemoryTool(memory));
-        toolRegistry.Register(new GetAllMemoriesTool(memory));
-
-
-        var agent = new AgentBuilder(toolRegistry)
-            .WithName("AgentFox")
-            .WithSystemPrompt(systemPrompt)
-            .WithMemory(memory)
-            .WithSkillsRegistry(skillRegistry)
-            .WithMCPClient(mcpClient)
-            .WithConversationStore(sessionStore)
-            .WithHistoryProvider(sessionStore.HistoryProvider)
-            .WithChatClient(chatClient)
-            .WithWorkspaceManager(workspaceManager)
-            .WithSessionManager(sessionManager)
-            .Build();
+        var agent = BuildAgent(svc, systemPrompt, configuration);
 
         var task = string.Join(" ", args);
         Console.WriteLine($"Executing: {task}");
@@ -143,23 +205,14 @@ class Program
         return result.Success ? 0 : 1;
     }
 
-
     static async Task<int> RunInteractiveMode(IConfiguration configuration)
     {
-        var workspaceManager = new WorkspaceManager(configuration);
-        var sessionConfig = new SessionConfig();
-        configuration.GetSection("Sessions").Bind(sessionConfig);
-        var sessionManager = new SessionManager(sessionConfig, workspaceManager);
-        var toolRegistry = CreateToolRegistry(workspaceManager);
-        var skillRegistry = await CreateSkillRegistryAsync(toolRegistry, configuration);
-        var mcpClient = await CreateAndInitializeMcpClientAsync(toolRegistry, configuration);
+        var svc = await CreateServicesAsync(configuration);
 
-        // Print skills summary at startup
-        var manifests = skillRegistry.GetSkillManifests();
+        var manifests = svc.SkillRegistry.GetSkillManifests();
         Console.WriteLine($"Skills loaded: {manifests.Count} skill(s) registered.");
         Console.WriteLine();
 
-        // Build comprehensive system prompt with all available tools and a compact skills index
         var systemPrompt = new SystemPromptBuilder()
             .WithPersona(SystemPromptConfig.AgentPrompts.DeveloperAssistant)
             .WithTools(
@@ -202,35 +255,10 @@ class Program
             )
             .Build();
 
-        var chatClient = LLMFactory.CreateFromConfiguration(configuration);
-        var longTermMemory = MemoryBackendFactory.CreateLongTermStorage(configuration, workspaceManager);
-        var memory = new HybridMemory(100, longTermMemory);
-        var chatHistoryPath = workspaceManager.ResolvePath("ChatHistory");
-        // MarkdownSessionStore: append-only markdown store with full message history (incl. tool calls).
-        var sessionStore = new MarkdownSessionStore(chatHistoryPath);
-
-        // Register memory tools into the registry specifically for this agent's memory
-        toolRegistry.Register(new AddMemoryTool(memory));
-        toolRegistry.Register(new SearchMemoryTool(memory));
-        toolRegistry.Register(new GetAllMemoriesTool(memory));
-
-        var agent = new AgentBuilder(toolRegistry)
-            .WithName("AgentFox")
-            .WithSystemPrompt(systemPrompt)
-            .WithMemory(memory)
-            .WithLogger(new ConsoleLogger<FoxAgent>())
-            .WithConversationStore(sessionStore)
-            .WithHistoryProvider(sessionStore.HistoryProvider)
-            .WithCompactionFromConfig(configuration)
-            .WithSkillsRegistry(skillRegistry)
-            .WithMCPClient(mcpClient)
-            .WithWorkspaceManager(workspaceManager)
-            .WithChatClient(chatClient)
-            .WithSessionManager(sessionManager)
-            .Build();
+        var agent = BuildAgent(svc, systemPrompt, configuration, withLogger: true);
 
         // Register spawn sub-agent tool (requires the agent instance)
-        toolRegistry.Register(new SpawnSubAgentTool(agent));
+        svc.ToolRegistry.Register(new SpawnSubAgentTool(agent));
 
         // Set up SubAgentManager for background/long-running sub-agents
         var subAgentConfig = new SubAgentConfiguration
@@ -247,22 +275,22 @@ class Program
 
         // Create command queue and agent runtime for sub-agent management
         var commandQueue = new CommandQueue();
-        var agentRuntime = new DefaultAgentRuntime(toolRegistry, null, new ConsoleLogger<DefaultAgentRuntime>());
-        var subAgentManager = new SubAgentManager(commandQueue, agentRuntime, subAgentConfig, new ConsoleLogger<SubAgentManager>(), sessionManager);
+        var agentRuntime = new DefaultAgentRuntime(svc.ToolRegistry, null, new ConsoleLogger<DefaultAgentRuntime>());
+        var subAgentManager = new SubAgentManager(commandQueue, agentRuntime, subAgentConfig,
+            new ConsoleLogger<SubAgentManager>(), svc.SessionManager);
 
         // Register callback for background sub-agent result announcements
         subAgentManager.RegisterResultCallback(async (task, result) =>
         {
             Console.WriteLine($"\n[BACKGROUND] Sub-agent '{task.SessionKey}' completed with status: {result.Status}");
 
-            // Create a result announcement command to report back to the main agent
             // For now, just log the result - the full channel announcement system can be enhanced later
-            return null; // Returning null since we're not wiring up the full command queue processing yet
+            return null;
         });
 
         // Register background sub-agent tool
-        var consoleSessionId = sessionManager.GetOrCreateConsoleSession(agent.Id);
-        toolRegistry.Register(new SpawnBackgroundSubAgentTool(
+        var consoleSessionId = svc.SessionManager.GetOrCreateConsoleSession(agent.Id);
+        svc.ToolRegistry.Register(new SpawnBackgroundSubAgentTool(
             subAgentManager,
             parentAgentId: agent.Id,
             parentSessionKey: consoleSessionId,

@@ -30,6 +30,12 @@ public class SessionManager : IDisposable
     private readonly SessionConfig _config;
     private readonly string _sessionDir;
     private readonly string _archiveDir;
+
+    /// <summary>Resolved absolute path where active session files and index.json are stored.</summary>
+    public string SessionDirectory => _sessionDir;
+
+    /// <summary>Resolved absolute path where archived session files are stored.</summary>
+    public string ArchiveDirectory => _archiveDir;
     private readonly ILogger? _logger;
 
     // In-memory index: sessionId → SessionInfo
