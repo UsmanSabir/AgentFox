@@ -72,6 +72,19 @@ public class ResultAnnouncementCommand : ICommand
     /// Indicates whether this announcement should be sent to the channel or only stored
     /// </summary>
     public bool SuppressChannelNotification { get; set; } = false;
+
+    /// <summary>
+    /// The session key of the parent agent's active conversation.
+    /// When set, the Main lane handler injects the result into the parent agent's context
+    /// so the LLM can reason about the completed sub-task on its next turn.
+    /// </summary>
+    public string? ParentSessionKey { get; set; }
+
+    /// <summary>
+    /// The session key of the sub-agent that produced this result.
+    /// Included in the parent notification for traceability.
+    /// </summary>
+    public string? SubAgentSessionKey { get; set; }
     
     /// <summary>
     /// Create a result announcement for sending to a channel
@@ -101,6 +114,35 @@ public class ResultAnnouncementCommand : ICommand
         };
     }
     
+    /// <summary>
+    /// Create a result announcement that routes back to the parent agent's conversation.
+    /// The Main lane handler will inject the formatted result into the parent's session
+    /// so the LLM sees it on the next turn.
+    /// </summary>
+    public static ResultAnnouncementCommand CreateParentAgentAnnouncement(
+        SubAgentCompletionResult result,
+        string correlationId,
+        string parentSessionKey,
+        string subAgentSessionKey)
+    {
+        return new ResultAnnouncementCommand
+        {
+            SessionKey = parentSessionKey,
+            Result = result,
+            RequesterChannel = null,
+            CorrelationId = correlationId,
+            ParentSessionKey = parentSessionKey,
+            SubAgentSessionKey = subAgentSessionKey,
+            SuppressChannelNotification = true,
+            Metadata = new Dictionary<string, string>
+            {
+                ["announcement_type"] = "parent_agent_result",
+                ["result_status"] = result.Status.ToString(),
+                ["sub_agent_session"] = subAgentSessionKey
+            }
+        };
+    }
+
     /// <summary>
     /// Create a result announcement for local storage only (no channel notification)
     /// </summary>

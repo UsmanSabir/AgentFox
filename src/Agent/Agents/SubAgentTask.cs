@@ -36,6 +36,12 @@ public class SubAgentTask
     /// The agent ID of the parent that spawned this sub-agent
     /// </summary>
     public string ParentAgentId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The session key of the parent agent's active conversation.
+    /// Used to route the result back into the parent agent's context when complete.
+    /// </summary>
+    public string ParentSessionKey { get; set; } = string.Empty;
     
     /// <summary>
     /// The ID of the channel that originated this sub-agent task (if spawned from a channel)

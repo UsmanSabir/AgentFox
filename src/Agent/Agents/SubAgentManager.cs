@@ -185,6 +185,7 @@ public class SubAgentManager : IDisposable
                 SessionKey = subAgentSessionKey,
                 RunId = command.RunId,
                 ParentAgentId = parentAgentId,
+                ParentSessionKey = parentSessionKey,
                 TaskPayload = taskMessage,
                 Model = model ?? _config.DefaultModel,
                 ThinkingLevel = thinkingLevel ?? _config.DefaultThinkingLevel,
