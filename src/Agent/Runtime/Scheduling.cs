@@ -1,6 +1,8 @@
 using System.Timers;
 using System.Text;
 using AgentFox.Agents;
+using AgentFox.Models;
+using AgentFox.Sessions;
 
 namespace AgentFox.Runtime;
 
@@ -13,22 +15,24 @@ public class HeartbeatManager : IDisposable
     private readonly System.Timers.Timer _timer;
     private readonly Dictionary<string, HeartbeatConfig> _heartbeats = new();
     private readonly FoxAgent _agent;
+    private readonly SessionManager? _sessionManager;
     private readonly string? _beatFilePath;
     private bool _disposed;
-    
+
     public event EventHandler<HeartbeatEventArgs>? HeartbeatTriggered;
     public event EventHandler<HeartbeatMissedEventArgs>? HeartbeatMissed;
     public event EventHandler<HeartbeatAddedEventArgs>? HeartbeatAdded;
     public event EventHandler<HeartbeatRemovedEventArgs>? HeartbeatRemoved;
     public event EventHandler<HeartbeatStatusChangedEventArgs>? HeartbeatStatusChanged;
-    
-    public HeartbeatManager(FoxAgent agent, int intervalSeconds = 60, string? beatFilePath = null)
+
+    public HeartbeatManager(FoxAgent agent, int intervalSeconds = 60, string? beatFilePath = null, SessionManager? sessionManager = null)
     {
         _agent = agent;
+        _sessionManager = sessionManager;
         _beatFilePath = beatFilePath ?? Path.Combine(AppContext.BaseDirectory, "Runtime", "Heartbeat.md");
         _timer = new System.Timers.Timer(intervalSeconds * 1000);
         _timer.Elapsed += OnTimerElapsed;
-        
+
         // Load existing heartbeats from file
         LoadHeartbeatsFromFile();
     }
@@ -288,7 +292,18 @@ public class HeartbeatManager : IDisposable
     {
         try
         {
-            var result = await _agent.ExecuteAsync(config.Task);
+            // Each heartbeat run gets a fresh session so runs don't share context
+            AgentResult result;
+            if (_sessionManager != null)
+            {
+                var sessionId = _sessionManager.CreateFreshSession(
+                    SessionOrigin.Heartbeat, config.Name, _agent.Id);
+                result = await _agent.ProcessAsync(config.Task, sessionId);
+            }
+            else
+            {
+                result = await _agent.ExecuteAsync(config.Task);
+            }
             
             config.LastTriggered = DateTime.UtcNow;
             config.MissedCount = 0;
@@ -385,14 +400,16 @@ public class CronScheduler : IDisposable
     private readonly System.Timers.Timer _timer;
     private readonly Dictionary<string, CronJob> _jobs = new();
     private readonly FoxAgent _agent;
+    private readonly SessionManager? _sessionManager;
     private bool _disposed;
-    
+
     public event EventHandler<CronJobExecutedEventArgs>? JobExecuted;
     public event EventHandler<CronJobErrorEventArgs>? JobError;
-    
-    public CronScheduler(FoxAgent agent, int checkIntervalSeconds = 60)
+
+    public CronScheduler(FoxAgent agent, int checkIntervalSeconds = 60, SessionManager? sessionManager = null)
     {
         _agent = agent;
+        _sessionManager = sessionManager;
         _timer = new System.Timers.Timer(checkIntervalSeconds * 1000);
         _timer.Elapsed += OnTimerElapsed;
     }
@@ -446,8 +463,19 @@ public class CronScheduler : IDisposable
         {
             try
             {
-                var result = await _agent.ExecuteAsync(job.Task);
-                
+                // Each cron run gets a fresh session so jobs don't share context
+                AgentResult result;
+                if (_sessionManager != null)
+                {
+                    var sessionId = _sessionManager.CreateFreshSession(
+                        SessionOrigin.CronJob, job.Name, _agent.Id);
+                    result = await _agent.ProcessAsync(job.Task, sessionId);
+                }
+                else
+                {
+                    result = await _agent.ExecuteAsync(job.Task);
+                }
+
                 job.LastExecuted = now;
                 job.NextExecution = CalculateNextExecution(job.CronExpression);
                 

@@ -1,5 +1,6 @@
 using AgentFox.Models;
 using AgentFox.Agents;
+using AgentFox.Sessions;
 using Newtonsoft.Json;
 using Microsoft.Extensions.Logging;
 
@@ -83,14 +84,16 @@ public class ChannelManager
     private readonly Dictionary<string, Channel> _channels = new();
     private readonly FoxAgent _agent;
     private ChannelMessageGateway? _gateway;
+    private readonly SessionManager? _sessionManager;
     private readonly ILogger? _logger;
-    
+
     public IReadOnlyDictionary<string, Channel> Channels => _channels;
     public ChannelMessageGateway? Gateway => _gateway;
-    
-    public ChannelManager(FoxAgent agent, ILogger? logger = null)
+
+    public ChannelManager(FoxAgent agent, SessionManager? sessionManager = null, ILogger? logger = null)
     {
         _agent = agent;
+        _sessionManager = sessionManager;
         _logger = logger;
     }
     
@@ -169,10 +172,20 @@ public class ChannelManager
             }
             else
             {
-                // Legacy direct execution mode
+                // Legacy direct execution mode — use a per-channel session when available
                 _logger?.LogInformation("Processing channel message in legacy mode: {MessageId}", message.Id);
-                var result = await _agent.ExecuteAsync(message.Content);
-                await channel.SendMessageAsync(result.Output);
+                if (_sessionManager != null)
+                {
+                    var sessionId = _sessionManager.GetOrCreateChannelSession(
+                        channel.ChannelId, channel.Name, _agent.Id);
+                    var result = await _agent.ProcessAsync(message.Content, sessionId);
+                    await channel.SendMessageAsync(result.Output);
+                }
+                else
+                {
+                    var result = await _agent.ExecuteAsync(message.Content);
+                    await channel.SendMessageAsync(result.Output);
+                }
             }
         }
         catch (Exception ex)

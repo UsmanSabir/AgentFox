@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using AgentFox.Models;
+using AgentFox.Sessions;
 using Microsoft.Extensions.Logging;
 
 namespace AgentFox.Agents;
@@ -44,6 +45,7 @@ public class SubAgentManager : IDisposable
     private readonly ICommandQueue _commandQueue;
     private readonly IAgentRuntime _agentRuntime;
     private readonly SubAgentConfiguration _config;
+    private readonly SessionManager? _sessionManager;
     private readonly ILogger? _logger;
     
     // Active sub-agents tracking
@@ -61,12 +63,14 @@ public class SubAgentManager : IDisposable
         ICommandQueue commandQueue,
         IAgentRuntime agentRuntime,
         SubAgentConfiguration? config = null,
-        ILogger? logger = null)
+        ILogger? logger = null,
+        SessionManager? sessionManager = null)
     {
         _commandQueue = commandQueue ?? throw new ArgumentNullException(nameof(commandQueue));
         _agentRuntime = agentRuntime ?? throw new ArgumentNullException(nameof(agentRuntime));
         _config = config ?? new SubAgentConfiguration();
         _logger = logger;
+        _sessionManager = sessionManager;
         _activeSubAgents = new ConcurrentDictionary<string, SubAgentTask>();
         _childCountPerAgent = new ConcurrentDictionary<string, int>();
         
@@ -159,9 +163,11 @@ public class SubAgentManager : IDisposable
                 };
             }
             
-            // 2. Generate sub-agent session key
+            // 2. Generate sub-agent session key (filesystem-safe, scoped to parent agent directory)
             var subAgentId = Guid.NewGuid().ToString("N");
-            string subAgentSessionKey = $"agent:{parentAgentId}:subagent:{subAgentId}";
+            string subAgentSessionKey = _sessionManager != null
+                ? _sessionManager.CreateSubAgentSession(parentAgentId, subAgentId, parentSessionKey)
+                : $"agent_{parentAgentId}_subagent_{subAgentId}"; // fallback: no colons for Windows FS safety
             
             // 3. Create sub-agent command
             var command = AgentCommand.CreateSubagentCommand(
@@ -242,7 +248,11 @@ public class SubAgentManager : IDisposable
             task.State = result.Status;
             task.CompletedAt = DateTime.UtcNow;
             task.Completion.SetResult(result);
-            
+
+            // Mark aborted sessions so SessionManager archives them
+            if (result.Status is SubAgentState.Cancelled or SubAgentState.TimedOut or SubAgentState.Failed)
+                _sessionManager?.MarkAborted(task.SessionKey, $"sub-agent {result.Status}");
+
             _logger?.LogInformation($"Sub-agent completed: {runId}, Status={result.Status}");
             
             // ✅ NEW: Invoke result callbacks for result announcement routing
@@ -318,9 +328,12 @@ public class SubAgentManager : IDisposable
         if (_activeSubAgents.TryGetValue(runId, out var task))
         {
             _logger?.LogInformation($"Cancelling sub-agent: {runId}");
-            
+
+            // Mark session as aborted before signalling cancellation
+            _sessionManager?.MarkAborted(task.SessionKey, "user cancelled");
+
             task.CancellationTokenSource.Cancel();
-            
+
             // Wait for completion or timeout
             try
             {
@@ -330,7 +343,7 @@ public class SubAgentManager : IDisposable
             {
                 _logger?.LogInformation($"Sub-agent cancelled: {runId}");
             }
-            
+
             return true;
         }
         

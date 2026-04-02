@@ -2,6 +2,7 @@ using AgentFox.Agents;
 using AgentFox.LLM;
 using AgentFox.MCP;
 using AgentFox.Memory;
+using AgentFox.Sessions;
 using AgentFox.Skills;
 using AgentFox.Tools;
 using SystemPromptBuilder = AgentFox.LLM.SystemPromptBuilder;
@@ -76,6 +77,9 @@ class Program
     static async Task<int> RunCommandLineMode(string[] args, IConfiguration configuration)
     {
         var workspaceManager = new WorkspaceManager(configuration);
+        var sessionConfig = new SessionConfig();
+        configuration.GetSection("Sessions").Bind(sessionConfig);
+        var sessionManager = new SessionManager(sessionConfig, workspaceManager);
         var toolRegistry = CreateToolRegistry(workspaceManager);
         var skillRegistry = await CreateSkillRegistryAsync(toolRegistry, configuration);
         var mcpClient = await CreateAndInitializeMcpClientAsync(toolRegistry, configuration);
@@ -118,6 +122,7 @@ class Program
             .WithHistoryProvider(sessionStore.HistoryProvider)
             .WithChatClient(chatClient)
             .WithWorkspaceManager(workspaceManager)
+            .WithSessionManager(sessionManager)
             .Build();
 
         var task = string.Join(" ", args);
@@ -142,6 +147,9 @@ class Program
     static async Task<int> RunInteractiveMode(IConfiguration configuration)
     {
         var workspaceManager = new WorkspaceManager(configuration);
+        var sessionConfig = new SessionConfig();
+        configuration.GetSection("Sessions").Bind(sessionConfig);
+        var sessionManager = new SessionManager(sessionConfig, workspaceManager);
         var toolRegistry = CreateToolRegistry(workspaceManager);
         var skillRegistry = await CreateSkillRegistryAsync(toolRegistry, configuration);
         var mcpClient = await CreateAndInitializeMcpClientAsync(toolRegistry, configuration);
@@ -218,6 +226,7 @@ class Program
             .WithMCPClient(mcpClient)
             .WithWorkspaceManager(workspaceManager)
             .WithChatClient(chatClient)
+            .WithSessionManager(sessionManager)
             .Build();
 
         // Register spawn sub-agent tool (requires the agent instance)
@@ -239,7 +248,7 @@ class Program
         // Create command queue and agent runtime for sub-agent management
         var commandQueue = new CommandQueue();
         var agentRuntime = new DefaultAgentRuntime(toolRegistry, null, new ConsoleLogger<DefaultAgentRuntime>());
-        var subAgentManager = new SubAgentManager(commandQueue, agentRuntime, subAgentConfig, new ConsoleLogger<SubAgentManager>());
+        var subAgentManager = new SubAgentManager(commandQueue, agentRuntime, subAgentConfig, new ConsoleLogger<SubAgentManager>(), sessionManager);
 
         // Register callback for background sub-agent result announcements
         subAgentManager.RegisterResultCallback(async (task, result) =>
@@ -252,10 +261,11 @@ class Program
         });
 
         // Register background sub-agent tool
+        var consoleSessionId = sessionManager.GetOrCreateConsoleSession(agent.Id);
         toolRegistry.Register(new SpawnBackgroundSubAgentTool(
             subAgentManager,
             parentAgentId: agent.Id,
-            parentSessionKey: $"agent:{agent.Id}:main",
+            parentSessionKey: consoleSessionId,
             parentSpawnDepth: 0,
             logger: new ConsoleLogger<SpawnBackgroundSubAgentTool>()
         ));

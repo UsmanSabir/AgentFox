@@ -198,9 +198,10 @@ public sealed class MarkdownSessionStore : IConversationStore
 
     public IEnumerable<string> GetAllSessionIds()
     {
-        var fromFiles = System.IO.Directory.EnumerateFiles(_directory, "*.md")
-            .Select(Path.GetFileNameWithoutExtension)
-            .OfType<string>();
+        var fromFiles = System.IO.Directory.EnumerateFiles(_directory, "*.md", SearchOption.AllDirectories)
+            .Select(f => Path.GetRelativePath(_directory, f))
+            .Select(rel => rel[..^3]) // strip .md
+            .Select(rel => rel.Replace(Path.DirectorySeparatorChar, '/'));
         return _cache.Keys.Union(fromFiles).Distinct();
     }
 
@@ -385,7 +386,22 @@ public sealed class MarkdownSessionStore : IConversationStore
         buf.Clear();
     }
 
-    private string FilePath(string id) => Path.Combine(_directory, $"{id}.md");
+    /// <summary>
+    /// Resolves the .md file path for a conversation ID.
+    /// IDs may include a single directory separator for sub-agent scoping
+    /// (e.g. "agentfox/sa_abc123" → {directory}/agentfox/sa_abc123.md).
+    /// </summary>
+    private string FilePath(string id)
+    {
+        var rel = id.Replace('/', Path.DirectorySeparatorChar)
+                    .Replace('\\', Path.DirectorySeparatorChar);
+        var path = Path.Combine(_directory, rel + ".md");
+        // Ensure the sub-directory exists before callers try to write
+        var dir = Path.GetDirectoryName(path)!;
+        if (!Directory.Exists(dir))
+            Directory.CreateDirectory(dir);
+        return path;
+    }
 
     // ------------------------------------------------------------------
     // JSON records for tool call / result lines

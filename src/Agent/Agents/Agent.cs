@@ -2,6 +2,7 @@ using AgentFox.LLM;
 using AgentFox.MCP;
 using AgentFox.Memory;
 using AgentFox.Models;
+using AgentFox.Sessions;
 using AgentFox.Skills;
 using AgentFox.Tools;
 using Microsoft.Agents.AI;
@@ -102,6 +103,11 @@ public class FoxAgent
     /// </summary>
     public string Role { get; set; } = "default";
 
+    /// <summary>
+    /// Optional session manager. When set, conversation IDs are resolved through it,
+    /// enabling per-channel persistence, idle archiving, and /new /reset support.
+    /// </summary>
+    public SessionManager? SessionManager { get; set; }
 
     public FoxAgent(ChatClientAgent agent, AgentConfig config, IConversationStore store, string defaultConversationId, WorkspaceManager workspaceManager, ILogger<FoxAgent>? logger = null)
     {
@@ -148,12 +154,23 @@ public class FoxAgent
             _agent.EnabledSkills.AddRange(_agent.Config.SkillRegistry.GetAll());
             _logger?.LogInformation("Auto-populated agent '{AgentName}' with {SkillCount} available skills", Name, _agent.EnabledSkills.Count);
         }
-        return await ProcessAsync(task, _agent.DefaultConversationId);
+        var conversationId = SessionManager != null
+            ? SessionManager.GetOrCreateConsoleSession(_agent.Config.Id)
+            : _agent.DefaultConversationId;
+        return await ProcessAsync(task, conversationId);
     }
 
     public async Task<AgentResult> ProcessAsync(string task, string? conversationId = null, CancellationToken cancellationToken = default)
     {
         conversationId ??= Guid.NewGuid().ToString("N");
+
+        // Handle /new and /reset — archive current session and start a fresh one
+        if (SessionManager != null && SessionManager.IsResetCommand(task))
+        {
+            var newId = SessionManager.ResetSession(conversationId);
+            _logger?.LogInformation("Session reset by user command: {Old} → {New}", conversationId, newId);
+            return new AgentResult { Success = true, Output = $"Session reset. Starting fresh (session: {newId})." };
+        }
 
         _logger?.LogInformation("Agent '{AgentName}' processing task in conversation {ConversationId}", Name, conversationId);
 
@@ -191,6 +208,9 @@ public class FoxAgent
             // Persist updated session metadata (e.g. lastActiveAt) after each turn.
             ConversationStore.SaveSession(conversationId, session);
 
+            // Keep the session alive in the session manager
+            SessionManager?.TouchSession(conversationId);
+
             var responseText = response.Text ?? "I apologize, but I wasn't able to generate a response.";
             _logger?.LogInformation("Agent '{AgentName}' completed task in conversation {ConversationId}", Name, conversationId);
 
@@ -200,11 +220,13 @@ public class FoxAgent
         catch (OperationCanceledException)
         {
             _logger?.LogWarning("Agent '{AgentName}' task timed out after {Timeout} seconds", Name, TimeoutSeconds);
+            SessionManager?.MarkAborted(conversationId, "timeout");
             throw;
         }
         catch (Exception ex)
         {
             _logger?.LogError(ex, "Agent '{AgentName}' failed to process task in conversation {ConversationId}", Name, conversationId);
+            SessionManager?.MarkAborted(conversationId, ex.Message);
             throw;
         }
     }
@@ -447,6 +469,7 @@ public class AgentBuilder
     private CompactionConfig? _compactionConfig;
     private ChatHistoryProvider? _chatHistoryProvider;
     private WorkspaceManager _workspaceManager;
+    private SessionManager? _sessionManager;
 
     public AgentBuilder(ToolRegistry toolRegistry)
     {
@@ -529,6 +552,12 @@ public class AgentBuilder
     public AgentBuilder WithWorkspaceManager(WorkspaceManager workspaceManager)
     {
         _workspaceManager = workspaceManager;
+        return this;
+    }
+
+    public AgentBuilder WithSessionManager(SessionManager sessionManager)
+    {
+        _sessionManager = sessionManager;
         return this;
     }
 
@@ -1087,6 +1116,9 @@ public class AgentBuilder
 
         
         var foxAgent = new FoxAgent(agent, _config, _conversationStore!, "main", _workspaceManager, _logger);
+
+        if (_sessionManager != null)
+            foxAgent.SessionManager = _sessionManager;
 
         // Apply memory configuration if set
         if (_memory != null)
