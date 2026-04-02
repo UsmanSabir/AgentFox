@@ -9,6 +9,8 @@ using Microsoft.Agents.AI.Compaction;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using OpenAI.Chat;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using SystemPromptBuilder = AgentFox.LLM.SystemPromptBuilder;
@@ -81,6 +83,7 @@ public class FoxAgent
     private readonly Agent _agent;
     private readonly ChatClientAgent _chatAgent;
     private readonly ILogger<FoxAgent>? _logger;
+    private WorkspaceManager _workspaceManager;
 
     public string Id => _agent.Config.Id;
     public string Name => _agent.Config.Name;
@@ -100,15 +103,17 @@ public class FoxAgent
     public string Role { get; set; } = "default";
 
 
-    public FoxAgent(ChatClientAgent agent, AgentConfig config, IConversationStore store, ILogger<FoxAgent>? logger = null)
+    public FoxAgent(ChatClientAgent agent, AgentConfig config, IConversationStore store, string defaultConversationId, WorkspaceManager workspaceManager, ILogger<FoxAgent>? logger = null)
     {
         _agent = new Agent
         {
             Config = config,
             Status = AgentStatus.Idle,
-            ConversationStore = store
+            ConversationStore = store,
+            DefaultConversationId = defaultConversationId
         };
         _chatAgent = agent;
+        _workspaceManager = workspaceManager;
         _logger = logger;
     }
 
@@ -161,16 +166,30 @@ public class FoxAgent
         {
             var agent = _chatAgent;
 
-            var thread = ConversationStore.GetThread(conversationId);
-            if (thread == null)
+            // Retrieve the cached session. On a cache miss (first call or after restart),
+            // create a fresh session and restore any persisted messages from disk so the
+            // ChatHistoryProvider sees the full prior history before RunAsync is called.
+            var session = ConversationStore.GetSession(conversationId);
+            if (session == null)
             {
-                _logger?.LogDebug("Creating new conversation thread for {ConversationId}", conversationId);
-                thread = await agent.CreateSessionAsync(timeoutToken);
-                ConversationStore.SaveThread(conversationId, thread);
+                _logger?.LogDebug("Creating new conversation session for {ConversationId}", conversationId);
+                session = await agent.CreateSessionAsync(cancellationToken);
+                session.StateBag.SetValue("ConversationId", conversationId);
+                session.StateBag.SetValue("CreatedAt", DateTime.UtcNow.ToString("O"));
+                await ConversationStore.RestoreAsync(conversationId, session);
+                ConversationStore.SaveSession(conversationId, session);
             }
 
             var runOptions = new AgentRunOptions();
-            var response = await agent.RunAsync(task, thread, options: runOptions, cancellationToken: timeoutToken);
+
+            // Proactive recall: inject relevant long-term memories as context preamble
+            var memoryContext = await BuildMemoryContextAsync(_agent.Memory, task);
+            var augmentedTask = string.IsNullOrEmpty(memoryContext) ? task : memoryContext + task;
+
+            var response = await agent.RunAsync(augmentedTask, session, options: runOptions, cancellationToken: timeoutToken);
+
+            // Persist updated session metadata (e.g. lastActiveAt) after each turn.
+            ConversationStore.SaveSession(conversationId, session);
 
             var responseText = response.Text ?? "I apologize, but I wasn't able to generate a response.";
             _logger?.LogInformation("Agent '{AgentName}' completed task in conversation {ConversationId}", Name, conversationId);
@@ -192,6 +211,25 @@ public class FoxAgent
 
 
     /// <summary>
+    /// Search long-term memory for entries relevant to the current task and format
+    /// them as a context preamble to prepend to the user message.
+    /// </summary>
+    private static async Task<string> BuildMemoryContextAsync(IMemory? memory, string task)
+    {
+        if (memory == null) return string.Empty;
+
+        var memories = await memory.SearchAsync(task, limit: 5);
+        if (memories.Count == 0) return string.Empty;
+
+        var sb = new StringBuilder();
+        sb.AppendLine("[Relevant context from long-term memory:]");
+        foreach (var mem in memories)
+            sb.AppendLine($"- [{mem.Type}] {mem.Content}");
+        sb.AppendLine();
+        return sb.ToString();
+    }
+
+    /// <summary>
     /// Spawn a sub-agent
     /// </summary>
     public FoxAgent SpawnSubAgent(AgentSpawnConfig config)
@@ -207,7 +245,7 @@ public class FoxAgent
         };
 
         var subAgent = SpawnSubAgentInternal(_agent, agentConfig);
-        var foxSubAgent = new FoxAgent(_chatAgent, subAgent.Config, ConversationStore)
+        var foxSubAgent = new FoxAgent(_chatAgent, subAgent.Config, ConversationStore, Guid.NewGuid().ToString("N"), _workspaceManager)
         {
             Role = config.Role ?? Role  // Inherit role from parent by default
         };
@@ -273,7 +311,7 @@ public class FoxAgent
     /// </summary>
     //public List<Message> GetHistory()
     //{
-    //    return _conversationStore.GetThread(_agent.DefaultConversationId).StateBag  // _agent.ConversationHistory.ToList();
+    //    return _conversationStore.GetSession(_agent.DefaultConversationId).StateBag  // _agent.ConversationHistory.ToList();
     //}
 
     /// <summary>
@@ -407,6 +445,8 @@ public class AgentBuilder
     private ILogger<FoxAgent>? _logger;
     private IChatClient? _chatClient;
     private CompactionConfig? _compactionConfig;
+    private ChatHistoryProvider? _chatHistoryProvider;
+    private WorkspaceManager _workspaceManager;
 
     public AgentBuilder(ToolRegistry toolRegistry)
     {
@@ -454,7 +494,7 @@ public class AgentBuilder
         _conversationStore = conversationStore;
         return this;
     }
-
+    
     public AgentBuilder WithChatClient(IChatClient chatClient)
     {
         _chatClient = chatClient;
@@ -483,6 +523,18 @@ public class AgentBuilder
     public AgentBuilder WithLogger(ILogger<FoxAgent> logger)
     {
         _logger = logger;
+        return this;
+    }
+
+    public AgentBuilder WithWorkspaceManager(WorkspaceManager workspaceManager)
+    {
+        _workspaceManager = workspaceManager;
+        return this;
+    }
+
+    public AgentBuilder WithHistoryProvider(ChatHistoryProvider chatHistoryProvider)
+    {
+        _chatHistoryProvider = chatHistoryProvider;
         return this;
     }
 
@@ -898,7 +950,26 @@ public class AgentBuilder
         // Return the dynamic schema instead of the one inferred from the delegate
         public override JsonElement JsonSchema => customSchema;
     }
+    
+    private async Task LoadMainSession(ChatClientAgent agent)
+    {
+        //// 1. Try to find the existing JSON state in your DB for this fixed key
+        //string savedJson = await _myDb.GetSessionByFixedKeyAsync(DefaultKey);
 
+        //if (!string.IsNullOrEmpty(savedJson))
+        //{
+        //    // 2. Hydrate the session from the saved state
+        //    return await agent.DeserializeSessionAsync(savedJson);
+        //}
+
+        //// 3. Fallback: If it's the very first run, create a fresh session
+        //var newSession = await agent.CreateSessionAsync();
+
+        //// Save the initial state immediately so it's ready for the next restart
+        //string initialState = await agent.SerializeSessionAsync(newSession);
+        //await _myDb.SaveSessionAsync(DefaultKey, initialState);
+
+    }
 
     public FoxAgent Build()
     {
@@ -993,12 +1064,16 @@ public class AgentBuilder
             _logger?.LogInformation("Compaction disabled for agent '{AgentName}'", _config.Name);
         }
 
+        ChatHistoryProvider chatHistoryProvider =
+            _chatHistoryProvider ?? new InMemoryChatHistoryProvider();
+
         // 2. Build the agent with nested ChatOptions
         //TODO: Incorporate AgentToolkit https://github.com/microsoft/agent-governance-toolkit
         var agent = agentBuilder
             .BuildAIAgent(new ChatClientAgentOptions
             {
                 Name = _config.Name,
+                ChatHistoryProvider = chatHistoryProvider,
                 ChatOptions = new ChatOptions // Tools must go here
                 {
                     Tools = agentTools,
@@ -1010,7 +1085,8 @@ public class AgentBuilder
 
         _logger?.LogInformation("Building FoxAgent '{AgentName}' with {ToolCount} tools", _config.Name, tools.Count);
 
-        var foxAgent = new FoxAgent(agent, _config, _conversationStore!, _logger);
+        
+        var foxAgent = new FoxAgent(agent, _config, _conversationStore!, "main", _workspaceManager, _logger);
 
         // Apply memory configuration if set
         if (_memory != null)
@@ -1022,5 +1098,7 @@ public class AgentBuilder
 
         return foxAgent;
     }
+
+    
 }
 

@@ -103,10 +103,11 @@ public class AgentConfig
 /// </summary>
 public class Agent
 {
+    const string GlobalMainSessionDefaultKey = "Main";
     public AgentConfig Config { get; set; } = new();
     public List<Message> ConversationHistory { get; set; } = new();
     public IConversationStore ConversationStore { get; set; }
-    public string DefaultConversationId { get; set; }= Guid.NewGuid().ToString("N");
+    public string DefaultConversationId { get; set; } = GlobalMainSessionDefaultKey; //Guid.NewGuid().ToString("N");
     public IMemory? Memory { get; set; }
     public Agent? Parent { get; set; }
     public List<Agent> SubAgents { get; set; } = new();
