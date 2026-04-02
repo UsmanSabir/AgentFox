@@ -56,4 +56,5 @@ nunit-*.xml
 # Vstudio Code workspace settings
 .vscode/
 .vs/
+.claude/
 appsettings.*.json
