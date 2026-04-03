@@ -164,9 +164,8 @@ class Program
 
         services.AddSingleton(sp => new CommandProcessor(
             sp.GetRequiredService<ICommandQueue>(),
-            sp.GetRequiredService<ILogger<CommandProcessor>>(),
-            processingDelayMilliseconds: 50,
-            maxCommandsPerBatch: 1));
+            CommandProcessorConfig.FromSubAgentConfig(sp.GetRequiredService<SubAgentConfiguration>()),
+            sp.GetRequiredService<ILogger<CommandProcessor>>()));
 
         return services.BuildServiceProvider();
     }

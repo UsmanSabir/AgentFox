@@ -29,9 +29,7 @@ public class SubAgentLaneSystemIntegration
         // Initialize the command processor
         _commandProcessor = new CommandProcessor(
             _commandQueue,
-            _logger,
-            processingDelayMilliseconds: 10,
-            maxCommandsPerBatch: 5);
+            logger: _logger);
         
         // Initialize the sub-agent manager
         _subAgentManager = new SubAgentManager(
