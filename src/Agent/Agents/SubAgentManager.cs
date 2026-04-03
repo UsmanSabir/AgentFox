@@ -322,6 +322,61 @@ public class SubAgentManager : IDisposable
     }
     
     /// <summary>
+    /// Pause a sub-agent.  If the task is still pending/queued it will block before
+    /// execution starts.  If already running, execution continues to the end of the
+    /// current turn and then pauses (pause points are between turns inside the executor).
+    /// </summary>
+    public bool PauseSubAgent(string runId)
+    {
+        if (!_activeSubAgents.TryGetValue(runId, out var task)) return false;
+        if (task.State is SubAgentState.Completed or SubAgentState.Failed
+                       or SubAgentState.TimedOut or SubAgentState.Cancelled)
+            return false;
+
+        task.PauseGate.Pause();
+        task.State = SubAgentState.Paused;
+        _logger?.LogInformation("Sub-agent paused: {RunId}", runId);
+        return true;
+    }
+
+    /// <summary>
+    /// Resume a previously paused sub-agent, unblocking its execution gate.
+    /// </summary>
+    public bool ResumeSubAgent(string runId)
+    {
+        if (!_activeSubAgents.TryGetValue(runId, out var task)) return false;
+        if (task.State != SubAgentState.Paused) return false;
+
+        task.State = SubAgentState.Pending; // will transition to Running once dequeued
+        task.PauseGate.Resume();
+        _logger?.LogInformation("Sub-agent resumed: {RunId}", runId);
+        return true;
+    }
+
+    /// <summary>
+    /// Gracefully stop a sub-agent: signals its cancellation token and waits for it
+    /// to complete the current work before returning.
+    /// </summary>
+    public Task<bool> StopSubAgentAsync(string runId) => CancelSubAgentAsync(runId);
+
+    /// <summary>
+    /// Force-kill a sub-agent: signals cancellation and returns immediately without
+    /// waiting for the task to finish.  Use when you need a fire-and-forget abort.
+    /// </summary>
+    public bool KillSubAgent(string runId)
+    {
+        if (!_activeSubAgents.TryGetValue(runId, out var task)) return false;
+
+        _logger?.LogInformation("Killing sub-agent: {RunId}", runId);
+        _sessionManager?.MarkAborted(task.SessionKey, "killed by user");
+
+        // Unblock any pause gate first so the cancellation propagates
+        task.PauseGate.Resume();
+        task.CancellationTokenSource.Cancel();
+        return true;
+    }
+
+    /// <summary>
     /// Cancel a sub-agent execution
     /// </summary>
     public async Task<bool> CancelSubAgentAsync(string runId)
@@ -333,6 +388,8 @@ public class SubAgentManager : IDisposable
             // Mark session as aborted before signalling cancellation
             _sessionManager?.MarkAborted(task.SessionKey, "user cancelled");
 
+            // Unblock any pause gate first so cancellation propagates
+            task.PauseGate.Resume();
             task.CancellationTokenSource.Cancel();
 
             // Wait for completion or timeout
@@ -347,7 +404,7 @@ public class SubAgentManager : IDisposable
 
             return true;
         }
-        
+
         return false;
     }
     

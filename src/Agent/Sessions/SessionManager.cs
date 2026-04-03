@@ -43,6 +43,10 @@ public class SessionManager : IDisposable
     // Channel lookup: channelId → sessionId  (only Active sessions)
     private readonly ConcurrentDictionary<string, string> _channelMap = new();
 
+    // SessionIds loaded from the index file at startup — used to detect
+    // sessions that were Active when the previous process terminated.
+    private readonly HashSet<string> _preloadedSessionIds = new();
+
     private readonly System.Timers.Timer _bgTimer;
     private readonly SemaphoreSlim _saveLock = new(1, 1);
     private bool _disposed;
@@ -319,6 +323,19 @@ public class SessionManager : IDisposable
     public IReadOnlyList<SessionInfo> GetAllSessions() =>
         _index.Values.ToList();
 
+    /// <summary>
+    /// Returns sessions that were persisted as <see cref="SessionStatus.Active"/> when the
+    /// previous process terminated — i.e., work that was in progress and may need recovery.
+    ///
+    /// Only sessions loaded from the index at startup are considered; any session created
+    /// during this run is excluded.
+    /// </summary>
+    public IReadOnlyList<SessionInfo> GetInterruptedActiveSessions() =>
+        _preloadedSessionIds
+            .Where(id => _index.TryGetValue(id, out var s) && s.Status == SessionStatus.Active)
+            .Select(id => _index[id])
+            .ToList();
+
     // -------------------------------------------------------------------------
     // Path helpers (public so MarkdownSessionStore can share the convention)
     // -------------------------------------------------------------------------
@@ -433,6 +450,7 @@ public class SessionManager : IDisposable
             foreach (var s in idx.Sessions)
             {
                 _index[s.SessionId] = s;
+                _preloadedSessionIds.Add(s.SessionId);
                 if (s.Origin == SessionOrigin.Channel &&
                     s.ChannelId != null &&
                     s.Status is SessionStatus.Active or SessionStatus.Idle)

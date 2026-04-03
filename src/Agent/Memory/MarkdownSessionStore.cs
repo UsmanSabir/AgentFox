@@ -216,6 +216,51 @@ public sealed class MarkdownSessionStore : IConversationStore
     }
 
     // ------------------------------------------------------------------
+    // Crash-safe pending message (written before RunAsync, deleted after)
+    // ------------------------------------------------------------------
+
+    /// <summary>
+    /// Atomically records the user message that is about to be processed.
+    /// Must be called immediately before <c>agent.RunAsync</c> so that if the
+    /// process crashes mid-LLM-call, the message is recoverable on the next startup.
+    /// The file is removed by <see cref="ClearPendingUserMessage"/> once the
+    /// turn completes and the session has been saved successfully.
+    /// </summary>
+    public void PersistIncomingUserMessage(string conversationId, string message)
+    {
+        var path = PendingFilePath(conversationId);
+        File.WriteAllText(path, message, Encoding.UTF8);
+    }
+
+    /// <summary>
+    /// Removes the pending-message marker after a successful agent turn.
+    /// No-op when no pending file exists.
+    /// </summary>
+    public void ClearPendingUserMessage(string conversationId)
+    {
+        var path = PendingFilePath(conversationId);
+        if (File.Exists(path))
+            File.Delete(path);
+    }
+
+    /// <summary>
+    /// Returns the original user message that was being processed when the
+    /// previous process terminated (detected via the <c>.pending</c> sidecar file),
+    /// or <c>null</c> if no interrupted turn is detected.
+    /// </summary>
+    public string? GetLastUnrespondedUserMessage(string conversationId)
+    {
+        var path = PendingFilePath(conversationId);
+        if (!File.Exists(path)) return null;
+
+        var text = File.ReadAllText(path, Encoding.UTF8).Trim();
+        return string.IsNullOrEmpty(text) ? null : text;
+    }
+
+    /// <summary>Pending-message sidecar path (<c>{session}.md.pending</c>) for a conversation.</summary>
+    private string PendingFilePath(string conversationId) => FilePath(conversationId) + ".pending";
+
+    // ------------------------------------------------------------------
     // Session → conversationId registration
     // ------------------------------------------------------------------
 

@@ -10,10 +10,73 @@ public enum SubAgentState
 {
     Pending,
     Running,
+    Paused,
     Completed,
     Failed,
     TimedOut,
     Cancelled
+}
+
+/// <summary>
+/// Allows a sub-agent execution to be paused and resumed.
+/// The lane handler awaits <see cref="WhenResumedAsync"/> before starting each turn,
+/// so a Pause() issued before execution begins will block until Resume() is called.
+/// </summary>
+public sealed class PauseTokenSource
+{
+    private TaskCompletionSource<bool>? _pauseTcs;
+    private readonly object _lock = new();
+
+    /// <summary>True while the gate is in the paused (closed) state.</summary>
+    public bool IsPaused { get; private set; }
+
+    /// <summary>Close the gate — subsequent WhenResumedAsync calls will block.</summary>
+    public void Pause()
+    {
+        lock (_lock)
+        {
+            if (IsPaused) return;
+            IsPaused = true;
+            _pauseTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+    }
+
+    /// <summary>Open the gate — all waiters are unblocked.</summary>
+    public void Resume()
+    {
+        TaskCompletionSource<bool>? tcs;
+        lock (_lock)
+        {
+            if (!IsPaused) return;
+            IsPaused = false;
+            tcs = _pauseTcs;
+            _pauseTcs = null;
+        }
+        tcs?.TrySetResult(true);
+    }
+
+    /// <summary>
+    /// Returns immediately if not paused.
+    /// Otherwise, awaits until <see cref="Resume"/> is called or
+    /// <paramref name="ct"/> is cancelled (which throws <see cref="OperationCanceledException"/>).
+    /// </summary>
+    public async Task WhenResumedAsync(CancellationToken ct = default)
+    {
+        Task? pauseTask;
+        lock (_lock)
+        {
+            if (!IsPaused) return;
+            pauseTask = _pauseTcs?.Task;
+        }
+
+        if (pauseTask == null) return;
+
+        // Race the pause gate against the cancellation token
+        var cancelSignal = Task.Delay(Timeout.Infinite, ct);
+        var winner = await Task.WhenAny(pauseTask, cancelSignal).ConfigureAwait(false);
+        if (winner == cancelSignal)
+            ct.ThrowIfCancellationRequested();
+    }
 }
 
 /// <summary>
@@ -128,6 +191,16 @@ public class SubAgentTask
     /// Cancellation token source for graceful shutdown
     /// </summary>
     public CancellationTokenSource CancellationTokenSource { get; set; } = new();
+
+    /// <summary>
+    /// Pause gate — the lane handler awaits this before starting execution.
+    /// Use <see cref="PauseTokenSource.Pause"/> / <see cref="PauseTokenSource.Resume"/>
+    /// to suspend and restart the sub-agent between turns.
+    /// </summary>
+    public PauseTokenSource PauseGate { get; } = new();
+
+    /// <summary>Convenience alias for <see cref="PauseGate"/>.IsPaused.</summary>
+    public bool IsPaused => PauseGate.IsPaused;
     
     /// <summary>
     /// Task completion source for awaiting results
@@ -163,9 +236,9 @@ public class SubAgentTask
     public bool IsTimedOut => ElapsedTime.TotalSeconds > TimeoutSeconds;
     
     /// <summary>
-    /// Check if this task is currently active
+    /// Check if this task is currently active (running, queued, or paused and waiting to resume)
     /// </summary>
-    public bool IsActive => State == SubAgentState.Running || State == SubAgentState.Pending;
+    public bool IsActive => State is SubAgentState.Running or SubAgentState.Pending or SubAgentState.Paused;
 }
 
 /// <summary>

@@ -209,10 +209,19 @@ public class FoxAgent
             var memoryContext = await BuildMemoryContextAsync(_agent.Memory, task);
             var augmentedTask = string.IsNullOrEmpty(memoryContext) ? task : memoryContext + task;
 
+            // Write the original user message to a sidecar .pending file before the LLM call.
+            // If the process crashes mid-response, the pending file lets startup recovery
+            // detect the interrupted task and offer to resume it.
+            // We persist `task` (not `augmentedTask`) so the memory preamble is rebuilt fresh on retry.
+            (ConversationStore as Memory.MarkdownSessionStore)?.PersistIncomingUserMessage(conversationId, task);
+
             var response = await agent.RunAsync(augmentedTask, session, options: runOptions, cancellationToken: timeoutToken);
 
             // Persist updated session metadata (e.g. lastActiveAt) after each turn.
             ConversationStore.SaveSession(conversationId, session);
+
+            // Turn completed successfully — remove the pending marker.
+            (ConversationStore as Memory.MarkdownSessionStore)?.ClearPendingUserMessage(conversationId);
 
             // Keep the session alive in the session manager
             SessionManager?.TouchSession(conversationId);

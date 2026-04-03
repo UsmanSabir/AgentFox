@@ -327,6 +327,10 @@ class Program
         // Agent-dependent tools registered after agent creation (circular dependency)
         toolRegistry.Register(new SpawnSubAgentTool(agent));
 
+        // Snapshot interrupted sessions BEFORE creating/getting this run's console session,
+        // so we know which Active sessions are left over from a previous process.
+        var interruptedSessions = sessionManager.GetInterruptedActiveSessions();
+
         var consoleSessionId = sessionManager.GetOrCreateConsoleSession(agent.Id);
         toolRegistry.Register(new SpawnBackgroundSubAgentTool(
             subAgentManager,
@@ -344,11 +348,23 @@ class Program
             if (command is not AgentCommand agentCmd) return;
 
             var runId = agentCmd.RunId;
+            var subTask = subAgentManager.GetSubAgentTask(runId);
+
+            // Block here if the task was paused before it got picked up by the lane pump.
+            if (subTask != null)
+                await subTask.PauseGate.WhenResumedAsync(ct);
+
             subAgentManager.OnSubAgentStarted(runId);
+
+            // Link the processor's shutdown token with the task's own cancellation token
+            // so that KillSubAgent / StopSubAgent actually cancels the LLM call.
+            using var linked = subTask != null
+                ? CancellationTokenSource.CreateLinkedTokenSource(ct, subTask.CancellationTokenSource.Token)
+                : CancellationTokenSource.CreateLinkedTokenSource(ct);
 
             try
             {
-                var subResult = await agentRuntime.ExecuteAsync(agentCmd, ct);
+                var subResult = await agentRuntime.ExecuteAsync(agentCmd, linked.Token);
 
                 var completion = subResult.Success
                     ? SubAgentCompletionResult.Success(subResult.Output)
@@ -468,6 +484,15 @@ class Program
         // ── Channels ─────────────────────────────────────────────────────────
         var channelManager = await LoadChannelsFromConfigAsync(sp, agent, configuration);
 
+        // ── Startup recovery ─────────────────────────────────────────────────
+        await RecoverInterruptedSessionsAsync(
+            sessionManager,
+            sp.GetRequiredService<MarkdownSessionStore>(),
+            commandQueue,
+            agent,
+            consoleSessionId,
+            interruptedSessions);
+
         Console.WriteLine("Type 'help' for available commands, 'exit' to quit.");
         Console.WriteLine();
 
@@ -482,13 +507,82 @@ class Program
             var trimmed = input.Trim();
             var lower = trimmed.ToLower();
 
-            if (lower == "exit")
+            // ── Built-in REPL commands ────────────────────────────────────────
+            if (lower is "exit")
             {
                 Console.WriteLine("Goodbye!");
                 if (channelManager != null)
                     await channelManager.DisconnectAllAsync();
                 await commandProcessor.StopAsync(TimeSpan.FromSeconds(10));
                 break;
+            }
+
+            if (lower is "help" or "?")
+            {
+                ShowHelp();
+                continue;
+            }
+
+            if (lower == "status")
+            {
+                ShowStatus(agent);
+                continue;
+            }
+
+            if (lower == "tools")
+            {
+                ShowTools(toolRegistry);
+                continue;
+            }
+
+            if (lower == "skills")
+            {
+                ShowSkills(skillRegistry);
+                continue;
+            }
+
+            if (lower.StartsWith("skill "))
+            {
+                ShowSkillDetail(skillRegistry, trimmed[6..].Trim());
+                continue;
+            }
+
+            // ── Agent management commands ─────────────────────────────────────
+            if (lower is "agents" or "agents list")
+            {
+                ShowAgents(subAgentManager);
+                continue;
+            }
+
+            if (lower == "agents stats")
+            {
+                ShowAgentStats(subAgentManager, commandProcessor);
+                continue;
+            }
+
+            if (lower.StartsWith("agents pause "))
+            {
+                HandleAgentPause(subAgentManager, trimmed[13..].Trim());
+                continue;
+            }
+
+            if (lower.StartsWith("agents resume "))
+            {
+                HandleAgentResume(subAgentManager, trimmed[14..].Trim());
+                continue;
+            }
+
+            if (lower.StartsWith("agents stop "))
+            {
+                await HandleAgentStopAsync(subAgentManager, trimmed[12..].Trim());
+                continue;
+            }
+
+            if (lower.StartsWith("agents kill"))
+            {
+                var target = lower.Length > 11 ? trimmed[11..].Trim() : "all";
+                HandleAgentKill(subAgentManager, target);
+                continue;
             }
 
             Console.WriteLine();
@@ -675,33 +769,29 @@ class Program
     {
         Console.WriteLine(@"
 Available commands:
-  help           - Show this help message
-  status         - Show agent status
-  history        - Show conversation history
-  memory         - Show agent memory
-  tools          - List available tools
-  skills         - List all registered skills (name, type, tool count, description)
-  skill <name>   - Show detailed info for a specific skill
-  clear          - Clear conversation history
-  exit           - Exit the program
+  help                  - Show this help message
+  status                - Show agent status
+  tools                 - List available tools
+  skills                - List all registered skills
+  skill <name>          - Show detailed info for a specific skill
+  exit                  - Exit the program
+
+Agent management:
+  agents                - List active sub-agents
+  agents list           - List active sub-agents (alias)
+  agents stats          - Show processor/queue statistics
+  agents pause <id>     - Pause a sub-agent (blocks before next turn)
+  agents resume <id>    - Resume a paused sub-agent
+  agents stop <id>      - Gracefully stop a sub-agent (waits for completion)
+  agents kill <id>      - Force-kill a sub-agent immediately
+  agents kill all       - Force-kill every active sub-agent
 
 You can also ask the agent to:
-  - Execute shell commands
-  - Read/write files
-  - Search for text in files
+  - Execute shell commands, read/write files, search files
   - Spawn sub-agents for complex tasks
   - Remember information for later
   - Use skills: git, docker, deployment, testing, api_integration, etc.
-    (ask the agent to 'load the git skill and help me commit my changes')
   - Use Composio.dev integrations: GitHub, Slack, Jira, Asana, etc.
-    (e.g., 'load the github skill and help me create a repository')
-
-Composio Integration:
-  If COMPOSIO_API_KEY is configured, the agent has access to:
-  - GitHub (create repos, manage issues, view code)
-  - Slack (send messages, create channels)
-  - Jira (manage tasks, create issues)
-  - And many more integrations...
 ");
     }
 
@@ -808,6 +898,223 @@ Composio Integration:
         Console.WriteLine($"  Type: {(skill is ISkillPlugin ? "local" : "generic")} skill");
         Console.WriteLine();
         Console.WriteLine($"  To load full guidance: load_skill(skill_name: \"{skill.Name}\")");
+        Console.WriteLine();
+    }
+
+    // -------------------------------------------------------------------------
+    // Agent management commands
+    // -------------------------------------------------------------------------
+
+    static void ShowAgents(SubAgentManager manager)
+    {
+        var tasks = manager.GetActiveSubAgents().ToList();
+        if (tasks.Count == 0)
+        {
+            Console.WriteLine("No active sub-agents.");
+            Console.WriteLine();
+            return;
+        }
+
+        Console.WriteLine($"Active Sub-Agents ({tasks.Count}):");
+        Console.WriteLine(new string('─', 90));
+        Console.WriteLine($"  {"RunId",-36}  {"State",-8}  {"Elapsed",8}  Session");
+        Console.WriteLine(new string('─', 90));
+
+        foreach (var t in tasks.OrderBy(t => t.CreatedAt))
+        {
+            var elapsed = t.ElapsedTime.TotalSeconds < 60
+                ? $"{t.ElapsedTime.TotalSeconds:F0}s"
+                : $"{t.ElapsedTime:mm\\:ss}";
+            var session = t.SessionKey.Length > 30 ? "…" + t.SessionKey[^29..] : t.SessionKey;
+            Console.WriteLine($"  {t.RunId,-36}  {t.State,-8}  {elapsed,8}  {session}");
+        }
+
+        Console.WriteLine(new string('─', 90));
+        Console.WriteLine();
+    }
+
+    static void ShowAgentStats(SubAgentManager subAgentManager, CommandProcessor commandProcessor)
+    {
+        var stats  = subAgentManager.GetStatistics();
+        var pStats = commandProcessor.GetStatistics();
+
+        Console.WriteLine($"""
+            Sub-Agent Statistics:
+            ─────────────────────────────────
+            Active sub-agents  : {stats.TotalActiveSubAgents}
+              Running          : {stats.RunningSubAgents}
+              Pending          : {stats.PendingSubAgents}
+              Completed        : {stats.CompletedSubAgents}
+              Failed           : {stats.FailedSubAgents}
+              Timed-out        : {stats.TimedOutSubAgents}
+
+            Command Processor:
+            ─────────────────────────────────
+            Total processed    : {pStats.TotalProcessed}
+            Total failed       : {pStats.TotalFailed}
+            Active commands    : {pStats.ActiveCommands}
+            Queued commands    : {pStats.QueuedCommands}
+            Uptime             : {pStats.Uptime:hh\\:mm\\:ss}
+            """);
+        Console.WriteLine();
+    }
+
+    static void HandleAgentPause(SubAgentManager manager, string runId)
+    {
+        if (string.IsNullOrWhiteSpace(runId))
+        {
+            Console.WriteLine("Usage: agents pause <runId>");
+            return;
+        }
+
+        if (manager.PauseSubAgent(runId))
+            Console.WriteLine($"Sub-agent '{runId}' paused.");
+        else
+            Console.WriteLine($"Sub-agent '{runId}' not found or already in a terminal state.");
+        Console.WriteLine();
+    }
+
+    static void HandleAgentResume(SubAgentManager manager, string runId)
+    {
+        if (string.IsNullOrWhiteSpace(runId))
+        {
+            Console.WriteLine("Usage: agents resume <runId>");
+            return;
+        }
+
+        if (manager.ResumeSubAgent(runId))
+            Console.WriteLine($"Sub-agent '{runId}' resumed.");
+        else
+            Console.WriteLine($"Sub-agent '{runId}' not found or not in Paused state.");
+        Console.WriteLine();
+    }
+
+    static async Task HandleAgentStopAsync(SubAgentManager manager, string runId)
+    {
+        if (string.IsNullOrWhiteSpace(runId))
+        {
+            Console.WriteLine("Usage: agents stop <runId>");
+            return;
+        }
+
+        Console.WriteLine($"Stopping sub-agent '{runId}' (waiting for current turn to finish)…");
+        var ok = await manager.StopSubAgentAsync(runId);
+        Console.WriteLine(ok ? $"Sub-agent '{runId}' stopped." : $"Sub-agent '{runId}' not found.");
+        Console.WriteLine();
+    }
+
+    static void HandleAgentKill(SubAgentManager manager, string runId)
+    {
+        if (string.IsNullOrWhiteSpace(runId) || runId.Equals("all", StringComparison.OrdinalIgnoreCase))
+        {
+            var active = manager.GetActiveSubAgents().ToList();
+            if (active.Count == 0)
+            {
+                Console.WriteLine("No active sub-agents to kill.");
+                Console.WriteLine();
+                return;
+            }
+
+            Console.WriteLine($"Killing {active.Count} sub-agent(s)…");
+            foreach (var t in active)
+                manager.KillSubAgent(t.RunId);
+            Console.WriteLine("Done.");
+        }
+        else
+        {
+            if (manager.KillSubAgent(runId))
+                Console.WriteLine($"Sub-agent '{runId}' killed.");
+            else
+                Console.WriteLine($"Sub-agent '{runId}' not found.");
+        }
+        Console.WriteLine();
+    }
+
+    // -------------------------------------------------------------------------
+    // Startup session recovery
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// On startup, handles sessions that were Active when the previous process terminated:
+    /// - Sub-agent sessions: marked Aborted (their in-flight work is lost).
+    /// - Console session: if the last persisted message is a user message with no response,
+    ///   the user is offered the option to re-queue it for processing.
+    /// </summary>
+    static async Task RecoverInterruptedSessionsAsync(
+        SessionManager sessionManager,
+        MarkdownSessionStore conversationStore,
+        ICommandQueue commandQueue,
+        FoxAgent agent,
+        string consoleSessionId,
+        IReadOnlyList<AgentFox.Sessions.SessionInfo> interrupted)
+    {
+        if (interrupted.Count == 0) return;
+
+        var subAgentSessions = interrupted
+            .Where(s => s.Origin == AgentFox.Sessions.SessionOrigin.SubAgent)
+            .ToList();
+
+        var channelSessions = interrupted
+            .Where(s => s.Origin == AgentFox.Sessions.SessionOrigin.Channel)
+            .ToList();
+
+        // ── Sub-agent sessions: work is irrecoverable, mark aborted ──────────
+        if (subAgentSessions.Count > 0)
+        {
+            Console.WriteLine($"⚠ {subAgentSessions.Count} sub-agent session(s) were interrupted by the previous process exit:");
+            foreach (var s in subAgentSessions)
+            {
+                var age = (DateTime.UtcNow - s.LastActivityAt).TotalSeconds < 60
+                    ? $"{(int)(DateTime.UtcNow - s.LastActivityAt).TotalSeconds}s ago"
+                    : s.LastActivityAt.ToString("g");
+                Console.WriteLine($"  • {s.SessionId}  (last active: {age})");
+                sessionManager.MarkAborted(s.SessionId, "interrupted by process restart");
+            }
+            Console.WriteLine("  → Marked as aborted. In-flight sub-agent work cannot be recovered.");
+            Console.WriteLine();
+        }
+
+        // ── Channel sessions: log a warning (channel adapters will reconnect) ─
+        if (channelSessions.Count > 0)
+        {
+            Console.WriteLine($"⚠ {channelSessions.Count} channel session(s) were active when the previous process exited.");
+            Console.WriteLine("  → Channel connections will be re-established; any in-flight message responses were lost.");
+            Console.WriteLine();
+        }
+
+        // ── Console session: offer to re-run any unanswered user message ──────
+        var consoleWasInterrupted = interrupted.Any(s => s.SessionId == consoleSessionId);
+        if (!consoleWasInterrupted) return;
+
+        var unprocessed = conversationStore.GetLastUnrespondedUserMessage(consoleSessionId);
+        if (unprocessed == null) return;
+
+        var preview = unprocessed.Length > 120 ? unprocessed[..120] + "…" : unprocessed;
+        Console.WriteLine("⚠ The previous session was interrupted mid-task.");
+        Console.WriteLine($"  Last unprocessed message: \"{preview}\"");
+        Console.Write("  Resume this task now? [y/N]: ");
+
+        var answer = Console.ReadLine()?.Trim();
+        Console.WriteLine();
+
+        if (!string.Equals(answer, "y", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(answer, "yes", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine("  Task skipped — you can re-enter it manually.");
+            Console.WriteLine();
+            return;
+        }
+
+        Console.WriteLine("  Re-queuing interrupted task…");
+        Console.WriteLine();
+
+        var tcs = new TaskCompletionSource<AgentResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cmd = AgentCommand.CreateMainCommand(consoleSessionId, agent.Id, unprocessed);
+        cmd.ResultSource = tcs;
+        commandQueue.Enqueue(cmd);
+
+        var result = await tcs.Task;
+        Console.WriteLine(result.Output);
         Console.WriteLine();
     }
 }
