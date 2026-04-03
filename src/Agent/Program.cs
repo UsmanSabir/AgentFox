@@ -11,32 +11,32 @@ using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Spectre.Console;
 using SystemPromptBuilder = AgentFox.LLM.SystemPromptBuilder;
 
 namespace AgentFox;
 
 /// <summary>
-/// Simple console-based logger for Composio initialization
+/// Spectre.Console-backed logger for structured, colorized console output.
 /// </summary>
 internal class ConsoleLogger : ILogger
 {
     public IDisposable BeginScope<TState>(TState state) where TState : notnull => null!;
-    public bool IsEnabled(LogLevel logLevel) => true;
+    public bool IsEnabled(LogLevel logLevel) => logLevel != LogLevel.Debug;
 
     public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
     {
         var message = formatter(state, exception);
-        var prefix = logLevel switch
+        var (prefix, style) = logLevel switch
         {
-            LogLevel.Error => "[ERROR]",
-            LogLevel.Warning => "[WARN]",
-            LogLevel.Information => "[INFO]",
-            LogLevel.Debug => "[DEBUG]",
-            _ => "[LOG]"
+            LogLevel.Error   => ("[[ERR]]",  "bold red"),
+            LogLevel.Warning => ("[[WARN]]", "bold yellow"),
+            LogLevel.Debug   => ("[[DBG]]",  "grey"),
+            _                => ("[[INF]]",  "dim blue"),
         };
-        Console.WriteLine($"{prefix} {message}");
+        AnsiConsole.MarkupLine($"[{style}]{prefix}[/] {Markup.Escape(message)}");
         if (exception != null)
-            Console.WriteLine($"  Exception: {exception.Message}");
+            AnsiConsole.MarkupLine($"  [red]↳ {Markup.Escape(exception.Message)}[/]");
     }
 }
 
@@ -50,14 +50,24 @@ class Program
 {
     static async Task<int> Main(string[] args)
     {
-        Console.WriteLine("╔════════════════════════════════════════════════════════════╗");
-        Console.WriteLine("║                  AgentFox - AI Agent Framework             ║");
-        Console.WriteLine("║         Multi-agent system with memory & channels          ║");
-        Console.WriteLine("╚════════════════════════════════════════════════════════════╝");
-        Console.WriteLine();
+        ShowBanner();
 
         var configuration = BuildConfiguration();
-        var serviceProvider = await BuildServiceProviderAsync(configuration);
+
+        IServiceProvider serviceProvider = null!;
+        await AnsiConsole.Status()
+            .Spinner(Spinner.Known.Dots12)
+            .SpinnerStyle(Style.Parse("dodgerblue1 bold"))
+            .StartAsync("[bold]Initializing AgentFox[/] [dim]— loading tools, memory & integrations...[/]",
+                async ctx =>
+                {
+                    ctx.Status("[dodgerblue1]Registering tools & workspace...[/]");
+                    serviceProvider = await BuildServiceProviderAsync(configuration);
+                    ctx.Status("[green]Ready.[/]");
+                });
+
+        AnsiConsole.MarkupLine("[bold green]✓[/] AgentFox initialized successfully.");
+        AnsiConsole.WriteLine();
 
         if (args.Length > 0)
             return await RunCommandLineMode(args, serviceProvider);
@@ -65,9 +75,29 @@ class Program
         return await RunInteractiveMode(serviceProvider);
     }
 
-    // -------------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────────
+    // Banner
+    // ─────────────────────────────────────────────────────────────────────────
+
+    static void ShowBanner()
+    {
+        AnsiConsole.Write(new FigletText("AgentFox")
+            .Centered()
+            .Color(Color.DodgerBlue1));
+
+        AnsiConsole.Write(new Rule("[bold blue] Multi-Agent AI Framework [/]")
+        {
+            Justification = Justify.Center,
+            Style = Style.Parse("blue"),
+        });
+
+        AnsiConsole.MarkupLine("[dim]  Sub-agents · Memory · MCP · Skills · Channel Integrations[/]");
+        AnsiConsole.WriteLine();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Configuration
-    // -------------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────────
 
     static IConfiguration BuildConfiguration()
     {
@@ -80,9 +110,9 @@ class Program
             .Build();
     }
 
-    // -------------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────────
     // DI container
-    // -------------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────────
 
     /// <summary>
     /// Builds and returns the application's service provider.
@@ -209,9 +239,9 @@ class Program
         return builder.Build();
     }
 
-    // -------------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────────
     // Execution modes
-    // -------------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────────
 
     static async Task<int> RunCommandLineMode(string[] args, IServiceProvider sp)
     {
@@ -235,20 +265,30 @@ class Program
         var agent = BuildAgent(sp, systemPrompt);
 
         var task = string.Join(" ", args);
-        Console.WriteLine($"Executing: {task}");
-        Console.WriteLine(new string('-', 50));
+
+        AnsiConsole.Write(new Rule("[bold]Task[/]") { Justification = Justify.Left, Style = Style.Parse("blue") });
+        AnsiConsole.MarkupLine($"[italic]{Markup.Escape(task)}[/]");
+        AnsiConsole.Write(new Rule() { Style = Style.Parse("blue dim") });
+        AnsiConsole.WriteLine();
 
         // CLI mode: no CommandProcessor is running, so we call ProcessAsync directly.
-        // Session is resolved the same way ExecuteAsync would — via SessionManager.
         var cliSessionId = sp.GetRequiredService<SessionManager>().GetOrCreateConsoleSession(agent.Id);
-        var result = await agent.ProcessAsync(task, cliSessionId);
 
-        Console.WriteLine("Result:");
-        Console.WriteLine(result.Output);
+        AgentResult result = null!;
+        await AnsiConsole.Status()
+            .Spinner(Spinner.Known.Dots12)
+            .SpinnerStyle(Style.Parse("blue"))
+            .StartAsync("[blue]Agent is working...[/]", async _ =>
+            {
+                result = await agent.ProcessAsync(task, cliSessionId);
+            });
+
+        AnsiConsole.Write(new Rule("[bold green]Result[/]") { Justification = Justify.Left, Style = Style.Parse("green") });
+        AnsiConsole.WriteLine(result.Output);
 
         if (!string.IsNullOrEmpty(result.Error))
         {
-            Console.WriteLine($"Error: {result.Error}");
+            AnsiConsole.MarkupLine($"[bold red]Error:[/] {Markup.Escape(result.Error)}");
             return 1;
         }
 
@@ -265,8 +305,8 @@ class Program
         var commandQueue = sp.GetRequiredService<ICommandQueue>();
 
         var manifests = skillRegistry.GetSkillManifests();
-        Console.WriteLine($"Skills loaded: {manifests.Count} skill(s) registered.");
-        Console.WriteLine();
+        AnsiConsole.MarkupLine($"[bold green]✓[/] [dim]{manifests.Count} skill(s) registered.[/]");
+        AnsiConsole.WriteLine();
 
         var systemPrompt = new SystemPromptBuilder()
             .WithPersona(SystemPromptConfig.AgentPrompts.DeveloperAssistant)
@@ -313,8 +353,6 @@ class Program
         var agent = BuildAgent(sp, systemPrompt, withLogger: true);
 
         // Upgrade runtime to use the real LLM-backed executor now that FoxAgent exists.
-        // Sub-agents with an AgentCommand.Model override get a freshly built FoxAgent
-        // wired to the resolved IChatClient; all other settings are shared.
         var agentRuntime = sp.GetRequiredService<IAgentRuntime>();
         var configuration = sp.GetRequiredService<IConfiguration>();
         agentRuntime.SetExecutor(new FoxAgentExecutor(
@@ -341,8 +379,6 @@ class Program
         ));
 
         // --- Subagent lane handler ---
-        // Delegates to agentRuntime which uses FoxAgentExecutor for real LLM execution.
-        // Model overrides in AgentCommand.Model are resolved automatically.
         commandProcessor.RegisterLaneHandler(CommandLane.Subagent, async (command, ct) =>
         {
             if (command is not AgentCommand agentCmd) return;
@@ -350,14 +386,11 @@ class Program
             var runId = agentCmd.RunId;
             var subTask = subAgentManager.GetSubAgentTask(runId);
 
-            // Block here if the task was paused before it got picked up by the lane pump.
             if (subTask != null)
                 await subTask.PauseGate.WhenResumedAsync(ct);
 
             subAgentManager.OnSubAgentStarted(runId);
 
-            // Link the processor's shutdown token with the task's own cancellation token
-            // so that KillSubAgent / StopSubAgent actually cancels the LLM call.
             using var linked = subTask != null
                 ? CancellationTokenSource.CreateLinkedTokenSource(ct, subTask.CancellationTokenSource.Token)
                 : CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -383,11 +416,6 @@ class Program
         });
 
         // --- Main lane handler ---
-        // Handles two command types on the serial Main lane:
-        //   1. AgentCommand  — a user turn or injected notification; executed via agentRuntime
-        //      so model-override / executor-swap logic applies uniformly.
-        //   2. ResultAnnouncementCommand — routes a completed sub-agent result to the right
-        //      destination (channel or parent agent conversation).
         commandProcessor.RegisterLaneHandler(CommandLane.Main, async (command, ct) =>
         {
             // ── 1. User / injected agent turn ────────────────────────────────
@@ -403,7 +431,6 @@ class Program
                     result = new AgentResult { Success = false, Error = ex.Message };
                 }
 
-                // Unblock the caller if it is awaiting a result (REPL loop, channel gateway, etc.)
                 agentCmd.ResultSource?.TrySetResult(result);
                 return;
             }
@@ -419,7 +446,7 @@ class Program
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"[ERROR] Failed to send result to channel: {ex.Message}");
+                    AnsiConsole.MarkupLine($"[bold red][[ERR]][/] Failed to send result to channel: {Markup.Escape(ex.Message)}");
                 }
                 return;
             }
@@ -427,10 +454,9 @@ class Program
             if (!string.IsNullOrEmpty(announcement.ParentSessionKey))
             {
                 var notification = $"[Background sub-agent result]\n{announcement.FormatMessage()}";
-                Console.WriteLine();
-                Console.WriteLine($"[SUB-AGENT] Reporting result to parent agent (session: {announcement.ParentSessionKey})...");
+                AnsiConsole.WriteLine();
+                AnsiConsole.MarkupLine($"[bold blue][[SUB-AGENT]][/] Reporting result to parent agent [dim](session: {Markup.Escape(announcement.ParentSessionKey)})[/]...");
 
-                // We are already on the Main lane — call the runtime directly (no re-enqueue).
                 var notifyCmd = AgentCommand.CreateMainCommand(
                     announcement.ParentSessionKey,
                     agentId: agent.Id,
@@ -439,22 +465,23 @@ class Program
                 try
                 {
                     var parentResult = await agentRuntime.ExecuteAsync(notifyCmd, ct);
-                    Console.WriteLine();
-                    Console.WriteLine($"[AGENT] {parentResult.Output}");
+                    AnsiConsole.WriteLine();
+                    AnsiConsole.MarkupLine("[bold cyan][[AGENT]][/]");
+                    AnsiConsole.WriteLine(parentResult.Output);
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"[ERROR] Failed to deliver sub-agent result to parent agent: {ex.Message}");
+                    AnsiConsole.MarkupLine($"[bold red][[ERR]][/] Failed to deliver sub-agent result to parent agent: {Markup.Escape(ex.Message)}");
                 }
 
-                Console.Write("\n> ");
+                AnsiConsole.Markup("\n[bold dodgerblue1]>[/] ");
             }
         });
 
         // --- Result callback ---
         subAgentManager.RegisterResultCallback(async (task, result) =>
         {
-            Console.WriteLine($"\n[BACKGROUND] Sub-agent '{task.SessionKey}' finished — status: {result.Status}");
+            AnsiConsole.MarkupLine($"\n[bold blue][[BG]][/] Sub-agent [dim]{Markup.Escape(task.SessionKey)}[/] finished — status: [bold]{Markup.Escape(result.Status.ToString())}[/]");
 
             if (task.OriginatingChannel != null)
             {
@@ -493,12 +520,12 @@ class Program
             consoleSessionId,
             interruptedSessions);
 
-        Console.WriteLine("Type 'help' for available commands, 'exit' to quit.");
-        Console.WriteLine();
+        AnsiConsole.MarkupLine("[dim]Type [bold white]help[/] for available commands, [bold white]exit[/] to quit.[/]");
+        AnsiConsole.WriteLine();
 
         while (true)
         {
-            Console.Write("> ");
+            AnsiConsole.Markup("[bold dodgerblue1]>[/] ");
             var input = Console.ReadLine();
 
             if (string.IsNullOrWhiteSpace(input))
@@ -510,7 +537,7 @@ class Program
             // ── Built-in REPL commands ────────────────────────────────────────
             if (lower is "exit")
             {
-                Console.WriteLine("Goodbye!");
+                AnsiConsole.MarkupLine("[bold green]Goodbye![/]");
                 if (channelManager != null)
                     await channelManager.DisconnectAllAsync();
                 await commandProcessor.StopAsync(TimeSpan.FromSeconds(10));
@@ -585,7 +612,7 @@ class Program
                 continue;
             }
 
-            Console.WriteLine();
+            AnsiConsole.WriteLine();
 
             // Route the user turn through the Main lane so the CommandProcessor
             // enforces serial execution and the FoxAgentExecutor handles it uniformly.
@@ -599,25 +626,20 @@ class Program
 
             var result = await tcs.Task;
 
-            Console.WriteLine(result.Output);
-            Console.WriteLine();
+            AnsiConsole.WriteLine(result.Output);
+            AnsiConsole.WriteLine();
 
             if (result.SpawnedSubAgents.Count > 0)
-                Console.WriteLine($"Spawned {result.SpawnedSubAgents.Count} sub-agent(s)");
+                AnsiConsole.MarkupLine($"[bold blue]↳[/] Spawned [bold]{result.SpawnedSubAgents.Count}[/] sub-agent(s)");
         }
 
         return 0;
     }
 
-    // -------------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────────
     // Channel loading
-    // -------------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Reads the "Channels" config section, creates a <see cref="ChannelManager"/>,
-    /// adds any enabled channels, connects them all, and returns the manager.
-    /// Returns null when no channels are configured and enabled.
-    /// </summary>
     static async Task<ChannelManager?> LoadChannelsFromConfigAsync(
         IServiceProvider sp,
         FoxAgent agent,
@@ -640,7 +662,7 @@ class Program
             var token = tgSection["BotToken"] ?? string.Empty;
             if (string.IsNullOrWhiteSpace(token) || token.Contains("your-telegram"))
             {
-                Console.WriteLine("⚠ Telegram: BotToken is not configured — skipping.");
+                AnsiConsole.MarkupLine("[bold yellow]⚠[/]  Telegram: BotToken is not configured — skipping.");
             }
             else
             {
@@ -651,21 +673,21 @@ class Program
                     sp.GetRequiredService<ILogger<TelegramChannel>>());
                 manager.AddChannel(tgChannel);
                 anyEnabled = true;
-                Console.WriteLine("  • Telegram channel added (long-polling)");
+                AnsiConsole.MarkupLine("[bold green]✓[/]  Telegram channel added [dim](long-polling)[/]");
             }
         }
 
         if (!anyEnabled) return null;
 
-        Console.WriteLine("Connecting channels…");
+        AnsiConsole.MarkupLine("[dim]Connecting channels...[/]");
         await manager.ConnectAllAsync();
-        Console.WriteLine($"Channels connected: {manager.Channels.Count}");
+        AnsiConsole.MarkupLine($"[bold green]✓[/]  Channels connected: [bold]{manager.Channels.Count}[/]");
         return manager;
     }
 
-    // -------------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────────
     // Factory helpers
-    // -------------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────────
 
     static ToolRegistry CreateToolRegistry(WorkspaceManager workspaceManager)
     {
@@ -714,16 +736,16 @@ class Program
                     serverConfig.TimeoutSeconds <= 0 ? 30 : serverConfig.TimeoutSeconds,
                     serverConfig.Headers);
                 if (!success)
-                    Console.WriteLine($"⚠ Warning: Failed to connect to MCP server '{serverConfig.Name}' at '{serverConfig.Url}'.");
+                    AnsiConsole.MarkupLine($"[bold yellow]⚠[/]  MCP server [dim]{Markup.Escape(serverConfig.Name)}[/]: connection failed.");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"⚠ Warning: Exception while initializing MCP server '{serverConfig.Name}': {ex.Message}");
+                AnsiConsole.MarkupLine($"[bold yellow]⚠[/]  MCP server [dim]{Markup.Escape(serverConfig.Name)}[/]: {Markup.Escape(ex.Message)}");
             }
         }
 
         if (servers.Count > 0)
-            Console.WriteLine($"MCP: Loaded configuration for {servers.Count} server(s).");
+            AnsiConsole.MarkupLine($"[bold green]✓[/]  MCP: {servers.Count} server(s) configured.");
 
         return mcpClient;
     }
@@ -750,81 +772,117 @@ class Program
                 else
                     await composioProvider.InitializeAsync();
 
-                Console.WriteLine("✓ Composio skills initialized successfully");
+                AnsiConsole.MarkupLine("[bold green]✓[/]  Composio skills initialized.");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"⚠ Warning: Failed to initialize Composio skills: {ex.Message}");
+                AnsiConsole.MarkupLine($"[bold yellow]⚠[/]  Composio skills: {Markup.Escape(ex.Message)}");
             }
         }
 
         return skillRegistry;
     }
 
-    // -------------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────────
     // Console display helpers
-    // -------------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────────
 
     static void ShowHelp()
     {
-        Console.WriteLine(@"
-Available commands:
-  help                  - Show this help message
-  status                - Show agent status
-  tools                 - List available tools
-  skills                - List all registered skills
-  skill <name>          - Show detailed info for a specific skill
-  exit                  - Exit the program
+        var grid = new Grid().AddColumn().AddColumn();
 
-Agent management:
-  agents                - List active sub-agents
-  agents list           - List active sub-agents (alias)
-  agents stats          - Show processor/queue statistics
-  agents pause <id>     - Pause a sub-agent (blocks before next turn)
-  agents resume <id>    - Resume a paused sub-agent
-  agents stop <id>      - Gracefully stop a sub-agent (waits for completion)
-  agents kill <id>      - Force-kill a sub-agent immediately
-  agents kill all       - Force-kill every active sub-agent
+        void AddSection(string header, string[][] rows)
+        {
+            var table = new Table()
+                .Border(TableBorder.None)
+                .HideHeaders()
+                .AddColumn(new TableColumn("").Width(30))
+                .AddColumn(new TableColumn(""));
 
-You can also ask the agent to:
-  - Execute shell commands, read/write files, search files
-  - Spawn sub-agents for complex tasks
-  - Remember information for later
-  - Use skills: git, docker, deployment, testing, api_integration, etc.
-  - Use Composio.dev integrations: GitHub, Slack, Jira, Asana, etc.
-");
+            foreach (var row in rows)
+                table.AddRow($"[bold white]{Markup.Escape(row[0])}[/]", $"[dim]{Markup.Escape(row[1])}[/]");
+
+            AnsiConsole.MarkupLine($"\n[bold dodgerblue1]{header}[/]");
+            AnsiConsole.Write(table);
+        }
+
+        AddSection("General Commands", new[]
+        {
+            new[] { "help",       "Show this help message" },
+            new[] { "status",     "Show agent status" },
+            new[] { "tools",      "List available tools" },
+            new[] { "skills",     "List all registered skills" },
+            new[] { "skill <name>","Show detailed info for a specific skill" },
+            new[] { "exit",       "Exit the program" },
+        });
+
+        AddSection("Agent Management", new[]
+        {
+            new[] { "agents",               "List active sub-agents" },
+            new[] { "agents list",          "List active sub-agents (alias)" },
+            new[] { "agents stats",         "Show processor/queue statistics" },
+            new[] { "agents pause <id>",    "Pause a sub-agent (blocks before next turn)" },
+            new[] { "agents resume <id>",   "Resume a paused sub-agent" },
+            new[] { "agents stop <id>",     "Gracefully stop a sub-agent" },
+            new[] { "agents kill <id>",     "Force-kill a sub-agent immediately" },
+            new[] { "agents kill all",      "Force-kill every active sub-agent" },
+        });
+
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("[dim]You can also ask the agent to execute commands, read/write files, spawn sub-agents, use skills (git, docker, etc.), and more.[/]");
+        AnsiConsole.WriteLine();
     }
 
     static void ShowStatus(FoxAgent agent)
     {
         var info = agent.GetInfo();
-        Console.WriteLine($"""
-            Agent Status:
-            ─────────────
-            Name:        {info.Name}
-            ID:          {info.Id}
-            Status:      {info.Status}
-            Messages:    {info.MessageCount}
-            Sub-agents:  {info.SubAgentCount}
-            Tools:       {info.ToolCount}
-            Memory:      {(info.HasMemory ? "Enabled" : "Disabled")}
-            Created:     {info.CreatedAt:yyyy-MM-dd HH:mm:ss}
-            Last Active: {info.LastActiveAt:yyyy-MM-dd HH:mm:ss}
-            """);
+
+        var table = new Table()
+            .Border(TableBorder.Rounded)
+            .BorderColor(Color.Blue)
+            .HideHeaders()
+            .AddColumn(new TableColumn("[bold]Property[/]").Width(14))
+            .AddColumn(new TableColumn("[bold]Value[/]"));
+
+        table.AddRow("[dim]Name[/]",        $"[bold white]{Markup.Escape(info.Name)}[/]");
+        table.AddRow("[dim]ID[/]",          $"[grey]{Markup.Escape(info.Id)}[/]");
+        table.AddRow("[dim]Status[/]",      $"[bold green]{Markup.Escape(info.Status.ToString())}[/]");
+        table.AddRow("[dim]Messages[/]",    info.MessageCount.ToString());
+        table.AddRow("[dim]Sub-agents[/]",  info.SubAgentCount.ToString());
+        table.AddRow("[dim]Tools[/]",       info.ToolCount.ToString());
+        table.AddRow("[dim]Memory[/]",      info.HasMemory ? "[green]Enabled[/]" : "[dim]Disabled[/]");
+        table.AddRow("[dim]Created[/]",     $"[grey]{info.CreatedAt:yyyy-MM-dd HH:mm:ss}[/]");
+        table.AddRow("[dim]Last Active[/]", $"[grey]{info.LastActiveAt:yyyy-MM-dd HH:mm:ss}[/]");
+
+        AnsiConsole.Write(new Panel(table)
+        {
+            Header = new PanelHeader("[bold] Agent Status [/]", Justify.Left),
+            Border = BoxBorder.Rounded,
+            BorderStyle = Style.Parse("blue"),
+            Padding = new Padding(1, 0),
+        });
+
+        AnsiConsole.WriteLine();
     }
 
     static void ShowTools(ToolRegistry registry)
     {
         var tools = registry.GetAll();
-        Console.WriteLine($"Available Tools ({tools.Count}):");
-        Console.WriteLine(new string('-', 50));
+
+        var table = new Table()
+            .Border(TableBorder.Rounded)
+            .BorderColor(Color.Blue)
+            .Title($"[bold] Available Tools ({tools.Count}) [/]")
+            .AddColumn(new TableColumn("[bold]Name[/]").Width(26))
+            .AddColumn(new TableColumn("[bold]Description[/]"));
 
         foreach (var tool in tools)
-        {
-            Console.WriteLine($"  {tool.Name}");
-            Console.WriteLine($"    {tool.Description}");
-            Console.WriteLine();
-        }
+            table.AddRow(
+                $"[bold white]{Markup.Escape(tool.Name)}[/]",
+                $"[dim]{Markup.Escape(tool.Description)}[/]");
+
+        AnsiConsole.Write(table);
+        AnsiConsole.WriteLine();
     }
 
     static void ShowSkills(SkillRegistry skillRegistry)
@@ -833,26 +891,33 @@ You can also ask the agent to:
 
         if (manifests.Count == 0)
         {
-            Console.WriteLine("No skills registered.");
+            AnsiConsole.MarkupLine("[dim]No skills registered.[/]");
             return;
         }
 
-        Console.WriteLine($"Registered Skills ({manifests.Count}):");
-        Console.WriteLine(new string('─', 80));
-        Console.WriteLine($"  {"Skill",-20} {"Type",-10} {"Tools",5}  Description");
-        Console.WriteLine(new string('─', 80));
+        var table = new Table()
+            .Border(TableBorder.Rounded)
+            .BorderColor(Color.Blue)
+            .Title($"[bold] Registered Skills ({manifests.Count}) [/]")
+            .AddColumn(new TableColumn("[bold]Skill[/]").Width(22))
+            .AddColumn(new TableColumn("[bold]Type[/]").Width(10))
+            .AddColumn(new TableColumn("[bold]Tools[/]").Width(7).RightAligned())
+            .AddColumn(new TableColumn("[bold]Description[/]"));
 
         foreach (var m in manifests)
         {
-            var desc = m.Description.Length > 44 ? m.Description[..41] + "..." : m.Description;
-            Console.WriteLine($"  {m.Name,-20} {m.SkillType,-10} {m.ToolCount,5}  {desc}");
+            var desc = m.Description.Length > 50 ? m.Description[..47] + "..." : m.Description;
+            table.AddRow(
+                $"[bold white]{Markup.Escape(m.Name)}[/]",
+                $"[dim]{Markup.Escape(m.SkillType)}[/]",
+                $"[dodgerblue1]{m.ToolCount}[/]",
+                $"[dim]{Markup.Escape(desc)}[/]");
         }
 
-        Console.WriteLine(new string('─', 80));
-        Console.WriteLine();
-        Console.WriteLine("Use 'skill <name>' for detailed skill info.");
-        Console.WriteLine("Ask the agent: \"load the <skill> skill\" to activate it during a conversation.");
-        Console.WriteLine();
+        AnsiConsole.Write(table);
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("[dim]Use [bold white]skill <name>[/] for details. Ask the agent: \"load the <skill> skill\" to activate it.[/]");
+        AnsiConsole.WriteLine();
     }
 
     static void ShowSkillDetail(SkillRegistry skillRegistry, string skillName)
@@ -863,74 +928,103 @@ You can also ask the agent to:
 
         if (skill == null)
         {
-            Console.WriteLine($"Skill '{skillName}' not found.");
-            Console.WriteLine("Use 'skills' to list all registered skills.");
+            AnsiConsole.MarkupLine($"[bold red]Skill '{Markup.Escape(skillName)}' not found.[/] Use [bold white]skills[/] to list all registered skills.");
             return;
         }
 
-        Console.WriteLine();
-        Console.WriteLine($"  Skill: {skill.Name}  (v{skill.Version})");
-        Console.WriteLine(new string('─', 60));
-        Console.WriteLine($"  Description : {skill.Description}");
+        var content = new Rows(
+            new Markup($"[dim]Description:[/]  {Markup.Escape(skill.Description)}"),
+            skill.Dependencies.Count > 0
+                ? new Markup($"[dim]Dependencies:[/] {Markup.Escape(string.Join(", ", skill.Dependencies))}")
+                : new Markup(""),
+            skill.Metadata?.Capabilities.Count > 0
+                ? new Markup($"[dim]Capabilities:[/] {Markup.Escape(string.Join(", ", skill.Metadata.Capabilities))}")
+                : new Markup(""),
+            skill.Metadata?.Tags.Count > 0
+                ? new Markup($"[dim]Tags:[/]         {Markup.Escape(string.Join(", ", skill.Metadata.Tags))}")
+                : new Markup(""),
+            skill.Metadata != null
+                ? new Markup($"[dim]Complexity:[/]   [bold]{skill.Metadata.ComplexityScore}[/]/10")
+                : new Markup(""),
+            new Markup($"[dim]Type:[/]         {(skill is ISkillPlugin ? "local" : "generic")} skill")
+        );
 
-        if (skill.Dependencies.Count > 0)
-            Console.WriteLine($"  Dependencies: {string.Join(", ", skill.Dependencies)}");
-
-        if (skill.Metadata != null)
+        AnsiConsole.Write(new Panel(content)
         {
-            if (skill.Metadata.Capabilities.Count > 0)
-                Console.WriteLine($"  Capabilities: {string.Join(", ", skill.Metadata.Capabilities)}");
-            if (skill.Metadata.Tags.Count > 0)
-                Console.WriteLine($"  Tags        : {string.Join(", ", skill.Metadata.Tags)}");
-            Console.WriteLine($"  Complexity  : {skill.Metadata.ComplexityScore}/10");
-        }
+            Header = new PanelHeader($"[bold] {Markup.Escape(skill.Name)}  v{Markup.Escape(skill.Version)} [/]", Justify.Left),
+            Border = BoxBorder.Rounded,
+            BorderStyle = Style.Parse("blue"),
+            Padding = new Padding(1, 0),
+        });
 
         var tools = skill.GetTools();
         if (tools.Count > 0)
         {
-            Console.WriteLine();
-            Console.WriteLine($"  Tools ({tools.Count}):");
+            var toolTable = new Table()
+                .Border(TableBorder.None)
+                .HideHeaders()
+                .AddColumn(new TableColumn("").Width(28))
+                .AddColumn(new TableColumn(""));
+
             foreach (var tool in tools)
-                Console.WriteLine($"    • {tool.Name,-25} {tool.Description}");
+                toolTable.AddRow(
+                    $"[bold white]  • {Markup.Escape(tool.Name)}[/]",
+                    $"[dim]{Markup.Escape(tool.Description)}[/]");
+
+            AnsiConsole.MarkupLine($"[bold]Tools ({tools.Count}):[/]");
+            AnsiConsole.Write(toolTable);
         }
 
-        Console.WriteLine();
-        Console.WriteLine($"  Type: {(skill is ISkillPlugin ? "local" : "generic")} skill");
-        Console.WriteLine();
-        Console.WriteLine($"  To load full guidance: load_skill(skill_name: \"{skill.Name}\")");
-        Console.WriteLine();
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine($"[dim]To load full guidance: [white]load_skill(skill_name: \"{Markup.Escape(skill.Name)}\")[/][/]");
+        AnsiConsole.WriteLine();
     }
 
-    // -------------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────────
     // Agent management commands
-    // -------------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────────
 
     static void ShowAgents(SubAgentManager manager)
     {
         var tasks = manager.GetActiveSubAgents().ToList();
         if (tasks.Count == 0)
         {
-            Console.WriteLine("No active sub-agents.");
-            Console.WriteLine();
+            AnsiConsole.MarkupLine("[dim]No active sub-agents.[/]");
+            AnsiConsole.WriteLine();
             return;
         }
 
-        Console.WriteLine($"Active Sub-Agents ({tasks.Count}):");
-        Console.WriteLine(new string('─', 90));
-        Console.WriteLine($"  {"RunId",-36}  {"State",-8}  {"Elapsed",8}  Session");
-        Console.WriteLine(new string('─', 90));
+        var table = new Table()
+            .Border(TableBorder.Rounded)
+            .BorderColor(Color.Blue)
+            .Title($"[bold] Active Sub-Agents ({tasks.Count}) [/]")
+            .AddColumn(new TableColumn("[bold]RunId[/]").Width(38))
+            .AddColumn(new TableColumn("[bold]State[/]").Width(10))
+            .AddColumn(new TableColumn("[bold]Elapsed[/]").Width(9).RightAligned())
+            .AddColumn(new TableColumn("[bold]Session[/]"));
 
         foreach (var t in tasks.OrderBy(t => t.CreatedAt))
         {
             var elapsed = t.ElapsedTime.TotalSeconds < 60
                 ? $"{t.ElapsedTime.TotalSeconds:F0}s"
                 : $"{t.ElapsedTime:mm\\:ss}";
-            var session = t.SessionKey.Length > 30 ? "…" + t.SessionKey[^29..] : t.SessionKey;
-            Console.WriteLine($"  {t.RunId,-36}  {t.State,-8}  {elapsed,8}  {session}");
+            var session = t.SessionKey.Length > 32 ? "…" + t.SessionKey[^31..] : t.SessionKey;
+            var stateStyle = t.State.ToString() switch
+            {
+                "Running" => "bold green",
+                "Paused"  => "bold yellow",
+                "Failed"  => "bold red",
+                _         => "dim"
+            };
+            table.AddRow(
+                $"[grey]{Markup.Escape(t.RunId)}[/]",
+                $"[{stateStyle}]{Markup.Escape(t.State.ToString())}[/]",
+                $"[dodgerblue1]{elapsed}[/]",
+                $"[dim]{Markup.Escape(session)}[/]");
         }
 
-        Console.WriteLine(new string('─', 90));
-        Console.WriteLine();
+        AnsiConsole.Write(table);
+        AnsiConsole.WriteLine();
     }
 
     static void ShowAgentStats(SubAgentManager subAgentManager, CommandProcessor commandProcessor)
@@ -938,69 +1032,94 @@ You can also ask the agent to:
         var stats  = subAgentManager.GetStatistics();
         var pStats = commandProcessor.GetStatistics();
 
-        Console.WriteLine($"""
-            Sub-Agent Statistics:
-            ─────────────────────────────────
-            Active sub-agents  : {stats.TotalActiveSubAgents}
-              Running          : {stats.RunningSubAgents}
-              Pending          : {stats.PendingSubAgents}
-              Completed        : {stats.CompletedSubAgents}
-              Failed           : {stats.FailedSubAgents}
-              Timed-out        : {stats.TimedOutSubAgents}
+        var agentTable = new Table()
+            .Border(TableBorder.None)
+            .HideHeaders()
+            .AddColumn(new TableColumn("").Width(22))
+            .AddColumn(new TableColumn(""));
 
-            Command Processor:
-            ─────────────────────────────────
-            Total processed    : {pStats.TotalProcessed}
-            Total failed       : {pStats.TotalFailed}
-            Active commands    : {pStats.ActiveCommands}
-            Queued commands    : {pStats.QueuedCommands}
-            Uptime             : {pStats.Uptime:hh\\:mm\\:ss}
-            """);
-        Console.WriteLine();
+        agentTable.AddRow("[dim]Active sub-agents[/]",  $"[bold]{stats.TotalActiveSubAgents}[/]");
+        agentTable.AddRow("[dim]  Running[/]",           $"[bold green]{stats.RunningSubAgents}[/]");
+        agentTable.AddRow("[dim]  Pending[/]",           stats.PendingSubAgents.ToString());
+        agentTable.AddRow("[dim]  Completed[/]",         stats.CompletedSubAgents.ToString());
+        agentTable.AddRow("[dim]  Failed[/]",            $"[bold red]{stats.FailedSubAgents}[/]");
+        agentTable.AddRow("[dim]  Timed-out[/]",         $"[bold yellow]{stats.TimedOutSubAgents}[/]");
+
+        var procTable = new Table()
+            .Border(TableBorder.None)
+            .HideHeaders()
+            .AddColumn(new TableColumn("").Width(22))
+            .AddColumn(new TableColumn(""));
+
+        procTable.AddRow("[dim]Total processed[/]",  pStats.TotalProcessed.ToString());
+        procTable.AddRow("[dim]Total failed[/]",     $"[bold red]{pStats.TotalFailed}[/]");
+        procTable.AddRow("[dim]Active commands[/]",  pStats.ActiveCommands.ToString());
+        procTable.AddRow("[dim]Queued commands[/]",  pStats.QueuedCommands.ToString());
+        procTable.AddRow("[dim]Uptime[/]",           $"[dodgerblue1]{pStats.Uptime:hh\\:mm\\:ss}[/]");
+
+        AnsiConsole.Write(new Panel(agentTable)
+        {
+            Header = new PanelHeader("[bold] Sub-Agent Statistics [/]", Justify.Left),
+            Border = BoxBorder.Rounded,
+            BorderStyle = Style.Parse("blue"),
+            Padding = new Padding(1, 0),
+        });
+
+        AnsiConsole.Write(new Panel(procTable)
+        {
+            Header = new PanelHeader("[bold] Command Processor [/]", Justify.Left),
+            Border = BoxBorder.Rounded,
+            BorderStyle = Style.Parse("blue"),
+            Padding = new Padding(1, 0),
+        });
+
+        AnsiConsole.WriteLine();
     }
 
     static void HandleAgentPause(SubAgentManager manager, string runId)
     {
         if (string.IsNullOrWhiteSpace(runId))
         {
-            Console.WriteLine("Usage: agents pause <runId>");
+            AnsiConsole.MarkupLine("[dim]Usage:[/] [bold white]agents pause <runId>[/]");
             return;
         }
 
         if (manager.PauseSubAgent(runId))
-            Console.WriteLine($"Sub-agent '{runId}' paused.");
+            AnsiConsole.MarkupLine($"[bold yellow]⏸[/]  Sub-agent [dim]{Markup.Escape(runId)}[/] paused.");
         else
-            Console.WriteLine($"Sub-agent '{runId}' not found or already in a terminal state.");
-        Console.WriteLine();
+            AnsiConsole.MarkupLine($"[bold red]✗[/]  Sub-agent [dim]{Markup.Escape(runId)}[/] not found or already in a terminal state.");
+        AnsiConsole.WriteLine();
     }
 
     static void HandleAgentResume(SubAgentManager manager, string runId)
     {
         if (string.IsNullOrWhiteSpace(runId))
         {
-            Console.WriteLine("Usage: agents resume <runId>");
+            AnsiConsole.MarkupLine("[dim]Usage:[/] [bold white]agents resume <runId>[/]");
             return;
         }
 
         if (manager.ResumeSubAgent(runId))
-            Console.WriteLine($"Sub-agent '{runId}' resumed.");
+            AnsiConsole.MarkupLine($"[bold green]▶[/]  Sub-agent [dim]{Markup.Escape(runId)}[/] resumed.");
         else
-            Console.WriteLine($"Sub-agent '{runId}' not found or not in Paused state.");
-        Console.WriteLine();
+            AnsiConsole.MarkupLine($"[bold red]✗[/]  Sub-agent [dim]{Markup.Escape(runId)}[/] not found or not in Paused state.");
+        AnsiConsole.WriteLine();
     }
 
     static async Task HandleAgentStopAsync(SubAgentManager manager, string runId)
     {
         if (string.IsNullOrWhiteSpace(runId))
         {
-            Console.WriteLine("Usage: agents stop <runId>");
+            AnsiConsole.MarkupLine("[dim]Usage:[/] [bold white]agents stop <runId>[/]");
             return;
         }
 
-        Console.WriteLine($"Stopping sub-agent '{runId}' (waiting for current turn to finish)…");
+        AnsiConsole.MarkupLine($"[dim]Stopping sub-agent [bold white]{Markup.Escape(runId)}[/]...[/]");
         var ok = await manager.StopSubAgentAsync(runId);
-        Console.WriteLine(ok ? $"Sub-agent '{runId}' stopped." : $"Sub-agent '{runId}' not found.");
-        Console.WriteLine();
+        AnsiConsole.MarkupLine(ok
+            ? $"[bold green]✓[/]  Sub-agent [dim]{Markup.Escape(runId)}[/] stopped."
+            : $"[bold red]✗[/]  Sub-agent [dim]{Markup.Escape(runId)}[/] not found.");
+        AnsiConsole.WriteLine();
     }
 
     static void HandleAgentKill(SubAgentManager manager, string runId)
@@ -1010,29 +1129,29 @@ You can also ask the agent to:
             var active = manager.GetActiveSubAgents().ToList();
             if (active.Count == 0)
             {
-                Console.WriteLine("No active sub-agents to kill.");
-                Console.WriteLine();
+                AnsiConsole.MarkupLine("[dim]No active sub-agents to kill.[/]");
+                AnsiConsole.WriteLine();
                 return;
             }
 
-            Console.WriteLine($"Killing {active.Count} sub-agent(s)…");
+            AnsiConsole.MarkupLine($"[bold red]✗[/]  Killing {active.Count} sub-agent(s)...");
             foreach (var t in active)
                 manager.KillSubAgent(t.RunId);
-            Console.WriteLine("Done.");
+            AnsiConsole.MarkupLine("[bold green]Done.[/]");
         }
         else
         {
             if (manager.KillSubAgent(runId))
-                Console.WriteLine($"Sub-agent '{runId}' killed.");
+                AnsiConsole.MarkupLine($"[bold red]✗[/]  Sub-agent [dim]{Markup.Escape(runId)}[/] killed.");
             else
-                Console.WriteLine($"Sub-agent '{runId}' not found.");
+                AnsiConsole.MarkupLine($"[bold red]✗[/]  Sub-agent [dim]{Markup.Escape(runId)}[/] not found.");
         }
-        Console.WriteLine();
+        AnsiConsole.WriteLine();
     }
 
-    // -------------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────────
     // Startup session recovery
-    // -------------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────────
 
     /// <summary>
     /// On startup, handles sessions that were Active when the previous process terminated:
@@ -1061,25 +1180,25 @@ You can also ask the agent to:
         // ── Sub-agent sessions: work is irrecoverable, mark aborted ──────────
         if (subAgentSessions.Count > 0)
         {
-            Console.WriteLine($"⚠ {subAgentSessions.Count} sub-agent session(s) were interrupted by the previous process exit:");
+            AnsiConsole.MarkupLine($"[bold yellow]⚠[/]  {subAgentSessions.Count} sub-agent session(s) were interrupted by the previous process exit:");
             foreach (var s in subAgentSessions)
             {
                 var age = (DateTime.UtcNow - s.LastActivityAt).TotalSeconds < 60
                     ? $"{(int)(DateTime.UtcNow - s.LastActivityAt).TotalSeconds}s ago"
                     : s.LastActivityAt.ToString("g");
-                Console.WriteLine($"  • {s.SessionId}  (last active: {age})");
+                AnsiConsole.MarkupLine($"   [dim]• {Markup.Escape(s.SessionId)}  (last active: {age})[/]");
                 sessionManager.MarkAborted(s.SessionId, "interrupted by process restart");
             }
-            Console.WriteLine("  → Marked as aborted. In-flight sub-agent work cannot be recovered.");
-            Console.WriteLine();
+            AnsiConsole.MarkupLine("   [dim]→ Marked as aborted. In-flight sub-agent work cannot be recovered.[/]");
+            AnsiConsole.WriteLine();
         }
 
         // ── Channel sessions: log a warning (channel adapters will reconnect) ─
         if (channelSessions.Count > 0)
         {
-            Console.WriteLine($"⚠ {channelSessions.Count} channel session(s) were active when the previous process exited.");
-            Console.WriteLine("  → Channel connections will be re-established; any in-flight message responses were lost.");
-            Console.WriteLine();
+            AnsiConsole.MarkupLine($"[bold yellow]⚠[/]  {channelSessions.Count} channel session(s) were active when the previous process exited.");
+            AnsiConsole.MarkupLine("   [dim]→ Channel connections will be re-established; any in-flight message responses were lost.[/]");
+            AnsiConsole.WriteLine();
         }
 
         // ── Console session: offer to re-run any unanswered user message ──────
@@ -1090,23 +1209,30 @@ You can also ask the agent to:
         if (unprocessed == null) return;
 
         var preview = unprocessed.Length > 120 ? unprocessed[..120] + "…" : unprocessed;
-        Console.WriteLine("⚠ The previous session was interrupted mid-task.");
-        Console.WriteLine($"  Last unprocessed message: \"{preview}\"");
-        Console.Write("  Resume this task now? [y/N]: ");
 
+        AnsiConsole.Write(new Panel(
+            new Markup($"[italic]{Markup.Escape(preview)}[/]"))
+        {
+            Header = new PanelHeader("[bold yellow] ⚠ Previous session interrupted [/]", Justify.Left),
+            Border = BoxBorder.Rounded,
+            BorderStyle = Style.Parse("yellow"),
+            Padding = new Padding(1, 0),
+        });
+
+        AnsiConsole.Markup("[dim]Resume this task?[/] [bold](y/N):[/] ");
         var answer = Console.ReadLine()?.Trim();
-        Console.WriteLine();
+        AnsiConsole.WriteLine();
 
         if (!string.Equals(answer, "y", StringComparison.OrdinalIgnoreCase) &&
             !string.Equals(answer, "yes", StringComparison.OrdinalIgnoreCase))
         {
-            Console.WriteLine("  Task skipped — you can re-enter it manually.");
-            Console.WriteLine();
+            AnsiConsole.MarkupLine("[dim]Task skipped — you can re-enter it manually.[/]");
+            AnsiConsole.WriteLine();
             return;
         }
 
-        Console.WriteLine("  Re-queuing interrupted task…");
-        Console.WriteLine();
+        AnsiConsole.MarkupLine("[dim]Re-queuing interrupted task...[/]");
+        AnsiConsole.WriteLine();
 
         var tcs = new TaskCompletionSource<AgentResult>(TaskCreationOptions.RunContinuationsAsynchronously);
         var cmd = AgentCommand.CreateMainCommand(consoleSessionId, agent.Id, unprocessed);
@@ -1114,7 +1240,7 @@ You can also ask the agent to:
         commandQueue.Enqueue(cmd);
 
         var result = await tcs.Task;
-        Console.WriteLine(result.Output);
-        Console.WriteLine();
+        AnsiConsole.WriteLine(result.Output);
+        AnsiConsole.WriteLine();
     }
 }
