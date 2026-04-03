@@ -177,6 +177,16 @@ class Program
     static FoxAgent BuildAgent(
         IServiceProvider sp,
         string systemPrompt,
+        bool withLogger = false) =>
+        BuildAgentWithClient(sp, systemPrompt, sp.GetRequiredService<IChatClient>(), withLogger);
+
+    /// <summary>
+    /// Builds a FoxAgent with a specific <see cref="IChatClient"/> (used for model overrides in sub-agents).
+    /// </summary>
+    static FoxAgent BuildAgentWithClient(
+        IServiceProvider sp,
+        string systemPrompt,
+        IChatClient chatClient,
         bool withLogger = false)
     {
         var builder = new AgentBuilder(sp.GetRequiredService<ToolRegistry>())
@@ -187,7 +197,7 @@ class Program
             .WithMCPClient(sp.GetRequiredService<MCPClient>())
             .WithConversationStore(sp.GetRequiredService<MarkdownSessionStore>())
             .WithHistoryProvider(sp.GetRequiredService<MarkdownSessionStore>().HistoryProvider)
-            .WithChatClient(sp.GetRequiredService<IChatClient>())
+            .WithChatClient(chatClient)
             .WithWorkspaceManager(sp.GetRequiredService<WorkspaceManager>())
             .WithSessionManager(sp.GetRequiredService<SessionManager>())
             .WithCompactionFromConfig(sp.GetRequiredService<IConfiguration>());
@@ -297,6 +307,18 @@ class Program
 
         var agent = BuildAgent(sp, systemPrompt, withLogger: true);
 
+        // Upgrade runtime to use the real LLM-backed executor now that FoxAgent exists.
+        // Sub-agents with an AgentCommand.Model override get a freshly built FoxAgent
+        // wired to the resolved IChatClient; all other settings are shared.
+        var agentRuntime = sp.GetRequiredService<IAgentRuntime>();
+        var configuration = sp.GetRequiredService<IConfiguration>();
+        agentRuntime.SetExecutor(new FoxAgentExecutor(
+            defaultAgent: agent,
+            agentFactory: client => BuildAgentWithClient(sp, systemPrompt, client),
+            modelResolver: model => LLMFactory.CreateWithModelOverride(configuration, model),
+            logger: sp.GetRequiredService<ILogger<FoxAgentExecutor>>()
+        ));
+
         // Agent-dependent tools registered after agent creation (circular dependency)
         toolRegistry.Register(new SpawnSubAgentTool(agent));
 
@@ -310,6 +332,8 @@ class Program
         ));
 
         // --- Subagent lane handler ---
+        // Delegates to agentRuntime which uses FoxAgentExecutor for real LLM execution.
+        // Model overrides in AgentCommand.Model are resolved automatically.
         commandProcessor.RegisterLaneHandler(CommandLane.Subagent, async (command, ct) =>
         {
             if (command is not AgentCommand agentCmd) return;
@@ -319,7 +343,7 @@ class Program
 
             try
             {
-                var subResult = await agent.ProcessAsync(agentCmd.Message, agentCmd.SessionKey, ct);
+                var subResult = await agentRuntime.ExecuteAsync(agentCmd, ct);
 
                 var completion = subResult.Success
                     ? SubAgentCompletionResult.Success(subResult.Output)

@@ -2,40 +2,52 @@ using AgentFox.Models;
 using AgentFox.Memory;
 using AgentFox.Tools;
 using AgentFox.LLM;
+using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Logging;
 
 namespace AgentFox.Agents;
 
-using Microsoft.Extensions.Logging;
+// ─────────────────────────────────────────────────────────────────────────────
+// Interfaces
+// ─────────────────────────────────────────────────────────────────────────────
 
 /// <summary>
-/// Interface for the agent runtime that manages agent execution
+/// Manages agent execution. Delegates to an <see cref="IAgentExecutor"/> that
+/// can be swapped at runtime (e.g. to upgrade from simulated to LLM-backed).
 /// </summary>
 public interface IAgentRuntime
 {
-    /// <summary>
-    /// Execute an agent with the given task
-    /// </summary>
-    Task<AgentResult> ExecuteAsync(Agent agent, string task);
-    
-    /// <summary>
-    /// Spawn a sub-agent
-    /// </summary>
+    /// <summary>Execute an agent command (supports per-command model overrides).</summary>
+    Task<AgentResult> ExecuteAsync(AgentCommand command, CancellationToken ct = default);
+
+    /// <summary>Spawn a lightweight internal sub-agent (used by the integration layer).</summary>
     Agent SpawnSubAgent(Agent parent, AgentConfig config);
-    
-    /// <summary>
-    /// Get tool registry
-    /// </summary>
+
+    /// <summary>Swap the executor after construction (called once FoxAgent is available).</summary>
+    void SetExecutor(IAgentExecutor executor);
+
     ToolRegistry ToolRegistry { get; }
-    
-    /// <summary>
-    /// Get logger
-    /// </summary>
     ILogger? Logger { get; set; }
 }
 
 /// <summary>
-/// Configuration for agent spawning
+/// Executes a single <see cref="AgentCommand"/>.
+/// Two implementations are provided:
+/// <list type="bullet">
+///   <item><see cref="FoxAgentExecutor"/> — real LLM-backed execution via FoxAgent</item>
+///   <item><see cref="SimulatedAgentExecutor"/> — keyword-matching stub for tests / doctor commands</item>
+/// </list>
 /// </summary>
+public interface IAgentExecutor
+{
+    Task<AgentResult> ExecuteAsync(AgentCommand command, CancellationToken ct = default);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Supporting types (kept for SpawnSubAgentTool / FoxAgent.SpawnSubAgent)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// <summary>Configuration for spawning a sub-agent via FoxAgent.</summary>
 public class AgentSpawnConfig
 {
     public string Name { get; set; } = string.Empty;
@@ -45,31 +57,13 @@ public class AgentSpawnConfig
     public int MaxIterations { get; set; } = 10;
     public bool InheritMemory { get; set; } = true;
     public bool InheritTools { get; set; } = true;
-    
-    /// <summary>
-    /// Inherit enabled skills from parent agent (for capability-based routing)
-    /// </summary>
     public bool InheritEnabledSkills { get; set; } = true;
-    
-    /// <summary>
-    /// Role for the spawned agent (defaults to parent role)
-    /// </summary>
     public string? Role { get; set; }
-    
-    /// <summary>
-    /// Additional skills to enable on the spawned agent
-    /// </summary>
     public List<string>? AdditionalSkills { get; set; }
-    
-    /// <summary>
-    /// Skills that should NOT be enabled (override inherited skills)
-    /// </summary>
     public List<string>? ForbiddenSkills { get; set; }
 }
 
-/// <summary>
-/// Result of spawning a sub-agent
-/// </summary>
+/// <summary>Result of a low-level internal sub-agent spawn.</summary>
 public class SpawnResult
 {
     public bool Success { get; set; }
@@ -77,31 +71,40 @@ public class SpawnResult
     public string? Error { get; set; }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// DefaultAgentRuntime
+// ─────────────────────────────────────────────────────────────────────────────
+
 /// <summary>
-/// Default agent runtime implementation
+/// Default runtime: delegates execution to an <see cref="IAgentExecutor"/> and
+/// exposes <see cref="SetExecutor"/> so Program.cs can inject a real LLM executor
+/// once FoxAgent has been built.
 /// </summary>
 public class DefaultAgentRuntime : IAgentRuntime
 {
     private readonly ToolRegistry _toolRegistry;
-    private readonly ILogger? _logger;
-    private readonly IAgentExecutor _executor;
-    
+    private IAgentExecutor _executor;
+
     public ToolRegistry ToolRegistry => _toolRegistry;
     public ILogger? Logger { get; set; }
-    
+
     public DefaultAgentRuntime(ToolRegistry toolRegistry, IAgentExecutor? executor = null, ILogger? logger = null)
     {
         _toolRegistry = toolRegistry;
-        _logger = logger;
-        _executor = executor ?? new DefaultAgentExecutor(this);
+        Logger = logger;
+        _executor = executor ?? new SimulatedAgentExecutor(toolRegistry, logger);
     }
-    
-    public async Task<AgentResult> ExecuteAsync(Agent agent, string task)
+
+    /// <summary>Replace the executor. Call this after FoxAgent is constructed.</summary>
+    public void SetExecutor(IAgentExecutor executor) => _executor = executor;
+
+    public Task<AgentResult> ExecuteAsync(AgentCommand command, CancellationToken ct = default)
     {
-        Logger?.LogInformation($"Executing agent '{agent.Config.Name}' with task: {task}");
-        return await _executor.ExecuteAsync(agent, task);
+        Logger?.LogInformation("Runtime executing command for session '{Session}'", command.SessionKey);
+        return _executor.ExecuteAsync(command, ct);
     }
-    
+
+    /// <summary>Spawn a lightweight internal Agent (used by the integration layer).</summary>
     public Agent SpawnSubAgent(Agent parent, AgentConfig config)
     {
         var agent = new Agent
@@ -110,326 +113,144 @@ public class DefaultAgentRuntime : IAgentRuntime
             Parent = parent,
             Status = AgentStatus.Idle
         };
-        
-        // Optionally inherit memory from parent
+
         if (parent.Memory != null)
-        {
-            agent.Memory = new ShortTermMemory(); // Sub-agent gets its own short-term
-        }
-        
-        // Optionally inherit tools from parent
-        if (parent.Config.Tools.Count > 0)
-        {
-            foreach (var tool in parent.Config.Tools)
-            {
-                if (!agent.Config.Tools.Any(t => t.Name == tool.Name))
-                {
-                    agent.Config.Tools.Add(tool);
-                }
-            }
-        }
-        
+            agent.Memory = new ShortTermMemory();
+
+        foreach (var tool in parent.Config.Tools.Where(t => !agent.Config.Tools.Any(x => x.Name == t.Name)))
+            agent.Config.Tools.Add(tool);
+
         parent.SubAgents.Add(agent);
-        Logger?.LogInformation($"Spawned sub-agent '{config.Name}' from parent '{parent.Config.Name}'");
-        
+        Logger?.LogInformation("Spawned sub-agent '{SubAgent}' from '{Parent}'", config.Name, parent.Config.Name);
         return agent;
     }
 }
 
-/// <summary>
-/// Interface for agent execution
-/// </summary>
-public interface IAgentExecutor
-{
-    Task<AgentResult> ExecuteAsync(Agent agent, string task);
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// FoxAgentExecutor  (real LLM-backed execution)
+// ─────────────────────────────────────────────────────────────────────────────
 
 /// <summary>
-/// Default agent executor - handles the main agent loop
+/// LLM-backed executor. Uses the parent <see cref="FoxAgent"/> for commands
+/// with no model override; builds a fresh sub-agent when <see cref="AgentCommand.Model"/>
+/// specifies a different model.
 /// </summary>
-public class DefaultAgentExecutor : IAgentExecutor
+public class FoxAgentExecutor : IAgentExecutor
 {
-    private readonly IAgentRuntime _runtime;
-    
-    public DefaultAgentExecutor(IAgentRuntime runtime)
+    private readonly FoxAgent _defaultAgent;
+    private readonly Func<IChatClient, FoxAgent> _agentFactory;
+    private readonly Func<string, IChatClient?> _modelResolver;
+    private readonly ILogger<FoxAgentExecutor>? _logger;
+
+    /// <param name="defaultAgent">Parent FoxAgent used when no model override is set.</param>
+    /// <param name="agentFactory">
+    ///     Factory that builds a fresh FoxAgent wired to a specific <see cref="IChatClient"/>.
+    ///     All other settings (tools, memory, session store) are shared with the parent.
+    /// </param>
+    /// <param name="modelResolver">
+    ///     Resolves a model name / named config key to an <see cref="IChatClient"/>.
+    ///     Return null to fall back to the default agent.
+    /// </param>
+    public FoxAgentExecutor(
+        FoxAgent defaultAgent,
+        Func<IChatClient, FoxAgent> agentFactory,
+        Func<string, IChatClient?> modelResolver,
+        ILogger<FoxAgentExecutor>? logger = null)
     {
-        _runtime = runtime;
+        _defaultAgent = defaultAgent;
+        _agentFactory = agentFactory;
+        _modelResolver = modelResolver;
+        _logger = logger;
     }
-    
-    public async Task<AgentResult> ExecuteAsync(Agent agent, string task)
+
+    public async Task<AgentResult> ExecuteAsync(AgentCommand command, CancellationToken ct = default)
     {
-        var startTime = DateTime.UtcNow;
-        var result = new AgentResult
-        {
-            Success = false
-        };
-        
-        try
-        {
-            // Add user message to conversation
-            agent.ConversationHistory.Add(new Message(MessageRole.User, task));
-            agent.Status = AgentStatus.Thinking;
-            
-            // Build system prompt
-            var systemMessage = BuildSystemMessage(agent);
-            agent.ConversationHistory.Insert(0, new Message(MessageRole.System, systemMessage));
-            
-            // Main agent loop
-            for (int iteration = 0; iteration < agent.Config.MaxIterations; iteration++)
-            {
-                agent.LastActiveAt = DateTime.UtcNow;
-                
-                // Get available tools
-                var availableTools = GetAvailableTools(agent);
-                
-                // In a real implementation, this would call an LLM
-                // For now, we'll simulate the agent's reasoning
-                var response = await SimulateAgentResponse(agent, availableTools);
-                
-                if (response == null)
-                {
-                    // No more responses - task complete
-                    break;
-                }
-                
-                // Add assistant message
-                agent.ConversationHistory.Add(new Message(MessageRole.Assistant, response.Content));
-                
-                // Check if response contains tool calls
-                if (response.ToolCalls.Count > 0)
-                {
-                    foreach (var toolCall in response.ToolCalls)
-                    {
-                        agent.Status = AgentStatus.ExecutingTool;
-                        _runtime.Logger?.LogInformation($"Executing tool: {toolCall.ToolName}");
-                        
-                        var toolResult = await ExecuteToolAsync(toolCall);
-                        result.ToolCalls.Add(toolCall);
-                        
-                        // Add tool result to conversation
-                        agent.ConversationHistory.Add(new Message
-                        {
-                            Role = MessageRole.Tool,
-                            Content = toolResult.Output,
-                            ToolCallId = toolCall.Id,
-                            ToolName = toolCall.ToolName
-                        });
-                        
-                        // Store in memory
-                        if (agent.Memory != null)
-                        {
-                            await agent.Memory.AddAsync(new MemoryEntry
-                            {
-                                Content = $"Tool '{toolCall.ToolName}' executed: {toolResult.Output}",
-                                Type = MemoryType.ToolExecution,
-                                Importance = 0.6
-                            });
-                        }
-                        
-                        if (!toolResult.Success)
-                        {
-                            _runtime.Logger?.LogWarning($"Tool execution failed: {toolResult.Error}");
-                        }
-                    }
-                }
-                
-                // Check for task completion
-                if (IsTaskComplete(response.Content))
-                {
-                    result.Success = true;
-                    result.Output = response.Content;
-                    break;
-                }
-                
-                agent.Status = AgentStatus.Thinking;
-            }
-            
-            if (!result.Success && string.IsNullOrEmpty(result.Output))
-            {
-                result.Output = GetLastAssistantMessage(agent);
-                result.Success = !string.IsNullOrEmpty(result.Output);
-            }
-            
-            result.Iterations = agent.Config.MaxIterations;
-        }
-        catch (Exception ex)
-        {
-            result.Error = ex.Message;
-            agent.Status = AgentStatus.Error;
-            _runtime.Logger?.LogError(ex, "Agent execution failed");
-        }
-        
-        result.Duration = DateTime.UtcNow - startTime;
-        agent.Status = result.Success ? AgentStatus.Completed : AgentStatus.Error;
-        
-        return result;
+        var agent = ResolveAgent(command);
+        _logger?.LogInformation(
+            "Sub-agent executing: session='{Session}', model='{Model}'",
+            command.SessionKey, command.Model ?? "default");
+
+        return await agent.ProcessAsync(command.Message, command.SessionKey, ct);
     }
-    
-    private string BuildSystemMessage(Agent agent)
+
+    private FoxAgent ResolveAgent(AgentCommand command)
     {
-        // Get base prompt or use default
-        var basePrompt = agent.Config.SystemPrompt ?? "You are a helpful AI assistant.";
-        
-        var builder = new SystemPromptBuilder()
-            .WithPersona(basePrompt);
-        
-        // Add available tools if any
-        if (agent.Config.Tools.Count > 0)
+        if (string.IsNullOrEmpty(command.Model))
+            return _defaultAgent;
+
+        var client = _modelResolver(command.Model);
+        if (client == null)
         {
-            var toolNames = agent.Config.Tools
-                .Select(t => $"{t.Name}: {t.Description}")
-                .ToArray();
-            builder.WithTools(toolNames);
+            _logger?.LogWarning("Model '{Model}' could not be resolved; using default", command.Model);
+            return _defaultAgent;
         }
-        
-        return builder.Build();
+
+        return _agentFactory(client);
     }
-    
-    private List<ToolDefinition> GetAvailableTools(Agent agent)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SimulatedAgentExecutor  (test / doctor commands)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// <summary>
+/// Keyword-matching stub executor. Does NOT call an LLM.
+/// Useful for health-check / doctor commands and unit tests where a real LLM
+/// is not available or not desirable.
+/// </summary>
+public class SimulatedAgentExecutor : IAgentExecutor
+{
+    private readonly ToolRegistry _toolRegistry;
+    private readonly ILogger? _logger;
+
+    public SimulatedAgentExecutor(ToolRegistry toolRegistry, ILogger? logger = null)
     {
-        var tools = new List<ToolDefinition>();
-        
-        // Add configured tools
-        tools.AddRange(agent.Config.Tools);
-        
-        // Also add runtime tools (for sub-agent spawning, etc.)
-        var spawnTool = new ToolDefinition
-        {
-            Name = "spawn_agent",
-            Description = "Spawn a sub-agent to handle a subtask",
-            Parameters = new Dictionary<string, Models.ToolParameter>
-            {
-                ["name"] = new() { Type = "string", Description = "Name of the sub-agent", Required = true },
-                ["description"] = new() { Type = "string", Description = "Description of the sub-agent's task", Required = true },
-                ["task"] = new() { Type = "string", Description = "Task for the sub-agent", Required = true },
-                ["system_prompt"] = new() { Type = "string", Description = "System prompt for the sub-agent", Required = false }
-            }
-        };
-        tools.Add(spawnTool);
-        
-        return tools;
+        _toolRegistry = toolRegistry;
+        _logger = logger;
     }
-    
-    private async Task<AgentResponse?> SimulateAgentResponse(Agent agent, List<ToolDefinition> availableTools)
+
+    public Task<AgentResult> ExecuteAsync(AgentCommand command, CancellationToken ct = default)
     {
-        // This is a simulation - in a real implementation, this would call an LLM
-        // For demonstration, we'll parse the last user message and make decisions
-        
-        var lastUserMessage = agent.ConversationHistory
-            .Where(m => m.Role == MessageRole.User)
-            .LastOrDefault();
-            
-        if (lastUserMessage == null)
-            return null;
-            
-        var response = new AgentResponse
+        _logger?.LogInformation("[Simulated] Executing command for session '{Session}'", command.SessionKey);
+
+        var response = BuildResponse(command.Message);
+
+        return Task.FromResult(new AgentResult
         {
-            Content = ""
-        };
-        
-        // Simple pattern matching for demo purposes
-        var content = lastUserMessage.Content.ToLower();
-        
-        // Check if we should spawn a sub-agent
-        if (content.Contains("subagent") || content.Contains("spawn") || content.Contains("delegate"))
-        {
-            // Extract task for sub-agent
-            var subAgentTask = "Help with: " + content;
-            var subAgent = _runtime.SpawnSubAgent(agent, new AgentConfig
-            {
-                Name = "SubAgent-" + Guid.NewGuid().ToString("N")[..8],
-                Description = "Sub-agent spawned by parent",
-                SystemPrompt = "You are a helpful sub-agent.",
-                Tools = availableTools
-            });
-            
-            // Note: In a real implementation, we'd execute the sub-agent
-            // For demo, we just indicate the sub-agent was spawned
-            response.Content = $"Would spawn sub-agent '{subAgent.Config.Name}' to handle the task.";
-        }
-        else if (content.Contains("memory") || content.Contains("remember"))
-        {
-            if (agent.Memory != null)
-            {
-                var memories = await agent.Memory.GetRecentAsync(5);
-                response.Content = "Recent memories:\n" + string.Join("\n", memories.Select(m => $"- {m.Content}"));
-            }
-            else
-            {
-                response.Content = "No memory system configured.";
-            }
-        }
-        else if (content.Contains("list") && content.Contains("tools"))
-        {
-            response.Content = "Available tools:\n" + string.Join("\n", availableTools.Select(t => $"- {t.Name}: {t.Description}"));
-        }
-        else if (content.Contains("status"))
-        {
-            response.Content = $"Agent Status: {agent.Status}\n" +
-                $"Sub-agents: {agent.SubAgents.Count}\n" +
-                $"Messages: {agent.ConversationHistory.Count}";
-        }
-        else
-        {
-            // Default response - indicate we're ready to help
-            response.Content = $"I understand your request: '{lastUserMessage.Content}'. " +
-                "I can help you with file operations, shell commands, spawning sub-agents, and more. " +
-                "What would you like me to do?";
-        }
-        
-        return response;
+            Success = true,
+            Output = response
+        });
     }
-    
-    private AgentResult result = new();
-    
-    private async Task<ToolResult> ExecuteToolAsync(ToolCall toolCall)
+
+    private string BuildResponse(string message)
     {
-        var tool = _runtime.ToolRegistry.Get(toolCall.ToolName);
-        
-        if (tool == null)
+        var lower = message.ToLowerInvariant();
+
+        if (lower.Contains("status") || lower.Contains("doctor") || lower.Contains("health"))
         {
-            return ToolResult.Fail($"Tool not found: {toolCall.ToolName}");
+            var tools = _toolRegistry.GetAll();
+            var sample = string.Join(", ", tools.Take(5).Select(t => t.Name));
+            var extra = tools.Count > 5 ? $" (+{tools.Count - 5} more)" : string.Empty;
+            return $"[Simulated] Agent healthy. Tools registered: {tools.Count} — {sample}{extra}";
         }
-        
-        try
+
+        if (lower.Contains("list") && lower.Contains("tool"))
         {
-            var result = await tool.ExecuteAsync(toolCall.Arguments);
-            toolCall.IsCompleted = true;
-            toolCall.Result = result.Output;
-            return result;
+            var tools = _toolRegistry.GetAll();
+            var list = string.Join("\n", tools.Select(t => $"  • {t.Name}: {t.Description}"));
+            return $"[Simulated] Available tools ({tools.Count}):\n{list}";
         }
-        catch (Exception ex)
-        {
-            return ToolResult.Fail(ex.Message);
-        }
-    }
-    
-    private bool IsTaskComplete(string response)
-    {
-        // Simple heuristic - check for completion indicators
-        if (string.IsNullOrEmpty(response))
-            return false;
-            
-        var lower = response.ToLower();
-        return lower.Contains("complete") || 
-               lower.Contains("done") || 
-               lower.Contains("finished") ||
-               lower.Contains("task completed");
-    }
-    
-    private string GetLastAssistantMessage(Agent agent)
-    {
-        return agent.ConversationHistory
-            .Where(m => m.Role == MessageRole.Assistant)
-            .LastOrDefault()?.Content ?? "";
+
+        return $"[Simulated] Received: \"{message}\".\n" +
+               "This is the SimulatedAgentExecutor — configure a real LLM to get actual responses.";
     }
 }
 
 /// <summary>
-/// Simulated agent response
+/// Simulated agent response (kept for internal use within the simulated executor).
 /// </summary>
 public class AgentResponse
 {
     public string Content { get; set; } = string.Empty;
-    public List<ToolCall> ToolCalls { get; set; } = new();
+    public List<ToolCall> ToolCalls { get; set; } = [];
 }

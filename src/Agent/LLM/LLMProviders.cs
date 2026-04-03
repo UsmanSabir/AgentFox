@@ -143,6 +143,33 @@ public class LLMFactory
         return provider;
     }
 
+    /// <summary>
+    /// Creates a chat client with a model override.
+    /// First looks for a named config under <c>Models:{modelNameOrKey}</c> (e.g. "CheapModel",
+    /// "FastModel", "ReasoningModel"); falls back to the default provider with
+    /// <paramref name="modelNameOrKey"/> used as the literal model name.
+    /// Returns null if the client cannot be created.
+    /// </summary>
+    public static IChatClient? CreateWithModelOverride(IConfiguration configuration, string modelNameOrKey)
+    {
+        // 1. Named model config lookup
+        var modelConfig = configuration.GetSection($"Models:{modelNameOrKey}").Get<ModelConfig>();
+        if (modelConfig != null && !string.IsNullOrEmpty(modelConfig.Model))
+            return CreateChatClient(modelConfig);
+
+        // 2. Fallback: reuse default provider settings, swap model name
+        var fallback = new ModelConfig
+        {
+            Provider = configuration["LLM:Provider"] ?? "ollama",
+            Model = modelNameOrKey,
+            BaseUrl = configuration["LLM:BaseUrl"] ?? "http://localhost:11434",
+            ApiKey = configuration["LLM:ApiKey"],
+            TimeoutSeconds = int.TryParse(configuration["LLM:TimeoutSeconds"], out var t) ? t : 3600
+        };
+
+        return CreateChatClient(fallback);
+    }
+
     public static IChatClient? CreateChatClient(ModelConfig modelConfig)
     {
         var providerType = modelConfig.Provider?.ToLowerInvariant();
