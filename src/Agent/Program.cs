@@ -6,9 +6,10 @@ using AgentFox.Sessions;
 using AgentFox.Skills;
 using AgentFox.Tools;
 using Microsoft.Extensions.AI;
-using SystemPromptBuilder = AgentFox.LLM.SystemPromptBuilder;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using SystemPromptBuilder = AgentFox.LLM.SystemPromptBuilder;
 
 namespace AgentFox;
 
@@ -45,8 +46,6 @@ internal class ConsoleLogger<T> : ConsoleLogger, ILogger<T> where T : class { }
 /// </summary>
 class Program
 {
-    
-
     static async Task<int> Main(string[] args)
     {
         Console.WriteLine("╔════════════════════════════════════════════════════════════╗");
@@ -55,109 +54,146 @@ class Program
         Console.WriteLine("╚════════════════════════════════════════════════════════════╝");
         Console.WriteLine();
 
-        var envName = Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT") ?? "Production"; // Default to Production if not set
+        var configuration = BuildConfiguration();
+        var serviceProvider = await BuildServiceProviderAsync(configuration);
 
-        // Build configuration
-        var configuration = new ConfigurationBuilder()
+        if (args.Length > 0)
+            return await RunCommandLineMode(args, serviceProvider);
+
+        return await RunInteractiveMode(serviceProvider);
+    }
+
+    // -------------------------------------------------------------------------
+    // Configuration
+    // -------------------------------------------------------------------------
+
+    static IConfiguration BuildConfiguration()
+    {
+        var envName = Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT") ?? "Production";
+        return new ConfigurationBuilder()
             .SetBasePath(Directory.GetCurrentDirectory())
             .AddJsonFile("appsettings.json", optional: true, reloadOnChange: true)
             .AddJsonFile($"appsettings.{envName}.json", optional: true, reloadOnChange: true)
             .AddEnvironmentVariables()
             .Build();
-
-        // Check for command line mode
-        if (args.Length > 0)
-        {
-            return await RunCommandLineMode(args, configuration);
-        }
-
-        // Interactive mode
-        return await RunInteractiveMode(configuration);
     }
 
     // -------------------------------------------------------------------------
-    // Shared infrastructure
+    // DI container
     // -------------------------------------------------------------------------
 
     /// <summary>
-    /// All services that are identical between command-line and interactive modes.
+    /// Builds and returns the application's service provider.
+    /// Services that require async initialization are pre-created and registered as instances.
     /// </summary>
-    private sealed class AgentServices(
-        WorkspaceManager workspaceManager,
-        SessionManager sessionManager,
-        ToolRegistry toolRegistry,
-        SkillRegistry skillRegistry,
-        MCPClient mcpClient,
-        IChatClient chatClient,
-        HybridMemory memory,
-        MarkdownSessionStore sessionStore)
+    static async Task<IServiceProvider> BuildServiceProviderAsync(IConfiguration configuration)
     {
-        public WorkspaceManager WorkspaceManager { get; } = workspaceManager;
-        public SessionManager SessionManager { get; } = sessionManager;
-        public ToolRegistry ToolRegistry { get; } = toolRegistry;
-        public SkillRegistry SkillRegistry { get; } = skillRegistry;
-        public MCPClient McpClient { get; } = mcpClient;
-        public IChatClient ChatClient { get; } = chatClient;
-        public HybridMemory Memory { get; } = memory;
-        public MarkdownSessionStore SessionStore { get; } = sessionStore;
-    }
+        var services = new ServiceCollection();
 
-    /// <summary>
-    /// Builds the shared infrastructure used by both execution modes.
-    /// Memory tools are registered here so neither mode needs to repeat it.
-    /// </summary>
-    static async Task<AgentServices> CreateServicesAsync(IConfiguration configuration)
-    {
+        // Logging — open-generic registration covers ILogger<T> for any T
+        services.AddSingleton(typeof(ILogger<>), typeof(ConsoleLogger<>));
+
+        // Configuration
+        services.AddSingleton(configuration);
+
+        // ── Pre-create services with async / ordering dependencies ──────────
+        // ToolRegistry must exist before SkillRegistry and MCPClient (async init).
         var workspaceManager = new WorkspaceManager(configuration);
-
-        var sessionConfig = new SessionConfig();
-        configuration.GetSection("Sessions").Bind(sessionConfig);
-        var sessionManager = new SessionManager(sessionConfig, workspaceManager);
-
         var toolRegistry = CreateToolRegistry(workspaceManager);
+
         var skillRegistry = await CreateSkillRegistryAsync(toolRegistry, configuration);
         var mcpClient = await CreateAndInitializeMcpClientAsync(toolRegistry, configuration);
 
-        var chatClient = LLMFactory.CreateFromConfiguration(configuration);
         var longTermMemory = MemoryBackendFactory.CreateLongTermStorage(configuration, workspaceManager);
         var memory = new HybridMemory(100, longTermMemory);
-        // MarkdownSessionStore: append-only store with full message history (incl. tool calls).
-        // Root it at the SessionManager's directory so all session files land in one place.
-        var sessionStore = new MarkdownSessionStore(sessionManager.SessionDirectory);
 
         toolRegistry.Register(new AddMemoryTool(memory));
         toolRegistry.Register(new SearchMemoryTool(memory));
         toolRegistry.Register(new GetAllMemoriesTool(memory));
 
-        return new AgentServices(workspaceManager, sessionManager, toolRegistry,
-            skillRegistry, mcpClient, chatClient, memory, sessionStore);
+        // Register pre-created instances
+        services.AddSingleton(workspaceManager);
+        services.AddSingleton(toolRegistry);
+        services.AddSingleton(skillRegistry);
+        services.AddSingleton(mcpClient);
+        services.AddSingleton(memory);
+
+        // ── Services resolved lazily by the container ────────────────────────
+        services.AddSingleton(sp =>
+        {
+            var cfg = new SessionConfig();
+            sp.GetRequiredService<IConfiguration>().GetSection("Sessions").Bind(cfg);
+            return cfg;
+        });
+
+        services.AddSingleton(sp => new SessionManager(
+            sp.GetRequiredService<SessionConfig>(),
+            sp.GetRequiredService<WorkspaceManager>()));
+
+        services.AddSingleton(_ => LLMFactory.CreateFromConfiguration(configuration));
+
+        services.AddSingleton(sp =>
+            new MarkdownSessionStore(sp.GetRequiredService<SessionManager>().SessionDirectory));
+
+        // ── Sub-agent infrastructure ─────────────────────────────────────────
+        services.AddSingleton<ICommandQueue, CommandQueue>();
+
+        services.AddSingleton(_ => new SubAgentConfiguration
+        {
+            MaxSpawnDepth = 3,
+            MaxConcurrentSubAgents = 10,
+            MaxChildrenPerAgent = 5,
+            DefaultRunTimeoutSeconds = 300,
+            DefaultModel = "gpt-4",
+            DefaultThinkingLevel = "high",
+            AutoCleanupCompleted = true,
+            CleanupDelayMilliseconds = 5000
+        });
+
+        services.AddSingleton<IAgentRuntime>(sp => new DefaultAgentRuntime(
+            sp.GetRequiredService<ToolRegistry>(),
+            executor: null,
+            sp.GetRequiredService<ILogger<DefaultAgentRuntime>>()));
+
+        services.AddSingleton(sp => new SubAgentManager(
+            sp.GetRequiredService<ICommandQueue>(),
+            sp.GetRequiredService<IAgentRuntime>(),
+            sp.GetRequiredService<SubAgentConfiguration>(),
+            sp.GetRequiredService<ILogger<SubAgentManager>>(),
+            sp.GetRequiredService<SessionManager>()));
+
+        services.AddSingleton(sp => new CommandProcessor(
+            sp.GetRequiredService<ICommandQueue>(),
+            sp.GetRequiredService<ILogger<CommandProcessor>>(),
+            processingDelayMilliseconds: 50,
+            maxCommandsPerBatch: 1));
+
+        return services.BuildServiceProvider();
     }
 
     /// <summary>
-    /// Builds a FoxAgent from shared services and a pre-built system prompt.
-    /// Pass <paramref name="configuration"/> to opt into compaction from config.
+    /// Builds a FoxAgent from the DI container and a pre-built system prompt.
     /// </summary>
     static FoxAgent BuildAgent(
-        AgentServices svc,
+        IServiceProvider sp,
         string systemPrompt,
-        IConfiguration configuration,
         bool withLogger = false)
     {
-        var builder = new AgentBuilder(svc.ToolRegistry)
+        var builder = new AgentBuilder(sp.GetRequiredService<ToolRegistry>())
             .WithName("AgentFox")
             .WithSystemPrompt(systemPrompt)
-            .WithMemory(svc.Memory)
-            .WithSkillsRegistry(svc.SkillRegistry)
-            .WithMCPClient(svc.McpClient)
-            .WithConversationStore(svc.SessionStore)
-            .WithHistoryProvider(svc.SessionStore.HistoryProvider)
-            .WithChatClient(svc.ChatClient)
-            .WithWorkspaceManager(svc.WorkspaceManager)
-            .WithSessionManager(svc.SessionManager)
-            .WithCompactionFromConfig(configuration);
+            .WithMemory(sp.GetRequiredService<HybridMemory>())
+            .WithSkillsRegistry(sp.GetRequiredService<SkillRegistry>())
+            .WithMCPClient(sp.GetRequiredService<MCPClient>())
+            .WithConversationStore(sp.GetRequiredService<MarkdownSessionStore>())
+            .WithHistoryProvider(sp.GetRequiredService<MarkdownSessionStore>().HistoryProvider)
+            .WithChatClient(sp.GetRequiredService<IChatClient>())
+            .WithWorkspaceManager(sp.GetRequiredService<WorkspaceManager>())
+            .WithSessionManager(sp.GetRequiredService<SessionManager>())
+            .WithCompactionFromConfig(sp.GetRequiredService<IConfiguration>());
 
         if (withLogger)
-            builder = builder.WithLogger(new ConsoleLogger<FoxAgent>());
+            builder = builder.WithLogger(sp.GetRequiredService<ILogger<FoxAgent>>());
 
         return builder.Build();
     }
@@ -166,15 +202,15 @@ class Program
     // Execution modes
     // -------------------------------------------------------------------------
 
-    static async Task<int> RunCommandLineMode(string[] args, IConfiguration configuration)
+    static async Task<int> RunCommandLineMode(string[] args, IServiceProvider sp)
     {
-        var svc = await CreateServicesAsync(configuration);
+        var skillRegistry = sp.GetRequiredService<SkillRegistry>();
 
         var systemPrompt = new SystemPromptBuilder()
             .WithPersona(SystemPromptConfig.AgentPrompts.DeveloperAssistant)
             .WithTools("shell", "read_file", "write_file", "list_files", "search_files",
                        "make_directory", "delete", "add_memory", "search_memory", "get_all_memories")
-            .WithSkillsIndex(svc.SkillRegistry.GetSkillManifests())
+            .WithSkillsIndex(skillRegistry.GetSkillManifests())
             .WithConstraints(
                 "Always verify changes before executing destructive operations",
                 "Prioritize security and best practices",
@@ -185,7 +221,7 @@ class Program
             )
             .Build();
 
-        var agent = BuildAgent(svc, systemPrompt, configuration);
+        var agent = BuildAgent(sp, systemPrompt);
 
         var task = string.Join(" ", args);
         Console.WriteLine($"Executing: {task}");
@@ -205,11 +241,15 @@ class Program
         return result.Success ? 0 : 1;
     }
 
-    static async Task<int> RunInteractiveMode(IConfiguration configuration)
+    static async Task<int> RunInteractiveMode(IServiceProvider sp)
     {
-        var svc = await CreateServicesAsync(configuration);
+        var skillRegistry = sp.GetRequiredService<SkillRegistry>();
+        var toolRegistry = sp.GetRequiredService<ToolRegistry>();
+        var sessionManager = sp.GetRequiredService<SessionManager>();
+        var subAgentManager = sp.GetRequiredService<SubAgentManager>();
+        var commandProcessor = sp.GetRequiredService<CommandProcessor>();
 
-        var manifests = svc.SkillRegistry.GetSkillManifests();
+        var manifests = skillRegistry.GetSkillManifests();
         Console.WriteLine($"Skills loaded: {manifests.Count} skill(s) registered.");
         Console.WriteLine();
 
@@ -255,40 +295,21 @@ class Program
             )
             .Build();
 
-        var agent = BuildAgent(svc, systemPrompt, configuration, withLogger: true);
+        var agent = BuildAgent(sp, systemPrompt, withLogger: true);
 
-        // Register spawn sub-agent tool (requires the agent instance)
-        svc.ToolRegistry.Register(new SpawnSubAgentTool(agent));
+        // Agent-dependent tools registered after agent creation (circular dependency)
+        toolRegistry.Register(new SpawnSubAgentTool(agent));
 
-        // Set up SubAgentManager for background/long-running sub-agents
-        var subAgentConfig = new SubAgentConfiguration
-        {
-            MaxSpawnDepth = 3,
-            MaxConcurrentSubAgents = 10,
-            MaxChildrenPerAgent = 5,
-            DefaultRunTimeoutSeconds = 300,
-            DefaultModel = "gpt-4",
-            DefaultThinkingLevel = "high",
-            AutoCleanupCompleted = true,
-            CleanupDelayMilliseconds = 5000
-        };
-
-        // Create command queue and agent runtime for sub-agent management
-        var commandQueue = new CommandQueue();
-        var agentRuntime = new DefaultAgentRuntime(svc.ToolRegistry, null, new ConsoleLogger<DefaultAgentRuntime>());
-        var subAgentManager = new SubAgentManager(commandQueue, agentRuntime, subAgentConfig,
-            new ConsoleLogger<SubAgentManager>(), svc.SessionManager);
-
-        // Create CommandProcessor to actually execute queued Subagent and Main lane commands
-        var commandProcessor = new CommandProcessor(
-            commandQueue,
-            new ConsoleLogger<CommandProcessor>(),
-            processingDelayMilliseconds: 50,
-            maxCommandsPerBatch: 1);
+        var consoleSessionId = sessionManager.GetOrCreateConsoleSession(agent.Id);
+        toolRegistry.Register(new SpawnBackgroundSubAgentTool(
+            subAgentManager,
+            parentAgentId: agent.Id,
+            parentSessionKey: consoleSessionId,
+            parentSpawnDepth: 0,
+            logger: sp.GetRequiredService<ILogger<SpawnBackgroundSubAgentTool>>()
+        ));
 
         // --- Subagent lane handler ---
-        // Executes each background sub-agent as a real FoxAgent turn under its own session key,
-        // then signals completion (success / failure / timeout / cancellation) to SubAgentManager.
         commandProcessor.RegisterLaneHandler(CommandLane.Subagent, async (command, ct) =>
         {
             if (command is not AgentCommand agentCmd) return;
@@ -298,8 +319,6 @@ class Program
 
             try
             {
-                // Re-use the parent FoxAgent but with the sub-agent's dedicated session key so
-                // it gets an isolated conversation history while sharing tools/memory/LLM config.
                 var subResult = await agent.ProcessAsync(agentCmd.Message, agentCmd.SessionKey, ct);
 
                 var completion = subResult.Success
@@ -319,15 +338,10 @@ class Program
         });
 
         // --- Main lane handler ---
-        // Routes ResultAnnouncementCommands to the right destination:
-        //   • Channel-spawned → send formatted message back to the originating channel
-        //   • Console-spawned  → inject result into the parent agent's conversation so the
-        //                        LLM acknowledges the completed sub-task on its next turn
         commandProcessor.RegisterLaneHandler(CommandLane.Main, async (command, ct) =>
         {
             if (command is not ResultAnnouncementCommand announcement) return;
 
-            // Channel path: send result to the originating messaging channel
             if (announcement.RequesterChannel != null && !announcement.SuppressChannelNotification)
             {
                 try
@@ -341,7 +355,6 @@ class Program
                 return;
             }
 
-            // Parent-agent path: inject the result into the parent's conversation context
             if (!string.IsNullOrEmpty(announcement.ParentSessionKey))
             {
                 var notification = $"[Background sub-agent result]\n{announcement.FormatMessage()}";
@@ -360,18 +373,15 @@ class Program
                     Console.WriteLine($"[ERROR] Failed to deliver sub-agent result to parent agent: {ex.Message}");
                 }
 
-                Console.Write("\n> "); // Re-display prompt so the user knows input is expected
+                Console.Write("\n> ");
             }
         });
 
         // --- Result callback ---
-        // Fires when a sub-agent finishes (any status). Builds the appropriate
-        // ResultAnnouncementCommand so the Main lane handler can route it correctly.
         subAgentManager.RegisterResultCallback(async (task, result) =>
         {
             Console.WriteLine($"\n[BACKGROUND] Sub-agent '{task.SessionKey}' finished — status: {result.Status}");
 
-            // Channel-spawned sub-agent: announce back to the originating channel
             if (task.OriginatingChannel != null)
             {
                 return ResultAnnouncementCommand.CreateChannelAnnouncement(
@@ -382,7 +392,6 @@ class Program
                     task.OriginatingChannelId ?? string.Empty);
             }
 
-            // Console/agent-spawned: route result back into the parent agent's conversation
             if (!string.IsNullOrEmpty(task.ParentSessionKey))
             {
                 return ResultAnnouncementCommand.CreateParentAgentAnnouncement(
@@ -392,22 +401,10 @@ class Program
                     task.SessionKey);
             }
 
-            // Fallback: local-only announcement (nothing to route back to)
             return ResultAnnouncementCommand.CreateLocalAnnouncement(
                 result, task.CorrelationId, task.SessionKey);
         });
 
-        // Register background sub-agent tool
-        var consoleSessionId = svc.SessionManager.GetOrCreateConsoleSession(agent.Id);
-        svc.ToolRegistry.Register(new SpawnBackgroundSubAgentTool(
-            subAgentManager,
-            parentAgentId: agent.Id,
-            parentSessionKey: consoleSessionId,
-            parentSpawnDepth: 0,
-            logger: new ConsoleLogger<SpawnBackgroundSubAgentTool>()
-        ));
-
-        // Start the command processor — runs until we cancel it on exit
         commandProcessor.Start();
 
         Console.WriteLine("Type 'help' for available commands, 'exit' to quit.");
@@ -431,7 +428,6 @@ class Program
                 break;
             }
 
-            // Execute task
             Console.WriteLine();
             var result = await agent.ExecuteAsync(trimmed);
 
@@ -439,19 +435,20 @@ class Program
             Console.WriteLine();
 
             if (result.SpawnedSubAgents.Count > 0)
-            {
                 Console.WriteLine($"Spawned {result.SpawnedSubAgents.Count} sub-agent(s)");
-            }
         }
 
         return 0;
     }
 
+    // -------------------------------------------------------------------------
+    // Factory helpers
+    // -------------------------------------------------------------------------
+
     static ToolRegistry CreateToolRegistry(WorkspaceManager workspaceManager)
     {
         var registry = new ToolRegistry();
 
-        // Register built-in tools
         registry.Register(new ShellCommandTool(workspaceManager));
         registry.Register(new ReadFileTool(workspaceManager));
         registry.Register(new WriteFileTool(workspaceManager));
@@ -460,8 +457,6 @@ class Program
         registry.Register(new MakeDirectoryTool(workspaceManager));
         registry.Register(new DeleteTool(workspaceManager));
         registry.Register(new GetEnvironmentInfoTool());
-
-        // Register custom tools
         registry.Register(new WebSearchTool());
         registry.Register(new FetchUrlTool());
         registry.Register(new CalculatorTool());
@@ -497,9 +492,7 @@ class Program
                     serverConfig.TimeoutSeconds <= 0 ? 30 : serverConfig.TimeoutSeconds,
                     serverConfig.Headers);
                 if (!success)
-                {
                     Console.WriteLine($"⚠ Warning: Failed to connect to MCP server '{serverConfig.Name}' at '{serverConfig.Url}'.");
-                }
             }
             catch (Exception ex)
             {
@@ -508,57 +501,47 @@ class Program
         }
 
         if (servers.Count > 0)
-        {
             Console.WriteLine($"MCP: Loaded configuration for {servers.Count} server(s).");
-        }
 
         return mcpClient;
     }
 
     static async Task<SkillRegistry> CreateSkillRegistryAsync(ToolRegistry toolRegistry, IConfiguration configuration)
     {
-        // SkillRegistry auto-registers all built-in skills (git, docker, code_review,
-        // debugging, api_integration, database, testing, deployment) and also
-        // registers LoadSkillTool into the toolRegistry for lazy on-demand loading.
         var skillRegistry = new SkillRegistry(toolRegistry);
 
-        // Initialize Composio skills if API key is configured
         var composioApiKey = configuration["Composio:ApiKey"];
         if (!string.IsNullOrEmpty(composioApiKey) && !composioApiKey.Contains("your-composio"))
         {
             try
             {
-                var logger = new ConsoleLogger<ComposioSkillProvider>();
                 var composioProvider = new ComposioSkillProvider(
                     apiKey: composioApiKey,
                     skillRegistry: skillRegistry,
-                    logger: logger
+                    logger: new ConsoleLogger<ComposioSkillProvider>()
                 );
 
-                // Get toolkit filter if specified
-                var toolkits = configuration.GetSection("Composio:Toolkits")
-                    .Get<List<string>>() ?? new();
+                var toolkits = configuration.GetSection("Composio:Toolkits").Get<List<string>>() ?? [];
 
                 if (toolkits.Any())
-                {
                     await composioProvider.InitializeAsync(filterToolkitIds: toolkits.ToArray());
-                }
                 else
-                {
                     await composioProvider.InitializeAsync();
-                }
 
                 Console.WriteLine("✓ Composio skills initialized successfully");
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"⚠ Warning: Failed to initialize Composio skills: {ex.Message}");
-                // Continue without Composio rather than failing startup
             }
         }
 
         return skillRegistry;
     }
+
+    // -------------------------------------------------------------------------
+    // Console display helpers
+    // -------------------------------------------------------------------------
 
     static void ShowHelp()
     {
@@ -626,9 +609,6 @@ Composio Integration:
         }
     }
 
-    /// <summary>
-    /// Show all registered skills in a compact table
-    /// </summary>
     static void ShowSkills(SkillRegistry skillRegistry)
     {
         var manifests = skillRegistry.GetSkillManifests();
@@ -657,18 +637,11 @@ Composio Integration:
         Console.WriteLine();
     }
 
-    /// <summary>
-    /// Show detailed info for a specific skill
-    /// </summary>
     static void ShowSkillDetail(SkillRegistry skillRegistry, string skillName)
     {
-        var skill = skillRegistry.Get(skillName);
-        if (skill == null)
-        {
-            // Try case-insensitive
-            skill = skillRegistry.GetAll()
+        var skill = skillRegistry.Get(skillName)
+            ?? skillRegistry.GetAll()
                 .FirstOrDefault(s => s.Name.Equals(skillName, StringComparison.OrdinalIgnoreCase));
-        }
 
         if (skill == null)
         {
@@ -700,14 +673,11 @@ Composio Integration:
             Console.WriteLine();
             Console.WriteLine($"  Tools ({tools.Count}):");
             foreach (var tool in tools)
-            {
                 Console.WriteLine($"    • {tool.Name,-25} {tool.Description}");
-            }
         }
 
-        var isPlugin = skill is ISkillPlugin;
         Console.WriteLine();
-        Console.WriteLine($"  Type: {(isPlugin ? "local" : "generic")} skill");
+        Console.WriteLine($"  Type: {(skill is ISkillPlugin ? "local" : "generic")} skill");
         Console.WriteLine();
         Console.WriteLine($"  To load full guidance: load_skill(skill_name: \"{skill.Name}\")");
         Console.WriteLine();
