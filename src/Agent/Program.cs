@@ -1,4 +1,5 @@
 using AgentFox.Agents;
+using AgentFox.Channels;
 using AgentFox.LLM;
 using AgentFox.Models;
 using AgentFox.MCP;
@@ -464,6 +465,9 @@ class Program
 
         commandProcessor.Start();
 
+        // ── Channels ─────────────────────────────────────────────────────────
+        var channelManager = await LoadChannelsFromConfigAsync(sp, agent, configuration);
+
         Console.WriteLine("Type 'help' for available commands, 'exit' to quit.");
         Console.WriteLine();
 
@@ -481,6 +485,8 @@ class Program
             if (lower == "exit")
             {
                 Console.WriteLine("Goodbye!");
+                if (channelManager != null)
+                    await channelManager.DisconnectAllAsync();
                 await commandProcessor.StopAsync(TimeSpan.FromSeconds(10));
                 break;
             }
@@ -507,6 +513,60 @@ class Program
         }
 
         return 0;
+    }
+
+    // -------------------------------------------------------------------------
+    // Channel loading
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Reads the "Channels" config section, creates a <see cref="ChannelManager"/>,
+    /// adds any enabled channels, connects them all, and returns the manager.
+    /// Returns null when no channels are configured and enabled.
+    /// </summary>
+    static async Task<ChannelManager?> LoadChannelsFromConfigAsync(
+        IServiceProvider sp,
+        FoxAgent agent,
+        IConfiguration configuration)
+    {
+        var channelSection = configuration.GetSection("Channels");
+        if (!channelSection.Exists()) return null;
+
+        var sessionManager = sp.GetRequiredService<SessionManager>();
+        var commandQueue   = sp.GetRequiredService<ICommandQueue>();
+        var logger         = sp.GetRequiredService<ILogger<ChannelManager>>();
+
+        var manager = new ChannelManager(agent, sessionManager, commandQueue, logger);
+        var anyEnabled = false;
+
+        // ── Telegram ──────────────────────────────────────────────────────────
+        var tgSection = channelSection.GetSection("Telegram");
+        if (tgSection.Exists() && tgSection.GetValue<bool>("Enabled"))
+        {
+            var token = tgSection["BotToken"] ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(token) || token.Contains("your-telegram"))
+            {
+                Console.WriteLine("⚠ Telegram: BotToken is not configured — skipping.");
+            }
+            else
+            {
+                var pollingTimeout = tgSection.GetValue<int>("PollingTimeoutSeconds", 30);
+                var tgChannel = new TelegramChannel(
+                    token,
+                    pollingTimeout,
+                    sp.GetRequiredService<ILogger<TelegramChannel>>());
+                manager.AddChannel(tgChannel);
+                anyEnabled = true;
+                Console.WriteLine("  • Telegram channel added (long-polling)");
+            }
+        }
+
+        if (!anyEnabled) return null;
+
+        Console.WriteLine("Connecting channels…");
+        await manager.ConnectAllAsync();
+        Console.WriteLine($"Channels connected: {manager.Channels.Count}");
+        return manager;
     }
 
     // -------------------------------------------------------------------------

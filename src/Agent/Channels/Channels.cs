@@ -47,6 +47,16 @@ public abstract class Channel
     {
         OnMessageReceived?.Invoke(this, message);
     }
+
+    /// <summary>
+    /// Send a reply in the context of an original message.
+    /// Override this in multi-chat channels (e.g., Telegram) to route replies
+    /// back to the correct chat. The default implementation delegates to SendMessageAsync.
+    /// </summary>
+    public virtual async Task SendReplyAsync(ChannelMessage originalMessage, string content)
+    {
+        await SendMessageAsync(content);
+    }
 }
 
 /// <summary>
@@ -181,8 +191,13 @@ public class ChannelManager
                 // No gateway — route through the command queue (Main lane) when available,
                 // so channel turns share the same serial execution lane as interactive ones.
                 _logger?.LogInformation("Processing channel message via queue: {MessageId}", message.Id);
+                // Use message.ChannelId when set (allows per-chat sessions, e.g., telegram_{chatId}).
+                // Fall back to channel.ChannelId for single-recipient channels.
+                var sessionChannelId = string.IsNullOrEmpty(message.ChannelId)
+                    ? channel.ChannelId
+                    : message.ChannelId;
                 var sessionId = _sessionManager?.GetOrCreateChannelSession(
-                    channel.ChannelId, channel.Name, _agent.Id)
+                    sessionChannelId, channel.Name, _agent.Id)
                     ?? Guid.NewGuid().ToString("N");
 
                 AgentResult result;
@@ -200,7 +215,7 @@ public class ChannelManager
                     result = await _agent.ProcessAsync(message.Content, sessionId);
                 }
 
-                await channel.SendMessageAsync(result.Output);
+                await channel.SendReplyAsync(message, result.Output);
             }
         }
         catch (Exception ex)
@@ -208,7 +223,7 @@ public class ChannelManager
             _logger?.LogError(ex, "Error handling channel message: {MessageId}", message.Id);
             try
             {
-                await channel.SendMessageAsync($"❌ Error processing request: {ex.Message}");
+                await channel.SendReplyAsync(message, $"❌ Error processing request: {ex.Message}");
             }
             catch (Exception sendEx)
             {
@@ -318,97 +333,236 @@ public class PairingStatus
 }
 
 /// <summary>
-/// Telegram Channel Integration
+/// Telegram Channel Integration — long-polling mode.
+/// One bot instance handles messages from multiple chats; each chat gets its own session.
 /// </summary>
 public class TelegramChannel : Channel
 {
+    //review this https://github.com/TelegramBots/telegram.bot
     private readonly string _botToken;
-    private readonly long _chatId;
-    private string? _webhookUrl;
-    
-    public TelegramChannel(string botToken, long? chatId = null)
+    private readonly int _pollingTimeoutSeconds;
+    private readonly HttpClient _http;
+    private readonly ILogger? _logger;
+
+    private long _updateOffset = 0;
+    private CancellationTokenSource? _pollingCts;
+    private Task? _pollingTask;
+
+    private string ApiBase => $"https://api.telegram.org/bot{_botToken}";
+
+    public TelegramChannel(string botToken, int pollingTimeoutSeconds = 30, ILogger? logger = null)
     {
         Name = "Telegram";
-        ChannelId = $"telegram_{botToken[..Math.Min(8, botToken.Length)]}";
+        ChannelId = "telegram";
         _botToken = botToken;
-        _chatId = chatId ?? 0;
+        _pollingTimeoutSeconds = pollingTimeoutSeconds;
+        _logger = logger;
+        // HTTP timeout must exceed the long-poll window
+        _http = new HttpClient { Timeout = TimeSpan.FromSeconds(pollingTimeoutSeconds + 15) };
     }
-    
+
     /// <summary>
-    /// Set webhook for Telegram bot
-    /// </summary>
-    public async Task SetWebhookAsync(string url)
-    {
-        _webhookUrl = url;
-        // In production, would call Telegram Bot API setWebhook
-        await Task.Delay(50);
-    }
-    
-    /// <summary>
-    /// Get bot info
+    /// Calls getMe to verify the bot token and retrieve bot identity.
     /// </summary>
     public async Task<BotInfo> GetBotInfoAsync()
     {
-        // In production, would call Telegram Bot API getMe
-        await Task.Delay(50);
+        var json = await _http.GetStringAsync($"{ApiBase}/getMe");
+        var resp = JsonConvert.DeserializeObject<TgApiResponse<TgUser>>(json);
+        if (resp?.Ok != true || resp.Result == null)
+            throw new InvalidOperationException("Telegram getMe failed — check your bot token.");
         return new BotInfo
         {
-            Id = "12345",
-            Name = "AgentFox Bot",
-            Username = "agentfox_bot"
+            Id = resp.Result.Id.ToString(),
+            Name = resp.Result.FirstName,
+            Username = resp.Result.Username ?? string.Empty
         };
     }
-    
+
     public override async Task<bool> ConnectAsync()
     {
         try
         {
-            // Simulated connection
-            await Task.Delay(100);
+            var info = await GetBotInfoAsync();
+            _logger?.LogInformation("Telegram connected: @{Username} (id={Id})", info.Username, info.Id);
             IsConnected = true;
+            _pollingCts = new CancellationTokenSource();
+            _pollingTask = Task.Run(() => PollLoopAsync(_pollingCts.Token));
             return true;
         }
-        catch
+        catch (Exception ex)
         {
+            _logger?.LogError(ex, "Telegram ConnectAsync failed");
             IsConnected = false;
             return false;
         }
     }
-    
+
     public override async Task DisconnectAsync()
     {
+        _pollingCts?.Cancel();
+        if (_pollingTask != null)
+        {
+            try { await _pollingTask; } catch { }
+        }
         IsConnected = false;
-        await Task.CompletedTask;
     }
-    
+
+    private async Task PollLoopAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                var url = $"{ApiBase}/getUpdates?offset={_updateOffset}&timeout={_pollingTimeoutSeconds}&allowed_updates=[\"message\"]";
+                var json = await _http.GetStringAsync(url, ct);
+                var resp = JsonConvert.DeserializeObject<TgApiResponse<List<TgUpdate>>>(json);
+
+                if (resp?.Ok == true && resp.Result != null)
+                {
+                    foreach (var update in resp.Result)
+                    {
+                        _updateOffset = update.UpdateId + 1;
+                        HandleUpdate(update);
+                    }
+                }
+            }
+            catch (OperationCanceledException) { break; }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "Telegram polling error; retrying in 5s");
+                try { await Task.Delay(5_000, ct); } catch { }
+            }
+        }
+    }
+
+    private void HandleUpdate(TgUpdate update)
+    {
+        var msg = update.Message;
+        if (msg == null || string.IsNullOrWhiteSpace(msg.Text)) return;
+
+        var chatId = msg.Chat.Id;
+        var incoming = new ChannelMessage
+        {
+            // Per-chat ChannelId so SessionManager creates one session per conversation
+            ChannelId = $"telegram_{chatId}",
+            SenderId = msg.From?.Id.ToString() ?? chatId.ToString(),
+            SenderName = msg.From == null ? "Unknown"
+                : $"{msg.From.FirstName} {msg.From.LastName}".Trim(),
+            Content = msg.Text,
+            Type = MessageType.Text,
+            Metadata = new Dictionary<string, string>
+            {
+                ["chat_id"]    = chatId.ToString(),
+                ["message_id"] = msg.MessageId.ToString()
+            }
+        };
+        RaiseMessageReceived(incoming);
+    }
+
+    /// <summary>
+    /// Routes the reply back to the chat from which the original message came.
+    /// Reads chat_id from originalMessage.Metadata set during HandleUpdate.
+    /// </summary>
+    public override async Task SendReplyAsync(ChannelMessage originalMessage, string content)
+    {
+        if (!originalMessage.Metadata.TryGetValue("chat_id", out var chatStr)
+            || !long.TryParse(chatStr, out var chatId))
+        {
+            _logger?.LogWarning("SendReplyAsync: no chat_id in message metadata");
+            return;
+        }
+        await SendToChatAsync(chatId, content);
+    }
+
+    /// <summary>
+    /// Sends to the channel's default chat (no context). Most callers should use SendReplyAsync.
+    /// </summary>
     public override async Task<ChannelMessage> SendMessageAsync(string content)
     {
-        // In production, would send via Telegram Bot API
-        await Task.Delay(50);
-        return new ChannelMessage
-        {
-            ChannelId = ChannelId,
-            Content = content,
-            Timestamp = DateTime.UtcNow
-        };
+        _logger?.LogWarning("SendMessageAsync called without chat context on TelegramChannel");
+        return new ChannelMessage { ChannelId = ChannelId, Content = content, Timestamp = DateTime.UtcNow };
     }
-    
-    public override async Task<List<ChannelMessage>> ReceiveMessagesAsync()
+
+    public override Task<List<ChannelMessage>> ReceiveMessagesAsync() =>
+        Task.FromResult(new List<ChannelMessage>()); // polling handled by background task
+
+    private async Task SendToChatAsync(long chatId, string text)
     {
-        // In production, would poll Telegram Bot API
-        await Task.Delay(50);
-        return new List<ChannelMessage>();
+        // Telegram max message size is 4096 chars
+        const int maxLen = 4096;
+        for (int i = 0; i < text.Length; i += maxLen)
+        {
+            var chunk = text.Substring(i, Math.Min(maxLen, text.Length - i));
+            await PostMessageAsync(chatId, chunk, parseMode: "Markdown");
+        }
+    }
+
+    private async Task PostMessageAsync(long chatId, string text, string? parseMode = null)
+    {
+        var payload = parseMode != null
+            ? (object)new { chat_id = chatId, text, parse_mode = parseMode }
+            : new { chat_id = chatId, text };
+
+        var body = new StringContent(
+            JsonConvert.SerializeObject(payload),
+            System.Text.Encoding.UTF8,
+            "application/json");
+
+        var resp = await _http.PostAsync($"{ApiBase}/sendMessage", body);
+        if (!resp.IsSuccessStatusCode)
+        {
+            var raw = await resp.Content.ReadAsStringAsync();
+            _logger?.LogError("Telegram sendMessage failed ({Status}): {Body}", resp.StatusCode, raw);
+
+            // Telegram rejects malformed Markdown — retry as plain text
+            if (parseMode != null && raw.Contains("can't parse entities"))
+                await PostMessageAsync(chatId, text, parseMode: null);
+        }
     }
 }
 
-/// <summary>
-/// Telegram bot info
-/// </summary>
+/// <summary>Telegram bot identity returned by getMe.</summary>
 public class BotInfo
 {
     public string Id { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
     public string Username { get; set; } = string.Empty;
+}
+
+// ── Internal Telegram API response models ─────────────────────────────────────
+
+internal class TgApiResponse<T>
+{
+    [JsonProperty("ok")]     public bool Ok { get; set; }
+    [JsonProperty("result")] public T? Result { get; set; }
+}
+
+internal class TgUpdate
+{
+    [JsonProperty("update_id")] public long UpdateId { get; set; }
+    [JsonProperty("message")]   public TgMessage? Message { get; set; }
+}
+
+internal class TgMessage
+{
+    [JsonProperty("message_id")] public long MessageId { get; set; }
+    [JsonProperty("from")]       public TgUser? From { get; set; }
+    [JsonProperty("chat")]       public TgChat Chat { get; set; } = new();
+    [JsonProperty("text")]       public string? Text { get; set; }
+}
+
+internal class TgChat
+{
+    [JsonProperty("id")]   public long Id { get; set; }
+    [JsonProperty("type")] public string Type { get; set; } = string.Empty;
+}
+
+internal class TgUser
+{
+    [JsonProperty("id")]         public long Id { get; set; }
+    [JsonProperty("first_name")] public string FirstName { get; set; } = string.Empty;
+    [JsonProperty("last_name")]  public string? LastName { get; set; }
+    [JsonProperty("username")]   public string? Username { get; set; }
 }
 
 /// <summary>
