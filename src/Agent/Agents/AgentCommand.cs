@@ -1,3 +1,5 @@
+using AgentFox.Models;
+
 namespace AgentFox.Agents;
 
 /// <summary>
@@ -66,6 +68,13 @@ public class AgentCommand : ICommand
     /// Metadata associated with this command for tracking/logging
     /// </summary>
     public Dictionary<string, string> Metadata { get; set; } = new();
+
+    /// <summary>
+    /// Optional result source for request/reply over the queue.
+    /// Set by the caller; the lane handler completes it when execution finishes.
+    /// Leave null for fire-and-forget commands (background sub-agents).
+    /// </summary>
+    public TaskCompletionSource<AgentResult>? ResultSource { get; set; }
     
     /// <summary>
     /// Creates an agent command for the main execution lane

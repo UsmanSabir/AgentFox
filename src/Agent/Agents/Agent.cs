@@ -142,9 +142,10 @@ public class FoxAgent
     }
 
     /// <summary>
-    /// Execute a task with the agent
+    /// Execute a task with the agent.
+    /// Internal: callers outside this assembly should route through ICommandQueue (Main lane).
     /// </summary>
-    public async Task<AgentResult> ExecuteAsync(string task)
+    internal async Task<AgentResult> ExecuteAsync(string task)
     {
         _logger?.LogInformation("Agent '{AgentName}' executing task: {Task}", Name, task.Length > 100 ? task[..100] + "..." : task);
 
@@ -160,7 +161,12 @@ public class FoxAgent
         return await ProcessAsync(task, conversationId);
     }
 
-    public async Task<AgentResult> ProcessAsync(string task, string? conversationId = null, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// Process a task in a specific conversation session.
+    /// Internal: external callers should route through ICommandQueue; only
+    /// FoxAgentExecutor and SpawnSubAgentTool use this directly (both same assembly).
+    /// </summary>
+    internal async Task<AgentResult> ProcessAsync(string task, string? conversationId = null, CancellationToken cancellationToken = default)
     {
         conversationId ??= Guid.NewGuid().ToString("N");
 

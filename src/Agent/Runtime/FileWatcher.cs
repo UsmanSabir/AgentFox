@@ -124,12 +124,14 @@ public class FileChangedEventArgs : EventArgs
 public class AutoRunManager
 {
     private readonly FoxAgent _agent;
+    private readonly ICommandQueue? _commandQueue;
     private readonly List<FileWatcher> _watchers = new();
     private readonly Dictionary<string, string> _fileTasks = new();
-    
-    public AutoRunManager(FoxAgent agent)
+
+    public AutoRunManager(FoxAgent agent, ICommandQueue? commandQueue = null)
     {
         _agent = agent;
+        _commandQueue = commandQueue;
     }
     
     /// <summary>
@@ -150,7 +152,25 @@ public class AutoRunManager
             var configuredTask = _fileTasks[path];
             var message = $"{configuredTask} - File changed: {e.Name}";
             
-            var result = await _agent.ExecuteAsync(message);
+            AgentResult result;
+            if (_commandQueue != null)
+            {
+                var tcs = new TaskCompletionSource<AgentResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var cmd = new AgentCommand
+                {
+                    SessionKey = $"autorun:{path}",
+                    AgentId = _agent.Id,
+                    Lane = CommandLane.Background,
+                    Message = message,
+                    ResultSource = tcs
+                };
+                _commandQueue.Enqueue(cmd);
+                result = await tcs.Task;
+            }
+            else
+            {
+                result = await _agent.ProcessAsync(message, $"autorun:{path}");
+            }
             Console.WriteLine($"[AutoRun] Result: {result.Output}");
         };
         

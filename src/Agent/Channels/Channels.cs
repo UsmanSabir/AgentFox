@@ -85,15 +85,21 @@ public class ChannelManager
     private readonly FoxAgent _agent;
     private ChannelMessageGateway? _gateway;
     private readonly SessionManager? _sessionManager;
+    private readonly ICommandQueue? _commandQueue;
     private readonly ILogger? _logger;
 
     public IReadOnlyDictionary<string, Channel> Channels => _channels;
     public ChannelMessageGateway? Gateway => _gateway;
 
-    public ChannelManager(FoxAgent agent, SessionManager? sessionManager = null, ILogger? logger = null)
+    public ChannelManager(
+        FoxAgent agent,
+        SessionManager? sessionManager = null,
+        ICommandQueue? commandQueue = null,
+        ILogger? logger = null)
     {
         _agent = agent;
         _sessionManager = sessionManager;
+        _commandQueue = commandQueue;
         _logger = logger;
     }
     
@@ -172,20 +178,29 @@ public class ChannelManager
             }
             else
             {
-                // Legacy direct execution mode — use a per-channel session when available
-                _logger?.LogInformation("Processing channel message in legacy mode: {MessageId}", message.Id);
-                if (_sessionManager != null)
+                // No gateway — route through the command queue (Main lane) when available,
+                // so channel turns share the same serial execution lane as interactive ones.
+                _logger?.LogInformation("Processing channel message via queue: {MessageId}", message.Id);
+                var sessionId = _sessionManager?.GetOrCreateChannelSession(
+                    channel.ChannelId, channel.Name, _agent.Id)
+                    ?? Guid.NewGuid().ToString("N");
+
+                AgentResult result;
+                if (_commandQueue != null)
                 {
-                    var sessionId = _sessionManager.GetOrCreateChannelSession(
-                        channel.ChannelId, channel.Name, _agent.Id);
-                    var result = await _agent.ProcessAsync(message.Content, sessionId);
-                    await channel.SendMessageAsync(result.Output);
+                    var tcs = new TaskCompletionSource<AgentResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    var cmd = AgentCommand.CreateMainCommand(sessionId, _agent.Id, message.Content);
+                    cmd.ResultSource = tcs;
+                    _commandQueue.Enqueue(cmd);
+                    result = await tcs.Task;
                 }
                 else
                 {
-                    var result = await _agent.ExecuteAsync(message.Content);
-                    await channel.SendMessageAsync(result.Output);
+                    // Fallback: no queue configured (tests / embedded use)
+                    result = await _agent.ProcessAsync(message.Content, sessionId);
                 }
+
+                await channel.SendMessageAsync(result.Output);
             }
         }
         catch (Exception ex)

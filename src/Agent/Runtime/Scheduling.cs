@@ -16,6 +16,7 @@ public class HeartbeatManager : IDisposable
     private readonly Dictionary<string, HeartbeatConfig> _heartbeats = new();
     private readonly FoxAgent _agent;
     private readonly SessionManager? _sessionManager;
+    private readonly ICommandQueue? _commandQueue;
     private readonly string? _beatFilePath;
     private bool _disposed;
 
@@ -25,10 +26,16 @@ public class HeartbeatManager : IDisposable
     public event EventHandler<HeartbeatRemovedEventArgs>? HeartbeatRemoved;
     public event EventHandler<HeartbeatStatusChangedEventArgs>? HeartbeatStatusChanged;
 
-    public HeartbeatManager(FoxAgent agent, int intervalSeconds = 60, string? beatFilePath = null, SessionManager? sessionManager = null)
+    public HeartbeatManager(
+        FoxAgent agent,
+        int intervalSeconds = 60,
+        string? beatFilePath = null,
+        SessionManager? sessionManager = null,
+        ICommandQueue? commandQueue = null)
     {
         _agent = agent;
         _sessionManager = sessionManager;
+        _commandQueue = commandQueue;
         _beatFilePath = beatFilePath ?? Path.Combine(AppContext.BaseDirectory, "Runtime", "Heartbeat.md");
         _timer = new System.Timers.Timer(intervalSeconds * 1000);
         _timer.Elapsed += OnTimerElapsed;
@@ -293,16 +300,28 @@ public class HeartbeatManager : IDisposable
         try
         {
             // Each heartbeat run gets a fresh session so runs don't share context
+            var sessionId = _sessionManager?.CreateFreshSession(
+                SessionOrigin.Heartbeat, config.Name, _agent.Id)
+                ?? Guid.NewGuid().ToString("N");
+
             AgentResult result;
-            if (_sessionManager != null)
+            if (_commandQueue != null)
             {
-                var sessionId = _sessionManager.CreateFreshSession(
-                    SessionOrigin.Heartbeat, config.Name, _agent.Id);
-                result = await _agent.ProcessAsync(config.Task, sessionId);
+                var tcs = new TaskCompletionSource<AgentResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var cmd = new AgentCommand
+                {
+                    SessionKey = sessionId,
+                    AgentId = _agent.Id,
+                    Lane = CommandLane.Background,
+                    Message = config.Task,
+                    ResultSource = tcs
+                };
+                _commandQueue.Enqueue(cmd);
+                result = await tcs.Task;
             }
             else
             {
-                result = await _agent.ExecuteAsync(config.Task);
+                result = await _agent.ProcessAsync(config.Task, sessionId);
             }
             
             config.LastTriggered = DateTime.UtcNow;
@@ -401,15 +420,21 @@ public class CronScheduler : IDisposable
     private readonly Dictionary<string, CronJob> _jobs = new();
     private readonly FoxAgent _agent;
     private readonly SessionManager? _sessionManager;
+    private readonly ICommandQueue? _commandQueue;
     private bool _disposed;
 
     public event EventHandler<CronJobExecutedEventArgs>? JobExecuted;
     public event EventHandler<CronJobErrorEventArgs>? JobError;
 
-    public CronScheduler(FoxAgent agent, int checkIntervalSeconds = 60, SessionManager? sessionManager = null)
+    public CronScheduler(
+        FoxAgent agent,
+        int checkIntervalSeconds = 60,
+        SessionManager? sessionManager = null,
+        ICommandQueue? commandQueue = null)
     {
         _agent = agent;
         _sessionManager = sessionManager;
+        _commandQueue = commandQueue;
         _timer = new System.Timers.Timer(checkIntervalSeconds * 1000);
         _timer.Elapsed += OnTimerElapsed;
     }
@@ -464,16 +489,28 @@ public class CronScheduler : IDisposable
             try
             {
                 // Each cron run gets a fresh session so jobs don't share context
+                var sessionId = _sessionManager?.CreateFreshSession(
+                    SessionOrigin.CronJob, job.Name, _agent.Id)
+                    ?? Guid.NewGuid().ToString("N");
+
                 AgentResult result;
-                if (_sessionManager != null)
+                if (_commandQueue != null)
                 {
-                    var sessionId = _sessionManager.CreateFreshSession(
-                        SessionOrigin.CronJob, job.Name, _agent.Id);
-                    result = await _agent.ProcessAsync(job.Task, sessionId);
+                    var tcs = new TaskCompletionSource<AgentResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    var cmd = new AgentCommand
+                    {
+                        SessionKey = sessionId,
+                        AgentId = _agent.Id,
+                        Lane = CommandLane.Background,
+                        Message = job.Task,
+                        ResultSource = tcs
+                    };
+                    _commandQueue.Enqueue(cmd);
+                    result = await tcs.Task;
                 }
                 else
                 {
-                    result = await _agent.ExecuteAsync(job.Task);
+                    result = await _agent.ProcessAsync(job.Task, sessionId);
                 }
 
                 job.LastExecuted = now;

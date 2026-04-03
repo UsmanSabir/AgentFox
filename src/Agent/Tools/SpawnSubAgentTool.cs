@@ -112,6 +112,7 @@ public class SpawnSubAgentTool : BaseTool
             var subAgent = _agent.SpawnSubAgent(config);
 
             // Execute the task with the sub-agent asynchronously
+            //Runs inside the Main lane (tool call); re-enqueueing to Subagent lane would deadlock the serial Main lane
             var result = await subAgent.ExecuteAsync(task);
 
             // Format the response

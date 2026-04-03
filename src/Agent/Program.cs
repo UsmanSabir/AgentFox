@@ -1,5 +1,6 @@
 using AgentFox.Agents;
 using AgentFox.LLM;
+using AgentFox.Models;
 using AgentFox.MCP;
 using AgentFox.Memory;
 using AgentFox.Sessions;
@@ -236,7 +237,10 @@ class Program
         Console.WriteLine($"Executing: {task}");
         Console.WriteLine(new string('-', 50));
 
-        var result = await agent.ExecuteAsync(task);
+        // CLI mode: no CommandProcessor is running, so we call ProcessAsync directly.
+        // Session is resolved the same way ExecuteAsync would — via SessionManager.
+        var cliSessionId = sp.GetRequiredService<SessionManager>().GetOrCreateConsoleSession(agent.Id);
+        var result = await agent.ProcessAsync(task, cliSessionId);
 
         Console.WriteLine("Result:");
         Console.WriteLine(result.Output);
@@ -257,6 +261,7 @@ class Program
         var sessionManager = sp.GetRequiredService<SessionManager>();
         var subAgentManager = sp.GetRequiredService<SubAgentManager>();
         var commandProcessor = sp.GetRequiredService<CommandProcessor>();
+        var commandQueue = sp.GetRequiredService<ICommandQueue>();
 
         var manifests = skillRegistry.GetSkillManifests();
         Console.WriteLine($"Skills loaded: {manifests.Count} skill(s) registered.");
@@ -361,8 +366,32 @@ class Program
         });
 
         // --- Main lane handler ---
+        // Handles two command types on the serial Main lane:
+        //   1. AgentCommand  — a user turn or injected notification; executed via agentRuntime
+        //      so model-override / executor-swap logic applies uniformly.
+        //   2. ResultAnnouncementCommand — routes a completed sub-agent result to the right
+        //      destination (channel or parent agent conversation).
         commandProcessor.RegisterLaneHandler(CommandLane.Main, async (command, ct) =>
         {
+            // ── 1. User / injected agent turn ────────────────────────────────
+            if (command is AgentCommand agentCmd)
+            {
+                AgentResult result;
+                try
+                {
+                    result = await agentRuntime.ExecuteAsync(agentCmd, ct);
+                }
+                catch (Exception ex)
+                {
+                    result = new AgentResult { Success = false, Error = ex.Message };
+                }
+
+                // Unblock the caller if it is awaiting a result (REPL loop, channel gateway, etc.)
+                agentCmd.ResultSource?.TrySetResult(result);
+                return;
+            }
+
+            // ── 2. Sub-agent result announcement ─────────────────────────────
             if (command is not ResultAnnouncementCommand announcement) return;
 
             if (announcement.RequesterChannel != null && !announcement.SuppressChannelNotification)
@@ -381,15 +410,20 @@ class Program
             if (!string.IsNullOrEmpty(announcement.ParentSessionKey))
             {
                 var notification = $"[Background sub-agent result]\n{announcement.FormatMessage()}";
-
                 Console.WriteLine();
                 Console.WriteLine($"[SUB-AGENT] Reporting result to parent agent (session: {announcement.ParentSessionKey})...");
 
+                // We are already on the Main lane — call the runtime directly (no re-enqueue).
+                var notifyCmd = AgentCommand.CreateMainCommand(
+                    announcement.ParentSessionKey,
+                    agentId: agent.Id,
+                    message: notification);
+
                 try
                 {
-                    var parentResponse = await agent.ProcessAsync(notification, announcement.ParentSessionKey, ct);
+                    var parentResult = await agentRuntime.ExecuteAsync(notifyCmd, ct);
                     Console.WriteLine();
-                    Console.WriteLine($"[AGENT] {parentResponse.Output}");
+                    Console.WriteLine($"[AGENT] {parentResult.Output}");
                 }
                 catch (Exception ex)
                 {
@@ -452,7 +486,18 @@ class Program
             }
 
             Console.WriteLine();
-            var result = await agent.ExecuteAsync(trimmed);
+
+            // Route the user turn through the Main lane so the CommandProcessor
+            // enforces serial execution and the FoxAgentExecutor handles it uniformly.
+            var tcs = new TaskCompletionSource<AgentResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var cmd = AgentCommand.CreateMainCommand(
+                sessionKey: consoleSessionId,
+                agentId: agent.Id,
+                message: trimmed);
+            cmd.ResultSource = tcs;
+            commandQueue.Enqueue(cmd);
+
+            var result = await tcs.Task;
 
             Console.WriteLine(result.Output);
             Console.WriteLine();
