@@ -13,4 +13,4 @@
 - MarkdownSessionHistoryProvider (ChatHistoryProvider):  evaluate whether we need reducer to prevent unbounded memory growth for long-running sessions with many messages.
 - Use LocalEmbedder in memory from https://github.com/dotnet/smartcomponents/blob/main/docs/local-embeddings.md | https://github.com/usmansabirnetsol/smartcomponents/blob/main/docs/local-embeddings.md
 - Agent Human in Loop (HITL) support https://learn.microsoft.com/en-us/agent-framework/workflows/human-in-the-loop?pivots=programming-language-csharp
-- 
+- Incorporate AgentToolkit https://github.com/microsoft/agent-governance-toolkit

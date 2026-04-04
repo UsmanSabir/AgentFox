@@ -30,6 +30,8 @@ public sealed class StreamingCallbacks
     /// Spectre.Console exclusive context is released before loggers try to write.
     /// </summary>
     public Func<Task>? OnComplete { get; set; }
+
+    public Func<string, Task>? OnReasoning { get; set; }
 }
 
 /// <summary>

@@ -12,6 +12,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Spectre.Console;
+using Spectre.Console.Rendering;
 using System.Text;
 using System.Threading.Channels;
 using SysChannel = System.Threading.Channels.Channel;
@@ -53,6 +54,7 @@ class Program
 {
     static async Task<int> Main(string[] args)
     {
+        Console.OutputEncoding = System.Text.Encoding.UTF8;
         ShowBanner();
 
         var configuration = BuildConfiguration();
@@ -628,10 +630,28 @@ class Program
 
             // All three streaming lifecycle hooks share one token channel so they
             // can coordinate cleanly without any state leaking into the REPL loop.
-            var tokenChannel = SysChannel.CreateUnbounded<string>(
-                new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
+            // Unified stream channel: bool flag distinguishes reasoning (true) from response tokens (false).
+            var streamChannel = SysChannel.CreateUnbounded<(bool IsReasoning, string Text)>(
+                new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
             var sb = new StringBuilder();
+            var sbReasoning = new StringBuilder();
             Task? liveDisplayTask = null;
+
+            IRenderable BuildDisplay()
+            {
+                if (sbReasoning.Length == 0)
+                    return new Text(Markup.Escape(sb.ToString()));
+
+                var thinkingPanel = new Panel(
+                        new Markup($"[italic dim yellow]{Markup.Escape(sbReasoning.ToString())}[/]"))
+                    .Header("[dim yellow]Thinking...[/]")
+                    .BorderColor(Color.Yellow)
+                    .Expand();
+
+                return sb.Length == 0
+                    ? thinkingPanel
+                    : new Rows(thinkingPanel, new Text(Markup.Escape(sb.ToString())));
+            }
 
             cmd.Streaming = new StreamingCallbacks
             {
@@ -643,25 +663,31 @@ class Program
                         .AutoClear(false)
                         .StartAsync(async ctx =>
                         {
-                            await foreach (var chunk in tokenChannel.Reader.ReadAllAsync())
+                            await foreach (var (isReasoning, text) in streamChannel.Reader.ReadAllAsync())
                             {
-                                sb.Append(chunk);
-                                ctx.UpdateTarget(new Text(sb.ToString()));
+                                if (isReasoning)
+                                    sbReasoning.Append(text);
+                                else
+                                    sb.Append(text);
+
+                                ctx.UpdateTarget(BuildDisplay());
                                 ctx.Refresh();
                             }
                         });
                     return Task.CompletedTask;
                 },
 
+                OnReasoning = async chunk => await streamChannel.Writer.WriteAsync((true, chunk)),
+
                 // OnToken: forward each text chunk to the live display via the channel.
-                OnToken = async chunk => await tokenChannel.Writer.WriteAsync(chunk),
+                OnToken = async chunk => await streamChannel.Writer.WriteAsync((false, chunk)),
 
                 // OnComplete: close the channel then await the live display so the
                 // Spectre.Console exclusive context is fully released before any
                 // post-processing (session save, logging) runs on the lane task.
                 OnComplete = async () =>
                 {
-                    tokenChannel.Writer.TryComplete();
+                    streamChannel.Writer.TryComplete();
                     if (liveDisplayTask != null)
                         await liveDisplayTask;
                 },

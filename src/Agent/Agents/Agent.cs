@@ -237,6 +237,14 @@ public class FoxAgent
                         //        Console.WriteLine($"Streaming content type {content.GetType()}");
                         //    }
                         //}
+                        if (streaming.OnReasoning != null)
+                            foreach (var content in update.Contents.OfType<TextReasoningContent>())
+                            {
+                                if (!string.IsNullOrEmpty(content.Text))
+                                {
+                                    await streaming.OnReasoning(content.Text);
+                                }
+                            }
                         if (streaming.OnToken != null)
                             foreach (var content in update.Contents.OfType<TextContent>())
                             {
@@ -1168,6 +1176,9 @@ public class AgentBuilder
 
         ChatHistoryProvider chatHistoryProvider =
             _chatHistoryProvider ?? new InMemoryChatHistoryProvider();
+
+        
+        //AgentWorkflowBuilder
 
         // 2. Build the agent with nested ChatOptions
         //TODO: Incorporate AgentToolkit https://github.com/microsoft/agent-governance-toolkit
