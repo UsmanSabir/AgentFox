@@ -42,6 +42,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\LocalEmbeddings\LocalEmbeddings.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
       <Content Update="appsettings.json">
           <CopyToOutputDirectory>Always</CopyToOutputDirectory>
       </Content>

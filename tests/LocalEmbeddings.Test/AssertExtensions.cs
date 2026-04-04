@@ -12,7 +12,22 @@ internal static class AssertExtensions
 {
     public static void Equals<T>(T expected, T actual, string? message = null)
     {
-        if (expected is IEnumerable<T> expectedEnumerable && actual is IEnumerable<T> actualEnumerable)
+        if (expected is Array expectedArray && actual is Array actualArray)
+        {
+            Microsoft.VisualStudio.TestTools.UnitTesting.Assert.AreEqual(
+                expectedArray.Length,
+                actualArray.Length,
+                $"Array length mismatch. {message}");
+
+            for (int i = 0; i < expectedArray.Length; i++)
+            {
+                Microsoft.VisualStudio.TestTools.UnitTesting.Assert.AreEqual(
+                    expectedArray.GetValue(i),
+                    actualArray.GetValue(i),
+                    $"Item at index {i} does not match. {message}");
+            }
+        }
+        else if (expected is IEnumerable<object> expectedEnumerable && actual is IEnumerable<object> actualEnumerable)
         {
             var expectedList = expectedEnumerable.ToList();
             var actualList = actualEnumerable.ToList();

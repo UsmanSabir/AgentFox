@@ -1,6 +1,8 @@
+using AgentFox.Tools;
+using Google.GenAI.Types;
+using LocalEmbeddings;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
-using AgentFox.Tools;
 
 namespace AgentFox.Memory;
 
@@ -11,7 +13,7 @@ namespace AgentFox.Memory;
 public class MemoryConfig
 {
     /// <summary>Which backend to use: "Markdown" (default) or "Sqlite"</summary>
-    public string LongTermStorage { get; set; } = "Markdown";
+    public string LongTermStorage { get; set; } = "Sqlite";
 
     /// <summary>Relative path for the markdown file (resolved against workspace)</summary>
     public string MarkdownPath { get; set; } = "LongTermMemory.md";
@@ -137,7 +139,7 @@ public class SqliteLongTermMemory : IMemory, IDisposable
         var queryVector = await _embedding.GenerateAsync(query);
         if (queryVector is { Length: > 0 })
         {
-            var vectorResults = await SearchByVectorAsync(queryVector, limit);
+            var vectorResults = await SearchByVectorAsync(query, queryVector, limit);
             if (vectorResults.Count > 0)
                 return vectorResults;
         }
@@ -277,7 +279,7 @@ public class SqliteLongTermMemory : IMemory, IDisposable
     /// and returns the top-k entries ranked by:
     ///   score = cosine_similarity × 0.6 + importance × 0.3 + recency_bonus × 0.1
     /// </summary>
-    private async Task<List<MemoryEntry>> SearchByVectorAsync(float[] queryVector, int limit)
+    private async Task<List<MemoryEntry>> SearchByVectorAsync(string query, float[] queryVector, int limit)
     {
         // Load all vectors in one query (typically < a few thousand rows for a personal agent).
         var vectors = new Dictionary<string, float[]>();
@@ -304,10 +306,46 @@ public class SqliteLongTermMemory : IMemory, IDisposable
         ";
         var entries = await ReadEntriesAsync(memCmd);
 
-        // Score and rank.
-        var now = DateTime.UtcNow;
-        var minCosine = 0.55f; //0.65f; // safe default
-        
+        // Use LocalEmbedder for Local service
+        if (_embedding is LocalEmbeddingService localService)
+        {
+            //var queryEmb = localService.Embedder.Embed(query);
+            var embeddedCandidates = entries
+                .Where(e => vectors.ContainsKey(e.Id))
+                .Select(e => (entry: e, emb: new EmbeddingF32(FloatsToBlob(vectors[e.Id]))))
+                .ToList();
+            SimilarityScore<MemoryEntry>[] closestWithScore;
+            closestWithScore = localService.FindClosestWithScore<MemoryEntry, EmbeddingF32>(query, embeddedCandidates, limit);
+            
+            if (!closestWithScore.Any())
+                return new List<MemoryEntry>();
+            
+            var candidates = closestWithScore
+                .OrderByDescending(c=>c.Similarity)
+                .ToList();
+            
+            if (candidates.Count == 0)
+                return new List<MemoryEntry>();
+            
+            var max = candidates.First().Similarity;
+            var mean = candidates.Average(x => x.Similarity);
+            var std = MathF.Sqrt(candidates.Average(x => MathF.Pow(x.Similarity - mean, 2)));
+
+            //adaptive threshold
+            var threshold = Math.Max(
+                0.60f,                 // hard floor
+                max - std * 0.5f       // dynamic band
+            );
+
+            var filtered = candidates
+                .Where(x => x.Similarity >= threshold)
+                .Select(x => x.Item)
+                .ToList();
+
+            return filtered;
+        }
+
+        // Fallback to manual cosine similarity calculation
         //var scored = entries
         //    .Where(e => vectors.ContainsKey(e.Id))
         //    .Select(e =>
@@ -334,36 +372,37 @@ public class SqliteLongTermMemory : IMemory, IDisposable
         //    .Select(x => x.entry)
         //    .ToList();
         //return scored;
+        {
+            var candidates = entries
+                .Where(e => vectors.ContainsKey(e.Id))
+                .Select(e =>
+                {
+                    var cosine = CosineSimilarity(queryVector, vectors[e.Id]);
+                    return (entry: e, cosine);
+                })
+                .OrderByDescending(x => x.cosine)
+                .ToList();
 
-        var candidates = entries
-            .Where(e => vectors.ContainsKey(e.Id))
-            .Select(e =>
-            {
-                var cosine = CosineSimilarity(queryVector, vectors[e.Id]);
-                return (entry: e, cosine);
-            })
-            .OrderByDescending(x => x.cosine)
-            .ToList();
+            if (candidates.Count == 0)
+                return new List<MemoryEntry>();
 
-        if (!candidates.Any())
-            return new List<MemoryEntry>();
+            var max = candidates.First().cosine;
+            var mean = candidates.Average(a=>a.cosine); //.Average(x => x.cosine);
+            var std = MathF.Sqrt(candidates.Average(x => MathF.Pow(x.cosine - mean, 2)));
 
-        var max = candidates.First().cosine;
-        var mean = candidates.Average(x => x.cosine);
-        var std = MathF.Sqrt(candidates.Average(x => MathF.Pow(x.cosine - mean, 2)));
+            //adaptive threshold
+            var threshold = Math.Max(
+                0.55f, // hard floor
+                max - std * 0.5f // dynamic band
+            );
 
-        //adaptive threshold
-        var threshold = Math.Max(
-            minCosine,                 // hard floor
-            max - std * 0.5f       // dynamic band
-        );
+            var filtered = candidates
+                .Where(x => x.cosine >= threshold)
+                .Select(x => x.entry)
+                .ToList();
 
-        var filtered = candidates
-            .Where(x => x.cosine >= threshold)
-            .Select(x => x.entry)
-            .ToList();
-
-        return filtered;
+            return filtered;
+        }
     }
 
     /// <summary>

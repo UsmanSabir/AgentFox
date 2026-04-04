@@ -25,6 +25,23 @@ public class LocalEmbedderFindClosestTest
     }
 
     [TestMethod]
+    public void CanFindClosestMatches_StaticName()
+    {
+        using var embedder = new LocalEmbedder();
+        string[] candidates = ["Tea", "Latte", "Coffee", "Cherryade", "My name is Usman"];
+        var embeddedCandidates = embedder.EmbedRange(candidates);
+
+        var query = "tell me about me";
+        var closest = LocalEmbedder.FindClosest(embedder.Embed(query), embeddedCandidates, 1);
+        var closestWithScore = LocalEmbedder.FindClosestWithScore(embedder.Embed(query), embeddedCandidates, 1);
+
+        Assert.Equals(new[] { "My name is Usman", "Tea" }, closest.Take(1).ToList());
+        Assert.Collection(closestWithScore.Take(1),
+            result => { Assert.Equal("My name is Usman", result.Item); Assert.InRange(result.Similarity, 0, 1.01f); }
+            );
+    }
+
+    [TestMethod]
     public void CanFindClosestMatches_Instance()
     {
         using var embedder = new LocalEmbedder();

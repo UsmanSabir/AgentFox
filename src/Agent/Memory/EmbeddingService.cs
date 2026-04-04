@@ -1,3 +1,4 @@
+using LocalEmbeddings;
 using Microsoft.Extensions.Configuration;
 using OllamaSharp;
 using OllamaSharp.Models;
@@ -22,6 +23,40 @@ public sealed class NullEmbeddingService : IEmbeddingService
 {
     public Task<float[]?> GenerateAsync(string text, CancellationToken ct = default)
         => Task.FromResult<float[]?>(null);
+}
+
+/// <summary>Local embeddings using LocalEmbedder.</summary>
+public sealed class LocalEmbeddingService : IEmbeddingService
+{
+    //https://github.com/dotnet/smartcomponents/blob/main/docs/local-embeddings.md
+    private readonly LocalEmbedder _embedder;
+
+    public LocalEmbeddingService()
+    {
+        _embedder = new LocalEmbedder();
+    }
+
+    //public LocalEmbedder Embedder => _embedder;
+
+    public async Task<float[]?> GenerateAsync(string text, CancellationToken ct = default)
+    {
+        try
+        {
+            var embedding = await Task.Run(() => _embedder.Embed(text), ct);
+            return embedding.Values.ToArray();
+        }
+        catch { return null; }
+    }
+
+    public SimilarityScore<TItem>[] FindClosestWithScore<TItem, EmbeddingF32>(string query,
+        IEnumerable<(TItem Item, LocalEmbeddings.EmbeddingF32 Embedding)> candidates,
+        int maxResults,
+        float? minSimilarity = null)
+    {
+        LocalEmbeddings.EmbeddingF32 target = _embedder.Embed(query);
+        var closestWithScore = LocalEmbedder.FindClosestWithScore<TItem, LocalEmbeddings.EmbeddingF32>(target, candidates, maxResults, minSimilarity);
+        return closestWithScore;
+    }
 }
 
 /// <summary>Ollama-backed embeddings via OllamaSharp.</summary>
@@ -83,8 +118,8 @@ public sealed class OpenAIEmbeddingService : IEmbeddingService
 /// <summary>Configuration for the embedding provider (nested under "Memory:Embedding").</summary>
 public class EmbeddingConfig
 {
-    /// <summary>"Ollama", "OpenAI", or "None" (default).</summary>
-    public string Provider { get; set; } = "None";
+    /// <summary>"Local", "Ollama", "OpenAI", or "None" (default).</summary>
+    public string Provider { get; set; } = "Local";
 
     /// <summary>Model name — e.g. "nomic-embed-text" for Ollama, "text-embedding-3-small" for OpenAI.</summary>
     public string Model { get; set; } = "nomic-embed-text";
@@ -110,6 +145,7 @@ public static class EmbeddingServiceFactory
 
         return config.Provider.Trim().ToLowerInvariant() switch
         {
+            "local" => new LocalEmbeddingService(),
             "ollama" => new OllamaEmbeddingService(config.BaseUrl, config.Model),
             "openai" => new OpenAIEmbeddingService(
                 config.ApiKey ?? Environment.GetEnvironmentVariable("OPENAI_API_KEY") ?? string.Empty,
