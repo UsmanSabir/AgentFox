@@ -99,12 +99,12 @@ public class SqliteLongTermMemory : IMemory, IDisposable
                     importance = excluded.importance,
                     metadata   = excluded.metadata;
             ";
-            cmd.Parameters.AddWithValue("@id",         entry.Id);
-            cmd.Parameters.AddWithValue("@content",    entry.Content);
-            cmd.Parameters.AddWithValue("@type",       entry.Type.ToString());
-            cmd.Parameters.AddWithValue("@timestamp",  entry.Timestamp.ToString("O"));
+            cmd.Parameters.AddWithValue("@id", entry.Id);
+            cmd.Parameters.AddWithValue("@content", entry.Content);
+            cmd.Parameters.AddWithValue("@type", entry.Type.ToString());
+            cmd.Parameters.AddWithValue("@timestamp", entry.Timestamp.ToString("O"));
             cmd.Parameters.AddWithValue("@importance", entry.Importance);
-            cmd.Parameters.AddWithValue("@metadata",   System.Text.Json.JsonSerializer.Serialize(entry.Metadata));
+            cmd.Parameters.AddWithValue("@metadata", System.Text.Json.JsonSerializer.Serialize(entry.Metadata));
             await cmd.ExecuteNonQueryAsync();
 
             // Store embedding when available
@@ -119,9 +119,9 @@ public class SqliteLongTermMemory : IMemory, IDisposable
                         embedding = excluded.embedding,
                         dims      = excluded.dims;
                 ";
-                vecCmd.Parameters.AddWithValue("@id",        entry.Id);
+                vecCmd.Parameters.AddWithValue("@id", entry.Id);
                 vecCmd.Parameters.AddWithValue("@embedding", FloatsToBlob(vector));
-                vecCmd.Parameters.AddWithValue("@dims",      vector.Length);
+                vecCmd.Parameters.AddWithValue("@dims", vector.Length);
                 await vecCmd.ExecuteNonQueryAsync();
             }
 
@@ -289,7 +289,7 @@ public class SqliteLongTermMemory : IMemory, IDisposable
         await using var vecReader = await vecCmd.ExecuteReaderAsync();
         while (await vecReader.ReadAsync())
         {
-            var id   = vecReader.GetString(0);
+            var id = vecReader.GetString(0);
             var blob = (byte[])vecReader["embedding"];
             vectors[id] = BlobToFloats(blob);
         }
@@ -309,24 +309,22 @@ public class SqliteLongTermMemory : IMemory, IDisposable
         // Use LocalEmbedder for Local service
         if (_embedding is LocalEmbeddingService localService)
         {
-            //var queryEmb = localService.Embedder.Embed(query);
             var embeddedCandidates = entries
                 .Where(e => vectors.ContainsKey(e.Id))
                 .Select(e => (entry: e, emb: new EmbeddingF32(FloatsToBlob(vectors[e.Id]))))
                 .ToList();
-            SimilarityScore<MemoryEntry>[] closestWithScore;
-            closestWithScore = localService.FindClosestWithScore<MemoryEntry, EmbeddingF32>(query, embeddedCandidates, limit);
-            
+            var closestWithScore = localService.FindClosestWithScore<MemoryEntry, EmbeddingF32>(query, embeddedCandidates, limit);
+
             if (!closestWithScore.Any())
                 return new List<MemoryEntry>();
-            
+
             var candidates = closestWithScore
-                .OrderByDescending(c=>c.Similarity)
+                .OrderByDescending(c => c.Similarity)
                 .ToList();
-            
+
             if (candidates.Count == 0)
                 return new List<MemoryEntry>();
-            
+
             var max = candidates.First().Similarity;
             var mean = candidates.Average(x => x.Similarity);
             var std = MathF.Sqrt(candidates.Average(x => MathF.Pow(x.Similarity - mean, 2)));
@@ -386,18 +384,19 @@ public class SqliteLongTermMemory : IMemory, IDisposable
             if (candidates.Count == 0)
                 return new List<MemoryEntry>();
 
-            var max = candidates.First().cosine;
-            var mean = candidates.Average(a=>a.cosine); //.Average(x => x.cosine);
-            var std = MathF.Sqrt(candidates.Average(x => MathF.Pow(x.cosine - mean, 2)));
+            var max = candidates[0].cosine;
+            var meanF = candidates.Average(a => a.cosine); //.Average(x => x.cosine);
+            var stdF = MathF.Sqrt(candidates.Average(x => MathF.Pow(x.cosine - meanF, 2)));
+
 
             //adaptive threshold
-            var threshold = Math.Max(
+            var thresholdF = Math.Max(
                 0.55f, // hard floor
-                max - std * 0.5f // dynamic band
+                max - stdF * 0.5f // dynamic band
             );
 
             var filtered = candidates
-                .Where(x => x.cosine >= threshold)
+                .Where(x => x.cosine >= thresholdF)
                 .Select(x => x.entry)
                 .ToList();
 
@@ -456,9 +455,9 @@ public class SqliteLongTermMemory : IMemory, IDisposable
         {
             var entry = new MemoryEntry
             {
-                Id         = reader.GetString(0),
-                Content    = reader.GetString(1),
-                Timestamp  = DateTime.Parse(reader.GetString(3), null,
+                Id = reader.GetString(0),
+                Content = reader.GetString(1),
+                Timestamp = DateTime.Parse(reader.GetString(3), null,
                                  System.Globalization.DateTimeStyles.RoundtripKind),
                 Importance = reader.GetDouble(4)
             };
@@ -514,7 +513,7 @@ public class SqliteLongTermMemory : IMemory, IDisposable
         float dot = 0f, normA = 0f, normB = 0f;
         for (int i = 0; i < len; i++)
         {
-            dot   += a[i] * b[i];
+            dot += a[i] * b[i];
             normA += a[i] * a[i];
             normB += b[i] * b[i];
         }
