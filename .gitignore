@@ -59,3 +59,4 @@ nunit-*.xml
 .claude/
 appsettings.*.json
 /src/AgentFox.sln.DotSettings.user
+/src/LocalEmbeddings/.cache
