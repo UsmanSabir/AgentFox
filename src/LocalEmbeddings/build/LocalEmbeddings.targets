@@ -33,6 +33,7 @@
     </Target>
 
     <Target Name="AcquireLocalEmbeddingsModel" Condition="!Exists('$(LocalEmbeddingsModelPath)')">
+        <MakeDir Directories="$(LocalEmbeddingsModelCacheDir)" />
         <PropertyGroup>
             <_TempFilePath>$([System.IO.Path]::GetTempFileName())</_TempFilePath>
         </PropertyGroup>
@@ -43,6 +44,7 @@
     </Target>
 
     <Target Name="AcquireLocalEmbeddingsVocab" Condition="!Exists('$(LocalEmbeddingsVocabPath)')">
+        <MakeDir Directories="$(LocalEmbeddingsModelCacheDir)" />
         <PropertyGroup>
             <_TempFilePath>$([System.IO.Path]::GetTempFileName())</_TempFilePath>
         </PropertyGroup>

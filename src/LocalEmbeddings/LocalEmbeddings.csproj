@@ -19,4 +19,6 @@
 		</ItemGroup>
 	</Target>
 
+	<Import Project="build\LocalEmbeddings.targets" />
+
 </Project>
