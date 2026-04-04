@@ -2,6 +2,7 @@ using AgentFox.LLM;
 using AgentFox.MCP;
 using AgentFox.Memory;
 using AgentFox.Models;
+using AgentFox.Runtime;
 using AgentFox.Sessions;
 using AgentFox.Skills;
 using AgentFox.Tools;
@@ -85,6 +86,7 @@ public class FoxAgent
     private readonly ChatClientAgent _chatAgent;
     private readonly ILogger<FoxAgent>? _logger;
     private WorkspaceManager _workspaceManager;
+    private readonly ConversationCheckpointService? _checkpointService;
 
     public string Id => _agent.Config.Id;
     public string Name => _agent.Config.Name;
@@ -109,7 +111,14 @@ public class FoxAgent
     /// </summary>
     public SessionManager? SessionManager { get; set; }
 
-    public FoxAgent(ChatClientAgent agent, AgentConfig config, IConversationStore store, string defaultConversationId, WorkspaceManager workspaceManager, ILogger<FoxAgent>? logger = null)
+    public FoxAgent(
+        ChatClientAgent agent,
+        AgentConfig config,
+        IConversationStore store,
+        string defaultConversationId,
+        WorkspaceManager workspaceManager,
+        ILogger<FoxAgent>? logger = null,
+        ConversationCheckpointService? checkpointService = null)
     {
         _agent = new Agent
         {
@@ -121,6 +130,7 @@ public class FoxAgent
         _chatAgent = agent;
         _workspaceManager = workspaceManager;
         _logger = logger;
+        _checkpointService = checkpointService;
     }
 
     /// <summary>
@@ -278,6 +288,11 @@ public class FoxAgent
 
             // Turn completed successfully — remove the pending marker.
             (ConversationStore as MarkdownSessionStore)?.ClearPendingUserMessage(conversationId);
+
+            // Save a checkpoint of the conversation state after each successful turn.
+            if (_checkpointService != null)
+                await _checkpointService.SaveTurnCheckpointAsync(conversationId, cancellationToken)
+                    .ConfigureAwait(false);
 
             // Keep the session alive in the session manager
             SessionManager?.TouchSession(conversationId);
@@ -539,6 +554,7 @@ public class AgentBuilder
     private ChatHistoryProvider? _chatHistoryProvider;
     private WorkspaceManager _workspaceManager;
     private SessionManager? _sessionManager;
+    private ConversationCheckpointService? _checkpointService;
     
     public AgentBuilder(ToolRegistry toolRegistry)
     {
@@ -627,6 +643,12 @@ public class AgentBuilder
     public AgentBuilder WithSessionManager(SessionManager sessionManager)
     {
         _sessionManager = sessionManager;
+        return this;
+    }
+
+    public AgentBuilder WithCheckpointService(ConversationCheckpointService checkpointService)
+    {
+        _checkpointService = checkpointService;
         return this;
     }
 
@@ -1199,7 +1221,7 @@ public class AgentBuilder
         _logger?.LogInformation("Building FoxAgent '{AgentName}' with {ToolCount} tools", _config.Name, tools.Count);
 
         
-        var foxAgent = new FoxAgent(agent, _config, _conversationStore!, "main", _workspaceManager, _logger);
+        var foxAgent = new FoxAgent(agent, _config, _conversationStore!, "main", _workspaceManager, _logger, _checkpointService);
 
         if (_sessionManager != null)
             foxAgent.SessionManager = _sessionManager;

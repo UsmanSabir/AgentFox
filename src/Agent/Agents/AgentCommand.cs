@@ -1,4 +1,6 @@
 using AgentFox.Models;
+using AgentFox.Runtime;
+using Microsoft.Agents.AI.Workflows;
 
 namespace AgentFox.Agents;
 
@@ -115,6 +117,14 @@ public class AgentCommand : ICommand
     public StreamingCallbacks? Streaming { get; set; }
 
     /// <summary>
+    /// When set, <c>FoxAgentExecutor</c> will restore the session to this
+    /// checkpoint before processing <see cref="Message"/>.  Use this to resume
+    /// an interrupted task from a known-good state rather than from the latest
+    /// persisted history.
+    /// </summary>
+    public CheckpointEntry? ResumeFromCheckpoint { get; set; }
+
+    /// <summary>
     /// Creates an agent command for the main execution lane
     /// </summary>
     public static AgentCommand CreateMainCommand(
@@ -155,6 +165,28 @@ public class AgentCommand : ICommand
             Model = model,
             ThinkingLevel = thinkingLevel,
             TimeoutSeconds = timeoutSeconds
+        };
+    }
+
+    /// <summary>
+    /// Creates a main-lane command that restores the session to
+    /// <paramref name="checkpoint"/> before processing <paramref name="message"/>.
+    /// Use in startup recovery when a more granular restore point is available
+    /// than the latest markdown session file.
+    /// </summary>
+    public static AgentCommand CreateResumeCommand(
+        string sessionKey,
+        string agentId,
+        string message,
+        CheckpointEntry checkpoint)
+    {
+        return new AgentCommand
+        {
+            SessionKey = sessionKey,
+            AgentId = agentId,
+            Lane = CommandLane.Main,
+            Message = message,
+            ResumeFromCheckpoint = checkpoint,
         };
     }
 }

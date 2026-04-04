@@ -222,6 +222,52 @@ public sealed class MarkdownSessionStore : IConversationStore
     }
 
     // ------------------------------------------------------------------
+    // Checkpoint support
+    // ------------------------------------------------------------------
+
+    /// <summary>
+    /// Returns the current in-memory message list for a conversation.
+    /// Used by <c>ConversationCheckpointService</c> to serialise a turn snapshot.
+    /// Returns null if no messages have been loaded for this conversation yet.
+    /// </summary>
+    public List<ChatMessage>? GetMessages(string conversationId)
+    {
+        _messages.TryGetValue(conversationId, out var list);
+        return list;
+    }
+
+    /// <summary>
+    /// Replaces the in-memory message list with the supplied checkpoint messages,
+    /// rewrites the on-disk markdown file to match (so the state survives a
+    /// restart), evicts the cached <see cref="AgentSession"/>, and resets the
+    /// written-count baseline.
+    ///
+    /// After this call the session cache is empty; the next <c>ProcessAsync</c>
+    /// call will create a fresh session and call <c>RestoreAsync</c>, which will
+    /// find the already-populated in-memory list and skip the disk parse.
+    /// </summary>
+    public Task RestoreFromCheckpointAsync(string conversationId, List<ChatMessage> messages)
+    {
+        // Update in-memory state
+        _messages[conversationId] = messages;
+        _writtenCounts[conversationId] = 0; // Force full rewrite on next SaveSession
+
+        // Evict cached session so the next ProcessAsync creates a fresh one
+        _cache.TryRemove(conversationId, out _);
+
+        // Rewrite the markdown file so the restored state is durable
+        var path = FilePath(conversationId);
+        if (File.Exists(path))
+            File.Delete(path);
+
+        if (messages.Count > 0)
+            AppendToFile(conversationId, messages, isNewFile: true);
+
+        _writtenCounts[conversationId] = messages.Count;
+        return Task.CompletedTask;
+    }
+
+    // ------------------------------------------------------------------
     // Crash-safe pending message (written before RunAsync, deleted after)
     // ------------------------------------------------------------------
 

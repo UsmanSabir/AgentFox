@@ -51,6 +51,13 @@ public class SessionManager : IDisposable
     private readonly SemaphoreSlim _saveLock = new(1, 1);
     private bool _disposed;
 
+    /// <summary>
+    /// Raised after a session transitions to <see cref="SessionStatus.Archived"/>.
+    /// Subscribers (e.g. <c>ConversationCheckpointService</c>) use this to prune
+    /// associated checkpoint data.
+    /// </summary>
+    public event Action<string>? SessionArchived;
+
     // Commands that trigger a session reset
     private static readonly HashSet<string> ResetCommands =
         new(StringComparer.OrdinalIgnoreCase) { "/new", "/reset" };
@@ -313,6 +320,8 @@ public class SessionManager : IDisposable
 
         info.Status = SessionStatus.Archived;
         SaveIndexAsync();
+
+        SessionArchived?.Invoke(sessionId);
     }
 
     /// <summary>Returns the SessionInfo for a conversation ID, or null if unknown.</summary>

@@ -4,6 +4,7 @@ using AgentFox.LLM;
 using AgentFox.Models;
 using AgentFox.MCP;
 using AgentFox.Memory;
+using AgentFox.Runtime;
 using AgentFox.Sessions;
 using AgentFox.Skills;
 using AgentFox.Tools;
@@ -172,6 +173,20 @@ class Program
         services.AddSingleton(sp =>
             new MarkdownSessionStore(sp.GetRequiredService<SessionManager>().SessionDirectory));
 
+        // ── Checkpoint infrastructure ────────────────────────────────────────
+        services.AddSingleton(sp =>
+        {
+            var dbPath = Path.Combine(
+                sp.GetRequiredService<SessionManager>().SessionDirectory,
+                "checkpoints.db");
+            return new SqliteJsonCheckpointStore(dbPath);
+        });
+
+        services.AddSingleton(sp => new ConversationCheckpointService(
+            sp.GetRequiredService<SqliteJsonCheckpointStore>(),
+            sp.GetRequiredService<MarkdownSessionStore>(),
+            sp.GetRequiredService<ILogger<ConversationCheckpointService>>()));
+
         // ── Sub-agent infrastructure ─────────────────────────────────────────
         services.AddSingleton<ICommandQueue, CommandQueue>();
 
@@ -236,6 +251,7 @@ class Program
             .WithChatClient(chatClient)
             .WithWorkspaceManager(sp.GetRequiredService<WorkspaceManager>())
             .WithSessionManager(sp.GetRequiredService<SessionManager>())
+            .WithCheckpointService(sp.GetRequiredService<ConversationCheckpointService>())
             .WithCompactionFromConfig(sp.GetRequiredService<IConfiguration>());
 
         if (withLogger)
@@ -360,12 +376,21 @@ class Program
         // Upgrade runtime to use the real LLM-backed executor now that FoxAgent exists.
         var agentRuntime = sp.GetRequiredService<IAgentRuntime>();
         var configuration = sp.GetRequiredService<IConfiguration>();
+        var checkpointService = sp.GetRequiredService<ConversationCheckpointService>();
+
         agentRuntime.SetExecutor(new FoxAgentExecutor(
             defaultAgent: agent,
             agentFactory: client => BuildAgentWithClient(sp, systemPrompt, client),
             modelResolver: model => LLMFactory.CreateWithModelOverride(configuration, model),
-            logger: sp.GetRequiredService<ILogger<FoxAgentExecutor>>()
+            logger: sp.GetRequiredService<ILogger<FoxAgentExecutor>>(),
+            checkpointService: checkpointService
         ));
+
+        // Prune checkpoints whenever a session is archived
+        sessionManager.SessionArchived += sessionId =>
+        {
+            _ = checkpointService.PruneCheckpointsAsync(sessionId);
+        };
 
         // Agent-dependent tools registered after agent creation (circular dependency)
         toolRegistry.Register(new SpawnSubAgentTool(agent));
@@ -614,6 +639,21 @@ class Program
             {
                 var target = lower.Length > 11 ? trimmed[11..].Trim() : "all";
                 HandleAgentKill(subAgentManager, target);
+                continue;
+            }
+
+            // ── Checkpoint commands ───────────────────────────────────────────
+            if (lower == "checkpoints" || lower == "checkpoint list")
+            {
+                await ShowCheckpointsAsync(checkpointService, consoleSessionId);
+                continue;
+            }
+
+            if (lower.StartsWith("checkpoint restore "))
+            {
+                var checkpointId = trimmed[19..].Trim();
+                await HandleCheckpointRestoreAsync(
+                    checkpointService, consoleSessionId, checkpointId);
                 continue;
             }
 
@@ -1217,6 +1257,77 @@ class Program
             else
                 AnsiConsole.MarkupLine($"[bold red]✗[/]  Sub-agent [dim]{Markup.Escape(runId)}[/] not found.");
         }
+        AnsiConsole.WriteLine();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Checkpoint REPL commands
+    // ─────────────────────────────────────────────────────────────────────────
+
+    static async Task ShowCheckpointsAsync(
+        ConversationCheckpointService checkpointService,
+        string conversationId)
+    {
+        var entries = await checkpointService.ListCheckpointsAsync(conversationId);
+
+        if (entries.Count == 0)
+        {
+            AnsiConsole.MarkupLine("[dim]No checkpoints found for this session.[/]");
+            AnsiConsole.WriteLine();
+            return;
+        }
+
+        var table = new Table()
+            .Border(TableBorder.Rounded)
+            .BorderColor(Color.Grey)
+            .AddColumn(new TableColumn("[bold]#[/]").RightAligned())
+            .AddColumn("[bold]Checkpoint ID[/]")
+            .AddColumn("[bold]Saved At (UTC)[/]");
+
+        int idx = 1;
+        foreach (var e in entries)
+        {
+            table.AddRow(
+                idx++.ToString(),
+                $"[dim]{Markup.Escape(e.Info.CheckpointId)}[/]",
+                e.CreatedAt.ToString("yyyy-MM-dd HH:mm:ss"));
+        }
+
+        AnsiConsole.Write(table);
+        AnsiConsole.MarkupLine("[dim]Use [bold]checkpoint restore <id>[/] to roll back the session.[/]");
+        AnsiConsole.WriteLine();
+    }
+
+    static async Task HandleCheckpointRestoreAsync(
+        ConversationCheckpointService checkpointService,
+        string conversationId,
+        string checkpointId)
+    {
+        var entries = await checkpointService.ListCheckpointsAsync(conversationId);
+        var target = entries.FirstOrDefault(e =>
+            e.Info.CheckpointId.Equals(checkpointId, StringComparison.OrdinalIgnoreCase) ||
+            e.Info.CheckpointId.StartsWith(checkpointId, StringComparison.OrdinalIgnoreCase));
+
+        if (target is null)
+        {
+            AnsiConsole.MarkupLine($"[red]Checkpoint not found:[/] [dim]{Markup.Escape(checkpointId)}[/]");
+            AnsiConsole.MarkupLine("[dim]Run [bold]checkpoints[/] to list available checkpoint IDs.[/]");
+            AnsiConsole.WriteLine();
+            return;
+        }
+
+        var ok = await checkpointService.RestoreCheckpointAsync(conversationId, target);
+        if (!ok)
+        {
+            AnsiConsole.MarkupLine("[red]Failed to restore checkpoint.[/] Check the logs for details.");
+            AnsiConsole.WriteLine();
+            return;
+        }
+
+        AnsiConsole.MarkupLine(
+            $"[bold green]✓[/]  Session restored to checkpoint [dim]{Markup.Escape(target.Info.CheckpointId)}[/] " +
+            $"([dim]{target.CreatedAt:yyyy-MM-dd HH:mm:ss} UTC[/]).");
+        AnsiConsole.MarkupLine("[dim]Your next message will continue from this point.[/]");
         AnsiConsole.WriteLine();
     }
 

@@ -1,5 +1,6 @@
 using AgentFox.Models;
 using AgentFox.Memory;
+using AgentFox.Runtime;
 using AgentFox.Tools;
 using AgentFox.LLM;
 using Microsoft.Extensions.AI;
@@ -141,6 +142,7 @@ public class FoxAgentExecutor : IAgentExecutor
     private readonly Func<IChatClient, FoxAgent> _agentFactory;
     private readonly Func<string, IChatClient?> _modelResolver;
     private readonly ILogger<FoxAgentExecutor>? _logger;
+    private readonly ConversationCheckpointService? _checkpointService;
 
     /// <param name="defaultAgent">Parent FoxAgent used when no model override is set.</param>
     /// <param name="agentFactory">
@@ -151,16 +153,22 @@ public class FoxAgentExecutor : IAgentExecutor
     ///     Resolves a model name / named config key to an <see cref="IChatClient"/>.
     ///     Return null to fall back to the default agent.
     /// </param>
+    /// <param name="checkpointService">
+    ///     Optional service used to restore a session from a checkpoint before
+    ///     execution when <see cref="AgentCommand.ResumeFromCheckpoint"/> is set.
+    /// </param>
     public FoxAgentExecutor(
         FoxAgent defaultAgent,
         Func<IChatClient, FoxAgent> agentFactory,
         Func<string, IChatClient?> modelResolver,
-        ILogger<FoxAgentExecutor>? logger = null)
+        ILogger<FoxAgentExecutor>? logger = null,
+        ConversationCheckpointService? checkpointService = null)
     {
         _defaultAgent = defaultAgent;
         _agentFactory = agentFactory;
         _modelResolver = modelResolver;
         _logger = logger;
+        _checkpointService = checkpointService;
     }
 
     public async Task<AgentResult> ExecuteAsync(AgentCommand command, CancellationToken ct = default)
@@ -169,6 +177,17 @@ public class FoxAgentExecutor : IAgentExecutor
         _logger?.LogInformation(
             "Sub-agent executing: session='{Session}', model='{Model}'",
             command.SessionKey, command.Model ?? "default");
+
+        // Restore session to a specific checkpoint before running when requested
+        // (e.g. startup recovery or user-triggered /checkpoint restore).
+        if (command.ResumeFromCheckpoint != null && _checkpointService != null)
+        {
+            _logger?.LogInformation(
+                "Restoring session '{Session}' from checkpoint '{CheckpointId}' before execution",
+                command.SessionKey, command.ResumeFromCheckpoint.Info.CheckpointId);
+            await _checkpointService.RestoreCheckpointAsync(command.SessionKey, command.ResumeFromCheckpoint, ct)
+                .ConfigureAwait(false);
+        }
 
         return await agent.ProcessAsync(command.Message, command.SessionKey, command.Streaming, ct);
     }
