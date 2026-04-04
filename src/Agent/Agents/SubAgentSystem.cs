@@ -170,7 +170,7 @@ public class FoxAgentExecutor : IAgentExecutor
             "Sub-agent executing: session='{Session}', model='{Model}'",
             command.SessionKey, command.Model ?? "default");
 
-        return await agent.ProcessAsync(command.Message, command.SessionKey, ct);
+        return await agent.ProcessAsync(command.Message, command.SessionKey, command.Streaming, ct);
     }
 
     private FoxAgent ResolveAgent(AgentCommand command)

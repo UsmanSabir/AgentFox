@@ -12,6 +12,9 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Spectre.Console;
+using System.Text;
+using System.Threading.Channels;
+using SysChannel = System.Threading.Channels.Channel;
 using SystemPromptBuilder = AgentFox.LLM.SystemPromptBuilder;
 
 namespace AgentFox;
@@ -622,11 +625,53 @@ class Program
                 agentId: agent.Id,
                 message: trimmed);
             cmd.ResultSource = tcs;
+
+            // All three streaming lifecycle hooks share one token channel so they
+            // can coordinate cleanly without any state leaking into the REPL loop.
+            var tokenChannel = SysChannel.CreateUnbounded<string>(
+                new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
+            var sb = new StringBuilder();
+            Task? liveDisplayTask = null;
+
+            cmd.Streaming = new StreamingCallbacks
+            {
+                // OnStart: launch the live display as a background task so the lane
+                // task can immediately proceed into RunStreamingAsync.
+                OnStart = () =>
+                {
+                    liveDisplayTask = AnsiConsole.Live(new Text(string.Empty))
+                        .AutoClear(false)
+                        .StartAsync(async ctx =>
+                        {
+                            await foreach (var chunk in tokenChannel.Reader.ReadAllAsync())
+                            {
+                                sb.Append(chunk);
+                                ctx.UpdateTarget(new Text(sb.ToString()));
+                                ctx.Refresh();
+                            }
+                        });
+                    return Task.CompletedTask;
+                },
+
+                // OnToken: forward each text chunk to the live display via the channel.
+                OnToken = async chunk => await tokenChannel.Writer.WriteAsync(chunk),
+
+                // OnComplete: close the channel then await the live display so the
+                // Spectre.Console exclusive context is fully released before any
+                // post-processing (session save, logging) runs on the lane task.
+                OnComplete = async () =>
+                {
+                    tokenChannel.Writer.TryComplete();
+                    if (liveDisplayTask != null)
+                        await liveDisplayTask;
+                },
+            };
+
             commandQueue.Enqueue(cmd);
 
             var result = await tcs.Task;
 
-            AnsiConsole.WriteLine(result.Output);
+            // Insert a blank line after the streamed block (or after a silent tool-only turn).
             AnsiConsole.WriteLine();
 
             if (result.SpawnedSubAgents.Count > 0)

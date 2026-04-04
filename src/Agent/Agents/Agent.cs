@@ -166,7 +166,7 @@ public class FoxAgent
     /// Internal: external callers should route through ICommandQueue; only
     /// FoxAgentExecutor and SpawnSubAgentTool use this directly (both same assembly).
     /// </summary>
-    internal async Task<AgentResult> ProcessAsync(string task, string? conversationId = null, CancellationToken cancellationToken = default)
+    internal async Task<AgentResult> ProcessAsync(string task, string? conversationId = null, StreamingCallbacks? streaming = null, CancellationToken cancellationToken = default)
     {
         conversationId ??= Guid.NewGuid().ToString("N");
 
@@ -215,18 +215,64 @@ public class FoxAgent
             // We persist `task` (not `augmentedTask`) so the memory preamble is rebuilt fresh on retry.
             (ConversationStore as Memory.MarkdownSessionStore)?.PersistIncomingUserMessage(conversationId, task);
 
-            var response = await agent.RunAsync(augmentedTask, session, options: runOptions, cancellationToken: timeoutToken);
+            string responseText;
+
+            if (streaming != null)
+            {
+                // Streaming path: forward tokens to the caller as they arrive (console/terminal).
+                // RunStreamingAsync handles the full agentic loop (tool calls, retries) just like
+                // RunAsync, but yields ChatResponseUpdate chunks as the model produces them.
+                if (streaming.OnStart != null)
+                    await streaming.OnStart();
+
+                var sb = new StringBuilder();
+                try
+                {
+                    await foreach (var update in agent.RunStreamingAsync(augmentedTask, session, options: runOptions, cancellationToken: timeoutToken))
+                    {
+                        //foreach (var content in update.Contents)
+                        //{
+                        //    if (content.GetType() != typeof(TextContent) && content.GetType() != typeof(TextReasoningContent) && content.GetType() != typeof(UsageContent))
+                        //    {
+                        //        Console.WriteLine($"Streaming content type {content.GetType()}");
+                        //    }
+                        //}
+                        if (streaming.OnToken != null)
+                            foreach (var content in update.Contents.OfType<TextContent>())
+                            {
+                                if (!string.IsNullOrEmpty(content.Text))
+                                {
+                                    sb.Append(content.Text);
+                                    await streaming.OnToken(content.Text);
+                                }
+                            }
+                    }
+                }
+                finally
+                {
+                    // Signal streaming complete *before* any post-processing (session save,
+                    // logging, etc.). This releases the AnsiConsole.Live exclusive context so
+                    // subsequent console writes (e.g. from loggers) do not deadlock.
+                    if (streaming.OnComplete != null)
+                        await streaming.OnComplete();
+                }
+                responseText = sb.Length > 0 ? sb.ToString() : "I apologize, but I wasn't able to generate a response.";
+            }
+            else
+            {
+                // Non-streaming path: channels, CLI, sub-agents — wait for the full response.
+                var response = await agent.RunAsync(augmentedTask, session, options: runOptions, cancellationToken: timeoutToken);
+                responseText = response.Text ?? "I apologize, but I wasn't able to generate a response.";
+            }
 
             // Persist updated session metadata (e.g. lastActiveAt) after each turn.
             ConversationStore.SaveSession(conversationId, session);
 
             // Turn completed successfully — remove the pending marker.
-            (ConversationStore as Memory.MarkdownSessionStore)?.ClearPendingUserMessage(conversationId);
+            (ConversationStore as MarkdownSessionStore)?.ClearPendingUserMessage(conversationId);
 
             // Keep the session alive in the session manager
             SessionManager?.TouchSession(conversationId);
-
-            var responseText = response.Text ?? "I apologize, but I wasn't able to generate a response.";
             _logger?.LogInformation("Agent '{AgentName}' completed task in conversation {ConversationId}", Name, conversationId);
 
             var result = new AgentResult { Success = true, Output = responseText };

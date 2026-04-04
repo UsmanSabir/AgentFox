@@ -1,3 +1,27 @@
+## Multi-Agent Orchestration - "Coordinator Mode"
+https://learn.microsoft.com/en-us/agent-framework/workflows/orchestrations/magentic
+
+TODO: Have a full **multi-agent orchestration system** 
+
+| Phase | Who | Purpose |
+|-------|-----|---------|
+| **Research** | Workers (parallel) | Investigate codebase, find files, understand problem |
+| **Synthesis** | **Coordinator** | Read findings, understand the problem, craft specs |
+| **Implementation** | Workers | Make targeted changes per spec, commit |
+| **Verification** | Workers | Test changes work |
+
+The prompt **explicitly** teaches parallelism:
+
+> *"Parallelism is your superpower. Workers are async. Launch independent workers concurrently whenever possible - don't serialize work that can run simultaneously."*
+
+Workers communicate via `<task-notification>` XML messages. There's a shared **scratchpad directory** (gated behind `tengu_scratch`) for cross-worker durable knowledge sharing. And the prompt has this gem banning lazy delegation:
+
+> *Do NOT say "based on your findings" - read the actual findings and specify exactly what to do.*
+
+The system also includes **Agent Teams/Swarm** capabilities (`tengu_amber_flint` feature gate) with in-process teammates using `AsyncLocalStorage` for context isolation, process-based teammates using tmux/iTerm2 panes, team memory synchronization, and color assignments for visual distinction.
+
+---
+
 # Channel Message Gateway - Quick Reference
 
 ## 🎯 Problem Solved

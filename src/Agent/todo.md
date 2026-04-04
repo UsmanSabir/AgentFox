@@ -1,7 +1,7 @@
 # TODO List
 - [x] Agent/sub-agent interruption and resume — commands (list/pause/resume/stop/kill), startup recovery
 - [x] TUI (onboarding, agent, doctor and other commands) Spectre.Console
-- - Stream response
+- [x] Stream response
 - Add health check/doctor on every configurable feature like llm configs, workspace dir, memory etc. Agent modifies/configure itself
 - Plugins support
 - Add channels like telegram, slack, whatsapp, ms-teams etc
@@ -13,3 +13,4 @@
 - MarkdownSessionHistoryProvider (ChatHistoryProvider):  evaluate whether we need reducer to prevent unbounded memory growth for long-running sessions with many messages.
 - Use LocalEmbedder in memory from https://github.com/dotnet/smartcomponents/blob/main/docs/local-embeddings.md | https://github.com/usmansabirnetsol/smartcomponents/blob/main/docs/local-embeddings.md
 - Agent Human in Loop (HITL) support https://learn.microsoft.com/en-us/agent-framework/workflows/human-in-the-loop?pivots=programming-language-csharp
+- 

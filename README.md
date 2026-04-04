@@ -275,3 +275,17 @@ MIT License - See LICENSE file for details
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
+
+## Multi-Agent Orchestration - "Coordinator Mode"
+
+
+TODO: Have a full **multi-agent orchestration system** 
+
+| Phase | Who | Purpose |
+|-------|-----|---------|
+| **Research** | Workers (parallel) | Investigate codebase, find files, understand problem |
+| **Synthesis** | **Coordinator** | Read findings, understand the problem, craft specs |
+| **Implementation** | Workers | Make targeted changes per spec, commit |
+| **Verification** | Workers | Test changes work |
+
+---
