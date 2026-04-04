@@ -485,7 +485,7 @@ public class AgentBuilder
     private ChatHistoryProvider? _chatHistoryProvider;
     private WorkspaceManager _workspaceManager;
     private SessionManager? _sessionManager;
-
+    
     public AgentBuilder(ToolRegistry toolRegistry)
     {
         _toolRegistry = toolRegistry;
@@ -1067,6 +1067,18 @@ public class AgentBuilder
 
         // Define a pipeline with multiple strategies (only if compaction is enabled)
 #pragma warning disable MAAI001
+        //https://github.com/microsoft/agent-framework/tree/d30103fee6b03e2322dc13d590ef43661692b7c9/dotnet/samples/02-agents/AgentSkills
+        //var options = new AgentFileSkillsSourceOptions();
+        //var skillsBuilder = new AgentSkillsProviderBuilder()
+        //    .UseFileSkills(skillPaths:
+        //    [
+        //        Path.Combine(AppContext.BaseDirectory, "company-skills"),
+        //        Path.Combine(AppContext.BaseDirectory, "team-skills"),
+        //    ])
+        //    .UseFileScriptRunner(SubprocessScriptRunner.RunAsync)
+        //    .UseOptions(o => o.DisableCaching = true)
+        //    .Build();
+
         var agentBuilder = chatClient.AsBuilder();
 
         if (_compactionConfig != null)

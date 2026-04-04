@@ -26,6 +26,7 @@ public sealed class MarkdownSessionHistoryProvider : ChatHistoryProvider
     private readonly ConditionalWeakTable<AgentSession, StrongBox<string>> _sessionIds;
     private readonly ConcurrentDictionary<string, List<ChatMessage>> _messages;
 
+    //TODO: evaluate whether we need reducer to prevent unbounded memory growth for long-running sessions with many messages.
     internal MarkdownSessionHistoryProvider(
         ConditionalWeakTable<AgentSession, StrongBox<string>> sessionIds,
         ConcurrentDictionary<string, List<ChatMessage>> messages)
@@ -72,6 +73,11 @@ public sealed class MarkdownSessionHistoryProvider : ChatHistoryProvider
         id = string.Empty;
         return false;
     }
+
+    //private static async Task ReduceMessagesAsync(IChatReducer reducer, State state, CancellationToken cancellationToken = default)
+    //{
+    //    state.Messages = [.. await reducer.ReduceAsync(state.Messages, cancellationToken).ConfigureAwait(false)];
+    //}
 }
 
 // ---------------------------------------------------------------------------
@@ -110,7 +116,7 @@ public sealed class MarkdownSessionHistoryProvider : ChatHistoryProvider
 //   builder.WithConversationStore(store)
 //          .WithHistoryProvider(store.HistoryProvider);
 // ---------------------------------------------------------------------------
-
+// Enhance based on https://github.com/microsoft/agent-framework/blob/main/dotnet/src/Microsoft.Agents.AI.CosmosNoSql/CosmosChatHistoryProvider.cs
 public sealed class MarkdownSessionStore : IConversationStore
 {
     // Shared with MarkdownSessionHistoryProvider

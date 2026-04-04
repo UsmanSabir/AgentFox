@@ -58,3 +58,4 @@ nunit-*.xml
 .vs/
 .claude/
 appsettings.*.json
+/src/AgentFox.sln.DotSettings.user
