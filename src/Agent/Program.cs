@@ -1,9 +1,9 @@
 using AgentFox.Agents;
 using AgentFox.Channels;
 using AgentFox.LLM;
-using AgentFox.Models;
 using AgentFox.MCP;
 using AgentFox.Memory;
+using AgentFox.Models;
 using AgentFox.Sessions;
 using AgentFox.Skills;
 using AgentFox.Tools;
@@ -11,6 +11,7 @@ using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using OpenTelemetry.Trace;
 using Spectre.Console;
 using Spectre.Console.Rendering;
 using System.Text;
@@ -19,6 +20,29 @@ using SysChannel = System.Threading.Channels.Channel;
 using SystemPromptBuilder = AgentFox.LLM.SystemPromptBuilder;
 
 namespace AgentFox;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UI / Logging configuration models
+// ─────────────────────────────────────────────────────────────────────────────
+
+internal class UIConfig
+{
+    /// <summary>When false, hides the reasoning panel and shows a spinner instead.</summary>
+    public bool RenderReasoning { get; set; } = true;
+}
+
+internal class LoggingConfig
+{
+    public bool UseFileLogger { get; set; } = true;
+    public string FilePath { get; set; } = "logs/agentfox.log";
+    public LogLevel MinLevel { get; set; } = LogLevel.Warning;
+    /// <summary>Log files older than this many days are deleted on startup. 0 = disabled.</summary>
+    public int RetentionDays { get; set; } = 3;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Loggers
+// ─────────────────────────────────────────────────────────────────────────────
 
 /// <summary>
 /// Spectre.Console-backed logger for structured, colorized console output.
@@ -33,10 +57,10 @@ internal class ConsoleLogger : ILogger
         var message = formatter(state, exception);
         var (prefix, style) = logLevel switch
         {
-            LogLevel.Error   => ("[[ERR]]",  "bold red"),
+            LogLevel.Error => ("[[ERR]]", "bold red"),
             LogLevel.Warning => ("[[WARN]]", "bold yellow"),
-            LogLevel.Debug   => ("[[DBG]]",  "grey"),
-            _                => ("[[INF]]",  "dim blue"),
+            LogLevel.Debug => ("[[DBG]]", "grey"),
+            _ => ("[[INF]]", "dim blue"),
         };
         AnsiConsole.MarkupLine($"[{style}]{prefix}[/] {Markup.Escape(message)}");
         if (exception != null)
@@ -45,6 +69,67 @@ internal class ConsoleLogger : ILogger
 }
 
 internal class ConsoleLogger<T> : ConsoleLogger, ILogger<T> where T : class { }
+
+/// <summary>
+/// Thread-safe file logger. Call <see cref="Configure"/> once at startup before DI registration.
+/// </summary>
+internal class FileLogger : ILogger
+{
+    private static readonly object _fileLock = new();
+    private static string _filePath = "logs/agentfox.log";
+    private static LogLevel _minLevel = LogLevel.Warning;
+
+    public static void Configure(string filePath, LogLevel minLevel)
+    {
+        _filePath = filePath;
+        _minLevel = minLevel;
+        var dir = Path.GetDirectoryName(filePath);
+        if (!string.IsNullOrEmpty(dir))
+            Directory.CreateDirectory(dir);
+    }
+
+    public static void DeleteOldLogs(string filePath, int retentionDays)
+    {
+        if (retentionDays <= 0) return;
+        var dir = Path.GetDirectoryName(filePath);
+        if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return;
+        var cutoff = DateTime.UtcNow.AddDays(-retentionDays);
+        foreach (var file in Directory.EnumerateFiles(dir, "*.log"))
+        {
+            try
+            {
+                if (File.GetLastWriteTimeUtc(file) < cutoff)
+                    File.Delete(file);
+            }
+            catch { /* best-effort */ }
+        }
+    }
+
+    public IDisposable BeginScope<TState>(TState state) where TState : notnull => null!;
+    public bool IsEnabled(LogLevel logLevel) => logLevel >= _minLevel;
+
+    public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+    {
+        if (!IsEnabled(logLevel)) return;
+        var message = formatter(state, exception);
+        var prefix = logLevel switch
+        {
+            LogLevel.Error => "[ERR] ",
+            LogLevel.Warning => "[WARN]",
+            LogLevel.Information => "[INF] ",
+            LogLevel.Debug => "[DBG] ",
+            _ => "[TRC] ",
+        };
+        var line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} {prefix} {message}";
+        if (exception != null)
+            line += $"\n       ↳ {exception}";
+        lock (_fileLock)
+            File.AppendAllText(_filePath, line + "\n");
+    }
+}
+
+internal class FileLogger<T> : FileLogger, ILogger<T> where T : class { }
+
 
 /// <summary>
 /// AgentFox - Multi-agent framework in C#
@@ -127,8 +212,25 @@ class Program
     {
         var services = new ServiceCollection();
 
-        // Logging — open-generic registration covers ILogger<T> for any T
-        services.AddSingleton(typeof(ILogger<>), typeof(ConsoleLogger<>));
+        // ── Logging config ───────────────────────────────────────────────────
+        var loggingCfg = new LoggingConfig();
+        configuration.GetSection("Logging").Bind(loggingCfg);
+
+        if (loggingCfg.UseFileLogger)
+        {
+            FileLogger.Configure(loggingCfg.FilePath, loggingCfg.MinLevel);
+            FileLogger.DeleteOldLogs(loggingCfg.FilePath, loggingCfg.RetentionDays);
+            services.AddSingleton(typeof(ILogger<>), typeof(FileLogger<>));
+        }
+        else
+        {
+            services.AddSingleton(typeof(ILogger<>), typeof(ConsoleLogger<>));
+        }
+
+        // ── UI config ────────────────────────────────────────────────────────
+        var uiCfg = new UIConfig();
+        configuration.GetSection("UI").Bind(uiCfg);
+        services.AddSingleton(uiCfg);
 
         // Configuration
         services.AddSingleton(configuration);
@@ -308,6 +410,7 @@ class Program
         var subAgentManager = sp.GetRequiredService<SubAgentManager>();
         var commandProcessor = sp.GetRequiredService<CommandProcessor>();
         var commandQueue = sp.GetRequiredService<ICommandQueue>();
+        var uiCfg = sp.GetRequiredService<UIConfig>();
 
         var manifests = skillRegistry.GetSkillManifests();
         AnsiConsole.MarkupLine($"[bold green]✓[/] [dim]{manifests.Count} skill(s) registered.[/]");
@@ -628,70 +731,159 @@ class Program
                 message: trimmed);
             cmd.ResultSource = tcs;
 
-            // All three streaming lifecycle hooks share one token channel so they
-            // can coordinate cleanly without any state leaking into the REPL loop.
             // Unified stream channel: bool flag distinguishes reasoning (true) from response tokens (false).
             var streamChannel = SysChannel.CreateUnbounded<(bool IsReasoning, string Text)>(
                 new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
             var sb = new StringBuilder();
             var sbReasoning = new StringBuilder();
-            Task? liveDisplayTask = null;
+            Task<string>? liveDisplayTask = null;
 
-            IRenderable BuildDisplay()
+            //if (uiCfg.RenderReasoning)
             {
-                if (sbReasoning.Length == 0)
-                    return new Text(Markup.Escape(sb.ToString()));
+                // ── Render reasoning inline with throttled refresh ────────────
+                // We only rebuild the Panel when content actually changed and at
+                // most once per ~80 ms to avoid the "Thinking..." flicker caused
+                // by Spectre repainting on every single token.
+                //const int RefreshIntervalMs = 80;
 
-                var thinkingPanel = new Panel(
-                        new Markup($"[italic dim yellow]{Markup.Escape(sbReasoning.ToString())}[/]"))
-                    .Header("[dim yellow]Thinking...[/]")
-                    .BorderColor(Color.Yellow)
-                    .Expand();
-
-                return sb.Length == 0
-                    ? thinkingPanel
-                    : new Rows(thinkingPanel, new Text(Markup.Escape(sb.ToString())));
-            }
-
-            cmd.Streaming = new StreamingCallbacks
-            {
-                // OnStart: launch the live display as a background task so the lane
-                // task can immediately proceed into RunStreamingAsync.
-                OnStart = () =>
+                IRenderable BuildDisplay()
                 {
-                    liveDisplayTask = AnsiConsole.Live(new Text(string.Empty))
-                        .AutoClear(false)
-                        .StartAsync(async ctx =>
+                    var responseText = sb.ToString();
+                    if (sbReasoning.Length == 0)
+                        return new Text(responseText.Trim());
+
+                    // Limit visible reasoning to the last 20 lines to keep the
+                    // panel from growing taller than the terminal.
+                    var reasoningLines = sbReasoning.ToString().Split('\n');
+                    var visibleReasoning = reasoningLines.Length > 20
+                        ? string.Join('\n', reasoningLines[^20..])
+                        : sbReasoning.ToString();
+
+                    var thinkingPanel = new Panel(
+                            new Markup($"[italic dim yellow]{Markup.Escape(visibleReasoning.TrimEnd('\n'))}[/]"))
+                        .Header("[dim yellow]Thinking...[/]")
+                        .BorderColor(Color.Yellow)
+                        .Expand();
+
+                    return sb.Length == 0
+                        ? thinkingPanel
+                        : new Rows(thinkingPanel, new Text(responseText));
+                }
+
+                cmd.Streaming = new StreamingCallbacks
+                {
+                    OnStart = () =>
+                    {
+                        if (!uiCfg.RenderReasoning)
                         {
-                            await foreach (var (isReasoning, text) in streamChannel.Reader.ReadAllAsync())
+                            liveDisplayTask = AnsiConsole.Status()
+                                .Spinner(Spinner.Known.Dots12)
+                                .SpinnerStyle(Style.Parse("dodgerblue1 bold"))
+                                .StartAsync(
+                                    "[bold]Working...[/]",
+                                    async ctx =>
+                                    {
+                                        bool spinnerUpdated = false;
+                                        //ctx.Status("[dodgerblue1]Processing...[/]");
+                                        await foreach (var (isReasoning, text) in streamChannel.Reader.ReadAllAsync())
+                                        {
+                                            if (!isReasoning)
+                                            {
+                                                sb.Append(text);
+                                                var responseChunk = sb.ToString();
+                                                if (!string.IsNullOrWhiteSpace(responseChunk))
+                                                {
+                                                    if (!spinnerUpdated)
+                                                    {
+                                                        ctx.Spinner(Spinner.Known.Star);
+                                                        spinnerUpdated = true;
+                                                    } 
+                                                    ctx.Status(Markup.Escape(responseChunk));
+                                                }
+                                            }
+                                            //else
+                                            //    sbReasoning.Append(text);
+                                        }
+                                        ctx.Status(Markup.Escape("done"));
+                                        var response = sb.ToString();
+                                        //if (!string.IsNullOrWhiteSpace(response))
+                                        //    AnsiConsole.MarkupLine(Markup.Escape(response));
+                                        return response;
+                                    });
+                        }
+                        else
+                        {
+                            //var table = new Table()
+                            //    .Border(TableBorder.None)
+                            //    .AddColumn(string.Empty);
+                            //var panel = new Panel(table)
+                            //    .Header("[dim yellow]Thinking...[/]")
+                            //    .BorderColor(Color.Yellow)
+                            //    .RoundedBorder();
+                            liveDisplayTask = AnsiConsole.Live(new Text("Working..."))
+                                .AutoClear(false)
+                                .Overflow(VerticalOverflow.Ellipsis)
+                                .Cropping(VerticalOverflowCropping.Top)
+                                .StartAsync(async ctx =>
+                                {
+                                    //var lastRefresh = DateTime.UtcNow;
+                                    //bool dirty = false;
+
+                                    await foreach (var (isReasoning, text) in streamChannel.Reader.ReadAllAsync())
+                                    {
+                                        if (isReasoning) sbReasoning.Append(text);
+                                        else sb.Append(text);
+                                        //dirty = true;
+
+                                        //var elapsed = (DateTime.UtcNow - lastRefresh).TotalMilliseconds;
+                                        //if (elapsed >= RefreshIntervalMs)
+                                        {
+                                            //table.Rows.Clear();
+                                            //var reasoningLines = sbReasoning.ToString().Split('\n');
+                                            //var visibleReasoning = reasoningLines.Length > 20
+                                            //    ? string.Join('\n', reasoningLines[^20..])
+                                            //    : sbReasoning.ToString();
+                                            //table.AddRow(visibleReasoning);
+                                            ctx.UpdateTarget(BuildDisplay());
+                                            ctx.Refresh();
+                                            //lastRefresh = DateTime.UtcNow;
+                                            //dirty = false;
+                                        }
+                                        //table.Rows.Update(status.Rows.Count - 1, 1, new Text("[green]Complete[/]"));
+                                        //ctx.Refresh();
+                                    }
+
+                                    // Final flush
+                                    //if (dirty)
+                                    //{
+                                    //    ctx.UpdateTarget(BuildDisplay());
+                                    //    ctx.Refresh();
+                                    //}
+                                    return string.Empty; //sb.ToString();
+                                });
+                        }
+
+                        return Task.CompletedTask;
+                    },
+
+                    OnReasoning = !uiCfg.RenderReasoning ? null : async chunk => await streamChannel.Writer.WriteAsync((true, chunk)),
+                    OnToken = async chunk => await streamChannel.Writer.WriteAsync((false, chunk)),
+
+                    OnComplete = async () =>
+                    {
+                        streamChannel.Writer.TryComplete();
+                        if (liveDisplayTask != null)
+                        {
+                            var response = await liveDisplayTask;
+                            if (!string.IsNullOrWhiteSpace(response))
                             {
-                                if (isReasoning)
-                                    sbReasoning.Append(text);
-                                else
-                                    sb.Append(text);
-
-                                ctx.UpdateTarget(BuildDisplay());
-                                ctx.Refresh();
+                                AnsiConsole.MarkupLine(Markup.Escape(response));
                             }
-                        });
-                    return Task.CompletedTask;
-                },
 
-                OnReasoning = async chunk => await streamChannel.Writer.WriteAsync((true, chunk)),
-
-                // OnToken: forward each text chunk to the live display via the channel.
-                OnToken = async chunk => await streamChannel.Writer.WriteAsync((false, chunk)),
-
-                // OnComplete: close the channel then await the live display so the
-                // Spectre.Console exclusive context is fully released before any
-                // post-processing (session save, logging) runs on the lane task.
-                OnComplete = async () =>
-                {
-                    streamChannel.Writer.TryComplete();
-                    if (liveDisplayTask != null)
-                        await liveDisplayTask;
-                },
-            };
+                        }
+                    },
+                };
+            }
 
             commandQueue.Enqueue(cmd);
 
@@ -720,8 +912,8 @@ class Program
         if (!channelSection.Exists()) return null;
 
         var sessionManager = sp.GetRequiredService<SessionManager>();
-        var commandQueue   = sp.GetRequiredService<ICommandQueue>();
-        var logger         = sp.GetRequiredService<ILogger<ChannelManager>>();
+        var commandQueue = sp.GetRequiredService<ICommandQueue>();
+        var logger = sp.GetRequiredService<ILogger<ChannelManager>>();
 
         var manager = new ChannelManager(agent, sessionManager, commandQueue, logger);
         var anyEnabled = false;
@@ -915,14 +1107,14 @@ class Program
             .AddColumn(new TableColumn("[bold]Property[/]").Width(14))
             .AddColumn(new TableColumn("[bold]Value[/]"));
 
-        table.AddRow("[dim]Name[/]",        $"[bold white]{Markup.Escape(info.Name)}[/]");
-        table.AddRow("[dim]ID[/]",          $"[grey]{Markup.Escape(info.Id)}[/]");
-        table.AddRow("[dim]Status[/]",      $"[bold green]{Markup.Escape(info.Status.ToString())}[/]");
-        table.AddRow("[dim]Messages[/]",    info.MessageCount.ToString());
-        table.AddRow("[dim]Sub-agents[/]",  info.SubAgentCount.ToString());
-        table.AddRow("[dim]Tools[/]",       info.ToolCount.ToString());
-        table.AddRow("[dim]Memory[/]",      info.HasMemory ? "[green]Enabled[/]" : "[dim]Disabled[/]");
-        table.AddRow("[dim]Created[/]",     $"[grey]{info.CreatedAt:yyyy-MM-dd HH:mm:ss}[/]");
+        table.AddRow("[dim]Name[/]", $"[bold white]{Markup.Escape(info.Name)}[/]");
+        table.AddRow("[dim]ID[/]", $"[grey]{Markup.Escape(info.Id)}[/]");
+        table.AddRow("[dim]Status[/]", $"[bold green]{Markup.Escape(info.Status.ToString())}[/]");
+        table.AddRow("[dim]Messages[/]", info.MessageCount.ToString());
+        table.AddRow("[dim]Sub-agents[/]", info.SubAgentCount.ToString());
+        table.AddRow("[dim]Tools[/]", info.ToolCount.ToString());
+        table.AddRow("[dim]Memory[/]", info.HasMemory ? "[green]Enabled[/]" : "[dim]Disabled[/]");
+        table.AddRow("[dim]Created[/]", $"[grey]{info.CreatedAt:yyyy-MM-dd HH:mm:ss}[/]");
         table.AddRow("[dim]Last Active[/]", $"[grey]{info.LastActiveAt:yyyy-MM-dd HH:mm:ss}[/]");
 
         AnsiConsole.Write(new Panel(table)
@@ -1083,9 +1275,9 @@ class Program
             var stateStyle = t.State.ToString() switch
             {
                 "Running" => "bold green",
-                "Paused"  => "bold yellow",
-                "Failed"  => "bold red",
-                _         => "dim"
+                "Paused" => "bold yellow",
+                "Failed" => "bold red",
+                _ => "dim"
             };
             table.AddRow(
                 $"[grey]{Markup.Escape(t.RunId)}[/]",
@@ -1100,7 +1292,7 @@ class Program
 
     static void ShowAgentStats(SubAgentManager subAgentManager, CommandProcessor commandProcessor)
     {
-        var stats  = subAgentManager.GetStatistics();
+        var stats = subAgentManager.GetStatistics();
         var pStats = commandProcessor.GetStatistics();
 
         var agentTable = new Table()
@@ -1109,12 +1301,12 @@ class Program
             .AddColumn(new TableColumn("").Width(22))
             .AddColumn(new TableColumn(""));
 
-        agentTable.AddRow("[dim]Active sub-agents[/]",  $"[bold]{stats.TotalActiveSubAgents}[/]");
-        agentTable.AddRow("[dim]  Running[/]",           $"[bold green]{stats.RunningSubAgents}[/]");
-        agentTable.AddRow("[dim]  Pending[/]",           stats.PendingSubAgents.ToString());
-        agentTable.AddRow("[dim]  Completed[/]",         stats.CompletedSubAgents.ToString());
-        agentTable.AddRow("[dim]  Failed[/]",            $"[bold red]{stats.FailedSubAgents}[/]");
-        agentTable.AddRow("[dim]  Timed-out[/]",         $"[bold yellow]{stats.TimedOutSubAgents}[/]");
+        agentTable.AddRow("[dim]Active sub-agents[/]", $"[bold]{stats.TotalActiveSubAgents}[/]");
+        agentTable.AddRow("[dim]  Running[/]", $"[bold green]{stats.RunningSubAgents}[/]");
+        agentTable.AddRow("[dim]  Pending[/]", stats.PendingSubAgents.ToString());
+        agentTable.AddRow("[dim]  Completed[/]", stats.CompletedSubAgents.ToString());
+        agentTable.AddRow("[dim]  Failed[/]", $"[bold red]{stats.FailedSubAgents}[/]");
+        agentTable.AddRow("[dim]  Timed-out[/]", $"[bold yellow]{stats.TimedOutSubAgents}[/]");
 
         var procTable = new Table()
             .Border(TableBorder.None)
@@ -1122,11 +1314,11 @@ class Program
             .AddColumn(new TableColumn("").Width(22))
             .AddColumn(new TableColumn(""));
 
-        procTable.AddRow("[dim]Total processed[/]",  pStats.TotalProcessed.ToString());
-        procTable.AddRow("[dim]Total failed[/]",     $"[bold red]{pStats.TotalFailed}[/]");
-        procTable.AddRow("[dim]Active commands[/]",  pStats.ActiveCommands.ToString());
-        procTable.AddRow("[dim]Queued commands[/]",  pStats.QueuedCommands.ToString());
-        procTable.AddRow("[dim]Uptime[/]",           $"[dodgerblue1]{pStats.Uptime:hh\\:mm\\:ss}[/]");
+        procTable.AddRow("[dim]Total processed[/]", pStats.TotalProcessed.ToString());
+        procTable.AddRow("[dim]Total failed[/]", $"[bold red]{pStats.TotalFailed}[/]");
+        procTable.AddRow("[dim]Active commands[/]", pStats.ActiveCommands.ToString());
+        procTable.AddRow("[dim]Queued commands[/]", pStats.QueuedCommands.ToString());
+        procTable.AddRow("[dim]Uptime[/]", $"[dodgerblue1]{pStats.Uptime:hh\\:mm\\:ss}[/]");
 
         AnsiConsole.Write(new Panel(agentTable)
         {
