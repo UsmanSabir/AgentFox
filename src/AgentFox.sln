@@ -1,8 +1,10 @@
 Microsoft Visual Studio Solution File, Format Version 12.00
-# Visual Studio Version 18
-VisualStudioVersion = 18.5.11605.296 insiders
+# Visual Studio Version 17
+VisualStudioVersion = 17.14.37012.4 d17.14
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AgentFox", "Agent\AgentFox.csproj", "{BDC49E80-C5E9-F870-9E5F-F4A8B9900BB1}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LocalEmbeddings", "LocalEmbeddings\LocalEmbeddings.csproj", "{6704236A-9038-4AD2-83C6-0564801AB20B}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -14,6 +16,10 @@ Global
 		{BDC49E80-C5E9-F870-9E5F-F4A8B9900BB1}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{BDC49E80-C5E9-F870-9E5F-F4A8B9900BB1}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{BDC49E80-C5E9-F870-9E5F-F4A8B9900BB1}.Release|Any CPU.Build.0 = Release|Any CPU
+		{6704236A-9038-4AD2-83C6-0564801AB20B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{6704236A-9038-4AD2-83C6-0564801AB20B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{6704236A-9038-4AD2-83C6-0564801AB20B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{6704236A-9038-4AD2-83C6-0564801AB20B}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
