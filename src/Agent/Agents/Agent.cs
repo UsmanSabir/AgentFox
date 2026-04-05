@@ -1101,7 +1101,7 @@ public class AgentBuilder
         //});
 
         var agentTools = new List<AITool>();
-
+        
         foreach (var toolDefinition in tools)
         {
             try
@@ -1117,6 +1117,14 @@ public class AgentBuilder
 
         var systemPrompt = BuildSystemMessage();
 
+        //https://github.com/microsoft/agent-framework/blob/main/dotnet/src/Microsoft.Agents.AI/TextSearchProvider.cs
+        var textSearchProviderOptions = new TextSearchProviderOptions()
+        {
+            SearchTime = TextSearchProviderOptions.TextSearchBehavior.OnDemandFunctionCalling,
+            FunctionToolDescription = "Allows searching for additional information to help answer the user question. It uses Long and short term memories along with other available context to find relevant information."
+        };
+        var textSearchProvider = new TextSearchProvider(SearchLongTermMemory, textSearchProviderOptions);
+        
         //var agent = chatClient.AsAIAgent(systemPrompt, tools: agentTools);
 
         // Define a pipeline with multiple strategies (only if compaction is enabled)
@@ -1191,7 +1199,10 @@ public class AgentBuilder
                 {
                     Tools = agentTools,
                     Instructions = systemPrompt
-                }
+                },
+                AIContextProviders = [
+                    textSearchProvider
+                ],
             });
 
 #pragma warning restore MAAI001
@@ -1215,6 +1226,15 @@ public class AgentBuilder
         return foxAgent;
     }
 
-    
+    private async Task<IEnumerable<TextSearchProvider.TextSearchResult>> SearchLongTermMemory(string query, CancellationToken token)
+    {
+        var searchResult = await _memory?.SearchAsync(query)!;
+        var textSearchResults = searchResult?.Select(s=> new TextSearchProvider.TextSearchResult()
+        {
+            Text = s.Content,
+            RawRepresentation = s.Content 
+        }).ToList();
+        return textSearchResults ?? new List<TextSearchProvider.TextSearchResult>();
+    }
 }
 
