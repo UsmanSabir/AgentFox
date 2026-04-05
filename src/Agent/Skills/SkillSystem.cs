@@ -1,3 +1,7 @@
+using System.Diagnostics;
+using System.Net.Http;
+using System.Text;
+using System.Text.Json;
 using AgentFox.LLM;
 using AgentFox.Tools;
 using Microsoft.Extensions.Logging;
@@ -914,6 +918,69 @@ public class DeploymentSkill : Skill, ISkillPlugin
     }
 }
 
+// Shared helpers for skill tool implementations
+internal static class SkillShellHelper
+{
+    public static async Task<ToolResult> RunAsync(string command, string? workingDirectory = null)
+    {
+        var dir = workingDirectory ?? Directory.GetCurrentDirectory();
+        try
+        {
+            var isWindows = OperatingSystem.IsWindows();
+            var psi = new ProcessStartInfo
+            {
+                FileName = isWindows ? "cmd.exe" : "/bin/sh",
+                Arguments = isWindows ? $"/c {command}" : $"-c \"{command.Replace("\"", "\\\"")}\"",
+                WorkingDirectory = dir,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            using var process = new Process { StartInfo = psi };
+            process.Start();
+            var output = await process.StandardOutput.ReadToEndAsync();
+            var error = await process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync();
+            var combined = $"{output.Trim()}\n{error.Trim()}".Trim();
+            return process.ExitCode == 0
+                ? ToolResult.Ok(string.IsNullOrEmpty(combined) ? "Done." : combined)
+                : ToolResult.Fail(string.IsNullOrEmpty(combined) ? $"Command failed (exit {process.ExitCode})" : combined);
+        }
+        catch (Exception ex)
+        {
+            return ToolResult.Fail($"Failed to run command: {ex.Message}");
+        }
+    }
+}
+
+internal static class SkillHttpHelper
+{
+    private static readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(30) };
+
+    public static async Task<ToolResult> SendAsync(string method, string url, string? body, Dictionary<string, string>? headers = null)
+    {
+        try
+        {
+            var request = new HttpRequestMessage(new HttpMethod(method.ToUpperInvariant()), url);
+            if (!string.IsNullOrEmpty(body))
+                request.Content = new StringContent(body, Encoding.UTF8, "application/json");
+            if (headers != null)
+                foreach (var h in headers)
+                    request.Headers.TryAddWithoutValidation(h.Key, h.Value);
+            var response = await _http.SendAsync(request);
+            var content = await response.Content.ReadAsStringAsync();
+            return response.IsSuccessStatusCode
+                ? ToolResult.Ok($"HTTP {(int)response.StatusCode}\n{content}")
+                : ToolResult.Fail($"HTTP {(int)response.StatusCode}\n{content}");
+        }
+        catch (Exception ex)
+        {
+            return ToolResult.Fail($"HTTP request failed: {ex.Message}");
+        }
+    }
+}
+
 // Git Tools
 public class GitCommitTool : BaseTool
 {
@@ -924,8 +991,16 @@ public class GitCommitTool : BaseTool
         ["message"] = new() { Type = "string", Description = "Commit message", Required = true },
         ["all"] = new() { Type = "boolean", Description = "Stage all changes", Required = false, Default = true }
     };
-    protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments) =>
-        Task.FromResult(ToolResult.Ok("git commit executed (simulated)"));
+    protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
+    {
+        var message = arguments["message"]?.ToString() ?? "";
+        var all = Convert.ToBoolean(arguments.GetValueOrDefault("all") ?? true);
+        var safeMsg = message.Replace("\"", "\\\"");
+        var cmd = all
+            ? $"git add -A && git commit -m \"{safeMsg}\""
+            : $"git commit -m \"{safeMsg}\"";
+        return await SkillShellHelper.RunAsync(cmd);
+    }
 }
 
 public class GitPushTool : BaseTool
@@ -937,8 +1012,13 @@ public class GitPushTool : BaseTool
         ["remote"] = new() { Type = "string", Description = "Remote name", Required = false, Default = "origin" },
         ["branch"] = new() { Type = "string", Description = "Branch name", Required = false }
     };
-    protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments) =>
-        Task.FromResult(ToolResult.Ok("git push executed (simulated)"));
+    protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
+    {
+        var remote = arguments.GetValueOrDefault("remote")?.ToString() ?? "origin";
+        var branch = arguments.GetValueOrDefault("branch")?.ToString() ?? "";
+        var cmd = string.IsNullOrEmpty(branch) ? $"git push {remote}" : $"git push {remote} {branch}";
+        return await SkillShellHelper.RunAsync(cmd);
+    }
 }
 
 public class GitPullTool : BaseTool
@@ -950,8 +1030,13 @@ public class GitPullTool : BaseTool
         ["remote"] = new() { Type = "string", Description = "Remote name", Required = false, Default = "origin" },
         ["branch"] = new() { Type = "string", Description = "Branch name", Required = false }
     };
-    protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments) =>
-        Task.FromResult(ToolResult.Ok("git pull executed (simulated)"));
+    protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
+    {
+        var remote = arguments.GetValueOrDefault("remote")?.ToString() ?? "origin";
+        var branch = arguments.GetValueOrDefault("branch")?.ToString() ?? "";
+        var cmd = string.IsNullOrEmpty(branch) ? $"git pull {remote}" : $"git pull {remote} {branch}";
+        return await SkillShellHelper.RunAsync(cmd);
+    }
 }
 
 public class GitBranchTool : BaseTool
@@ -963,8 +1048,19 @@ public class GitBranchTool : BaseTool
         ["action"] = new() { Type = "string", Description = "Action: list, create, delete", Required = false, Default = "list" },
         ["name"] = new() { Type = "string", Description = "Branch name", Required = false }
     };
-    protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments) =>
-        Task.FromResult(ToolResult.Ok("Branches listed (simulated)"));
+    protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
+    {
+        var action = arguments.GetValueOrDefault("action")?.ToString() ?? "list";
+        var name = arguments.GetValueOrDefault("name")?.ToString() ?? "";
+        var cmd = action switch
+        {
+            "create"   => $"git branch {name}",
+            "delete"   => $"git branch -d {name}",
+            "checkout" => $"git checkout {name}",
+            _          => "git branch"
+        };
+        return await SkillShellHelper.RunAsync(cmd);
+    }
 }
 
 public class GitStatusTool : BaseTool
@@ -973,7 +1069,7 @@ public class GitStatusTool : BaseTool
     public override string Description => "Show working tree status";
     public override Dictionary<string, ToolParameter> Parameters { get; } = new();
     protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments) =>
-        Task.FromResult(ToolResult.Ok("Status: clean (simulated)"));
+        SkillShellHelper.RunAsync("git status");
 }
 
 public class GitLogTool : BaseTool
@@ -984,8 +1080,11 @@ public class GitLogTool : BaseTool
     {
         ["count"] = new() { Type = "number", Description = "Number of commits", Required = false, Default = 10 }
     };
-    protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments) =>
-        Task.FromResult(ToolResult.Ok("Commit log (simulated)"));
+    protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
+    {
+        var count = Convert.ToInt32(arguments.GetValueOrDefault("count") ?? 10);
+        return await SkillShellHelper.RunAsync($"git log --oneline -{count}");
+    }
 }
 
 // Docker Tools
@@ -998,8 +1097,12 @@ public class DockerBuildTool : BaseTool
         ["tag"] = new() { Type = "string", Description = "Image tag", Required = true },
         ["path"] = new() { Type = "string", Description = "Dockerfile path", Required = false, Default = "." }
     };
-    protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments) =>
-        Task.FromResult(ToolResult.Ok("Docker image built (simulated)"));
+    protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
+    {
+        var tag = arguments["tag"]?.ToString() ?? "";
+        var path = arguments.GetValueOrDefault("path")?.ToString() ?? ".";
+        return await SkillShellHelper.RunAsync($"docker build -t {tag} {path}");
+    }
 }
 
 public class DockerRunTool : BaseTool
@@ -1012,8 +1115,17 @@ public class DockerRunTool : BaseTool
         ["name"] = new() { Type = "string", Description = "Container name", Required = false },
         ["detach"] = new() { Type = "boolean", Description = "Run in background", Required = false, Default = true }
     };
-    protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments) =>
-        Task.FromResult(ToolResult.Ok("Container started (simulated)"));
+    protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
+    {
+        var image = arguments["image"]?.ToString() ?? "";
+        var name = arguments.GetValueOrDefault("name")?.ToString() ?? "";
+        var detach = Convert.ToBoolean(arguments.GetValueOrDefault("detach") ?? true);
+        var parts = new List<string> { "docker run" };
+        if (detach) parts.Add("-d");
+        if (!string.IsNullOrEmpty(name)) parts.Add($"--name {name}");
+        parts.Add(image);
+        return await SkillShellHelper.RunAsync(string.Join(" ", parts));
+    }
 }
 
 public class DockerStopTool : BaseTool
@@ -1024,8 +1136,11 @@ public class DockerStopTool : BaseTool
     {
         ["container"] = new() { Type = "string", Description = "Container name or ID", Required = true }
     };
-    protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments) =>
-        Task.FromResult(ToolResult.Ok("Container stopped (simulated)"));
+    protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
+    {
+        var container = arguments["container"]?.ToString() ?? "";
+        return await SkillShellHelper.RunAsync($"docker stop {container}");
+    }
 }
 
 public class DockerLogsTool : BaseTool
@@ -1037,8 +1152,12 @@ public class DockerLogsTool : BaseTool
         ["container"] = new() { Type = "string", Description = "Container name or ID", Required = true },
         ["tail"] = new() { Type = "number", Description = "Number of lines", Required = false, Default = 100 }
     };
-    protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments) =>
-        Task.FromResult(ToolResult.Ok("Container logs (simulated)"));
+    protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
+    {
+        var container = arguments["container"]?.ToString() ?? "";
+        var tail = Convert.ToInt32(arguments.GetValueOrDefault("tail") ?? 100);
+        return await SkillShellHelper.RunAsync($"docker logs --tail {tail} {container}");
+    }
 }
 
 public class DockerPSTool : BaseTool
@@ -1049,8 +1168,11 @@ public class DockerPSTool : BaseTool
     {
         ["all"] = new() { Type = "boolean", Description = "Show all containers", Required = false, Default = false }
     };
-    protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments) =>
-        Task.FromResult(ToolResult.Ok("Running containers (simulated)"));
+    protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
+    {
+        var all = Convert.ToBoolean(arguments.GetValueOrDefault("all") ?? false);
+        return await SkillShellHelper.RunAsync(all ? "docker ps -a" : "docker ps");
+    }
 }
 
 // Code Review Tool
@@ -1063,8 +1185,59 @@ public class CodeReviewTool : BaseTool
         ["path"] = new() { Type = "string", Description = "Path to code to review", Required = true },
         ["language"] = new() { Type = "string", Description = "Programming language", Required = false }
     };
-    protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments) =>
-        Task.FromResult(ToolResult.Ok("Code review complete (simulated)"));
+    protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
+    {
+        var path = arguments["path"]?.ToString() ?? "";
+        if (!File.Exists(path) && !Directory.Exists(path))
+            return ToolResult.Fail($"Path not found: {path}");
+
+        var files = File.Exists(path)
+            ? new[] { path }
+            : Directory.GetFiles(path, "*.*", SearchOption.AllDirectories)
+                .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}")
+                         && !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}")
+                         && !f.Contains(".git"))
+                .ToArray();
+
+        var issues = new List<string>();
+        var totalLines = 0;
+
+        foreach (var file in files.Take(50))
+        {
+            var lines = await File.ReadAllLinesAsync(file);
+            totalLines += lines.Length;
+            var rel = Path.GetRelativePath(Directory.GetCurrentDirectory(), file);
+
+            for (var i = 0; i < lines.Length; i++)
+            {
+                var line = lines[i];
+                var n = i + 1;
+                if (line.Contains("TODO") || line.Contains("FIXME") || line.Contains("HACK"))
+                    issues.Add($"{rel}:{n} [{(line.Contains("TODO") ? "TODO" : line.Contains("FIXME") ? "FIXME" : "HACK")}] {line.Trim()}");
+                if (line.Length > 200)
+                    issues.Add($"{rel}:{n} [LINE_LENGTH] {line.Length} chars");
+                if (line.Contains("password") && line.Contains("=") && !line.TrimStart().StartsWith("//") && !line.TrimStart().StartsWith("*"))
+                    issues.Add($"{rel}:{n} [CREDENTIAL] Possible hardcoded credential");
+                if (line.Contains("catch") && (line.TrimEnd().EndsWith("catch {}") || line.TrimEnd().EndsWith("catch { }")))
+                    issues.Add($"{rel}:{n} [EMPTY_CATCH] Empty catch block");
+            }
+        }
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"Code Review: {path}");
+        sb.AppendLine($"Files analyzed: {files.Length}  |  Total lines: {totalLines}  |  Issues: {issues.Count}");
+        if (issues.Count > 0)
+        {
+            sb.AppendLine();
+            foreach (var issue in issues.Take(100))
+                sb.AppendLine($"  {issue}");
+        }
+        else
+        {
+            sb.AppendLine("No issues found.");
+        }
+        return ToolResult.Ok(sb.ToString());
+    }
 }
 
 // Debugging Tools
@@ -1076,8 +1249,12 @@ public class DebugTool : BaseTool
     {
         ["target"] = new() { Type = "string", Description = "Application to debug", Required = true }
     };
-    protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments) =>
-        Task.FromResult(ToolResult.Ok("Debug session started (simulated)"));
+    protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
+    {
+        var target = arguments["target"]?.ToString() ?? "";
+        // Build the target and surface any compiler errors/warnings
+        return await SkillShellHelper.RunAsync($"dotnet build \"{target}\" --verbosity minimal");
+    }
 }
 
 public class TraceTool : BaseTool
@@ -1088,8 +1265,14 @@ public class TraceTool : BaseTool
     {
         ["target"] = new() { Type = "string", Description = "Application to trace", Required = true }
     };
-    protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments) =>
-        Task.FromResult(ToolResult.Ok("Trace enabled (simulated)"));
+    protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
+    {
+        var target = arguments["target"]?.ToString() ?? "";
+        var check = await SkillShellHelper.RunAsync("dotnet-trace --version");
+        if (!check.Success)
+            return ToolResult.Fail("dotnet-trace not installed. Run: dotnet tool install -g dotnet-trace");
+        return await SkillShellHelper.RunAsync($"dotnet-trace collect -- {target}");
+    }
 }
 
 public class ProfileTool : BaseTool
@@ -1101,8 +1284,15 @@ public class ProfileTool : BaseTool
         ["target"] = new() { Type = "string", Description = "Application to profile", Required = true },
         ["duration"] = new() { Type = "number", Description = "Duration in seconds", Required = false, Default = 30 }
     };
-    protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments) =>
-        Task.FromResult(ToolResult.Ok("Profiling complete (simulated)"));
+    protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
+    {
+        var target = arguments["target"]?.ToString() ?? "";
+        var duration = Convert.ToInt32(arguments.GetValueOrDefault("duration") ?? 30);
+        var check = await SkillShellHelper.RunAsync("dotnet-counters --version");
+        if (!check.Success)
+            return ToolResult.Fail("dotnet-counters not installed. Run: dotnet tool install -g dotnet-counters");
+        return await SkillShellHelper.RunAsync($"dotnet-counters monitor --duration {duration}s -- {target}");
+    }
 }
 
 // API Tools
@@ -1116,8 +1306,19 @@ public class RESTClientTool : BaseTool
         ["url"] = new() { Type = "string", Description = "API URL", Required = true },
         ["body"] = new() { Type = "string", Description = "Request body", Required = false }
     };
-    protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments) =>
-        Task.FromResult(ToolResult.Ok("REST call executed (simulated)"));
+    protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
+    {
+        var method = arguments["method"]?.ToString() ?? "GET";
+        var url = arguments["url"]?.ToString() ?? "";
+        var body = arguments.GetValueOrDefault("body")?.ToString();
+        var headersJson = arguments.GetValueOrDefault("headers")?.ToString();
+        Dictionary<string, string>? headers = null;
+        if (!string.IsNullOrEmpty(headersJson))
+        {
+            try { headers = JsonSerializer.Deserialize<Dictionary<string, string>>(headersJson); } catch { }
+        }
+        return await SkillHttpHelper.SendAsync(method, url, body, headers);
+    }
 }
 
 public class GraphQLTool : BaseTool
@@ -1129,8 +1330,15 @@ public class GraphQLTool : BaseTool
         ["query"] = new() { Type = "string", Description = "GraphQL query", Required = true },
         ["endpoint"] = new() { Type = "string", Description = "GraphQL endpoint", Required = true }
     };
-    protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments) =>
-        Task.FromResult(ToolResult.Ok("GraphQL query executed (simulated)"));
+    protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
+    {
+        var query = arguments["query"]?.ToString() ?? "";
+        var endpoint = arguments["endpoint"]?.ToString() ?? "";
+        var variables = arguments.GetValueOrDefault("variables")?.ToString();
+        var payload = JsonSerializer.Serialize(new { query, variables });
+        return await SkillHttpHelper.SendAsync("POST", endpoint, payload,
+            new Dictionary<string, string> { ["Content-Type"] = "application/json" });
+    }
 }
 
 // Database Tools
@@ -1143,8 +1351,21 @@ public class DBQueryTool : BaseTool
         ["query"] = new() { Type = "string", Description = "SQL query", Required = true },
         ["connection"] = new() { Type = "string", Description = "Database connection string", Required = false }
     };
-    protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments) =>
-        Task.FromResult(ToolResult.Ok("Query executed (simulated)"));
+    protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
+    {
+        var query = arguments["query"]?.ToString() ?? "";
+        var connection = arguments.GetValueOrDefault("connection")?.ToString() ?? "";
+        if (string.IsNullOrEmpty(connection))
+            return ToolResult.Fail("A connection string is required. Provide it in the 'connection' parameter.");
+        var safeQuery = query.Replace("\"", "\\\"");
+        // Route to appropriate CLI based on connection string format
+        if (connection.StartsWith("postgresql://") || connection.Contains("Host="))
+            return await SkillShellHelper.RunAsync($"psql \"{connection}\" -c \"{safeQuery}\"");
+        if (connection.StartsWith("mysql://") || connection.Contains("port=3306"))
+            return await SkillShellHelper.RunAsync($"mysql --execute=\"{safeQuery}\"");
+        // Default: SQL Server via sqlcmd
+        return await SkillShellHelper.RunAsync($"sqlcmd -S . -Q \"{safeQuery}\"");
+    }
 }
 
 public class DBMigrationTool : BaseTool
@@ -1155,8 +1376,12 @@ public class DBMigrationTool : BaseTool
     {
         ["direction"] = new() { Type = "string", Description = "up or down", Required = false, Default = "up" }
     };
-    protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments) =>
-        Task.FromResult(ToolResult.Ok("Migration executed (simulated)"));
+    protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
+    {
+        var direction = arguments.GetValueOrDefault("direction")?.ToString() ?? "up";
+        var cmd = direction == "down" ? "dotnet ef database update 0" : "dotnet ef database update";
+        return await SkillShellHelper.RunAsync(cmd);
+    }
 }
 
 // Testing Tools
@@ -1169,8 +1394,15 @@ public class RunTestsTool : BaseTool
         ["pattern"] = new() { Type = "string", Description = "Test pattern", Required = false },
         ["coverage"] = new() { Type = "boolean", Description = "Generate coverage report", Required = false, Default = false }
     };
-    protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments) =>
-        Task.FromResult(ToolResult.Ok("Tests passed (simulated)"));
+    protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
+    {
+        var pattern = arguments.GetValueOrDefault("pattern")?.ToString() ?? "";
+        var coverage = Convert.ToBoolean(arguments.GetValueOrDefault("coverage") ?? false);
+        var parts = new List<string> { "dotnet test" };
+        if (!string.IsNullOrEmpty(pattern)) parts.Add($"--filter \"{pattern}\"");
+        if (coverage) parts.Add("--collect:\"XPlat Code Coverage\"");
+        return await SkillShellHelper.RunAsync(string.Join(" ", parts));
+    }
 }
 
 public class CoverageTool : BaseTool
@@ -1181,8 +1413,20 @@ public class CoverageTool : BaseTool
     {
         ["format"] = new() { Type = "string", Description = "Report format", Required = false, Default = "html" }
     };
-    protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments) =>
-        Task.FromResult(ToolResult.Ok("Coverage report generated (simulated)"));
+    protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
+    {
+        var format = arguments.GetValueOrDefault("format")?.ToString() ?? "html";
+        var result = await SkillShellHelper.RunAsync(
+            "dotnet test --collect:\"XPlat Code Coverage\" --results-directory ./coverage");
+        if (result.Success && format == "html")
+        {
+            var report = await SkillShellHelper.RunAsync(
+                "dotnet reportgenerator -reports:\"./coverage/**/*.xml\" -targetdir:./coverage/html -reporttypes:Html");
+            if (report.Success)
+                return ToolResult.Ok($"{result.Output}\n\nHTML report: ./coverage/html/index.html");
+        }
+        return result;
+    }
 }
 
 // Deployment Tools
@@ -1195,8 +1439,24 @@ public class DeployTool : BaseTool
         ["target"] = new() { Type = "string", Description = "Deployment target", Required = true },
         ["environment"] = new() { Type = "string", Description = "Environment", Required = false, Default = "production" }
     };
-    protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments) =>
-        Task.FromResult(ToolResult.Ok("Deployment complete (simulated)"));
+    protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
+    {
+        var target = arguments["target"]?.ToString() ?? "";
+        var environment = arguments.GetValueOrDefault("environment")?.ToString() ?? "production";
+        var cwd = Directory.GetCurrentDirectory();
+        var script =
+            File.Exists(Path.Combine(cwd, $"deploy-{environment}.sh")) ? $"bash deploy-{environment}.sh" :
+            File.Exists(Path.Combine(cwd, $"deploy-{environment}.ps1")) ? $"powershell -File deploy-{environment}.ps1" :
+            File.Exists(Path.Combine(cwd, "deploy.sh")) ? $"bash deploy.sh {environment}" :
+            File.Exists(Path.Combine(cwd, "deploy.ps1")) ? $"powershell -File deploy.ps1 {environment}" :
+            File.Exists(Path.Combine(cwd, "Makefile")) ? $"make deploy ENV={environment}" :
+            null;
+        if (script == null)
+            return ToolResult.Fail(
+                $"No deploy script found for target '{target}' / environment '{environment}'. " +
+                $"Create deploy-{environment}.sh, deploy.sh, or a Makefile with a 'deploy' target.");
+        return await SkillShellHelper.RunAsync(script, cwd);
+    }
 }
 
 public class CICDPipelineTool : BaseTool
@@ -1207,6 +1467,22 @@ public class CICDPipelineTool : BaseTool
     {
         ["pipeline"] = new() { Type = "string", Description = "Pipeline name", Required = true }
     };
-    protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments) =>
-        Task.FromResult(ToolResult.Ok("CI/CD pipeline executed (simulated)"));
+    protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
+    {
+        var pipeline = arguments["pipeline"]?.ToString() ?? "";
+        var cwd = Directory.GetCurrentDirectory();
+        var ghWorkflow = Path.Combine(cwd, ".github", "workflows", $"{pipeline}.yml");
+        var script =
+            File.Exists(ghWorkflow) ? $"gh workflow run {pipeline}" :
+            File.Exists(Path.Combine(cwd, "Jenkinsfile")) ? "jenkins-cli build ." :
+            File.Exists(Path.Combine(cwd, ".gitlab-ci.yml")) ? $"gitlab-runner exec shell {pipeline}" :
+            File.Exists(Path.Combine(cwd, $"{pipeline}.sh")) ? $"bash {pipeline}.sh" :
+            File.Exists(Path.Combine(cwd, $"{pipeline}.ps1")) ? $"powershell -File {pipeline}.ps1" :
+            null;
+        if (script == null)
+            return ToolResult.Fail(
+                $"Pipeline '{pipeline}' not found. Supported: GitHub Actions (.github/workflows/{pipeline}.yml), " +
+                $"Jenkins (Jenkinsfile), GitLab CI (.gitlab-ci.yml), or shell script ({pipeline}.sh).");
+        return await SkillShellHelper.RunAsync(script, cwd);
+    }
 }
