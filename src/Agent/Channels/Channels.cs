@@ -57,6 +57,18 @@ public abstract class Channel
     {
         await SendMessageAsync(content);
     }
+
+    /// <summary>
+    /// Proactively send a message to a specific target within this channel.
+    /// For single-recipient channels (WhatsApp, Teams) targetId is ignored.
+    /// For multi-chat channels (Telegram) targetId is the chat/user ID.
+    /// For workspace channels (Slack, Discord) targetId is the channel/room name or ID.
+    /// Default implementation delegates to SendMessageAsync (ignores targetId).
+    /// </summary>
+    public virtual async Task SendToTargetAsync(string targetId, string content)
+    {
+        await SendMessageAsync(content);
+    }
 }
 
 /// <summary>
@@ -100,6 +112,15 @@ public class ChannelManager
 
     public IReadOnlyDictionary<string, Channel> Channels => _channels;
     public ChannelMessageGateway? Gateway => _gateway;
+
+    /// <summary>
+    /// Look up a registered channel by its human-readable name (case-insensitive).
+    /// E.g., "telegram", "slack", "discord".
+    /// Returns null if no matching channel is registered.
+    /// </summary>
+    public Channel? GetChannelByName(string name) =>
+        _channels.Values.FirstOrDefault(c =>
+            c.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
 
     public ChannelManager(
         FoxAgent agent,
@@ -485,6 +506,20 @@ public class TelegramChannel : Channel
 
     public override Task<List<ChannelMessage>> ReceiveMessagesAsync() =>
         Task.FromResult(new List<ChannelMessage>()); // polling handled by background task
+
+    /// <summary>
+    /// Proactively send to a specific Telegram chat by its numeric chat ID.
+    /// targetId must be a parseable long (e.g., "123456789" or "-100123456789" for groups).
+    /// </summary>
+    public override async Task SendToTargetAsync(string targetId, string content)
+    {
+        if (!long.TryParse(targetId, out var chatId))
+        {
+            _logger?.LogWarning("TelegramChannel.SendToTargetAsync: invalid chat_id '{TargetId}'", targetId);
+            return;
+        }
+        await SendToChatAsync(chatId, content);
+    }
 
     private async Task SendToChatAsync(long chatId, string text)
     {
