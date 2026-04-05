@@ -825,19 +825,6 @@ public class AgentBuilder
                 }
             }
 
-        // Add spawn agent tool
-        tools.Add(new ToolDefinition
-        {
-            Name = "spawn_agent",
-            Description = "Spawn a sub-agent to handle a subtask",
-            Parameters = new Dictionary<string, Models.ToolParameter>
-            {
-                ["name"] = new() { Type = "string", Description = "Name of the sub-agent", Required = true },
-                ["description"] = new() { Type = "string", Description = "Description of the sub-agent's task", Required = true },
-                ["task"] = new() { Type = "string", Description = "Task for the sub-agent", Required = true }
-            }
-        });
-
         return tools;
     }
 
@@ -877,12 +864,6 @@ public class AgentBuilder
 
     private async Task<ToolResult> ExecuteToolAsync(string toolName, Dictionary<string, object?> arguments, CancellationToken ct)
     {
-        // Handle spawn_agent specially
-        if (toolName == "spawn_agent")
-        {
-            return ToolResult.Ok("Sub-agent spawning is handled by the runtime.");
-        }
-
         // First, try to get tool from global registry
         var tool = _toolRegistry.Get(toolName);
 

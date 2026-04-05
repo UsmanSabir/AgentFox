@@ -5,29 +5,36 @@ using Microsoft.Extensions.Logging;
 namespace AgentFox.Tools;
 
 /// <summary>
-/// Tool for spawning background sub-agents that run in separate lanes and announce results back
-/// Use this for long-running tasks that should not block the main agent
+/// Tool for spawning background sub-agents that run in separate lanes and announce results back.
+/// Use this for long-running tasks that should not block the main agent.
+/// Register this tool before the FoxAgent is built, then call Initialize() once the agent
+/// and console session are available — this breaks the circular dependency.
 /// </summary>
 public class SpawnBackgroundSubAgentTool : BaseTool
 {
     private readonly SubAgentManager _subAgentManager;
-    private readonly string _parentAgentId;
-    private readonly string _parentSessionKey;
-    private readonly int _parentSpawnDepth;
     private readonly ILogger? _logger;
+    private string _parentAgentId = string.Empty;
+    private string _parentSessionKey = string.Empty;
+    private int _parentSpawnDepth;
 
     public SpawnBackgroundSubAgentTool(
-        SubAgentManager subAgentManager, 
-        string parentAgentId, 
-        string parentSessionKey,
-        int parentSpawnDepth = 0,
+        SubAgentManager subAgentManager,
         ILogger? logger = null)
     {
         _subAgentManager = subAgentManager;
+        _logger = logger;
+    }
+
+    /// <summary>
+    /// Wire up the agent-specific identifiers after the FoxAgent has been built.
+    /// Must be called before the tool is first invoked.
+    /// </summary>
+    public void Initialize(string parentAgentId, string parentSessionKey, int parentSpawnDepth = 0)
+    {
         _parentAgentId = parentAgentId;
         _parentSessionKey = parentSessionKey;
         _parentSpawnDepth = parentSpawnDepth;
-        _logger = logger;
     }
 
     public override string Name => "spawn_background_subagent";

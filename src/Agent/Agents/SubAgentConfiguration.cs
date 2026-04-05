@@ -30,9 +30,11 @@ public class SubAgentConfiguration
     public int DefaultRunTimeoutSeconds { get; set; } = 300;
     
     /// <summary>
-    /// Default model for sub-agents (if not specified in spawn request)
+    /// Default model key for sub-agents (if not specified in spawn request).
+    /// Must be a key from the <c>Models</c> appsettings section (e.g. "SubAgent", "FastModel").
+    /// Null or empty means the primary LLM is used (same model as the parent agent).
     /// </summary>
-    public string DefaultModel { get; set; } = "gpt-4";
+    public string? DefaultModel { get; set; }
     
     /// <summary>
     /// Default thinking level ("low", "medium", "high")
@@ -92,9 +94,6 @@ public class SubAgentConfiguration
         
         if (DefaultRunTimeoutSeconds < 1)
             errors.Add("DefaultRunTimeoutSeconds must be at least 1");
-        
-        if (string.IsNullOrWhiteSpace(DefaultModel))
-            errors.Add("DefaultModel is required");
         
         if (DefaultMaxIterations < 1)
             errors.Add("DefaultMaxIterations must be at least 1");

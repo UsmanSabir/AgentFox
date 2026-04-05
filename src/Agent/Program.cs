@@ -277,16 +277,25 @@ class Program
         // ── Sub-agent infrastructure ─────────────────────────────────────────
         services.AddSingleton<ICommandQueue, CommandQueue>();
 
-        services.AddSingleton(_ => new SubAgentConfiguration
+        services.AddSingleton(sp =>
         {
-            MaxSpawnDepth = 3,
-            MaxConcurrentSubAgents = 10,
-            MaxChildrenPerAgent = 5,
-            DefaultRunTimeoutSeconds = 300,
-            DefaultModel = "gpt-4",
-            DefaultThinkingLevel = "high",
-            AutoCleanupCompleted = true,
-            CleanupDelayMilliseconds = 5000
+            var cfg = sp.GetRequiredService<IConfiguration>();
+
+            // Resolve the default sub-agent model from the Models section.
+            // Prefer Models:SubAgent; fall back to null so FoxAgentExecutor uses the primary LLM.
+            string? defaultModel = cfg.GetSection("Models:SubAgent").Exists() ? "SubAgent" : null;
+
+            return new SubAgentConfiguration
+            {
+                MaxSpawnDepth = 3,
+                MaxConcurrentSubAgents = 10,
+                MaxChildrenPerAgent = 5,
+                DefaultRunTimeoutSeconds = 300,
+                DefaultModel = defaultModel,
+                DefaultThinkingLevel = "high",
+                AutoCleanupCompleted = true,
+                CleanupDelayMilliseconds = 5000
+            };
         });
 
         services.AddSingleton<IAgentRuntime>(sp => new DefaultAgentRuntime(
@@ -353,11 +362,16 @@ class Program
     static async Task<int> RunCommandLineMode(string[] args, IServiceProvider sp)
     {
         var skillRegistry = sp.GetRequiredService<SkillRegistry>();
+        var toolRegistry = sp.GetRequiredService<ToolRegistry>();
+        var subAgentManager = sp.GetRequiredService<SubAgentManager>();
+        var sessionManager = sp.GetRequiredService<SessionManager>();
 
         var systemPrompt = new SystemPromptBuilder()
             .WithPersona(SystemPromptConfig.AgentPrompts.DeveloperAssistant)
             .WithTools("shell", "read_file", "write_file", "list_files", "search_files",
-                       "make_directory", "delete", "add_memory", "search_memory", "get_all_memories")
+                       "make_directory", "delete", "add_memory", "search_memory", "get_all_memories",
+                       "spawn_subagent: Spawn a sub-agent for complex tasks (waits for result)",
+                       "spawn_background_subagent: Spawn a background sub-agent that runs in a separate lane and announces results back")
             .WithSkillsIndex(skillRegistry.GetSkillManifests())
             .WithConstraints(
                 "Always verify changes before executing destructive operations",
@@ -369,7 +383,23 @@ class Program
             )
             .Build();
 
+        // Register spawn tools before Build() so they appear in the LLM's tool list.
+        FoxAgent? agentRef = null;
+        var spawnSubAgentTool = new SpawnSubAgentTool(() => agentRef!);
+        toolRegistry.Register(spawnSubAgentTool);
+
+        var spawnBgTool = new SpawnBackgroundSubAgentTool(subAgentManager);
+        toolRegistry.Register(spawnBgTool);
+
         var agent = BuildAgent(sp, systemPrompt);
+        agentRef = agent;
+
+        var cliSessionId = sessionManager.GetOrCreateConsoleSession(agent.Id);
+        spawnBgTool.Initialize(
+            parentAgentId: agent.Id,
+            parentSessionKey: cliSessionId,
+            parentSpawnDepth: 0
+        );
 
         var task = string.Join(" ", args);
 
@@ -378,8 +408,7 @@ class Program
         AnsiConsole.Write(new Rule() { Style = Style.Parse("blue dim") });
         AnsiConsole.WriteLine();
 
-        // CLI mode: no CommandProcessor is running, so we call ProcessAsync directly.
-        var cliSessionId = sp.GetRequiredService<SessionManager>().GetOrCreateConsoleSession(agent.Id);
+        // cliSessionId was already obtained above for spawnBgTool.Initialize()
 
         AgentResult result = null!;
         await AnsiConsole.Status()
@@ -458,7 +487,25 @@ class Program
             )
             .Build();
 
+        // Register spawn tools BEFORE Build() so the ToolRegistry snapshot that
+        // AgentBuilder.GetAvailableTools() reads already contains them, making the
+        // LLM aware of these tools at construction time.
+        //
+        // Circular dependency is broken by:
+        //   • SpawnSubAgentTool  – receives a Func<FoxAgent> resolved after Build()
+        //   • SpawnBackgroundSubAgentTool – receives agent/session ids via Initialize()
+        FoxAgent? agentRef = null;
+        var spawnSubAgentTool = new SpawnSubAgentTool(() => agentRef!);
+        toolRegistry.Register(spawnSubAgentTool);
+
+        var spawnBgTool = new SpawnBackgroundSubAgentTool(
+            subAgentManager,
+            logger: sp.GetRequiredService<ILogger<SpawnBackgroundSubAgentTool>>()
+        );
+        toolRegistry.Register(spawnBgTool);
+
         var agent = BuildAgent(sp, systemPrompt, withLogger: true);
+        agentRef = agent; // resolve the lazy reference used by SpawnSubAgentTool
 
         // Upgrade runtime to use the real LLM-backed executor now that FoxAgent exists.
         var agentRuntime = sp.GetRequiredService<IAgentRuntime>();
@@ -470,21 +517,16 @@ class Program
             logger: sp.GetRequiredService<ILogger<FoxAgentExecutor>>()
         ));
 
-        // Agent-dependent tools registered after agent creation (circular dependency)
-        toolRegistry.Register(new SpawnSubAgentTool(agent));
-
         // Snapshot interrupted sessions BEFORE creating/getting this run's console session,
         // so we know which Active sessions are left over from a previous process.
         var interruptedSessions = sessionManager.GetInterruptedActiveSessions();
 
         var consoleSessionId = sessionManager.GetOrCreateConsoleSession(agent.Id);
-        toolRegistry.Register(new SpawnBackgroundSubAgentTool(
-            subAgentManager,
+        spawnBgTool.Initialize(
             parentAgentId: agent.Id,
             parentSessionKey: consoleSessionId,
-            parentSpawnDepth: 0,
-            logger: sp.GetRequiredService<ILogger<SpawnBackgroundSubAgentTool>>()
-        ));
+            parentSpawnDepth: 0
+        );
 
         // --- Subagent lane handler ---
         commandProcessor.RegisterLaneHandler(CommandLane.Subagent, async (command, ct) =>
