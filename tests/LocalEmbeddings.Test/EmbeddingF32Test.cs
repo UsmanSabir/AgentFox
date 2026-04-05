@@ -8,7 +8,7 @@ using System.Text.Json;
 namespace LocalEmbeddings.Test;
 
 [TestClass]
-public class EmbeddingI8Test
+public class EmbeddingF32Test
 {
     [TestMethod]
     public void ByteRepresentationIsSameAsFloatExceptScaled()
@@ -16,12 +16,12 @@ public class EmbeddingI8Test
         using var embedder = new LocalEmbedder();
         var testSentence = "This is my test sentence";
         var floats = embedder.Embed(testSentence);
-        var bytes = embedder.Embed<EmbeddingI8>(testSentence);
+        var bytes = embedder.Embed<EmbeddingF32>(testSentence);
 
         // Check it's the same length
         Assert.Equal(floats.Values.Length, bytes.Values.Length);
         Assert.Equal(bytes.Buffer.Length, bytes.Values.Length + 4); // 1 byte per value, plus 4 for magnitude
-        Assert.Equal(bytes.Buffer.Length, EmbeddingI8.GetBufferByteLength(floats.Values.Length));
+        Assert.Equal(bytes.Buffer.Length, EmbeddingF32.GetBufferByteLength(floats.Values.Length));
 
         // Work out how we expect the floats to be scaled
         var expectedScaleFactor = sbyte.MaxValue / Math.Abs(TensorPrimitives.MaxMagnitude(floats.Values.Span));
@@ -42,7 +42,7 @@ public class EmbeddingI8Test
     {
         using var embedder = new LocalEmbedder();
         var testSentence = "This is my test sentence";
-        var values = embedder.Embed<EmbeddingI8>(testSentence);
+        var values = embedder.Embed<EmbeddingF32>(testSentence);
         Assert.Equal(1, MathF.Round(LocalEmbedder.Similarity(values, values), 3));
     }
 
@@ -51,8 +51,8 @@ public class EmbeddingI8Test
     public void Similarity_CanSwapInputOrderAndGetSameResults()
     {
         using var embedder = new LocalEmbedder();
-        var cat = embedder.Embed<EmbeddingI8>("cat");
-        var dog = embedder.Embed<EmbeddingI8>("dog");
+        var cat = embedder.Embed<EmbeddingF32>("cat");
+        var dog = embedder.Embed<EmbeddingF32>("dog");
         Assert.Equal(
             LocalEmbedder.Similarity(cat, dog),
             LocalEmbedder.Similarity(dog, cat));
@@ -64,7 +64,7 @@ public class EmbeddingI8Test
     {
         using var embedder = new LocalEmbedder();
 
-        var cat = embedder.Embed<EmbeddingI8>("cat");
+        var cat = embedder.Embed<EmbeddingF32>("cat");
         string[] sentences = [
             "dog",
             "kitten!",
@@ -76,7 +76,7 @@ public class EmbeddingI8Test
             "Elephants are here",
         ];
         var sentencesRankedBySimilarity = sentences.OrderByDescending(
-            s => LocalEmbedder.Similarity(cat, embedder.Embed<EmbeddingI8>(s))).ToArray();
+            s => LocalEmbedder.Similarity(cat, embedder.Embed<EmbeddingF32>(s))).ToArray();
 
         Assert.Equals(new[] {
             "Cats are good",
@@ -95,9 +95,9 @@ public class EmbeddingI8Test
     public void CanRoundTripThroughJson()
     {
         using var embedder = new LocalEmbedder();
-        var cat = embedder.Embed<EmbeddingI8>("cat");
+        var cat = embedder.Embed<EmbeddingF32>("cat");
         var json = JsonSerializer.Serialize(cat);
-        var deserializedCat = JsonSerializer.Deserialize<EmbeddingI8>(json);
+        var deserializedCat = JsonSerializer.Deserialize<EmbeddingF32>(json);
 
         Assert.Equals(cat.Values.ToArray(), deserializedCat.Values.ToArray());
         Assert.Equal(1, MathF.Round(LocalEmbedder.Similarity(cat, deserializedCat), 3));
@@ -108,8 +108,8 @@ public class EmbeddingI8Test
     public void CanRoundTripThroughByteBuffer()
     {
         using var embedder = new LocalEmbedder();
-        var cat1 = embedder.Embed<EmbeddingI8>("cat");
-        var cat2 = new EmbeddingI8(cat1.Buffer.ToArray());
+        var cat1 = embedder.Embed<EmbeddingF32>("cat");
+        var cat2 = new EmbeddingF32(cat1.Buffer.ToArray());
 
         Assert.Equals(cat1.Buffer.ToArray(), cat2.Buffer.ToArray());
         Assert.Equal(1, MathF.Round(LocalEmbedder.Similarity(cat1, cat2), 3));

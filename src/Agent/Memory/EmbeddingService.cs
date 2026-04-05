@@ -11,18 +11,18 @@ namespace AgentFox.Memory;
 
 /// <summary>
 /// Generates a dense vector embedding for a text string.
-/// Returns null when the provider is unavailable or the call fails.
+/// Returns empty when the provider is unavailable or the call fails.
 /// </summary>
 public interface IEmbeddingService
 {
-    Task<float[]?> GenerateAsync(string text, CancellationToken ct = default);
+    Task<ReadOnlyMemory<float>> GenerateAsync(string text, CancellationToken ct = default);
 }
 
 /// <summary>No-op implementation — vector search is disabled.</summary>
 public sealed class NullEmbeddingService : IEmbeddingService
 {
-    public Task<float[]?> GenerateAsync(string text, CancellationToken ct = default)
-        => Task.FromResult<float[]?>(null);
+    public Task<ReadOnlyMemory<float>> GenerateAsync(string text, CancellationToken ct = default)
+        => Task.FromResult(ReadOnlyMemory<float>.Empty);
 }
 
 /// <summary>Local embeddings using LocalEmbedder.</summary>
@@ -38,14 +38,14 @@ public sealed class LocalEmbeddingService : IEmbeddingService
 
     //public LocalEmbedder Embedder => _embedder;
 
-    public async Task<float[]?> GenerateAsync(string text, CancellationToken ct = default)
+    public async Task<ReadOnlyMemory<float>> GenerateAsync(string text, CancellationToken ct = default)
     {
         try
         {
-            var embedding = await Task.Run(() => _embedder.Embed(text), ct);
-            return embedding.Values.ToArray();
+            var embedding = await Task.Run(() => _embedder.GenerateEmbedding(text), ct);
+            return embedding;
         }
-        catch { return null; }
+        catch { return ReadOnlyMemory<float>.Empty; }
     }
 
     public SimilarityScore<TItem>[] FindClosestWithScore<TItem, EmbeddingF32>(string query,
@@ -75,15 +75,15 @@ public sealed class OllamaEmbeddingService : IEmbeddingService
         });
     }
 
-    public async Task<float[]?> GenerateAsync(string text, CancellationToken ct = default)
+    public async Task<ReadOnlyMemory<float>> GenerateAsync(string text, CancellationToken ct = default)
     {
         try
         {
             var response = await _client.EmbedAsync(
                 new EmbedRequest { Model = _model, Input = [text] }, ct);
-            return response?.Embeddings?[0];
+            return response?.Embeddings?[0] ?? ReadOnlyMemory<float>.Empty;
         }
-        catch { return null; }
+        catch { return ReadOnlyMemory<float>.Empty; }
     }
 }
 
@@ -100,18 +100,19 @@ public sealed class OpenAIEmbeddingService : IEmbeddingService
         _client = openAiClient.GetEmbeddingClient(model);
     }
 
-    public async Task<float[]?> GenerateAsync(string text, CancellationToken ct = default)
+    public async Task<ReadOnlyMemory<float>> GenerateAsync(string text, CancellationToken ct = default)
     {
         try
         {
             var result = await _client.GenerateEmbeddingAsync(text, cancellationToken: ct);
-            return result.Value.ToFloats().ToArray();
+            return result.Value.ToFloats();
         }
         catch(Exception ex) 
         { 
             if(Debugger.IsAttached)
                 Debugger.Break();
-            return null; }
+            return ReadOnlyMemory<float>.Empty; 
+        }
     }
 }
 

@@ -89,7 +89,7 @@ public sealed partial class LocalEmbedder : IDisposable
         where TEmbedding : IEmbedding<TEmbedding>
         => EmbedAsync<TEmbedding>(inputText, outputBuffer).Result;
 
-    private ReadOnlyMemory<float> GenerateEmbedding(string inputText)
+    public ReadOnlyMemory<float> GenerateEmbedding(string inputText)
     {
         var tokenizer = _tokenizerPool.Get();
         try
