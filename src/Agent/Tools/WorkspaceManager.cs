@@ -8,12 +8,15 @@ namespace AgentFox.Tools;
 public class WorkspaceManager
 {
     private readonly List<string> _allowedWorkspaces = new();
+    private readonly bool _restrictToWorkspace;
 
     public WorkspaceManager(IConfiguration configuration)
     {
+        _restrictToWorkspace = configuration.GetValue("RestrictToWorkspace", true);
+
         // Load workspaces from configuration (e.g., appsettings.json or Environment Variables)
         var workspaces = configuration.GetSection("Workspaces").Get<string[]>();
-        
+
         if (workspaces != null)
         {
             foreach (var ws in workspaces)
@@ -24,7 +27,7 @@ public class WorkspaceManager
                 }
             }
         }
-        
+
         // If no workspaces configured, default to current directory
         if (_allowedWorkspaces.Count == 0)
         {
@@ -35,8 +38,10 @@ public class WorkspaceManager
     /// <summary>
     /// For testing or manual configuration
     /// </summary>
-    public WorkspaceManager(IEnumerable<string> workspaces)
+    public WorkspaceManager(IEnumerable<string> workspaces, bool restrictToWorkspace = true)
     {
+        _restrictToWorkspace = restrictToWorkspace;
+
         foreach (var ws in workspaces)
         {
             if (!string.IsNullOrWhiteSpace(ws))
@@ -44,7 +49,7 @@ public class WorkspaceManager
                 _allowedWorkspaces.Add(Path.GetFullPath(ws));
             }
         }
-        
+
         if (_allowedWorkspaces.Count == 0)
         {
             _allowedWorkspaces.Add(Directory.GetCurrentDirectory());
@@ -52,22 +57,26 @@ public class WorkspaceManager
     }
 
     /// <summary>
-    /// Checks if a given path is within any of the allowed workspaces
+    /// Checks if a given path is within any of the allowed workspaces.
+    /// Always returns true when RestrictToWorkspace is disabled.
     /// </summary>
     public bool IsPathAllowed(string path)
     {
+        if (!_restrictToWorkspace)
+            return true;
+
         try
         {
             var fullPath = Path.GetFullPath(path);
 
             foreach (var workspace in _allowedWorkspaces)
             {
-                // Ensure directory separator at the end so we don't accidentally allow sibling directories 
+                // Ensure directory separator at the end so we don't accidentally allow sibling directories
                 // e.g. "C:\workspace" allowing "C:\workspace2"
-                var wsDir = workspace.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) 
+                var wsDir = workspace.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
                             + Path.DirectorySeparatorChar;
-                            
-                var targetDir = fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) 
+
+                var targetDir = fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
                               + Path.DirectorySeparatorChar;
 
                 if (targetDir.StartsWith(wsDir, StringComparison.OrdinalIgnoreCase) || targetDir.Equals(wsDir, StringComparison.OrdinalIgnoreCase))
