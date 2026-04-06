@@ -8,13 +8,15 @@ public class McpHealthCheck : IHealthCheckable
 {
     private readonly MCPClient _mcpClient;
     private readonly IConfiguration _config;
+    private readonly DoctorAgent? _doctorAgent;
 
     public string ComponentName => "MCP";
 
-    public McpHealthCheck(MCPClient mcpClient, IConfiguration config)
+    public McpHealthCheck(MCPClient mcpClient, IConfiguration config, DoctorAgent? doctorAgent = null)
     {
         _mcpClient = mcpClient;
         _config = config;
+        _doctorAgent = doctorAgent;
     }
 
     public Task<IReadOnlyList<HealthCheckResult>> CheckHealthAsync(CancellationToken ct = default)
@@ -73,7 +75,11 @@ public class McpHealthCheck : IHealthCheckable
         {
             if (!kvp.Value.IsConnected)
             {
-                results.Add(Critical($"Server '{kvp.Key}' is not connected"));
+                results.Add(new HealthCheckResult(
+                    HealthStatus.Critical, "MCP",
+                    $"Server '{kvp.Key}' is not connected — check URL and credentials in appsettings.json MCP:Servers",
+                    CanAutoFix: _doctorAgent != null,
+                    FixDescription: _doctorAgent != null ? "Ask DoctorAgent to update MCP server config" : null));
             }
         }
 
@@ -83,6 +89,15 @@ public class McpHealthCheck : IHealthCheckable
         }
 
         return Task.FromResult<IReadOnlyList<HealthCheckResult>>(results);
+    }
+
+    public async Task<FixResult> TryFixAsync(HealthCheckResult result, CancellationToken ct = default)
+    {
+        if (_doctorAgent != null)
+            return await _doctorAgent.FixConfigIssueAsync(
+                $"MCP server configuration issue: {result.Message}", ct);
+
+        return new FixResult(false, "No DoctorAgent configured — cannot auto-fix MCP config");
     }
 
     private static HealthCheckResult Healthy(string msg)

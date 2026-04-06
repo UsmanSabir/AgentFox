@@ -173,9 +173,14 @@ class Program
             var longTermMemory   = MemoryBackendFactory.CreateLongTermStorage(configuration, workspaceManager);
             var workspacePath    = workspaceManager.ResolvePath("");
 
+            var startupConfigFilePath = Path.Combine(AppContext.BaseDirectory, "appsettings.json");
+            if (File.Exists(Path.Combine(Directory.GetCurrentDirectory(), "appsettings.json")))
+                startupConfigFilePath = Path.Combine(Directory.GetCurrentDirectory(), "appsettings.json");
+            var startupDoctorAgent = new DoctorAgent(serviceProvider.GetRequiredService<IChatClient>(), startupConfigFilePath);
+
             var doctorRunner = new DoctorRunner(new IHealthCheckable[]
             {
-                new ConfigHealthCheck(configuration),
+                new ConfigHealthCheck(configuration, startupDoctorAgent),
                 new LlmHealthCheck(configuration),
                 new EmbeddingHealthCheck(
                     EmbeddingServiceFactory.Create(configuration),
@@ -185,7 +190,7 @@ class Program
                 new SessionHealthCheck(configuration, workspacePath),
                 new SkillHealthCheck(skillRegistry),
                 new ToolHealthCheck(toolRegistry),
-                new McpHealthCheck(mcpClient, configuration),
+                new McpHealthCheck(mcpClient, configuration, startupDoctorAgent),
             });
             await doctorRunner.RunAsync(doctorAutoFix);
             return 0;
@@ -705,6 +710,12 @@ class Program
         AnsiConsole.MarkupLine("[dim]Type [bold white]help[/] for available commands, [bold white]exit[/] to quit.[/]");
         AnsiConsole.WriteLine();
 
+        // ── DoctorAgent ───────────────────────────────────────────────────────
+        var configFilePath = Path.Combine(AppContext.BaseDirectory, "appsettings.json");
+        if (File.Exists(Path.Combine(Directory.GetCurrentDirectory(), "appsettings.json")))
+            configFilePath = Path.Combine(Directory.GetCurrentDirectory(), "appsettings.json");
+        var doctorAgent = new DoctorAgent(sp.GetRequiredService<IChatClient>(), configFilePath);
+
         while (true)
         {
             AnsiConsole.Markup("[bold dodgerblue1]>[/] ");
@@ -747,7 +758,7 @@ class Program
                 var replMcpClient    = sp.GetRequiredService<MCPClient>();
                 var doctorRunner = new DoctorRunner(new IHealthCheckable[]
                 {
-                    new ConfigHealthCheck(configuration),
+                    new ConfigHealthCheck(configuration, doctorAgent),
                     new LlmHealthCheck(configuration),
                     new EmbeddingHealthCheck(
                         EmbeddingServiceFactory.Create(configuration),
@@ -757,9 +768,27 @@ class Program
                     new SessionHealthCheck(configuration, workspacePath),
                     new SkillHealthCheck(skillRegistry),
                     new ToolHealthCheck(toolRegistry),
-                    new McpHealthCheck(replMcpClient, configuration),
+                    new McpHealthCheck(replMcpClient, configuration, doctorAgent),
                 });
                 await doctorRunner.RunAsync(autoFix);
+                continue;
+            }
+
+            if (lower.StartsWith("doctor config ") || lower.StartsWith("doctor configure "))
+            {
+                var request = lower.StartsWith("doctor config ")
+                    ? trimmed["doctor config ".Length..].Trim()
+                    : trimmed["doctor configure ".Length..].Trim();
+                if (string.IsNullOrWhiteSpace(request))
+                {
+                    AnsiConsole.MarkupLine("[yellow]Usage: doctor config <your request>[/]");
+                    AnsiConsole.MarkupLine("[dim]Example: doctor config set LLM provider to Anthropic with claude-3-5-sonnet[/]");
+                }
+                else
+                {
+                    var doctorConfigResult = await doctorAgent.ProcessRequestAsync(request);
+                    AnsiConsole.MarkupLine($"  [dim]{Markup.Escape(doctorConfigResult)}[/]");
+                }
                 continue;
             }
 
@@ -1175,9 +1204,10 @@ class Program
             new[] { "tools",       "List available tools" },
             new[] { "skills",      "List all registered skills" },
             new[] { "skill <name>","Show detailed info for a specific skill" },
-            new[] { "doctor",      "Run health checks (config, LLM, memory, MCP, skills, tools)" },
-            new[] { "doctor fix",  "Run health checks and attempt automatic fixes" },
-            new[] { "exit",        "Exit the program" },
+            new[] { "doctor",              "Run health checks (config, LLM, memory, MCP, skills, tools)" },
+            new[] { "doctor fix",          "Run health checks and attempt automatic fixes" },
+            new[] { "doctor config <req>", "Ask DoctorAgent to modify appsettings.json (e.g. change LLM provider)" },
+            new[] { "exit",                "Exit the program" },
         });
 
         AddSection("Startup Flags", new[]

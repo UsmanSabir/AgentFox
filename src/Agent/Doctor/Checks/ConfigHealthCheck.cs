@@ -6,9 +6,14 @@ using Microsoft.Extensions.Configuration;
 public class ConfigHealthCheck : IHealthCheckable
 {
     private readonly IConfiguration _config;
+    private readonly DoctorAgent? _doctorAgent;
     public string ComponentName => "Configuration";
 
-    public ConfigHealthCheck(IConfiguration config) => _config = config;
+    public ConfigHealthCheck(IConfiguration config, DoctorAgent? doctorAgent = null)
+    {
+        _config = config;
+        _doctorAgent = doctorAgent;
+    }
 
     public Task<IReadOnlyList<HealthCheckResult>> CheckHealthAsync(CancellationToken ct = default)
     {
@@ -25,7 +30,7 @@ public class ConfigHealthCheck : IHealthCheckable
             var resolved = _config.GetSection($"Models:{modelRef}").Exists();
             results.Add(resolved
                 ? Healthy($"Embedding ModelRef '{modelRef}' resolves to Models:{modelRef}")
-                : Critical($"Embedding ModelRef '{modelRef}' not found under Models section", canFix: false));
+                : Critical($"Embedding ModelRef '{modelRef}' not found under Models section", canFix: _doctorAgent != null, _doctorAgent != null ? "Ask DoctorAgent to fix" : null));
         }
 
         // Workspace path
@@ -37,26 +42,35 @@ public class ConfigHealthCheck : IHealthCheckable
         return Task.FromResult<IReadOnlyList<HealthCheckResult>>(results);
     }
 
-    public Task<FixResult> TryFixAsync(HealthCheckResult result, CancellationToken ct = default)
+    public async Task<FixResult> TryFixAsync(HealthCheckResult result, CancellationToken ct = default)
     {
-        // Only fix is creating the missing workspace directory
-        try
+        // Directory creation (existing fix)
+        if (result.Message.Contains("Workspace path missing") || result.FixDescription == "Create missing directory")
         {
-            var workspacePath = _config["Workspace:Path"] ?? Directory.GetCurrentDirectory();
-            Directory.CreateDirectory(workspacePath);
-            return Task.FromResult(new FixResult(true, $"Created directory: {workspacePath}"));
+            try
+            {
+                var workspacePath = _config["Workspace:Path"] ?? Directory.GetCurrentDirectory();
+                Directory.CreateDirectory(workspacePath);
+                return new FixResult(true, $"Created directory: {workspacePath}");
+            }
+            catch (Exception ex)
+            {
+                return new FixResult(false, $"Could not create directory: {ex.Message}");
+            }
         }
-        catch (Exception ex)
-        {
-            return Task.FromResult(new FixResult(false, $"Could not create directory: {ex.Message}"));
-        }
+
+        // LLM-assisted fix for config issues
+        if (_doctorAgent != null)
+            return await _doctorAgent.FixConfigIssueAsync(result.Message, ct);
+
+        return new FixResult(false, "No DoctorAgent configured — cannot auto-fix this issue");
     }
 
     private void CheckRequiredKey(string key, List<HealthCheckResult> list)
     {
         var val = _config[key];
         list.Add(string.IsNullOrWhiteSpace(val)
-            ? Critical($"Missing required config key: {key}", canFix: false)
+            ? Critical($"Missing required config key: {key}", canFix: _doctorAgent != null, _doctorAgent != null ? "Ask DoctorAgent to fix" : null)
             : Healthy($"{key} = {val}"));
     }
 
