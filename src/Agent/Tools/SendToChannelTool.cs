@@ -22,11 +22,41 @@ public class SendToChannelTool : BaseTool
 {
     private readonly ChannelManager _channelManager;
     private readonly ILogger? _logger;
+    private readonly Dictionary<string, ToolParameter> _parameters;
 
     public SendToChannelTool(ChannelManager channelManager, ILogger? logger = null)
     {
         _channelManager = channelManager;
         _logger = logger;
+        
+        // Dynamically build EnumValues from the actual configured channels
+        var configuredChannels = _channelManager.Channels.Values
+            .Select(c => c.Name.ToLowerInvariant())
+            .ToList();
+
+        _parameters = new()
+        {
+            ["channel_name"] = new()
+            {
+                Type = "string",
+                Description = $"Name of the target channel. Configured channels: {string.Join(", ", configuredChannels)}",
+                Required = true,
+                EnumValues = configuredChannels
+            },
+            ["target_id"] = new()
+            {
+                Type = "string",
+                Description = "Destination within the channel. For Telegram: numeric chat ID (e.g., '123456789'). " +
+                              "For Slack/Discord: channel name or ID. For single-recipient channels (WhatsApp, Teams): can be omitted.",
+                Required = false
+            },
+            ["message"] = new()
+            {
+                Type = "string",
+                Description = "The message content to send. Markdown is supported on Telegram and Discord.",
+                Required = true
+            }
+        };
     }
 
     public override string Name => "send_to_channel";
@@ -35,33 +65,10 @@ public class SendToChannelTool : BaseTool
         "Send a message to a specific registered channel. " +
         "Use this to proactively notify a channel with results, summaries, or alerts — " +
         "regardless of where the current task was initiated (terminal, another channel, etc.). " +
-        "Supported channels: telegram, slack, discord, whatsapp, teams (must be registered at startup). " +
         "For Telegram, target_id is the numeric chat ID (e.g., '123456789' for DMs, '-100...' for groups). " +
         "For Slack/Discord, target_id is the channel name or ID.";
 
-    public override Dictionary<string, ToolParameter> Parameters { get; } = new()
-    {
-        ["channel_name"] = new()
-        {
-            Type = "string",
-            Description = "Name of the target channel: 'telegram', 'slack', 'discord', 'whatsapp', or 'teams'",
-            Required = true,
-            EnumValues = ["telegram", "slack", "discord", "whatsapp", "teams"]
-        },
-        ["target_id"] = new()
-        {
-            Type = "string",
-            Description = "Destination within the channel. For Telegram: numeric chat ID (e.g., '123456789'). " +
-                          "For Slack/Discord: channel name or ID. For single-recipient channels (WhatsApp, Teams): can be omitted.",
-            Required = false
-        },
-        ["message"] = new()
-        {
-            Type = "string",
-            Description = "The message content to send. Markdown is supported on Telegram and Discord.",
-            Required = true
-        }
-    };
+    public override Dictionary<string, ToolParameter> Parameters => _parameters;
 
     protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
     {

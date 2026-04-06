@@ -498,7 +498,8 @@ class Program
                 "load_skill: Load a skill's full guidance on demand",
                 "add_memory: Save an important fact to memory",
                 "search_memory: Search memory for a fact",
-                "get_all_memories: Retrieve all stored long-term memories"
+                "get_all_memories: Retrieve all stored long-term memories",
+                "send_to_channel: Send messages to configured channels (telegram, slack, discord, whatsapp, teams)"
             )
             .WithSkillsIndex(manifests)
             .WithExecutionContext(
@@ -553,6 +554,19 @@ class Program
             modelResolver: model => LLMFactory.CreateWithModelOverride(configuration, model),
             logger: sp.GetRequiredService<ILogger<FoxAgentExecutor>>()
         ));
+
+        // ── Load and register channels ────────────────────────────────────────
+        // Must happen after agent is built so SendToChannelTool can reference it
+        var channelManager = await LoadChannelsFromConfigAsync(sp, agent, configuration);
+        if (channelManager != null)
+        {
+            var sendToChannelTool = new SendToChannelTool(
+                channelManager,
+                sp.GetRequiredService<ILogger<SendToChannelTool>>()
+            );
+            toolRegistry.Register(sendToChannelTool);
+            AnsiConsole.MarkupLine($"[bold green]✓[/]  SendToChannelTool registered with {channelManager.Channels.Count} channel(s).");
+        }
 
         // Snapshot interrupted sessions BEFORE creating/getting this run's console session,
         // so we know which Active sessions are left over from a previous process.
@@ -694,9 +708,6 @@ class Program
         });
 
         commandProcessor.Start();
-
-        // ── Channels ─────────────────────────────────────────────────────────
-        var channelManager = await LoadChannelsFromConfigAsync(sp, agent, configuration);
 
         // ── Startup recovery ─────────────────────────────────────────────────
         await RecoverInterruptedSessionsAsync(
