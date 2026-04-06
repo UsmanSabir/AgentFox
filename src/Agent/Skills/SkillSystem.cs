@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using AgentFox.Doctor;
 using AgentFox.LLM;
 using AgentFox.Tools;
 using Microsoft.Extensions.Logging;
@@ -47,7 +48,12 @@ public abstract class Skill
     /// Get system prompts provided by this skill
     /// </summary>
     public virtual List<string> GetSystemPrompts() => new();
-    
+
+    /// <summary>Override to report this skill's prerequisite health (e.g. required binaries).</summary>
+    public virtual Task<IReadOnlyList<HealthCheckResult>> CheckHealthAsync(CancellationToken ct = default)
+        => Task.FromResult<IReadOnlyList<HealthCheckResult>>(
+            new[] { new HealthCheckResult(HealthStatus.Healthy, Name, $"{Name} has no prerequisites to check") });
+
     /// <summary>
     /// Execute a skill with the given parameters
     /// </summary>
@@ -532,7 +538,34 @@ public class GitSkill : Skill, ISkillPlugin
             SystemPromptConfig.SkillPrompts.GitExpert
         };
     }
-    
+
+    public override async Task<IReadOnlyList<HealthCheckResult>> CheckHealthAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo("git", "--version")
+            {
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            using var proc = Process.Start(psi)!;
+            var output = await proc.StandardOutput.ReadToEndAsync(ct);
+            await proc.WaitForExitAsync(ct);
+            return proc.ExitCode == 0
+                ? new[] { new HealthCheckResult(HealthStatus.Healthy, "GitSkill", output.Trim()) }
+                : new[] { new HealthCheckResult(HealthStatus.Critical, "GitSkill",
+                    "git binary not found or returned non-zero", true,
+                    "Install git (Windows: winget install --id Git.Git)") };
+        }
+        catch (Exception ex)
+        {
+            return new[] { new HealthCheckResult(HealthStatus.Critical, "GitSkill",
+                $"git not found: {ex.Message}", true,
+                "Install git (Windows: winget install --id Git.Git)") };
+        }
+    }
+
     public async Task OnRegisterAsync(ISkillRegistrationContext context)
     {
         // Register all git tools (NOTE: full system prompt is NOT injected here;
@@ -605,7 +638,34 @@ public class DockerSkill : Skill, ISkillPlugin
             SystemPromptConfig.SkillPrompts.DockerExpert
         };
     }
-    
+
+    public override async Task<IReadOnlyList<HealthCheckResult>> CheckHealthAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo("docker", "--version")
+            {
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            using var proc = Process.Start(psi)!;
+            var output = await proc.StandardOutput.ReadToEndAsync(ct);
+            await proc.WaitForExitAsync(ct);
+            return proc.ExitCode == 0
+                ? new[] { new HealthCheckResult(HealthStatus.Healthy, "DockerSkill", output.Trim()) }
+                : new[] { new HealthCheckResult(HealthStatus.Critical, "DockerSkill",
+                    "docker binary not found or daemon not running", true,
+                    "Install Docker Desktop from https://www.docker.com/products/docker-desktop") };
+        }
+        catch (Exception ex)
+        {
+            return new[] { new HealthCheckResult(HealthStatus.Critical, "DockerSkill",
+                $"docker not found: {ex.Message}", true,
+                "Install Docker Desktop") };
+        }
+    }
+
     public async Task OnRegisterAsync(ISkillRegistrationContext context)
     {
         foreach (var tool in GetTools())

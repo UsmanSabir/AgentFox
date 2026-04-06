@@ -81,6 +81,13 @@ public class SqliteLongTermMemory : IMemory, IDisposable
         // Generate embedding before acquiring the write lock to keep critical section short.
         var vector = await _embedding.GenerateAsync(entry.Content);
 
+        // Write embedding metadata once so doctor can detect dimension mismatches
+        if (vector.Length > 0 && GetMetadata("embedding_dimension") == null)
+        {
+            SetMetadata("embedding_dimension", vector.Length.ToString());
+            SetMetadata("embedding_model", _embedding.GetType().Name);
+        }
+
         await _writeLock.WaitAsync();
         try
         {
@@ -201,6 +208,25 @@ public class SqliteLongTermMemory : IMemory, IDisposable
         }
     }
 
+    public void SetMetadata(string key, string value)
+    {
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "INSERT INTO doctor_metadata(key, value) VALUES(@k, @v) ON CONFLICT(key) DO UPDATE SET value=excluded.value;";
+        cmd.Parameters.AddWithValue("@k", key);
+        cmd.Parameters.AddWithValue("@v", value);
+        cmd.ExecuteNonQuery();
+    }
+
+    public string? GetMetadata(string key)
+    {
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT value FROM doctor_metadata WHERE key=@k;";
+        cmd.Parameters.AddWithValue("@k", key);
+        return cmd.ExecuteScalar() as string;
+    }
+
     public void Dispose()
     {
         _writeLock.Dispose();
@@ -269,6 +295,12 @@ public class SqliteLongTermMemory : IMemory, IDisposable
                     INSERT INTO memories_fts(rowid, content)
                     VALUES (new.rowid, new.content);
                 END;
+
+            -- Key/value store for doctor health-check metadata
+            CREATE TABLE IF NOT EXISTS doctor_metadata (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
         ";
         cmd.ExecuteNonQuery();
     }

@@ -1,5 +1,7 @@
 using AgentFox.Agents;
 using AgentFox.Channels;
+using AgentFox.Doctor;
+using AgentFox.Doctor.Checks;
 using AgentFox.LLM;
 using AgentFox.MCP;
 using AgentFox.Memory;
@@ -142,6 +144,9 @@ class Program
         Console.OutputEncoding = System.Text.Encoding.UTF8;
         ShowBanner();
 
+        bool runDoctor = args.Contains("--doctor");
+        bool doctorAutoFix = args.Contains("--fix");
+
         var configuration = BuildConfiguration();
 
         IServiceProvider serviceProvider = null!;
@@ -158,6 +163,33 @@ class Program
 
         AnsiConsole.MarkupLine("[bold green]✓[/] AgentFox initialized successfully.");
         AnsiConsole.WriteLine();
+
+        if (runDoctor)
+        {
+            var workspaceManager = serviceProvider.GetRequiredService<WorkspaceManager>();
+            var toolRegistry     = serviceProvider.GetRequiredService<ToolRegistry>();
+            var skillRegistry    = serviceProvider.GetRequiredService<SkillRegistry>();
+            var mcpClient        = serviceProvider.GetRequiredService<MCPClient>();
+            var longTermMemory   = MemoryBackendFactory.CreateLongTermStorage(configuration, workspaceManager);
+            var workspacePath    = workspaceManager.ResolvePath("");
+
+            var doctorRunner = new DoctorRunner(new IHealthCheckable[]
+            {
+                new ConfigHealthCheck(configuration),
+                new LlmHealthCheck(configuration),
+                new EmbeddingHealthCheck(
+                    EmbeddingServiceFactory.Create(configuration),
+                    longTermMemory as SqliteLongTermMemory,
+                    configuration),
+                new MemoryHealthCheck(longTermMemory, configuration, workspacePath),
+                new SessionHealthCheck(configuration, workspacePath),
+                new SkillHealthCheck(skillRegistry),
+                new ToolHealthCheck(toolRegistry),
+                new McpHealthCheck(mcpClient, configuration),
+            });
+            await doctorRunner.RunAsync(doctorAutoFix);
+            return 0;
+        }
 
         if (args.Length > 0)
             return await RunCommandLineMode(args, serviceProvider);
@@ -706,6 +738,31 @@ class Program
                 continue;
             }
 
+            if (lower == "doctor" || lower == "doctor fix")
+            {
+                var autoFix = lower == "doctor fix";
+                var workspaceManager = sp.GetRequiredService<WorkspaceManager>();
+                var workspacePath    = workspaceManager.ResolvePath("");
+                var ltMemory         = MemoryBackendFactory.CreateLongTermStorage(configuration, workspaceManager);
+                var replMcpClient    = sp.GetRequiredService<MCPClient>();
+                var doctorRunner = new DoctorRunner(new IHealthCheckable[]
+                {
+                    new ConfigHealthCheck(configuration),
+                    new LlmHealthCheck(configuration),
+                    new EmbeddingHealthCheck(
+                        EmbeddingServiceFactory.Create(configuration),
+                        ltMemory as SqliteLongTermMemory,
+                        configuration),
+                    new MemoryHealthCheck(ltMemory, configuration, workspacePath),
+                    new SessionHealthCheck(configuration, workspacePath),
+                    new SkillHealthCheck(skillRegistry),
+                    new ToolHealthCheck(toolRegistry),
+                    new McpHealthCheck(replMcpClient, configuration),
+                });
+                await doctorRunner.RunAsync(autoFix);
+                continue;
+            }
+
             if (lower == "tools")
             {
                 ShowTools(toolRegistry);
@@ -1113,12 +1170,20 @@ class Program
 
         AddSection("General Commands", new[]
         {
-            new[] { "help",       "Show this help message" },
-            new[] { "status",     "Show agent status" },
-            new[] { "tools",      "List available tools" },
-            new[] { "skills",     "List all registered skills" },
+            new[] { "help",        "Show this help message" },
+            new[] { "status",      "Show agent status" },
+            new[] { "tools",       "List available tools" },
+            new[] { "skills",      "List all registered skills" },
             new[] { "skill <name>","Show detailed info for a specific skill" },
-            new[] { "exit",       "Exit the program" },
+            new[] { "doctor",      "Run health checks (config, LLM, memory, MCP, skills, tools)" },
+            new[] { "doctor fix",  "Run health checks and attempt automatic fixes" },
+            new[] { "exit",        "Exit the program" },
+        });
+
+        AddSection("Startup Flags", new[]
+        {
+            new[] { "--doctor",    "Run health checks on startup and exit" },
+            new[] { "--fix",       "Combined with --doctor: attempt automatic fixes" },
         });
 
         AddSection("Agent Management", new[]
