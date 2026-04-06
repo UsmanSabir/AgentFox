@@ -556,17 +556,24 @@ class Program
         ));
 
         // ── Load and register channels ────────────────────────────────────────
-        // Must happen after agent is built so SendToChannelTool can reference it
+        // Must happen after agent is built so SendToChannelTool can reference the agent.
+        // We always create a ChannelManager so channels can be added at runtime via ManageChannelTool.
+        var appConfigPath  = ResolveAppSettingsPath();
         var channelManager = await LoadChannelsFromConfigAsync(sp, agent, configuration);
-        if (channelManager != null)
-        {
-            var sendToChannelTool = new SendToChannelTool(
-                channelManager,
-                sp.GetRequiredService<ILogger<SendToChannelTool>>()
-            );
-            toolRegistry.Register(sendToChannelTool);
-            AnsiConsole.MarkupLine($"[bold green]✓[/]  SendToChannelTool registered with {channelManager.Channels.Count} channel(s).");
-        }
+
+        toolRegistry.Register(new SendToChannelTool(
+            channelManager,
+            sp.GetRequiredService<ILogger<SendToChannelTool>>()));
+
+        toolRegistry.Register(new ManageChannelTool(
+            channelManager,
+            appConfigPath,
+            sp.GetRequiredService<ILogger<ManageChannelTool>>()));
+
+        if (channelManager.Channels.Count > 0)
+            AnsiConsole.MarkupLine($"[bold green]✓[/]  {channelManager.Channels.Count} channel(s) connected.");
+        else
+            AnsiConsole.MarkupLine("[dim]No channels configured. Use manage_channel to add one at runtime.[/]");
 
         // Snapshot interrupted sessions BEFORE creating/getting this run's console session,
         // so we know which Active sessions are left over from a previous process.
@@ -722,10 +729,7 @@ class Program
         AnsiConsole.WriteLine();
 
         // ── DoctorAgent ───────────────────────────────────────────────────────
-        var configFilePath = Path.Combine(AppContext.BaseDirectory, "appsettings.json");
-        if (File.Exists(Path.Combine(Directory.GetCurrentDirectory(), "appsettings.json")))
-            configFilePath = Path.Combine(Directory.GetCurrentDirectory(), "appsettings.json");
-        var doctorAgent = new DoctorAgent(sp.GetRequiredService<IChatClient>(), configFilePath);
+        var doctorAgent = new DoctorAgent(sp.GetRequiredService<IChatClient>(), appConfigPath);
 
         while (true)
         {
@@ -1042,20 +1046,18 @@ class Program
     // Channel loading
     // ─────────────────────────────────────────────────────────────────────────
 
-    static async Task<ChannelManager?> LoadChannelsFromConfigAsync(
+    static async Task<ChannelManager> LoadChannelsFromConfigAsync(
         IServiceProvider sp,
         FoxAgent agent,
         IConfiguration configuration)
     {
-        var channelSection = configuration.GetSection("Channels");
-        if (!channelSection.Exists()) return null;
-
         var sessionManager = sp.GetRequiredService<SessionManager>();
-        var commandQueue = sp.GetRequiredService<ICommandQueue>();
-        var logger = sp.GetRequiredService<ILogger<ChannelManager>>();
+        var commandQueue   = sp.GetRequiredService<ICommandQueue>();
+        var logger         = sp.GetRequiredService<ILogger<ChannelManager>>();
+        var manager        = new ChannelManager(agent, sessionManager, commandQueue, logger);
 
-        var manager = new ChannelManager(agent, sessionManager, commandQueue, logger);
-        var anyEnabled = false;
+        var channelSection = configuration.GetSection("Channels");
+        if (!channelSection.Exists()) return manager;
 
         // ── Telegram ──────────────────────────────────────────────────────────
         var tgSection = channelSection.GetSection("Telegram");
@@ -1069,22 +1071,33 @@ class Program
             else
             {
                 var pollingTimeout = tgSection.GetValue<int>("PollingTimeoutSeconds", 30);
-                var tgChannel = new TelegramChannel(
+                manager.AddChannel(new TelegramChannel(
                     token,
                     pollingTimeout,
-                    sp.GetRequiredService<ILogger<TelegramChannel>>());
-                manager.AddChannel(tgChannel);
-                anyEnabled = true;
+                    sp.GetRequiredService<ILogger<TelegramChannel>>()));
                 AnsiConsole.MarkupLine("[bold green]✓[/]  Telegram channel added [dim](long-polling)[/]");
             }
         }
 
-        if (!anyEnabled) return null;
+        if (manager.Channels.Count == 0) return manager;
 
         AnsiConsole.MarkupLine("[dim]Connecting channels...[/]");
         await manager.ConnectAllAsync();
-        AnsiConsole.MarkupLine($"[bold green]✓[/]  Channels connected: [bold]{manager.Channels.Count}[/]");
         return manager;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Config path helper
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns the path to appsettings.json, preferring the current working directory
+    /// (which is the project root when running with `dotnet run`) over the output directory.
+    /// </summary>
+    static string ResolveAppSettingsPath()
+    {
+        var cwdPath = Path.Combine(Directory.GetCurrentDirectory(), "appsettings.json");
+        return File.Exists(cwdPath) ? cwdPath : Path.Combine(AppContext.BaseDirectory, "appsettings.json");
     }
 
     // ─────────────────────────────────────────────────────────────────────────

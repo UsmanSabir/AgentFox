@@ -145,12 +145,30 @@ public class ChannelManager
     }
     
     /// <summary>
-    /// Add a channel
+    /// Register a channel and subscribe to its incoming messages.
+    /// The caller is responsible for connecting the channel first.
     /// </summary>
     public void AddChannel(Channel channel)
     {
         _channels[channel.ChannelId] = channel;
         channel.OnMessageReceived += async (s, msg) => await HandleMessage(channel, msg);
+    }
+
+    /// <summary>
+    /// Connect a channel and register it live at runtime — no restart needed.
+    /// Returns false if the connection attempt fails (channel is not added in that case).
+    /// </summary>
+    public async Task<bool> AddAndConnectAsync(Channel channel)
+    {
+        var connected = await channel.ConnectAsync();
+        if (!connected)
+        {
+            _logger?.LogWarning("AddAndConnectAsync: could not connect channel '{Name}'", channel.Name);
+            return false;
+        }
+        AddChannel(channel);
+        _logger?.LogInformation("Channel '{Name}' added and connected at runtime", channel.Name);
+        return true;
     }
     
     /// <summary>

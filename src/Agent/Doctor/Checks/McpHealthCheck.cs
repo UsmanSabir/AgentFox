@@ -23,17 +23,17 @@ public class McpHealthCheck : IHealthCheckable
     {
         var results = new List<HealthCheckResult>();
 
-        // If MCP is disabled (or the key is absent), report healthy and skip further checks.
-        var mcpEnabledRaw = _config["MCP:Enabled"];
-        bool mcpEnabled = !string.IsNullOrWhiteSpace(mcpEnabledRaw)
-                          && bool.TryParse(mcpEnabledRaw, out var parsed)
-                          && parsed;
+        //// If MCP is disabled (or the key is absent), report healthy and skip further checks.
+        //var mcpEnabledRaw = _config["MCP:Enabled"];
+        //bool mcpEnabled = !string.IsNullOrWhiteSpace(mcpEnabledRaw)
+        //                  && bool.TryParse(mcpEnabledRaw, out var parsed)
+        //                  && parsed;
 
-        if (!mcpEnabled)
-        {
-            results.Add(Healthy("MCP disabled"));
-            return Task.FromResult<IReadOnlyList<HealthCheckResult>>(results);
-        }
+        //if (!mcpEnabled)
+        //{
+        //    results.Add(Healthy("MCP disabled"));
+        //    return Task.FromResult<IReadOnlyList<HealthCheckResult>>(results);
+        //}
 
         // MCP is enabled — inspect server connections.
         var allServers      = _mcpClient.Servers;
