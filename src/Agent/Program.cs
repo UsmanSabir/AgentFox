@@ -899,7 +899,14 @@ class Program
                 {
                     var responseText = sb.ToString();
                     if (sbReasoning.Length == 0)
-                        return new Text(responseText.Trim());
+                    {
+                        //return new Rows(new Panel(string.Empty).NoBorder(), new Text(Markup.Escape(responseText)));
+                        var table = new Table().NoBorder();
+                        table.AddColumn(new TableColumn(""));
+                        table.AddRow(Markup.Escape(responseText));
+                        return table;
+                        //return new Text(responseText.Trim());
+                    }
 
                     // Limit visible reasoning to the last 20 lines to keep the
                     // panel from growing taller than the terminal.
@@ -925,51 +932,75 @@ class Program
                     {
                         if (!uiCfg.RenderReasoning)
                         {
-                            liveDisplayTask = AnsiConsole.Status()
-                                .Spinner(Spinner.Known.Dots12)
-                                .SpinnerStyle(Style.Parse("dodgerblue1 bold"))
-                                .StartAsync(
-                                    "[bold]Working...[/]",
-                                    async ctx =>
+                            //https://github.com/spectreconsole/spectre.console/issues/2076
+                            var table = new Table().NoBorder();
+                            table.AddColumn(new TableColumn(""));
+                            table.AddRow("Working...");
+                            liveDisplayTask = AnsiConsole.Live(table)
+                                .AutoClear(false)
+                                .Overflow(VerticalOverflow.Ellipsis)
+                                .Cropping(VerticalOverflowCropping.Top)
+                                .StartAsync(async ctx =>
+                                {
+                                    await foreach (var (isReasoning, text) in streamChannel.Reader.ReadAllAsync())
                                     {
-                                        bool spinnerUpdated = false;
-                                        //ctx.Status("[dodgerblue1]Processing...[/]");
-                                        await foreach (var (isReasoning, text) in streamChannel.Reader.ReadAllAsync())
+                                        if (!isReasoning)
                                         {
-                                            if (!isReasoning)
+                                            sb.Append(text);
+                                            var responseChunk = sb.ToString();
+                                            if (!string.IsNullOrWhiteSpace(responseChunk))
                                             {
-                                                sb.Append(text);
-                                                var responseChunk = sb.ToString();
-                                                if (!string.IsNullOrWhiteSpace(responseChunk))
-                                                {
-                                                    if (!spinnerUpdated)
-                                                    {
-                                                        ctx.Spinner(Spinner.Known.Star);
-                                                        spinnerUpdated = true;
-                                                    } 
-                                                    ctx.Status(Markup.Escape(responseChunk));
-                                                }
+                                                table.Rows.Clear();
+                                                table.AddRow(Markup.Escape(responseChunk));
+                                                ctx.Refresh();
                                             }
-                                            //else
-                                            //    sbReasoning.Append(text);
                                         }
-                                        ctx.Status(Markup.Escape("done"));
-                                        var response = sb.ToString();
-                                        //if (!string.IsNullOrWhiteSpace(response))
-                                        //    AnsiConsole.MarkupLine(Markup.Escape(response));
-                                        return response;
-                                    });
+                                    }
+                                    
+                                    return string.Empty;
+                                });
+                            #region commented
+                            
+                            //liveDisplayTask = AnsiConsole.Status()
+                            //    .Spinner(Spinner.Known.Dots12)
+                            //    .SpinnerStyle(Style.Parse("dodgerblue1 bold"))
+                            //    .StartAsync(
+                            //        "[bold]Working...[/]",
+                            //        async ctx =>
+                            //        {
+                            //            bool spinnerUpdated = false;
+                            //            //ctx.Status("[dodgerblue1]Processing...[/]");
+                            //            await foreach (var (isReasoning, text) in streamChannel.Reader.ReadAllAsync())
+                            //            {
+                            //                if (!isReasoning)
+                            //                {
+                            //                    sb.Append(text);
+                            //                    var responseChunk = sb.ToString();
+                            //                    if (!string.IsNullOrWhiteSpace(responseChunk))
+                            //                    {
+                            //                        if (!spinnerUpdated)
+                            //                        {
+                            //                            ctx.Spinner(Spinner.Known.Star);
+                            //                            spinnerUpdated = true;
+                            //                        } 
+                            //                        ctx.Status(Markup.Escape(responseChunk));
+                            //                    }
+                            //                }
+                            //                //else
+                            //                //    sbReasoning.Append(text);
+                            //            }
+                            //            ctx.Status(Markup.Escape("done"));
+                            //            var response = sb.ToString();
+                            //            //if (!string.IsNullOrWhiteSpace(response))
+                            //            //    AnsiConsole.MarkupLine(Markup.Escape(response));
+                            //            return response;
+                            //        }); 
+                            #endregion
                         }
                         else
                         {
-                            //var table = new Table()
-                            //    .Border(TableBorder.None)
-                            //    .AddColumn(string.Empty);
-                            //var panel = new Panel(table)
-                            //    .Header("[dim yellow]Thinking...[/]")
-                            //    .BorderColor(Color.Yellow)
-                            //    .RoundedBorder();
-                            liveDisplayTask = AnsiConsole.Live(new Text("Working..."))
+                            //https://github.com/spectreconsole/spectre.console/issues/2076
+                            liveDisplayTask = AnsiConsole.Live(new Text(string.Empty))
                                 .AutoClear(false)
                                 .Overflow(VerticalOverflow.Ellipsis)
                                 .Cropping(VerticalOverflowCropping.Top)
