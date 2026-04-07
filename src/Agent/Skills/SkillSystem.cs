@@ -3,6 +3,7 @@ using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using AgentFox.Doctor;
+using AgentFox.Http;
 using AgentFox.LLM;
 using AgentFox.Tools;
 using Microsoft.Extensions.Logging;
@@ -1016,7 +1017,7 @@ internal static class SkillShellHelper
 
 internal static class SkillHttpHelper
 {
-    private static readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(30) };
+    private static readonly HttpClient _http = HttpResilienceFactory.Create(TimeSpan.FromSeconds(60));
 
     public static async Task<ToolResult> SendAsync(string method, string url, string? body, Dictionary<string, string>? headers = null)
     {

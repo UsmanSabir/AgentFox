@@ -1,3 +1,4 @@
+using AgentFox.Http;
 using AgentFox.Models;
 using AgentFox.Tools;
 using Newtonsoft.Json;
@@ -80,7 +81,7 @@ public class MCPServer
         Name = name;
         Url = url;
         _timeoutSeconds = timeoutSeconds;
-        _httpClient = new HttpClient();
+        _httpClient = HttpResilienceFactory.Create(TimeSpan.FromSeconds(timeoutSeconds * 4));
         _httpClient.Timeout = TimeSpan.FromSeconds(timeoutSeconds);
     }
     

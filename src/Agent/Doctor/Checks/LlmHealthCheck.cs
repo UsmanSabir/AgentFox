@@ -1,6 +1,7 @@
 namespace AgentFox.Doctor.Checks;
 
 using AgentFox.Doctor;
+using AgentFox.Http;
 using Microsoft.Extensions.Configuration;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -73,7 +74,7 @@ public class LlmHealthCheck : IHealthCheckable
     {
         try
         {
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+            using var http = HttpResilienceFactory.CreateForHealthCheck(TimeSpan.FromSeconds(5));
             var response = await http.GetAsync($"{baseUrl}/api/tags", ct);
             if (!response.IsSuccessStatusCode)
             {
@@ -117,7 +118,7 @@ public class LlmHealthCheck : IHealthCheckable
 
         try
         {
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
+            using var http = HttpResilienceFactory.CreateForHealthCheck(TimeSpan.FromSeconds(8));
             http.DefaultRequestHeaders.Authorization =
                 new AuthenticationHeaderValue("Bearer", apiKey);
 
@@ -179,7 +180,7 @@ public class LlmHealthCheck : IHealthCheckable
 
         try
         {
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
+            using var http = HttpResilienceFactory.CreateForHealthCheck(TimeSpan.FromSeconds(8));
             http.DefaultRequestHeaders.Add("x-api-key", apiKey);
             http.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
 
@@ -239,7 +240,7 @@ public class LlmHealthCheck : IHealthCheckable
 
         try
         {
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
+            using var http = HttpResilienceFactory.CreateForHealthCheck(TimeSpan.FromSeconds(8));
             http.DefaultRequestHeaders.Add("api-key", apiKey);
 
             // Azure OpenAI models endpoint

@@ -1,3 +1,4 @@
+using AgentFox.Http;
 using AgentFox.Models;
 using AgentFox.Agents;
 using AgentFox.Sessions;
@@ -398,8 +399,8 @@ public class TelegramChannel : Channel
         _botToken = botToken;
         _pollingTimeoutSeconds = pollingTimeoutSeconds;
         _logger = logger;
-        // HTTP timeout must exceed the long-poll window
-        _http = new HttpClient { Timeout = TimeSpan.FromSeconds(pollingTimeoutSeconds + 15) };
+        // HTTP timeout must exceed the long-poll window; resilient handler retries transient failures.
+        _http = HttpResilienceFactory.CreateForPolling(TimeSpan.FromSeconds(pollingTimeoutSeconds + 15));
     }
 
     /// <summary>

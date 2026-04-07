@@ -1,3 +1,4 @@
+using AgentFox.Http;
 using AgentFox.Models;
 using System.Net.Http;
 
@@ -52,13 +53,10 @@ public class WebSearchTool : BaseTool
 /// </summary>
 public class FetchUrlTool : BaseTool
 {
-    private static readonly HttpClient _httpClient = new()
-    {
-        Timeout = TimeSpan.FromSeconds(30)
-    };
-    
-    private const int MaxRetries = 3;
-    private const int InitialDelayMs = 1000;
+    // Resilient client: 3 retries with exponential back-off + circuit-breaker.
+    // Per-request timeout is enforced via CancellationTokenSource below.
+    private static readonly HttpClient _httpClient =
+        HttpResilienceFactory.Create(TimeSpan.FromMinutes(5));
 
     public override string Name => "fetch_url";
     public override string Description => "Fetch content from a URL";
@@ -85,60 +83,42 @@ public class FetchUrlTool : BaseTool
             : 30;
         timeoutSeconds = Math.Max(5, Math.Min(300, timeoutSeconds));
 
-        // Retry logic with exponential backoff
-        int delayMs = InitialDelayMs;
-        Exception? lastException = null;
-
-        for (int attempt = 1; attempt <= MaxRetries; attempt++)
+        // The resilient HttpClient handler retries transient network failures automatically.
+        // A per-request CancellationTokenSource enforces the user-configured timeout.
+        try
         {
-            try
-            {
-                using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds)))
-                using (var response = await _httpClient.GetAsync(uri, cts.Token))
-                {
-                    if (!response.IsSuccessStatusCode)
-                        return ToolResult.Fail($"HTTP Error {(int)response.StatusCode}: {response.ReasonPhrase}");
-                    
-                    // Read content with size limit (10MB max)
-                    var content = await response.Content.ReadAsStringAsync(cts.Token);
-                    
-                    if (content.Length > 10 * 1024 * 1024)
-                        content = content[..(10 * 1024 * 1024)] + "\n... (content truncated - exceeds 10MB limit)";
-                    
-                    return ToolResult.Ok($"""
-                        Fetched: {url}
-                        Status: {(int)response.StatusCode} {response.ReasonPhrase}
-                        Content-Type: {response.Content.Headers.ContentType}
-                        ═════════════════════════════════════
-                        
-                        {content}
-                        """);
-                }
-            }
-            catch (HttpRequestException ex)
-            {
-                lastException = ex;
-                if (attempt < MaxRetries)
-                {
-                    await Task.Delay(delayMs);
-                    delayMs *= 2; // Exponential backoff
-                }
-            }
-            catch (TaskCanceledException)
-            {
-                return ToolResult.Fail($"Request timeout after {timeoutSeconds} seconds");
-            }
-            catch (OperationCanceledException)
-            {
-                return ToolResult.Fail("Request was cancelled");
-            }
-            catch (Exception ex)
-            {
-                return ToolResult.Fail($"Unexpected error: {ex.GetType().Name} - {ex.Message}");
-            }
-        }
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+            using var response = await _httpClient.GetAsync(uri, cts.Token);
 
-        return ToolResult.Fail($"Failed to fetch URL after {MaxRetries} retries: {lastException?.Message}");
+            if (!response.IsSuccessStatusCode)
+                return ToolResult.Fail($"HTTP Error {(int)response.StatusCode}: {response.ReasonPhrase}");
+
+            var content = await response.Content.ReadAsStringAsync(cts.Token);
+
+            if (content.Length > 10 * 1024 * 1024)
+                content = content[..(10 * 1024 * 1024)] + "\n... (content truncated - exceeds 10MB limit)";
+
+            return ToolResult.Ok($"""
+                Fetched: {url}
+                Status: {(int)response.StatusCode} {response.ReasonPhrase}
+                Content-Type: {response.Content.Headers.ContentType}
+                ═════════════════════════════════════
+
+                {content}
+                """);
+        }
+        catch (TaskCanceledException)
+        {
+            return ToolResult.Fail($"Request timeout after {timeoutSeconds} seconds");
+        }
+        catch (OperationCanceledException)
+        {
+            return ToolResult.Fail("Request was cancelled");
+        }
+        catch (Exception ex)
+        {
+            return ToolResult.Fail($"Failed to fetch URL: {ex.GetType().Name} - {ex.Message}");
+        }
     }
 }
 
