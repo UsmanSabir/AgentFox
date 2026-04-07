@@ -106,11 +106,19 @@ public class ToolRegistry
 {
     private readonly Dictionary<string, ITool> _tools = new();
     private readonly object _lock = new();
-    
+    private int _version = 0;
+
     // Event hooks and metrics
     public ToolEventHookRegistry HookRegistry { get; } = new();
     public ToolMetricsCollector MetricsCollector { get; } = new();
-    
+
+    /// <summary>
+    /// Monotonically increasing counter, incremented on every Register or Unregister.
+    /// Consumers (e.g. DynamicAgentMiddleware) can compare against a cached value
+    /// to detect changes without scanning the full tool list.
+    /// </summary>
+    public int Version => Volatile.Read(ref _version);
+
     /// <summary>
     /// Register a tool
     /// </summary>
@@ -120,11 +128,11 @@ public class ToolRegistry
         {
             _tools[tool.Name] = tool;
         }
-        
+        Interlocked.Increment(ref _version);
         // Invoke registration hook
         await HookRegistry.InvokeToolRegisteredAsync(tool.Name, tool.Description);
     }
-    
+
     /// <summary>
     /// Register a tool (synchronous, for backward compatibility)
     /// </summary>
@@ -134,8 +142,11 @@ public class ToolRegistry
         {
             _tools[tool.Name] = tool;
         }
+        Interlocked.Increment(ref _version);
+        // Fire-and-forget: hooks are observability-only and already swallow all errors
+        _ = HookRegistry.InvokeToolRegisteredAsync(tool.Name, tool.Description);
     }
-    
+
     /// <summary>
     /// Unregister a tool
     /// </summary>
@@ -145,11 +156,11 @@ public class ToolRegistry
         {
             _tools.Remove(name);
         }
-        
+        Interlocked.Increment(ref _version);
         // Invoke unregistration hook
         await HookRegistry.InvokeToolUnregisteredAsync(name);
     }
-    
+
     /// <summary>
     /// Unregister a tool (synchronous, for backward compatibility)
     /// </summary>
@@ -159,6 +170,8 @@ public class ToolRegistry
         {
             _tools.Remove(name);
         }
+        Interlocked.Increment(ref _version);
+        _ = HookRegistry.InvokeToolUnregisteredAsync(name);
     }
     
     /// <summary>

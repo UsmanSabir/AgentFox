@@ -733,7 +733,7 @@ class Program
             consoleSessionId,
             interruptedSessions);
 
-        AnsiConsole.MarkupLine("[dim]Type [bold white]help[/] for available commands, [bold white]exit[/] to quit.[/]");
+        AnsiConsole.MarkupLine("[dim]Type [bold white]help[/] for commands, [bold white]exit[/] to quit. [bold white]Shift+Enter[/] for multi-line input.[/]");
         AnsiConsole.WriteLine();
 
         // ── DoctorAgent ───────────────────────────────────────────────────────
@@ -741,8 +741,7 @@ class Program
 
         while (true)
         {
-            AnsiConsole.Markup("[bold dodgerblue1]>[/] ");
-            var input = Console.ReadLine();
+            var input = ReadMultilineInput();
 
             if (string.IsNullOrWhiteSpace(input))
                 continue;
@@ -1718,5 +1717,71 @@ class Program
         var result = await tcs.Task;
         AnsiConsole.WriteLine(result.Output);
         AnsiConsole.WriteLine();
+    }
+
+    /// <summary>
+    /// Reads a (potentially multi-line) input from the console.
+    /// <list type="bullet">
+    ///   <item><b>Enter</b> — submits when no paste is in progress (KeyAvailable is false).</item>
+    ///   <item><b>Shift+Enter</b> — always inserts a newline without submitting.</item>
+    ///   <item><b>Paste</b> — newlines inside pasted text are detected via <see cref="Console.KeyAvailable"/>
+    ///         (more characters waiting) and treated as line breaks rather than submit.</item>
+    /// </list>
+    /// </summary>
+    static string ReadMultilineInput()
+    {
+        const string prompt = "\x1b[1;38;5;33m>\x1b[0m "; // bold dodgerblue1 ">" + space
+        const string continuation = "  ";                   // aligns with text after "> "
+
+        Console.Write(prompt);
+
+        var lines = new List<string>();
+        var current = new StringBuilder();
+
+        while (true)
+        {
+            var key = Console.ReadKey(intercept: true);
+
+            // ── Submit ────────────────────────────────────────────────────────
+            // Plain Enter with nothing more in the buffer = user pressed Enter to send.
+            if (key.Key == ConsoleKey.Enter
+                && !key.Modifiers.HasFlag(ConsoleModifiers.Shift)
+                && !Console.KeyAvailable)
+            {
+                Console.WriteLine();
+                lines.Add(current.ToString());
+                return string.Join("\n", lines);
+            }
+
+            // ── New line ──────────────────────────────────────────────────────
+            // Either Shift+Enter (explicit multiline) or Enter with more characters
+            // waiting in the buffer (mid-paste newline).
+            if (key.Key == ConsoleKey.Enter)
+            {
+                Console.WriteLine();
+                Console.Write(continuation);
+                lines.Add(current.ToString());
+                current.Clear();
+                continue;
+            }
+
+            // ── Backspace ─────────────────────────────────────────────────────
+            if (key.Key == ConsoleKey.Backspace)
+            {
+                if (current.Length > 0)
+                {
+                    current.Remove(current.Length - 1, 1);
+                    Console.Write("\b \b");
+                }
+                continue;
+            }
+
+            // ── Printable character ───────────────────────────────────────────
+            if (key.KeyChar != '\0')
+            {
+                current.Append(key.KeyChar);
+                Console.Write(key.KeyChar);
+            }
+        }
     }
 }

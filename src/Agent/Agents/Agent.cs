@@ -109,7 +109,14 @@ public class FoxAgent
     /// </summary>
     public SessionManager? SessionManager { get; set; }
 
-    public FoxAgent(ChatClientAgent agent, AgentConfig config, IConversationStore store, string defaultConversationId, WorkspaceManager workspaceManager, ILogger<FoxAgent>? logger = null)
+    /// <summary>
+    /// Runtime prompt contributors. Add <see cref="IPromptContributor"/> instances here
+    /// to inject dynamic content (e.g. connected MCP servers, active plugins) into the
+    /// system prompt before every LLM call without rebuilding the agent.
+    /// </summary>
+    public PromptContributorRegistry PromptContributors { get; }
+
+    public FoxAgent(ChatClientAgent agent, AgentConfig config, IConversationStore store, string defaultConversationId, WorkspaceManager workspaceManager, PromptContributorRegistry promptContributors, ILogger<FoxAgent>? logger = null)
     {
         _agent = new Agent
         {
@@ -120,6 +127,7 @@ public class FoxAgent
         };
         _chatAgent = agent;
         _workspaceManager = workspaceManager;
+        PromptContributors = promptContributors;
         _logger = logger;
     }
 
@@ -338,7 +346,7 @@ public class FoxAgent
         };
 
         var subAgent = SpawnSubAgentInternal(_agent, agentConfig);
-        var foxSubAgent = new FoxAgent(_chatAgent, subAgent.Config, ConversationStore, Guid.NewGuid().ToString("N"), _workspaceManager)
+        var foxSubAgent = new FoxAgent(_chatAgent, subAgent.Config, ConversationStore, Guid.NewGuid().ToString("N"), _workspaceManager, PromptContributors)
         {
             Role = config.Role ?? Role  // Inherit role from parent by default
         };
@@ -541,10 +549,23 @@ public class AgentBuilder
     private ChatHistoryProvider? _chatHistoryProvider;
     private WorkspaceManager _workspaceManager;
     private SessionManager? _sessionManager;
-    
+    private readonly PromptContributorRegistry _promptContributorRegistry = new();
+    private SkillRegistry? _pendingSkillsRegistry; // set by WithSkillsRegistry, consumed in Build()
+
     public AgentBuilder(ToolRegistry toolRegistry)
     {
         _toolRegistry = toolRegistry;
+    }
+
+    /// <summary>
+    /// Register a prompt contributor that injects dynamic content into the system prompt
+    /// before every LLM call. Contributors can also be added at runtime via
+    /// <see cref="FoxAgent.PromptContributors"/>.
+    /// </summary>
+    public AgentBuilder WithPromptContributor(IPromptContributor contributor)
+    {
+        _promptContributorRegistry.Add(contributor);
+        return this;
     }
 
     public AgentBuilder WithName(string name)
@@ -605,12 +626,18 @@ public class AgentBuilder
     {
         _skillRegistry = skillRegistry;
         _config.SkillRegistry = skillRegistry;
+        // Auto-register contributor — will surface skills enabled after Build()
+        // The build-time skill snapshot is recorded in Build() when the contributor is created.
+        _pendingSkillsRegistry = skillRegistry;
         return this;
     }
 
     public AgentBuilder WithMCPClient(MCPClient mcpClient)
     {
         _mcpClient = mcpClient;
+        // Auto-register: injects connected MCP server list into system prompt each turn
+        _promptContributorRegistry.Remove("mcp-servers"); // idempotent re-set
+        _promptContributorRegistry.Add(new MCPServerContributor(mcpClient));
         return this;
     }
 
@@ -1066,6 +1093,19 @@ public class AgentBuilder
         {
             _config.Tools.AddRange(tools);
         }
+
+        // Snapshot tool names at build time — DynamicAgentMiddleware will only surface
+        // tools registered AFTER this point (avoiding duplicates with the static set).
+        var baselineToolNames = _toolRegistry.GetAll().Select(t => t.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        // Register RuntimeSkillsContributor now that we know the build-time skill set.
+        // Deferred from WithSkillsRegistry() so we can pass the accurate baseline names.
+        if (_pendingSkillsRegistry != null)
+        {
+            var buildTimeSkillNames = _pendingSkillsRegistry.GetEnabledSkills().Select(s => s.Name);
+            _promptContributorRegistry.Remove("runtime-skills"); // idempotent re-set
+            _promptContributorRegistry.Add(new RuntimeSkillsContributor(_pendingSkillsRegistry, buildTimeSkillNames));
+        }
         //var toolCalls = tools?.Select(t => new
         //{
         //    type = "function",
@@ -1125,6 +1165,18 @@ public class AgentBuilder
         //    .Build();
 
         var agentBuilder = chatClient.AsBuilder();
+
+        // Install dynamic middleware — wraps the IChatClient so every LLM call (streaming
+        // and non-streaming) automatically receives up-to-date tools and prompt addons.
+        // Capture locals so the closure does not root the entire AgentBuilder.
+        var toolRegistry = _toolRegistry;
+        var promptRegistry = _promptContributorRegistry;
+        agentBuilder.Use(inner => new DynamicAgentMiddleware(
+            inner,
+            toolRegistry,
+            promptRegistry,
+            baselineToolNames,
+            def => CreateAgentTool(def)));
 
         if (_compactionConfig != null)
         {
@@ -1193,7 +1245,7 @@ public class AgentBuilder
         _logger?.LogInformation("Building FoxAgent '{AgentName}' with {ToolCount} tools", _config.Name, tools.Count);
 
         
-        var foxAgent = new FoxAgent(agent, _config, _conversationStore!, "main", _workspaceManager, _logger);
+        var foxAgent = new FoxAgent(agent, _config, _conversationStore!, "main", _workspaceManager, _promptContributorRegistry, _logger);
 
         if (_sessionManager != null)
             foxAgent.SessionManager = _sessionManager;
