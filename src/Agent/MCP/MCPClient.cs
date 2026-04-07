@@ -478,17 +478,27 @@ public class MCPClient
         => AddServerAsync(name, url, 30, null);
     
     /// <summary>
-    /// Remove an MCP server
+    /// Remove an MCP server and unregister its wrapped tools.
     /// </summary>
-    public void RemoveServer(string name)
+    public async Task RemoveServerAsync(string name)
     {
         if (_servers.TryGetValue(name, out var server))
         {
             server.Disconnect();
             _servers.Remove(name);
+
+            var wrappersToRemove = _toolRegistry.GetAll()
+                .OfType<MCPToolWrapper>()
+                .Where(w => w.ServerName.Equals(name, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            foreach (var wrapper in wrappersToRemove)
+            {
+                await _toolRegistry.UnregisterAsync(wrapper.Name);
+            }
         }
     }
-    
+
     /// <summary>
     /// Get all connected servers
     /// </summary>
@@ -521,6 +531,9 @@ public class MCPToolWrapper : ITool
         _server = server;
         _definition = definition;
     }
+
+    public string ServerName => _server.Name;
+    public string ToolName => _definition.Name;
     
     public async Task<ToolResult> ExecuteAsync(Dictionary<string, object?> arguments)
     {

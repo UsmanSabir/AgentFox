@@ -371,6 +371,8 @@ public class PairingStatus
     public DateTime? PairedAt { get; set; }
 }
 
+#region Telemgram
+
 /// <summary>
 /// Telegram Channel Integration — long-polling mode.
 /// One bot instance handles messages from multiple chats; each chat gets its own session.
@@ -491,7 +493,7 @@ public class TelegramChannel : Channel
             Type = MessageType.Text,
             Metadata = new Dictionary<string, string>
             {
-                ["chat_id"]    = chatId.ToString(),
+                ["chat_id"] = chatId.ToString(),
                 ["message_id"] = msg.MessageId.ToString()
             }
         };
@@ -586,37 +588,39 @@ public class BotInfo
 
 internal class TgApiResponse<T>
 {
-    [JsonProperty("ok")]     public bool Ok { get; set; }
+    [JsonProperty("ok")] public bool Ok { get; set; }
     [JsonProperty("result")] public T? Result { get; set; }
 }
 
 internal class TgUpdate
 {
     [JsonProperty("update_id")] public long UpdateId { get; set; }
-    [JsonProperty("message")]   public TgMessage? Message { get; set; }
+    [JsonProperty("message")] public TgMessage? Message { get; set; }
 }
 
 internal class TgMessage
 {
     [JsonProperty("message_id")] public long MessageId { get; set; }
-    [JsonProperty("from")]       public TgUser? From { get; set; }
-    [JsonProperty("chat")]       public TgChat Chat { get; set; } = new();
-    [JsonProperty("text")]       public string? Text { get; set; }
+    [JsonProperty("from")] public TgUser? From { get; set; }
+    [JsonProperty("chat")] public TgChat Chat { get; set; } = new();
+    [JsonProperty("text")] public string? Text { get; set; }
 }
 
 internal class TgChat
 {
-    [JsonProperty("id")]   public long Id { get; set; }
+    [JsonProperty("id")] public long Id { get; set; }
     [JsonProperty("type")] public string Type { get; set; } = string.Empty;
 }
 
 internal class TgUser
 {
-    [JsonProperty("id")]         public long Id { get; set; }
+    [JsonProperty("id")] public long Id { get; set; }
     [JsonProperty("first_name")] public string FirstName { get; set; } = string.Empty;
-    [JsonProperty("last_name")]  public string? LastName { get; set; }
-    [JsonProperty("username")]   public string? Username { get; set; }
+    [JsonProperty("last_name")] public string? LastName { get; set; }
+    [JsonProperty("username")] public string? Username { get; set; }
 }
+
+#endregion
 
 /// <summary>
 /// Microsoft Teams Channel Integration

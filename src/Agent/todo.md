@@ -2,6 +2,7 @@
 - [x] Agent/sub-agent interruption and resume — commands (list/pause/resume/stop/kill), startup recovery
 - [x] TUI (onboarding, agent, doctor and other commands) Spectre.Console
 - [x] Stream response
+- [ ] Add prompt caching
 - [ ] Checkpoints : https://learn.microsoft.com/en-us/agent-framework/workflows/checkpoints?pivots=programming-language-csharp
 - Add health check/doctor on every configurable feature like llm configs, workspace dir, memory etc. Agent modifies/configure itself
 - Plugins support

@@ -204,6 +204,8 @@ public class FoxAgent
             }
 
             var runOptions = new AgentRunOptions();
+            //TODO: Look into prompt caching
+            //runOptions.AdditionalProperties = new AdditionalPropertiesDictionary { { "prompt_cache_key", "my-shared-context-v1" } };
 
             // Proactive recall: inject relevant long-term memories as context preamble
             var memoryContext = await BuildMemoryContextAsync(_agent.Memory, task);

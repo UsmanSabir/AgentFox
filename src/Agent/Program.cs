@@ -280,6 +280,7 @@ class Program
         var skillRegistry = await CreateSkillRegistryAsync(toolRegistry, configuration);
         var mcpClient = await CreateAndInitializeMcpClientAsync(toolRegistry, configuration);
 
+        var appConfigPath = ResolveAppSettingsPath();
         var longTermMemory = MemoryBackendFactory.CreateLongTermStorage(configuration, workspaceManager);
         var memory = new HybridMemory(100, longTermMemory);
 
@@ -541,6 +542,11 @@ class Program
             logger: sp.GetRequiredService<ILogger<SpawnBackgroundSubAgentTool>>()
         );
         toolRegistry.Register(spawnBgTool);
+
+        toolRegistry.Register(new ManageMCPTool(
+            sp.GetRequiredService<MCPClient>(),
+            ResolveAppSettingsPath(),
+            sp.GetRequiredService<ILogger<ManageMCPTool>>()));
 
         var agent = BuildAgent(sp, systemPrompt, withLogger: true);
         agentRef = agent; // resolve the lazy reference used by SpawnSubAgentTool
@@ -1071,11 +1077,24 @@ class Program
             else
             {
                 var pollingTimeout = tgSection.GetValue<int>("PollingTimeoutSeconds", 30);
-                manager.AddChannel(new TelegramChannel(
-                    token,
-                    pollingTimeout,
-                    sp.GetRequiredService<ILogger<TelegramChannel>>()));
-                AnsiConsole.MarkupLine("[bold green]✓[/]  Telegram channel added [dim](long-polling)[/]");
+                var (telegramChannel, error) = ChannelFactory.Create("Telegram", new Dictionary<string, string>()
+                {
+                    ["BotToken"] = token,
+                    ["PollingTimeoutSeconds"] = pollingTimeout.ToString()
+                });
+                if (telegramChannel != null)
+                {
+                    //manager.AddChannel(new TelegramChannel(
+                    //    token,
+                    //    pollingTimeout,
+                    //    sp.GetRequiredService<ILogger<TelegramChannel>>()));
+                    //AnsiConsole.MarkupLine("[bold green]✓[/]  Telegram channel added [dim](long-polling)[/]");
+                    manager.AddChannel(telegramChannel);
+                }
+                else
+                {
+                    AnsiConsole.MarkupLine($"[bold yellow]⚠[/]  Telegram: {error}");
+                }
             }
         }
 
