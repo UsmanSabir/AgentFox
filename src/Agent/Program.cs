@@ -18,6 +18,7 @@ using Spectre.Console;
 using Spectre.Console.Rendering;
 using System.Text;
 using System.Threading.Channels;
+using AgentFox.Helers;
 using SysChannel = System.Threading.Channels.Channel;
 using SystemPromptBuilder = AgentFox.LLM.SystemPromptBuilder;
 
@@ -1730,6 +1731,9 @@ class Program
     /// </summary>
     static string ReadMultilineInput()
     {
+        var userPrompt = AnsiConsole.Prompt(new PromptBox() { Placeholder = "Your prompt" });
+        return userPrompt;
+
         const string prompt = "\x1b[1;38;5;33m>\x1b[0m "; // bold dodgerblue1 ">" + space
         const string continuation = "  ";                   // aligns with text after "> "
 
