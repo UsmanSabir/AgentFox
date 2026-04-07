@@ -1,7 +1,8 @@
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using AgentFox.MCP;
 using Microsoft.Extensions.Logging;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 
 namespace AgentFox.Tools;
 
@@ -20,8 +21,6 @@ public class ManageMCPTool : BaseTool
     private readonly MCPClient _mcpClient;
     private readonly string _configFilePath;
     private readonly ILogger? _logger;
-
-    private static readonly JsonSerializerOptions _jsonWriteOpts = new() { WriteIndented = true };
 
     public ManageMCPTool(MCPClient mcpClient, string configFilePath, ILogger? logger = null)
     {
@@ -118,7 +117,7 @@ public class ManageMCPTool : BaseTool
 
         var connected = await _mcpClient.AddServerAsync(serverName, url, timeout <= 0 ? 30 : timeout, headers);
         if (!connected)
-            return ToolResult.Fail($"MCP server '{serverName}' was created but failed to connect. Check the URL and server availability.");
+            return ToolResult.Fail($"MCP server '{serverName}' was created but failed to connect. Check the URL and server availability or authorization header.");
 
         var persistError = PersistServerAdd(serverName, url, timeout <= 0 ? 30 : timeout, headers);
         if (persistError != null)
@@ -166,7 +165,7 @@ public class ManageMCPTool : BaseTool
 
         try
         {
-            return JsonSerializer.Deserialize<Dictionary<string, string>>(headersJson)
+            return System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(headersJson)
                 ?? new Dictionary<string, string>();
         }
         catch (Exception ex)
@@ -183,26 +182,26 @@ public class ManageMCPTool : BaseTool
             var root = ReadRoot();
             if (root == null) return "Cannot read appsettings.json";
 
-            if (root["MCP"] is not JsonObject mcp)
+            if (root["MCP"] is not JObject mcp)
             {
-                mcp = new JsonObject();
+                mcp = new JObject();
                 root["MCP"] = mcp;
             }
 
-            if (mcp["Servers"] is not JsonArray servers)
+            if (mcp["Servers"] is not JArray servers)
             {
-                servers = new JsonArray();
+                servers = new JArray();
                 mcp["Servers"] = servers;
             }
 
-            var existing = servers.OfType<JsonObject>()
-                .FirstOrDefault(obj => obj["Name"]?.ToString()?.Equals(serverName, StringComparison.OrdinalIgnoreCase) == true);
+            var existing = servers.OfType<JObject>()
+                .FirstOrDefault(obj => string.Equals(obj["Name"]?.ToString(), serverName, StringComparison.OrdinalIgnoreCase));
             if (existing != null)
             {
                 servers.Remove(existing);
             }
 
-            var serverEntry = new JsonObject
+            var serverEntry = new JObject
             {
                 ["Name"] = serverName,
                 ["Url"] = url,
@@ -211,7 +210,7 @@ public class ManageMCPTool : BaseTool
 
             if (headers != null && headers.Count > 0)
             {
-                var headersObj = new JsonObject();
+                var headersObj = new JObject();
                 foreach (var (key, value) in headers)
                     headersObj[key] = value;
                 serverEntry["Headers"] = headersObj;
@@ -234,11 +233,11 @@ public class ManageMCPTool : BaseTool
             var root = ReadRoot();
             if (root == null) return "Cannot read appsettings.json";
 
-            if (root["MCP"] is not JsonObject mcp) return null;
-            if (mcp["Servers"] is not JsonArray servers) return null;
+            if (root["MCP"] is not JObject mcp) return null;
+            if (mcp["Servers"] is not JArray servers) return null;
 
-            var entry = servers.OfType<JsonObject>()
-                .FirstOrDefault(obj => obj["Name"]?.ToString()?.Equals(serverName, StringComparison.OrdinalIgnoreCase) == true);
+            var entry = servers.OfType<JObject>()
+                .FirstOrDefault(obj => string.Equals(obj["Name"]?.ToString(), serverName, StringComparison.OrdinalIgnoreCase));
 
             if (entry != null)
             {
@@ -254,14 +253,19 @@ public class ManageMCPTool : BaseTool
         }
     }
 
-    private JsonObject? ReadRoot()
+    private JObject? ReadRoot()
     {
         var json = File.ReadAllText(_configFilePath);
-        return JsonNode.Parse(json) as JsonObject;
+        return JObject.Parse(json, new JsonLoadSettings
+        {
+            CommentHandling = CommentHandling.Ignore,
+            LineInfoHandling = LineInfoHandling.Ignore
+        });
     }
 
-    private void WriteRoot(JsonObject root)
+    private void WriteRoot(JObject root)
     {
-        File.WriteAllText(_configFilePath, root.ToJsonString(_jsonWriteOpts));
+        File.WriteAllText(_configFilePath, root.ToString(Formatting.Indented));
     }
 }
+
