@@ -406,6 +406,7 @@ class Program
 
         var systemPrompt = new SystemPromptBuilder()
             .WithPersona(SystemPromptConfig.AgentPrompts.DeveloperAssistant)
+            //.WithAllTools(toolRegistry) TODO: Analyze 
             .WithTools("shell", "read_file", "write_file", "list_files", "search_files",
                        "make_directory", "delete", "add_memory", "search_memory", "get_all_memories",
                        "spawn_subagent: Spawn a sub-agent for complex tasks (waits for result)",
@@ -485,6 +486,7 @@ class Program
 
         var systemPrompt = new SystemPromptBuilder()
             .WithPersona(SystemPromptConfig.AgentPrompts.DeveloperAssistant)
+            //.WithAllTools(toolRegistry) TODO: Analyze 
             .WithTools(
                 "shell: Execute shell commands",
                 "read_file: Read file contents",

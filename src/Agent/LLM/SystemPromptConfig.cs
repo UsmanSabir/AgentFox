@@ -1,4 +1,5 @@
 using System.Text;
+using AgentFox.Tools;
 
 namespace AgentFox.LLM;
 
@@ -369,6 +370,26 @@ public class SystemPromptBuilder
     }
 
     /// <summary>
+    /// Dynamically add all tools from the ToolRegistry to the prompt
+    /// </summary>
+    public SystemPromptBuilder WithAllTools(ToolRegistry toolRegistry)
+    {
+        var allTools = toolRegistry.GetAll();
+        if (allTools.Any())
+        {
+            _prompt.AppendLine();
+            _prompt.AppendLine("AVAILABLE TOOLS:");
+            _prompt.AppendLine("You have access to the following tools. Use them when needed to accomplish tasks:");
+            _prompt.AppendLine("Note: Additional tools may be added dynamically at runtime (e.g., MCP server tools).");
+            foreach (var tool in allTools)
+            {
+                _prompt.AppendLine($"- {tool.Name}: {tool.Description}");
+            }
+        }
+        return this;
+    }
+
+    /// <summary>
     /// Add enabled skills to the prompt
     /// </summary>
     public SystemPromptBuilder WithSkills(params string[] skillNames)
@@ -477,7 +498,7 @@ public class SystemPromptBuilder
     {
         var result = new StringBuilder(_prompt.ToString());
 
-        // Add tools section
+        // Add tools section (legacy support for WithTools method)
         if (_tools.Count > 0)
         {
             result.AppendLine();
