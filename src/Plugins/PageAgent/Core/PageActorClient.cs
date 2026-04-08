@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using PageAgent.Config;
@@ -7,25 +8,43 @@ using PuppeteerSharp;
 namespace PageAgent.Core;
 
 /// <summary>
-/// Wraps PuppeteerSharp to provide high-level, human-like browser interactions:
-/// navigation, page analysis, content extraction, and smart element clicking.
+/// Wraps PuppeteerSharp to provide high-level browser interactions.
 ///
-/// One instance = one browser session. Create a fresh instance per agent run
-/// and dispose when finished (<see cref="IAsyncDisposable"/>).
+/// Supports explicit <see cref="KillAsync"/> and <see cref="RestartAsync"/> so the
+/// autonomous agent can recover from crashes or hung pages without losing the profile
+/// copy or having to re-initialize from scratch.
 /// </summary>
 public sealed class PageActorClient : IAsyncDisposable
 {
     private readonly BrowserAgentOptions _options;
     private readonly ILogger<PageActorClient> _logger;
 
+    // ── Browser state ────────────────────────────────────────────────────────
     private IBrowser? _browser;
     private IPage? _page;
     private bool _initialized;
-    private string? _tempProfileDir;   // non-null when we created a profile copy
+    private volatile bool _crashed;
+
+    // ── Saved launch parameters (reused on restart) ──────────────────────────
+    private string? _resolvedExecutablePath;
+    private string? _resolvedUserDataDir;
+    private string? _tempProfileDir;   // non-null when we own a profile copy
+
     private readonly SemaphoreSlim _initLock = new(1, 1);
+
+    // ── Public state ─────────────────────────────────────────────────────────
 
     /// <summary>Current page URL reported by the browser.</summary>
     public string CurrentUrl => _page?.Url ?? "about:blank";
+
+    /// <summary>
+    /// True when the browser process has disconnected unexpectedly (crash, OOM, etc.).
+    /// Cleared automatically by <see cref="RestartAsync"/>.
+    /// </summary>
+    public bool IsCrashed => _crashed;
+
+    /// <summary>True when the browser is running and has not crashed.</summary>
+    public bool IsAlive => _initialized && !_crashed;
 
     public PageActorClient(IOptions<BrowserAgentOptions> options, ILogger<PageActorClient> logger)
     {
@@ -36,9 +55,8 @@ public sealed class PageActorClient : IAsyncDisposable
     // ── Lifecycle ────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Launches the browser. Prefers a system-installed Chromium/Chrome/Edge;
-    /// downloads Chromium automatically when no system browser is found.
-    /// Safe to call multiple times (idempotent after the first call).
+    /// Launches the browser for the first time.
+    /// Idempotent — safe to call multiple times.
     /// </summary>
     public async Task InitializeAsync(CancellationToken ct = default)
     {
@@ -47,62 +65,58 @@ public sealed class PageActorClient : IAsyncDisposable
         {
             if (_initialized) return;
 
-            var executablePath = BrowserSystemDetector.ExecutablePath;
+            _resolvedExecutablePath = await EnsureExecutableAsync(ct);
+            _resolvedUserDataDir    = ResolveUserDataDir();
 
-            if (executablePath is null)
-            {
-                _logger.LogInformation(
-                    "No system browser found. Downloading Chromium (this may take a moment)...");
-                var fetcher = new BrowserFetcher();
-                await fetcher.DownloadAsync();
-                _logger.LogInformation("Chromium download complete.");
-            }
-            else
-            {
-                _logger.LogInformation("Using system browser: {Path}", executablePath);
-            }
-
-            var userDataDir = ResolveUserDataDir();
-
-            var launchOptions = new LaunchOptions
-            {
-                Headless = _options.Headless,
-                ExecutablePath = executablePath,  // null → use PuppeteerSharp's downloaded copy
-                UserDataDir = userDataDir,        // null → ephemeral profile
-                Args =
-                [
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--window-size=1280,900",
-                ],
-            };
-
-            _browser = await Puppeteer.LaunchAsync(launchOptions);
-            _page = await _browser.NewPageAsync();
-
-            await _page.SetViewportAsync(new ViewPortOptions
-            {
-                Width = _options.ViewportWidth,
-                Height = _options.ViewportHeight,
-            });
-
-            await _page.SetUserAgentAsync(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-                "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36");
-
-            // Suppress console noise from pages
-            _page.Console += (_, e) =>
-                _logger.LogTrace("[browser-console] {Type}: {Text}", e.Message.Type, e.Message.Text);
+            await LaunchBrowserCoreAsync(_resolvedExecutablePath, _resolvedUserDataDir);
 
             _initialized = true;
-            _logger.LogDebug("Browser session ready.");
+            _logger.LogInformation("Browser session ready.");
         }
         finally
         {
             _initLock.Release();
         }
+    }
+
+    /// <summary>
+    /// Forcefully kills the browser process. The instance remains usable —
+    /// call <see cref="RestartAsync"/> to bring it back up.
+    /// </summary>
+    public async Task KillAsync()
+    {
+        _logger.LogWarning("Killing browser process.");
+
+        if (_page is not null)
+        {
+            try { await _page.CloseAsync(); } catch { }
+            try { await _page.DisposeAsync(); } catch { }
+            _page = null;
+        }
+
+        if (_browser is not null)
+        {
+            try { await _browser.CloseAsync(); } catch { }
+            try { await _browser.DisposeAsync(); } catch { }
+            _browser = null;
+        }
+    }
+
+    /// <summary>
+    /// Kills the current browser process and launches a fresh one using the same
+    /// executable and user-data directory (including the profile copy, if any).
+    /// The agent can continue working without re-copying the profile.
+    /// </summary>
+    public async Task RestartAsync(CancellationToken ct = default)
+    {
+        _logger.LogInformation("Restarting browser...");
+
+        await KillAsync();
+        _crashed = false;
+
+        await LaunchBrowserCoreAsync(_resolvedExecutablePath, _resolvedUserDataDir);
+
+        _logger.LogInformation("Browser restarted successfully.");
     }
 
     // ── High-level actions ───────────────────────────────────────────────────
@@ -137,33 +151,24 @@ public sealed class PageActorClient : IAsyncDisposable
     /// </summary>
     public async Task<PageAnalysis> AnalyzePageAsync(CancellationToken ct = default)
     {
-        EnsureInitialized();
+        EnsureAlive();
         try
         {
-            var title = await _page!.GetTitleAsync();
-
+            var title       = await _page!.GetTitleAsync();
             var headingsJson = await _page.EvaluateExpressionAsync<string>(
                 DomAnalyzer.HeadingsScript(_options.MaxHeadings));
-
-            var linksJson = await _page.EvaluateExpressionAsync<string>(
+            var linksJson   = await _page.EvaluateExpressionAsync<string>(
                 DomAnalyzer.LinksScript(_options.MaxLinks));
 
             var headings = DomAnalyzer.DeserialiseStrings(headingsJson);
-            var rawLinks = DomAnalyzer.DeserialiseLinks(linksJson);
-            var links = rawLinks
+            var links    = DomAnalyzer.DeserialiseLinks(linksJson)
                 .Select(l => new LinkInfo { Text = l.Text, Href = l.Href })
                 .ToList();
 
-            _logger.LogDebug("Analyzed page: \"{Title}\" — {H} headings, {L} links",
+            _logger.LogDebug("Analyzed: \"{Title}\" — {H} headings, {L} links",
                 title, headings.Count, links.Count);
 
-            return new PageAnalysis
-            {
-                Title = title,
-                Url = _page.Url,
-                Headings = headings,
-                Links = links,
-            };
+            return new PageAnalysis { Title = title, Url = _page.Url, Headings = headings, Links = links };
         }
         catch (Exception ex)
         {
@@ -174,17 +179,16 @@ public sealed class PageActorClient : IAsyncDisposable
 
     /// <summary>
     /// Extracts the visible text of the current page, stripping navigation,
-    /// footers, scripts, and ads. Content is truncated to <c>MaxExtractLength</c>.
+    /// footers, scripts, and ads. Truncated to <c>MaxExtractLength</c> characters.
     /// </summary>
     public async Task<string> ExtractContentAsync(CancellationToken ct = default)
     {
-        EnsureInitialized();
+        EnsureAlive();
         try
         {
             var text = await _page!.EvaluateExpressionAsync<string>(
                 DomAnalyzer.TextContentScript(_options.MaxExtractLength));
-
-            _logger.LogDebug("Extracted {Chars} characters from {Url}", text?.Length ?? 0, _page.Url);
+            _logger.LogDebug("Extracted {Chars} chars from {Url}", text?.Length ?? 0, _page.Url);
             return text ?? string.Empty;
         }
         catch (Exception ex)
@@ -197,11 +201,10 @@ public sealed class PageActorClient : IAsyncDisposable
     /// <summary>
     /// Finds and clicks the best-matching link/button for <paramref name="targetText"/>
     /// using cascading fuzzy matching (exact → contains → word-level).
-    /// Waits briefly for any resulting navigation to settle.
     /// </summary>
     public async Task<string> SmartClickAsync(string targetText, CancellationToken ct = default)
     {
-        EnsureInitialized();
+        EnsureAlive();
         try
         {
             var result = await _page!.EvaluateExpressionAsync<string>(
@@ -209,9 +212,7 @@ public sealed class PageActorClient : IAsyncDisposable
 
             if (result?.StartsWith("clicked:", StringComparison.OrdinalIgnoreCase) == true)
             {
-                _logger.LogInformation("Clicked element: {Label}", result[8..]);
-
-                // Best-effort wait — navigation may or may not occur after a click
+                _logger.LogInformation("Clicked: {Label}", result[8..]);
                 try
                 {
                     await _page.WaitForNavigationAsync(new NavigationOptions
@@ -220,11 +221,7 @@ public sealed class PageActorClient : IAsyncDisposable
                         Timeout = 6_000,
                     });
                 }
-                catch (TimeoutException)
-                {
-                    // No full navigation triggered; that's fine (SPA route, modal, etc.)
-                }
-
+                catch (TimeoutException) { /* SPA route or modal — no full navigation, that's fine */ }
                 return result;
             }
 
@@ -238,13 +235,95 @@ public sealed class PageActorClient : IAsyncDisposable
         }
     }
 
-    // ── Internal helpers ─────────────────────────────────────────────────────
+    // ── Internal: launch ─────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Core launch logic — creates <see cref="_browser"/> and <see cref="_page"/>,
+    /// subscribes to the <c>Disconnected</c> event for crash detection, and configures
+    /// the page viewport + user-agent. Does NOT touch <see cref="_tempProfileDir"/>.
+    /// </summary>
+    private async Task LaunchBrowserCoreAsync(string? executablePath, string? userDataDir)
+    {
+        // When using the profile directly (no copy), free any process holding the dir
+        // and remove stale lock files so Chrome accepts a new instance.
+        if (userDataDir is not null && !_options.UseProfileCopy)
+        {
+            if (_options.KillConflictingBrowser)
+                await KillConflictingBrowserProcessesAsync(executablePath);
+
+            CleanProfileLockFiles(userDataDir);
+        }
+
+        var launchOptions = new LaunchOptions
+        {
+            Headless     = _options.Headless,
+            ExecutablePath = executablePath,
+            UserDataDir  = userDataDir,
+            Args =
+            [
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--window-size=1280,900",
+            ],
+        };
+
+        _browser = await Puppeteer.LaunchAsync(launchOptions);
+
+        // ── Crash detection ──────────────────────────────────────────────────
+        _browser.Disconnected += (_, _) =>
+        {
+            if (!_crashed)   // only log once
+            {
+                _crashed = true;
+                _logger.LogWarning("Browser disconnected unexpectedly (crash or external kill).");
+            }
+        };
+
+        _page = await _browser.NewPageAsync();
+
+        await _page.SetViewportAsync(new ViewPortOptions
+        {
+            Width  = _options.ViewportWidth,
+            Height = _options.ViewportHeight,
+        });
+
+        await _page.SetUserAgentAsync(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36");
+
+        _page.Console += (_, e) =>
+            _logger.LogTrace("[browser] {Type}: {Text}", e.Message.Type, e.Message.Text);
+    }
+
+    /// <summary>
+    /// Ensures a browser executable is available, downloading Chromium if needed.
+    /// Returns the path (or null when PuppeteerSharp's bundled copy should be used).
+    /// </summary>
+    private async Task<string?> EnsureExecutableAsync(CancellationToken ct)
+    {
+        var path = BrowserSystemDetector.ExecutablePath;
+        if (path is not null)
+        {
+            _logger.LogInformation("Using system browser: {Path}", path);
+            return path;
+        }
+
+        _logger.LogInformation(
+            "No system browser found. Downloading Chromium (this may take a moment)...");
+        var fetcher = new BrowserFetcher();
+        await fetcher.DownloadAsync();
+        _logger.LogInformation("Chromium download complete.");
+        return null;
+    }
+
+    // ── Internal: navigation ─────────────────────────────────────────────────
 
     private async Task<string> NavigateAsync(string url, CancellationToken ct)
     {
-        EnsureInitialized();
+        EnsureAlive();
 
-        Exception? lastEx = null;
         for (int attempt = 1; attempt <= _options.RetryAttempts; attempt++)
         {
             ct.ThrowIfCancellationRequested();
@@ -253,51 +332,38 @@ public sealed class PageActorClient : IAsyncDisposable
                 await _page!.GoToAsync(url, new NavigationOptions
                 {
                     WaitUntil = [WaitUntilNavigation.Networkidle2],
-                    Timeout = _options.NavigationTimeoutMs,
+                    Timeout   = _options.NavigationTimeoutMs,
                 });
-
                 _logger.LogDebug("Navigated to: {Url}", _page.Url);
                 return $"Navigated to: {_page.Url}";
             }
             catch (Exception ex) when (attempt < _options.RetryAttempts)
             {
-                lastEx = ex;
-                _logger.LogWarning(
-                    "Navigation attempt {Attempt}/{Max} failed for {Url}: {Error}",
-                    attempt, _options.RetryAttempts, url, ex.Message);
-
+                _logger.LogWarning("Navigation attempt {A}/{Max} failed: {Err}",
+                    attempt, _options.RetryAttempts, ex.Message);
                 await Task.Delay(TimeSpan.FromSeconds(attempt * 2), ct);
             }
         }
 
-        // Final attempt — let the exception propagate
+        // Final attempt — propagate exception
         await _page!.GoToAsync(url, new NavigationOptions
         {
             WaitUntil = [WaitUntilNavigation.Networkidle2],
-            Timeout = _options.NavigationTimeoutMs,
+            Timeout   = _options.NavigationTimeoutMs,
         });
-
         return $"Navigated to: {_page.Url}";
     }
 
-    private void EnsureInitialized()
-    {
-        if (!_initialized)
-            throw new InvalidOperationException(
-                "PageActorClient is not initialised. Call InitializeAsync first.");
-    }
+    // ── Internal: profile ────────────────────────────────────────────────────
 
     /// <summary>
-    /// Resolves which user-data directory (if any) to pass to the browser.
-    /// Priority: explicit config → auto-detect system profile → none (ephemeral).
-    /// When <c>UseProfileCopy</c> is true, copies the directory to a temp path first.
+    /// Resolves which user-data directory to pass on first launch.
+    /// On restart this is skipped — <see cref="_resolvedUserDataDir"/> is reused directly.
     /// </summary>
     private string? ResolveUserDataDir()
     {
-        // 1. Explicit path from config
         string? sourceDir = _options.UserDataDir;
 
-        // 2. Auto-detect the default profile for the system browser
         if (sourceDir is null && _options.UseSystemProfile)
         {
             sourceDir = BrowserSystemDetector.DefaultUserDataDir;
@@ -305,8 +371,7 @@ public sealed class PageActorClient : IAsyncDisposable
                 _logger.LogInformation("Auto-detected system profile: {Dir}", sourceDir);
         }
 
-        if (sourceDir is null)
-            return null;   // no profile → ephemeral session
+        if (sourceDir is null) return null;
 
         if (!Directory.Exists(sourceDir))
         {
@@ -315,41 +380,131 @@ public sealed class PageActorClient : IAsyncDisposable
             return null;
         }
 
-        // 3. Optional: copy to temp dir so the original browser can stay running
         if (_options.UseProfileCopy)
         {
             _tempProfileDir = Path.Combine(Path.GetTempPath(), "PageAgent_" + Guid.NewGuid().ToString("N"));
-            _logger.LogInformation(
-                "Copying profile to temp dir (UseProfileCopy=true): {Temp}", _tempProfileDir);
+            _logger.LogInformation("Copying profile → {Temp}", _tempProfileDir);
             CopyDirectory(sourceDir, _tempProfileDir);
             return _tempProfileDir;
         }
 
         _logger.LogInformation(
-            "Using existing browser profile: {Dir} — close any running browser windows first.",
-            sourceDir);
+            "Using profile directly: {Dir} — close any running browser windows first.", sourceDir);
         return sourceDir;
     }
 
-    /// <summary>Recursively copies a directory tree, skipping locked/inaccessible files.</summary>
     private static void CopyDirectory(string source, string dest)
     {
         Directory.CreateDirectory(dest);
         foreach (var file in Directory.EnumerateFiles(source))
         {
             try { File.Copy(file, Path.Combine(dest, Path.GetFileName(file)), overwrite: true); }
-            catch { /* skip locked files (e.g. LevelDB lock) */ }
+            catch { /* skip locked files */ }
         }
         foreach (var dir in Directory.EnumerateDirectories(source))
         {
             var name = Path.GetFileName(dir);
-            // Skip the cache — it's large and not needed for auth
-            if (name.Equals("Cache", StringComparison.OrdinalIgnoreCase) ||
-                name.Equals("Code Cache", StringComparison.OrdinalIgnoreCase) ||
-                name.Equals("GPUCache", StringComparison.OrdinalIgnoreCase))
+            if (name.Equals("Cache",       StringComparison.OrdinalIgnoreCase) ||
+                name.Equals("Code Cache",  StringComparison.OrdinalIgnoreCase) ||
+                name.Equals("GPUCache",    StringComparison.OrdinalIgnoreCase))
                 continue;
             CopyDirectory(dir, Path.Combine(dest, name));
         }
+    }
+
+    // ── Profile conflict resolution ───────────────────────────────────────────
+
+    /// <summary>
+    /// Finds running browser processes that match the resolved executable (or common
+    /// Chromium-family names when the executable is unknown) and kills them so the
+    /// profile directory lock is released before we launch.
+    ///
+    /// A brief delay afterwards lets the OS close any remaining file handles.
+    /// </summary>
+    private async Task KillConflictingBrowserProcessesAsync(string? executablePath)
+    {
+        // Derive process name(s) to target
+        string[] names = executablePath is not null
+            ? [Path.GetFileNameWithoutExtension(executablePath)]
+            : ["chrome", "msedge", "brave", "chromium", "chromium-browser"];
+
+        var killed = 0;
+        foreach (var name in names)
+        {
+            foreach (var proc in Process.GetProcessesByName(name))
+            {
+                try
+                {
+                    _logger.LogWarning(
+                        "Killing '{Name}' (PID {Pid}) to release profile lock.", name, proc.Id);
+                    proc.Kill(entireProcessTree: true);
+                    proc.WaitForExit(4_000);
+                    killed++;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning("Could not kill '{Name}' PID {Pid}: {Err}",
+                        name, proc.Id, ex.Message);
+                }
+                finally
+                {
+                    proc.Dispose();
+                }
+            }
+        }
+
+        if (killed > 0)
+        {
+            // Give the OS time to flush file handles before we re-open the profile
+            await Task.Delay(600);
+        }
+    }
+
+    /// <summary>
+    /// Deletes stale Chrome/Chromium lock files left in <paramref name="userDataDir"/>
+    /// after a crash or forceful kill. These prevent a fresh instance from starting.
+    /// </summary>
+    private void CleanProfileLockFiles(string userDataDir)
+    {
+        // Files Chrome/Chromium create to prevent concurrent access
+        ReadOnlySpan<string> lockFiles =
+        [
+            "SingletonLock",    // symlink on Linux/macOS; Chrome's primary lock
+            "SingletonSocket",  // Unix socket (Linux)
+            "SingletonCookie",  // macOS alternative
+            "lockfile",         // some Chromium builds
+        ];
+
+        foreach (var name in lockFiles)
+        {
+            var path = Path.Combine(userDataDir, name);
+            try
+            {
+                // File.Exists returns false for broken symlinks — use FileInfo instead
+                var info = new FileInfo(path);
+                if (info.Exists || (info.Attributes & FileAttributes.ReparsePoint) != 0)
+                {
+                    File.Delete(path);
+                    _logger.LogDebug("Removed stale lock file: {File}", name);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning("Could not remove lock file '{File}': {Err}", name, ex.Message);
+            }
+        }
+    }
+
+    // ── Guards ───────────────────────────────────────────────────────────────
+
+    private void EnsureAlive()
+    {
+        if (!_initialized)
+            throw new InvalidOperationException(
+                "PageActorClient is not initialised. Call InitializeAsync first.");
+        if (_crashed)
+            throw new InvalidOperationException(
+                "Browser has crashed. Call RestartAsync() to recover.");
     }
 
     // ── Disposal ─────────────────────────────────────────────────────────────
@@ -360,21 +515,20 @@ public sealed class PageActorClient : IAsyncDisposable
 
         if (_page is not null)
         {
-            try { await _page.CloseAsync(); } catch { /* best-effort */ }
+            try { await _page.CloseAsync(); } catch { }
             await _page.DisposeAsync();
         }
 
         if (_browser is not null)
         {
-            try { await _browser.CloseAsync(); } catch { /* best-effort */ }
+            try { await _browser.CloseAsync(); } catch { }
             await _browser.DisposeAsync();
         }
 
-        // Clean up profile copy (if we made one)
         if (_tempProfileDir is not null && Directory.Exists(_tempProfileDir))
         {
             try { Directory.Delete(_tempProfileDir, recursive: true); }
-            catch { /* best-effort */ }
+            catch { }
         }
     }
 }

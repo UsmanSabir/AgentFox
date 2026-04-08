@@ -69,10 +69,33 @@ public sealed class AutonomousPageAgent
         await browser.InitializeAsync(runCt);
 
         var runSw = Stopwatch.StartNew();
+        int restartCount = 0;
 
         for (int step = 1; step <= opts.MaxSteps; step++)
         {
             runCt.ThrowIfCancellationRequested();
+
+            // ── Crash recovery ───────────────────────────────────────────────
+            if (browser.IsCrashed)
+            {
+                if (!opts.AutoRestartOnCrash || restartCount >= opts.MaxRestarts)
+                {
+                    _logger.LogError(
+                        "Browser crashed and will not be restarted " +
+                        "(AutoRestartOnCrash={Auto}, restarts={Count}/{Max}).",
+                        opts.AutoRestartOnCrash, restartCount, opts.MaxRestarts);
+                    return BuildReport(goal, history, memory, executionLog,
+                        "Aborted: browser crashed.", completed: false);
+                }
+
+                restartCount++;
+                _logger.LogWarning(
+                    "Browser crashed — restarting ({Count}/{Max})...", restartCount, opts.MaxRestarts);
+                executionLog.AppendLine($"[Step {step:D2}] [RESTART #{restartCount}] Browser crashed — restarting");
+
+                await browser.RestartAsync(runCt);
+                _logger.LogInformation("Browser back online after crash.");
+            }
 
             _logger.LogInformation("── Step {Step}/{Max} ──", step, opts.MaxSteps);
 

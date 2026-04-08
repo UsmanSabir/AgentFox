@@ -69,7 +69,7 @@ public sealed class BrowserAgentOptions
     /// The copy is deleted automatically when the browser session ends.
     /// Default: false.
     /// </summary>
-    public bool UseProfileCopy { get; set; } = true;
+    public bool UseProfileCopy { get; set; } = false;
 
     /// <summary>
     /// When true, auto-detect the default user-data directory for the system browser
@@ -77,4 +77,26 @@ public sealed class BrowserAgentOptions
     /// <see cref="UserDataDir"/> is set explicitly. Default: false.
     /// </summary>
     public bool UseSystemProfile { get; set; } = true;
+
+    /// <summary>
+    /// Automatically restart the browser if it crashes mid-run and continue from
+    /// where the agent left off. Default: true.
+    /// </summary>
+    public bool AutoRestartOnCrash { get; set; } = true;
+
+    /// <summary>
+    /// Maximum number of automatic browser restarts allowed per run.
+    /// Prevents an infinite crash-restart loop. Default: 3.
+    /// </summary>
+    public int MaxRestarts { get; set; } = 3;
+
+    /// <summary>
+    /// When true AND <see cref="UseProfileCopy"/> is false, kill any running browser
+    /// process that holds the profile directory before launching (or restarting).
+    /// This allows the agent to take over the real browser's profile without first
+    /// closing it manually.
+    ///
+    /// ⚠ This terminates the user's browser and all its open tabs. Default: false.
+    /// </summary>
+    public bool KillConflictingBrowser { get; set; } = true;
 }
