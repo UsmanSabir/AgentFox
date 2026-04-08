@@ -5,7 +5,7 @@
 - [ ] Add prompt caching
 - [ ] Dynamic tools loading and unloading (e.g. for mcp server / plugins etc)
 - [ ] Checkpoints : https://learn.microsoft.com/en-us/agent-framework/workflows/checkpoints?pivots=programming-language-csharp
-- Add health check/doctor on every configurable feature like llm configs, workspace dir, memory etc. Agent modifies/configure itself
+- [x] Add health check/doctor on every configurable feature like llm configs, workspace dir, memory etc. Agent modifies/configure itself
 - Plugins support
 - Add channels like telegram, slack, whatsapp, ms-teams etc
 - Agent Skills 
