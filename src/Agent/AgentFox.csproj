@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -43,8 +43,7 @@
   </ItemGroup>
 
   <ItemGroup>
-	  <ProjectReference Include="..\AgentFox.Plugins\AgentFox.Plugins.csproj" >
-		  <Private>false</Private>
+	  <ProjectReference Include="..\AgentFox.Plugins\AgentFox.Plugins.csproj">
 	  </ProjectReference>
     <ProjectReference Include="..\LocalEmbeddings\LocalEmbeddings.csproj" />
   </ItemGroup>
