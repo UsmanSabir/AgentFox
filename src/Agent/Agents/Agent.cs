@@ -14,6 +14,7 @@ using OpenAI.Chat;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using AgentFox.Plugins.Interfaces;
 using SystemPromptBuilder = AgentFox.LLM.SystemPromptBuilder;
 
 namespace AgentFox.Agents;

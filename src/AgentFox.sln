@@ -10,6 +10,8 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{02EA681E
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LocalEmbeddings.Test", "..\tests\LocalEmbeddings.Test\LocalEmbeddings.Test.csproj", "{4970C96D-099F-4501-B596-05DF32730BC1}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AgentFox.Plugins", "AgentFox.Plugins\AgentFox.Plugins.csproj", "{48149EE8-0F3D-4A44-A2F8-304E7AC47A9D}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -28,6 +30,10 @@ Global
 		{4970C96D-099F-4501-B596-05DF32730BC1}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{4970C96D-099F-4501-B596-05DF32730BC1}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{4970C96D-099F-4501-B596-05DF32730BC1}.Release|Any CPU.Build.0 = Release|Any CPU
+		{48149EE8-0F3D-4A44-A2F8-304E7AC47A9D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{48149EE8-0F3D-4A44-A2F8-304E7AC47A9D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{48149EE8-0F3D-4A44-A2F8-304E7AC47A9D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{48149EE8-0F3D-4A44-A2F8-304E7AC47A9D}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

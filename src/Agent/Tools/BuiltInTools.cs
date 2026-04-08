@@ -1,5 +1,6 @@
 using System.Diagnostics;
-using AgentFox.Models;
+using AgentFox.Plugins.Interfaces;
+using ToolParameter = AgentFox.Plugins.Interfaces.ToolParameter;
 
 namespace AgentFox.Tools;
 

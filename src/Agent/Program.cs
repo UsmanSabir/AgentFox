@@ -6,12 +6,16 @@ using AgentFox.LLM;
 using AgentFox.MCP;
 using AgentFox.Memory;
 using AgentFox.Models;
+using AgentFox.Modules.Loaders;
+using AgentFox.Plugins.Interfaces;
 using AgentFox.Sessions;
 using AgentFox.Skills;
 using AgentFox.Tools;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using OpenTelemetry.Trace;
 using Spectre.Console;
@@ -146,6 +150,63 @@ class Program
 
         bool runDoctor = args.Contains("--doctor");
         bool doctorAutoFix = args.Contains("--fix");
+
+        //=============== Start Block ===============
+        var builder = WebApplication.CreateBuilder(args);
+
+        var enabledModules = builder.Configuration["Modules"]?.Split(',')
+                             ?? new[] { "cli", "web" };
+        bool isCliOnly = enabledModules.Length == 1 && enabledModules.Contains("cli");
+        bool requiresWeb = enabledModules.Contains("api") || enabledModules.Contains("web");
+        var modules = LoadPluginsAndModules(builder);
+
+        foreach (var module in modules.Where(m => enabledModules.Contains(m.Name)))
+        {
+            module.RegisterServices(builder.Services, builder.Configuration);
+        }
+
+        var app = builder.Build();
+
+        if (requiresWeb)
+        {
+            app.UseRouting();
+            app.UseDefaultFiles();
+            app.UseStaticFiles();
+
+            foreach (var module in modules.Where(m => enabledModules.Contains(m.Name)))
+            {
+                module.MapEndpoints(app);
+            }
+        }
+
+
+        //if (isCliOnly)
+        //{
+        //    //No web server, just run background services
+        //    await app.StartAsync();
+
+        //    Console.WriteLine("CLI-only mode running...");
+
+        //    await app.WaitForShutdownAsync();
+        //}
+        //else
+        //{
+        //    // Start web server (non-blocking)
+        //    await app.RunAsync();
+        //}
+
+        if (!requiresWeb)
+        {
+            await app.StartAsync();
+            await app.WaitForShutdownAsync();
+        }
+        else
+        {
+            await app.RunAsync();
+        }
+
+
+        //=============== End Block ===============
 
         var configuration = BuildConfiguration();
 
@@ -1783,5 +1844,30 @@ class Program
                 Console.Write(key.KeyChar);
             }
         }
+    }
+
+
+    private static List<IAppModule> LoadPluginsAndModules(WebApplicationBuilder builder)
+    {
+        var pluginFolder = Path.Combine(AppContext.BaseDirectory, "plugins");
+        Directory.CreateDirectory(pluginFolder);
+
+        var pluginLoader = new PluginLoader();
+        var toolLoader = new ToolLoader();
+
+        var pluginModules = pluginLoader.LoadModules(pluginFolder);
+        // Register modules
+        var allModules = ModuleLoader.LoadModules();
+        allModules.AddRange(pluginModules);
+
+        var pluginTools = toolLoader.LoadTools(pluginFolder);
+
+        // Register tools
+        foreach (var tool in pluginTools)
+        {
+            builder.Services.AddSingleton(typeof(ITool), tool);
+        }
+
+        return allModules;
     }
 }

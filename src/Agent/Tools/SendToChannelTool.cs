@@ -1,4 +1,5 @@
 using AgentFox.Channels;
+using AgentFox.Plugins.Interfaces;
 using Microsoft.Extensions.Logging;
 
 namespace AgentFox.Tools;

@@ -5,6 +5,7 @@ using System.Text.Json;
 using AgentFox.Doctor;
 using AgentFox.Http;
 using AgentFox.LLM;
+using AgentFox.Plugins.Interfaces;
 using AgentFox.Tools;
 using Microsoft.Extensions.Logging;
 

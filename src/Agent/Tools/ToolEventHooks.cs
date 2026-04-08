@@ -1,3 +1,5 @@
+using AgentFox.Plugins.Interfaces;
+
 namespace AgentFox.Tools;
 
 /// <summary>

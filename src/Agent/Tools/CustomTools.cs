@@ -1,6 +1,7 @@
 using AgentFox.Http;
-using AgentFox.Models;
 using System.Net.Http;
+using AgentFox.Plugins.Interfaces;
+using ToolParameter = AgentFox.Plugins.Interfaces.ToolParameter;
 
 namespace AgentFox.Tools;
 

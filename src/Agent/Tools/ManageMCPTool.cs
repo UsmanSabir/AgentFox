@@ -1,5 +1,6 @@
 using System.Text.Json;
 using AgentFox.MCP;
+using AgentFox.Plugins.Interfaces;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
