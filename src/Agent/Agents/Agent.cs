@@ -740,13 +740,16 @@ public class AgentBuilder
 
     private string BuildSystemMessage()
     {
-        // Get base prompt depending on agent configuration or use default
-        var basePrompt = _config.SystemPrompt ?? SystemPromptConfig.AgentPrompts.BaseAssistant;
+        // If a complete system prompt was provided (e.g. built by SystemPromptBuilder in
+        // Program.cs with WithTools already applied), return it as-is to avoid a second
+        // "AVAILABLE TOOLS:" section being appended here.
+        if (_config.SystemPrompt != null)
+            return _config.SystemPrompt;
 
+        // No system prompt provided — build one from the default persona + registered tools.
         var builder = new SystemPromptBuilder()
-            .WithPersona(basePrompt);
+            .WithPersona(SystemPromptConfig.AgentPrompts.BaseAssistant);
 
-        // Add available tools if any
         if (_config.Tools.Count > 0)
         {
             var toolNames = _config.Tools
