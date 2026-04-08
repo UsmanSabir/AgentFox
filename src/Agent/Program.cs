@@ -388,7 +388,7 @@ class Program
     {
         var envName = Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT") ?? "Production";
         return new ConfigurationBuilder()
-            .SetBasePath(Directory.GetCurrentDirectory())
+            .SetBasePath(AppContext.BaseDirectory)
             .AddJsonFile("appsettings.json", optional: true, reloadOnChange: true)
             .AddJsonFile($"appsettings.{envName}.json", optional: true, reloadOnChange: true)
             .AddEnvironmentVariables()

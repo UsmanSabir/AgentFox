@@ -43,7 +43,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\AgentFox.Plugins\AgentFox.Plugins.csproj" />
+	  <ProjectReference Include="..\AgentFox.Plugins\AgentFox.Plugins.csproj" >
+		  <Private>false</Private>
+	  </ProjectReference>
     <ProjectReference Include="..\LocalEmbeddings\LocalEmbeddings.csproj" />
   </ItemGroup>
 

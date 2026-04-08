@@ -34,7 +34,7 @@ public class ConfigHealthCheck : IHealthCheckable
         }
 
         // Workspace path
-        var workspacePath = _config["Workspace:Path"] ?? Directory.GetCurrentDirectory();
+        var workspacePath = _config["Workspace:Path"] ?? AppContext.BaseDirectory;
         results.Add(Directory.Exists(workspacePath)
             ? Healthy($"Workspace path exists: {workspacePath}")
             : Critical($"Workspace path missing: {workspacePath}", canFix: true, "Create missing directory"));
@@ -49,7 +49,7 @@ public class ConfigHealthCheck : IHealthCheckable
         {
             try
             {
-                var workspacePath = _config["Workspace:Path"] ?? Directory.GetCurrentDirectory();
+                var workspacePath = _config["Workspace:Path"] ?? AppContext.BaseDirectory;
                 Directory.CreateDirectory(workspacePath);
                 return new FixResult(true, $"Created directory: {workspacePath}");
             }

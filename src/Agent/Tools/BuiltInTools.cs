@@ -422,7 +422,7 @@ public class GetEnvironmentInfoTool : BaseTool
         var info = $"""
             Operating System: {Environment.OSVersion}
             Machine Name: {Environment.MachineName}
-            Current Directory: {Directory.GetCurrentDirectory()}
+            Current Directory: {AppContext.BaseDirectory}
             User: {Environment.UserName}
             Processor Count: {Environment.ProcessorCount}
             CLR Version: {Environment.Version}

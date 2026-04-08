@@ -31,7 +31,7 @@ public class WorkspaceManager
         // If no workspaces configured, default to current directory
         if (_allowedWorkspaces.Count == 0)
         {
-            _allowedWorkspaces.Add(Directory.GetCurrentDirectory());
+            _allowedWorkspaces.Add(AppContext.BaseDirectory);
         }
     }
 
@@ -52,7 +52,7 @@ public class WorkspaceManager
 
         if (_allowedWorkspaces.Count == 0)
         {
-            _allowedWorkspaces.Add(Directory.GetCurrentDirectory());
+            _allowedWorkspaces.Add(AppContext.BaseDirectory);
         }
     }
 
