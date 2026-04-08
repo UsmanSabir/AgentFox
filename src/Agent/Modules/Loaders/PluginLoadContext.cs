@@ -15,6 +15,11 @@ public class PluginLoadContext : AssemblyLoadContext
 
     protected override Assembly Load(AssemblyName assemblyName)
     {
+        if (assemblyName.Name == "AgentFox.Plugins")
+        {
+            return null; // fallback to Default context
+        }
+
         var path = _resolver.ResolveAssemblyToPath(assemblyName);
 
         if (path != null)
