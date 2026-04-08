@@ -465,13 +465,18 @@ class Program
         var subAgentManager = sp.GetRequiredService<SubAgentManager>();
         var sessionManager = sp.GetRequiredService<SessionManager>();
 
+        // Register tools before building the system prompt so WithAllTools captures
+        // real names and descriptions from the registry.
+        FoxAgent? agentRef = null;
+        var spawnSubAgentTool = new SpawnSubAgentTool(() => agentRef!);
+        toolRegistry.Register(spawnSubAgentTool);
+
+        var spawnBgTool = new SpawnBackgroundSubAgentTool(subAgentManager);
+        toolRegistry.Register(spawnBgTool);
+
         var systemPrompt = new SystemPromptBuilder()
             .WithPersona(SystemPromptConfig.AgentPrompts.DeveloperAssistant)
-            //.WithAllTools(toolRegistry) TODO: Analyze 
-            .WithTools("shell", "read_file", "write_file", "list_files", "search_files",
-                       "make_directory", "delete", "add_memory", "search_memory", "get_all_memories",
-                       "spawn_subagent: Spawn a sub-agent for complex tasks (waits for result)",
-                       "spawn_background_subagent: Spawn a background sub-agent that runs in a separate lane and announces results back")
+            .WithAllTools(toolRegistry)
             .WithSkillsIndex(skillRegistry.GetSkillManifests())
             .WithConstraints(
                 "Always verify changes before executing destructive operations",
@@ -482,14 +487,6 @@ class Program
                 "Use get_all_memories to retrieve everything stored in long-term memory."
             )
             .Build();
-
-        // Register spawn tools before Build() so they appear in the LLM's tool list.
-        FoxAgent? agentRef = null;
-        var spawnSubAgentTool = new SpawnSubAgentTool(() => agentRef!);
-        toolRegistry.Register(spawnSubAgentTool);
-
-        var spawnBgTool = new SpawnBackgroundSubAgentTool(subAgentManager);
-        toolRegistry.Register(spawnBgTool);
 
         var agent = BuildAgent(sp, systemPrompt);
         agentRef = agent;
@@ -545,26 +542,30 @@ class Program
         AnsiConsole.MarkupLine($"[bold green]✓[/] [dim]{manifests.Count} skill(s) registered.[/]");
         AnsiConsole.WriteLine();
 
+        // Register tools before building the system prompt so WithAllTools captures
+        // real names and descriptions from the registry.
+        //
+        // Circular dependency is broken by:
+        //   • SpawnSubAgentTool  – receives a Func<FoxAgent> resolved after Build()
+        //   • SpawnBackgroundSubAgentTool – receives agent/session ids via Initialize()
+        FoxAgent? agentRef = null;
+        var spawnSubAgentTool = new SpawnSubAgentTool(() => agentRef!);
+        toolRegistry.Register(spawnSubAgentTool);
+
+        var spawnBgTool = new SpawnBackgroundSubAgentTool(
+            subAgentManager,
+            logger: sp.GetRequiredService<ILogger<SpawnBackgroundSubAgentTool>>()
+        );
+        toolRegistry.Register(spawnBgTool);
+
+        toolRegistry.Register(new ManageMCPTool(
+            sp.GetRequiredService<MCPClient>(),
+            ResolveAppSettingsPath(),
+            sp.GetRequiredService<ILogger<ManageMCPTool>>()));
+
         var systemPrompt = new SystemPromptBuilder()
             .WithPersona(SystemPromptConfig.AgentPrompts.DeveloperAssistant)
-            //.WithAllTools(toolRegistry) TODO: Analyze 
-            .WithTools(
-                "shell: Execute shell commands",
-                "read_file: Read file contents",
-                "write_file: Write content to files",
-                "list_files: List files in a directory",
-                "search_files: Search for text in files",
-                "make_directory: Create directories",
-                "delete: Delete files or directories",
-                "get_env_info: Get environment information",
-                "spawn_subagent: Spawn a sub-agent for complex tasks (waits for result)",
-                "spawn_background_subagent: Spawn a background sub-agent that runs in a separate lane and announces results back",
-                "load_skill: Load a skill's full guidance on demand",
-                "add_memory: Save an important fact to memory",
-                "search_memory: Search memory for a fact",
-                "get_all_memories: Retrieve all stored long-term memories",
-                "send_to_channel: Send messages to configured channels (telegram, slack, discord, whatsapp, teams)"
-            )
+            .WithAllTools(toolRegistry)
             .WithSkillsIndex(manifests)
             .WithExecutionContext(
                 "You are running in interactive mode and can help with:\n" +
@@ -588,28 +589,6 @@ class Program
                 "For Composio integrations, provide clear examples and documentation on usage"
             )
             .Build();
-
-        // Register spawn tools BEFORE Build() so the ToolRegistry snapshot that
-        // AgentBuilder.GetAvailableTools() reads already contains them, making the
-        // LLM aware of these tools at construction time.
-        //
-        // Circular dependency is broken by:
-        //   • SpawnSubAgentTool  – receives a Func<FoxAgent> resolved after Build()
-        //   • SpawnBackgroundSubAgentTool – receives agent/session ids via Initialize()
-        FoxAgent? agentRef = null;
-        var spawnSubAgentTool = new SpawnSubAgentTool(() => agentRef!);
-        toolRegistry.Register(spawnSubAgentTool);
-
-        var spawnBgTool = new SpawnBackgroundSubAgentTool(
-            subAgentManager,
-            logger: sp.GetRequiredService<ILogger<SpawnBackgroundSubAgentTool>>()
-        );
-        toolRegistry.Register(spawnBgTool);
-
-        toolRegistry.Register(new ManageMCPTool(
-            sp.GetRequiredService<MCPClient>(),
-            ResolveAppSettingsPath(),
-            sp.GetRequiredService<ILogger<ManageMCPTool>>()));
 
         var agent = BuildAgent(sp, systemPrompt, withLogger: true);
         agentRef = agent; // resolve the lazy reference used by SpawnSubAgentTool
