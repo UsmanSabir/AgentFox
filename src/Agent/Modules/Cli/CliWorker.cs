@@ -546,7 +546,7 @@ public sealed class CliWorker : BackgroundService
         string consoleSessionId,
         CancellationToken ct)
     {
-        AnsiConsole.WriteLine();
+        //AnsiConsole.WriteLine();
 
         var tcs = new TaskCompletionSource<AgentResult>(TaskCreationOptions.RunContinuationsAsynchronously);
         var cmd = AgentCommand.CreateMainCommand(
