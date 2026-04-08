@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using AgentFox.Channels;
+using AgentFox.Plugins.Interfaces;
 using Microsoft.Extensions.Logging;
 
 namespace AgentFox.Tools;

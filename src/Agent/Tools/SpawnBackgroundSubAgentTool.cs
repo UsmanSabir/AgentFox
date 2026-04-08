@@ -1,6 +1,7 @@
 using AgentFox.Agents;
-using AgentFox.Models;
+using AgentFox.Plugins.Interfaces;
 using Microsoft.Extensions.Logging;
+using ToolParameter = AgentFox.Models.ToolParameter;
 
 namespace AgentFox.Tools;
 
@@ -44,7 +45,7 @@ public class SpawnBackgroundSubAgentTool : BaseTool
         "Use this for long-running tasks like research, code analysis, or building complex features. " +
         "The sub-agent runs asynchronously and will report results back to this agent.";
 
-    public override Dictionary<string, ToolParameter> Parameters { get; } = new()
+    public override Dictionary<string, Plugins.Interfaces.ToolParameter> Parameters { get; } = new()
     {
         ["name"] = new() 
         { 

@@ -1,5 +1,6 @@
 using AgentFox.Agents;
-using AgentFox.Models;
+using AgentFox.Plugins.Interfaces;
+using ToolParameter = AgentFox.Models.ToolParameter;
 
 namespace AgentFox.Tools;
 
@@ -24,7 +25,7 @@ public class SpawnSubAgentTool : BaseTool
         "Use this when a task requires different expertise, extended context, or parallel execution. " +
         "The sub-agent will have access to the parent's tools and can collaborate through shared memory.";
 
-    public override Dictionary<string, ToolParameter> Parameters { get; } = new()
+    public override Dictionary<string, Plugins.Interfaces.ToolParameter> Parameters { get; } = new()
     {
         ["name"] = new() 
         { 

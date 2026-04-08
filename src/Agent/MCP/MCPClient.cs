@@ -6,6 +6,8 @@ using Newtonsoft.Json.Linq;
 using System.Text;
 using System.Net.Http.Headers;
 using System.Linq;
+using AgentFox.Plugins.Interfaces;
+using ToolParameter = AgentFox.Plugins.Interfaces.ToolParameter;
 
 namespace AgentFox.MCP;
 
@@ -519,8 +521,8 @@ public class MCPToolWrapper : ITool
     
     public string Name => $"mcp_{_definition.Name}";
     public string Description => $"[MCP] {_definition.Description}";
-    public Dictionary<string, Tools.ToolParameter> Parameters => _definition.Parameters
-        .ToDictionary(p => p.Key, p => new Tools.ToolParameter
+    public Dictionary<string, ToolParameter> Parameters => _definition.Parameters
+        .ToDictionary(p => p.Key, p => new ToolParameter
         {
             Type = p.Value.Type,
             Description = p.Value.Description,

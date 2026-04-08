@@ -5,6 +5,7 @@ using System.Text.Json;
 using AgentFox.Doctor;
 using AgentFox.Http;
 using AgentFox.LLM;
+using AgentFox.Plugins.Interfaces;
 using AgentFox.Tools;
 using Microsoft.Extensions.Logging;
 
@@ -984,7 +985,7 @@ internal static class SkillShellHelper
 {
     public static async Task<ToolResult> RunAsync(string command, string? workingDirectory = null)
     {
-        var dir = workingDirectory ?? Directory.GetCurrentDirectory();
+        var dir = workingDirectory ?? AppContext.BaseDirectory;
         try
         {
             var isWindows = OperatingSystem.IsWindows();
@@ -1267,7 +1268,7 @@ public class CodeReviewTool : BaseTool
         {
             var lines = await File.ReadAllLinesAsync(file);
             totalLines += lines.Length;
-            var rel = Path.GetRelativePath(Directory.GetCurrentDirectory(), file);
+            var rel = Path.GetRelativePath(AppContext.BaseDirectory, file);
 
             for (var i = 0; i < lines.Length; i++)
             {
@@ -1504,7 +1505,7 @@ public class DeployTool : BaseTool
     {
         var target = arguments["target"]?.ToString() ?? "";
         var environment = arguments.GetValueOrDefault("environment")?.ToString() ?? "production";
-        var cwd = Directory.GetCurrentDirectory();
+        var cwd = AppContext.BaseDirectory;
         var script =
             File.Exists(Path.Combine(cwd, $"deploy-{environment}.sh")) ? $"bash deploy-{environment}.sh" :
             File.Exists(Path.Combine(cwd, $"deploy-{environment}.ps1")) ? $"powershell -File deploy-{environment}.ps1" :
@@ -1531,7 +1532,7 @@ public class CICDPipelineTool : BaseTool
     protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
     {
         var pipeline = arguments["pipeline"]?.ToString() ?? "";
-        var cwd = Directory.GetCurrentDirectory();
+        var cwd = AppContext.BaseDirectory;
         var ghWorkflow = Path.Combine(cwd, ".github", "workflows", $"{pipeline}.yml");
         var script =
             File.Exists(ghWorkflow) ? $"gh workflow run {pipeline}" :
