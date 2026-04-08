@@ -226,9 +226,14 @@ class Program
             CommandProcessorConfig.FromSubAgentConfig(sp.GetRequiredService<SubAgentConfiguration>()),
             sp.GetRequiredService<ILogger<CommandProcessor>>()));
 
-        // Agent holder + IAgentService (used by WebModule /chat)
+        // Agent holder + channel manager holder + IAgentService (used by WebModule /chat)
         builder.Services.AddSingleton<FoxAgentHolder>();
+        builder.Services.AddSingleton<ChannelManagerHolder>();
         builder.Services.AddSingleton<AgentFox.Plugins.Interfaces.IAgentService, FoxAgentService>();
+
+        // AgentOrchestrator — builds the main agent, starts the command processor,
+        // and connects channels. Runs in every mode (cli, web, api, service).
+        builder.Services.AddHostedService<AgentOrchestrator>();
 
         // Service heartbeat (for periodic health checks when running as service)
         if (serviceCfg.Enabled && serviceCfg.HeartbeatIntervalSeconds > 0)

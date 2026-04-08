@@ -1,5 +1,6 @@
 ﻿using AgentFox.Modules.Cli;
 using AgentFox.Modules.Web;
+using AgentFox.Modules.Webhook;
 using AgentFox.Plugins.Interfaces;
 
 namespace AgentFox.Modules.Loaders;
@@ -11,7 +12,8 @@ public class ModuleLoader
         return new List<IAppModule>
         {
             new CliModule(),
-            new WebModule()
+            new WebModule(),
+            new WebhookModule(),
         };
     }
 }

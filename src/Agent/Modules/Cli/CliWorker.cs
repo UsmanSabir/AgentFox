@@ -4,7 +4,6 @@ using AgentFox.Doctor;
 using AgentFox.Doctor.Checks;
 using AgentFox.LLM;
 using AgentFox.MCP;
-using SystemPromptBuilder = AgentFox.LLM.SystemPromptBuilder;
 using AgentFox.Memory;
 using AgentFox.Models;
 using AgentFox.Plugins.Interfaces;
@@ -28,13 +27,9 @@ namespace AgentFox.Modules.Cli;
 /// <summary>
 /// Hosted background service that owns the interactive CLI REPL.
 /// <para>
-/// On startup it:
-/// <list type="bullet">
-///   <item>Registers runtime tools (SpawnSubAgent, ManageMCP, channels)</item>
-///   <item>Builds the <see cref="FoxAgent"/> and publishes it via <see cref="FoxAgentHolder"/></item>
-///   <item>Notifies any <see cref="IAgentAwareModule"/> plugins via <c>OnAgentReadyAsync</c></item>
-///   <item>Runs the interactive input loop until "exit" or cancellation</item>
-/// </list>
+/// Agent initialization, channel loading, and command processor setup are handled
+/// by <see cref="AgentOrchestrator"/>. This worker simply awaits the agent, then
+/// drives the interactive input loop until "exit" or cancellation.
 /// </para>
 /// </summary>
 public sealed class CliWorker : BackgroundService
@@ -52,11 +47,9 @@ public sealed class CliWorker : BackgroundService
     private readonly WorkspaceManager _workspaceManager;
     private readonly UIConfig _uiConfig;
     private readonly IConfiguration _configuration;
-    private readonly IAgentRuntime _agentRuntime;
     private readonly MarkdownSessionStore _sessionStore;
     private readonly FoxAgentHolder _agentHolder;
-    private readonly IEnumerable<IAppModule> _modules;
-    private readonly ILoggerFactory _loggerFactory;
+    private readonly ChannelManagerHolder _channelManagerHolder;
     private readonly ILogger<CliWorker> _logger;
     private readonly ServiceConfig _serviceConfig;
 
@@ -74,34 +67,30 @@ public sealed class CliWorker : BackgroundService
         WorkspaceManager workspaceManager,
         UIConfig uiConfig,
         IConfiguration configuration,
-        IAgentRuntime agentRuntime,
         MarkdownSessionStore sessionStore,
         FoxAgentHolder agentHolder,
-        IEnumerable<IAppModule> modules,
-        ILoggerFactory loggerFactory,
+        ChannelManagerHolder channelManagerHolder,
         ILogger<CliWorker> logger,
         ServiceConfig serviceConfig)
     {
-        _lifetime = lifetime;
-        _chatClient = chatClient;
-        _toolRegistry = toolRegistry;
-        _skillRegistry = skillRegistry;
-        _mcpClient = mcpClient;
-        _memory = memory;
-        _sessionManager = sessionManager;
-        _subAgentManager = subAgentManager;
-        _commandProcessor = commandProcessor;
-        _commandQueue = commandQueue;
-        _workspaceManager = workspaceManager;
-        _uiConfig = uiConfig;
-        _configuration = configuration;
-        _agentRuntime = agentRuntime;
-        _sessionStore = sessionStore;
-        _agentHolder = agentHolder;
-        _modules = modules;
-        _loggerFactory = loggerFactory;
-        _logger = logger;
-        _serviceConfig = serviceConfig;
+        _lifetime             = lifetime;
+        _chatClient           = chatClient;
+        _toolRegistry         = toolRegistry;
+        _skillRegistry        = skillRegistry;
+        _mcpClient            = mcpClient;
+        _memory               = memory;
+        _sessionManager       = sessionManager;
+        _subAgentManager      = subAgentManager;
+        _commandProcessor     = commandProcessor;
+        _commandQueue         = commandQueue;
+        _workspaceManager     = workspaceManager;
+        _uiConfig             = uiConfig;
+        _configuration        = configuration;
+        _sessionStore         = sessionStore;
+        _agentHolder          = agentHolder;
+        _channelManagerHolder = channelManagerHolder;
+        _logger               = logger;
+        _serviceConfig        = serviceConfig;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -110,6 +99,9 @@ public sealed class CliWorker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // In service / web-only / redirected mode there is no interactive terminal.
+        // AgentOrchestrator still runs (agent + channels + command processor are live);
+        // we just skip the REPL loop.
         if (Console.IsInputRedirected)
             return;
 
@@ -130,7 +122,7 @@ public sealed class CliWorker : BackgroundService
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Interactive session setup + REPL loop
+    // Interactive session — waits for the orchestrator then runs the REPL
     // ─────────────────────────────────────────────────────────────────────────
 
     private async Task RunInteractiveSessionAsync(CancellationToken ct)
@@ -139,90 +131,23 @@ public sealed class CliWorker : BackgroundService
         AnsiConsole.MarkupLine($"[bold green]✓[/] [dim]{manifests.Count} skill(s) registered.[/]");
         AnsiConsole.WriteLine();
 
-        // ── Register runtime tools ────────────────────────────────────────────
-        FoxAgent? agentRef = null;
-        var spawnSubAgentTool = new SpawnSubAgentTool(() => agentRef!);
-        _toolRegistry.Register(spawnSubAgentTool);
-
-        var spawnBgTool = new SpawnBackgroundSubAgentTool(
-            _subAgentManager,
-            logger: _loggerFactory.CreateLogger<SpawnBackgroundSubAgentTool>());
-        _toolRegistry.Register(spawnBgTool);
-
-        var appConfigPath = ResolveAppSettingsPath();
-        _toolRegistry.Register(new ManageMCPTool(
-            _mcpClient, appConfigPath,
-            _loggerFactory.CreateLogger<ManageMCPTool>()));
-
-        // ── Build system prompt ───────────────────────────────────────────────
-        var systemPrompt = new SystemPromptBuilder()
-            .WithPersona(SystemPromptConfig.AgentPrompts.DeveloperAssistant)
-            .WithAllTools(_toolRegistry)
-            .WithSkillsIndex(manifests)
-            .WithExecutionContext(
-                "You are running in interactive mode and can help with:\n" +
-                "- Code development and debugging\n" +
-                "- File system operations\n" +
-                "- System administration\n" +
-                "- Architecture and design consultation\n" +
-                "- Composio.dev integrations (GitHub, Slack, Jira, etc.)\n" +
-                "- Git, Docker, deployment, testing, and more via skills")
-            .WithConstraints(
-                "Always verify changes before executing destructive operations",
-                "Protect sensitive information (API keys, credentials, etc.)",
-                "Test code in isolated environments when possible",
-                "Explain your reasoning and approach clearly",
-                "Ask for confirmation for high-risk operations",
-                "Before using a skill's tools, always call load_skill to load the skill's guidance",
-                "Use add_memory to save important user facts or preferences to long-term memory.",
-                "Use search_memory to recall past information or facts when requested.",
-                "Use get_all_memories to retrieve everything stored in long-term memory.",
-                "For Composio integrations, provide clear examples and documentation on usage")
-            .Build();
-
-        // ── Build agent ───────────────────────────────────────────────────────
-        var agent = BuildAgent(systemPrompt, withLogger: true);
-        agentRef = agent;
-        _agentHolder.Publish(agent);
-
-        // ── Notify agent-aware plugins ────────────────────────────────────────
-        await NotifyAgentAwareModulesAsync(agent, ct);
-
-        // ── Upgrade runtime executor ──────────────────────────────────────────
-        _agentRuntime.SetExecutor(new FoxAgentExecutor(
-            defaultAgent: agent,
-            agentFactory: client => BuildAgentWithClient(systemPrompt, client),
-            modelResolver: model => LLMFactory.CreateWithModelOverride(_configuration, model),
-            logger: _loggerFactory.CreateLogger<FoxAgentExecutor>()));
-
-        // ── Load channels ─────────────────────────────────────────────────────
-        var channelManager = await LoadChannelsFromConfigAsync(agent, ct);
-        _toolRegistry.Register(new SendToChannelTool(
-            channelManager, _loggerFactory.CreateLogger<SendToChannelTool>()));
-        _toolRegistry.Register(new ManageChannelTool(
-            channelManager, appConfigPath, _loggerFactory.CreateLogger<ManageChannelTool>()));
+        // Wait until AgentOrchestrator has finished building the agent and channels.
+        var agent          = await _agentHolder.WaitAsync(ct);
+        var channelManager = await _channelManagerHolder.WaitAsync(ct);
 
         if (channelManager.Channels.Count > 0)
             AnsiConsole.MarkupLine($"[bold green]✓[/]  {channelManager.Channels.Count} channel(s) connected.");
         else
             AnsiConsole.MarkupLine("[dim]No channels configured. Use manage_channel to add one at runtime.[/]");
 
-        // ── Session recovery ──────────────────────────────────────────────────
-        var interrupted = _sessionManager.GetInterruptedActiveSessions();
+        // Session recovery (interactive — must stay in CliWorker)
+        var interrupted      = _sessionManager.GetInterruptedActiveSessions();
         var consoleSessionId = _sessionManager.GetOrCreateConsoleSession(agent.Id);
-        spawnBgTool.Initialize(
-            parentAgentId: agent.Id,
-            parentSessionKey: consoleSessionId,
-            parentSpawnDepth: 0);
-
-        // ── Wire command processor ────────────────────────────────────────────
-        RegisterCommandHandlers(agent, consoleSessionId);
-        _commandProcessor.Start();
-
         await RecoverInterruptedSessionsAsync(agent, consoleSessionId, interrupted, ct);
 
-        // ── DoctorAgent ───────────────────────────────────────────────────────
-        var doctorAgent = new DoctorAgent(_chatClient, appConfigPath);
+        // DoctorAgent for inline health-check commands
+        var appConfigPath = ResolveAppSettingsPath();
+        var doctorAgent   = new DoctorAgent(_chatClient, appConfigPath);
 
         AnsiConsole.MarkupLine("[dim]Type [bold white]help[/] for commands, [bold white]exit[/] to quit. [bold white]Shift+Enter[/] for multi-line input.[/]");
         AnsiConsole.WriteLine();
@@ -240,183 +165,16 @@ public sealed class CliWorker : BackgroundService
             if (handled == ReplAction.Exit)
             {
                 AnsiConsole.MarkupLine("[bold green]Goodbye![/]");
-                await channelManager.DisconnectAllAsync();
-                await _commandProcessor.StopAsync(TimeSpan.FromSeconds(10));
+                // StopApplication triggers AgentOrchestrator.StopAsync which
+                // disconnects channels and stops the command processor.
                 break;
             }
 
             if (handled != ReplAction.Unhandled)
                 continue;
 
-            // ── Route user turn through Main lane ─────────────────────────────
             await RunAgentTurnAsync(input, agent, consoleSessionId, ct);
         }
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Agent builder helpers
-    // ─────────────────────────────────────────────────────────────────────────
-
-    private FoxAgent BuildAgent(string systemPrompt, bool withLogger = false) =>
-        BuildAgentWithClient(systemPrompt, _chatClient, withLogger);
-
-    private FoxAgent BuildAgentWithClient(string systemPrompt, IChatClient client, bool withLogger = false)
-    {
-        var builder = new AgentBuilder(_toolRegistry)
-            .WithName("AgentFox")
-            .WithSystemPrompt(systemPrompt)
-            .WithMemory(_memory)
-            .WithSkillsRegistry(_skillRegistry)
-            .WithMCPClient(_mcpClient)
-            .WithConversationStore(_sessionStore)
-            .WithHistoryProvider(_sessionStore.HistoryProvider)
-            .WithChatClient(client)
-            .WithWorkspaceManager(_workspaceManager)
-            .WithSessionManager(_sessionManager)
-            .WithCompactionFromConfig(_configuration);
-
-        if (withLogger)
-            builder = builder.WithLogger(_loggerFactory.CreateLogger<FoxAgent>());
-
-        return builder.Build();
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Plugin notification
-    // ─────────────────────────────────────────────────────────────────────────
-
-    private async Task NotifyAgentAwareModulesAsync(FoxAgent agent, CancellationToken ct)
-    {
-        var awarenModules = _modules.OfType<IAgentAwareModule>().ToList();
-        if (awarenModules.Count == 0) return;
-
-        var context = new PluginContextAdapter(
-            _toolRegistry,
-            agent.PromptContributors,
-            _sessionStore);
-
-        foreach (var m in awarenModules)
-        {
-            try
-            {
-                await m.OnAgentReadyAsync(context);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Plugin {Module}.OnAgentReadyAsync threw an exception.", m.Name);
-            }
-        }
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Command processor wiring
-    // ─────────────────────────────────────────────────────────────────────────
-
-    private void RegisterCommandHandlers(FoxAgent agent, string consoleSessionId)
-    {
-        // Sub-agent lane
-        _commandProcessor.RegisterLaneHandler(CommandLane.Subagent, async (command, ct) =>
-        {
-            if (command is not AgentCommand agentCmd) return;
-
-            var runId = agentCmd.RunId;
-            var subTask = _subAgentManager.GetSubAgentTask(runId);
-
-            if (subTask != null)
-                await subTask.PauseGate.WhenResumedAsync(ct);
-
-            _subAgentManager.OnSubAgentStarted(runId);
-
-            using var linked = subTask != null
-                ? CancellationTokenSource.CreateLinkedTokenSource(ct, subTask.CancellationTokenSource.Token)
-                : CancellationTokenSource.CreateLinkedTokenSource(ct);
-
-            try
-            {
-                var subResult = await _agentRuntime.ExecuteAsync(agentCmd, linked.Token);
-                var completion = subResult.Success
-                    ? SubAgentCompletionResult.Success(subResult.Output)
-                    : SubAgentCompletionResult.Failure(subResult.Error ?? "Sub-agent returned no output");
-                _subAgentManager.OnSubAgentCompleted(runId, completion);
-            }
-            catch (OperationCanceledException)
-            {
-                _subAgentManager.OnSubAgentCompleted(runId, SubAgentCompletionResult.Cancelled());
-            }
-            catch (Exception ex)
-            {
-                _subAgentManager.OnSubAgentCompleted(runId, SubAgentCompletionResult.Failure(ex.Message));
-            }
-        });
-
-        // Main lane
-        _commandProcessor.RegisterLaneHandler(CommandLane.Main, async (command, ct) =>
-        {
-            if (command is AgentCommand agentCmd)
-            {
-                AgentResult result;
-                try
-                {
-                    result = await _agentRuntime.ExecuteAsync(agentCmd, ct);
-                }
-                catch (Exception ex)
-                {
-                    result = new AgentResult { Success = false, Error = ex.Message };
-                }
-                agentCmd.ResultSource?.TrySetResult(result);
-                return;
-            }
-
-            if (command is not ResultAnnouncementCommand announcement) return;
-
-            if (announcement.RequesterChannel != null && !announcement.SuppressChannelNotification)
-            {
-                try { await announcement.RequesterChannel.SendMessageAsync(announcement.FormatMessage()); }
-                catch (Exception ex) { AnsiConsole.MarkupLine($"[bold red][[ERR]][/] Channel send failed: {Markup.Escape(ex.Message)}"); }
-                return;
-            }
-
-            if (!string.IsNullOrEmpty(announcement.ParentSessionKey))
-            {
-                var notification = $"[Background sub-agent result]\n{announcement.FormatMessage()}";
-                AnsiConsole.WriteLine();
-                AnsiConsole.MarkupLine($"[bold blue][[SUB-AGENT]][/] Reporting to parent agent [dim](session: {Markup.Escape(announcement.ParentSessionKey)})[/]...");
-
-                var notifyCmd = AgentCommand.CreateMainCommand(
-                    announcement.ParentSessionKey, agentId: agent.Id, message: notification);
-                try
-                {
-                    var parentResult = await _agentRuntime.ExecuteAsync(notifyCmd, ct);
-                    AnsiConsole.WriteLine();
-                    AnsiConsole.MarkupLine("[bold cyan][[AGENT]][/]");
-                    AnsiConsole.WriteLine(parentResult.Output);
-                }
-                catch (Exception ex)
-                {
-                    AnsiConsole.MarkupLine($"[bold red][[ERR]][/] Failed to deliver sub-agent result: {Markup.Escape(ex.Message)}");
-                }
-                AnsiConsole.Markup("\n[bold dodgerblue1]>[/] ");
-            }
-        });
-
-        // Background sub-agent result callback
-        _subAgentManager.RegisterResultCallback(async (task, result) =>
-        {
-            AnsiConsole.MarkupLine($"\n[bold blue][[BG]][/] Sub-agent [dim]{Markup.Escape(task.SessionKey)}[/] finished — status: [bold]{Markup.Escape(result.Status.ToString())}[/]");
-
-            if (task.OriginatingChannel != null)
-                return ResultAnnouncementCommand.CreateChannelAnnouncement(
-                    result, task.OriginatingChannel,
-                    task.OriginatingMessageId ?? string.Empty,
-                    task.CorrelationId,
-                    task.OriginatingChannelId ?? string.Empty);
-
-            if (!string.IsNullOrEmpty(task.ParentSessionKey))
-                return ResultAnnouncementCommand.CreateParentAgentAnnouncement(
-                    result, task.CorrelationId, task.ParentSessionKey, task.SessionKey);
-
-            return ResultAnnouncementCommand.CreateLocalAnnouncement(result, task.CorrelationId, task.SessionKey);
-        });
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -434,7 +192,7 @@ public sealed class CliWorker : BackgroundService
         CancellationToken ct)
     {
         var trimmed = input.Trim();
-        var lower = trimmed.ToLowerInvariant();
+        var lower   = trimmed.ToLowerInvariant();
 
         switch (lower)
         {
@@ -546,19 +304,17 @@ public sealed class CliWorker : BackgroundService
         string consoleSessionId,
         CancellationToken ct)
     {
-        //AnsiConsole.WriteLine();
-
         var tcs = new TaskCompletionSource<AgentResult>(TaskCreationOptions.RunContinuationsAsynchronously);
         var cmd = AgentCommand.CreateMainCommand(
             sessionKey: consoleSessionId,
-            agentId: agent.Id,
-            message: input);
+            agentId:    agent.Id,
+            message:    input);
         cmd.ResultSource = tcs;
 
         var streamChannel = SysChannel.CreateUnbounded<(bool IsReasoning, string Text)>(
             new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
-        var sb = new StringBuilder();
-        var sbReasoning = new StringBuilder();
+        var sb           = new StringBuilder();
+        var sbReasoning  = new StringBuilder();
         Task<string>? liveDisplayTask = null;
 
         IRenderable BuildDisplay()
@@ -571,7 +327,7 @@ public sealed class CliWorker : BackgroundService
                 table.AddRow(Markup.Escape(responseText));
                 return table;
             }
-            var reasoningLines = sbReasoning.ToString().Split('\n');
+            var reasoningLines  = sbReasoning.ToString().Split('\n');
             var visibleReasoning = reasoningLines.Length > 20
                 ? string.Join('\n', reasoningLines[^20..])
                 : sbReasoning.ToString();
@@ -626,7 +382,7 @@ public sealed class CliWorker : BackgroundService
                             await foreach (var (isReasoning, text) in streamChannel.Reader.ReadAllAsync())
                             {
                                 if (isReasoning) sbReasoning.Append(text);
-                                else sb.Append(text);
+                                else             sb.Append(text);
                                 ctx.UpdateTarget(BuildDisplay());
                                 ctx.Refresh();
                             }
@@ -637,7 +393,7 @@ public sealed class CliWorker : BackgroundService
             },
             OnReasoning = !_uiConfig.RenderReasoning ? null
                 : async chunk => await streamChannel.Writer.WriteAsync((true, chunk)),
-            OnToken = async chunk => await streamChannel.Writer.WriteAsync((false, chunk)),
+            OnToken  = async chunk => await streamChannel.Writer.WriteAsync((false, chunk)),
             OnComplete = async () =>
             {
                 streamChannel.Writer.TryComplete();
@@ -662,8 +418,8 @@ public sealed class CliWorker : BackgroundService
     private async Task RunDoctorAsync(DoctorAgent doctorAgent, bool autoFix, CancellationToken ct)
     {
         var workspacePath = _workspaceManager.ResolvePath("");
-        var ltMemory = MemoryBackendFactory.CreateLongTermStorage(_configuration, _workspaceManager);
-        var doctorRunner = new DoctorRunner(new IHealthCheckable[]
+        var ltMemory      = MemoryBackendFactory.CreateLongTermStorage(_configuration, _workspaceManager);
+        var doctorRunner  = new DoctorRunner(new IHealthCheckable[]
         {
             new ConfigHealthCheck(_configuration, doctorAgent),
             new LlmHealthCheck(_configuration),
@@ -678,47 +434,6 @@ public sealed class CliWorker : BackgroundService
             new McpHealthCheck(_mcpClient, _configuration, doctorAgent),
         });
         await doctorRunner.RunAsync(autoFix);
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Channel loading
-    // ─────────────────────────────────────────────────────────────────────────
-
-    private async Task<ChannelManager> LoadChannelsFromConfigAsync(FoxAgent agent, CancellationToken ct)
-    {
-        var manager = new ChannelManager(
-            agent, _sessionManager, _commandQueue,
-            _loggerFactory.CreateLogger<ChannelManager>());
-
-        var channelSection = _configuration.GetSection("Channels");
-        if (!channelSection.Exists()) return manager;
-
-        var tgSection = channelSection.GetSection("Telegram");
-        if (tgSection.Exists() && tgSection.GetValue<bool>("Enabled"))
-        {
-            var token = tgSection["BotToken"] ?? string.Empty;
-            if (string.IsNullOrWhiteSpace(token) || token.Contains("your-telegram"))
-            {
-                AnsiConsole.MarkupLine("[bold yellow]⚠[/]  Telegram: BotToken not configured — skipping.");
-            }
-            else
-            {
-                var pollingTimeout = tgSection.GetValue<int>("PollingTimeoutSeconds", 30);
-                var (ch, error) = ChannelFactory.Create("Telegram", new Dictionary<string, string>
-                {
-                    ["BotToken"] = token,
-                    ["PollingTimeoutSeconds"] = pollingTimeout.ToString()
-                });
-                if (ch != null) manager.AddChannel(ch);
-                else AnsiConsole.MarkupLine($"[bold yellow]⚠[/]  Telegram: {error}");
-            }
-        }
-
-        if (manager.Channels.Count == 0) return manager;
-
-        AnsiConsole.MarkupLine("[dim]Connecting channels...[/]");
-        await manager.ConnectAllAsync();
-        return manager;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -768,10 +483,10 @@ public sealed class CliWorker : BackgroundService
 
         AnsiConsole.Write(new Panel(new Markup($"[italic]{Markup.Escape(preview)}[/]"))
         {
-            Header = new PanelHeader("[bold yellow] ⚠ Previous session interrupted [/]", Justify.Left),
-            Border = BoxBorder.Rounded,
+            Header      = new PanelHeader("[bold yellow] ⚠ Previous session interrupted [/]", Justify.Left),
+            Border      = BoxBorder.Rounded,
             BorderStyle = Style.Parse("yellow"),
-            Padding = new Padding(1, 0),
+            Padding     = new Padding(1, 0),
         });
 
         AnsiConsole.Markup("[dim]Resume this task?[/] [bold](y/N):[/] ");
@@ -827,33 +542,26 @@ public sealed class CliWorker : BackgroundService
             new[] { "doctor",              "Run health checks" },
             new[] { "doctor fix",          "Run health checks and attempt auto-fixes" },
             new[] { "doctor config <req>", "Ask DoctorAgent to modify appsettings.json" },
-            new[] { "exit",                "Exit the program" },
+            new[] { "exit",                "Quit AgentFox" },
         });
 
-        AddSection("Startup Flags", new[]
-        {
-            new[] { "--doctor",  "Run health checks on startup and exit" },
-            new[] { "--fix",     "Combined with --doctor: attempt automatic fixes" },
-        });
-
-        AddSection("Agent Management", new[]
+        AddSection("Sub-Agent Commands", new[]
         {
             new[] { "agents",              "List active sub-agents" },
-            new[] { "agents stats",        "Show processor/queue statistics" },
-            new[] { "agents pause <id>",   "Pause a sub-agent" },
+            new[] { "agents stats",        "Show sub-agent and processor statistics" },
+            new[] { "agents pause <id>",   "Pause a running sub-agent" },
             new[] { "agents resume <id>",  "Resume a paused sub-agent" },
             new[] { "agents stop <id>",    "Gracefully stop a sub-agent" },
-            new[] { "agents kill <id>",    "Force-kill a sub-agent" },
-            new[] { "agents kill all",     "Force-kill every active sub-agent" },
+            new[] { "agents kill [<id>]",  "Kill a sub-agent (or all with no id)" },
         });
 
-        AddSection("Service Management", new[]
+        AddSection("Service Commands", new[]
         {
-            new[] { "install-service",     "Install FoxAgent as a system service" },
-            new[] { "uninstall-service",   "Uninstall the FoxAgent service" },
-            new[] { "start-service",       "Start the FoxAgent service" },
-            new[] { "stop-service",        "Stop the FoxAgent service" },
-            new[] { "restart-service",     "Restart the FoxAgent service" },
+            new[] { "install-service",     "Install as a system service" },
+            new[] { "uninstall-service",   "Remove the system service" },
+            new[] { "start-service",       "Start the system service" },
+            new[] { "stop-service",        "Stop the system service" },
+            new[] { "restart-service",     "Restart the system service" },
             new[] { "service-status",      "Show service status" },
             new[] { "service-config",      "Show service configuration" },
         });
@@ -865,27 +573,28 @@ public sealed class CliWorker : BackgroundService
 
     private static void ShowStatus(FoxAgent agent)
     {
-        var info = agent.GetInfo();
+        var info  = agent.GetInfo();
         var table = new Table()
             .Border(TableBorder.Rounded).BorderColor(Color.Blue).HideHeaders()
             .AddColumn(new TableColumn("[bold]Property[/]").Width(14))
             .AddColumn(new TableColumn("[bold]Value[/]"));
 
-        table.AddRow("[dim]Name[/]",       $"[bold white]{Markup.Escape(info.Name)}[/]");
-        table.AddRow("[dim]ID[/]",         $"[grey]{Markup.Escape(info.Id)}[/]");
-        table.AddRow("[dim]Status[/]",     $"[bold green]{Markup.Escape(info.Status.ToString())}[/]");
-        table.AddRow("[dim]Messages[/]",   info.MessageCount.ToString());
-        table.AddRow("[dim]Sub-agents[/]", info.SubAgentCount.ToString());
-        table.AddRow("[dim]Tools[/]",      info.ToolCount.ToString());
-        table.AddRow("[dim]Memory[/]",     info.HasMemory ? "[green]Enabled[/]" : "[dim]Disabled[/]");
-        table.AddRow("[dim]Created[/]",    $"[grey]{info.CreatedAt:yyyy-MM-dd HH:mm:ss}[/]");
-        table.AddRow("[dim]Last Active[/]",$"[grey]{info.LastActiveAt:yyyy-MM-dd HH:mm:ss}[/]");
+        table.AddRow("[dim]Name[/]",        $"[bold white]{Markup.Escape(info.Name)}[/]");
+        table.AddRow("[dim]ID[/]",          $"[grey]{Markup.Escape(info.Id)}[/]");
+        table.AddRow("[dim]Status[/]",      $"[bold green]{Markup.Escape(info.Status.ToString())}[/]");
+        table.AddRow("[dim]Messages[/]",    info.MessageCount.ToString());
+        table.AddRow("[dim]Sub-agents[/]",  info.SubAgentCount.ToString());
+        table.AddRow("[dim]Tools[/]",       info.ToolCount.ToString());
+        table.AddRow("[dim]Memory[/]",      info.HasMemory ? "[green]Enabled[/]" : "[dim]Disabled[/]");
+        table.AddRow("[dim]Created[/]",     $"[grey]{info.CreatedAt:yyyy-MM-dd HH:mm:ss}[/]");
+        table.AddRow("[dim]Last Active[/]", $"[grey]{info.LastActiveAt:yyyy-MM-dd HH:mm:ss}[/]");
 
         AnsiConsole.Write(new Panel(table)
         {
-            Header = new PanelHeader("[bold] Agent Status [/]", Justify.Left),
-            Border = BoxBorder.Rounded, BorderStyle = Style.Parse("blue"),
-            Padding = new Padding(1, 0),
+            Header      = new PanelHeader("[bold] Agent Status [/]", Justify.Left),
+            Border      = BoxBorder.Rounded,
+            BorderStyle = Style.Parse("blue"),
+            Padding     = new Padding(1, 0),
         });
         AnsiConsole.WriteLine();
     }
@@ -958,9 +667,10 @@ public sealed class CliWorker : BackgroundService
 
         AnsiConsole.Write(new Panel(content)
         {
-            Header = new PanelHeader($"[bold] {Markup.Escape(skill.Name)}  v{Markup.Escape(skill.Version)} [/]", Justify.Left),
-            Border = BoxBorder.Rounded, BorderStyle = Style.Parse("blue"),
-            Padding = new Padding(1, 0),
+            Header      = new PanelHeader($"[bold] {Markup.Escape(skill.Name)}  v{Markup.Escape(skill.Version)} [/]", Justify.Left),
+            Border      = BoxBorder.Rounded,
+            BorderStyle = Style.Parse("blue"),
+            Padding     = new Padding(1, 0),
         });
 
         var tools = skill.GetTools();
@@ -997,7 +707,7 @@ public sealed class CliWorker : BackgroundService
         {
             var elapsed = t.ElapsedTime.TotalSeconds < 60
                 ? $"{t.ElapsedTime.TotalSeconds:F0}s" : $"{t.ElapsedTime:mm\\:ss}";
-            var session = t.SessionKey.Length > 32 ? "…" + t.SessionKey[^31..] : t.SessionKey;
+            var session    = t.SessionKey.Length > 32 ? "…" + t.SessionKey[^31..] : t.SessionKey;
             var stateStyle = t.State.ToString() switch
             {
                 "Running" => "bold green", "Paused" => "bold yellow", "Failed" => "bold red", _ => "dim"
@@ -1020,11 +730,11 @@ public sealed class CliWorker : BackgroundService
         var agentTable = new Table().Border(TableBorder.None).HideHeaders()
             .AddColumn(new TableColumn("").Width(22)).AddColumn(new TableColumn(""));
         agentTable.AddRow("[dim]Active sub-agents[/]", $"[bold]{stats.TotalActiveSubAgents}[/]");
-        agentTable.AddRow("[dim]  Running[/]",         $"[bold green]{stats.RunningSubAgents}[/]");
-        agentTable.AddRow("[dim]  Pending[/]",         stats.PendingSubAgents.ToString());
-        agentTable.AddRow("[dim]  Completed[/]",       stats.CompletedSubAgents.ToString());
-        agentTable.AddRow("[dim]  Failed[/]",          $"[bold red]{stats.FailedSubAgents}[/]");
-        agentTable.AddRow("[dim]  Timed-out[/]",       $"[bold yellow]{stats.TimedOutSubAgents}[/]");
+        agentTable.AddRow("[dim]  Running[/]",          $"[bold green]{stats.RunningSubAgents}[/]");
+        agentTable.AddRow("[dim]  Pending[/]",          stats.PendingSubAgents.ToString());
+        agentTable.AddRow("[dim]  Completed[/]",        stats.CompletedSubAgents.ToString());
+        agentTable.AddRow("[dim]  Failed[/]",           $"[bold red]{stats.FailedSubAgents}[/]");
+        agentTable.AddRow("[dim]  Timed-out[/]",        $"[bold yellow]{stats.TimedOutSubAgents}[/]");
 
         var procTable = new Table().Border(TableBorder.None).HideHeaders()
             .AddColumn(new TableColumn("").Width(22)).AddColumn(new TableColumn(""));
@@ -1103,8 +813,8 @@ public sealed class CliWorker : BackgroundService
         try
         {
             var handler = ServiceCommandHandler.CreateFromConfiguration(_configuration, _logger);
-            var result = await handler.ProcessCommandAsync(command);
-            
+            var result  = await handler.ProcessCommandAsync(command);
+
             AnsiConsole.WriteLine();
             if (result.Success)
             {

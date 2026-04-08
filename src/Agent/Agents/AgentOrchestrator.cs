@@ -1,0 +1,464 @@
+using AgentFox.Channels;
+using AgentFox.LLM;
+using AgentFox.MCP;
+using AgentFox.Memory;
+using AgentFox.Models;
+using AgentFox.Plugins.Interfaces;
+using AgentFox.Runtime.Services;
+using AgentFox.Sessions;
+using AgentFox.Skills;
+using AgentFox.Tools;
+using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Spectre.Console;
+using SystemPromptBuilder = AgentFox.LLM.SystemPromptBuilder;
+
+namespace AgentFox.Agents;
+
+/// <summary>
+/// Hosted service that owns the lifecycle of the main <see cref="FoxAgent"/>,
+/// the <see cref="CommandProcessor"/>, and all channel connections.
+/// <para>
+/// Runs in every mode except single-shot command mode (<c>RunCommandLineMode</c>).
+/// This ensures the agent, sub-agent infrastructure, and command processing are
+/// available to all modules (CLI REPL, Web /chat, Webhooks) without any module
+/// being responsible for initialization.
+/// </para>
+/// </summary>
+public sealed class AgentOrchestrator : IHostedService
+{
+    private readonly IChatClient _chatClient;
+    private readonly ToolRegistry _toolRegistry;
+    private readonly SkillRegistry _skillRegistry;
+    private readonly MCPClient _mcpClient;
+    private readonly HybridMemory _memory;
+    private readonly SessionManager _sessionManager;
+    private readonly SubAgentManager _subAgentManager;
+    private readonly CommandProcessor _commandProcessor;
+    private readonly ICommandQueue _commandQueue;
+    private readonly WorkspaceManager _workspaceManager;
+    private readonly IConfiguration _configuration;
+    private readonly IAgentRuntime _agentRuntime;
+    private readonly MarkdownSessionStore _sessionStore;
+    private readonly FoxAgentHolder _agentHolder;
+    private readonly ChannelManagerHolder _channelManagerHolder;
+    private readonly IEnumerable<IAppModule> _modules;
+    private readonly ILoggerFactory _loggerFactory;
+    private readonly ILogger<AgentOrchestrator> _logger;
+
+    // Built during InitializeAsync, used by StopAsync
+    private ChannelManager? _channelManager;
+    private string? _systemPrompt;
+
+    public AgentOrchestrator(
+        IChatClient chatClient,
+        ToolRegistry toolRegistry,
+        SkillRegistry skillRegistry,
+        MCPClient mcpClient,
+        HybridMemory memory,
+        SessionManager sessionManager,
+        SubAgentManager subAgentManager,
+        CommandProcessor commandProcessor,
+        ICommandQueue commandQueue,
+        WorkspaceManager workspaceManager,
+        IConfiguration configuration,
+        IAgentRuntime agentRuntime,
+        MarkdownSessionStore sessionStore,
+        FoxAgentHolder agentHolder,
+        ChannelManagerHolder channelManagerHolder,
+        IEnumerable<IAppModule> modules,
+        ILoggerFactory loggerFactory,
+        ILogger<AgentOrchestrator> logger)
+    {
+        _chatClient           = chatClient;
+        _toolRegistry         = toolRegistry;
+        _skillRegistry        = skillRegistry;
+        _mcpClient            = mcpClient;
+        _memory               = memory;
+        _sessionManager       = sessionManager;
+        _subAgentManager      = subAgentManager;
+        _commandProcessor     = commandProcessor;
+        _commandQueue         = commandQueue;
+        _workspaceManager     = workspaceManager;
+        _configuration        = configuration;
+        _agentRuntime         = agentRuntime;
+        _sessionStore         = sessionStore;
+        _agentHolder          = agentHolder;
+        _channelManagerHolder = channelManagerHolder;
+        _modules              = modules;
+        _loggerFactory        = loggerFactory;
+        _logger               = logger;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // IHostedService
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Fires off initialization in the background so the host starts quickly.
+    /// The agent becomes available via <see cref="FoxAgentHolder"/> once ready.
+    /// </summary>
+    public Task StartAsync(CancellationToken cancellationToken)
+    {
+        // Run without awaiting so the host can finish startup concurrently.
+        _ = Task.Run(() => InitializeAsync(cancellationToken), cancellationToken);
+        return Task.CompletedTask;
+    }
+
+    public async Task StopAsync(CancellationToken cancellationToken)
+    {
+        if (_channelManager != null)
+        {
+            try { await _channelManager.DisconnectAllAsync(); }
+            catch (Exception ex) { _logger.LogWarning(ex, "Error disconnecting channels during shutdown."); }
+        }
+
+        try { await _commandProcessor.StopAsync(TimeSpan.FromSeconds(10)); }
+        catch (Exception ex) { _logger.LogWarning(ex, "Error stopping command processor during shutdown."); }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Core initialization
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private async Task InitializeAsync(CancellationToken ct)
+    {
+        try
+        {
+            var manifests      = _skillRegistry.GetSkillManifests();
+            var appConfigPath  = ResolveAppSettingsPath();
+
+            // ── Register runtime tools ────────────────────────────────────────
+            FoxAgent? agentRef = null;
+            var spawnSubAgentTool = new SpawnSubAgentTool(() => agentRef!);
+            _toolRegistry.Register(spawnSubAgentTool);
+
+            var spawnBgTool = new SpawnBackgroundSubAgentTool(
+                _subAgentManager,
+                logger: _loggerFactory.CreateLogger<SpawnBackgroundSubAgentTool>());
+            _toolRegistry.Register(spawnBgTool);
+
+            _toolRegistry.Register(new ManageMCPTool(
+                _mcpClient, appConfigPath,
+                _loggerFactory.CreateLogger<ManageMCPTool>()));
+
+            // ── Build system prompt ───────────────────────────────────────────
+            _systemPrompt = new SystemPromptBuilder()
+                .WithPersona(SystemPromptConfig.AgentPrompts.DeveloperAssistant)
+                .WithAllTools(_toolRegistry)
+                .WithSkillsIndex(manifests)
+                .WithExecutionContext(
+                    "You are running in interactive mode and can help with:\n" +
+                    "- Code development and debugging\n" +
+                    "- File system operations\n" +
+                    "- System administration\n" +
+                    "- Architecture and design consultation\n" +
+                    "- Composio.dev integrations (GitHub, Slack, Jira, etc.)\n" +
+                    "- Git, Docker, deployment, testing, and more via skills")
+                .WithConstraints(
+                    "Always verify changes before executing destructive operations",
+                    "Protect sensitive information (API keys, credentials, etc.)",
+                    "Test code in isolated environments when possible",
+                    "Explain your reasoning and approach clearly",
+                    "Ask for confirmation for high-risk operations",
+                    "Before using a skill's tools, always call load_skill to load the skill's guidance",
+                    "Use add_memory to save important user facts or preferences to long-term memory.",
+                    "Use search_memory to recall past information or facts when requested.",
+                    "Use get_all_memories to retrieve everything stored in long-term memory.",
+                    "For Composio integrations, provide clear examples and documentation on usage")
+                .Build();
+
+            // ── Build agent ───────────────────────────────────────────────────
+            var agent = BuildAgent(_systemPrompt, withLogger: true);
+            agentRef = agent;
+
+            // ── Publish agent to holder (unlocks FoxAgentService for web /chat) ─
+            _agentHolder.Publish(agent);
+
+            // ── Upgrade runtime executor (enables sub-agent model overrides) ──
+            _agentRuntime.SetExecutor(new FoxAgentExecutor(
+                defaultAgent:  agent,
+                agentFactory:  client => BuildAgentWithClient(_systemPrompt, client),
+                modelResolver: model  => LLMFactory.CreateWithModelOverride(_configuration, model),
+                logger:        _loggerFactory.CreateLogger<FoxAgentExecutor>()));
+
+            // ── Notify agent-aware plugins ────────────────────────────────────
+            await NotifyAgentAwareModulesAsync(agent, ct);
+
+            // ── Load channels from config ─────────────────────────────────────
+            _channelManager = await LoadChannelsFromConfigAsync(agent, ct);
+
+            // ── Register SendToChannel / ManageChannel tools ──────────────────
+            _toolRegistry.Register(new SendToChannelTool(
+                _channelManager, _loggerFactory.CreateLogger<SendToChannelTool>()));
+            _toolRegistry.Register(new ManageChannelTool(
+                _channelManager, appConfigPath, _loggerFactory.CreateLogger<ManageChannelTool>()));
+
+            // ── Initialise background-spawn tool with console session ─────────
+            var consoleSessionId = _sessionManager.GetOrCreateConsoleSession(agent.Id);
+            spawnBgTool.Initialize(
+                parentAgentId:    agent.Id,
+                parentSessionKey: consoleSessionId,
+                parentSpawnDepth: 0);
+
+            // ── Publish channel manager (unlocks WebhookModule) ───────────────
+            _channelManagerHolder.Publish(_channelManager);
+
+            // ── Wire command processor ────────────────────────────────────────
+            RegisterCommandHandlers(agent);
+            _commandProcessor.Start();
+
+            if (_channelManager.Channels.Count > 0)
+                _logger.LogInformation("{Count} channel(s) connected.", _channelManager.Channels.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "AgentOrchestrator initialization failed.");
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Agent builder helpers
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private FoxAgent BuildAgent(string systemPrompt, bool withLogger = false) =>
+        BuildAgentWithClient(systemPrompt, _chatClient, withLogger);
+
+    private FoxAgent BuildAgentWithClient(string systemPrompt, IChatClient client, bool withLogger = false)
+    {
+        var builder = new AgentBuilder(_toolRegistry)
+            .WithName("AgentFox")
+            .WithSystemPrompt(systemPrompt)
+            .WithMemory(_memory)
+            .WithSkillsRegistry(_skillRegistry)
+            .WithMCPClient(_mcpClient)
+            .WithConversationStore(_sessionStore)
+            .WithHistoryProvider(_sessionStore.HistoryProvider)
+            .WithChatClient(client)
+            .WithWorkspaceManager(_workspaceManager)
+            .WithSessionManager(_sessionManager)
+            .WithCompactionFromConfig(_configuration);
+
+        if (withLogger)
+            builder = builder.WithLogger(_loggerFactory.CreateLogger<FoxAgent>());
+
+        return builder.Build();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Plugin notification
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private async Task NotifyAgentAwareModulesAsync(FoxAgent agent, CancellationToken ct)
+    {
+        var awareModules = _modules.OfType<IAgentAwareModule>().ToList();
+        if (awareModules.Count == 0) return;
+
+        var context = new PluginContextAdapter(
+            _toolRegistry,
+            agent.PromptContributors,
+            _sessionStore);
+
+        foreach (var m in awareModules)
+        {
+            try
+            {
+                await m.OnAgentReadyAsync(context);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Plugin {Module}.OnAgentReadyAsync threw an exception.", m.Name);
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Command processor wiring
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private void RegisterCommandHandlers(FoxAgent agent)
+    {
+        var isInteractive = !Console.IsInputRedirected;
+
+        // Sub-agent lane: execute spawned sub-agents
+        _commandProcessor.RegisterLaneHandler(CommandLane.Subagent, async (command, ct) =>
+        {
+            if (command is not AgentCommand agentCmd) return;
+
+            var runId   = agentCmd.RunId;
+            var subTask = _subAgentManager.GetSubAgentTask(runId);
+
+            if (subTask != null)
+                await subTask.PauseGate.WhenResumedAsync(ct);
+
+            _subAgentManager.OnSubAgentStarted(runId);
+
+            using var linked = subTask != null
+                ? CancellationTokenSource.CreateLinkedTokenSource(ct, subTask.CancellationTokenSource.Token)
+                : CancellationTokenSource.CreateLinkedTokenSource(ct);
+
+            try
+            {
+                var subResult = await _agentRuntime.ExecuteAsync(agentCmd, linked.Token);
+                var completion = subResult.Success
+                    ? SubAgentCompletionResult.Success(subResult.Output)
+                    : SubAgentCompletionResult.Failure(subResult.Error ?? "Sub-agent returned no output");
+                _subAgentManager.OnSubAgentCompleted(runId, completion);
+            }
+            catch (OperationCanceledException)
+            {
+                _subAgentManager.OnSubAgentCompleted(runId, SubAgentCompletionResult.Cancelled());
+            }
+            catch (Exception ex)
+            {
+                _subAgentManager.OnSubAgentCompleted(runId, SubAgentCompletionResult.Failure(ex.Message));
+            }
+        });
+
+        // Main lane: execute agent turns + deliver sub-agent result announcements
+        _commandProcessor.RegisterLaneHandler(CommandLane.Main, async (command, ct) =>
+        {
+            if (command is AgentCommand agentCmd)
+            {
+                AgentResult result;
+                try
+                {
+                    result = await _agentRuntime.ExecuteAsync(agentCmd, ct);
+                }
+                catch (Exception ex)
+                {
+                    result = new AgentResult { Success = false, Error = ex.Message };
+                }
+                agentCmd.ResultSource?.TrySetResult(result);
+                return;
+            }
+
+            if (command is not ResultAnnouncementCommand announcement) return;
+
+            // Route to channel if the request originated from one
+            if (announcement.RequesterChannel != null && !announcement.SuppressChannelNotification)
+            {
+                try { await announcement.RequesterChannel.SendMessageAsync(announcement.FormatMessage()); }
+                catch (Exception ex) { _logger.LogError(ex, "Channel send failed after sub-agent completion."); }
+                return;
+            }
+
+            // Report back to a parent agent session
+            if (!string.IsNullOrEmpty(announcement.ParentSessionKey))
+            {
+                var notification = $"[Background sub-agent result]\n{announcement.FormatMessage()}";
+
+                if (isInteractive)
+                {
+                    AnsiConsole.WriteLine();
+                    AnsiConsole.MarkupLine($"[bold blue][[SUB-AGENT]][/] Reporting to parent agent [dim](session: {Markup.Escape(announcement.ParentSessionKey)})[/]...");
+                }
+
+                var notifyCmd = AgentCommand.CreateMainCommand(
+                    announcement.ParentSessionKey, agentId: agent.Id, message: notification);
+                try
+                {
+                    var parentResult = await _agentRuntime.ExecuteAsync(notifyCmd, ct);
+                    if (isInteractive)
+                    {
+                        AnsiConsole.WriteLine();
+                        AnsiConsole.MarkupLine("[bold cyan][[AGENT]][/]");
+                        AnsiConsole.WriteLine(parentResult.Output);
+                        AnsiConsole.Markup("\n[bold dodgerblue1]>[/] ");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to deliver sub-agent result to parent session.");
+                    if (isInteractive)
+                        AnsiConsole.MarkupLine($"[bold red][[ERR]][/] Failed to deliver sub-agent result: {Markup.Escape(ex.Message)}");
+                }
+                return;
+            }
+
+            // Local announcement (no channel, no parent) — log + console if interactive
+            _logger.LogInformation("Sub-agent {Session} completed.", announcement.SessionKey);
+            if (isInteractive)
+            {
+                AnsiConsole.WriteLine();
+                AnsiConsole.MarkupLine($"[bold blue][[BG]][/] Sub-agent finished: {Markup.Escape(announcement.FormatMessage())}");
+                AnsiConsole.Markup("\n[bold dodgerblue1]>[/] ");
+            }
+        });
+
+        // Background sub-agent result callback
+        _subAgentManager.RegisterResultCallback(async (task, result) =>
+        {
+            if (isInteractive)
+                AnsiConsole.MarkupLine($"\n[bold blue][[BG]][/] Sub-agent [dim]{Markup.Escape(task.SessionKey)}[/] finished — status: [bold]{Markup.Escape(result.Status.ToString())}[/]");
+            else
+                _logger.LogInformation("Background sub-agent {Session} finished with status {Status}.", task.SessionKey, result.Status);
+
+            if (task.OriginatingChannel != null)
+                return ResultAnnouncementCommand.CreateChannelAnnouncement(
+                    result, task.OriginatingChannel,
+                    task.OriginatingMessageId ?? string.Empty,
+                    task.CorrelationId,
+                    task.OriginatingChannelId ?? string.Empty);
+
+            if (!string.IsNullOrEmpty(task.ParentSessionKey))
+                return ResultAnnouncementCommand.CreateParentAgentAnnouncement(
+                    result, task.CorrelationId, task.ParentSessionKey, task.SessionKey);
+
+            return ResultAnnouncementCommand.CreateLocalAnnouncement(result, task.CorrelationId, task.SessionKey);
+        });
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Channel loading
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private async Task<ChannelManager> LoadChannelsFromConfigAsync(FoxAgent agent, CancellationToken ct)
+    {
+        var manager = new ChannelManager(
+            agent, _sessionManager, _commandQueue,
+            _loggerFactory.CreateLogger<ChannelManager>());
+
+        var channelSection = _configuration.GetSection("Channels");
+        if (!channelSection.Exists()) return manager;
+
+        var tgSection = channelSection.GetSection("Telegram");
+        if (tgSection.Exists() && tgSection.GetValue<bool>("Enabled"))
+        {
+            var token = tgSection["BotToken"] ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(token) || token.Contains("your-telegram"))
+            {
+                _logger.LogWarning("Telegram: BotToken not configured — skipping.");
+            }
+            else
+            {
+                var pollingTimeout = tgSection.GetValue<int>("PollingTimeoutSeconds", 30);
+                var (ch, error) = ChannelFactory.Create("Telegram", new Dictionary<string, string>
+                {
+                    ["BotToken"]               = token,
+                    ["PollingTimeoutSeconds"]   = pollingTimeout.ToString()
+                });
+                if (ch != null) manager.AddChannel(ch);
+                else            _logger.LogWarning("Telegram channel failed: {Error}", error);
+            }
+        }
+
+        if (manager.Channels.Count == 0) return manager;
+
+        _logger.LogInformation("Connecting {Count} channel(s)...", manager.Channels.Count);
+        await manager.ConnectAllAsync();
+        return manager;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Helpers
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private static string ResolveAppSettingsPath()
+    {
+        var cwdPath = Path.Combine(Directory.GetCurrentDirectory(), "appsettings.json");
+        return File.Exists(cwdPath) ? cwdPath : Path.Combine(AppContext.BaseDirectory, "appsettings.json");
+    }
+}

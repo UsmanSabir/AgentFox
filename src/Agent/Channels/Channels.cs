@@ -60,6 +60,20 @@ public abstract class Channel
     }
 
     /// <summary>
+    /// Process an inbound webhook payload from an external service.
+    /// Override this in channels that support webhook mode (e.g. Telegram, Slack).
+    /// The default implementation returns <see cref="WebhookResult.Unsupported"/>.
+    /// </summary>
+    /// <param name="body">Raw request body (typically JSON).</param>
+    /// <param name="headers">HTTP headers forwarded from the webhook request.</param>
+    /// <param name="ct">Cancellation token.</param>
+    public virtual Task<WebhookResult> ProcessWebhookAsync(
+        string body,
+        IReadOnlyDictionary<string, string> headers,
+        CancellationToken ct = default)
+        => Task.FromResult(WebhookResult.Unsupported(Name));
+
+    /// <summary>
     /// Proactively send a message to a specific target within this channel.
     /// For single-recipient channels (WhatsApp, Teams) targetId is ignored.
     /// For multi-chat channels (Telegram) targetId is the chat/user ID.
@@ -70,6 +84,22 @@ public abstract class Channel
     {
         await SendMessageAsync(content);
     }
+}
+
+/// <summary>
+/// Result returned by <see cref="Channel.ProcessWebhookAsync"/>.
+/// </summary>
+public sealed record WebhookResult(bool Supported, bool Accepted, string? Error = null)
+{
+    /// <summary>The channel does not support webhook mode.</summary>
+    public static WebhookResult Unsupported(string channelName) =>
+        new(false, false, $"Channel '{channelName}' does not support webhooks.");
+
+    /// <summary>Webhook payload was accepted and is being processed.</summary>
+    public static WebhookResult Ok() => new(true, true);
+
+    /// <summary>Webhook was received but processing failed.</summary>
+    public static WebhookResult Failed(string error) => new(true, false, error);
 }
 
 /// <summary>
