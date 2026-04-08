@@ -7,6 +7,7 @@ using AgentFox.Memory;
 using AgentFox.Models;
 using AgentFox.Modules.Loaders;
 using AgentFox.Plugins.Interfaces;
+using AgentFox.Runtime.Services;
 using AgentFox.Sessions;
 using AgentFox.Skills;
 using AgentFox.Tools;
@@ -30,11 +31,22 @@ class Program
     static async Task<int> Main(string[] args)
     {
         Console.OutputEncoding = Encoding.UTF8;
-        ShowBanner();
+        
+        // ── Service mode detection ────────────────────────────────────────────
+        // Check if running in service mode before showing banner
+        bool isServiceMode = ServiceHostMode.DetectServiceMode(args);
+        
+        // Show banner only if not in service mode
+        if (!isServiceMode)
+            ShowBanner();
 
         bool runDoctor   = args.Contains("--doctor");
         bool doctorFix   = args.Contains("--fix");
-        var  taskArgs    = args.Where(a => !a.StartsWith("--")).ToArray();
+        
+        // Extract service management commands
+        string? serviceCommand = args.FirstOrDefault(a => ServiceCommandHandler.IsServiceCommand(a));
+        
+        var  taskArgs    = args.Where(a => !a.StartsWith("--") && !ServiceCommandHandler.IsServiceCommand(a)).ToArray();
 
         // ── Web application builder (single DI container for the whole process) ─
         var builder       = WebApplication.CreateBuilder(args);
@@ -70,6 +82,16 @@ class Program
         builder.Logging.AddFilter("Microsoft",       LogLevel.Warning);
         builder.Logging.AddFilter("System",          LogLevel.Warning);
         builder.Logging.AddFilter("Microsoft.Hosting.Lifetime", LogLevel.Warning);
+
+        // ── Handle service commands (--install-service, --uninstall-service, etc.) ─
+        if (!string.IsNullOrEmpty(serviceCommand))
+        {
+            var tempLogger = new ConsoleLogger<Program>();
+            var handler = ServiceCommandHandler.CreateFromConfiguration(configuration, tempLogger);
+            var result = await handler.ProcessCommandAsync(serviceCommand);
+            AnsiConsole.WriteLine(result.ToString());
+            return result.Success ? 0 : 1;
+        }
 
         // ── Pre-build async services ──────────────────────────────────────────
         // These need async init (Composio, MCP) so they are created before the host
@@ -139,6 +161,15 @@ class Program
         configuration.GetSection("UI").Bind(uiCfg);
         builder.Services.AddSingleton(uiCfg);
 
+        // Service configuration
+        var serviceCfg = new ServiceConfig();
+        configuration.GetSection("Services").Bind(serviceCfg);
+        if (string.IsNullOrWhiteSpace(serviceCfg.ServiceName))
+            serviceCfg.ServiceName = "AgentFox";
+        if (string.IsNullOrWhiteSpace(serviceCfg.LogPath))
+            serviceCfg.LogPath = "{workspace}/logs/service.log";
+        builder.Services.AddSingleton(serviceCfg);
+
         // Pre-built singletons
         builder.Services.AddSingleton(workspaceManager);
         builder.Services.AddSingleton(toolRegistry);
@@ -198,6 +229,12 @@ class Program
         // Agent holder + IAgentService (used by WebModule /chat)
         builder.Services.AddSingleton<FoxAgentHolder>();
         builder.Services.AddSingleton<AgentFox.Plugins.Interfaces.IAgentService, FoxAgentService>();
+
+        // Service heartbeat (for periodic health checks when running as service)
+        if (serviceCfg.Enabled && serviceCfg.HeartbeatIntervalSeconds > 0)
+        {
+            builder.Services.AddHostedService<ServiceHeartbeat>();
+        }
 
         // ── Load modules ──────────────────────────────────────────────────────
         var enabledModules = configuration["Modules"]?.Split(',') ?? new[] { "cli", "web" };

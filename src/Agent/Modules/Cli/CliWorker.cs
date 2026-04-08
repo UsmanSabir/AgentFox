@@ -8,6 +8,7 @@ using SystemPromptBuilder = AgentFox.LLM.SystemPromptBuilder;
 using AgentFox.Memory;
 using AgentFox.Models;
 using AgentFox.Plugins.Interfaces;
+using AgentFox.Runtime.Services;
 using AgentFox.Sessions;
 using AgentFox.Skills;
 using AgentFox.Tools;
@@ -19,6 +20,7 @@ using Spectre.Console;
 using Spectre.Console.Rendering;
 using System.Text;
 using System.Threading.Channels;
+using AgentFox.Helpers;
 using SysChannel = System.Threading.Channels.Channel;
 
 namespace AgentFox.Modules.Cli;
@@ -56,6 +58,7 @@ public sealed class CliWorker : BackgroundService
     private readonly IEnumerable<IAppModule> _modules;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<CliWorker> _logger;
+    private readonly ServiceConfig _serviceConfig;
 
     public CliWorker(
         IHostApplicationLifetime lifetime,
@@ -76,7 +79,8 @@ public sealed class CliWorker : BackgroundService
         FoxAgentHolder agentHolder,
         IEnumerable<IAppModule> modules,
         ILoggerFactory loggerFactory,
-        ILogger<CliWorker> logger)
+        ILogger<CliWorker> logger,
+        ServiceConfig serviceConfig)
     {
         _lifetime = lifetime;
         _chatClient = chatClient;
@@ -97,6 +101,7 @@ public sealed class CliWorker : BackgroundService
         _modules = modules;
         _loggerFactory = loggerFactory;
         _logger = logger;
+        _serviceConfig = serviceConfig;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -466,6 +471,17 @@ public sealed class CliWorker : BackgroundService
             case "agents stats":
                 ShowAgentStats();
                 return ReplAction.Handled;
+
+            // ── Service commands ─────────────────────────────────────────────
+            case "install-service":
+            case "uninstall-service":
+            case "start-service":
+            case "stop-service":
+            case "restart-service":
+            case "service-status":
+            case "service-config":
+                await HandleServiceCommandAsync(lower, ct);
+                return ReplAction.Handled;
         }
 
         if (lower.StartsWith("skill "))
@@ -831,6 +847,17 @@ public sealed class CliWorker : BackgroundService
             new[] { "agents kill all",     "Force-kill every active sub-agent" },
         });
 
+        AddSection("Service Management", new[]
+        {
+            new[] { "install-service",     "Install FoxAgent as a system service" },
+            new[] { "uninstall-service",   "Uninstall the FoxAgent service" },
+            new[] { "start-service",       "Start the FoxAgent service" },
+            new[] { "stop-service",        "Stop the FoxAgent service" },
+            new[] { "restart-service",     "Restart the FoxAgent service" },
+            new[] { "service-status",      "Show service status" },
+            new[] { "service-config",      "Show service configuration" },
+        });
+
         AnsiConsole.WriteLine();
         AnsiConsole.MarkupLine("[dim]You can also ask the agent to execute commands, read/write files, spawn sub-agents, use skills, and more.[/]");
         AnsiConsole.WriteLine();
@@ -1065,6 +1092,39 @@ public sealed class CliWorker : BackgroundService
                 AnsiConsole.MarkupLine($"[bold red]✗[/]  Sub-agent [dim]{Markup.Escape(runId)}[/] not found.");
         }
         AnsiConsole.WriteLine();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Service management commands
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private async Task HandleServiceCommandAsync(string command, CancellationToken ct)
+    {
+        try
+        {
+            var handler = ServiceCommandHandler.CreateFromConfiguration(_configuration, _logger);
+            var result = await handler.ProcessCommandAsync(command);
+            
+            AnsiConsole.WriteLine();
+            if (result.Success)
+            {
+                AnsiConsole.MarkupLine($"[bold green]✓[/]  {Markup.Escape(result.Message)}");
+                if (!string.IsNullOrEmpty(result.Details))
+                    AnsiConsole.MarkupLine($"[dim]{Markup.Escape(result.Details)}[/]");
+            }
+            else
+            {
+                AnsiConsole.MarkupLine($"[bold red]✗[/]  {Markup.Escape(result.Message)}");
+                if (!string.IsNullOrEmpty(result.Details))
+                    AnsiConsole.MarkupLine($"[dim]{Markup.Escape(result.Details)}[/]");
+            }
+            AnsiConsole.WriteLine();
+        }
+        catch (Exception ex)
+        {
+            AnsiConsole.MarkupLine($"[bold red]✗[/]  Error processing service command: {Markup.Escape(ex.Message)}");
+            AnsiConsole.WriteLine();
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
