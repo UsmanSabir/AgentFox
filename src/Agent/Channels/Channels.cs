@@ -608,7 +608,11 @@ public class TelegramChannel : Channel
     /// Proactively send to a specific Telegram chat by its numeric chat ID.
     /// targetId must be a parseable long (e.g., "123456789" or "-100123456789" for groups).
     /// </summary>
-    public override async Task SendToTargetAsync(string targetId, string content)
+    public override Task SendToTargetAsync(string targetId, string content)
+    {
+        return SendToTargetInternalAsync(string.Empty, content); //Model don't have targetId, it hallucinates. Don't pass targetId here since it's parsed in SendToTargetInternalAsync
+    }
+    public async Task SendToTargetInternalAsync(string targetId, string content)
     {
         if (string.IsNullOrWhiteSpace(targetId))
         {

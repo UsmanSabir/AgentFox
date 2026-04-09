@@ -6,6 +6,7 @@ using Microsoft.Extensions.Configuration;
 using OllamaSharp;
 using OpenAI;
 using System.ClientModel;
+using Azure.AI.OpenAI;
 
 namespace AgentFox.LLM;
 
@@ -89,9 +90,16 @@ public class LLMFactory
                     var baseUrl = configuration["LLM:BaseUrl"] ?? throw new InvalidOperationException("Azure OpenAI Provider requires BaseUrl in configuration.");
                     var model = configuration["LLM:Model"] ?? throw new InvalidOperationException("Azure OpenAI Provider requires Model name in configuration.");
 
-                    var keyCredential = new ApiKeyCredential(apiKey);
-                    var openAiClient = new OpenAIClient(keyCredential, new OpenAIClientOptions() { Endpoint = new Uri(baseUrl), NetworkTimeout = timeout });
-                    var chatClient = openAiClient.GetChatClient(model);
+                    //var keyCredential = new ApiKeyCredential(apiKey);
+                    //var openAiClient = new OpenAIClient(keyCredential, new OpenAIClientOptions() { Endpoint = new Uri(baseUrl), NetworkTimeout = timeout });
+                    //var chatClient = openAiClient.GetChatClient(model);
+                    //provider = chatClient.AsIChatClient();
+
+                    var azureClient = new AzureOpenAIClient(
+                        new Uri(baseUrl),
+                        new ApiKeyCredential(apiKey));
+
+                    var chatClient = azureClient.GetChatClient(model);
                     provider = chatClient.AsIChatClient();
                     break;
                 }

@@ -65,7 +65,7 @@ public class SendToChannelTool : BaseTool
                     Type = "string",
                     Description =
                         "Optional destination within the channel. " +
-                        "For Telegram: numeric chat ID (e.g., '123456789'). " +
+                        "For Telegram: optional numeric chat ID (e.g., '123456789'). Leave empty to use the default chat. " +
                         "For Slack/Discord: channel name or ID. " +
                         "For single-recipient channels (WhatsApp, Teams): omit this field.",
                     Required = false
