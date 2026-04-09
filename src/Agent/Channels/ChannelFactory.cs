@@ -82,7 +82,16 @@ public static class ChannelFactory
             return (null, "Telegram requires 'BotToken'");
 
         var timeout = config.TryGetValue("PollingTimeoutSeconds", out var t) && int.TryParse(t, out var s) ? s : 30;
-        return (new TelegramChannel(token, timeout, logger), null);
+        long? chatId = null;
+        if (config.TryGetValue("ChatId", out var chatIdStr)
+            && !string.IsNullOrWhiteSpace(chatIdStr)
+            && long.TryParse(chatIdStr, out var parsedChatId))
+        {
+            chatId = parsedChatId;
+        }
+
+        config.TryGetValue("WorkspacePath", out var workspacePath);
+        return (new TelegramChannel(token, timeout, logger, chatId, workspacePath), null);
     }
 
     private static (Channel?, string?) CreateSlack(Dictionary<string, string> config)

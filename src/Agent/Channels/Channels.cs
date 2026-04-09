@@ -1,3 +1,4 @@
+using System.IO;
 using AgentFox.Http;
 using AgentFox.Models;
 using AgentFox.Agents;
@@ -135,7 +136,7 @@ public enum MessageType
 public class ChannelManager
 {
     private readonly Dictionary<string, Channel> _channels = new();
-    private readonly FoxAgent _agent;
+    private readonly Func<FoxAgent?> _agentFactory;
     private ChannelMessageGateway? _gateway;
     private readonly SessionManager? _sessionManager;
     private readonly ICommandQueue? _commandQueue;
@@ -153,16 +154,33 @@ public class ChannelManager
         _channels.Values.FirstOrDefault(c =>
             c.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>
+    /// Creates a ChannelManager with a lazy agent reference.
+    /// Use this overload when the agent hasn't been built yet (e.g., to register
+    /// SendToChannelTool before building the system prompt).
+    /// </summary>
+    public ChannelManager(
+        Func<FoxAgent?> agentFactory,
+        SessionManager? sessionManager = null,
+        ICommandQueue? commandQueue = null,
+        ILogger? logger = null)
+    {
+        _agentFactory = agentFactory;
+        _sessionManager = sessionManager;
+        _commandQueue = commandQueue;
+        _logger = logger;
+    }
+
+    /// <summary>
+    /// Creates a ChannelManager with a direct agent reference.
+    /// </summary>
     public ChannelManager(
         FoxAgent agent,
         SessionManager? sessionManager = null,
         ICommandQueue? commandQueue = null,
         ILogger? logger = null)
+        : this(() => agent, sessionManager, commandQueue, logger)
     {
-        _agent = agent;
-        _sessionManager = sessionManager;
-        _commandQueue = commandQueue;
-        _logger = logger;
     }
     
     /// <summary>
@@ -242,6 +260,13 @@ public class ChannelManager
     /// </summary>
     private async Task HandleMessage(Channel channel, ChannelMessage message)
     {
+        var agent = _agentFactory();
+        if (agent == null)
+        {
+            _logger?.LogWarning("HandleMessage: agent not yet available, dropping message {MessageId}", message.Id);
+            return;
+        }
+
         try
         {
             if (_gateway != null)
@@ -250,8 +275,8 @@ public class ChannelManager
                 var task = await _gateway.ProcessChannelMessageAsync(
                     message,
                     channel,
-                    _agent.Id);
-                
+                    agent.Id);
+
                 _logger?.LogInformation(
                     "Channel message routed through gateway: MessageId={MessageId}, State={State}",
                     message.Id, task.State);
@@ -267,14 +292,14 @@ public class ChannelManager
                     ? channel.ChannelId
                     : message.ChannelId;
                 var sessionId = _sessionManager?.GetOrCreateChannelSession(
-                    sessionChannelId, channel.Name, _agent.Id)
+                    sessionChannelId, channel.Name, agent.Id)
                     ?? Guid.NewGuid().ToString("N");
 
                 AgentResult result;
                 if (_commandQueue != null)
                 {
                     var tcs = new TaskCompletionSource<AgentResult>(TaskCreationOptions.RunContinuationsAsynchronously);
-                    var cmd = AgentCommand.CreateMainCommand(sessionId, _agent.Id, message.Content);
+                    var cmd = AgentCommand.CreateMainCommand(sessionId, agent.Id, message.Content);
                     cmd.ResultSource = tcs;
                     _commandQueue.Enqueue(cmd);
                     result = await tcs.Task;
@@ -282,7 +307,7 @@ public class ChannelManager
                 else
                 {
                     // Fallback: no queue configured (tests / embedded use)
-                    result = await _agent.ProcessAsync(message.Content, sessionId);
+                    result = await agent.ProcessAsync(message.Content, sessionId);
                 }
 
                 await channel.SendReplyAsync(message, result.Output);
@@ -416,19 +441,26 @@ public class TelegramChannel : Channel
     private readonly HttpClient _http;
     private readonly ILogger? _logger;
 
+    private readonly string _chatIdStoragePath;
+    private long? _defaultChatId;
     private long _updateOffset = 0;
     private CancellationTokenSource? _pollingCts;
     private Task? _pollingTask;
 
     private string ApiBase => $"https://api.telegram.org/bot{_botToken}";
 
-    public TelegramChannel(string botToken, int pollingTimeoutSeconds = 30, ILogger? logger = null)
+    public TelegramChannel(string botToken, int pollingTimeoutSeconds = 30, ILogger? logger = null, long? chatId = null, string? workspacePath = null)
     {
         Name = "Telegram";
         ChannelId = "telegram";
         _botToken = botToken;
         _pollingTimeoutSeconds = pollingTimeoutSeconds;
         _logger = logger;
+        _defaultChatId = chatId;
+        _chatIdStoragePath = !string.IsNullOrWhiteSpace(workspacePath)
+            ? Path.Combine(workspacePath, "telegram_chat_id.txt")
+            : Path.Combine(AppContext.BaseDirectory, "telegram_chat_id.txt");
+        LoadPersistedChatId();
         // HTTP timeout must exceed the long-poll window; resilient handler retries transient failures.
         _http = HttpResilienceFactory.CreateForPolling(TimeSpan.FromSeconds(pollingTimeoutSeconds + 15));
     }
@@ -456,6 +488,13 @@ public class TelegramChannel : Channel
         {
             var info = await GetBotInfoAsync();
             _logger?.LogInformation("Telegram connected: @{Username} (id={Id})", info.Username, info.Id);
+            if (!_defaultChatId.HasValue)
+            {
+                var resolvedChatId = await ResolveDefaultChatIdAsync();
+                if (resolvedChatId.HasValue)
+                    _logger?.LogInformation("Telegram default chat id resolved: {ChatId}", resolvedChatId.Value);
+            }
+
             IsConnected = true;
             _pollingCts = new CancellationTokenSource();
             _pollingTask = Task.Run(() => PollLoopAsync(_pollingCts.Token));
@@ -513,6 +552,13 @@ public class TelegramChannel : Channel
         if (msg == null || string.IsNullOrWhiteSpace(msg.Text)) return;
 
         var chatId = msg.Chat.Id;
+        if (chatId != 0 && !_defaultChatId.HasValue)
+        {
+            _defaultChatId = chatId;
+            PersistDefaultChatId(chatId);
+            _logger?.LogInformation("Telegram default chat id persisted from incoming update: {ChatId}", chatId);
+        }
+
         var incoming = new ChannelMessage
         {
             // Per-chat ChannelId so SessionManager creates one session per conversation
@@ -564,12 +610,108 @@ public class TelegramChannel : Channel
     /// </summary>
     public override async Task SendToTargetAsync(string targetId, string content)
     {
+        if (string.IsNullOrWhiteSpace(targetId))
+        {
+            if (!await EnsureDefaultChatIdAsync())
+            {
+                _logger?.LogWarning("TelegramChannel.SendToTargetAsync: no chat ID configured or discoverable from getUpdates.");
+                return;
+            }
+
+            await SendToChatAsync(_defaultChatId!.Value, content);
+            return;
+        }
+
         if (!long.TryParse(targetId, out var chatId))
         {
             _logger?.LogWarning("TelegramChannel.SendToTargetAsync: invalid chat_id '{TargetId}'", targetId);
             return;
         }
         await SendToChatAsync(chatId, content);
+    }
+
+    private async Task<bool> EnsureDefaultChatIdAsync()
+    {
+        if (_defaultChatId.HasValue)
+            return true;
+
+        return (await ResolveDefaultChatIdAsync()).HasValue;
+    }
+
+    private async Task<long?> ResolveDefaultChatIdAsync()
+    {
+        try
+        {
+            var url = $"{ApiBase}/getUpdates?limit=1";
+            var json = await _http.GetStringAsync(url);
+            var resp = JsonConvert.DeserializeObject<TgApiResponse<List<TgUpdate>>>(json);
+            if (resp?.Ok == true && resp.Result != null && resp.Result.Count > 0)
+            {
+                var update = resp.Result[0];
+                if (update.UpdateId >= _updateOffset)
+                    _updateOffset = update.UpdateId + 1;
+
+                var msg = update.Message;
+                var chatId = msg != null && msg.Chat.Id != 0
+                    ? msg.Chat.Id
+                    : msg?.From?.Id ?? 0;
+
+                if (chatId != 0)
+                {
+                    _defaultChatId = chatId;
+                    PersistDefaultChatId(chatId);
+                    return chatId;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Telegram default chat id lookup via getUpdates failed");
+        }
+
+        return null;
+    }
+
+    private void LoadPersistedChatId()
+    {
+        if (_defaultChatId.HasValue || string.IsNullOrWhiteSpace(_chatIdStoragePath))
+            return;
+
+        try
+        {
+            if (File.Exists(_chatIdStoragePath))
+            {
+                var text = File.ReadAllText(_chatIdStoragePath).Trim();
+                if (long.TryParse(text, out var chatId) && chatId != 0)
+                {
+                    _defaultChatId = chatId;
+                    _logger?.LogInformation("Telegram default chat id loaded from {Path}", _chatIdStoragePath);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Failed to read persisted Telegram chat id from {Path}", _chatIdStoragePath);
+        }
+    }
+
+    private void PersistDefaultChatId(long chatId)
+    {
+        if (chatId == 0 || string.IsNullOrWhiteSpace(_chatIdStoragePath))
+            return;
+
+        try
+        {
+            var directory = Path.GetDirectoryName(_chatIdStoragePath);
+            if (!string.IsNullOrWhiteSpace(directory))
+                Directory.CreateDirectory(directory);
+
+            File.WriteAllText(_chatIdStoragePath, chatId.ToString());
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Failed to persist Telegram chat id to {Path}", _chatIdStoragePath);
+        }
     }
 
     private async Task SendToChatAsync(long chatId, string text)

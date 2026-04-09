@@ -169,7 +169,30 @@ public sealed class AgentOrchestrator : IHostedService
                 _toolRegistry.Register(new ManageCronTool(() => _cronScheduler!));
             }
 
-            // ── Build system prompt ───────────────────────────────────────────
+            // ── Create ChannelManager early with lazy agent ref ───────────────
+            // The lazy ref resolves once the agent is built below. Any messages that
+            // arrive before the agent is ready are dropped by the null guard in HandleMessage.
+            _channelManager = new ChannelManager(
+                () => agentRef,
+                _sessionManager, _commandQueue,
+                _loggerFactory.CreateLogger<ChannelManager>());
+
+            // ── Connect channels BEFORE registering tools and building the prompt ─
+            // This ensures SendToChannelTool.Description (which calls CurrentChannelNames()
+            // live) shows the actual configured channels in the system prompt and in the
+            // tool's parameter enum, rather than "none".
+            await ConnectChannelsFromConfigAsync(_channelManager, ct);
+
+            // ── Register channel tools BEFORE building system prompt ──────────
+            if (toolsConfig.Channels)
+            {
+                _toolRegistry.Register(new SendToChannelTool(
+                    _channelManager, _loggerFactory.CreateLogger<SendToChannelTool>()));
+                _toolRegistry.Register(new ManageChannelTool(
+                    _channelManager, appConfigPath, _loggerFactory.CreateLogger<ManageChannelTool>()));
+            }
+
+            // ── Build system prompt (includes channel tools with live channel list) ──
             _systemPrompt = new SystemPromptBuilder()
                 .WithPersona(SystemPromptConfig.AgentPrompts.DeveloperAssistant)
                 .WithAllTools(_toolRegistry)
@@ -197,7 +220,12 @@ public sealed class AgentOrchestrator : IHostedService
 
             // ── Build agent ───────────────────────────────────────────────────
             var agent = BuildAgent(_systemPrompt, withLogger: true);
-            agentRef = agent;
+            agentRef = agent;  // lazy ref in ChannelManager and SpawnSubAgentTool now resolves
+
+            // // ── Register ChannelContributor so runtime channel changes (add/remove
+            // //    via manage_channel) are reflected in every subsequent LLM call ────
+            // if (toolsConfig.Channels)
+            //     agent.PromptContributors.Add(new ChannelContributor(_channelManager));
 
             // ── Create scheduling infrastructure (if enabled) ─────────────────
             if (toolsConfig.Scheduling)
@@ -233,18 +261,6 @@ public sealed class AgentOrchestrator : IHostedService
 
             // ── Notify agent-aware plugins ────────────────────────────────────
             await NotifyAgentAwareModulesAsync(agent, ct);
-
-            // ── Load channels from config ─────────────────────────────────────
-            _channelManager = await LoadChannelsFromConfigAsync(agent, ct);
-
-            // ── Register SendToChannel / ManageChannel tools ──────────────────
-            if (toolsConfig.Channels)
-            {
-                _toolRegistry.Register(new SendToChannelTool(
-                    _channelManager, _loggerFactory.CreateLogger<SendToChannelTool>()));
-                _toolRegistry.Register(new ManageChannelTool(
-                    _channelManager, appConfigPath, _loggerFactory.CreateLogger<ManageChannelTool>()));
-            }
 
             // ── Initialise background-spawn tool with console session ─────────
             var consoleSessionId = _sessionManager.GetOrCreateConsoleSession(agent.Id);
@@ -505,14 +521,15 @@ public sealed class AgentOrchestrator : IHostedService
     // Channel loading
     // ─────────────────────────────────────────────────────────────────────────
 
-    private async Task<ChannelManager> LoadChannelsFromConfigAsync(FoxAgent agent, CancellationToken ct)
+    /// <summary>
+    /// Reads channel config and adds/connects configured channels into an existing manager.
+    /// The manager is created early (with a lazy agent ref) so that channel tools can be
+    /// registered before the system prompt is built.
+    /// </summary>
+    private async Task ConnectChannelsFromConfigAsync(ChannelManager manager, CancellationToken ct)
     {
-        var manager = new ChannelManager(
-            agent, _sessionManager, _commandQueue,
-            _loggerFactory.CreateLogger<ChannelManager>());
-
         var channelSection = _configuration.GetSection("Channels");
-        if (!channelSection.Exists()) return manager;
+        if (!channelSection.Exists()) return;
 
         var tgSection = channelSection.GetSection("Telegram");
         if (tgSection.Exists() && tgSection.GetValue<bool>("Enabled"))
@@ -525,21 +542,26 @@ public sealed class AgentOrchestrator : IHostedService
             else
             {
                 var pollingTimeout = tgSection.GetValue<int>("PollingTimeoutSeconds", 30);
-                var (ch, error) = ChannelFactory.Create("Telegram", new Dictionary<string, string>
+                var config = new Dictionary<string, string>
                 {
                     ["BotToken"]               = token,
-                    ["PollingTimeoutSeconds"]   = pollingTimeout.ToString()
-                });
+                    ["PollingTimeoutSeconds"]   = pollingTimeout.ToString(),
+                    ["WorkspacePath"]           = _workspaceManager.ResolvePath("")
+                };
+                var configuredChatId = tgSection["ChatId"];
+                if (!string.IsNullOrWhiteSpace(configuredChatId))
+                    config["ChatId"] = configuredChatId;
+
+                var (ch, error) = ChannelFactory.Create("Telegram", config);
                 if (ch != null) manager.AddChannel(ch);
                 else            _logger.LogWarning("Telegram channel failed: {Error}", error);
             }
         }
 
-        if (manager.Channels.Count == 0) return manager;
+        if (manager.Channels.Count == 0) return;
 
         _logger.LogInformation("Connecting {Count} channel(s)...", manager.Channels.Count);
         await manager.ConnectAllAsync();
-        return manager;
     }
 
     // ─────────────────────────────────────────────────────────────────────────

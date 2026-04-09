@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using AgentFox.Channels;
 using AgentFox.MCP;
 using AgentFox.Models;
 using AgentFox.Skills;
@@ -244,6 +245,40 @@ public sealed class MCPServerContributor : IPromptContributor
                 ? string.Join(", ", s.AvailableTools.Select(t => t.Name))
                 : "no tools";
             sb.AppendLine($"- **{s.Name}** ({s.AvailableTools.Count} tools): {toolNames}");
+        }
+        return sb.ToString().TrimEnd();
+    }
+}
+
+/// <summary>
+/// Injects a live list of connected channels and their status into the system prompt
+/// each turn. This keeps the agent aware of channels added or removed at runtime via
+/// <c>manage_channel</c> without requiring an agent rebuild.
+/// <para>
+/// Registered by <see cref="AgentOrchestrator"/> after the channel manager is ready.
+/// Fragment is only emitted when at least one channel is registered, and only rebuilt
+/// when the channel list or connection states change.
+/// </para>
+/// </summary>
+public sealed class ChannelContributor : IPromptContributor
+{
+    private readonly ChannelManager _channelManager;
+    public string ContributorId => "channels";
+
+    public ChannelContributor(ChannelManager channelManager) => _channelManager = channelManager;
+
+    public string? GetFragment()
+    {
+        var channels = _channelManager.Channels.Values.ToList();
+        if (channels.Count == 0) return null;
+
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("## Connected Channels");
+        sb.AppendLine("Use send_to_channel to proactively push messages to these channels:");
+        foreach (var ch in channels)
+        {
+            var status = ch.IsConnected ? "connected" : "disconnected";
+            sb.AppendLine($"- **{ch.Name.ToLowerInvariant()}** ({status})");
         }
         return sb.ToString().TrimEnd();
     }

@@ -64,7 +64,7 @@ public class SendToChannelTool : BaseTool
                 {
                     Type = "string",
                     Description =
-                        "Destination within the channel. " +
+                        "Optional destination within the channel. " +
                         "For Telegram: numeric chat ID (e.g., '123456789'). " +
                         "For Slack/Discord: channel name or ID. " +
                         "For single-recipient channels (WhatsApp, Teams): omit this field.",

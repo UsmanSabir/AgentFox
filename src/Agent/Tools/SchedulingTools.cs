@@ -43,7 +43,7 @@ public class ManageHeartbeatTool : BaseTool
         ["task"] = new()
         {
             Type = "string",
-            Description = "Agent task to execute on each beat (required for 'add'; optional for 'update')",
+            Description = "A detailed Agent task to execute on each beat with all parameters (required for 'add'; optional for 'update')",
             Required = false
         },
         ["interval_seconds"] = new()
@@ -241,7 +241,7 @@ public class ManageCronTool : BaseTool
         ["task"] = new()
         {
             Type = "string",
-            Description = "Agent task to run when the cron fires (required for 'add')",
+            Description = "A detailed Agent task to run when the cron fires (required for 'add'). Clear steps and parameters should be provided.",
             Required = false
         }
     };
