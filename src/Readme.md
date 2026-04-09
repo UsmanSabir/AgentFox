@@ -1,3 +1,7 @@
+# Onboarding Guide
+.\AgentFox.exe --onboarding
+.\AgentFox.exe --onboarding --provider OpenAI --model gpt-4 --apikey sk-xxxx
+
 # Install as service
 ## CLI Flags
 dotnet run -- --install-service
@@ -12,7 +16,8 @@ dotnet run -- --restart-service
 
 - Uninstall
 dotnet run -- --uninstall-service
-
+.\AgentFox.exe uninstall-service
+- 
 ## Interactive REPL:
 > install-service
 ✓ Service 'AgentFox' installed successfully on port 8080

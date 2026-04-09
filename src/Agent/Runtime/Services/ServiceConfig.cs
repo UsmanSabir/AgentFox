@@ -65,6 +65,19 @@ public class ServiceConfig
     /// </summary>
     public Dictionary<string, string> EnvironmentVariables { get; set; } = new();
 
+    // ── Ephemeral install-time credentials (never persisted to appsettings.json) ─
+    // Populated by the onboarding wizard before the spinner starts, so that
+    // WindowsServiceManager does not need to call interactive prompts mid-spinner.
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string? InstallUserName { get; set; }
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string? InstallPassword { get; set; }
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string? InstallDomain { get; set; }
+
     /// <summary>
     /// Generates and returns the effective display name with ServiceName substituted if DisplayName is empty.
     /// </summary>

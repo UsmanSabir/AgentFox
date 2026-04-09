@@ -1,6 +1,7 @@
 using AgentFox.Agents;
 using AgentFox.Doctor;
 using AgentFox.Doctor.Checks;
+using AgentFox.Doctor.Onboarding;
 using AgentFox.LLM;
 using AgentFox.MCP;
 using AgentFox.Memory;
@@ -30,7 +31,8 @@ class Program
 {
     static async Task<int> Main(string[] args)
     {
-        Console.OutputEncoding = Encoding.UTF8;
+        if (!Console.IsInputRedirected)
+            Console.OutputEncoding = Encoding.UTF8;
         
         // ── Service mode detection ────────────────────────────────────────────
         // Check if running in service mode before showing banner
@@ -40,13 +42,23 @@ class Program
         if (!isServiceMode)
             ShowBanner();
 
-        bool runDoctor   = args.Contains("--doctor");
-        bool doctorFix   = args.Contains("--fix");
-        
+        bool runDoctor    = args.Contains("--doctor");
+        bool doctorFix    = args.Contains("--fix");
+        bool runOnboarding = args.Contains("--onboarding");
+
         // Extract service management commands
         string? serviceCommand = args.FirstOrDefault(a => ServiceCommandHandler.IsServiceCommand(a));
-        
-        var  taskArgs    = args.Where(a => !a.StartsWith("--") && !ServiceCommandHandler.IsServiceCommand(a)).ToArray();
+
+        var taskArgs = args.Where(a => !a.StartsWith("--") && !ServiceCommandHandler.IsServiceCommand(a)).ToArray();
+
+        // "agentfox onboarding ..." (positional) is also accepted
+        if (!runOnboarding
+            && taskArgs.Length > 0
+            && taskArgs[0].Equals("onboarding", StringComparison.OrdinalIgnoreCase))
+        {
+            runOnboarding = true;
+            taskArgs = taskArgs.Skip(1).ToArray();
+        }
 
         // ── Web application builder (single DI container for the whole process) ─
         var builder       = WebApplication.CreateBuilder(args);
@@ -91,6 +103,27 @@ class Program
             var result = await handler.ProcessCommandAsync(serviceCommand);
             AnsiConsole.WriteLine(result.ToString());
             return result.Success ? 0 : 1;
+        }
+
+        // ── Onboarding wizard (--onboarding  or  agentfox onboarding ...) ────
+        if (runOnboarding)
+        {
+            var appCfgPath = ResolveAppSettingsPath();
+            var wizard     = new OnboardingWizard(appCfgPath);
+
+            // Command mode: any LLM named args present alongside --onboarding
+            bool commandMode = args.Any(a =>
+                a.Equals("--provider",  StringComparison.OrdinalIgnoreCase) ||
+                a.Equals("--model",     StringComparison.OrdinalIgnoreCase) ||
+                a.Equals("--apikey",    StringComparison.OrdinalIgnoreCase) ||
+                a.Equals("--api-key",   StringComparison.OrdinalIgnoreCase));
+
+            if (commandMode)
+                await wizard.RunCommandModeAsync(args);
+            else
+                await wizard.RunInteractiveModeAsync();
+
+            return 0;
         }
 
         // ── Pre-build async services ──────────────────────────────────────────
