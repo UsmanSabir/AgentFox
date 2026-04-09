@@ -48,7 +48,7 @@ public sealed class BrowserAgentModule : IAgentAwareModule
     public void RegisterServices(IServiceCollection services, IConfiguration config)
     {
         services.Configure<BrowserAgentOptions>(
-            config.GetSection(BrowserAgentOptions.SectionName));
+            config.GetSection($"Plugins:{BrowserAgentOptions.SectionName}"));
     }
 
     public void MapEndpoints(IEndpointRouteBuilder endpoints)

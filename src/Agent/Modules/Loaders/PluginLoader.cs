@@ -1,8 +1,10 @@
 ﻿using AgentFox.Plugins.Interfaces;
+using Microsoft.Extensions.DependencyInjection;
+using System;
 
 namespace AgentFox.Modules.Loaders;
 
-public class PluginLoader
+public class PluginLoader(ServiceProvider pluginCofigProvider)
 {
     public List<IAppModule> LoadModules(string pluginFolder)
     {
@@ -19,7 +21,7 @@ public class PluginLoader
 
             foreach (var type in types)
             {
-                var module = (IAppModule)Activator.CreateInstance(type)!;
+                var module = (IAppModule)ActivatorUtilities.CreateInstance(pluginCofigProvider, type)!; //Activator.CreateInstance(type)!;
                 modules.Add(module);
             }
         }

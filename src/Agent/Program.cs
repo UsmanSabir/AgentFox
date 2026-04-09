@@ -527,7 +527,7 @@ class Program
         tempServices.AddSingleton(builder.Configuration.GetSection("Plugins"));
         var tempProvider = tempServices.BuildServiceProvider();
 
-        var pluginLoader = new PluginLoader();
+        var pluginLoader = new PluginLoader(tempProvider);
         var toolLoader = new ToolLoader(tempProvider);
 
         var pluginModules = pluginLoader.LoadModules(pluginFolder);

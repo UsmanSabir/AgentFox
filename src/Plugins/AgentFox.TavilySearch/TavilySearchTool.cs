@@ -6,6 +6,7 @@ using Tavily;
 
 namespace AgentFox.TavilySearch;
 
+//https://app.tavily.com/playground
 public class TavilySearchTool(IConfiguration configuration) : BaseTool
 {
     private readonly string _apiKey = configuration["Tavily:ApiKey"] ?? throw new InvalidOperationException("Tavily:ApiKey is not configured");
