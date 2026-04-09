@@ -130,7 +130,8 @@ class Program
         // These need async init (Composio, MCP) so they are created before the host
         // and then registered as already-constructed singletons.
         var workspaceManager = new WorkspaceManager(configuration);
-        var toolRegistry     = CreateToolRegistry(workspaceManager);
+        var toolsConfig      = configuration.GetSection("Tools").Get<ToolsConfig>() ?? new ToolsConfig();
+        var toolRegistry     = CreateToolRegistry(workspaceManager, toolsConfig);
         SkillRegistry? skillRegistry = null;
         MCPClient?     mcpClient     = null;
         HybridMemory?  memory        = null;
@@ -148,9 +149,12 @@ class Program
                     var longTermMemory = MemoryBackendFactory.CreateLongTermStorage(configuration, workspaceManager);
                     memory = new HybridMemory(100, longTermMemory);
 
-                    toolRegistry.Register(new AddMemoryTool(memory));
-                    toolRegistry.Register(new SearchMemoryTool(memory));
-                    toolRegistry.Register(new GetAllMemoriesTool(memory));
+                    if (toolsConfig.Memory)
+                    {
+                        if (toolsConfig.IsEnabled("add_memory"))      toolRegistry.Register(new AddMemoryTool(memory));
+                        if (toolsConfig.IsEnabled("search_memory"))   toolRegistry.Register(new SearchMemoryTool(memory));
+                        if (toolsConfig.IsEnabled("get_all_memories")) toolRegistry.Register(new GetAllMemoriesTool(memory));
+                    }
                     ctx.Status("[green]Ready.[/]");
                 });
 
@@ -376,11 +380,16 @@ class Program
             commandQueue, agentRuntime, subAgentConfig,
             new ConsoleLogger<SubAgentManager>(), sessionManager);
 
-        FoxAgent? agentRef    = null;
-        var spawnTool         = new SpawnSubAgentTool(() => agentRef!);
-        toolRegistry.Register(spawnTool);
-        var spawnBgTool       = new SpawnBackgroundSubAgentTool(subAgentManager);
-        toolRegistry.Register(spawnBgTool);
+        FoxAgent? agentRef = null;
+        SpawnBackgroundSubAgentTool? spawnBgTool = null;
+        var toolsConfig = configuration.GetSection("Tools").Get<ToolsConfig>() ?? new ToolsConfig();
+        if (toolsConfig.SubAgent)
+        {
+            var spawnTool = new SpawnSubAgentTool(() => agentRef!);
+            toolRegistry.Register(spawnTool);
+            spawnBgTool = new SpawnBackgroundSubAgentTool(subAgentManager);
+            toolRegistry.Register(spawnBgTool);
+        }
 
         var systemPrompt = new SystemPromptBuilder()
             .WithPersona(SystemPromptConfig.AgentPrompts.DeveloperAssistant)
@@ -412,8 +421,8 @@ class Program
         agentRef = agent;
 
         var cliSessionId = sessionManager.GetOrCreateConsoleSession(agent.Id);
-        spawnBgTool.Initialize(
-            parentAgentId:   agent.Id,
+        spawnBgTool?.Initialize(
+            parentAgentId:    agent.Id,
             parentSessionKey: cliSessionId,
             parentSpawnDepth: 0);
 
@@ -459,22 +468,39 @@ class Program
     // Factory helpers
     // ─────────────────────────────────────────────────────────────────────────
 
-    static ToolRegistry CreateToolRegistry(WorkspaceManager workspaceManager)
+    static ToolRegistry CreateToolRegistry(WorkspaceManager workspaceManager, ToolsConfig toolsConfig)
     {
         var registry = new ToolRegistry();
-        registry.Register(new ShellCommandTool(workspaceManager));
-        registry.Register(new ReadFileTool(workspaceManager));
-        registry.Register(new WriteFileTool(workspaceManager));
-        registry.Register(new ListFilesTool(workspaceManager));
-        registry.Register(new SearchFilesTool(workspaceManager));
-        registry.Register(new MakeDirectoryTool(workspaceManager));
-        registry.Register(new DeleteTool(workspaceManager));
-        registry.Register(new GetEnvironmentInfoTool());
-        registry.Register(new WebSearchTool());
-        registry.Register(new FetchUrlTool());
-        registry.Register(new CalculatorTool());
-        registry.Register(new UuidTool());
-        registry.Register(new TimestampTool());
+
+        if (toolsConfig.Shell && toolsConfig.IsEnabled("shell"))
+            registry.Register(new ShellCommandTool(workspaceManager));
+
+        if (toolsConfig.FileSystem)
+        {
+            if (toolsConfig.IsEnabled("read_file"))       registry.Register(new ReadFileTool(workspaceManager));
+            if (toolsConfig.IsEnabled("write_file"))      registry.Register(new WriteFileTool(workspaceManager));
+            if (toolsConfig.IsEnabled("list_files"))      registry.Register(new ListFilesTool(workspaceManager));
+            if (toolsConfig.IsEnabled("search_files"))    registry.Register(new SearchFilesTool(workspaceManager));
+            if (toolsConfig.IsEnabled("make_directory"))  registry.Register(new MakeDirectoryTool(workspaceManager));
+            if (toolsConfig.IsEnabled("delete"))          registry.Register(new DeleteTool(workspaceManager));
+        }
+
+        if (toolsConfig.SystemInfo && toolsConfig.IsEnabled("get_env_info"))
+            registry.Register(new GetEnvironmentInfoTool());
+
+        if (toolsConfig.Web)
+        {
+            if (toolsConfig.IsEnabled("web_search")) registry.Register(new WebSearchTool());
+            if (toolsConfig.IsEnabled("fetch_url"))  registry.Register(new FetchUrlTool());
+        }
+
+        if (toolsConfig.Utilities)
+        {
+            if (toolsConfig.IsEnabled("calculate"))  registry.Register(new CalculatorTool());
+            if (toolsConfig.IsEnabled("uuid"))        registry.Register(new UuidTool());
+            if (toolsConfig.IsEnabled("timestamp"))   registry.Register(new TimestampTool());
+        }
+
         return registry;
     }
 

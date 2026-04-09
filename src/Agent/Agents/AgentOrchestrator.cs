@@ -4,6 +4,7 @@ using AgentFox.MCP;
 using AgentFox.Memory;
 using AgentFox.Models;
 using AgentFox.Plugins.Interfaces;
+using AgentFox.Runtime;
 using AgentFox.Runtime.Services;
 using AgentFox.Sessions;
 using AgentFox.Skills;
@@ -51,6 +52,9 @@ public sealed class AgentOrchestrator : IHostedService
     // Built during InitializeAsync, used by StopAsync
     private ChannelManager? _channelManager;
     private string? _systemPrompt;
+    private HeartbeatManager? _heartbeatManager;
+    private HeartbeatService? _heartbeatService;
+    private CronScheduler? _cronScheduler;
 
     public AgentOrchestrator(
         IChatClient chatClient,
@@ -115,6 +119,12 @@ public sealed class AgentOrchestrator : IHostedService
             catch (Exception ex) { _logger.LogWarning(ex, "Error disconnecting channels during shutdown."); }
         }
 
+        _cronScheduler?.Stop();
+        _cronScheduler?.Dispose();
+        _heartbeatManager?.Stop();
+        _heartbeatService?.Dispose();
+        _heartbeatManager?.Dispose();
+
         try { await _commandProcessor.StopAsync(TimeSpan.FromSeconds(10)); }
         catch (Exception ex) { _logger.LogWarning(ex, "Error stopping command processor during shutdown."); }
     }
@@ -131,18 +141,33 @@ public sealed class AgentOrchestrator : IHostedService
             var appConfigPath  = ResolveAppSettingsPath();
 
             // ── Register runtime tools ────────────────────────────────────────
+            var toolsConfig = _configuration.GetSection("Tools").Get<ToolsConfig>() ?? new ToolsConfig();
+
             FoxAgent? agentRef = null;
-            var spawnSubAgentTool = new SpawnSubAgentTool(() => agentRef!);
-            _toolRegistry.Register(spawnSubAgentTool);
+            SpawnBackgroundSubAgentTool? spawnBgTool = null;
 
-            var spawnBgTool = new SpawnBackgroundSubAgentTool(
-                _subAgentManager,
-                logger: _loggerFactory.CreateLogger<SpawnBackgroundSubAgentTool>());
-            _toolRegistry.Register(spawnBgTool);
+            if (toolsConfig.SubAgent)
+            {
+                var spawnSubAgentTool = new SpawnSubAgentTool(() => agentRef!);
+                _toolRegistry.Register(spawnSubAgentTool);
 
-            _toolRegistry.Register(new ManageMCPTool(
-                _mcpClient, appConfigPath,
-                _loggerFactory.CreateLogger<ManageMCPTool>()));
+                spawnBgTool = new SpawnBackgroundSubAgentTool(
+                    _subAgentManager,
+                    logger: _loggerFactory.CreateLogger<SpawnBackgroundSubAgentTool>());
+                _toolRegistry.Register(spawnBgTool);
+            }
+
+            if (toolsConfig.Mcp)
+                _toolRegistry.Register(new ManageMCPTool(
+                    _mcpClient, appConfigPath,
+                    _loggerFactory.CreateLogger<ManageMCPTool>()));
+
+            // Scheduling tools use lazy refs — managers are created after the agent is built
+            if (toolsConfig.Scheduling)
+            {
+                _toolRegistry.Register(new ManageHeartbeatTool(() => _heartbeatManager!));
+                _toolRegistry.Register(new ManageCronTool(() => _cronScheduler!));
+            }
 
             // ── Build system prompt ───────────────────────────────────────────
             _systemPrompt = new SystemPromptBuilder()
@@ -174,6 +199,28 @@ public sealed class AgentOrchestrator : IHostedService
             var agent = BuildAgent(_systemPrompt, withLogger: true);
             agentRef = agent;
 
+            // ── Create scheduling infrastructure (if enabled) ─────────────────
+            if (toolsConfig.Scheduling)
+            {
+                var schedulingDir = Path.Combine(_workspaceManager.ResolvePath(""), "scheduling");
+                _heartbeatManager = new HeartbeatManager(
+                    agent,
+                    beatFilePath: Path.Combine(schedulingDir, "heartbeats.md"),
+                    sessionManager: _sessionManager,
+                    commandQueue: _commandQueue);
+                _heartbeatService = new HeartbeatService(
+                    _heartbeatManager,
+                    logger: _loggerFactory.CreateLogger<HeartbeatService>());
+                _heartbeatManager.Start();
+
+                _cronScheduler = new CronScheduler(
+                    agent,
+                    jobsFilePath: Path.Combine(schedulingDir, "cron.md"),
+                    sessionManager: _sessionManager,
+                    commandQueue: _commandQueue);
+                _cronScheduler.Start();
+            }
+
             // ── Publish agent to holder (unlocks FoxAgentService for web /chat) ─
             _agentHolder.Publish(agent);
 
@@ -191,14 +238,17 @@ public sealed class AgentOrchestrator : IHostedService
             _channelManager = await LoadChannelsFromConfigAsync(agent, ct);
 
             // ── Register SendToChannel / ManageChannel tools ──────────────────
-            _toolRegistry.Register(new SendToChannelTool(
-                _channelManager, _loggerFactory.CreateLogger<SendToChannelTool>()));
-            _toolRegistry.Register(new ManageChannelTool(
-                _channelManager, appConfigPath, _loggerFactory.CreateLogger<ManageChannelTool>()));
+            if (toolsConfig.Channels)
+            {
+                _toolRegistry.Register(new SendToChannelTool(
+                    _channelManager, _loggerFactory.CreateLogger<SendToChannelTool>()));
+                _toolRegistry.Register(new ManageChannelTool(
+                    _channelManager, appConfigPath, _loggerFactory.CreateLogger<ManageChannelTool>()));
+            }
 
             // ── Initialise background-spawn tool with console session ─────────
             var consoleSessionId = _sessionManager.GetOrCreateConsoleSession(agent.Id);
-            spawnBgTool.Initialize(
+            spawnBgTool?.Initialize(
                 parentAgentId:    agent.Id,
                 parentSessionKey: consoleSessionId,
                 parentSpawnDepth: 0);
@@ -408,6 +458,46 @@ public sealed class AgentOrchestrator : IHostedService
                     result, task.CorrelationId, task.ParentSessionKey, task.SessionKey);
 
             return ResultAnnouncementCommand.CreateLocalAnnouncement(result, task.CorrelationId, task.SessionKey);
+        });
+
+        // Tool lane: heartbeat management commands (Add/Remove/Pause/etc.) + parallel agent tasks
+        _commandProcessor.RegisterLaneHandler(CommandLane.Tool, async (command, ct) =>
+        {
+            if (command is HeartbeatCommand hbCmd && _heartbeatService != null)
+            {
+                await _heartbeatService.ExecuteCommandAsync(hbCmd, ct);
+                return;
+            }
+            if (command is AgentCommand agentCmd)
+            {
+                try
+                {
+                    var result = await _agentRuntime.ExecuteAsync(agentCmd, ct);
+                    agentCmd.ResultSource?.TrySetResult(result);
+                }
+                catch (OperationCanceledException) { agentCmd.ResultSource?.TrySetCanceled(ct); }
+                catch (Exception ex) { agentCmd.ResultSource?.TrySetException(ex); }
+            }
+        });
+
+        // Background lane: scheduled agent tasks (HeartbeatManager/CronScheduler) + service pings
+        _commandProcessor.RegisterLaneHandler(CommandLane.Background, async (command, ct) =>
+        {
+            if (command is AgentCommand agentCmd)
+            {
+                try
+                {
+                    var result = await _agentRuntime.ExecuteAsync(agentCmd, ct);
+                    agentCmd.ResultSource?.TrySetResult(result);
+                }
+                catch (OperationCanceledException) { agentCmd.ResultSource?.TrySetCanceled(ct); }
+                catch (Exception ex) { agentCmd.ResultSource?.TrySetException(ex); }
+                return;
+            }
+            if (command is ServicePingCommand ping)
+            {
+                _logger.LogDebug("Service heartbeat ping received (session: {Session})", ping.SessionKey);
+            }
         });
     }
 

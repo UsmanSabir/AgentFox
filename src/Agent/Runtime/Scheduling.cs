@@ -421,6 +421,7 @@ public class CronScheduler : IDisposable
     private readonly FoxAgent _agent;
     private readonly SessionManager? _sessionManager;
     private readonly ICommandQueue? _commandQueue;
+    private readonly string? _jobsFilePath;
     private bool _disposed;
 
     public event EventHandler<CronJobExecutedEventArgs>? JobExecuted;
@@ -429,14 +430,18 @@ public class CronScheduler : IDisposable
     public CronScheduler(
         FoxAgent agent,
         int checkIntervalSeconds = 60,
+        string? jobsFilePath = null,
         SessionManager? sessionManager = null,
         ICommandQueue? commandQueue = null)
     {
         _agent = agent;
         _sessionManager = sessionManager;
         _commandQueue = commandQueue;
+        _jobsFilePath = jobsFilePath;
         _timer = new System.Timers.Timer(checkIntervalSeconds * 1000);
         _timer.Elapsed += OnTimerElapsed;
+
+        LoadJobsFromFile();
     }
     
     /// <summary>
@@ -452,8 +457,33 @@ public class CronScheduler : IDisposable
             LastExecuted = DateTime.MinValue,
             NextExecution = CalculateNextExecution(cronExpression)
         };
+        SaveJobsToFile();
     }
     
+    /// <summary>
+    /// Remove a cron job by name. Returns false if not found.
+    /// </summary>
+    public bool RemoveJob(string name)
+    {
+        var removed = _jobs.Remove(name);
+        if (removed) SaveJobsToFile();
+        return removed;
+    }
+
+    /// <summary>
+    /// Get a single job by name, or null if not found.
+    /// </summary>
+    public CronJob? GetJob(string name)
+    {
+        _jobs.TryGetValue(name, out var job);
+        return job;
+    }
+
+    /// <summary>
+    /// Get all registered cron jobs.
+    /// </summary>
+    public IReadOnlyDictionary<string, CronJob> GetJobs() => _jobs;
+
     /// <summary>
     /// Add common cron jobs
     /// </summary>
@@ -562,6 +592,89 @@ public class CronScheduler : IDisposable
         return now.AddMinutes(1);
     }
     
+    // ── Persistence ──────────────────────────────────────────────────────────
+
+    private void SaveJobsToFile()
+    {
+        try
+        {
+            if (_jobsFilePath == null) return;
+
+            var dir = Path.GetDirectoryName(_jobsFilePath);
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                Directory.CreateDirectory(dir);
+
+            var sb = new StringBuilder();
+            sb.AppendLine("# Cron Schedule");
+            sb.AppendLine();
+            sb.AppendLine("> Scheduled cron jobs managed by AgentFox. Edit with care — task strings are executed by the agent.");
+            sb.AppendLine();
+            sb.AppendLine("## Jobs");
+            sb.AppendLine();
+
+            if (_jobs.Count == 0)
+            {
+                sb.AppendLine("| Name | Cron | Task |");
+                sb.AppendLine("|------|------|------|");
+                sb.AppendLine("| (none configured) | - | - |");
+            }
+            else
+            {
+                sb.AppendLine("| Name | Cron | Task |");
+                sb.AppendLine("|------|------|------|");
+                foreach (var job in _jobs.Values)
+                    sb.AppendLine($"| {job.Name} | {job.CronExpression} | {job.Task} |");
+            }
+
+            File.WriteAllText(_jobsFilePath, sb.ToString());
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Could not save cron jobs: {ex.Message}");
+        }
+    }
+
+    private void LoadJobsFromFile()
+    {
+        try
+        {
+            if (_jobsFilePath == null || !File.Exists(_jobsFilePath)) return;
+
+            var lines = File.ReadAllLines(_jobsFilePath);
+            var inTable = false;
+
+            foreach (var line in lines)
+            {
+                if (line.Contains("---|")) { inTable = true; continue; }
+                if (!inTable || !line.StartsWith("|") || line.Contains("Name") || line.Contains("(none")) continue;
+
+                var parts = line.Split('|')
+                    .Select(p => p.Trim())
+                    .Where(p => !string.IsNullOrEmpty(p))
+                    .ToArray();
+
+                if (parts.Length < 3) continue;
+
+                var name = parts[0];
+                var cron = parts[1];
+                var task = parts[2];
+
+                _jobs[name] = new CronJob
+                {
+                    Name = name,
+                    CronExpression = cron,
+                    Task = task,
+                    LastExecuted = DateTime.MinValue,
+                    NextExecution = CalculateNextExecution(cron)
+                };
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Could not load cron jobs: {ex.Message}");
+        }
+    }
+
     public void Dispose()
     {
         if (!_disposed)

@@ -8,7 +8,7 @@
 - [x] Add health check/doctor on every configurable feature like llm configs, workspace dir, memory etc. Agent modifies/configure itself
 - [x] Plugins support
 - [x] Onboarding Wizard
-- [ ] Schedulare Heartbeat and periodic tasks test runs
+- [ ] Schedule Heartbeat and periodic tasks test runs
 - [ ] Web UI start with relevant skills
 - Add channels like telegram, slack, whatsapp, ms-teams, ntfy(https://ntfy.sh/ , https://codeberg.org/nwithan8/ntfy-dotnet) etc
 - Agent Skills 

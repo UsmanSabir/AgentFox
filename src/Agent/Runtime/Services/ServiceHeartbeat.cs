@@ -53,13 +53,16 @@ public class ServiceHeartbeat : BackgroundService
                     break;
 
                 heartbeatCount++;
+                if (heartbeatCount >= int.MaxValue)
+                    heartbeatCount = 0;
 
                 try
                 {
                     // Create and queue a heartbeat command
-                    var heartbeatCommand = new HeartbeatCommand(
+                    var heartbeatCommand = new ServicePingCommand(
                         runId: Guid.NewGuid().ToString(),
-                        sessionKey: _sessionKey);
+                        sessionKey: _sessionKey
+                        );
 
                     _commandQueue.Enqueue(heartbeatCommand);
 
@@ -90,17 +93,18 @@ public class ServiceHeartbeat : BackgroundService
 }
 
 /// <summary>
-/// Heartbeat command sent periodically by the service to trigger health checks and scheduled tasks.
+/// Periodic ping sent by <see cref="ServiceHeartbeat"/> to signal the service is alive.
+/// Distinct from <see cref="AgentFox.Agents.HeartbeatCommand"/>, which manages named heartbeat schedules.
 /// </summary>
-public class HeartbeatCommand : ICommand
+public class ServicePingCommand : ICommand
 {
     public string RunId { get; }
     public string SessionKey { get; }
-    public CommandLane Lane => CommandLane.Main;
+    public CommandLane Lane => CommandLane.Background;
     public int Priority => 0;
     public DateTime CreatedAt { get; }
 
-    public HeartbeatCommand(string runId, string sessionKey)
+    public ServicePingCommand(string runId, string sessionKey)
     {
         RunId = runId ?? throw new ArgumentNullException(nameof(runId));
         SessionKey = sessionKey ?? throw new ArgumentNullException(nameof(sessionKey));
