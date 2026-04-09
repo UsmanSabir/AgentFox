@@ -940,28 +940,32 @@ public class AgentBuilder
 
         foreach (var (name, param) in tool.Parameters)
         {
-            JsonObject prop = new()
+            JsonObject prop;
+
+            // MCP tools store the full property schema in JsonSchema (set by MCPClient).
+            // Use it directly to preserve nested types, array items, enum, etc.
+            // For native AgentFox tools JsonSchema is null — build from individual fields.
+            if (!string.IsNullOrEmpty(param.JsonSchema))
             {
-                ["type"] = param.Type
-            };
+                try
+                {
+                    prop = JsonNode.Parse(param.JsonSchema)?.AsObject()
+                           ?? BuildPropFromFields(param);
+                }
+                catch
+                {
+                    prop = BuildPropFromFields(param);
+                }
+            }
+            else
+            {
+                prop = BuildPropFromFields(param);
+            }
 
-            if (!string.IsNullOrEmpty(param.Description))
-                prop["description"] = param.Description;
-
-            if (param.Pattern != null)
-                prop["pattern"] = param.Pattern;
-
-            if (param.MinLength.HasValue)
-                prop["minLength"] = param.MinLength;
-
-            if (param.MaxLength.HasValue)
-                prop["maxLength"] = param.MaxLength;
-
-            if (param.Minimum.HasValue)
-                prop["minimum"] = param.Minimum;
-
-            if (param.Maximum.HasValue)
-                prop["maximum"] = param.Maximum;
+            // OpenAI rejects array schemas that are missing "items".
+            // Ensure it's always present, even if the source schema omitted it.
+            if (prop["type"]?.GetValue<string>() == "array" && prop["items"] == null)
+                prop["items"] = new JsonObject { ["type"] = "string" };
 
             properties[name] = prop;
 
@@ -979,6 +983,35 @@ public class AgentBuilder
             root["required"] = required;
 
         return JsonSerializer.SerializeToElement(root);
+    }
+
+    private static JsonObject BuildPropFromFields(Models.ToolParameter param)
+    {
+        var prop = new JsonObject { ["type"] = param.Type };
+
+        if (!string.IsNullOrEmpty(param.Description))
+            prop["description"] = param.Description;
+        if (param.Pattern != null)
+            prop["pattern"] = param.Pattern;
+        if (param.MinLength.HasValue)
+            prop["minLength"] = param.MinLength;
+        if (param.MaxLength.HasValue)
+            prop["maxLength"] = param.MaxLength;
+        if (param.Minimum.HasValue)
+            prop["minimum"] = param.Minimum;
+        if (param.Maximum.HasValue)
+            prop["maximum"] = param.Maximum;
+        if (param.EnumValues?.Count > 0)
+        {
+            var enumArr = new JsonArray();
+            foreach (var v in param.EnumValues) enumArr.Add(v);
+            prop["enum"] = enumArr;
+        }
+        // OpenAI requires "items" for array types
+        if (param.Type == "array")
+            prop["items"] = new JsonObject { ["type"] = "string" };
+
+        return prop;
     }
 
     private static object? ConvertJsonValue(object? value)

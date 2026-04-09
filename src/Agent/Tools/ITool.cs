@@ -117,7 +117,13 @@ public class ToolRegistry
                     Required = p.Value.Required,
                     Default = p.Value.Default,
                     JsonSchema = p.Value.JsonSchema,
-                    Example = p.Value.Example
+                    Example = p.Value.Example,
+                    Pattern = p.Value.Pattern,
+                    MinLength = p.Value.MinLength,
+                    MaxLength = p.Value.MaxLength,
+                    Minimum = p.Value.Minimum,
+                    Maximum = p.Value.Maximum,
+                    EnumValues = p.Value.EnumValues
                 })
             }).ToList();
         }
