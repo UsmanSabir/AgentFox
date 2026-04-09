@@ -1,8 +1,10 @@
 ﻿using AgentFox.Plugins.Interfaces;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace AgentFox.Modules.Loaders;
 
-public class ToolLoader
+public class ToolLoader(IServiceProvider serviceProvider)
 {
     public List<ITool> LoadTools(string pluginFolder)
     {
@@ -18,7 +20,7 @@ public class ToolLoader
 
             foreach (var type in types)
             {
-                var tool = (ITool)Activator.CreateInstance(type)!;
+                var tool = (ITool)ActivatorUtilities.CreateInstance(serviceProvider, type);
                 tools.Add(tool);
             }
         }

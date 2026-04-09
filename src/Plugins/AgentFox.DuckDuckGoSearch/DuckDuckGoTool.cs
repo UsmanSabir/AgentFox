@@ -1,6 +1,7 @@
-﻿using System.Net.Http.Json;
-using AgentFox.Http;
+﻿using AgentFox.Http;
 using AgentFox.Plugins.Interfaces;
+using System.Net.Http.Json;
+using System.Text.Json.Serialization;
 
 namespace AgentFox.DuckDuckGoSearch
 {
@@ -19,13 +20,9 @@ namespace AgentFox.DuckDuckGoSearch
         protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
         {
             var query = arguments["query"]?.ToString();
-            if (string.IsNullOrEmpty(query))
-                return ToolResult.Fail("No query provided");
-
-            // Validate URL format
             if (string.IsNullOrWhiteSpace(query))
-                return ToolResult.Fail($"Invalid URL format: {query}");
-
+                return ToolResult.Fail("No query provided");
+            
             var timeoutSeconds = 45;
 
             try
@@ -42,7 +39,10 @@ namespace AgentFox.DuckDuckGoSearch
                 if (!response.IsSuccessStatusCode)
                     return ToolResult.Fail($"HTTP Error {(int)response.StatusCode}: {response.ReasonPhrase}");
 
-                var contentObject = await response.Content.ReadFromJsonAsync<dynamic>(cts.Token);//.ReadAsStringAsync(cts.Token);
+                var contentObject = await response.Content.ReadFromJsonAsync<DuckResponse>(cts.Token);//.ReadAsStringAsync(cts.Token);
+                // Limit to the top 3 related topics
+                var limitedResults = contentObject?.RelatedTopics.Take(3).ToList();
+
                 var content = contentObject?.AbstractText?.ToString() ?? "No info found.";
                 if (content.Length > 10 * 1024 * 1024)
                     content = content[..(10 * 1024 * 1024)] + "\n... (content truncated - exceeds 10MB limit)";
@@ -70,4 +70,47 @@ namespace AgentFox.DuckDuckGoSearch
             }
         }
     }
+}
+
+public class DuckResponse
+{
+    [JsonPropertyName("Abstract")]
+    public string Abstract { get; set; }
+
+    [JsonPropertyName("AbstractText")]
+    public string AbstractText { get; set; }
+
+    [JsonPropertyName("AbstractSource")]
+    public string AbstractSource { get; set; }
+
+    [JsonPropertyName("AbstractURL")]
+    public string AbstractURL { get; set; }
+
+    [JsonPropertyName("Heading")]
+    public string Heading { get; set; }
+
+    [JsonPropertyName("Image")]
+    public string ImageUrl { get; set; }
+
+    [JsonPropertyName("RelatedTopics")]
+    public List<RelatedTopic> RelatedTopics { get; set; }
+
+    [JsonPropertyName("Entity")]
+    public string EntityType { get; set; }
+}
+
+public class RelatedTopic
+{
+    [JsonPropertyName("Text")]
+    public string Text { get; set; }
+
+    [JsonPropertyName("FirstURL")]
+    public string FirstURL { get; set; }
+
+    [JsonPropertyName("Result")]
+    public string ResultHtml { get; set; }
+
+    // Some related topics are nested groups
+    [JsonPropertyName("Topics")]
+    public List<RelatedTopic> SubTopics { get; set; }
 }

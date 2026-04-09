@@ -15,7 +15,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\AgentFox.Plugins\AgentFox.Plugins.csproj" />
+	  <ProjectReference Include="..\..\AgentFox.Plugins\AgentFox.Plugins.csproj" >
+		  <private>false</private>
+	  </ProjectReference>
   </ItemGroup>
 
 </Project>

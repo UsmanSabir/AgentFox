@@ -522,8 +522,13 @@ class Program
         var pluginFolder = Path.Combine(AppContext.BaseDirectory, "plugins");
         Directory.CreateDirectory(pluginFolder);
 
+        // Create a temporary service provider for tool instantiation
+        var tempServices = new ServiceCollection();
+        tempServices.AddSingleton(builder.Configuration.GetSection("Plugins"));
+        var tempProvider = tempServices.BuildServiceProvider();
+
         var pluginLoader = new PluginLoader();
-        var toolLoader = new ToolLoader();
+        var toolLoader = new ToolLoader(tempProvider);
 
         var pluginModules = pluginLoader.LoadModules(pluginFolder);
         // Register modules

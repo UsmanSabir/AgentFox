@@ -23,6 +23,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PageAgent", "Plugins\PageAg
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AgentFox.DuckDuckGoSearch", "Plugins\AgentFox.DuckDuckGoSearch\AgentFox.DuckDuckGoSearch.csproj", "{4D9DDFCD-4B56-444A-A93E-7E858F4ACBFA}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AgentFox.BraveSearch", "Plugins\AgentFox.BraveSearch\AgentFox.BraveSearch.csproj", "{F9AA3A72-D6A5-4957-9890-DF18971F129A}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AgentFox.TavilySearch", "Plugins\AgentFox.TavilySearch\AgentFox.TavilySearch.csproj", "{5CBB4B02-7086-4E8A-A9FD-BC5EBF64B79E}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -53,6 +57,14 @@ Global
 		{4D9DDFCD-4B56-444A-A93E-7E858F4ACBFA}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{4D9DDFCD-4B56-444A-A93E-7E858F4ACBFA}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{4D9DDFCD-4B56-444A-A93E-7E858F4ACBFA}.Release|Any CPU.Build.0 = Release|Any CPU
+		{F9AA3A72-D6A5-4957-9890-DF18971F129A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F9AA3A72-D6A5-4957-9890-DF18971F129A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F9AA3A72-D6A5-4957-9890-DF18971F129A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F9AA3A72-D6A5-4957-9890-DF18971F129A}.Release|Any CPU.Build.0 = Release|Any CPU
+		{5CBB4B02-7086-4E8A-A9FD-BC5EBF64B79E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5CBB4B02-7086-4E8A-A9FD-BC5EBF64B79E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5CBB4B02-7086-4E8A-A9FD-BC5EBF64B79E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5CBB4B02-7086-4E8A-A9FD-BC5EBF64B79E}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -61,6 +73,8 @@ Global
 		{4970C96D-099F-4501-B596-05DF32730BC1} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{EFB0ECF1-42B3-46E0-B443-B885D38A1896} = {430AC596-E6CC-40F2-A662-4A43BC4A22E3}
 		{4D9DDFCD-4B56-444A-A93E-7E858F4ACBFA} = {430AC596-E6CC-40F2-A662-4A43BC4A22E3}
+		{F9AA3A72-D6A5-4957-9890-DF18971F129A} = {430AC596-E6CC-40F2-A662-4A43BC4A22E3}
+		{5CBB4B02-7086-4E8A-A9FD-BC5EBF64B79E} = {430AC596-E6CC-40F2-A662-4A43BC4A22E3}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {EA5EF7EC-D5C8-4E10-9E19-AE1D086CD520}

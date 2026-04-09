@@ -3,10 +3,13 @@
 - [x] TUI (onboarding, agent, doctor and other commands) Spectre.Console
 - [x] Stream response
 - [ ] Add prompt caching
-- [ ] Dynamic tools loading and unloading (e.g. for mcp server / plugins etc)
+- [x] Dynamic tools loading and unloading (e.g. for mcp server / plugins etc)
 - [ ] Checkpoints : https://learn.microsoft.com/en-us/agent-framework/workflows/checkpoints?pivots=programming-language-csharp
 - [x] Add health check/doctor on every configurable feature like llm configs, workspace dir, memory etc. Agent modifies/configure itself
-- Plugins support
+- [x] Plugins support
+- [ ] Onboarding Wizard
+- [ ] Schedulare Heartbeat and periodic tasks test runs
+- [ ] Web UI start with relevant skills
 - Add channels like telegram, slack, whatsapp, ms-teams etc
 - Agent Skills 
 	- -- https://agentskills.io/home (https://learn.microsoft.com/en-us/agent-framework/agents/skills?pivots=programming-language-csharp)
