@@ -190,6 +190,8 @@ public sealed class AgentOrchestrator : IHostedService
                     _channelManager, _loggerFactory.CreateLogger<SendToChannelTool>()));
                 _toolRegistry.Register(new ManageChannelTool(
                     _channelManager, appConfigPath, _loggerFactory.CreateLogger<ManageChannelTool>()));
+                _toolRegistry.Register(new NotifyUserTool(
+                    _channelManager, _loggerFactory.CreateLogger<NotifyUserTool>()));
             }
 
             // ── Build system prompt (includes channel tools with live channel list) ──
@@ -215,17 +217,18 @@ public sealed class AgentOrchestrator : IHostedService
                     "Use add_memory to save important user facts or preferences to long-term memory.",
                     "Use search_memory to recall past information or facts when requested.",
                     "Use get_all_memories to retrieve everything stored in long-term memory.",
-                    "For Composio integrations, provide clear examples and documentation on usage")
+                    "For Composio integrations, provide clear examples and documentation on usage",
+                    "Use notify_user to send alerts, summaries, cron job results, or any message intended for the user — it delivers to all connected channels automatically.")
                 .Build();
 
             // ── Build agent ───────────────────────────────────────────────────
             var agent = BuildAgent(_systemPrompt, withLogger: true);
             agentRef = agent;  // lazy ref in ChannelManager and SpawnSubAgentTool now resolves
 
-            // // ── Register ChannelContributor so runtime channel changes (add/remove
-            // //    via manage_channel) are reflected in every subsequent LLM call ────
-            // if (toolsConfig.Channels)
-            //     agent.PromptContributors.Add(new ChannelContributor(_channelManager));
+            // ── Register ChannelContributor so runtime channel changes (add/remove
+            //    via manage_channel) are reflected in every subsequent LLM call ────
+            if (toolsConfig.Channels)
+                agent.PromptContributors.Add(new ChannelContributor(_channelManager));
 
             // ── Create scheduling infrastructure (if enabled) ─────────────────
             if (toolsConfig.Scheduling)

@@ -274,7 +274,8 @@ public sealed class ChannelContributor : IPromptContributor
 
         var sb = new System.Text.StringBuilder();
         sb.AppendLine("## Connected Channels");
-        sb.AppendLine("Use send_to_channel to proactively push messages to these channels:");
+        sb.AppendLine("Use **notify_user** to send any message, alert, or result to the user (broadcasts to all channels).");
+        sb.AppendLine("Use **send_to_channel** to target a specific channel or recipient.");
         foreach (var ch in channels)
         {
             var status = ch.IsConnected ? "connected" : "disconnected";
