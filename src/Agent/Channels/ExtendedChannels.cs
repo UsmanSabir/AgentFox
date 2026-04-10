@@ -266,7 +266,36 @@ public class DiscordChannel : Channel
             IsConnected = false;
         }
     }
-    
+
+    public override async Task SendReplyAsync(ChannelMessage originalMessage, string content)
+    {
+        if (!IsConnected || _textChannel == null)
+            throw new InvalidOperationException("Discord channel is not connected");
+
+        if (originalMessage?.Metadata == null
+            || !originalMessage.Metadata.TryGetValue("messageId", out var msgIdStr)
+            || !ulong.TryParse(msgIdStr, out var msgId))
+        {
+            // Fall back to channel post when no message id available
+            await SendMessageAsync(content);
+            return;
+        }
+
+        try
+        {
+            // Send as a Discord reply (message reference). This will show as a reply to the original message.
+            var reference = new MessageReference(messageId: msgId, channelId: _channelId);
+            // Use the SendMessageAsync overload that accepts messageReference
+            await _textChannel.SendMessageAsync(text: content, messageReference: reference);
+        }
+        catch
+        {
+            // Best-effort: if anything fails, just send a normal message
+            await SendMessageAsync(content);
+        }
+    }
+
+
     public override async Task<ChannelMessage> SendMessageAsync(string content)
     {
         try

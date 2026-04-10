@@ -900,7 +900,8 @@ public class SlackChannel : Channel
     private readonly string _botToken;
     private readonly string _signingSecret;
     private readonly string _appToken;
-    
+
+    //todo https://github.com/soxtoby/SlackNet
     public SlackChannel(string botToken, string signingSecret, string? appToken = null)
     {
         Name = "Slack";
