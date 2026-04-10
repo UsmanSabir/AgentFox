@@ -102,6 +102,8 @@ public sealed class OpenAIEmbeddingService : IEmbeddingService
 
     public async Task<ReadOnlyMemory<float>> GenerateAsync(string text, CancellationToken ct = default)
     {
+        if (string.IsNullOrWhiteSpace(text))
+            return ReadOnlyMemory<float>.Empty;
         try
         {
             var result = await _client.GenerateEmbeddingAsync(text, cancellationToken: ct);

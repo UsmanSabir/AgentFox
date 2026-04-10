@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using AgentFox.Models;
 using Discord;
 using Discord.WebSocket;
@@ -17,6 +18,8 @@ public class DiscordChannel : Channel
     private SocketTextChannel? _textChannel;
     private DiscordWebhookClient? _webhookClient;
     private readonly List<ChannelMessage> _receivedMessages = new();
+    private bool _stopReconnecting = false;
+    private bool _reconnecting = false;
     
     public DiscordChannel(string botToken, ulong guildId, ulong channelId)
     {
@@ -84,12 +87,37 @@ public class DiscordChannel : Channel
     
     public override async Task<bool> ConnectAsync()
     {
+        _stopReconnecting = false;
+        return await ConnectInternalAsync();
+    }
+
+    private async Task<bool> ConnectInternalAsync()
+    {
         try
         {
-            _client = new DiscordSocketClient();
+            // Dispose any previous client cleanly
+            if (_client != null)
+            {
+                _client.MessageReceived -= HandleMessageReceivedAsync;
+                _client.Disconnected   -= OnDisconnectedAsync;
+                try { await _client.StopAsync(); } catch { /* ignore */ }
+                _client.Dispose();
+                _client = null;
+            }
+
+            // Request MessageContent privileged intent so message.Content is populated.
+            // NOTE: You must also enable "Message Content Intent" in the Discord Developer
+            //       Portal under your bot's settings (Bot → Privileged Gateway Intents).
+            var config = new DiscordSocketConfig
+            {
+                GatewayIntents = GatewayIntents.AllUnprivileged | GatewayIntents.MessageContent
+            };
+
+            _client = new DiscordSocketClient(config);
             
-            // Hook up logging
-            _client.Log += LogAsync;
+            // Hook up logging and disconnect handler
+            _client.Log          += LogAsync;
+            _client.Disconnected += OnDisconnectedAsync;
             
             // Login and start
             await _client.LoginAsync(TokenType.Bot, _botToken);
@@ -129,6 +157,7 @@ public class DiscordChannel : Channel
             _client.MessageReceived += HandleMessageReceivedAsync;
             
             IsConnected = true;
+            _reconnecting = false;
             return true;
         }
         catch
@@ -137,14 +166,60 @@ public class DiscordChannel : Channel
             return false;
         }
     }
+
+    /// <summary>
+    /// Triggered by Discord.Net whenever the socket drops. Attempts reconnection
+    /// with exponential backoff (5 s → 10 s → 20 s → 40 s → 80 s → 120 s max).
+    /// </summary>
+    private Task OnDisconnectedAsync(Exception? ex)
+    {
+        if (_stopReconnecting || _reconnecting)
+            return Task.CompletedTask;
+
+        _reconnecting = true;
+        IsConnected = false;
+
+        _ = Task.Run(async () =>
+        {
+            int delayMs = 5000; // start at 5 s
+            const int maxDelayMs = 120_000; // cap at 2 min
+
+            while (!_stopReconnecting)
+            {
+                Debug.WriteLine($"[Discord] Disconnected. Reconnecting in {delayMs / 1000} s…");
+                await Task.Delay(delayMs);
+
+                if (_stopReconnecting)
+                    break;
+
+                var success = await ConnectInternalAsync();
+                if (success)
+                {
+                    Debug.WriteLine("[Discord] Reconnected successfully.");
+                    break;
+                }
+
+                // Exponential backoff
+                delayMs = Math.Min(delayMs * 2, maxDelayMs);
+            }
+
+            _reconnecting = false;
+        });
+
+        return Task.CompletedTask;
+    }
     
     public override async Task DisconnectAsync()
     {
+        // Signal the reconnect loop to stop before we tear down the client
+        _stopReconnecting = true;
+
         try
         {
             if (_client != null)
             {
                 _client.MessageReceived -= HandleMessageReceivedAsync;
+                _client.Disconnected   -= OnDisconnectedAsync;
                 
                 await _client.LogoutAsync();
                 await _client.StopAsync();
@@ -173,6 +248,9 @@ public class DiscordChannel : Channel
         {
             if (!IsConnected || _textChannel == null)
                 throw new InvalidOperationException("Discord channel is not connected");
+
+            if(string.IsNullOrWhiteSpace(content))
+                content = "[Empty Response]";
 
             // Split long messages (Discord has a 2000 character limit)
             const int maxLength = 2000;
@@ -250,27 +328,33 @@ public class DiscordChannel : Channel
     {
         try
         {
-            // Ignore system messages and messages from the bot itself
-            if (message.Author.IsBot || !(message is SocketUserMessage userMessage))
+            // Ignore system messages and messages from the bot itself.
+            // Cast to SocketUserMessage to access user-sent content.
+            if (message.Author.IsBot || message is not SocketUserMessage userMessage)
                 return;
             
             // Only process messages from our channel
             if (userMessage.Channel.Id != _channelId)
                 return;
+
+            // message.Content is populated only when the MessageContent privileged
+            // gateway intent is enabled (set in ConnectInternalAsync via DiscordSocketConfig
+            // and in the Discord Developer Portal under Bot → Privileged Gateway Intents).
+            var content = userMessage.Content;
             
             var channelMessage = new ChannelMessage
             {
-                Id = message.Id.ToString(),
+                Id = userMessage.Id.ToString(),
                 ChannelId = ChannelId,
-                SenderId = message.Author.Id.ToString(),
-                SenderName = message.Author.Username,
-                Content = message.Content,
-                Timestamp = message.Timestamp.UtcDateTime,
+                SenderId = userMessage.Author.Id.ToString(),
+                SenderName = userMessage.Author.Username,
+                Content = content,
+                Timestamp = userMessage.Timestamp.UtcDateTime,
                 Type = MessageType.Text,
                 Metadata = new Dictionary<string, string>
                 {
-                    { "messageId", message.Id.ToString() },
-                    { "authorId", message.Author.Id.ToString() }
+                    { "messageId", userMessage.Id.ToString() },
+                    { "authorId",  userMessage.Author.Id.ToString() }
                 }
             };
             
@@ -287,6 +371,7 @@ public class DiscordChannel : Channel
     {
         // You can implement logging here
         // Console.WriteLine($"[{message.Severity}] {message.Source}: {message.Message}");
+        Debug.WriteLine($"[{message.Severity}] {message.Source}: {message.Message}");
         return Task.CompletedTask;
     }
     

@@ -525,39 +525,57 @@ public sealed class AgentOrchestrator : IHostedService
     // ─────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Reads channel config and adds/connects configured channels into an existing manager.
-    /// The manager is created early (with a lazy agent ref) so that channel tools can be
-    /// registered before the system prompt is built.
+    /// Reads the "Channels" array from config and adds/connects every enabled entry.
+    /// Each element must have a "Type" field (e.g. "Telegram", "Discord"). The same
+    /// provider type can appear multiple times to support multiple bots/servers.
     /// </summary>
     private async Task ConnectChannelsFromConfigAsync(ChannelManager manager, CancellationToken ct)
     {
         var channelSection = _configuration.GetSection("Channels");
         if (!channelSection.Exists()) return;
 
-        var tgSection = channelSection.GetSection("Telegram");
-        if (tgSection.Exists() && tgSection.GetValue<bool>("Enabled"))
+        // Track per-type counts so we can log meaningful names when duplicates exist.
+        var typeCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var entry in channelSection.GetChildren())
         {
-            var token = tgSection["BotToken"] ?? string.Empty;
-            if (string.IsNullOrWhiteSpace(token) || token.Contains("your-telegram"))
+            // Each child is one array element — read all its key/value pairs.
+            var config = entry.GetChildren()
+                .Where(c => c.Value != null)
+                .ToDictionary(c => c.Key, c => c.Value!, StringComparer.OrdinalIgnoreCase);
+
+            // "Type" is required; "Enabled" defaults to true if absent.
+            if (!config.TryGetValue("Type", out var type) || string.IsNullOrWhiteSpace(type))
             {
-                _logger.LogWarning("Telegram: BotToken not configured — skipping.");
+                _logger.LogWarning("Channels[{Index}]: missing 'Type' — skipping.", entry.Key);
+                continue;
+            }
+
+            if (config.TryGetValue("Enabled", out var enabledStr)
+                && bool.TryParse(enabledStr, out var enabled)
+                && !enabled)
+            {
+                _logger.LogDebug("Channels[{Index}] ({Type}): disabled — skipping.", entry.Key, type);
+                continue;
+            }
+
+            // Inject workspace path for providers that need it (e.g. Telegram file downloads).
+            config["WorkspacePath"] = _workspaceManager.ResolvePath("");
+
+            typeCounts.TryGetValue(type, out var count);
+            typeCounts[type] = count + 1;
+
+            var label = count == 0 ? type : $"{type}#{count + 1}";
+
+            var (ch, error) = ChannelFactory.Create(type, config, _logger);
+            if (ch != null)
+            {
+                manager.AddChannel(ch);
+                _logger.LogInformation("Channel '{Label}' registered.", label);
             }
             else
             {
-                var pollingTimeout = tgSection.GetValue<int>("PollingTimeoutSeconds", 30);
-                var config = new Dictionary<string, string>
-                {
-                    ["BotToken"]               = token,
-                    ["PollingTimeoutSeconds"]   = pollingTimeout.ToString(),
-                    ["WorkspacePath"]           = _workspaceManager.ResolvePath("")
-                };
-                var configuredChatId = tgSection["ChatId"];
-                if (!string.IsNullOrWhiteSpace(configuredChatId))
-                    config["ChatId"] = configuredChatId;
-
-                var (ch, error) = ChannelFactory.Create("Telegram", config);
-                if (ch != null) manager.AddChannel(ch);
-                else            _logger.LogWarning("Telegram channel failed: {Error}", error);
+                _logger.LogWarning("Channel '{Label}' failed to create: {Error}", label, error);
             }
         }
 
