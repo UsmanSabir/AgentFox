@@ -542,7 +542,7 @@ public class AgentBuilder
     private readonly AgentConfig _config = new();
     private IMemory? _memory;
     private SkillRegistry? _skillRegistry = null;
-    private MCPClient? _mcpClient;
+    private McpManager? _mcpManager;
     private IConversationStore? _conversationStore;
     private ILogger<FoxAgent>? _logger;
     private IChatClient? _chatClient;
@@ -633,12 +633,12 @@ public class AgentBuilder
         return this;
     }
 
-    public AgentBuilder WithMCPClient(MCPClient mcpClient)
+    public AgentBuilder WithMcpManager(McpManager mcpManager)
     {
-        _mcpClient = mcpClient;
+        _mcpManager = mcpManager;
         // Auto-register: injects connected MCP server list into system prompt each turn
         _promptContributorRegistry.Remove("mcp-servers"); // idempotent re-set
-        _promptContributorRegistry.Add(new MCPServerContributor(mcpClient));
+        _promptContributorRegistry.Add(new MCPServerContributor(mcpManager));
         return this;
     }
 
@@ -1208,12 +1208,14 @@ public class AgentBuilder
         // Capture locals so the closure does not root the entire AgentBuilder.
         var toolRegistry = _toolRegistry;
         var promptRegistry = _promptContributorRegistry;
+        var mcpManager = _mcpManager;
         agentBuilder.Use(inner => new DynamicAgentMiddleware(
             inner,
             toolRegistry,
             promptRegistry,
             baselineToolNames,
-            def => CreateAgentTool(def)));
+            def => CreateAgentTool(def),
+            mcpManager));
 
         if (_compactionConfig != null)
         {

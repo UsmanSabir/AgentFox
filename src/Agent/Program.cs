@@ -133,7 +133,7 @@ class Program
         var toolsConfig      = configuration.GetSection("Tools").Get<ToolsConfig>() ?? new ToolsConfig();
         var toolRegistry     = CreateToolRegistry(workspaceManager, toolsConfig);
         SkillRegistry? skillRegistry = null;
-        MCPClient?     mcpClient     = null;
+        McpManager?    mcpManager    = null;
         HybridMemory?  memory        = null;
 
         await AnsiConsole.Status()
@@ -144,7 +144,7 @@ class Program
                 {
                     ctx.Status("[dodgerblue1]Registering tools & workspace...[/]");
                     skillRegistry = await CreateSkillRegistryAsync(toolRegistry, configuration);
-                    mcpClient     = await CreateAndInitializeMcpClientAsync(toolRegistry, configuration);
+                    mcpManager    = await CreateAndInitializeMcpManagerAsync(configuration);
 
                     var longTermMemory = MemoryBackendFactory.CreateLongTermStorage(configuration, workspaceManager);
                     memory = new HybridMemory(100, longTermMemory);
@@ -182,7 +182,7 @@ class Program
                 new SessionHealthCheck(configuration, workspacePath),
                 new SkillHealthCheck(skillRegistry!),
                 new ToolHealthCheck(toolRegistry),
-                new McpHealthCheck(mcpClient!, configuration, doctorAgent),
+                new McpHealthCheck(mcpManager!, configuration, doctorAgent),
             });
             await doctorRunner.RunAsync(doctorFix);
             return 0;
@@ -191,7 +191,7 @@ class Program
         // ── Single-shot command mode (runs before web host, then exits) ───────
         if (taskArgs.Length > 0)
             return await RunCommandLineMode(taskArgs, configuration, workspaceManager,
-                toolRegistry, skillRegistry!, mcpClient!, memory!);
+                toolRegistry, skillRegistry!, mcpManager!, memory!);
 
         // ── Register all services in the single DI container ─────────────────
         var uiCfg = new UIConfig();
@@ -211,7 +211,7 @@ class Program
         builder.Services.AddSingleton(workspaceManager);
         builder.Services.AddSingleton(toolRegistry);
         builder.Services.AddSingleton(skillRegistry!);
-        builder.Services.AddSingleton(mcpClient!);
+        builder.Services.AddSingleton(mcpManager!);
         builder.Services.AddSingleton(memory!);
 
         // LLM
@@ -360,7 +360,7 @@ class Program
         WorkspaceManager workspaceManager,
         ToolRegistry toolRegistry,
         SkillRegistry skillRegistry,
-        MCPClient mcpClient,
+        McpManager mcpManager,
         HybridMemory memory)
     {
         var sessionCfg = new SessionConfig();
@@ -414,7 +414,7 @@ class Program
             .WithSystemPrompt(systemPrompt)
             .WithMemory(memory)
             .WithSkillsRegistry(skillRegistry)
-            .WithMCPClient(mcpClient)
+            .WithMcpManager(mcpManager)
             .WithConversationStore(sessionStore)
             .WithHistoryProvider(sessionStore.HistoryProvider)
             .WithChatClient(chatClient)
@@ -508,40 +508,41 @@ class Program
         return registry;
     }
 
-    private sealed class McpServerConfig
+    static async Task<McpManager> CreateAndInitializeMcpManagerAsync(IConfiguration configuration)
     {
-        public string Name { get; set; } = string.Empty;
-        public string Url { get; set; } = string.Empty;
-        public int TimeoutSeconds { get; set; } = 30;
-        public Dictionary<string, string> Headers { get; set; } = new();
-    }
+        var mcpManager = new McpManager();
+        var servers = configuration.GetSection("MCP:Servers").Get<List<McpServerConfig>>() ?? [];
 
-    static async Task<MCPClient> CreateAndInitializeMcpClientAsync(ToolRegistry toolRegistry, IConfiguration configuration)
-    {
-        var mcpClient = new MCPClient(toolRegistry);
-        var servers = configuration.GetSection("MCP:Servers").Get<List<McpServerConfig>>() ?? new();
+        // Only process servers that have a name and are not explicitly disabled.
+        // "Enabled" defaults to true, so omitting the key is treated as enabled.
+        var enabledServers = servers
+            .Where(s => !string.IsNullOrWhiteSpace(s.Name) && s.Enabled)
+            .ToList();
 
-        foreach (var serverConfig in servers.Where(s => !string.IsNullOrWhiteSpace(s.Name) && !string.IsNullOrWhiteSpace(s.Url)))
+        foreach (var serverConfig in enabledServers)
         {
             try
             {
-                var success = await mcpClient.AddServerAsync(
-                    serverConfig.Name, serverConfig.Url,
-                    serverConfig.TimeoutSeconds <= 0 ? 30 : serverConfig.TimeoutSeconds,
-                    serverConfig.Headers);
+                var success = await mcpManager.AddServerAsync(serverConfig);
                 if (!success)
-                    AnsiConsole.MarkupLine($"[bold yellow]⚠[/]  MCP server [dim]{Markup.Escape(serverConfig.Name)}[/]: connection failed.");
+                    AnsiConsole.MarkupLine(
+                        $"[bold yellow]⚠[/]  MCP server [dim]{Markup.Escape(serverConfig.Name)}[/]: connection failed.");
             }
             catch (Exception ex)
             {
-                AnsiConsole.MarkupLine($"[bold yellow]⚠[/]  MCP server [dim]{Markup.Escape(serverConfig.Name)}[/]: {Markup.Escape(ex.Message)}");
+                AnsiConsole.MarkupLine(
+                    $"[bold yellow]⚠[/]  MCP server [dim]{Markup.Escape(serverConfig.Name)}[/]: {Markup.Escape(ex.Message)}");
             }
         }
 
-        if (servers.Count > 0)
-            AnsiConsole.MarkupLine($"[bold green]✓[/]  MCP: {servers.Count} server(s) configured.");
+        var skipped = servers.Count - enabledServers.Count;
+        if (enabledServers.Count > 0 || skipped > 0)
+        {
+            var skippedNote = skipped > 0 ? $" [dim]({skipped} disabled)[/]" : "";
+            AnsiConsole.MarkupLine($"[bold green]✓[/]  MCP: {enabledServers.Count} server(s) configured.{skippedNote}");
+        }
 
-        return mcpClient;
+        return mcpManager;
     }
 
     static async Task<SkillRegistry> CreateSkillRegistryAsync(ToolRegistry toolRegistry, IConfiguration configuration)

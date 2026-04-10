@@ -11,21 +11,24 @@ namespace AgentFox.Tools;
 /// Tool that adds or removes MCP servers at runtime without restarting.
 ///
 /// When an MCP server is added:
-///   1. The MCPClient connects to the server.
-///   2. MCP tools from the server are registered in the live ToolRegistry.
+///   1. McpManager connects to the server using the official SDK.
+///   2. MCP tools are surfaced directly in ChatOptions.Tools via DynamicAgentMiddleware.
 ///   3. The server config is persisted to appsettings.json so it survives restarts.
 ///
 /// When an MCP server is removed the reverse happens.
+///
+/// Stdio transport is startup-only (requires a Command path); this tool supports
+/// Http (AutoDetect) and Sse transports for runtime adds.
 /// </summary>
 public class ManageMCPTool : BaseTool
 {
-    private readonly MCPClient _mcpClient;
+    private readonly McpManager _mcpManager;
     private readonly string _configFilePath;
     private readonly ILogger? _logger;
 
-    public ManageMCPTool(MCPClient mcpClient, string configFilePath, ILogger? logger = null)
+    public ManageMCPTool(McpManager mcpManager, string configFilePath, ILogger? logger = null)
     {
-        _mcpClient = mcpClient;
+        _mcpManager = mcpManager;
         _configFilePath = configFilePath;
         _logger = logger;
     }
@@ -35,41 +38,43 @@ public class ManageMCPTool : BaseTool
     public override string Description =>
         "Add or remove an external MCP server at runtime without restarting. " +
         "Changes are persisted to appsettings.json under MCP:Servers and take effect immediately. " +
-        "For 'add': provide server_name and url. Optionally provide timeout_seconds and headers_json. " +
-        "For 'remove': provide server_name.";
+        "For 'add': provide server_name, url, and optionally transport_mode and headers_json. " +
+        "For 'remove': provide server_name only.";
 
     public override Dictionary<string, ToolParameter> Parameters => new()
     {
         ["action"] = new()
         {
-            Type = "string",
+            Type        = "string",
             Description = "'add' to configure a new MCP server, 'remove' to disconnect an existing one.",
-            Required = true,
-            EnumValues = ["add", "remove"]
+            Required    = true,
+            EnumValues  = ["add", "remove"]
         },
         ["server_name"] = new()
         {
-            Type = "string",
+            Type        = "string",
             Description = "Unique name of the MCP server.",
-            Required = true
+            Required    = true
         },
         ["url"] = new()
         {
-            Type = "string",
-            Description = "The MCP server URL. Required for 'add'.",
-            Required = false
+            Type        = "string",
+            Description = "The MCP server endpoint URL. Required for 'add'.",
+            Required    = false
         },
-        ["timeout_seconds"] = new()
+        ["transport_mode"] = new()
         {
-            Type = "number",
-            Description = "Optional connection timeout in seconds for the MCP server. Defaults to 30.",
-            Required = false
+            Type        = "string",
+            Description = "Transport mode for 'add'. 'http' uses Streamable HTTP (AutoDetect, default). " +
+                          "'sse' forces legacy SSE mode.",
+            Required    = false,
+            EnumValues  = ["http", "sse"]
         },
         ["headers_json"] = new()
         {
-            Type = "string",
-            Description = "Optional JSON object of additional headers to send to the MCP server.",
-            Required = false
+            Type        = "string",
+            Description = "Optional JSON object of additional HTTP headers (e.g. '{\"Authorization\":\"Bearer …\"}').",
+            Required    = false
         }
     };
 
@@ -78,17 +83,17 @@ public class ManageMCPTool : BaseTool
         var action = arguments.GetValueOrDefault("action")?.ToString()?.ToLowerInvariant();
         return action switch
         {
-            "add" => await AddServerAsync(arguments),
+            "add"    => await AddServerAsync(arguments),
             "remove" => await RemoveServerAsync(arguments),
-            _ => ToolResult.Fail("action must be 'add' or 'remove'")
+            _        => ToolResult.Fail("action must be 'add' or 'remove'")
         };
     }
 
     private async Task<ToolResult> AddServerAsync(Dictionary<string, object?> arguments)
     {
         var serverName = arguments.GetValueOrDefault("server_name")?.ToString();
-        var url = arguments.GetValueOrDefault("url")?.ToString();
-        var timeoutSeconds = arguments.GetValueOrDefault("timeout_seconds");
+        var url        = arguments.GetValueOrDefault("url")?.ToString();
+        var modeStr    = arguments.GetValueOrDefault("transport_mode")?.ToString()?.ToLowerInvariant();
         var headersJson = arguments.GetValueOrDefault("headers_json")?.ToString();
 
         if (string.IsNullOrWhiteSpace(serverName))
@@ -96,31 +101,23 @@ public class ManageMCPTool : BaseTool
         if (string.IsNullOrWhiteSpace(url))
             return ToolResult.Fail("url is required for 'add'");
 
-        if (_mcpClient.Servers.Keys.Any(k => k.Equals(serverName, StringComparison.OrdinalIgnoreCase)))
-            return ToolResult.Fail($"An MCP server named '{serverName}' is already configured. Remove it first with action='remove'.");
+        if (_mcpManager.Servers.Keys.Any(k => k.Equals(serverName, StringComparison.OrdinalIgnoreCase)))
+            return ToolResult.Fail(
+                $"An MCP server named '{serverName}' is already configured. Remove it first with action='remove'.");
 
-        var timeout = 30;
-        if (timeoutSeconds != null)
-        {
-            if (timeoutSeconds is int intTimeout)
-                timeout = intTimeout;
-            else if (timeoutSeconds is long longTimeout)
-                timeout = (int)longTimeout;
-            else if (timeoutSeconds is double doubleTimeout)
-                timeout = (int)doubleTimeout;
-            else if (!int.TryParse(timeoutSeconds.ToString(), out timeout))
-                return ToolResult.Fail("timeout_seconds must be a number.");
-        }
+        var transportType = modeStr == "sse" ? McpTransportType.Sse : McpTransportType.Http;
 
         var headers = ParseHeaders(headersJson, out var headerError);
         if (headerError != null)
             return ToolResult.Fail(headerError);
 
-        var connected = await _mcpClient.AddServerAsync(serverName, url, timeout <= 0 ? 30 : timeout, headers);
+        var connected = await _mcpManager.AddServerAsync(serverName, url, transportType, headers);
         if (!connected)
-            return ToolResult.Fail($"MCP server '{serverName}' was created but failed to connect. Check the URL and server availability or authorization header.");
+            return ToolResult.Fail(
+                $"MCP server '{serverName}' failed to connect. Check the URL and credentials, " +
+                $"or review the server log. Error: {_mcpManager.Failures.GetValueOrDefault(serverName, "unknown")}");
 
-        var persistError = PersistServerAdd(serverName, url, timeout <= 0 ? 30 : timeout, headers);
+        var persistError = PersistServerAdd(serverName, url, transportType, headers);
         if (persistError != null)
             _logger?.LogWarning("manage_mcp_server add: connected but could not save config — {Error}", persistError);
 
@@ -137,15 +134,17 @@ public class ManageMCPTool : BaseTool
         if (string.IsNullOrWhiteSpace(serverName))
             return ToolResult.Fail("server_name is required for 'remove'");
 
-        var actualName = _mcpClient.Servers.Keys
+        var actualName = _mcpManager.Servers.Keys
             .FirstOrDefault(k => k.Equals(serverName, StringComparison.OrdinalIgnoreCase));
         if (actualName == null)
         {
-            var registered = string.Join(", ", _mcpClient.Servers.Keys);
-            return ToolResult.Fail($"MCP server '{serverName}' is not registered. Registered: {(registered.Length > 0 ? registered : "none")}");
+            var registered = string.Join(", ", _mcpManager.Servers.Keys);
+            return ToolResult.Fail(
+                $"MCP server '{serverName}' is not registered. " +
+                $"Registered: {(registered.Length > 0 ? registered : "none")}");
         }
 
-        await _mcpClient.RemoveServerAsync(actualName);
+        await _mcpManager.RemoveServerAsync(actualName);
 
         var persistError = PersistServerRemove(serverName);
         if (persistError != null)
@@ -158,7 +157,7 @@ public class ManageMCPTool : BaseTool
         return ToolResult.Ok($"MCP server '{serverName}' disconnected and {saveNote}.");
     }
 
-    private Dictionary<string, string>? ParseHeaders(string? headersJson, out string? error)
+    private static Dictionary<string, string>? ParseHeaders(string? headersJson, out string? error)
     {
         error = null;
         if (string.IsNullOrWhiteSpace(headersJson))
@@ -167,7 +166,7 @@ public class ManageMCPTool : BaseTool
         try
         {
             return System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(headersJson)
-                ?? new Dictionary<string, string>();
+                   ?? new Dictionary<string, string>();
         }
         catch (Exception ex)
         {
@@ -176,7 +175,12 @@ public class ManageMCPTool : BaseTool
         }
     }
 
-    private string? PersistServerAdd(string serverName, string url, int timeoutSeconds, Dictionary<string, string>? headers)
+    // ── Config persistence ────────────────────────────────────────────────────
+
+    private string? PersistServerAdd(
+        string serverName, string url,
+        McpTransportType transportType,
+        Dictionary<string, string>? headers)
     {
         try
         {
@@ -195,29 +199,34 @@ public class ManageMCPTool : BaseTool
                 mcp["Servers"] = servers;
             }
 
+            // Remove duplicate if present
             var existing = servers.OfType<JObject>()
-                .FirstOrDefault(obj => string.Equals(obj["Name"]?.ToString(), serverName, StringComparison.OrdinalIgnoreCase));
+                .FirstOrDefault(obj => string.Equals(
+                    obj["Name"]?.ToString(), serverName, StringComparison.OrdinalIgnoreCase));
             if (existing != null)
-            {
                 servers.Remove(existing);
-            }
 
-            var serverEntry = new JObject
+            // Write new structured transport format
+            var transportObj = new JObject
             {
-                ["Name"] = serverName,
-                ["Url"] = url,
-                ["TimeoutSeconds"] = timeoutSeconds
+                ["Type"] = transportType.ToString(),
+                ["Url"]  = url
             };
 
-            if (headers != null && headers.Count > 0)
+            if (headers is { Count: > 0 })
             {
                 var headersObj = new JObject();
                 foreach (var (key, value) in headers)
                     headersObj[key] = value;
-                serverEntry["Headers"] = headersObj;
+                transportObj["Headers"] = headersObj;
             }
 
-            servers.Add(serverEntry);
+            servers.Add(new JObject
+            {
+                ["Name"]      = serverName,
+                ["Transport"] = transportObj
+            });
+
             WriteRoot(root);
             return null;
         }
@@ -238,7 +247,8 @@ public class ManageMCPTool : BaseTool
             if (mcp["Servers"] is not JArray servers) return null;
 
             var entry = servers.OfType<JObject>()
-                .FirstOrDefault(obj => string.Equals(obj["Name"]?.ToString(), serverName, StringComparison.OrdinalIgnoreCase));
+                .FirstOrDefault(obj => string.Equals(
+                    obj["Name"]?.ToString(), serverName, StringComparison.OrdinalIgnoreCase));
 
             if (entry != null)
             {
@@ -259,14 +269,11 @@ public class ManageMCPTool : BaseTool
         var json = File.ReadAllText(_configFilePath);
         return JObject.Parse(json, new JsonLoadSettings
         {
-            CommentHandling = CommentHandling.Ignore,
+            CommentHandling  = CommentHandling.Ignore,
             LineInfoHandling = LineInfoHandling.Ignore
         });
     }
 
     private void WriteRoot(JObject root)
-    {
-        File.WriteAllText(_configFilePath, root.ToString(Formatting.Indented));
-    }
+        => File.WriteAllText(_configFilePath, root.ToString(Formatting.Indented));
 }
-
