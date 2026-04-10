@@ -1,16 +1,22 @@
 using AgentFox.Models;
+using Discord;
+using Discord.WebSocket;
+using Discord.Webhook;
 
 namespace AgentFox.Channels;
 
 /// <summary>
-/// Discord Channel Integration
+/// Discord Channel Integration using Discord.Net
 /// </summary>
 public class DiscordChannel : Channel
 {
     private readonly string _botToken;
     private readonly ulong _guildId;
     private readonly ulong _channelId;
-    private string? _webhookUrl;
+    private DiscordSocketClient? _client;
+    private SocketTextChannel? _textChannel;
+    private DiscordWebhookClient? _webhookClient;
+    private readonly List<ChannelMessage> _receivedMessages = new();
     
     public DiscordChannel(string botToken, ulong guildId, ulong channelId)
     {
@@ -22,36 +28,106 @@ public class DiscordChannel : Channel
     }
     
     /// <summary>
-    /// Set up Discord webhook
+    /// Set up Discord webhook for message sending
     /// </summary>
-    public async Task SetWebhookAsync(string url)
+    public async Task SetWebhookAsync(string webhookUrl)
     {
-        _webhookUrl = url;
-        await Task.Delay(50); // Simulated
+        try
+        {
+            _webhookClient = new DiscordWebhookClient(webhookUrl);
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException($"Failed to set webhook URL: {ex.Message}", ex);
+        }
     }
     
     /// <summary>
-    /// Send embed message
+    /// Send an embed message to Discord
     /// </summary>
-    public async Task SendEmbedAsync(DiscordEmbed embed)
+    public async Task SendEmbedAsync(EmbedBuilder embed)
     {
-        // In production, would use Discord API
-        await Task.Delay(50);
+        try
+        {
+            if (!IsConnected || _textChannel == null)
+                throw new InvalidOperationException("Discord channel is not connected");
+
+            await _textChannel.SendMessageAsync(embed: embed.Build());
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException($"Failed to send embed: {ex.Message}", ex);
+        }
     }
     
     /// <summary>
-    /// Add reaction to message
+    /// Add reaction to a message
     /// </summary>
-    public async Task AddReactionAsync(ulong messageId, string emoji)
+    public async Task AddReactionAsync(ulong messageId, IEmote emoji)
     {
-        await Task.Delay(50);
+        try
+        {
+            if (!IsConnected || _textChannel == null)
+                throw new InvalidOperationException("Discord channel is not connected");
+
+            var message = await _textChannel.GetMessageAsync(messageId);
+            if (message is IUserMessage userMessage)
+            {
+                await userMessage.AddReactionAsync(emoji);
+            }
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException($"Failed to add reaction: {ex.Message}", ex);
+        }
     }
     
     public override async Task<bool> ConnectAsync()
     {
         try
         {
-            await Task.Delay(100);
+            _client = new DiscordSocketClient();
+            
+            // Hook up logging
+            _client.Log += LogAsync;
+            
+            // Login and start
+            await _client.LoginAsync(TokenType.Bot, _botToken);
+            await _client.StartAsync();
+            
+            // Wait for the client to be ready
+            int maxWaitTime = 30000; // 30 seconds
+            int elapsed = 0;
+            while (!_client.ConnectionState.Equals(ConnectionState.Connected) && elapsed < maxWaitTime)
+            {
+                await Task.Delay(100);
+                elapsed += 100;
+            }
+            
+            if (!_client.ConnectionState.Equals(ConnectionState.Connected))
+            {
+                IsConnected = false;
+                return false;
+            }
+            
+            // Get the guild and channel
+            var guild = _client.GetGuild(_guildId);
+            if (guild == null)
+            {
+                IsConnected = false;
+                return false;
+            }
+            
+            _textChannel = guild.GetTextChannel(_channelId);
+            if (_textChannel == null)
+            {
+                IsConnected = false;
+                return false;
+            }
+            
+            // Hook message received event
+            _client.MessageReceived += HandleMessageReceivedAsync;
+            
             IsConnected = true;
             return true;
         }
@@ -64,61 +140,199 @@ public class DiscordChannel : Channel
     
     public override async Task DisconnectAsync()
     {
-        IsConnected = false;
-        await Task.CompletedTask;
+        try
+        {
+            if (_client != null)
+            {
+                _client.MessageReceived -= HandleMessageReceivedAsync;
+                
+                await _client.LogoutAsync();
+                await _client.StopAsync();
+                _client.Dispose();
+                _client = null;
+            }
+            
+            if (_webhookClient != null)
+            {
+                _webhookClient.Dispose();
+                _webhookClient = null;
+            }
+            
+            IsConnected = false;
+        }
+        catch
+        {
+            // Ensure disconnection happens
+            IsConnected = false;
+        }
     }
     
     public override async Task<ChannelMessage> SendMessageAsync(string content)
     {
-        await Task.Delay(50);
-        return new ChannelMessage
+        try
         {
-            ChannelId = ChannelId,
-            Content = content,
-            Timestamp = DateTime.UtcNow
-        };
+            if (!IsConnected || _textChannel == null)
+                throw new InvalidOperationException("Discord channel is not connected");
+
+            // Split long messages (Discord has a 2000 character limit)
+            const int maxLength = 2000;
+            var messages = SplitMessage(content, maxLength);
+            
+            IMessage? lastMessage = null;
+            foreach (var msg in messages)
+            {
+                lastMessage = await _textChannel.SendMessageAsync(msg);
+            }
+            
+            if (lastMessage == null)
+                throw new InvalidOperationException("Failed to send message");
+
+            return new ChannelMessage
+            {
+                Id = lastMessage.Id.ToString(),
+                ChannelId = ChannelId,
+                SenderId = _client!.CurrentUser.Id.ToString(),
+                SenderName = _client.CurrentUser.Username,
+                Content = content,
+                Timestamp = DateTime.UtcNow,
+                Type = MessageType.Text
+            };
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException($"Failed to send message: {ex.Message}", ex);
+        }
     }
     
     public override async Task<List<ChannelMessage>> ReceiveMessagesAsync()
     {
-        await Task.Delay(50);
-        return new List<ChannelMessage>();
+        try
+        {
+            if (!IsConnected || _textChannel == null)
+                return new List<ChannelMessage>();
+
+            var messages = new List<ChannelMessage>();
+            
+            // Fetch recent messages from the channel
+            var discordMessages = await _textChannel.GetMessagesAsync(limit: 10).FlattenAsync();
+            
+            foreach (var msg in discordMessages.OrderBy(m => m.Timestamp))
+            {
+                if (msg.Author.IsBot && msg.Author.Id == _client!.CurrentUser.Id)
+                    continue; // Skip own messages
+                
+                messages.Add(new ChannelMessage
+                {
+                    Id = msg.Id.ToString(),
+                    ChannelId = ChannelId,
+                    SenderId = msg.Author.Id.ToString(),
+                    SenderName = msg.Author.Username,
+                    Content = msg.Content,
+                    Timestamp = msg.Timestamp.UtcDateTime,
+                    Type = MessageType.Text,
+                    Metadata = new Dictionary<string, string>
+                    {
+                        { "messageId", msg.Id.ToString() },
+                        { "authorId", msg.Author.Id.ToString() }
+                    }
+                });
+            }
+            
+            return messages;
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException($"Failed to receive messages: {ex.Message}", ex);
+        }
+    }
+    
+    private async Task HandleMessageReceivedAsync(SocketMessage message)
+    {
+        try
+        {
+            // Ignore system messages and messages from the bot itself
+            if (message.Author.IsBot || !(message is SocketUserMessage userMessage))
+                return;
+            
+            // Only process messages from our channel
+            if (userMessage.Channel.Id != _channelId)
+                return;
+            
+            var channelMessage = new ChannelMessage
+            {
+                Id = message.Id.ToString(),
+                ChannelId = ChannelId,
+                SenderId = message.Author.Id.ToString(),
+                SenderName = message.Author.Username,
+                Content = message.Content,
+                Timestamp = message.Timestamp.UtcDateTime,
+                Type = MessageType.Text,
+                Metadata = new Dictionary<string, string>
+                {
+                    { "messageId", message.Id.ToString() },
+                    { "authorId", message.Author.Id.ToString() }
+                }
+            };
+            
+            _receivedMessages.Add(channelMessage);
+            RaiseMessageReceived(channelMessage);
+        }
+        catch
+        {
+            // Log but don't crash on message handling errors
+        }
+    }
+    
+    private static Task LogAsync(LogMessage message)
+    {
+        // You can implement logging here
+        // Console.WriteLine($"[{message.Severity}] {message.Source}: {message.Message}");
+        return Task.CompletedTask;
+    }
+    
+    private static List<string> SplitMessage(string message, int maxLength)
+    {
+        var messages = new List<string>();
+        if (message.Length <= maxLength)
+        {
+            messages.Add(message);
+        }
+        else
+        {
+            int index = 0;
+            while (index < message.Length)
+            {
+                int length = Math.Min(maxLength, message.Length - index);
+                messages.Add(message.Substring(index, length));
+                index += length;
+            }
+        }
+        return messages;
     }
 }
 
+
 /// <summary>
-/// Discord embed message
+/// Helper extension methods for Discord embeds
 /// </summary>
-public class DiscordEmbed
+public static class DiscordEmbedExtensions
 {
-    public string? Title { get; set; }
-    public string? Description { get; set; }
-    public int? Color { get; set; }
-    public List<DiscordField>? Fields { get; set; }
-    public DiscordFooter? Footer { get; set; }
-    public DiscordAuthor? Author { get; set; }
-    public string? ThumbnailUrl { get; set; }
-    public string? ImageUrl { get; set; }
-}
-
-public class DiscordField
-{
-    public string Name { get; set; } = string.Empty;
-    public string Value { get; set; } = string.Empty;
-    public bool Inline { get; set; }
-}
-
-public class DiscordFooter
-{
-    public string Text { get; set; } = string.Empty;
-    public string? IconUrl { get; set; }
-}
-
-public class DiscordAuthor
-{
-    public string Name { get; set; } = string.Empty;
-    public string? IconUrl { get; set; }
-    public string? Url { get; set; }
+    /// <summary>
+    /// Create an embed from field list
+    /// </summary>
+    public static EmbedBuilder CreateEmbed(string title, string? description = null, uint? color = null)
+    {
+        var embed = new EmbedBuilder()
+            .WithTitle(title);
+        
+        if (!string.IsNullOrEmpty(description))
+            embed.WithDescription(description);
+        
+        if (color.HasValue)
+            embed.WithColor(new Color(color.Value));
+        
+        return embed;
+    }
 }
 
 /// <summary>
