@@ -100,6 +100,7 @@ public class DiscordChannel : Channel
             {
                 _client.MessageReceived -= HandleMessageReceivedAsync;
                 _client.Disconnected   -= OnDisconnectedAsync;
+                _client.Ready          -= OnClientReady;
                 try { await _client.StopAsync(); } catch { /* ignore */ }
                 _client.Dispose();
                 _client = null;
@@ -115,15 +116,19 @@ public class DiscordChannel : Channel
 
             _client = new DiscordSocketClient(config);
             
-            // Hook up logging and disconnect handler
+            // Hook up logging, disconnect handler, and ready handler.
+            // IsConnected is set to true inside OnClientReady, AFTER the guild
+            // and text channel have been successfully resolved from the cache.
             _client.Log          += LogAsync;
             _client.Disconnected += OnDisconnectedAsync;
-            
+            _client.Ready        += OnClientReady;
+
             // Login and start
             await _client.LoginAsync(TokenType.Bot, _botToken);
             await _client.StartAsync();
             
-            // Wait for the client to be ready
+            // Wait for the socket to reach "Connected" state.
+            // Note: IsConnected (our flag) is set later inside OnClientReady.
             int maxWaitTime = 30000; // 30 seconds
             int elapsed = 0;
             while (!_client.ConnectionState.Equals(ConnectionState.Connected) && elapsed < maxWaitTime)
@@ -137,26 +142,10 @@ public class DiscordChannel : Channel
                 IsConnected = false;
                 return false;
             }
-            
-            // Get the guild and channel
-            var guild = _client.GetGuild(_guildId);
-            if (guild == null)
-            {
-                IsConnected = false;
-                return false;
-            }
-            
-            _textChannel = guild.GetTextChannel(_channelId);
-            if (_textChannel == null)
-            {
-                IsConnected = false;
-                return false;
-            }
-            
-            // Hook message received event
-            _client.MessageReceived += HandleMessageReceivedAsync;
-            
-            IsConnected = true;
+
+            // Guild/channel resolution and IsConnected=true happen in OnClientReady.
+            // Return true to indicate the socket handshake succeeded; the caller should
+            // treat the channel as fully ready once IsConnected becomes true.
             _reconnecting = false;
             return true;
         }
@@ -165,6 +154,41 @@ public class DiscordChannel : Channel
             IsConnected = false;
             return false;
         }
+    }
+
+    private Task OnClientReady()
+    {
+        // The Ready event guarantees the guild cache is fully populated — safe to resolve now.
+        var guild = _client?.GetGuild(_guildId);
+        if (guild == null)
+        {
+            IsConnected = false;
+            Debug.WriteLine($"[Discord] OnClientReady: guild {_guildId} not found in cache.");
+            return Task.CompletedTask; // don't subscribe MessageReceived in a broken state
+        }
+
+        _textChannel = guild.GetTextChannel(_channelId);
+        if (_textChannel == null)
+        {
+            // This skips the cache and asks Discord's servers directly
+            //_textChannel = await _client?.Rest?.GetChannelAsync(_channelId)! as ITextChannel;
+
+            IsConnected = false;
+            Debug.WriteLine($"[Discord] OnClientReady: text channel {_channelId} not found in guild {_guildId}.");
+            return Task.CompletedTask; // don't subscribe MessageReceived in a broken state
+        }
+
+        // Guard against double-subscribe: Ready can fire more than once within a
+        // single Discord.Net session (e.g. after a gateway resume).
+        if (_client != null)
+        {
+            _client.MessageReceived -= HandleMessageReceivedAsync;
+            _client.MessageReceived += HandleMessageReceivedAsync;
+        }
+
+        IsConnected = true;
+        Debug.WriteLine($"[Discord] Ready — guild '{guild.Name}', channel '#{_textChannel.Name}'.");
+        return Task.CompletedTask;
     }
 
     /// <summary>
@@ -220,7 +244,8 @@ public class DiscordChannel : Channel
             {
                 _client.MessageReceived -= HandleMessageReceivedAsync;
                 _client.Disconnected   -= OnDisconnectedAsync;
-                
+                _client.Ready -= OnClientReady;
+
                 await _client.LogoutAsync();
                 await _client.StopAsync();
                 _client.Dispose();

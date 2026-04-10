@@ -69,6 +69,12 @@ public class McpServerConfig
 {
     public string Name { get; set; } = string.Empty;
 
+    /// <summary>
+    /// When set to <c>false</c> the server is skipped during initialisation.
+    /// Defaults to <c>true</c>, so omitting the key keeps the current behaviour.
+    /// </summary>
+    public bool Enabled { get; set; } = true;
+
     /// <summary>Structured transport config (new format).</summary>
     public McpTransportConfig? Transport { get; set; }
 

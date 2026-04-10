@@ -513,7 +513,13 @@ class Program
         var mcpManager = new McpManager();
         var servers = configuration.GetSection("MCP:Servers").Get<List<McpServerConfig>>() ?? [];
 
-        foreach (var serverConfig in servers.Where(s => !string.IsNullOrWhiteSpace(s.Name)))
+        // Only process servers that have a name and are not explicitly disabled.
+        // "Enabled" defaults to true, so omitting the key is treated as enabled.
+        var enabledServers = servers
+            .Where(s => !string.IsNullOrWhiteSpace(s.Name) && s.Enabled)
+            .ToList();
+
+        foreach (var serverConfig in enabledServers)
         {
             try
             {
@@ -529,8 +535,12 @@ class Program
             }
         }
 
-        if (servers.Count > 0)
-            AnsiConsole.MarkupLine($"[bold green]✓[/]  MCP: {servers.Count} server(s) configured.");
+        var skipped = servers.Count - enabledServers.Count;
+        if (enabledServers.Count > 0 || skipped > 0)
+        {
+            var skippedNote = skipped > 0 ? $" [dim]({skipped} disabled)[/]" : "";
+            AnsiConsole.MarkupLine($"[bold green]✓[/]  MCP: {enabledServers.Count} server(s) configured.{skippedNote}");
+        }
 
         return mcpManager;
     }
