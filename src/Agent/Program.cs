@@ -298,8 +298,12 @@ class Program
             app.UseDefaultFiles();
             app.UseStaticFiles();
 
+            var apiGroup = app.MapGroup("/api");
             foreach (var module in modules.Where(m => enabledModules.Contains(m.Name)))
-                module.MapEndpoints(app);
+                module.MapEndpoints(apiGroup);
+
+            // SPA fallback
+            app.MapFallbackToFile("index.html");
         }
 
         // Notify modules of startup (IAppModule.StartAsync)
