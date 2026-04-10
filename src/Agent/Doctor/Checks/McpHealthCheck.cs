@@ -6,15 +6,15 @@ using Microsoft.Extensions.Configuration;
 
 public class McpHealthCheck : IHealthCheckable
 {
-    private readonly MCPClient _mcpClient;
+    private readonly McpManager _mcpManager;
     private readonly IConfiguration _config;
     private readonly DoctorAgent? _doctorAgent;
 
     public string ComponentName => "MCP";
 
-    public McpHealthCheck(MCPClient mcpClient, IConfiguration config, DoctorAgent? doctorAgent = null)
+    public McpHealthCheck(McpManager mcpManager, IConfiguration config, DoctorAgent? doctorAgent = null)
     {
-        _mcpClient = mcpClient;
+        _mcpManager = mcpManager;
         _config = config;
         _doctorAgent = doctorAgent;
     }
@@ -23,70 +23,44 @@ public class McpHealthCheck : IHealthCheckable
     {
         var results = new List<HealthCheckResult>();
 
-        //// If MCP is disabled (or the key is absent), report healthy and skip further checks.
-        //var mcpEnabledRaw = _config["MCP:Enabled"];
-        //bool mcpEnabled = !string.IsNullOrWhiteSpace(mcpEnabledRaw)
-        //                  && bool.TryParse(mcpEnabledRaw, out var parsed)
-        //                  && parsed;
+        var connected = _mcpManager.GetConnectedServers();
+        var failures  = _mcpManager.Failures;
+        var totalConfigured = connected.Count + failures.Count;
 
-        //if (!mcpEnabled)
-        //{
-        //    results.Add(Healthy("MCP disabled"));
-        //    return Task.FromResult<IReadOnlyList<HealthCheckResult>>(results);
-        //}
-
-        // MCP is enabled — inspect server connections.
-        var allServers      = _mcpClient.Servers;
-        var connectedServers = _mcpClient.GetConnectedServers();
-
-        if (allServers.Count == 0)
+        if (totalConfigured == 0)
         {
             results.Add(Warning("MCP enabled but no servers are configured"));
             return Task.FromResult<IReadOnlyList<HealthCheckResult>>(results);
         }
 
-        // Report overall connection status.
-        if (connectedServers.Count == allServers.Count)
-        {
-            results.Add(Healthy($"All {allServers.Count} MCP server(s) connected"));
-        }
-        else if (connectedServers.Count > 0)
-        {
-            results.Add(Warning(
-                $"{connectedServers.Count}/{allServers.Count} MCP server(s) connected"));
-        }
+        // Overall connection summary
+        if (failures.Count == 0)
+            results.Add(Healthy($"All {totalConfigured} MCP server(s) connected"));
+        else if (connected.Count > 0)
+            results.Add(Warning($"{connected.Count}/{totalConfigured} MCP server(s) connected"));
         else
-        {
-            results.Add(Critical(
-                $"MCP enabled but none of the {allServers.Count} configured server(s) are connected"));
-        }
+            results.Add(Critical($"MCP enabled but none of the {totalConfigured} configured server(s) are connected"));
 
-        // Report tool count per connected server.
-        int totalTools = 0;
-        foreach (var server in connectedServers)
+        // Per-server tool counts
+        var totalTools = 0;
+        foreach (var (name, toolCount, _) in connected)
         {
-            var toolCount = server.AvailableTools.Count;
             totalTools += toolCount;
-            results.Add(Healthy($"Server '{server.Name}': {toolCount} tool(s) registered"));
+            results.Add(Healthy($"Server '{name}': {toolCount} tool(s) registered"));
         }
 
-        // Also report servers that failed to connect.
-        foreach (var kvp in allServers)
+        // Failed servers with error detail
+        foreach (var (name, error) in failures)
         {
-            if (!kvp.Value.IsConnected)
-            {
-                results.Add(new HealthCheckResult(
-                    HealthStatus.Critical, "MCP",
-                    $"Server '{kvp.Key}' is not connected — check URL and credentials in appsettings.json MCP:Servers",
-                    CanAutoFix: _doctorAgent != null,
-                    FixDescription: _doctorAgent != null ? "Ask DoctorAgent to update MCP server config" : null));
-            }
+            results.Add(new HealthCheckResult(
+                HealthStatus.Critical, "MCP",
+                $"Server '{name}' failed to connect: {error}",
+                CanAutoFix: _doctorAgent != null,
+                FixDescription: _doctorAgent != null ? "Ask DoctorAgent to update MCP server config" : null));
         }
 
-        if (connectedServers.Count > 0)
-        {
+        if (connected.Count > 0)
             results.Add(Healthy($"Total MCP tools registered: {totalTools}"));
-        }
 
         return Task.FromResult<IReadOnlyList<HealthCheckResult>>(results);
     }
@@ -101,10 +75,10 @@ public class McpHealthCheck : IHealthCheckable
     }
 
     private static HealthCheckResult Healthy(string msg)
-        => new(HealthStatus.Healthy,  "MCP", msg);
+        => new(HealthStatus.Healthy, "MCP", msg);
 
     private static HealthCheckResult Warning(string msg)
-        => new(HealthStatus.Warning,  "MCP", msg);
+        => new(HealthStatus.Warning, "MCP", msg);
 
     private static HealthCheckResult Critical(string msg, bool canFix = false, string? fixDesc = null)
         => new(HealthStatus.Critical, "MCP", msg, canFix, fixDesc);

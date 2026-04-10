@@ -99,10 +99,15 @@ internal sealed class DynamicAgentMiddleware : DelegatingChatClient
     private readonly PromptContributorRegistry _promptRegistry;
     private readonly HashSet<string> _baselineToolNames;
     private readonly Func<ToolDefinition, AITool> _toolFactory;
+    private readonly McpManager? _mcpManager;
 
-    // Tool injection cache — rebuilt only when Version changes
+    // Tool injection cache — rebuilt only when ToolRegistry.Version changes
     private int _cachedToolVersion;
     private List<AITool> _cachedNewTools = [];
+
+    // MCP tool cache — rebuilt only when McpManager.Version changes
+    private int _cachedMcpVersion = -1;
+    private List<AITool> _cachedMcpTools = [];
 
     // Prompt addon cache — rebuilt only when contributor output changes
     private string? _cachedAddonHash;
@@ -113,12 +118,14 @@ internal sealed class DynamicAgentMiddleware : DelegatingChatClient
         ToolRegistry toolRegistry,
         PromptContributorRegistry promptRegistry,
         IEnumerable<string> baselineToolNames,
-        Func<ToolDefinition, AITool> toolFactory) : base(inner)
+        Func<ToolDefinition, AITool> toolFactory,
+        McpManager? mcpManager = null) : base(inner)
     {
         _toolRegistry = toolRegistry;
         _promptRegistry = promptRegistry;
         _baselineToolNames = new HashSet<string>(baselineToolNames, StringComparer.OrdinalIgnoreCase);
         _toolFactory = toolFactory;
+        _mcpManager = mcpManager;
         // Snapshot the version at construction so first-call change detection is accurate
         _cachedToolVersion = toolRegistry.Version;
     }
@@ -155,6 +162,7 @@ internal sealed class DynamicAgentMiddleware : DelegatingChatClient
     /// </summary>
     private void InjectDynamicTools(ChatOptions options)
     {
+        // ── ToolRegistry tools (ITool wrappers, registered at runtime) ────────
         var currentVersion = _toolRegistry.Version;
         if (currentVersion != _cachedToolVersion)
         {
@@ -173,8 +181,20 @@ internal sealed class DynamicAgentMiddleware : DelegatingChatClient
             _cachedToolVersion = currentVersion;
         }
 
-        if (_cachedNewTools.Count > 0)
-            options.Tools = [..(options.Tools ?? []), .._cachedNewTools];
+        // ── McpManager tools (AITool directly from official SDK) ─────────────
+        if (_mcpManager is not null)
+        {
+            var mcpVersion = _mcpManager.Version;
+            if (mcpVersion != _cachedMcpVersion)
+            {
+                _cachedMcpTools = _mcpManager.GetAllTools();
+                _cachedMcpVersion = mcpVersion;
+            }
+        }
+
+        var extra = _cachedNewTools.Count + _cachedMcpTools.Count;
+        if (extra > 0)
+            options.Tools = [..(options.Tools ?? []), .._cachedNewTools, .._cachedMcpTools];
     }
 
     /// <summary>
@@ -227,24 +247,22 @@ internal sealed class DynamicAgentMiddleware : DelegatingChatClient
 /// </summary>
 public sealed class MCPServerContributor : IPromptContributor
 {
-    private readonly MCPClient _mcpClient;
+    private readonly McpManager _mcpManager;
     public string ContributorId => "mcp-servers";
 
-    public MCPServerContributor(MCPClient mcpClient) => _mcpClient = mcpClient;
+    public MCPServerContributor(McpManager mcpManager) => _mcpManager = mcpManager;
 
     public string? GetFragment()
     {
-        var servers = _mcpClient.GetConnectedServers();
+        var servers = _mcpManager.GetConnectedServers();
         if (servers.Count == 0) return null;
 
         var sb = new System.Text.StringBuilder();
         sb.AppendLine("## Connected MCP Servers");
-        foreach (var s in servers)
+        foreach (var (name, toolCount, toolNames) in servers)
         {
-            var toolNames = s.AvailableTools.Count > 0
-                ? string.Join(", ", s.AvailableTools.Select(t => t.Name))
-                : "no tools";
-            sb.AppendLine($"- **{s.Name}** ({s.AvailableTools.Count} tools): {toolNames}");
+            var tools = toolCount > 0 ? string.Join(", ", toolNames) : "no tools";
+            sb.AppendLine($"- **{name}** ({toolCount} tools): {tools}");
         }
         return sb.ToString().TrimEnd();
     }

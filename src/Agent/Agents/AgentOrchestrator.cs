@@ -33,7 +33,7 @@ public sealed class AgentOrchestrator : IHostedService
     private readonly IChatClient _chatClient;
     private readonly ToolRegistry _toolRegistry;
     private readonly SkillRegistry _skillRegistry;
-    private readonly MCPClient _mcpClient;
+    private readonly McpManager _mcpManager;
     private readonly HybridMemory _memory;
     private readonly SessionManager _sessionManager;
     private readonly SubAgentManager _subAgentManager;
@@ -60,7 +60,7 @@ public sealed class AgentOrchestrator : IHostedService
         IChatClient chatClient,
         ToolRegistry toolRegistry,
         SkillRegistry skillRegistry,
-        MCPClient mcpClient,
+        McpManager mcpManager,
         HybridMemory memory,
         SessionManager sessionManager,
         SubAgentManager subAgentManager,
@@ -79,7 +79,7 @@ public sealed class AgentOrchestrator : IHostedService
         _chatClient           = chatClient;
         _toolRegistry         = toolRegistry;
         _skillRegistry        = skillRegistry;
-        _mcpClient            = mcpClient;
+        _mcpManager           = mcpManager;
         _memory               = memory;
         _sessionManager       = sessionManager;
         _subAgentManager      = subAgentManager;
@@ -159,7 +159,7 @@ public sealed class AgentOrchestrator : IHostedService
 
             if (toolsConfig.Mcp)
                 _toolRegistry.Register(new ManageMCPTool(
-                    _mcpClient, appConfigPath,
+                    _mcpManager, appConfigPath,
                     _loggerFactory.CreateLogger<ManageMCPTool>()));
 
             // Scheduling tools use lazy refs — managers are created after the agent is built
@@ -302,7 +302,7 @@ public sealed class AgentOrchestrator : IHostedService
             .WithSystemPrompt(systemPrompt)
             .WithMemory(_memory)
             .WithSkillsRegistry(_skillRegistry)
-            .WithMCPClient(_mcpClient)
+            .WithMcpManager(_mcpManager)
             .WithConversationStore(_sessionStore)
             .WithHistoryProvider(_sessionStore.HistoryProvider)
             .WithChatClient(client)

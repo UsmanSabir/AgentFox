@@ -38,7 +38,7 @@ public sealed class CliWorker : BackgroundService
     private readonly IChatClient _chatClient;
     private readonly ToolRegistry _toolRegistry;
     private readonly SkillRegistry _skillRegistry;
-    private readonly MCPClient _mcpClient;
+    private readonly McpManager _mcpManager;
     private readonly HybridMemory _memory;
     private readonly SessionManager _sessionManager;
     private readonly SubAgentManager _subAgentManager;
@@ -58,7 +58,7 @@ public sealed class CliWorker : BackgroundService
         IChatClient chatClient,
         ToolRegistry toolRegistry,
         SkillRegistry skillRegistry,
-        MCPClient mcpClient,
+        McpManager mcpManager,
         HybridMemory memory,
         SessionManager sessionManager,
         SubAgentManager subAgentManager,
@@ -77,7 +77,7 @@ public sealed class CliWorker : BackgroundService
         _chatClient           = chatClient;
         _toolRegistry         = toolRegistry;
         _skillRegistry        = skillRegistry;
-        _mcpClient            = mcpClient;
+        _mcpManager           = mcpManager;
         _memory               = memory;
         _sessionManager       = sessionManager;
         _subAgentManager      = subAgentManager;
@@ -431,7 +431,7 @@ public sealed class CliWorker : BackgroundService
             new SessionHealthCheck(_configuration, workspacePath),
             new SkillHealthCheck(_skillRegistry),
             new ToolHealthCheck(_toolRegistry),
-            new McpHealthCheck(_mcpClient, _configuration, doctorAgent),
+            new McpHealthCheck(_mcpManager, _configuration, doctorAgent),
         });
         await doctorRunner.RunAsync(autoFix);
     }
