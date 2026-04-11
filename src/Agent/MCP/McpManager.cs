@@ -48,6 +48,7 @@ public class McpTransportConfig
     public Dictionary<string, string?>? Env { get; set; }
     /// <summary>Graceful shutdown timeout for the process (default 5 s).</summary>
     public int ShutdownTimeoutSeconds { get; set; } = 5;
+    public int TimeoutSeconds { get; set; } = 30;
 }
 
 /// <summary>
@@ -162,9 +163,10 @@ public sealed class McpManager : IAsyncDisposable
         // Normalise: if no Transport block, treat legacy flat Url as Http/AutoDetect
         var transport = config.Transport ?? new McpTransportConfig
         {
-            Type    = McpTransportType.Http,
-            Url     = config.Url,
-            Headers = config.Headers
+            Type = McpTransportType.Http,
+            Url = config.Url,
+            Headers = config.Headers,
+            TimeoutSeconds = config.TimeoutSeconds
         };
         return AddServerCoreAsync(config.Name, transport, ct);
     }
@@ -181,8 +183,8 @@ public sealed class McpManager : IAsyncDisposable
         CancellationToken ct = default)
         => AddServerCoreAsync(name, new McpTransportConfig
         {
-            Type    = transportType,
-            Url     = url,
+            Type = transportType,
+            Url = url,
             Headers = headers
         }, ct);
 
@@ -228,7 +230,7 @@ public sealed class McpManager : IAsyncDisposable
         {
             IClientTransport transport = CreateTransport(config);
             var client = await McpClient.CreateAsync(transport, cancellationToken: ct);
-            var tools  = (await client.ListToolsAsync(cancellationToken: ct)).ToList();
+            var tools = (await client.ListToolsAsync(cancellationToken: ct)).ToList();
 
             var displayUrl = config.Type == McpTransportType.Stdio
                 ? config.Command ?? "(stdio)"
@@ -263,34 +265,36 @@ public sealed class McpManager : IAsyncDisposable
         {
             McpTransportType.Stdio => new StdioClientTransport(new StdioClientTransportOptions
             {
-                Command          = config.Command
+                Command = config.Command
                                    ?? throw new InvalidOperationException(
                                        "Stdio transport requires 'Command' to be set"),
-                Arguments        = config.Arguments,
+                Arguments = config.Arguments,
                 WorkingDirectory = config.WorkingDirectory,
                 EnvironmentVariables = config.Env,
-                ShutdownTimeout  = TimeSpan.FromSeconds(
+                ShutdownTimeout = TimeSpan.FromSeconds(
                     config.ShutdownTimeoutSeconds > 0 ? config.ShutdownTimeoutSeconds : 5)
             }),
 
             McpTransportType.Sse => new HttpClientTransport(new HttpClientTransportOptions
             {
-                Endpoint              = new Uri(config.Url
+                Endpoint = new Uri(config.Url
                                         ?? throw new InvalidOperationException(
                                             "SSE transport requires 'Url' to be set")),
-                TransportMode         = HttpTransportMode.Sse,
-                AdditionalHeaders     = config.Headers,
-                MaxReconnectionAttempts = config.MaxReconnectionAttempts
+                TransportMode = HttpTransportMode.Sse,
+                AdditionalHeaders = config.Headers,
+                MaxReconnectionAttempts = config.MaxReconnectionAttempts,
+                //ConnectionTimeout = TimeSpan.FromSeconds(config.TimeoutSeconds)
             }),
 
             // Http (default) — AutoDetect tries Streamable HTTP first, falls back to SSE
             _ => new HttpClientTransport(new HttpClientTransportOptions
             {
-                Endpoint          = new Uri(config.Url
+                Endpoint = new Uri(config.Url
                                     ?? throw new InvalidOperationException(
                                         "Http transport requires 'Url' to be set")),
-                TransportMode     = HttpTransportMode.AutoDetect,
-                AdditionalHeaders = config.Headers
+                TransportMode = HttpTransportMode.AutoDetect,
+                AdditionalHeaders = config.Headers,
+                //ConnectionTimeout = TimeSpan.FromSeconds(config.TimeoutSeconds)
             })
         };
 

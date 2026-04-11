@@ -150,15 +150,65 @@ internal sealed class DynamicAgentMiddleware : DelegatingChatClient
 
     private ChatOptions PrepareOptions(ChatOptions? options)
     {
+        // Inject MCP tools into the ORIGINAL options in-place BEFORE cloning.
+        //
+        // Why: BuildAIAgent wraps the pipeline with FunctionInvokingChatClient (outer layer).
+        // That outer layer dispatches LLM tool calls by looking up function names in the
+        // `options` reference it owns — NOT in the cloned copy we pass down to the LLM.
+        // If we only add MCP tools to the clone, the outer dispatcher never sees them and
+        // returns "Requested function not found" for every MCP tool call.
+        // Mutating `options.Tools` here (before Clone()) propagates the tools to both the
+        // outer dispatcher and the LLM request.
+        if (options != null)
+            InjectMcpToolsInPlace(options);
+
         var opts = options?.Clone() ?? new ChatOptions();
+
+        // For the null-options edge case (no outer dispatcher), seed MCP tools on the new object.
+        if (options is null && _cachedMcpTools.Count > 0)
+            opts.Tools = [.._cachedMcpTools];
+
         InjectDynamicTools(opts);
         InjectPromptAddons(opts);
         return opts;
     }
 
     /// <summary>
+    /// Adds MCP tools to <paramref name="options"/> in-place so that the outer
+    /// <c>FunctionInvokingChatClient</c> can find and invoke them when the LLM returns a call.
+    /// Idempotent: already-present tools (by name) are never duplicated.
+    /// </summary>
+    private void InjectMcpToolsInPlace(ChatOptions options)
+    {
+        if (_mcpManager is null) return;
+
+        var mcpVersion = _mcpManager.Version;
+        if (mcpVersion != _cachedMcpVersion)
+        {
+            _cachedMcpTools = _mcpManager.GetAllTools();
+            _cachedMcpVersion = mcpVersion;
+        }
+
+        if (_cachedMcpTools.Count == 0) return;
+
+        var existingNames = new HashSet<string>(
+            (options.Tools ?? Enumerable.Empty<AITool>())
+                .OfType<AIFunction>()
+                .Select(f => f.Name),
+            StringComparer.OrdinalIgnoreCase);
+
+        var toAdd = _cachedMcpTools
+            .Where(t => t is AIFunction f && !existingNames.Contains(f.Name))
+            .ToList();
+
+        if (toAdd.Count > 0)
+            options.Tools = [..(options.Tools ?? []), ..toAdd];
+    }
+
+    /// <summary>
     /// Appends tools registered after the agent was built.
     /// No-op when <see cref="ToolRegistry.Version"/> hasn't changed since the last call.
+    /// MCP tools are handled separately via <see cref="InjectMcpToolsInPlace"/>.
     /// </summary>
     private void InjectDynamicTools(ChatOptions options)
     {
@@ -181,20 +231,10 @@ internal sealed class DynamicAgentMiddleware : DelegatingChatClient
             _cachedToolVersion = currentVersion;
         }
 
-        // ── McpManager tools (AITool directly from official SDK) ─────────────
-        if (_mcpManager is not null)
-        {
-            var mcpVersion = _mcpManager.Version;
-            if (mcpVersion != _cachedMcpVersion)
-            {
-                _cachedMcpTools = _mcpManager.GetAllTools();
-                _cachedMcpVersion = mcpVersion;
-            }
-        }
+        // MCP tools are already in opts (cloned from mutated original) — do not re-add.
 
-        var extra = _cachedNewTools.Count + _cachedMcpTools.Count;
-        if (extra > 0)
-            options.Tools = [..(options.Tools ?? []), .._cachedNewTools, .._cachedMcpTools];
+        if (_cachedNewTools.Count > 0)
+            options.Tools = [..(options.Tools ?? []), .._cachedNewTools];
     }
 
     /// <summary>
