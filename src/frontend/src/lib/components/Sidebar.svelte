@@ -10,7 +10,8 @@
     Wrench,
     Settings,
     ChevronLeft,
-    Zap
+    Zap,
+    Server
   } from 'lucide-svelte';
 
   const navItems = [
@@ -20,6 +21,7 @@
     { href: '/memory',   label: 'Memory',    icon: Database },
     { href: '/skills',   label: 'Skills',    icon: Puzzle },
     { href: '/tools',    label: 'Tools',     icon: Wrench },
+    { href: '/mcp',      label: 'MCP',       icon: Server },
     { href: '/settings', label: 'Settings',  icon: Settings },
   ];
 

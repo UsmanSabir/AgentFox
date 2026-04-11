@@ -1,5 +1,5 @@
 node_modules/
 .svelte-kit/
-.env
-.env.*
-!.env.example
+# .env is committed (safe defaults only — no secrets)
+.env.local
+.env.*.local

@@ -31,6 +31,7 @@
     '/memory':  'Memory',
     '/skills':  'Skills',
     '/tools':   'Tools',
+    '/mcp':     'MCP Servers',
     '/settings':'Settings',
   };
 

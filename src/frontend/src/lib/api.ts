@@ -62,6 +62,21 @@ export interface SessionInfo {
   channelType?: string;
 }
 
+export interface McpServerInfo {
+  name: string;
+  toolCount: number;
+  tools: string[];
+  status: 'connected' | 'failed';
+  error?: string;
+}
+
+export interface McpStatus {
+  servers: McpServerInfo[];
+  totalTools: number;
+  serverCount: number;
+  failureCount: number;
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 async function get<T>(path: string): Promise<T> {
@@ -80,6 +95,7 @@ export const api = {
   skills:   () => get<SkillInfo[]>('/skills'),
   memory:   () => get<MemoryEntry[]>('/memory'),
   sessions: () => get<SessionInfo[]>('/sessions'),
+  mcp:      () => get<McpStatus>('/mcp'),
 
   chat: async (req: ChatRequest): Promise<ChatResponse> => {
     const res = await fetch(`${BASE}/chat`, {

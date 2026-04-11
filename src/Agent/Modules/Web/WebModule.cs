@@ -1,16 +1,19 @@
+using AgentFox.MCP;
 using AgentFox.Memory;
-using AgentFox.Plugins.Interfaces;
 using AgentFox.Plugins.Models;
 using AgentFox.Sessions;
 using AgentFox.Skills;
 using AgentFox.Tools;
 using AgentFox.Agents;
+// Alias to avoid ambiguity with AgentFox.Skills.IAgentService (SkillContext.cs)
+using IAgentService = AgentFox.Plugins.Interfaces.IAgentService;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using System.Text.Json;
+using AgentFox.Plugins.Interfaces;
 
 namespace AgentFox.Modules.Web;
 
@@ -194,6 +197,35 @@ public class WebModule : IAppModule
                 channelType = s.ChannelType
             });
             return Results.Ok(sessions);
+        });
+
+        // ── MCP Servers ───────────────────────────────────────────────────────
+        endpoints.MapGet("/mcp", (McpManager mcpManager) =>
+        {
+            var connected = mcpManager.GetConnectedServers().Select(s => new
+            {
+                name      = s.Name,
+                toolCount = s.ToolCount,
+                tools     = s.ToolNames,
+                status    = "connected"
+            });
+
+            var failed = mcpManager.Failures.Select(kv => new
+            {
+                name      = kv.Key,
+                toolCount = 0,
+                tools     = (IReadOnlyList<string>)Array.Empty<string>(),
+                status    = "failed",
+                error     = kv.Value
+            });
+
+            return Results.Ok(new
+            {
+                servers      = connected.Cast<object>().Concat(failed.Cast<object>()),
+                totalTools   = mcpManager.GetAllTools().Count,
+                serverCount  = mcpManager.Servers.Count,
+                failureCount = mcpManager.Failures.Count
+            });
         });
 
         // ── Agents (main + sub-agents snapshot) ───────────────────────────────
