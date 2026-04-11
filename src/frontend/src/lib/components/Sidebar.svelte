@@ -11,18 +11,22 @@
     Settings,
     ChevronLeft,
     Zap,
-    Server
+    Server,
+    Heart,
+    CalendarClock
   } from 'lucide-svelte';
 
   const navItems = [
-    { href: '/',         label: 'Dashboard', icon: LayoutDashboard },
-    { href: '/chat',     label: 'Chat',      icon: MessageSquare },
-    { href: '/agents',   label: 'Agents',    icon: Bot },
-    { href: '/memory',   label: 'Memory',    icon: Database },
-    { href: '/skills',   label: 'Skills',    icon: Puzzle },
-    { href: '/tools',    label: 'Tools',     icon: Wrench },
-    { href: '/mcp',      label: 'MCP',       icon: Server },
-    { href: '/settings', label: 'Settings',  icon: Settings },
+    { href: '/',            label: 'Dashboard', icon: LayoutDashboard },
+    { href: '/chat',        label: 'Chat',      icon: MessageSquare },
+    { href: '/agents',      label: 'Agents',    icon: Bot },
+    { href: '/memory',      label: 'Memory',    icon: Database },
+    { href: '/skills',      label: 'Skills',    icon: Puzzle },
+    { href: '/tools',       label: 'Tools',     icon: Wrench },
+    { href: '/mcp',         label: 'MCP',       icon: Server },
+    { href: '/heartbeats',  label: 'Heartbeats', icon: Heart },
+    { href: '/cron',        label: 'Cron Jobs', icon: CalendarClock },
+    { href: '/settings',    label: 'Settings',  icon: Settings },
   ];
 
   $: collapsed = $sidebarCollapsed;

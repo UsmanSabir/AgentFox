@@ -13,6 +13,7 @@ using AgentFox.Sessions;
 using AgentFox.Skills;
 using AgentFox.Tools;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -265,9 +266,10 @@ class Program
             CommandProcessorConfig.FromSubAgentConfig(sp.GetRequiredService<SubAgentConfiguration>()),
             sp.GetRequiredService<ILogger<CommandProcessor>>()));
 
-        // Agent holder + channel manager holder + IAgentService (used by WebModule /chat)
+        // Agent holder + channel manager holder + scheduling holder + IAgentService (used by WebModule /chat)
         builder.Services.AddSingleton<FoxAgentHolder>();
         builder.Services.AddSingleton<ChannelManagerHolder>();
+        builder.Services.AddSingleton<SchedulingHolder>();
         builder.Services.AddSingleton<AgentFox.Plugins.Interfaces.IAgentService, FoxAgentService>();
 
         // AgentOrchestrator — builds the main agent, starts the command processor,
@@ -284,6 +286,13 @@ class Program
         var enabledModules = configuration["Modules"]?.Split(',') ?? new[] { "cli", "web" };
         bool requiresWeb   = enabledModules.Contains("api") || enabledModules.Contains("web");
         var modules        = LoadPluginsAndModules(builder);
+
+        // Bind the HTTP listener to Services.Port (default 8080) when the web layer is active.
+        // Precedence (highest → lowest): --urls CLI arg  >  ASPNETCORE_URLS env  >  UseUrls()  >  applicationUrl in launchSettings.json
+        // The service installer always passes --urls, so it overrides this line unaffected.
+        // For bare  dotnet run  or single-file exe the port comes from Services.Port in appsettings.json.
+        if (requiresWeb)
+            builder.WebHost.UseUrls($"http://*:{serviceCfg.Port}");
 
         // Expose module list for CliWorker plugin notification
         builder.Services.AddSingleton<IEnumerable<IAppModule>>(modules);
@@ -534,9 +543,10 @@ class Program
         var servers = configuration.GetSection("MCP:Servers").Get<List<McpServerConfig>>() ?? [];
 
         // Only process servers that have a name and are not explicitly disabled.
-        // "Enabled" defaults to true, so omitting the key is treated as enabled.
+        // IsEnabled returns true unless Enabled is explicitly set to false in config.
+        // Absent "Enabled" key → null → treated as enabled (opt-out, not opt-in).
         var enabledServers = servers
-            .Where(s => !string.IsNullOrWhiteSpace(s.Name) && s.Enabled)
+            .Where(s => !string.IsNullOrWhiteSpace(s.Name) && s.IsEnabled)
             .ToList();
 
         foreach (var serverConfig in enabledServers)

@@ -77,10 +77,64 @@ export interface McpStatus {
   failureCount: number;
 }
 
+export interface HeartbeatInfo {
+  name: string;
+  task: string;
+  intervalSeconds: number;
+  maxMissed: number;
+  missedCount: number;
+  lastTriggered: string;
+  isPaused: boolean;
+  status: 'active' | 'paused';
+}
+
+export interface HeartbeatRequest {
+  name: string;
+  task: string;
+  intervalSeconds?: number;
+  maxMissed?: number;
+}
+
+export interface HeartbeatUpdateRequest {
+  task?: string;
+  intervalSeconds?: number;
+  maxMissed?: number;
+}
+
+export interface CronJobInfo {
+  name: string;
+  cronExpression: string;
+  task: string;
+  lastExecuted: string | null;
+  nextExecution: string;
+}
+
+export interface CronJobRequest {
+  name: string;
+  cronExpression: string;
+  task: string;
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(`${BASE}${path}`);
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json() as Promise<T>;
+}
+
+async function post<T>(path: string, body?: unknown): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    body !== undefined ? JSON.stringify(body) : undefined
+  });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json() as Promise<T>;
+}
+
+async function del<T>(path: string): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, { method: 'DELETE' });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json() as Promise<T>;
 }
@@ -104,6 +158,24 @@ export const api = {
       body:    JSON.stringify(req)
     });
     return res.json();
+  },
+
+  // ── Heartbeats ───────────────────────────────────────────────────────────
+  heartbeats: {
+    list:   ()                                   => get<HeartbeatInfo[]>('/heartbeats'),
+    add:    (req: HeartbeatRequest)              => post<{ success: boolean }>('/heartbeats', req),
+    update: (name: string, req: HeartbeatUpdateRequest) =>
+      post<{ success: boolean }>(`/heartbeats/${encodeURIComponent(name)}/update`, req),
+    remove: (name: string)                       => del<{ success: boolean }>(`/heartbeats/${encodeURIComponent(name)}`),
+    pause:  (name: string)                       => post<{ success: boolean }>(`/heartbeats/${encodeURIComponent(name)}/pause`),
+    resume: (name: string)                       => post<{ success: boolean }>(`/heartbeats/${encodeURIComponent(name)}/resume`),
+  },
+
+  // ── Cron Jobs ────────────────────────────────────────────────────────────
+  cron: {
+    list:   ()                         => get<CronJobInfo[]>('/cron'),
+    add:    (req: CronJobRequest)      => post<{ success: boolean }>('/cron', req),
+    remove: (name: string)             => del<{ success: boolean }>(`/cron/${encodeURIComponent(name)}`),
   }
 };
 

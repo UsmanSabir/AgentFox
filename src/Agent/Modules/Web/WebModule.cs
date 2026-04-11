@@ -14,6 +14,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using System.Text.Json;
 using AgentFox.Plugins.Interfaces;
+using AgentFox.Runtime;
 
 namespace AgentFox.Modules.Web;
 
@@ -258,7 +259,128 @@ public class WebModule : IAppModule
             }
             return Results.Ok(list);
         });
+
+        // ── Heartbeats ────────────────────────────────────────────────────────
+
+        endpoints.MapGet("/heartbeats", (SchedulingHolder scheduling) =>
+        {
+            if (!scheduling.IsAvailable)
+                return Results.Ok(Array.Empty<object>());
+
+            var beats = scheduling.HeartbeatManager!.GetHeartbeats().Values.Select(b => new
+            {
+                name            = b.Name,
+                task            = b.Task,
+                intervalSeconds = b.IntervalSeconds,
+                maxMissed       = b.MaxMissed,
+                missedCount     = b.MissedCount,
+                lastTriggered   = b.LastTriggered,
+                isPaused        = b.IsPaused,
+                status          = b.IsPaused ? "paused" : "active"
+            });
+            return Results.Ok(beats);
+        });
+
+        endpoints.MapPost("/heartbeats", (SchedulingHolder scheduling, HeartbeatRequest req) =>
+        {
+            if (!scheduling.IsAvailable)
+                return Results.StatusCode(503);
+            if (string.IsNullOrWhiteSpace(req.Name) || string.IsNullOrWhiteSpace(req.Task))
+                return Results.BadRequest(new { error = "Name and Task are required." });
+
+            scheduling.HeartbeatManager!.AddHeartbeat(
+                req.Name, req.Task,
+                req.IntervalSeconds > 0 ? req.IntervalSeconds : 60,
+                req.MaxMissed > 0        ? req.MaxMissed        : 3);
+
+            return Results.Ok(new { success = true });
+        });
+
+        endpoints.MapDelete("/heartbeats/{name}", (SchedulingHolder scheduling, string name) =>
+        {
+            if (!scheduling.IsAvailable) return Results.StatusCode(503);
+            var removed = scheduling.HeartbeatManager!.RemoveHeartbeat(name);
+            return removed ? Results.Ok(new { success = true }) : Results.NotFound();
+        });
+
+        endpoints.MapPost("/heartbeats/{name}/pause", (SchedulingHolder scheduling, string name) =>
+        {
+            if (!scheduling.IsAvailable) return Results.StatusCode(503);
+            var ok = scheduling.HeartbeatManager!.PauseHeartbeat(name);
+            return ok ? Results.Ok(new { success = true }) : Results.NotFound();
+        });
+
+        endpoints.MapPost("/heartbeats/{name}/resume", (SchedulingHolder scheduling, string name) =>
+        {
+            if (!scheduling.IsAvailable) return Results.StatusCode(503);
+            var ok = scheduling.HeartbeatManager!.ResumeHeartbeat(name);
+            return ok ? Results.Ok(new { success = true }) : Results.NotFound();
+        });
+
+        endpoints.MapPost("/heartbeats/{name}/update", (
+            SchedulingHolder scheduling, string name, HeartbeatUpdateRequest req) =>
+        {
+            if (!scheduling.IsAvailable) return Results.StatusCode(503);
+            var ok = scheduling.HeartbeatManager!.UpdateHeartbeat(
+                name, req.Task, req.IntervalSeconds, req.MaxMissed);
+            return ok ? Results.Ok(new { success = true }) : Results.NotFound();
+        });
+
+        // ── Cron Jobs ─────────────────────────────────────────────────────────
+
+        endpoints.MapGet("/cron", (SchedulingHolder scheduling) =>
+        {
+            if (!scheduling.IsAvailable)
+                return Results.Ok(Array.Empty<object>());
+
+            var jobs = scheduling.CronScheduler!.GetJobs().Values.Select(j => new
+            {
+                name           = j.Name,
+                cronExpression = j.CronExpression,
+                task           = j.Task,
+                lastExecuted   = j.LastExecuted == DateTime.MinValue ? (DateTime?)null : j.LastExecuted,
+                nextExecution  = j.NextExecution
+            });
+            return Results.Ok(jobs);
+        });
+
+        endpoints.MapPost("/cron", (SchedulingHolder scheduling, CronJobRequest req) =>
+        {
+            if (!scheduling.IsAvailable) return Results.StatusCode(503);
+            if (string.IsNullOrWhiteSpace(req.Name)
+                || string.IsNullOrWhiteSpace(req.CronExpression)
+                || string.IsNullOrWhiteSpace(req.Task))
+                return Results.BadRequest(new { error = "Name, CronExpression and Task are required." });
+
+            scheduling.CronScheduler!.AddJob(req.Name, req.CronExpression, req.Task);
+            return Results.Ok(new { success = true });
+        });
+
+        endpoints.MapDelete("/cron/{name}", (SchedulingHolder scheduling, string name) =>
+        {
+            if (!scheduling.IsAvailable) return Results.StatusCode(503);
+            var removed = scheduling.CronScheduler!.RemoveJob(name);
+            return removed ? Results.Ok(new { success = true }) : Results.NotFound();
+        });
     }
 
     public Task StartAsync(IServiceProvider services) => Task.CompletedTask;
 }
+
+// ── Request / response models ─────────────────────────────────────────────────
+
+public record HeartbeatRequest(
+    string Name,
+    string Task,
+    int IntervalSeconds = 60,
+    int MaxMissed = 3);
+
+public record HeartbeatUpdateRequest(
+    string? Task = null,
+    int? IntervalSeconds = null,
+    int? MaxMissed = null);
+
+public record CronJobRequest(
+    string Name,
+    string CronExpression,
+    string Task);

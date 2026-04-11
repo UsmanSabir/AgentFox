@@ -71,10 +71,18 @@ public class McpServerConfig
     public string Name { get; set; } = string.Empty;
 
     /// <summary>
-    /// When set to <c>false</c> the server is skipped during initialisation.
-    /// Defaults to <c>true</c>, so omitting the key keeps the current behaviour.
+    /// Controls whether this server is used during initialisation.
+    /// <c>null</c> (key absent) and <c>true</c> both mean enabled.
+    /// Only an explicit <c>false</c> disables the server.
     /// </summary>
-    public bool Enabled { get; set; } = true;
+    public bool? Enabled
+    {
+        get; 
+        set;
+    } = null;
+
+    /// <summary>Returns true unless Enabled is explicitly set to false.</summary>
+    public bool IsEnabled => Enabled != false;
 
     /// <summary>Structured transport config (new format).</summary>
     public McpTransportConfig? Transport { get; set; }
