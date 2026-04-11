@@ -15,6 +15,19 @@ public interface IPluginContext
     /// <summary>Register a tool into the agent's tool registry at runtime.</summary>
     void RegisterTool(ITool tool);
 
+    // ── Channel registration ─────────────────────────────────────────────────
+
+    /// <summary>
+    /// Register a channel provider. Channels the provider creates will be routed
+    /// through the live ChannelManager.
+    /// </summary>
+    void RegisterChannelProvider(IChannelProvider provider);
+
+    /// <summary>
+    /// Returns the live ChannelManager so a plugin can add/remove channels directly.
+    /// </summary>
+    IChannelManager ChannelManager { get; }
+
     // ── Dynamic system-prompt injection ─────────────────────────────────────
 
     /// <summary>
