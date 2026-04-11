@@ -9,6 +9,13 @@
     <AssemblyName>AgentFox</AssemblyName>
     <Version>1.0.0</Version>
     <Description>AgentFox - Multi-agent framework with sub-agents, memory, MCP support, and channel integrations</Description>
+
+    <!-- Single-file publish: framework-dependent, platform-specific RID required -->
+    <!-- Usage: dotnet publish -c Release -r win-x64 -p:PublishSingleFile=true -->
+    <PublishSingleFile>false</PublishSingleFile>
+
+    <!-- Required for ManifestEmbeddedFileProvider to serve wwwroot from inside the exe -->
+    <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
   </PropertyGroup>
 
   <ItemGroup>
@@ -17,6 +24,24 @@
     </Content>
     <Content Include="appsettings.json" />
   </ItemGroup>
+
+  <!-- ── Frontend static files ──────────────────────────────────────────────
+       Embed wwwroot into the assembly so dotnet publish produces a single exe.
+       Uncomment after running: cd src/frontend && npm run build
+       Then publish with: dotnet publish -c Release -r win-x64 -p:PublishSingleFile=true
+  <ItemGroup>
+    <EmbeddedResource Include="wwwroot\**\*" />
+  </ItemGroup>
+  ──────────────────────────────────────────────────────────────────────────── -->
+
+  <!-- ── Auto-build frontend before dotnet build (optional hook) ───────────
+       Uncomment to have MSBuild run "npm run build" automatically.
+       Requires Node.js + npm in PATH. Manual build is recommended for dev.
+  <Target Name="BuildFrontend" BeforeTargets="BeforeBuild">
+    <Message Text="Building SvelteKit frontend..." Importance="high" />
+    <Exec Command="npm run build" WorkingDirectory="$(MSBuildProjectDirectory)\..\frontend" />
+  </Target>
+  ──────────────────────────────────────────────────────────────────────────── -->
 
   <ItemGroup>
 	  <PackageReference Include="Azure.AI.OpenAI" Version="2.1.0" />
@@ -43,6 +68,8 @@
 	  <PackageReference Include="YamlDotNet" Version="16.3.0" />
 	  <PackageReference Include="ModelContextProtocol.Core" Version="1.2.0" />
 	  <PackageReference Include="Discord.Net" Version="3.19.1" />
+	  <!-- Serves wwwroot embedded in the assembly for single-file publish -->
+	  <PackageReference Include="Microsoft.Extensions.FileProviders.Embedded" Version="8.0.0" />
   </ItemGroup>
 
   <ItemGroup>

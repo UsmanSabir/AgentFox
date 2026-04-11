@@ -19,6 +19,8 @@ using Microsoft.Extensions.Logging;
 using Spectre.Console;
 using System.Text;
 using AgentFox.Helpers;
+using Microsoft.Extensions.FileProviders;
+using System.Reflection;
 using SystemPromptBuilder = AgentFox.LLM.SystemPromptBuilder;
 
 namespace AgentFox;
@@ -295,14 +297,32 @@ class Program
         if (requiresWeb)
         {
             app.UseRouting();
-            app.UseDefaultFiles();
-            app.UseStaticFiles();
+
+            // Serve wwwroot from embedded resources (single-file publish) or from disk (dev / regular publish).
+            // When EmbeddedResource items are present in the .csproj, the manifest is baked into the assembly
+            // and ManifestEmbeddedFileProvider serves them.  During development the wwwroot folder on disk is
+            // used so you don't need to rebuild just to iterate on the frontend.
+            var entryAssembly   = Assembly.GetEntryAssembly()!;
+            var embeddedResources = entryAssembly.GetManifestResourceNames();
+            bool hasEmbeddedWwwroot = embeddedResources.Any(n => n.Contains(".wwwroot."));
+
+            if (hasEmbeddedWwwroot)
+            {
+                var embeddedProvider = new ManifestEmbeddedFileProvider(entryAssembly, "wwwroot");
+                app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = embeddedProvider });
+                app.UseStaticFiles(new StaticFileOptions  { FileProvider = embeddedProvider });
+            }
+            else
+            {
+                app.UseDefaultFiles();
+                app.UseStaticFiles();
+            }
 
             var apiGroup = app.MapGroup("/api");
             foreach (var module in modules.Where(m => enabledModules.Contains(m.Name)))
                 module.MapEndpoints(apiGroup);
 
-            // SPA fallback
+            // SPA fallback — all non-API routes resolve to index.html
             app.MapFallbackToFile("index.html");
         }
 
