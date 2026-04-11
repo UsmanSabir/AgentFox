@@ -115,6 +115,21 @@ export interface CronJobRequest {
   task: string;
 }
 
+export interface ChannelInfo {
+  id: string;
+  name: string;
+  type: string;
+  isConnected: boolean;
+  status: 'connected' | 'disconnected';
+}
+
+export interface ChannelsStatus {
+  ready: boolean;
+  channels: ChannelInfo[];
+  total: number;
+  connected: number;
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 async function get<T>(path: string): Promise<T> {
@@ -150,6 +165,7 @@ export const api = {
   memory:   () => get<MemoryEntry[]>('/memory'),
   sessions: () => get<SessionInfo[]>('/sessions'),
   mcp:      () => get<McpStatus>('/mcp'),
+  channels: () => get<ChannelsStatus>('/channels'),
 
   chat: async (req: ChatRequest): Promise<ChatResponse> => {
     const res = await fetch(`${BASE}/chat`, {

@@ -260,6 +260,32 @@ public class WebModule : IAppModule
             return Results.Ok(list);
         });
 
+        // ── Channels ─────────────────────────────────────────────────────────
+
+        endpoints.MapGet("/channels", (ChannelManagerHolder channelHolder) =>
+        {
+            var manager = channelHolder.Manager;
+            if (manager == null)
+                return Results.Ok(new { ready = false, channels = Array.Empty<object>() });
+
+            var channels = manager.Channels.Values.Select(ch => new
+            {
+                id          = ch.ChannelId,
+                name        = ch.Name,
+                type        = ch.GetType().Name.Replace("Channel", "", StringComparison.Ordinal),
+                isConnected = ch.IsConnected,
+                status      = ch.IsConnected ? "connected" : "disconnected"
+            });
+
+            return Results.Ok(new
+            {
+                ready    = true,
+                channels,
+                total     = manager.Channels.Count,
+                connected = manager.Channels.Values.Count(c => c.IsConnected)
+            });
+        });
+
         // ── Heartbeats ────────────────────────────────────────────────────────
 
         endpoints.MapGet("/heartbeats", (SchedulingHolder scheduling) =>

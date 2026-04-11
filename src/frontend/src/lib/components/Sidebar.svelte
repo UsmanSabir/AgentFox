@@ -13,20 +13,22 @@
     Zap,
     Server,
     Heart,
-    CalendarClock
+    CalendarClock,
+    Radio
   } from 'lucide-svelte';
 
   const navItems = [
-    { href: '/',            label: 'Dashboard', icon: LayoutDashboard },
-    { href: '/chat',        label: 'Chat',      icon: MessageSquare },
-    { href: '/agents',      label: 'Agents',    icon: Bot },
-    { href: '/memory',      label: 'Memory',    icon: Database },
-    { href: '/skills',      label: 'Skills',    icon: Puzzle },
-    { href: '/tools',       label: 'Tools',     icon: Wrench },
-    { href: '/mcp',         label: 'MCP',       icon: Server },
+    { href: '/',            label: 'Dashboard',  icon: LayoutDashboard },
+    { href: '/chat',        label: 'Chat',       icon: MessageSquare },
+    { href: '/agents',      label: 'Agents',     icon: Bot },
+    { href: '/memory',      label: 'Memory',     icon: Database },
+    { href: '/skills',      label: 'Skills',     icon: Puzzle },
+    { href: '/tools',       label: 'Tools',      icon: Wrench },
+    { href: '/mcp',         label: 'MCP',        icon: Server },
+    { href: '/channels',    label: 'Channels',   icon: Radio },
     { href: '/heartbeats',  label: 'Heartbeats', icon: Heart },
-    { href: '/cron',        label: 'Cron Jobs', icon: CalendarClock },
-    { href: '/settings',    label: 'Settings',  icon: Settings },
+    { href: '/cron',        label: 'Cron Jobs',  icon: CalendarClock },
+    { href: '/settings',    label: 'Settings',   icon: Settings },
   ];
 
   $: collapsed = $sidebarCollapsed;
