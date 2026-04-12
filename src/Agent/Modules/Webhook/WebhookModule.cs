@@ -1,5 +1,6 @@
 using AgentFox.Agents;
 using AgentFox.Channels;
+using AgentFox.Plugins.Channels;
 using AgentFox.Plugins.Interfaces;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;

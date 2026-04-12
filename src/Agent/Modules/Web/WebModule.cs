@@ -62,7 +62,11 @@ public class WebModule : IAppModule
 
             try
             {
-                var reply = await agentService.RunAsync(req.Message, req.ConversationId, ct);
+                // Pre-generate a conversation ID so the same session is reused across turns.
+                // If the client already has one (follow-up message) we keep it; otherwise we
+                // mint a new one here and return it so the client can send it on the next turn.
+                var conversationId = req.ConversationId ?? Guid.NewGuid().ToString("N");
+                var reply = await agentService.RunAsync(req.Message, conversationId, ct);
                 return Results.Ok(new ChatResponse
                 {
                     Response       = reply,
@@ -105,9 +109,12 @@ public class WebModule : IAppModule
 
             try
             {
+                // Pre-generate a conversation ID so the same session is reused across turns.
+                var conversationId = req.ConversationId ?? Guid.NewGuid().ToString("N");
+
                 await agentService.StreamAsync(
                     req.Message,
-                    req.ConversationId,
+                    conversationId,
                     async token =>
                     {
                         if (ct.IsCancellationRequested) return;
@@ -117,11 +124,12 @@ public class WebModule : IAppModule
                     },
                     ct);
 
-                // Terminal event
+                // Terminal event — always includes the conversation ID so the client
+                // can store it and send it with the next message.
                 var donePayload = JsonSerializer.Serialize(new
                 {
-                    done           = true,
-                    conversationId = req.ConversationId
+                    done = true,
+                    conversationId
                 });
                 await httpContext.Response.WriteAsync($"event: done\ndata: {donePayload}\n\n", ct);
                 await httpContext.Response.Body.FlushAsync(ct);
@@ -272,7 +280,7 @@ public class WebModule : IAppModule
             {
                 id          = ch.ChannelId,
                 name        = ch.Name,
-                type        = ch.GetType().Name.Replace("Channel", "", StringComparison.Ordinal),
+                type        = ch.Type,
                 isConnected = ch.IsConnected,
                 status      = ch.IsConnected ? "connected" : "disconnected"
             });

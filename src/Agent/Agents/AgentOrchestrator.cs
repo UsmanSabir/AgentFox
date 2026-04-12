@@ -3,6 +3,7 @@ using AgentFox.LLM;
 using AgentFox.MCP;
 using AgentFox.Memory;
 using AgentFox.Models;
+using AgentFox.Plugins.Channels;
 using AgentFox.Plugins.Interfaces;
 using AgentFox.Runtime;
 using AgentFox.Runtime.Services;
@@ -46,6 +47,7 @@ public sealed class AgentOrchestrator : IHostedService
     private readonly FoxAgentHolder _agentHolder;
     private readonly ChannelManagerHolder _channelManagerHolder;
     private readonly SchedulingHolder _schedulingHolder;
+    private readonly ChannelProviderCatalog _channelProviderCatalog;
     private readonly IEnumerable<IAppModule> _modules;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<AgentOrchestrator> _logger;
@@ -74,6 +76,7 @@ public sealed class AgentOrchestrator : IHostedService
         FoxAgentHolder agentHolder,
         ChannelManagerHolder channelManagerHolder,
         SchedulingHolder schedulingHolder,
+        ChannelProviderCatalog channelProviderCatalog,
         IEnumerable<IAppModule> modules,
         ILoggerFactory loggerFactory,
         ILogger<AgentOrchestrator> logger)
@@ -94,6 +97,7 @@ public sealed class AgentOrchestrator : IHostedService
         _agentHolder          = agentHolder;
         _channelManagerHolder = channelManagerHolder;
         _schedulingHolder     = schedulingHolder;
+        _channelProviderCatalog = channelProviderCatalog;
         _modules              = modules;
         _loggerFactory        = loggerFactory;
         _logger               = logger;
@@ -192,7 +196,10 @@ public sealed class AgentOrchestrator : IHostedService
                 _toolRegistry.Register(new SendToChannelTool(
                     _channelManager, _loggerFactory.CreateLogger<SendToChannelTool>()));
                 _toolRegistry.Register(new ManageChannelTool(
-                    _channelManager, appConfigPath, _loggerFactory.CreateLogger<ManageChannelTool>()));
+                    _channelManager,
+                    _channelProviderCatalog,
+                    appConfigPath,
+                    _loggerFactory.CreateLogger<ManageChannelTool>()));
                 _toolRegistry.Register(new NotifyUserTool(
                     _channelManager, _loggerFactory.CreateLogger<NotifyUserTool>()));
             }
@@ -537,13 +544,9 @@ public sealed class AgentOrchestrator : IHostedService
     /// </summary>
     private async Task ConnectChannelsFromConfigAsync(ChannelManager manager, CancellationToken ct)
     {
-        var channelSection = _configuration.GetSection("Channels");
-        if (!channelSection.Exists()) return;
-
-        // Track per-type counts so we can log meaningful names when duplicates exist.
         var typeCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var entry in channelSection.GetChildren())
+        foreach (var entry in ChannelConfiguration.ReadEntries(_configuration, _logger))
         {
             // Each child is one array element — read all its key/value pairs.
             var config = entry.GetChildren()
@@ -573,7 +576,7 @@ public sealed class AgentOrchestrator : IHostedService
 
             var label = count == 0 ? type : $"{type}#{count + 1}";
 
-            var (ch, error) = ChannelFactory.Create(type, config, _logger);
+            var (ch, error) = _channelProviderCatalog.Create(type, config);
             if (ch != null)
             {
                 manager.AddChannel(ch);

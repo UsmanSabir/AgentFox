@@ -8,7 +8,7 @@ namespace AgentFox.Tools;
 /// Tool that lets the agent proactively push a message to any registered channel.
 ///
 /// Parameters and Description are computed from the live ChannelManager on every access,
-/// so the agent always sees up-to-date channel information — even after channels are
+/// so the agent always sees up-to-date channel information � even after channels are
 /// added or removed at runtime via ManageChannelTool.
 ///
 /// Registration (Program.cs, before agent build):
@@ -27,36 +27,34 @@ public class SendToChannelTool : BaseTool
 
     public override string Name => "send_to_channel";
 
-    // Computed live so the agent always sees the current channel list.
     public override string Description
     {
         get
         {
-            var channels = CurrentChannelNames();
-            var list = channels.Count > 0 ? string.Join(", ", channels) : "none — use manage_channel to add one";
+            var channels = CurrentChannelTypes();
+            var list = channels.Count > 0 ? string.Join(", ", channels) : "none - use manage_channel to add one";
             return
                 "Send a message to a specific registered channel. " +
                 $"Available channels: {list}. " +
-                "For Telegram, target_id is the numeric chat ID (e.g. '123456789' for DMs, '-100...' for groups). " +
-                "For Slack/Discord, target_id is the channel name or ID. " +
+                "For Telegram, target_id is the numeric chat ID (for example '123456789' for DMs or '-100...' for groups). " +
+                "For Slack and Discord, target_id is the channel name or ID. " +
                 "Use manage_channel to add new channels at runtime.";
         }
     }
 
-    // Computed live so EnumValues always matches the current channel set.
     public override Dictionary<string, ToolParameter> Parameters
     {
         get
         {
-            var channels = CurrentChannelNames();
+            var channels = CurrentChannelTypes();
             return new()
             {
                 ["channel_name"] = new()
                 {
                     Type = "string",
                     Description = channels.Count > 0
-                        ? $"Target channel. Available: {string.Join(", ", channels)}"
-                        : "Target channel. No channels configured yet — use manage_channel to add one.",
+                        ? $"Target channel type. Available: {string.Join(", ", channels)}"
+                        : "Target channel type. No channels configured yet - use manage_channel to add one.",
                     Required = true,
                     EnumValues = channels.Count > 0 ? channels : null
                 },
@@ -65,9 +63,9 @@ public class SendToChannelTool : BaseTool
                     Type = "string",
                     Description =
                         "Optional destination within the channel. " +
-                        "For Telegram: optional numeric chat ID (e.g., '123456789'). Leave empty to use the default chat. " +
-                        "For Slack/Discord: channel name or ID. " +
-                        "For single-recipient channels (WhatsApp, Teams): omit this field.",
+                        "For Telegram: optional numeric chat ID. Leave empty to use the default chat. " +
+                        "For Slack and Discord: channel name or ID. " +
+                        "For single-recipient channels such as WhatsApp and Teams: omit this field.",
                     Required = false
                 },
                 ["message"] = new()
@@ -83,8 +81,8 @@ public class SendToChannelTool : BaseTool
     protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
     {
         var channelName = arguments.GetValueOrDefault("channel_name")?.ToString();
-        var targetId    = arguments.GetValueOrDefault("target_id")?.ToString() ?? string.Empty;
-        var message     = arguments.GetValueOrDefault("message")?.ToString();
+        var targetId = arguments.GetValueOrDefault("target_id")?.ToString() ?? string.Empty;
+        var message = arguments.GetValueOrDefault("message")?.ToString();
 
         if (string.IsNullOrWhiteSpace(channelName))
             return ToolResult.Fail("channel_name is required");
@@ -94,7 +92,7 @@ public class SendToChannelTool : BaseTool
         var channel = _channelManager.GetChannelByName(channelName);
         if (channel == null)
         {
-            var registered = string.Join(", ", CurrentChannelNames());
+            var registered = string.Join(", ", CurrentChannelTypes());
             return ToolResult.Fail(
                 $"Channel '{channelName}' is not registered. " +
                 $"Registered: {(registered.Length > 0 ? registered : "none")}");
@@ -108,12 +106,13 @@ public class SendToChannelTool : BaseTool
             await channel.SendToTargetAsync(targetId, message);
 
             var destination = string.IsNullOrWhiteSpace(targetId)
-                ? channelName
-                : $"{channelName}:{targetId}";
+                ? channel.Type
+                : $"{channel.Type}:{targetId}";
 
             _logger?.LogInformation(
                 "send_to_channel: delivered to {Destination} ({Length} chars)",
-                destination, message.Length);
+                destination,
+                message.Length);
 
             return ToolResult.Ok($"Message sent to {destination} successfully.");
         }
@@ -124,8 +123,10 @@ public class SendToChannelTool : BaseTool
         }
     }
 
-    private List<string> CurrentChannelNames() =>
+    private List<string> CurrentChannelTypes() =>
         _channelManager.Channels.Values
-            .Select(c => c.Name.ToLowerInvariant())
+            .Select(c => c.Type)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
             .ToList();
 }

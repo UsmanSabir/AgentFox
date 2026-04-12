@@ -7,7 +7,7 @@ using Microsoft.Extensions.Logging;
 namespace AgentFox.Tools;
 
 /// <summary>
-/// Tool that adds or removes messaging channels at runtime — no restart needed.
+/// Tool that adds or removes messaging channels at runtime without restarting.
 ///
 /// When a channel is added:
 ///   1. A Channel instance is created via ChannelFactory.
@@ -20,32 +20,47 @@ namespace AgentFox.Tools;
 public class ManageChannelTool : BaseTool
 {
     private readonly ChannelManager _channelManager;
+    private readonly ChannelProviderCatalog _channelProviderCatalog;
     private readonly string _configFilePath;
     private readonly ILogger? _logger;
 
     private static readonly JsonSerializerOptions _jsonWriteOpts = new() { WriteIndented = true };
 
-    public ManageChannelTool(ChannelManager channelManager, string configFilePath, ILogger? logger = null)
+    public ManageChannelTool(
+        ChannelManager channelManager,
+        ChannelProviderCatalog channelProviderCatalog,
+        string configFilePath,
+        ILogger? logger = null)
     {
         _channelManager = channelManager;
+        _channelProviderCatalog = channelProviderCatalog;
         _configFilePath = configFilePath;
         _logger = logger;
     }
 
     public override string Name => "manage_channel";
 
-    public override string Description =>
-        "Add or remove a messaging channel at runtime without restarting. " +
-        "Changes are persisted to appsettings.json and take effect immediately. " +
-        "Supported types: telegram, slack, discord, teams, whatsapp. " +
-        "For 'add': provide channel_type and config_json. " +
-        "For 'remove': provide channel_name (e.g. 'telegram'). " +
-        "Config shapes — " +
-        "Telegram: {\"BotToken\":\"...\",\"PollingTimeoutSeconds\":30}; " +
-        "Slack: {\"BotToken\":\"xoxb-...\",\"SigningSecret\":\"...\"}; " +
-        "Discord: {\"BotToken\":\"...\",\"GuildId\":\"123\",\"DefaultChannelId\":\"456\"}; " +
-        "Teams: {\"TenantId\":\"...\",\"ClientId\":\"...\",\"ClientSecret\":\"...\",\"ServiceUrl\":\"...\"}; " +
-        "WhatsApp: {\"PhoneNumberId\":\"...\",\"AccessToken\":\"...\",\"BusinessAccountId\":\"...\"}";
+    public override string Description
+    {
+        get
+        {
+            var parts = _channelProviderCatalog.Providers.Select(provider =>
+            {
+                var schema = string.Join(", ", provider.GetConfigSchema().Select(field =>
+                    $"{field.Key}{(field.Value.Required ? "*" : "")}"));
+                return $"{provider.ChannelType}: {{{schema}}}";
+            });
+
+            return
+                "Add or remove a messaging channel at runtime without restarting. " +
+                "Changes are persisted to appsettings.json and take effect immediately. " +
+                $"Supported types: {string.Join(", ", _channelProviderCatalog.SupportedTypes)}. " +
+                "For 'add': provide channel_type and config_json. " +
+                "For 'remove': provide channel_name (for example 'telegram'). " +
+                "Config shapes by provider: " +
+                string.Join("; ", parts);
+        }
+    }
 
     public override Dictionary<string, ToolParameter> Parameters => new()
     {
@@ -59,14 +74,14 @@ public class ManageChannelTool : BaseTool
         ["channel_type"] = new()
         {
             Type = "string",
-            Description = "Channel type to add. Required for 'add'. One of: telegram, slack, discord, teams, whatsapp.",
+            Description = "Channel type to add. Required for 'add'.",
             Required = false,
-            EnumValues = [.. ChannelFactory.SupportedTypes]
+            EnumValues = [.. _channelProviderCatalog.SupportedTypes]
         },
         ["channel_name"] = new()
         {
             Type = "string",
-            Description = "Name of the channel to remove. Required for 'remove'. E.g., 'telegram'.",
+            Description = "Name or type of the channel to remove. Required for 'remove'.",
             Required = false
         },
         ["config_json"] = new()
@@ -83,60 +98,54 @@ public class ManageChannelTool : BaseTool
 
         return action switch
         {
-            "add"    => await AddChannelAsync(arguments),
+            "add" => await AddChannelAsync(arguments),
             "remove" => await RemoveChannelAsync(arguments),
             _ => ToolResult.Fail("action must be 'add' or 'remove'")
         };
     }
 
-    // ── Add ──────────────────────────────────────────────────────────────────
-
     private async Task<ToolResult> AddChannelAsync(Dictionary<string, object?> arguments)
     {
-        var channelType = arguments.GetValueOrDefault("channel_type")?.ToString();
-        var configJson  = arguments.GetValueOrDefault("config_json")?.ToString();
+        var channelType = arguments.GetValueOrDefault("channel_type")?.ToString()?.Trim().ToLowerInvariant();
+        var configJson = arguments.GetValueOrDefault("config_json")?.ToString();
 
         if (string.IsNullOrWhiteSpace(channelType))
             return ToolResult.Fail("channel_type is required for 'add'");
         if (string.IsNullOrWhiteSpace(configJson))
             return ToolResult.Fail("config_json is required for 'add'");
 
-        // Parse the config JSON into a flat string dictionary
         Dictionary<string, string> config;
         try
         {
             config = JsonSerializer.Deserialize<Dictionary<string, string>>(configJson)
-                ?? throw new Exception("Parsed to null");
+                ?? throw new InvalidOperationException("Parsed to null");
         }
         catch (Exception ex)
         {
             return ToolResult.Fail($"config_json is not valid JSON: {ex.Message}");
         }
 
-        // Reject duplicates
-        if (_channelManager.Channels.Values.Any(c =>
-                c.Name.Equals(channelType, StringComparison.OrdinalIgnoreCase)))
+        if (_channelManager.Channels.Values.Any(c => c.Type.Equals(channelType, StringComparison.OrdinalIgnoreCase)))
         {
             return ToolResult.Fail(
                 $"A '{channelType}' channel is already registered. Remove it first with action='remove'.");
         }
 
-        // Create the channel instance
-        var (channel, factoryError) = ChannelFactory.Create(channelType, config, _logger);
+        var (channel, factoryError) = _channelProviderCatalog.Create(channelType, config);
         if (channel == null)
             return ToolResult.Fail(factoryError ?? "Failed to create channel");
 
-        // Connect and register in the live ChannelManager
         var connected = await _channelManager.AddAndConnectAsync(channel);
         if (!connected)
+        {
             return ToolResult.Fail(
                 $"'{channelType}' channel was created but failed to connect. " +
                 "Check that credentials are valid and the service is reachable.");
+        }
 
-        // Persist to appsettings.json (best-effort — channel is already live even if this fails)
         var persistError = PersistChannelAdd(channelType, config);
         if (persistError != null)
-            _logger?.LogWarning("manage_channel add: connected but could not save config — {Error}", persistError);
+            _logger?.LogWarning("manage_channel add: connected but could not save config - {Error}", persistError);
 
         var saveNote = persistError == null
             ? "saved to appsettings.json"
@@ -146,8 +155,6 @@ public class ManageChannelTool : BaseTool
             $"Channel '{channel.Name}' added and connected. Config {saveNote}. " +
             "send_to_channel now includes this channel.");
     }
-
-    // ── Remove ───────────────────────────────────────────────────────────────
 
     private async Task<ToolResult> RemoveChannelAsync(Dictionary<string, object?> arguments)
     {
@@ -159,7 +166,7 @@ public class ManageChannelTool : BaseTool
         if (channel == null)
         {
             var registered = string.Join(", ",
-                _channelManager.Channels.Values.Select(c => c.Name.ToLowerInvariant()));
+                _channelManager.Channels.Values.Select(c => c.Type).Distinct(StringComparer.OrdinalIgnoreCase));
             return ToolResult.Fail(
                 $"Channel '{channelName}' is not registered. " +
                 $"Registered: {(registered.Length > 0 ? registered : "none")}");
@@ -167,40 +174,36 @@ public class ManageChannelTool : BaseTool
 
         await _channelManager.RemoveChannelAsync(channel.ChannelId);
 
-        var persistError = PersistChannelRemove(channelName);
+        var persistError = PersistChannelRemove(channel.Type);
         if (persistError != null)
-            _logger?.LogWarning("manage_channel remove: disconnected but could not update config — {Error}", persistError);
+            _logger?.LogWarning("manage_channel remove: disconnected but could not update config - {Error}", persistError);
 
         var saveNote = persistError == null
             ? "removed from appsettings.json"
             : $"NOT removed from appsettings.json ({persistError})";
 
-        return ToolResult.Ok($"Channel '{channelName}' disconnected and {saveNote}.");
+        return ToolResult.Ok($"Channel '{channel.Type}' disconnected and {saveNote}.");
     }
-
-    // ── appsettings.json persistence ─────────────────────────────────────────
 
     private string? PersistChannelAdd(string channelType, Dictionary<string, string> config)
     {
         try
         {
             var root = ReadRoot();
-            if (root == null) return "Cannot read appsettings.json";
+            if (root == null)
+                return "Cannot read appsettings.json";
 
-            // Ensure the Channels section exists
-            if (root["Channels"] is not JsonObject channels)
+            var channels = ChannelConfiguration.GetOrNormalizeCanonicalArray(root);
+            var entry = new JsonObject
             {
-                channels = new JsonObject();
-                root["Channels"] = channels;
-            }
+                ["Type"] = channelType,
+                ["Enabled"] = true
+            };
 
-            // Use PascalCase key to match existing conventions (e.g. "Telegram")
-            var key = char.ToUpperInvariant(channelType[0]) + channelType[1..].ToLowerInvariant();
-            var entry = new JsonObject { ["Enabled"] = true };
             foreach (var (k, v) in config)
                 entry[k] = v;
 
-            channels[key] = entry;
+            channels.Add(entry);
             WriteRoot(root);
             return null;
         }
@@ -210,25 +213,35 @@ public class ManageChannelTool : BaseTool
         }
     }
 
-    private string? PersistChannelRemove(string channelName)
+    private string? PersistChannelRemove(string channelType)
     {
         try
         {
             var root = ReadRoot();
-            if (root == null) return "Cannot read appsettings.json";
+            if (root == null)
+                return "Cannot read appsettings.json";
 
-            if (root["Channels"] is not JsonObject channels) return null;
-
-            // Find the key case-insensitively
-            var key = channels
-                .Select(kv => kv.Key)
-                .FirstOrDefault(k => k.Equals(channelName, StringComparison.OrdinalIgnoreCase));
-
-            if (key != null)
+            var channels = ChannelConfiguration.GetOrNormalizeCanonicalArray(root);
+            JsonNode? toRemove = null;
+            foreach (var node in channels)
             {
-                channels.Remove(key);
+                if (node is not JsonObject channel)
+                    continue;
+
+                var type = channel["Type"]?.GetValue<string>();
+                if (type != null && type.Equals(channelType, StringComparison.OrdinalIgnoreCase))
+                {
+                    toRemove = node;
+                    break;
+                }
+            }
+
+            if (toRemove != null)
+            {
+                channels.Remove(toRemove);
                 WriteRoot(root);
             }
+
             return null;
         }
         catch (Exception ex)

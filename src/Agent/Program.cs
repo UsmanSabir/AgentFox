@@ -7,6 +7,8 @@ using AgentFox.MCP;
 using AgentFox.Memory;
 using AgentFox.Models;
 using AgentFox.Modules.Loaders;
+using AgentFox.Channels;
+using AgentFox.Plugins.Channels;
 using AgentFox.Plugins.Interfaces;
 using AgentFox.Runtime.Services;
 using AgentFox.Sessions;
@@ -216,6 +218,12 @@ class Program
         builder.Services.AddSingleton(skillRegistry!);
         builder.Services.AddSingleton(mcpManager!);
         builder.Services.AddSingleton(memory!);
+        builder.Services.AddSingleton<IChannelProvider, TelegramChannelProvider>();
+        builder.Services.AddSingleton<IChannelProvider, SlackChannelProvider>();
+        builder.Services.AddSingleton<IChannelProvider, DiscordChannelProvider>();
+        builder.Services.AddSingleton<IChannelProvider, TeamsChannelProvider>();
+        builder.Services.AddSingleton<IChannelProvider, WhatsAppChannelProvider>();
+        builder.Services.AddSingleton<ChannelProviderCatalog>();
 
         // LLM
         builder.Services.AddSingleton(_ => LLMFactory.CreateFromConfiguration(configuration));
@@ -305,8 +313,6 @@ class Program
 
         if (requiresWeb)
         {
-            app.UseRouting();
-
             // Serve wwwroot from embedded resources (single-file publish) or from disk (dev / regular publish).
             // When EmbeddedResource items are present in the .csproj, the manifest is baked into the assembly
             // and ManifestEmbeddedFileProvider serves them.  During development the wwwroot folder on disk is
@@ -314,6 +320,7 @@ class Program
             var entryAssembly   = Assembly.GetEntryAssembly()!;
             var embeddedResources = entryAssembly.GetManifestResourceNames();
             bool hasEmbeddedWwwroot = embeddedResources.Any(n => n.Contains(".wwwroot."));
+            ManifestEmbeddedFileProvider? embeddedProvider = null;
 
             if (hasEmbeddedWwwroot)
             {
@@ -623,6 +630,7 @@ class Program
 
         var pluginLoader = new PluginLoader(tempProvider);
         var toolLoader = new ToolLoader(tempProvider);
+        var channelProviderLoader = new ChannelProviderLoader();
 
         var pluginModules = pluginLoader.LoadModules(pluginFolder);
         // Register modules
@@ -635,6 +643,11 @@ class Program
         foreach (var tool in pluginTools)
         {
             builder.Services.AddSingleton(typeof(ITool), tool);
+        }
+
+        foreach (var providerType in channelProviderLoader.LoadProviderTypes(pluginFolder))
+        {
+            builder.Services.AddSingleton(typeof(IChannelProvider), providerType);
         }
 
         return allModules;

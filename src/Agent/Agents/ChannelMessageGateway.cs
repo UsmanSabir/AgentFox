@@ -1,6 +1,6 @@
 using System.Collections.Concurrent;
-using AgentFox.Channels;
 using AgentFox.Models;
+using AgentFox.Plugins.Channels;
 using Microsoft.Extensions.Logging;
 
 namespace AgentFox.Agents;
