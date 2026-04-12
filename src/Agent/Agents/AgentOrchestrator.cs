@@ -48,6 +48,7 @@ public sealed class AgentOrchestrator : IHostedService
     private readonly FoxAgentHolder _agentHolder;
     private readonly ChannelManagerHolder _channelManagerHolder;
     private readonly SchedulingHolder _schedulingHolder;
+    private readonly PendingNotificationStore _pendingNotifications;
     private readonly ChannelProviderCatalog _channelProviderCatalog;
     private readonly IEnumerable<IAppModule> _modules;
     private readonly ILoggerFactory _loggerFactory;
@@ -59,6 +60,7 @@ public sealed class AgentOrchestrator : IHostedService
     private HeartbeatManager? _heartbeatManager;
     private HeartbeatService? _heartbeatService;
     private CronScheduler? _cronScheduler;
+    private CancellationTokenSource? _cleanupCts;
 
     public AgentOrchestrator(
         IChatClient chatClient,
@@ -80,7 +82,8 @@ public sealed class AgentOrchestrator : IHostedService
         ChannelProviderCatalog channelProviderCatalog,
         IEnumerable<IAppModule> modules,
         ILoggerFactory loggerFactory,
-        ILogger<AgentOrchestrator> logger)
+        ILogger<AgentOrchestrator> logger,
+        PendingNotificationStore pendingNotifications)
     {
         _chatClient           = chatClient;
         _toolRegistry         = toolRegistry;
@@ -102,6 +105,7 @@ public sealed class AgentOrchestrator : IHostedService
         _modules              = modules;
         _loggerFactory        = loggerFactory;
         _logger               = logger;
+        _pendingNotifications = pendingNotifications;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -132,6 +136,9 @@ public sealed class AgentOrchestrator : IHostedService
         _heartbeatManager?.Stop();
         _heartbeatService?.Dispose();
         _heartbeatManager?.Dispose();
+
+        _cleanupCts?.Cancel();
+        _cleanupCts?.Dispose();
 
         try { await _commandProcessor.StopAsync(TimeSpan.FromSeconds(10)); }
         catch (Exception ex) { _logger.LogWarning(ex, "Error stopping command processor during shutdown."); }
@@ -295,6 +302,10 @@ public sealed class AgentOrchestrator : IHostedService
 
             if (_channelManager.Channels.Count > 0)
                 _logger.LogInformation("{Count} channel(s) connected.", _channelManager.Channels.Count);
+
+            // ── Start pending-notification cleanup loop ───────────────────────
+            _cleanupCts = new CancellationTokenSource();
+            _ = Task.Run(() => RunPendingCleanupLoopAsync(_cleanupCts.Token), _cleanupCts.Token);
         }
         catch (Exception ex)
         {
@@ -451,6 +462,17 @@ public sealed class AgentOrchestrator : IHostedService
                         AnsiConsole.WriteLine(parentResult.Output);
                         AnsiConsole.Markup("\n[bold dodgerblue1]>[/] ");
                     }
+
+                    // Always queue for web/channel clients regardless of console interactivity.
+                    // isInteractive reflects the *process* console, not whether the parent
+                    // session is a web session — a CLI process can serve web sessions too.
+                    if (!string.IsNullOrEmpty(parentResult.Output))
+                    {
+                        _pendingNotifications.Add(
+                            announcement.ParentSessionKey,
+                            parentResult.Output,
+                            subAgentRunId: announcement.SessionKey);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -593,6 +615,70 @@ public sealed class AgentOrchestrator : IHostedService
 
         _logger.LogInformation("Connecting {Count} channel(s)...", manager.Channels.Count);
         await manager.ConnectAllAsync();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Pending-notification expiry
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Runs every 60 s. Drains notifications that have exceeded
+    /// <see cref="PendingNotificationStore.Retention"/> without being polled by a
+    /// web client, aggregates them per conversation, and broadcasts a summary to
+    /// every connected channel (same behaviour as the notify_user tool).
+    /// </summary>
+    private async Task RunPendingCleanupLoopAsync(CancellationToken ct)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(60));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(ct))
+            {
+                var expired = _pendingNotifications.DrainExpired();
+                if (expired.Count == 0) continue;
+
+                var connectedChannels = _channelManager?.Channels.Values
+                    .Where(c => c.IsConnected)
+                    .ToList();
+
+                foreach (var (convId, notifications) in expired)
+                {
+                    // Build an aggregated message — one block per notification.
+                    var body = string.Join("\n\n", notifications.Select((n, i) =>
+                        $"**Result {i + 1}**\n{n.Message}"));
+
+                    var message =
+                        $"🕐 **Undelivered background sub-agent result(s)**\n" +
+                        $"Session `{convId}` had {notifications.Count} result(s) that were not polled in time:\n\n" +
+                        body;
+
+                    _logger.LogInformation(
+                        "Expired {Count} pending notification(s) for session {ConvId}; broadcasting to channels.",
+                        notifications.Count, convId);
+
+                    if (connectedChannels is { Count: > 0 })
+                    {
+                        foreach (var channel in connectedChannels)
+                        {
+                            try   { await channel.SendToTargetAsync(string.Empty, message); }
+                            catch (Exception ex)
+                            { _logger.LogError(ex, "Failed to broadcast expired notification to {Channel}.", channel.Type); }
+                        }
+                    }
+                    else
+                    {
+                        _logger.LogWarning(
+                            "No channels connected — expired notification for session {ConvId} discarded.",
+                            convId);
+                    }
+                }
+            }
+        }
+        catch (OperationCanceledException) { /* normal shutdown */ }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Pending notification cleanup loop terminated unexpectedly.");
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────

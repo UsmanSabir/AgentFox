@@ -130,6 +130,18 @@ export interface ChannelsStatus {
   connected: number;
 }
 
+export interface PendingNotification {
+  message: string;
+  timestamp: string;
+  subAgentRunId?: string;
+}
+
+export interface PendingNotificationsResponse {
+  conversationId: string;
+  count: number;
+  notifications: PendingNotification[];
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 async function get<T>(path: string): Promise<T> {
@@ -166,6 +178,8 @@ export const api = {
   sessions: () => get<SessionInfo[]>('/sessions'),
   mcp:      () => get<McpStatus>('/mcp'),
   channels: () => get<ChannelsStatus>('/channels'),
+  pendingNotifications: (conversationId: string) =>
+    get<PendingNotificationsResponse>(`/chat/pending/${encodeURIComponent(conversationId)}`),
 
   chat: async (req: ChatRequest): Promise<ChatResponse> => {
     const res = await fetch(`${BASE}/chat`, {

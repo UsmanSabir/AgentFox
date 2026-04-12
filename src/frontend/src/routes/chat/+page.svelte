@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
-  import { streamChat } from '$lib/api';
+  import { onMount, onDestroy, tick } from 'svelte';
+  import { streamChat, api } from '$lib/api';
   import {
-    chatMessages, addUserMessage, addAssistantMessage,
+    chatMessages, addUserMessage, addAssistantMessage, addBackgroundResultMessage,
     appendToken, finalizeMessage, activeConversationId, agentReady
   } from '$lib/stores';
   import {
@@ -15,14 +15,42 @@
   let isStreaming = false;
   let abortCtrl: AbortController | null = null;
   let copiedId: string | null = null;
+  let pollTimer: ReturnType<typeof setInterval> | null = null;
 
   $: messages     = $chatMessages;
   $: convId       = $activeConversationId;
   $: agentIsReady = $agentReady;
 
+  // Start / restart polling whenever the conversation ID changes.
+  // Polling is intentionally keyed to the conversation, not to isStreaming,
+  // so background results arrive even while the user is mid-conversation.
+  $: {
+    const cid = $activeConversationId;
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    if (cid) pollTimer = setInterval(() => pollPending(cid), 3000);
+  }
+
   onMount(() => {
     inputEl?.focus();
   });
+
+  onDestroy(() => {
+    if (pollTimer) clearInterval(pollTimer);
+  });
+
+  async function pollPending(cid: string) {
+    try {
+      const data = await api.pendingNotifications(cid);
+      if (data.count > 0) {
+        for (const n of data.notifications) {
+          addBackgroundResultMessage(n.message);
+        }
+        await scrollToBottom();
+      }
+    } catch {
+      // silently ignore poll errors (server may be restarting)
+    }
+  }
 
   async function scrollToBottom() {
     await tick();
@@ -155,6 +183,9 @@
             <div class="message-body">
               <div class="message-meta">
                 <span class="message-role">{msg.role === 'user' ? 'You' : 'AgentFox'}</span>
+                {#if msg.isBackgroundResult}
+                  <span class="bg-badge">background result</span>
+                {/if}
                 <span class="message-time">{msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
               </div>
 
@@ -404,6 +435,18 @@
   .message-time {
     font-size: 0.6875rem;
     color: var(--text-3);
+  }
+
+  .bg-badge {
+    font-size: 0.625rem;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    background: rgba(129,140,248,0.12);
+    color: var(--primary);
+    border: 1px solid rgba(129,140,248,0.25);
+    border-radius: 99px;
+    padding: 0.1em 0.5em;
   }
 
   .message-content {

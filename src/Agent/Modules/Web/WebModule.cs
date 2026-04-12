@@ -270,6 +270,27 @@ public class WebModule : IAppModule
             return Results.Ok(list);
         });
 
+        // ── Pending notifications (background sub-agent results) ─────────────
+        // Clients poll this after spawning a background sub-agent to receive the
+        // result once it arrives. Each call drains the queue (deliver-once).
+        endpoints.MapGet("/chat/pending/{conversationId}", (
+            string conversationId,
+            PendingNotificationStore pendingStore) =>
+        {
+            var notifications = pendingStore.Drain(conversationId);
+            return Results.Ok(new
+            {
+                conversationId,
+                count         = notifications.Count,
+                notifications = notifications.Select(n => new
+                {
+                    message      = n.Message,
+                    timestamp    = n.Timestamp,
+                    subAgentRunId = n.SubAgentRunId
+                })
+            });
+        });
+
         // ── Channels ─────────────────────────────────────────────────────────
 
         endpoints.MapGet("/channels", (ChannelManagerHolder channelHolder) =>

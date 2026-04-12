@@ -18,6 +18,7 @@ export interface ChatMessage {
   streaming?: boolean;
   error?: string;
   timestamp: Date;
+  isBackgroundResult?: boolean;
 }
 
 export const chatMessages = writable<ChatMessage[]>([]);
@@ -34,6 +35,15 @@ export function addAssistantMessage(content = '', streaming = false): string {
   const id = crypto.randomUUID();
   chatMessages.update(msgs => [...msgs, {
     id, role: 'assistant', content, streaming, timestamp: new Date()
+  }]);
+  return id;
+}
+
+export function addBackgroundResultMessage(content: string): string {
+  const id = crypto.randomUUID();
+  chatMessages.update(msgs => [...msgs, {
+    id, role: 'assistant', content, streaming: false,
+    isBackgroundResult: true, timestamp: new Date()
   }]);
   return id;
 }
