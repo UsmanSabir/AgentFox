@@ -48,6 +48,7 @@ public class WebModule : IAppModule
         });
 
         // ── Chat (request/response) ───────────────────────────────────────────
+
         endpoints.MapPost("/chat", async (
             IAgentService agentService,
             ChatRequest req,
@@ -57,17 +58,21 @@ public class WebModule : IAppModule
                 return Results.BadRequest(new ChatResponse
                 {
                     Success = false,
-                    Error   = "Message must not be empty."
+                    Error = "Message must not be empty."
                 });
 
             try
             {
                 // Pre-generate a conversation ID so the same session is reused across turns.
+                // If the client already has one (follow-up message) we keep it; otherwise we
+                // mint a new one here and return it so the client can send it on the next turn.
+                var conversationId = req.ConversationId ?? Guid.NewGuid().ToString("N");
+                var reply = await agentService.RunAsync(req.Message, conversationId, ct);
                 return Results.Ok(new ChatResponse
                 {
-                    Response       = reply,
+                    Response = reply,
                     ConversationId = conversationId,
-                    Success        = true
+                    Success = true
                 });
             }
             catch (Exception ex)
@@ -75,10 +80,11 @@ public class WebModule : IAppModule
                 return Results.Ok(new ChatResponse
                 {
                     Success = false,
-                    Error   = ex.Message
+                    Error = ex.Message
                 });
             }
         });
+
 
         // ── Chat (SSE streaming) ──────────────────────────────────────────────
         // Emits Server-Sent Events:
@@ -86,10 +92,10 @@ public class WebModule : IAppModule
         //   event: done\ndata: {...}       — final event with conversationId
         //   event: error\ndata: {...}      — on failure
         endpoints.MapPost("/chat/stream", async (
-            ChatRequest req,
-            IAgentService agentService,
-            HttpContext httpContext,
-            CancellationToken ct) =>
+    ChatRequest req,
+    IAgentService agentService,
+    HttpContext httpContext,
+    CancellationToken ct) =>
         {
             if (string.IsNullOrWhiteSpace(req.Message))
             {
@@ -98,16 +104,19 @@ public class WebModule : IAppModule
                 return;
             }
 
-            httpContext.Response.ContentType     = "text/event-stream; charset=utf-8";
-            httpContext.Response.Headers.CacheControl  = "no-cache";
-            httpContext.Response.Headers.Connection    = "keep-alive";
+            httpContext.Response.ContentType = "text/event-stream; charset=utf-8";
+            httpContext.Response.Headers.CacheControl = "no-cache";
+            httpContext.Response.Headers.Connection = "keep-alive";
             httpContext.Response.Headers["X-Accel-Buffering"] = "no"; // disable nginx buffering
 
             try
             {
+                // Pre-generate a conversation ID so the same session is reused across turns.
+                var conversationId = req.ConversationId ?? Guid.NewGuid().ToString("N");
+
                 await agentService.StreamAsync(
                     req.Message,
-                    req.ConversationId,
+                    conversationId,
                     async token =>
                     {
                         if (ct.IsCancellationRequested) return;
@@ -117,11 +126,12 @@ public class WebModule : IAppModule
                     },
                     ct);
 
-                // Terminal event
+                // Terminal event — always includes the conversation ID so the client
+                // can store it and send it with the next message.
                 var donePayload = JsonSerializer.Serialize(new
                 {
-                    done           = true,
-                    conversationId = req.ConversationId
+                    done = true,
+                    conversationId
                 });
                 await httpContext.Response.WriteAsync($"event: done\ndata: {donePayload}\n\n", ct);
                 await httpContext.Response.Body.FlushAsync(ct);
