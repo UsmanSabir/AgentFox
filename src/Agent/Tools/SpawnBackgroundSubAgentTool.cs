@@ -123,9 +123,15 @@ public class SpawnBackgroundSubAgentTool : BaseTool
                 Execute this task thoroughly and report your findings/results when complete.
                 """;
 
+            // Use the ambient session key set by FoxAgent.ProcessAsync so that calls
+            // originating from a web session are routed back to that session, not the
+            // console session that was stored at tool initialization time.
+            var effectiveSessionKey = AgentFox.Agents.FoxAgent.CurrentSessionKey.Value
+                ?? _parentSessionKey;
+
             // Spawn the background sub-agent
             var spawnResult = await _subAgentManager.SpawnSubAgentAsync(
-                parentSessionKey: _parentSessionKey,
+                parentSessionKey: effectiveSessionKey,
                 parentAgentId: _parentAgentId,
                 taskMessage: fullTaskMessage,
                 parentSpawnDepth: _parentSpawnDepth,

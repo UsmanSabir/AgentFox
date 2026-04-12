@@ -87,6 +87,13 @@ public class FoxAgent
     private readonly ILogger<FoxAgent>? _logger;
     private WorkspaceManager _workspaceManager;
 
+    /// <summary>
+    /// Ambient session key for the currently executing agent turn.
+    /// Set by <see cref="ProcessAsync"/> so tools can read the originating session
+    /// without being explicitly initialized with it (e.g. SpawnBackgroundSubAgentTool).
+    /// </summary>
+    internal static readonly AsyncLocal<string?> CurrentSessionKey = new();
+
     public string Id => _agent.Config.Id;
     public string Name => _agent.Config.Name;
     public IMemory Memory => _agent.Memory;
@@ -178,6 +185,7 @@ public class FoxAgent
     internal async Task<AgentResult> ProcessAsync(string task, string? conversationId = null, StreamingCallbacks? streaming = null, CancellationToken cancellationToken = default)
     {
         conversationId ??= Guid.NewGuid().ToString("N");
+        CurrentSessionKey.Value = conversationId;
 
         // Handle /new and /reset — archive current session and start a fresh one
         if (SessionManager != null && SessionManager.IsResetCommand(task))
