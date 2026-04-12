@@ -70,7 +70,7 @@ public class WebModule : IAppModule
                 return Results.Ok(new ChatResponse
                 {
                     Response       = reply,
-                    ConversationId = req.ConversationId,
+                    ConversationId = conversationId,
                     Success        = true
                 });
             }

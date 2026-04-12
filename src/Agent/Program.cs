@@ -317,16 +317,20 @@ class Program
             // When EmbeddedResource items are present in the .csproj, the manifest is baked into the assembly
             // and ManifestEmbeddedFileProvider serves them.  During development the wwwroot folder on disk is
             // used so you don't need to rebuild just to iterate on the frontend.
-            var entryAssembly   = Assembly.GetEntryAssembly()!;
+            //
+            // Static files must be registered BEFORE UseRouting() so that requests for static files
+            // short-circuit early and never reach the routing / endpoint middleware.
+            var entryAssembly     = Assembly.GetEntryAssembly()!;
             var embeddedResources = entryAssembly.GetManifestResourceNames();
             bool hasEmbeddedWwwroot = embeddedResources.Any(n => n.Contains(".wwwroot."));
             ManifestEmbeddedFileProvider? embeddedProvider = null;
 
+            IFileProvider? embeddedFileProvider = null;
             if (hasEmbeddedWwwroot)
             {
-                embeddedProvider = new ManifestEmbeddedFileProvider(entryAssembly, "wwwroot");
-                app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = embeddedProvider });
-                app.UseStaticFiles(new StaticFileOptions  { FileProvider = embeddedProvider });
+                embeddedFileProvider = new ManifestEmbeddedFileProvider(entryAssembly, "wwwroot");
+                app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = embeddedFileProvider });
+                app.UseStaticFiles(new StaticFileOptions  { FileProvider = embeddedFileProvider });
             }
             else
             {
@@ -334,11 +338,18 @@ class Program
                 app.UseStaticFiles();
             }
 
+            app.UseRouting();
+
             var apiGroup = app.MapGroup("/api");
             foreach (var module in modules.Where(m => enabledModules.Contains(m.Name)))
                 module.MapEndpoints(apiGroup);
 
-            // SPA fallback — all non-API routes resolve to index.html
+            // SPA fallback — all non-API routes resolve to index.html.
+            // When serving from embedded resources, pass the same provider so the fallback
+            // can locate index.html even without a physical wwwroot directory on disk.
+            if (embeddedFileProvider != null)
+                app.MapFallbackToFile("index.html", new StaticFileOptions { FileProvider = embeddedFileProvider });
+            else
             app.MapFallbackToFile("index.html");
         }
 
