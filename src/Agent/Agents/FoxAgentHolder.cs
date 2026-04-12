@@ -56,6 +56,18 @@ internal sealed class FoxAgentService : IAgentService
         var result = await agent.ProcessAsync(input, conversationId, cancellationToken: ct);
         return result.Output ?? string.Empty;
     }
+
+    public async Task<string> StreamAsync(
+        string input,
+        string? conversationId,
+        Func<string, Task> onToken,
+        CancellationToken ct = default)
+    {
+        var agent = await _holder.WaitAsync(ct);
+        var streaming = new StreamingCallbacks { OnToken = onToken };
+        var result = await agent.ProcessAsync(input, conversationId, streaming, ct);
+        return result.Output ?? string.Empty;
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

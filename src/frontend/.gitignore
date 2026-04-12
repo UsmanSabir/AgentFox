@@ -1,0 +1,5 @@
+node_modules/
+.svelte-kit/
+# .env is committed (safe defaults only — no secrets)
+.env.local
+.env.*.local

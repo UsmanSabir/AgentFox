@@ -45,6 +45,7 @@ public sealed class AgentOrchestrator : IHostedService
     private readonly MarkdownSessionStore _sessionStore;
     private readonly FoxAgentHolder _agentHolder;
     private readonly ChannelManagerHolder _channelManagerHolder;
+    private readonly SchedulingHolder _schedulingHolder;
     private readonly IEnumerable<IAppModule> _modules;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<AgentOrchestrator> _logger;
@@ -72,6 +73,7 @@ public sealed class AgentOrchestrator : IHostedService
         MarkdownSessionStore sessionStore,
         FoxAgentHolder agentHolder,
         ChannelManagerHolder channelManagerHolder,
+        SchedulingHolder schedulingHolder,
         IEnumerable<IAppModule> modules,
         ILoggerFactory loggerFactory,
         ILogger<AgentOrchestrator> logger)
@@ -91,6 +93,7 @@ public sealed class AgentOrchestrator : IHostedService
         _sessionStore         = sessionStore;
         _agentHolder          = agentHolder;
         _channelManagerHolder = channelManagerHolder;
+        _schedulingHolder     = schedulingHolder;
         _modules              = modules;
         _loggerFactory        = loggerFactory;
         _logger               = logger;
@@ -250,6 +253,9 @@ public sealed class AgentOrchestrator : IHostedService
                     sessionManager: _sessionManager,
                     commandQueue: _commandQueue);
                 _cronScheduler.Start();
+
+                // Expose managers to DI consumers (e.g. WebModule scheduling endpoints)
+                _schedulingHolder.Publish(_heartbeatManager, _cronScheduler);
             }
 
             // ── Publish agent to holder (unlocks FoxAgentService for web /chat) ─
