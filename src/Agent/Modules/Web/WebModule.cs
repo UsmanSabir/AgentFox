@@ -48,6 +48,7 @@ public class WebModule : IAppModule
         });
 
         // ── Chat (request/response) ───────────────────────────────────────────
+
         endpoints.MapPost("/chat", async (
             IAgentService agentService,
             ChatRequest req,
@@ -57,7 +58,7 @@ public class WebModule : IAppModule
                 return Results.BadRequest(new ChatResponse
                 {
                     Success = false,
-                    Error   = "Message must not be empty."
+                    Error = "Message must not be empty."
                 });
 
             try
@@ -69,9 +70,9 @@ public class WebModule : IAppModule
                 var reply = await agentService.RunAsync(req.Message, conversationId, ct);
                 return Results.Ok(new ChatResponse
                 {
-                    Response       = reply,
+                    Response = reply,
                     ConversationId = conversationId,
-                    Success        = true
+                    Success = true
                 });
             }
             catch (Exception ex)
@@ -79,10 +80,11 @@ public class WebModule : IAppModule
                 return Results.Ok(new ChatResponse
                 {
                     Success = false,
-                    Error   = ex.Message
+                    Error = ex.Message
                 });
             }
         });
+
 
         // ── Chat (SSE streaming) ──────────────────────────────────────────────
         // Emits Server-Sent Events:
@@ -90,10 +92,10 @@ public class WebModule : IAppModule
         //   event: done\ndata: {...}       — final event with conversationId
         //   event: error\ndata: {...}      — on failure
         endpoints.MapPost("/chat/stream", async (
-            ChatRequest req,
-            IAgentService agentService,
-            HttpContext httpContext,
-            CancellationToken ct) =>
+    ChatRequest req,
+    IAgentService agentService,
+    HttpContext httpContext,
+    CancellationToken ct) =>
         {
             if (string.IsNullOrWhiteSpace(req.Message))
             {
@@ -102,9 +104,9 @@ public class WebModule : IAppModule
                 return;
             }
 
-            httpContext.Response.ContentType     = "text/event-stream; charset=utf-8";
-            httpContext.Response.Headers.CacheControl  = "no-cache";
-            httpContext.Response.Headers.Connection    = "keep-alive";
+            httpContext.Response.ContentType = "text/event-stream; charset=utf-8";
+            httpContext.Response.Headers.CacheControl = "no-cache";
+            httpContext.Response.Headers.Connection = "keep-alive";
             httpContext.Response.Headers["X-Accel-Buffering"] = "no"; // disable nginx buffering
 
             try
