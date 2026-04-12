@@ -324,7 +324,7 @@ class Program
 
             if (hasEmbeddedWwwroot)
             {
-                var embeddedProvider = new ManifestEmbeddedFileProvider(entryAssembly, "wwwroot");
+                embeddedProvider = new ManifestEmbeddedFileProvider(entryAssembly, "wwwroot");
                 app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = embeddedProvider });
                 app.UseStaticFiles(new StaticFileOptions  { FileProvider = embeddedProvider });
             }
