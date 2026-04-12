@@ -2,6 +2,7 @@ using AgentFox.Agents;
 using AgentFox.Channels;
 using AgentFox.Doctor;
 using AgentFox.Doctor.Checks;
+using AgentFox.Helpers;
 using AgentFox.LLM;
 using AgentFox.MCP;
 using AgentFox.Memory;
@@ -146,7 +147,7 @@ public sealed class CliWorker : BackgroundService
         await RecoverInterruptedSessionsAsync(agent, consoleSessionId, interrupted, ct);
 
         // DoctorAgent for inline health-check commands
-        var appConfigPath = ResolveAppSettingsPath();
+        var appConfigPath = AppSettingsHelper.ResolveAppSettingsPath();
         var doctorAgent   = new DoctorAgent(_chatClient, appConfigPath);
 
         AnsiConsole.MarkupLine("[dim]Type [bold white]help[/] for commands, [bold white]exit[/] to quit. [bold white]Shift+Enter[/] for multi-line input.[/]");
@@ -903,9 +904,4 @@ public sealed class CliWorker : BackgroundService
     // Helpers
     // ─────────────────────────────────────────────────────────────────────────
 
-    private static string ResolveAppSettingsPath()
-    {
-        var cwdPath = Path.Combine(Directory.GetCurrentDirectory(), "appsettings.json");
-        return File.Exists(cwdPath) ? cwdPath : Path.Combine(AppContext.BaseDirectory, "appsettings.json");
-    }
 }

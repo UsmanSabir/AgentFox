@@ -1,4 +1,5 @@
 using AgentFox.Channels;
+using AgentFox.Helpers;
 using AgentFox.LLM;
 using AgentFox.MCP;
 using AgentFox.Memory;
@@ -145,7 +146,7 @@ public sealed class AgentOrchestrator : IHostedService
         try
         {
             var manifests      = _skillRegistry.GetSkillManifests();
-            var appConfigPath  = ResolveAppSettingsPath();
+            var appConfigPath  = AppSettingsHelper.ResolveAppSettingsPath();
 
             // ── Register runtime tools ────────────────────────────────────────
             var toolsConfig = _configuration.GetSection("Tools").Get<ToolsConfig>() ?? new ToolsConfig();
@@ -598,9 +599,4 @@ public sealed class AgentOrchestrator : IHostedService
     // Helpers
     // ─────────────────────────────────────────────────────────────────────────
 
-    private static string ResolveAppSettingsPath()
-    {
-        var cwdPath = Path.Combine(Directory.GetCurrentDirectory(), "appsettings.json");
-        return File.Exists(cwdPath) ? cwdPath : Path.Combine(AppContext.BaseDirectory, "appsettings.json");
-    }
 }

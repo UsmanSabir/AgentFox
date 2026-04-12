@@ -2,6 +2,7 @@ using AgentFox.Agents;
 using AgentFox.Doctor;
 using AgentFox.Doctor.Checks;
 using AgentFox.Doctor.Onboarding;
+using AgentFox.Helpers;
 using AgentFox.LLM;
 using AgentFox.MCP;
 using AgentFox.Memory;
@@ -47,9 +48,10 @@ class Program
         if (!isServiceMode)
             ShowBanner();
 
+        var appCfgPath = AppSettingsHelper.ResolveAppSettingsPath();
         bool runDoctor    = args.Contains("--doctor");
         bool doctorFix    = args.Contains("--fix");
-        bool runOnboarding = args.Contains("--onboarding");
+        bool runOnboarding = args.Contains("--onboarding") || !File.Exists(appCfgPath); // If appsettings.json doesn't exist, default to onboarding mode to guide the user through initial setup.
 
         // Extract service management commands
         string? serviceCommand = args.FirstOrDefault(a => ServiceCommandHandler.IsServiceCommand(a));
@@ -113,7 +115,6 @@ class Program
         // ── Onboarding wizard (--onboarding  or  agentfox onboarding ...) ────
         if (runOnboarding)
         {
-            var appCfgPath = ResolveAppSettingsPath();
             var wizard     = new OnboardingWizard(appCfgPath);
 
             // Command mode: any LLM named args present alongside --onboarding
@@ -169,7 +170,6 @@ class Program
         // ── --doctor mode (runs before web host, then exits) ──────────────────
         if (runDoctor)
         {
-            var appCfgPath    = ResolveAppSettingsPath();
             var chatClient    = LLMFactory.CreateFromConfiguration(configuration);
             var doctorAgent   = new DoctorAgent(chatClient, appCfgPath);
             var workspacePath = workspaceManager.ResolvePath("");
@@ -503,16 +503,6 @@ class Program
         }
 
         return result.Success ? 0 : 1;
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Config path helper
-    // ─────────────────────────────────────────────────────────────────────────
-
-    static string ResolveAppSettingsPath()
-    {
-        var cwdPath = Path.Combine(Directory.GetCurrentDirectory(), "appsettings.json");
-        return File.Exists(cwdPath) ? cwdPath : Path.Combine(AppContext.BaseDirectory, "appsettings.json");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
