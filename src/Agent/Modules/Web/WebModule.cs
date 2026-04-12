@@ -62,11 +62,11 @@ public class WebModule : IAppModule
 
             try
             {
-                var reply = await agentService.RunAsync(req.Message, req.ConversationId, ct);
+                // Pre-generate a conversation ID so the same session is reused across turns.
                 return Results.Ok(new ChatResponse
                 {
                     Response       = reply,
-                    ConversationId = req.ConversationId,
+                    ConversationId = conversationId,
                     Success        = true
                 });
             }
