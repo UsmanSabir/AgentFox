@@ -42,7 +42,7 @@
     <Exec Command="npm run build" WorkingDirectory="$(MSBuildProjectDirectory)\..\frontend" />
   </Target>
   ──────────────────────────────────────────────────────────────────────────── -->
-
+  
   <ItemGroup>
 	  <PackageReference Include="Azure.AI.OpenAI" Version="2.1.0" />
 	  <PackageReference Include="Google.GenAI" Version="1.6.1" />

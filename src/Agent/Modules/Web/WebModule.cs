@@ -282,7 +282,7 @@ public class WebModule : IAppModule
             {
                 id          = ch.ChannelId,
                 name        = ch.Name,
-                type        = ch.GetType().Name.Replace("Channel", "", StringComparison.Ordinal),
+                type        = ch.Type,
                 isConnected = ch.IsConnected,
                 status      = ch.IsConnected ? "connected" : "disconnected"
             });

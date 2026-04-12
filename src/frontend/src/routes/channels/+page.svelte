@@ -12,32 +12,31 @@
   let error = '';
   let intervalId: ReturnType<typeof setInterval>;
 
-  // Icon map keyed by channel type string (from backend GetType().Name minus "Channel")
+  // Icon map keyed by stable backend channel type id.
   const typeIcons: Record<string, typeof Radio> = {
-    Discord:    MessageSquare,
-    Telegram:   Send,
-    Slack:      Hash,
-    WhatsApp:   Phone,
-    Teams:      Users,
-    MicrosoftTeams: Users,
-    Email:      Mail,
-    SMS:        Smartphone,
-    WebSocket:  Wifi,
-    RSS:        Rss,
-    Webhook:    Globe,
+    discord:    MessageSquare,
+    telegram:   Send,
+    slack:      Hash,
+    whatsapp:   Phone,
+    teams:      Users,
+    email:      Mail,
+    sms:        Smartphone,
+    websocket:  Wifi,
+    rss:        Rss,
+    webhook:    Globe,
   };
 
   const typeColors: Record<string, string> = {
-    Discord:   '#5865f2',
-    Telegram:  '#26a5e4',
-    Slack:     '#e01e5a',
-    WhatsApp:  '#25d366',
-    Teams:     '#6264a7',
-    Email:     '#ea4335',
-    SMS:       '#fb923c',
-    WebSocket: '#0ea5e9',
-    RSS:       '#f97316',
-    Webhook:   '#8b5cf6',
+    discord:   '#5865f2',
+    telegram:  '#26a5e4',
+    slack:     '#e01e5a',
+    whatsapp:  '#25d366',
+    teams:     '#6264a7',
+    email:     '#ea4335',
+    sms:       '#fb923c',
+    websocket: '#0ea5e9',
+    rss:       '#f97316',
+    webhook:   '#8b5cf6',
   };
 
   function iconFor(type: string) {
@@ -46,6 +45,12 @@
 
   function colorFor(type: string) {
     return typeColors[type] ?? 'var(--primary)';
+  }
+
+  function labelFor(type: string) {
+    if (type === 'whatsapp') return 'WhatsApp';
+    if (type === 'websocket') return 'WebSocket';
+    return type.charAt(0).toUpperCase() + type.slice(1);
   }
 
   async function load() {
@@ -119,7 +124,7 @@
       <p>No channels configured.</p>
       <p class="empty-sub">
         Add channels in <code>appsettings.json</code> under the <code>Channels</code> array.<br />
-        Supported: Discord, Telegram, Slack, WhatsApp, Teams, Email, SMS, WebSocket, RSS, Webhook.
+        Supported via providers. Built-in providers: telegram, discord, slack, whatsapp, teams.
       </p>
     </div>
   {:else}
@@ -137,7 +142,7 @@
               </div>
               <div class="card-titles">
                 <div class="ch-name">{ch.name}</div>
-                <div class="ch-type">{ch.type}</div>
+                <div class="ch-type">{labelFor(ch.type)}</div>
               </div>
               <span
                 class="status-dot"

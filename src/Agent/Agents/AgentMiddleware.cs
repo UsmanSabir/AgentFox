@@ -337,7 +337,7 @@ public sealed class ChannelContributor : IPromptContributor
         foreach (var ch in channels)
         {
             var status = ch.IsConnected ? "connected" : "disconnected";
-            sb.AppendLine($"- **{ch.Name.ToLowerInvariant()}** ({status})");
+            sb.AppendLine($"- **{ch.Type}** ({status})");
         }
         return sb.ToString().TrimEnd();
     }
