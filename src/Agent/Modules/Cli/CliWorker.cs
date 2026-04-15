@@ -74,8 +74,10 @@ public sealed class CliWorker : BackgroundService
         FoxAgentHolder agentHolder,
         ChannelManagerHolder channelManagerHolder,
         ILogger<CliWorker> logger,
-        ServiceConfig serviceConfig)
+        ServiceConfig serviceConfig,
+        HitlManager hitlManager)
     {
+        _hitlManager          = hitlManager;
         _lifetime             = lifetime;
         _chatClient           = chatClient;
         _toolRegistry         = toolRegistry;
@@ -266,6 +268,41 @@ public sealed class CliWorker : BackgroundService
                 var doctorResult = await doctorAgent.ProcessRequestAsync(request);
                 AnsiConsole.MarkupLine($"  [dim]{Markup.Escape(doctorResult)}[/]");
             }
+            return ReplAction.Handled;
+        }
+
+        // ── HITL approval commands ───────────────────────────────────────────
+        if (lower.StartsWith("hitl approve "))
+        {
+            var rest       = trimmed["hitl approve ".Length..].Trim();
+            var spaceIdx   = rest.IndexOf(' ');
+            var approvalId = spaceIdx < 0 ? rest : rest[..spaceIdx];
+            var feedback   = spaceIdx < 0 ? null : rest[(spaceIdx + 1)..].Trim();
+
+            if (_hitlManager.Respond(approvalId, approved: true, feedback))
+                AnsiConsole.MarkupLine($"[green]✅ Approved[/] [{approvalId}]");
+            else
+                AnsiConsole.MarkupLine($"[yellow]No pending approval with id '{approvalId}'.[/]");
+            return ReplAction.Handled;
+        }
+
+        if (lower.StartsWith("hitl reject "))
+        {
+            var rest       = trimmed["hitl reject ".Length..].Trim();
+            var spaceIdx   = rest.IndexOf(' ');
+            var approvalId = spaceIdx < 0 ? rest : rest[..spaceIdx];
+            var reason     = spaceIdx < 0 ? null : rest[(spaceIdx + 1)..].Trim();
+
+            if (_hitlManager.Respond(approvalId, approved: false, reason))
+                AnsiConsole.MarkupLine($"[red]❌ Rejected[/] [{approvalId}]");
+            else
+                AnsiConsole.MarkupLine($"[yellow]No pending approval with id '{approvalId}'.[/]");
+            return ReplAction.Handled;
+        }
+
+        if (lower is "hitl" or "hitl list")
+        {
+            ShowHitlPending();
             return ReplAction.Handled;
         }
 
@@ -558,6 +595,13 @@ public sealed class CliWorker : BackgroundService
             new[] { "agents kill [<id>]",  "Kill a sub-agent (or all with no id)" },
         });
 
+        AddSection("HITL (Human-in-the-Loop)", new[]
+        {
+            new[] { "hitl",                "List pending approval requests" },
+            new[] { "hitl approve <id>",   "Approve a pending tool execution" },
+            new[] { "hitl reject <id>",    "Reject a pending tool execution" },
+        });
+
         AddSection("Service Commands", new[]
         {
             new[] { "install-service",     "Install as a system service" },
@@ -690,6 +734,40 @@ public sealed class CliWorker : BackgroundService
 
         AnsiConsole.WriteLine();
         AnsiConsole.MarkupLine($"[dim]To load guidance: [white]load_skill(skill_name: \"{Markup.Escape(skill.Name)}\")[/][/]");
+        AnsiConsole.WriteLine();
+    }
+
+    private void ShowHitlPending()
+    {
+        var pending = _hitlManager.GetPending();
+        if (pending.Count == 0)
+        {
+            AnsiConsole.MarkupLine("[dim]No pending HITL approvals.[/]");
+            AnsiConsole.WriteLine();
+            return;
+        }
+
+        var table = new Table()
+            .Border(TableBorder.Rounded).BorderColor(Color.Yellow)
+            .Title($"[bold] Pending Approvals ({pending.Count}) [/]")
+            .AddColumn(new TableColumn("[bold]ID[/]").Width(10))
+            .AddColumn(new TableColumn("[bold]Trigger[/]").Width(10))
+            .AddColumn(new TableColumn("[bold]Tool / Description[/]"))
+            .AddColumn(new TableColumn("[bold]Waiting[/]").Width(9).RightAligned());
+
+        foreach (var (req, createdAt) in pending.OrderBy(p => p.CreatedAt))
+        {
+            var elapsed = (DateTime.UtcNow - createdAt).TotalSeconds;
+            var wait    = elapsed < 60 ? $"{elapsed:F0}s" : $"{elapsed / 60:F0}m";
+            table.AddRow(
+                $"[bold yellow]{Markup.Escape(req.ApprovalId)}[/]",
+                $"[dim]{req.Trigger}[/]",
+                Markup.Escape(req.Description),
+                $"[dodgerblue1]{wait}[/]");
+        }
+
+        AnsiConsole.Write(table);
+        AnsiConsole.MarkupLine("[dim]  hitl approve <id>   hitl reject <id> [reason][/]");
         AnsiConsole.WriteLine();
     }
 

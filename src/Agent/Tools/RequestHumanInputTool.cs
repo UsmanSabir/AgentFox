@@ -69,7 +69,7 @@ public class RequestHumanInputTool : BaseTool
         var context = arguments.GetValueOrDefault("context")?.ToString();
 
         // Resolve the originating channel from the ambient session key set by FoxAgent.ProcessAsync
-        var sessionKey = FoxAgent.CurrentSessionKey;
+        var sessionKey = FoxAgent.CurrentSessionKey.Value;
         var sessionInfo = sessionKey != null ? _sessionManager?.GetSession(sessionKey) : null;
         var channelId = sessionInfo?.ChannelId;
 
