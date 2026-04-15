@@ -1,4 +1,5 @@
 using AgentFox.Agents;
+using AgentFox.Hitl;
 using AgentFox.Models;
 using AgentFox.Plugins.Channels;
 using AgentFox.Sessions;
@@ -18,6 +19,7 @@ public class ChannelManager
     private readonly SessionManager? _sessionManager;
     private readonly ICommandQueue? _commandQueue;
     private readonly ILogger? _logger;
+    private HitlManager? _hitlManager;
 
     public IReadOnlyDictionary<string, Channel> Channels => _channels;
     public ChannelMessageGateway? Gateway => _gateway;
@@ -53,6 +55,13 @@ public class ChannelManager
         _gateway = gateway;
         _logger?.LogInformation("ChannelMessageGateway set for channel manager");
     }
+
+    /// <summary>
+    /// Wires in the HITL manager so incoming channel messages can resolve
+    /// pending approval gates (/approve, /reject) and free-form input gates.
+    /// </summary>
+    public void SetHitlManager(HitlManager hitlManager) =>
+        _hitlManager = hitlManager;
 
     public void AddChannel(Channel channel)
     {
@@ -102,6 +111,50 @@ public class ChannelManager
         {
             _logger?.LogWarning("HandleMessage: agent not yet available, dropping message {MessageId}", message.Id);
             return;
+        }
+
+        // ── HITL interception — runs before gateway/queue routing ─────────────
+        if (_hitlManager != null)
+        {
+            var channelId = string.IsNullOrEmpty(message.ChannelId)
+                ? channel.ChannelId
+                : message.ChannelId;
+            var content = message.Content?.Trim() ?? string.Empty;
+
+            // Mode 1: /approve <id> [feedback]
+            if (content.StartsWith("/approve ", StringComparison.OrdinalIgnoreCase))
+            {
+                var rest = content["/approve ".Length..].Trim();
+                var spaceIdx = rest.IndexOf(' ');
+                var approvalId = spaceIdx < 0 ? rest : rest[..spaceIdx];
+                var feedback   = spaceIdx < 0 ? null : rest[(spaceIdx + 1)..].Trim();
+
+                if (_hitlManager.Respond(approvalId, approved: true, feedback))
+                {
+                    await channel.SendReplyAsync(message, $"✅ Approved `{approvalId}`.");
+                    return;
+                }
+            }
+            // Mode 1: /reject <id> [reason]
+            else if (content.StartsWith("/reject ", StringComparison.OrdinalIgnoreCase))
+            {
+                var rest = content["/reject ".Length..].Trim();
+                var spaceIdx = rest.IndexOf(' ');
+                var approvalId = spaceIdx < 0 ? rest : rest[..spaceIdx];
+                var reason     = spaceIdx < 0 ? null : rest[(spaceIdx + 1)..].Trim();
+
+                if (_hitlManager.Respond(approvalId, approved: false, reason))
+                {
+                    await channel.SendReplyAsync(message, $"❌ Rejected `{approvalId}`.");
+                    return;
+                }
+            }
+            // Mode 2: free-form reply to a request_human_input call
+            else if (_hitlManager.HasPendingFreeForm(channelId))
+            {
+                if (_hitlManager.RespondFreeForm(channelId, content))
+                    return;
+            }
         }
 
         try

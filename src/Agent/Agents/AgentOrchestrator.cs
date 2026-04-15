@@ -1,5 +1,6 @@
 using AgentFox.Channels;
 using AgentFox.Helpers;
+using AgentFox.Hitl;
 using AgentFox.LLM;
 using AgentFox.MCP;
 using AgentFox.Memory;
@@ -54,6 +55,8 @@ public sealed class AgentOrchestrator : IHostedService
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<AgentOrchestrator> _logger;
 
+    private readonly HitlManager _hitlManager;
+
     // Built during InitializeAsync, used by StopAsync
     private ChannelManager? _channelManager;
     private string? _systemPrompt;
@@ -83,8 +86,10 @@ public sealed class AgentOrchestrator : IHostedService
         IEnumerable<IAppModule> modules,
         ILoggerFactory loggerFactory,
         ILogger<AgentOrchestrator> logger,
-        PendingNotificationStore pendingNotifications)
+        PendingNotificationStore pendingNotifications,
+        HitlManager hitlManager)
     {
+        _hitlManager          = hitlManager;
         _chatClient           = chatClient;
         _toolRegistry         = toolRegistry;
         _skillRegistry        = skillRegistry;
@@ -212,6 +217,14 @@ public sealed class AgentOrchestrator : IHostedService
                     _channelManager, _loggerFactory.CreateLogger<NotifyUserTool>()));
             }
 
+            // ── HITL tools ────────────────────────────────────────────────────
+            _channelManager.SetHitlManager(_hitlManager);
+            _toolRegistry.Register(new RequestHumanInputTool(
+                _hitlManager,
+                _channelManager,
+                _sessionManager,
+                _loggerFactory.CreateLogger<RequestHumanInputTool>()));
+
             // ── Build system prompt (includes channel tools with live channel list) ──
             _systemPrompt = new SystemPromptBuilder()
                 .WithPersona(SystemPromptConfig.AgentPrompts.DeveloperAssistant)
@@ -337,6 +350,61 @@ public sealed class AgentOrchestrator : IHostedService
 
         if (withLogger)
             builder = builder.WithLogger(_loggerFactory.CreateLogger<FoxAgent>());
+
+        // ── HITL Mode 1: policy-based tool approval gate ──────────────────────
+        var hitlConfig = _configuration.GetSection("Hitl").Get<HitlConfig>();
+        if (hitlConfig is { Enabled: true } && hitlConfig.RequireApprovalForTools.Count > 0)
+        {
+            var watchedTools = new HashSet<string>(
+                hitlConfig.RequireApprovalForTools,
+                StringComparer.OrdinalIgnoreCase);
+
+            builder = builder.WithToolApprovalGate(async (toolName, args, ct) =>
+            {
+                if (!watchedTools.Contains(toolName))
+                    return true; // not a watched tool — pass through
+
+                var sessionKey  = FoxAgent.CurrentSessionKey.Value;
+                var sessionInfo = sessionKey != null ? _sessionManager.GetSession(sessionKey) : null;
+                var channelId   = sessionInfo?.ChannelId;
+
+                var approvalId  = Guid.NewGuid().ToString("N")[..8].ToUpper();
+                var argsPreview = args.Count == 0
+                    ? string.Empty
+                    : string.Join(", ", args.Take(3).Select(kv => $"{kv.Key}={kv.Value}"));
+
+                var msg =
+                    $"🔐 **Approval Required** `[{approvalId}]`\n\n" +
+                    $"Agent wants to run: **{toolName}**" +
+                    (argsPreview.Length > 0 ? $"\nArguments: `{argsPreview}`" : string.Empty) +
+                    $"\n\n`/approve {approvalId}` — allow\n`/reject {approvalId} [reason]` — block";
+
+                var request = new HitlRequest(
+                    approvalId, sessionKey ?? string.Empty, channelId,
+                    HitlTrigger.Tool, toolName, argsPreview);
+
+                if (channelId != null && _channelManager != null)
+                {
+                    var channel = _channelManager.Channels.Values
+                        .FirstOrDefault(c => c.ChannelId == channelId && c.IsConnected);
+                    if (channel != null)
+                        await channel.SendToTargetAsync(string.Empty, msg);
+                }
+                else
+                {
+                    // Console fallback — print approval prompt
+                    AnsiConsole.WriteLine();
+                    AnsiConsole.MarkupLine($"[bold yellow]🔐 Approval Required[/] [[{approvalId}]]");
+                    AnsiConsole.MarkupLine($"Tool: [bold]{Markup.Escape(toolName)}[/]");
+                    if (argsPreview.Length > 0)
+                        AnsiConsole.MarkupLine($"Args: [dim]{Markup.Escape(argsPreview)}[/]");
+                    AnsiConsole.MarkupLine($"[dim]Type [bold]hitl approve {approvalId}[/] or [bold]hitl reject {approvalId}[/][/]");
+                }
+
+                var decision = await _hitlManager.RequestApprovalAsync(request, ct);
+                return decision.Approved;
+            });
+        }
 
         return builder.Build();
     }

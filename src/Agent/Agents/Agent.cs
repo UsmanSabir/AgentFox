@@ -561,6 +561,12 @@ public class AgentBuilder
     private readonly PromptContributorRegistry _promptContributorRegistry = new();
     private SkillRegistry? _pendingSkillsRegistry; // set by WithSkillsRegistry, consumed in Build()
 
+    /// <summary>
+    /// Optional gate evaluated before every tool execution.
+    /// Return true to allow, false to block.  Set via <see cref="WithToolApprovalGate"/>.
+    /// </summary>
+    private Func<string, Dictionary<string, object?>, CancellationToken, Task<bool>>? _toolApprovalGate;
+
     public AgentBuilder(ToolRegistry toolRegistry)
     {
         _toolRegistry = toolRegistry;
@@ -665,6 +671,19 @@ public class AgentBuilder
     public AgentBuilder WithSessionManager(SessionManager sessionManager)
     {
         _sessionManager = sessionManager;
+        return this;
+    }
+
+    /// <summary>
+    /// Installs a gate that is evaluated before every tool execution.
+    /// Return <c>true</c> to allow the tool to run, <c>false</c> to block it.
+    /// The gate receives the tool name, its resolved arguments, and the cancellation token.
+    /// Typically wired by AgentOrchestrator to HitlManager for human-approval flows.
+    /// </summary>
+    public AgentBuilder WithToolApprovalGate(
+        Func<string, Dictionary<string, object?>, CancellationToken, Task<bool>> gate)
+    {
+        _toolApprovalGate = gate;
         return this;
     }
 
@@ -927,6 +946,15 @@ public class AgentBuilder
             }
 
             return ToolResult.Fail($"Tool not found: {toolName}");
+        }
+
+        // ── HITL approval gate (Mode 1) ──────────────────────────────────────
+        if (_toolApprovalGate != null)
+        {
+            var allowed = await _toolApprovalGate(toolName, arguments, ct);
+            if (!allowed)
+                return ToolResult.Fail(
+                    $"Tool '{toolName}' was blocked — not approved by user.");
         }
 
         try

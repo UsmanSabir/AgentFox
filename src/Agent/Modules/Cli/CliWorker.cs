@@ -1,6 +1,7 @@
 using AgentFox.Agents;
 using AgentFox.Channels;
 using AgentFox.Doctor;
+using AgentFox.Hitl;
 using AgentFox.Doctor.Checks;
 using AgentFox.Helpers;
 using AgentFox.LLM;
@@ -53,6 +54,7 @@ public sealed class CliWorker : BackgroundService
     private readonly ChannelManagerHolder _channelManagerHolder;
     private readonly ILogger<CliWorker> _logger;
     private readonly ServiceConfig _serviceConfig;
+    private readonly HitlManager _hitlManager;
 
     public CliWorker(
         IHostApplicationLifetime lifetime,
