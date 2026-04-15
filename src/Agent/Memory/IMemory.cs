@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using System.Threading.Channels;
 
 namespace AgentFox.Memory;
 
@@ -136,7 +137,7 @@ public class LongTermMemory : IMemory
 {
     private readonly List<MemoryEntry> _memories = new();
     private readonly string _storagePath;
-    private readonly object _lock = new();
+    private readonly SemaphoreSlim _lock = new(1, 1);
 
     public LongTermMemory(string? storagePath = null)
     {
@@ -144,57 +145,61 @@ public class LongTermMemory : IMemory
         LoadFromDisk();
     }
 
-    public Task AddAsync(MemoryEntry entry)
+    public async Task AddAsync(MemoryEntry entry)
     {
-        lock (_lock)
+        await _lock.WaitAsync();
+        try
         {
             _memories.Add(entry);
-            SaveToDisk();
+            await SaveToDiskAsync();
         }
-        return Task.CompletedTask;
+        finally { _lock.Release(); }
     }
 
-    public Task<List<MemoryEntry>> SearchAsync(string query, int limit = 10)
+    public async Task<List<MemoryEntry>> SearchAsync(string query, int limit = 10)
     {
-        lock (_lock)
+        await _lock.WaitAsync();
+        try
         {
-            var results = _memories
+            return _memories
                 .Where(m => m.Content.Contains(query, StringComparison.OrdinalIgnoreCase))
                 .OrderByDescending(m => m.Importance)
                 .ThenByDescending(m => m.Timestamp)
                 .Take(limit)
                 .ToList();
-            return Task.FromResult(results);
         }
+        finally { _lock.Release(); }
     }
 
-    public Task<List<MemoryEntry>> GetAllAsync()
+    public async Task<List<MemoryEntry>> GetAllAsync()
     {
-        lock (_lock)
-        {
-            return Task.FromResult(_memories.ToList());
-        }
+        await _lock.WaitAsync();
+        try { return _memories.ToList(); }
+        finally { _lock.Release(); }
     }
 
-    public Task ClearAsync()
+    public async Task ClearAsync()
     {
-        lock (_lock)
+        await _lock.WaitAsync();
+        try
         {
             _memories.Clear();
-            SaveToDisk();
+            await SaveToDiskAsync();
         }
-        return Task.CompletedTask;
+        finally { _lock.Release(); }
     }
 
-    public Task<List<MemoryEntry>> GetRecentAsync(int count = 10)
+    public async Task<List<MemoryEntry>> GetRecentAsync(int count = 10)
     {
-        lock (_lock)
+        await _lock.WaitAsync();
+        try
         {
-            return Task.FromResult(_memories
+            return _memories
                 .OrderByDescending(m => m.Timestamp)
                 .Take(count)
-                .ToList());
+                .ToList();
         }
+        finally { _lock.Release(); }
     }
 
     private void LoadFromDisk()
@@ -206,45 +211,44 @@ public class LongTermMemory : IMemory
                 var json = File.ReadAllText(_storagePath);
                 var memories = Newtonsoft.Json.JsonConvert.DeserializeObject<List<MemoryEntry>>(json);
                 if (memories != null)
-                {
                     _memories.AddRange(memories);
-                }
             }
         }
-        catch
-        {
-            // Start fresh if loading fails
-        }
+        catch { /* Start fresh if loading fails */ }
     }
 
-    private void SaveToDisk()
+    private async Task SaveToDiskAsync()
     {
         try
         {
             var json = Newtonsoft.Json.JsonConvert.SerializeObject(_memories, Newtonsoft.Json.Formatting.Indented);
-            File.WriteAllText(_storagePath, json);
+            await File.WriteAllTextAsync(_storagePath, json);
         }
-        catch
-        {
-            // Ignore save errors
-        }
+        catch { /* Ignore save errors */ }
     }
 }
 
 /// <summary>
-/// Hybrid memory system combining short-term and long-term
+/// Hybrid memory system combining short-term and long-term.
+/// Short-term writes are immediate (in-memory). Long-term writes are enqueued
+/// to a background channel so disk I/O never blocks conversation processing.
 /// </summary>
-public class HybridMemory : IMemory
+public class HybridMemory : IMemory, IAsyncDisposable
 {
     private readonly ShortTermMemory _shortTerm;
     private readonly IMemory _longTerm;
     private readonly double _importanceThreshold;
+    private readonly Channel<MemoryEntry> _longTermWriteQueue;
+    private readonly Task _writerTask;
+    private readonly CancellationTokenSource _cts = new();
 
     public HybridMemory(int shortTermSize = 50, string? longTermPath = null, double importanceThreshold = 0.7)
     {
         _shortTerm = new ShortTermMemory(shortTermSize);
         _longTerm = new LongTermMemory(longTermPath);
         _importanceThreshold = importanceThreshold;
+        _longTermWriteQueue = CreateWriteQueue();
+        _writerTask = Task.Run(DrainLongTermWritesAsync);
     }
 
     /// <summary>
@@ -255,40 +259,49 @@ public class HybridMemory : IMemory
         _shortTerm = new ShortTermMemory(shortTermSize);
         _longTerm = longTermStorage;
         _importanceThreshold = importanceThreshold;
+        _longTermWriteQueue = CreateWriteQueue();
+        _writerTask = Task.Run(DrainLongTermWritesAsync);
     }
 
+    private static Channel<MemoryEntry> CreateWriteQueue() =>
+        Channel.CreateBounded<MemoryEntry>(new BoundedChannelOptions(512)
+        {
+            FullMode = BoundedChannelFullMode.DropOldest,
+            SingleReader = true,
+            SingleWriter = false
+        });
+
+    /// <summary>
+    /// Writes to short-term memory immediately (in-memory, non-blocking).
+    /// If the entry meets the importance threshold it is enqueued for long-term
+    /// persistence on a background task — conversation is never blocked by disk I/O.
+    /// </summary>
     public async Task AddAsync(MemoryEntry entry)
     {
         await _shortTerm.AddAsync(entry);
-        
-        // Auto-consolidate important memories to long-term
+
         if (entry.Importance >= _importanceThreshold)
-        {
-            await _longTerm.AddAsync(entry);
-        }
+            _longTermWriteQueue.Writer.TryWrite(entry);
     }
 
     public async Task<List<MemoryEntry>> SearchAsync(string query, int limit = 10)
     {
         var shortTerm = await _shortTerm.SearchAsync(query, limit);
-        var longTerm = await _longTerm.SearchAsync(query, limit);
-        
-        // Merge and deduplicate
-        var combined = shortTerm.Concat(longTerm)
+        var longTerm  = await _longTerm.SearchAsync(query, limit);
+
+        return shortTerm.Concat(longTerm)
             .GroupBy(m => m.Id)
             .Select(g => g.First())
             .OrderByDescending(m => m.Importance)
             .ThenByDescending(m => m.Timestamp)
             .Take(limit)
             .ToList();
-        
-        return combined;
     }
 
     public async Task<List<MemoryEntry>> GetAllAsync()
     {
         var shortMem = await _shortTerm.GetAllAsync();
-        var longMem = await _longTerm.GetAllAsync();
+        var longMem  = await _longTerm.GetAllAsync();
         return shortMem.Concat(longMem).ToList();
     }
 
@@ -297,21 +310,36 @@ public class HybridMemory : IMemory
         await _shortTerm.ClearAsync();
     }
 
-    public Task<List<MemoryEntry>> GetRecentAsync(int count = 10)
-    {
-        return _shortTerm.GetRecentAsync(count);
-    }
-    
+    public Task<List<MemoryEntry>> GetRecentAsync(int count = 10) =>
+        _shortTerm.GetRecentAsync(count);
+
     /// <summary>
-    /// Consolidate short-term to long-term
+    /// Enqueues all important short-term entries for long-term persistence.
+    /// Returns immediately — actual disk write happens on the background task.
     /// </summary>
     public async Task ConsolidateAsync()
     {
         var recent = await _shortTerm.GetAllAsync();
         foreach (var entry in recent.Where(e => e.Importance >= _importanceThreshold))
+            _longTermWriteQueue.Writer.TryWrite(entry);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _longTermWriteQueue.Writer.TryComplete();
+        _cts.Cancel();
+        try { await _writerTask.ConfigureAwait(false); } catch (OperationCanceledException) { }
+        _cts.Dispose();
+    }
+
+    private async Task DrainLongTermWritesAsync()
+    {
+        try
         {
-            await _longTerm.AddAsync(entry);
+            await foreach (var entry in _longTermWriteQueue.Reader.ReadAllAsync(_cts.Token))
+                await _longTerm.AddAsync(entry);
         }
+        catch (OperationCanceledException) { /* normal shutdown */ }
     }
 }
 

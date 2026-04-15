@@ -137,27 +137,27 @@ public class DefaultAgentRuntime : IAgentRuntime
 /// </summary>
 public class FoxAgentExecutor : IAgentExecutor
 {
-    private readonly FoxAgent _defaultAgent;
+    private readonly IChatClient _defaultClient;
     private readonly Func<IChatClient, FoxAgent> _agentFactory;
     private readonly Func<string, IChatClient?> _modelResolver;
     private readonly ILogger<FoxAgentExecutor>? _logger;
 
-    /// <param name="defaultAgent">Parent FoxAgent used when no model override is set.</param>
+    /// <param name="defaultClient">The default <see cref="IChatClient"/> used when no model override is set.</param>
     /// <param name="agentFactory">
-    ///     Factory that builds a fresh FoxAgent wired to a specific <see cref="IChatClient"/>.
-    ///     All other settings (tools, memory, session store) are shared with the parent.
+    ///     Factory that builds a fresh <see cref="FoxAgent"/> wired to a given <see cref="IChatClient"/>.
+    ///     Called for every execution — no shared agent instance, so concurrent sessions are fully isolated.
     /// </param>
     /// <param name="modelResolver">
     ///     Resolves a model name / named config key to an <see cref="IChatClient"/>.
-    ///     Return null to fall back to the default agent.
+    ///     Return null to fall back to the default client.
     /// </param>
     public FoxAgentExecutor(
-        FoxAgent defaultAgent,
+        IChatClient defaultClient,
         Func<IChatClient, FoxAgent> agentFactory,
         Func<string, IChatClient?> modelResolver,
         ILogger<FoxAgentExecutor>? logger = null)
     {
-        _defaultAgent = defaultAgent;
+        _defaultClient = defaultClient;
         _agentFactory = agentFactory;
         _modelResolver = modelResolver;
         _logger = logger;
@@ -175,15 +175,12 @@ public class FoxAgentExecutor : IAgentExecutor
 
     private FoxAgent ResolveAgent(AgentCommand command)
     {
-        if (string.IsNullOrEmpty(command.Model))
-            return _defaultAgent;
+        var client = string.IsNullOrEmpty(command.Model)
+            ? _defaultClient
+            : (_modelResolver(command.Model) ?? _defaultClient);
 
-        var client = _modelResolver(command.Model);
-        if (client == null)
-        {
-            _logger?.LogWarning("Model '{Model}' could not be resolved; using default", command.Model);
-            return _defaultAgent;
-        }
+        if (!string.IsNullOrEmpty(command.Model) && ReferenceEquals(client, _defaultClient))
+            _logger?.LogWarning("Model '{Model}' could not be resolved; falling back to default", command.Model);
 
         return _agentFactory(client);
     }

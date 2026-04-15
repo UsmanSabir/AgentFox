@@ -9,7 +9,8 @@
 - [x] Plugins support
 - [x] Onboarding Wizard
 - [x] Schedule Heartbeat and periodic tasks test runs
-- [ ] Web UI start with relevant skills
+- [x] Web UI start with relevant skills
+- [ ] Multi-agent workflow -> Planner / retriever / executor / critic
 - Add channels like telegram, slack, whatsapp, ms-teams, ntfy(https://ntfy.sh/ , https://codeberg.org/nwithan8/ntfy-dotnet) etc
 - Agent Skills 
 	- -- https://agentskills.io/home (https://learn.microsoft.com/en-us/agent-framework/agents/skills?pivots=programming-language-csharp)

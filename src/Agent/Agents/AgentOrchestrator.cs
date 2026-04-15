@@ -278,8 +278,8 @@ public sealed class AgentOrchestrator : IHostedService
 
             // ── Upgrade runtime executor (enables sub-agent model overrides) ──
             _agentRuntime.SetExecutor(new FoxAgentExecutor(
-                defaultAgent:  agent,
-                agentFactory:  client => BuildAgentWithClient(_systemPrompt, client),
+                defaultClient: _chatClient,
+                agentFactory:  client => BuildAgentWithClient(_systemPrompt!, client),
                 modelResolver: model  => LLMFactory.CreateWithModelOverride(_configuration, model),
                 logger:        _loggerFactory.CreateLogger<FoxAgentExecutor>()));
 
