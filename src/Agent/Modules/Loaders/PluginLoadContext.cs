@@ -15,7 +15,11 @@ public class PluginLoadContext : AssemblyLoadContext
 
     protected override Assembly Load(AssemblyName assemblyName)
     {
-        if (assemblyName.Name == "AgentFox.Plugins")
+        // Share host contracts and common framework libraries rather than loading duplicates
+        if (assemblyName.Name == "AgentFox.Plugins"
+            || assemblyName.Name.StartsWith("Microsoft.Extensions.", StringComparison.Ordinal)
+            || assemblyName.Name == "Newtonsoft.Json"
+            || assemblyName.Name.StartsWith("Polly", StringComparison.Ordinal))
         {
             return null; // fallback to Default context
         }

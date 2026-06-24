@@ -4,10 +4,14 @@
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <OutputPath>D:\RnD\CSharpClaw\src\Agent\bin\Debug\net8.0\plugins\</OutputPath>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AppendConfigurationToOutputPath>false</AppendConfigurationToOutputPath>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="PuppeteerSharp" Version="24.40.0" />
+    <PackageReference Include="PuppeteerSharp" Version="25.1.2" />
     <PackageReference Include="Microsoft.Extensions.AI.Abstractions" Version="10.4.1" />
   </ItemGroup>
 

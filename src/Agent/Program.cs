@@ -296,7 +296,8 @@ class Program
         // ── Load modules ──────────────────────────────────────────────────────
         var enabledModules = configuration["Modules"]?.Split(',') ?? new[] { "cli", "web" };
         bool requiresWeb   = enabledModules.Contains("api") || enabledModules.Contains("web");
-        var modules        = LoadPluginsAndModules(builder);
+        var pluginDiscovery = LoadPluginsAndModules(builder);
+        var modules         = pluginDiscovery.Modules;
 
         // Bind the HTTP listener to Services.Port (default 8080) when the web layer is active.
         // Precedence (highest → lowest): --urls CLI arg  >  ASPNETCORE_URLS env  >  UseUrls()  >  applicationUrl in launchSettings.json
@@ -308,8 +309,24 @@ class Program
         // Expose module list for CliWorker plugin notification
         builder.Services.AddSingleton<IEnumerable<IAppModule>>(modules);
 
-        foreach (var module in modules.Where(m => enabledModules.Contains(m.Name)))
+        var enabledModulesSet = enabledModules.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var enabledModuleAssemblies = new HashSet<Assembly>();
+
+        foreach (var module in modules.Where(m => enabledModulesSet.Contains(m.Name)))
+        {
             module.RegisterServices(builder.Services, configuration);
+            enabledModuleAssemblies.Add(module.GetType().Assembly);
+        }
+
+        foreach (var toolType in pluginDiscovery.ToolTypes.Where(t => enabledModuleAssemblies.Contains(t.Assembly)))
+        {
+            builder.Services.AddSingleton(typeof(ITool), toolType);
+        }
+
+        foreach (var providerType in pluginDiscovery.ChannelProviderTypes.Where(t => enabledModuleAssemblies.Contains(t.Assembly)))
+        {
+            builder.Services.AddSingleton(typeof(IChannelProvider), providerType);
+        }
 
         // ── Build and configure the web application ───────────────────────────
         var app = builder.Build();
@@ -622,7 +639,12 @@ class Program
     // Plugin / module loader
     // ─────────────────────────────────────────────────────────────────────────
 
-    private static List<IAppModule> LoadPluginsAndModules(WebApplicationBuilder builder)
+    private sealed record PluginDiscovery(
+        List<IAppModule> Modules,
+        List<Type> ToolTypes,
+        List<Type> ChannelProviderTypes);
+
+    private static PluginDiscovery LoadPluginsAndModules(WebApplicationBuilder builder)
     {
         var pluginFolder = Path.Combine(AppContext.BaseDirectory, "plugins");
         Directory.CreateDirectory(pluginFolder);
@@ -633,7 +655,7 @@ class Program
         var tempProvider = tempServices.BuildServiceProvider();
 
         var pluginLoader = new PluginLoader(tempProvider);
-        var toolLoader = new ToolLoader(tempProvider);
+        var toolLoader = new ToolLoader();
         var channelProviderLoader = new ChannelProviderLoader();
 
         var pluginModules = pluginLoader.LoadModules(pluginFolder);
@@ -641,19 +663,9 @@ class Program
         var allModules = ModuleLoader.LoadModules();
         allModules.AddRange(pluginModules);
 
-        var pluginTools = toolLoader.LoadTools(pluginFolder);
+        var pluginToolTypes = toolLoader.LoadTools(pluginFolder);
+        var providerTypes = channelProviderLoader.LoadProviderTypes(pluginFolder);
 
-        // Register tools
-        foreach (var tool in pluginTools)
-        {
-            builder.Services.AddSingleton(typeof(ITool), tool);
-        }
-
-        foreach (var providerType in channelProviderLoader.LoadProviderTypes(pluginFolder))
-        {
-            builder.Services.AddSingleton(typeof(IChannelProvider), providerType);
-        }
-
-        return allModules;
+        return new PluginDiscovery(allModules, pluginToolTypes, providerTypes);
     }
 }
