@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -61,47 +62,163 @@ public sealed class AhkBroker : IAsyncDisposable
 
     // ── Initialization ────────────────────────────────────────────────────────
 
-    public async Task InitializeAsync(CancellationToken ct = default)
+    /// <summary>
+    /// Ensures a live browser session, taking the gate. Pass <paramref name="forceRestart"/> to tear
+    /// down and relaunch even if one already appears healthy.
+    /// </summary>
+    public async Task InitializeAsync(bool forceRestart = false, CancellationToken ct = default)
     {
-        if (_initialized) return;
-
         await _gate.WaitAsync(ct);
         try
         {
-            if (_initialized) return; // double-checked under the gate
-
-            var cfg = _config.Value;
-
-            // Chrome resolves a relative UserDataDir against its OWN working directory (the
-            // chrome.exe location), not ours — which it cannot write to, hence "cannot read and
-            // write to its data directory: session_ahk". Always hand Chrome an absolute path.
-            var sessionDir = ResolvePath(cfg.SessionDir);
-            Directory.CreateDirectory(sessionDir);
-            Directory.CreateDirectory(ResolvePath(cfg.LogDir));
-
-            var executablePath = await ResolveBrowserPathAsync(cfg, ct);
-
-            var launchOptions = new LaunchOptions
-            {
-                Headless       = cfg.Headless,
-                ExecutablePath = string.IsNullOrWhiteSpace(executablePath) ? null : executablePath,
-                UserDataDir    = sessionDir,
-                Args           = ["--no-sandbox", "--disable-setuid-sandbox"]
-            };
-
-            _browser = await Puppeteer.LaunchAsync(launchOptions);
-
-            var pages = await _browser.PagesAsync();
-            _page = pages.Length > 0 ? pages[0] : await _browser.NewPageAsync();
-
-            _initialized = true;
-            _logger.LogInformation(
-                "[AhkBroker] Browser session ready. Headless={Headless} Profile={Dir}",
-                cfg.Headless, cfg.SessionDir);
+            await EnsureBrowserAsync(forceRestart, ct);
         }
         finally
         {
             _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// (Re)launches the browser if needed. ASSUMES the caller holds <see cref="_gate"/> — it must
+    /// never take the gate itself (it is also called from the order path which already holds it).
+    /// Any stray browser this broker left running on a previous run is killed first, and stale
+    /// profile lock files are removed, so "session already running / profile in use" can never
+    /// silently block an order.
+    /// </summary>
+    private async Task EnsureBrowserAsync(bool forceRestart, CancellationToken ct = default)
+    {
+        if (!forceRestart && IsHealthy()) return;
+
+        var cfg        = _config.Value;
+        var sessionDir = ResolvePath(cfg.SessionDir);
+        Directory.CreateDirectory(sessionDir);
+        Directory.CreateDirectory(ResolvePath(cfg.LogDir));
+
+        await TeardownAsync();            // close/kill our own browser if one is half-alive
+        KillPreviousBrowser(sessionDir); // kill a Chrome WE launched on a prior run that outlived us
+        CleanProfileLocks(sessionDir);   // remove stale Singleton*/lockfile entries
+
+        var executablePath = await ResolveBrowserPathAsync(cfg, ct);
+
+        var launchOptions = new LaunchOptions
+        {
+            Headless       = cfg.Headless,
+            ExecutablePath = string.IsNullOrWhiteSpace(executablePath) ? null : executablePath,
+            UserDataDir    = sessionDir,
+            Args           = ["--no-sandbox", "--disable-setuid-sandbox"]
+        };
+
+        _browser = await LaunchWithRetryAsync(launchOptions, sessionDir);
+
+        var pages = await _browser.PagesAsync();
+        _page = pages.Length > 0 ? pages[0] : await _browser.NewPageAsync();
+
+        WritePidFile(sessionDir, _browser.Process?.Id);
+        _initialized = true;
+        _logger.LogInformation(
+            "[AhkBroker] Browser session ready. Headless={Headless} Profile={Dir}",
+            cfg.Headless, sessionDir);
+    }
+
+    private bool IsHealthy() =>
+        _initialized && _browser is { IsConnected: true } && _page is { IsClosed: false };
+
+    /// <summary>Launches Chromium; on failure (often a stale profile lock) cleans locks and retries once.</summary>
+    private async Task<IBrowser> LaunchWithRetryAsync(LaunchOptions options, string sessionDir)
+    {
+        try
+        {
+            return await Puppeteer.LaunchAsync(options);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[AhkBroker] Browser launch failed — cleaning profile locks and retrying once.");
+            KillPreviousBrowser(sessionDir);
+            CleanProfileLocks(sessionDir);
+            await Task.Delay(500);
+            return await Puppeteer.LaunchAsync(options);
+        }
+    }
+
+    // ── Browser lifecycle / process control ────────────────────────────────────
+
+    private static string PidFilePath(string sessionDir) => Path.Combine(sessionDir, ".broker_chrome.pid");
+
+    private static void WritePidFile(string sessionDir, int? pid)
+    {
+        if (pid is null) return;
+        try { File.WriteAllText(PidFilePath(sessionDir), pid.Value.ToString()); } catch { /* best effort */ }
+    }
+
+    /// <summary>
+    /// Tears down the browser this broker currently owns and guarantees the OS process is gone so it
+    /// cannot keep holding the profile lock.
+    /// </summary>
+    private async Task TeardownAsync()
+    {
+        _initialized = false;
+        _page = null;
+
+        var browser = _browser;
+        _browser = null;
+        if (browser is null) return;
+
+        var process = browser.Process;
+        try { await browser.CloseAsync(); } catch { /* best effort */ }
+        try { browser.Dispose(); }          catch { /* best effort */ }
+        try { if (process is { HasExited: false }) process.Kill(entireProcessTree: true); }
+        catch { /* already gone */ }
+    }
+
+    /// <summary>
+    /// Kills a Chrome instance this broker launched on a previous run (tracked by PID file) that is
+    /// still alive and holding the profile. Deliberately targeted by recorded PID + process name so a
+    /// user's own Chrome is never touched.
+    /// </summary>
+    private void KillPreviousBrowser(string sessionDir)
+    {
+        var pidFile = PidFilePath(sessionDir);
+        try
+        {
+            if (!File.Exists(pidFile)) return;
+
+            if (int.TryParse(File.ReadAllText(pidFile).Trim(), out var pid))
+            {
+                try
+                {
+                    var p = Process.GetProcessById(pid);
+                    if (p.ProcessName.Contains("chrome", StringComparison.OrdinalIgnoreCase))
+                    {
+                        p.Kill(entireProcessTree: true);
+                        _logger.LogWarning(
+                            "[AhkBroker] Killed leftover browser PID {Pid} from a previous run before relaunch.", pid);
+                    }
+                }
+                catch (ArgumentException) { /* PID no longer running */ }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[AhkBroker] Could not check/kill the previous browser process.");
+        }
+        finally
+        {
+            try { File.Delete(pidFile); } catch { /* best effort */ }
+        }
+    }
+
+    /// <summary>Removes stale single-instance lock files a crashed Chrome leaves behind in the profile.</summary>
+    private static void CleanProfileLocks(string sessionDir)
+    {
+        foreach (var name in new[] { "SingletonLock", "SingletonCookie", "SingletonSocket", "lockfile" })
+        {
+            try
+            {
+                var path = Path.Combine(sessionDir, name);
+                if (File.Exists(path)) File.Delete(path);
+            }
+            catch { /* best effort — a live lock can't be deleted, but the kill above handles that */ }
         }
     }
 
@@ -140,22 +257,13 @@ public sealed class AhkBroker : IAsyncDisposable
 
     public async Task<OrderResult> PlaceOrderAsync(TradingSignal signal)
     {
-        // Ensure the browser is up before placing the order. InitializeAsync is idempotent and
-        // self-gated, so this is a no-op once initialized. Calling it here (BEFORE acquiring _gate,
-        // which is non-reentrant) means an order never depends on the fire-and-forget warm-up in
-        // OnAgentReadyAsync having finished, and a genuine init failure surfaces its real cause
-        // instead of a misleading "not initialized".
-        await InitializeAsync();
-
         await _gate.WaitAsync();
         try
         {
-            if (!_initialized || _page is null)
-                throw new InvalidOperationException(
-                    "AhkBroker initialization did not complete (browser unavailable).");
-
-            if (!await IsLoggedInAsync())
-                await LoginAsync();
+            // Readiness — launch + login — is safe to retry, so a dead/locked/stray browser is
+            // restarted rather than failing the order. The submit below runs EXACTLY ONCE and is
+            // never auto-retried, to avoid double execution if a browser error happens after submit.
+            await PrepareSessionWithRetryAsync();
 
             return signal.Action.ToUpperInvariant() switch
             {
@@ -174,14 +282,44 @@ public sealed class AhkBroker : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Brings the session to a logged-in, order-ready state. ASSUMES the gate is held. On any
+    /// browser/infra failure it forces a full session restart (kill stray browser, relaunch,
+    /// re-login) and retries once, so a controllable failure does not cause a missed order.
+    /// </summary>
+    private async Task PrepareSessionWithRetryAsync()
+    {
+        const int maxAttempts = 2;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await EnsureBrowserAsync(forceRestart: attempt > 1);
+
+                if (!IsHealthy())
+                    throw new InvalidOperationException("Browser unavailable after launch.");
+
+                if (!await IsLoggedInAsync())
+                    await LoginAsync();
+
+                return; // ready
+            }
+            catch (Exception ex) when (attempt < maxAttempts && ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex,
+                    "[AhkBroker] Session not ready (attempt {Attempt}/{Max}) — restarting browser and retrying.",
+                    attempt, maxAttempts);
+            }
+        }
+    }
+
     // ── Login ─────────────────────────────────────────────────────────────────
 
     private async Task<bool> IsLoggedInAsync()
     {
         try
         {
-            return await _page!.EvaluateFunctionAsync<bool>(
-                "() => document.querySelector('#buysymbol') !== null");
+            return await _page!.QuerySelectorAsync(_config.Value.LoggedInSelector) is not null;
         }
         catch { return false; }
     }
@@ -192,14 +330,228 @@ public sealed class AhkBroker : IAsyncDisposable
         _logger.LogInformation("[AhkBroker] Logging in to {Url}", cfg.PortalUrl);
 
         await _page!.GoToAsync(cfg.PortalUrl, WaitUntilNavigation.Networkidle0);
-        await FillFieldAsync("#ps_userid",   cfg.Username);
-        await FillFieldAsync("#ps_password", cfg.Password);
-        await _page.ClickAsync("input[type=submit]");
+        _logger.LogInformation("[AhkBroker] Login page loaded: {Url}", _page.Url);
 
-        await _page.WaitForSelectorAsync("#buysymbol",
-            new WaitForSelectorOptions { Timeout = 15_000 });
+        // 1. Username — discovered robustly (a wrong/redirected PortalUrl shows up here as "not found").
+        var userHandle = await FindUsernameFieldAsync(cfg);
+        if (userHandle is null)
+        {
+            await DumpLoginFormAsync("no_username");
+            throw new InvalidOperationException(
+                $"Username field not found on '{_page.Url}'. If that is not the AHK login page, fix " +
+                "Ahk.PortalUrl; otherwise set Ahk.UsernameSelector (see the dumped login_no_username.html).");
+        }
+        await TypeIntoAsync(userHandle, cfg.Username);
+
+        // 2. Positional password — read which character positions the portal is asking for THIS login.
+        await FillPositionalPasswordAsync(cfg);
+
+        // 3. Submit.
+        await ClickLoginButtonAsync(cfg);
+
+        // 4. Verify, surfacing any on-page error instead of a blind timeout.
+        await VerifyLoggedInAsync(cfg);
 
         _logger.LogInformation("[AhkBroker] Login successful.");
+    }
+
+    /// <summary>
+    /// Fills the AHK positional-password grid. The portal asks for a changing subset of characters
+    /// ("enter 2nd,3rd,5th,6th character of your password"); we parse that instruction, pair each
+    /// requested position with the corresponding enabled box (left-to-right), and type the matching
+    /// character from the configured full password.
+    /// </summary>
+    private async Task FillPositionalPasswordAsync(AhkConfig cfg)
+    {
+        var password = cfg.Password ?? "";
+
+        var pageText    = await _page!.EvaluateFunctionAsync<string>("() => document.body?.innerText || ''");
+        var positions   = ParsePasswordPositions(pageText);
+
+        // Editable single-character boxes, in DOM (left-to-right) order.
+        var allBoxes = await _page.QuerySelectorAllAsync(cfg.PasswordBoxSelector);
+        var editable = new List<IElementHandle>();
+        foreach (var box in allBoxes)
+        {
+            var usable = await box.EvaluateFunctionAsync<bool>(
+                "e => !e.disabled && !e.readOnly && e.offsetParent !== null");
+            if (usable) editable.Add(box);
+        }
+
+        // Fallback: not a positional grid (single full-password field).
+        if (positions.Count == 0 && editable.Count <= 1)
+        {
+            var pwd = editable.Count == 1 ? editable[0] : await FindFullPasswordFieldAsync();
+            if (pwd is null)
+            {
+                await DumpLoginFormAsync("no_password");
+                throw new InvalidOperationException("Password field not found. See dumped login_no_password.html.");
+            }
+            await TypeIntoAsync(pwd, password);
+            return;
+        }
+
+        if (positions.Count == 0)
+        {
+            await DumpLoginFormAsync("no_password_instruction");
+            throw new InvalidOperationException(
+                $"Found {editable.Count} password boxes but could not read which character positions to enter. " +
+                "See dumped login_no_password_instruction.html.");
+        }
+
+        if (editable.Count != positions.Count)
+        {
+            await DumpLoginFormAsync("password_mismatch");
+            throw new InvalidOperationException(
+                $"Positional-password mismatch: portal asked for {positions.Count} position(s) " +
+                $"[{string.Join(",", positions)}] but found {editable.Count} editable box(es). " +
+                "Adjust Ahk.PasswordBoxSelector (see login_password_mismatch.html).");
+        }
+
+        for (var k = 0; k < positions.Count; k++)
+        {
+            var pos = positions[k];
+            if (pos < 1 || pos > password.Length)
+                throw new InvalidOperationException(
+                    $"Portal requested character #{pos} but the configured password has only {password.Length} character(s).");
+
+            await TypeIntoAsync(editable[k], password[pos - 1].ToString());
+        }
+
+        _logger.LogInformation(
+            "[AhkBroker] Entered {Count} positional password character(s) at positions [{Positions}].",
+            positions.Count, string.Join(",", positions));
+    }
+
+    /// <summary>
+    /// Extracts the requested 1-based character positions from an instruction such as
+    /// "Please enter 2nd,3rd,5th,6th character of your password". Order is preserved.
+    /// </summary>
+    private static List<int> ParsePasswordPositions(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return new();
+
+        // Scope to the phrase between "enter" and "character" so we don't pick up unrelated numbers.
+        var scope = Regex.Match(text, @"enter(.*?)character",
+            RegexOptions.IgnoreCase | RegexOptions.Singleline);
+        var window = scope.Success ? scope.Groups[1].Value : text;
+
+        var seen = new HashSet<int>();
+        var result = new List<int>();
+        foreach (Match m in Regex.Matches(window, @"\d+"))
+        {
+            if (int.TryParse(m.Value, out var n) && n is >= 1 and <= 64 && seen.Add(n))
+                result.Add(n);
+        }
+        return result;
+    }
+
+    private async Task<IElementHandle?> FindUsernameFieldAsync(AhkConfig cfg)
+    {
+        if (!string.IsNullOrWhiteSpace(cfg.UsernameSelector))
+            return await _page!.QuerySelectorAsync(cfg.UsernameSelector);
+
+        foreach (var selector in new[]
+                 {
+                     "#ps_userid",
+                     "input[name*='user' i]",
+                     "input[id*='user' i]",
+                     "input[placeholder*='user' i]",
+                     "input[type='text']:not([maxlength='1'])",
+                     "input:not([type]):not([maxlength='1'])"
+                 })
+        {
+            var handle = await _page!.QuerySelectorAsync(selector);
+            if (handle is not null) return handle;
+        }
+        return null;
+    }
+
+    private async Task<IElementHandle?> FindFullPasswordFieldAsync()
+    {
+        foreach (var selector in new[] { "#ps_password", "input[type='password']", "input[name*='pass' i]" })
+        {
+            var handle = await _page!.QuerySelectorAsync(selector);
+            if (handle is not null) return handle;
+        }
+        return null;
+    }
+
+    private async Task ClickLoginButtonAsync(AhkConfig cfg)
+    {
+        if (!string.IsNullOrWhiteSpace(cfg.LoginButtonSelector))
+        {
+            await _page!.ClickAsync(cfg.LoginButtonSelector);
+            return;
+        }
+
+        var clicked = await _page!.EvaluateFunctionAsync<bool>(@"() => {
+            const els = Array.from(document.querySelectorAll(
+                ""button, input[type='submit'], input[type='button'], a[role='button']""));
+            const el = els.find(e => /log\s*in|sign\s*in/i.test((e.textContent || '') + ' ' + (e.value || '')));
+            if (el) { el.click(); return true; }
+            // Fall back to a lone submit button if no text matched.
+            const submit = document.querySelector(""button[type='submit'], input[type='submit']"");
+            if (submit) { submit.click(); return true; }
+            return false;
+        }");
+
+        if (!clicked)
+        {
+            await DumpLoginFormAsync("no_login_button");
+            throw new InvalidOperationException("Login button not found. See dumped login_no_login_button.html.");
+        }
+    }
+
+    private async Task VerifyLoggedInAsync(AhkConfig cfg)
+    {
+        try
+        {
+            await _page!.WaitForSelectorAsync(cfg.LoggedInSelector,
+                new WaitForSelectorOptions { Timeout = 15_000 });
+        }
+        catch (Exception)
+        {
+            var text  = await _page!.EvaluateFunctionAsync<string>("() => document.body?.innerText || ''");
+            var lower = text.ToLowerInvariant();
+            var err   = _errorMarkers.FirstOrDefault(m => lower.Contains(m));
+            await DumpLoginFormAsync("login_unverified");
+
+            throw new InvalidOperationException(err is not null
+                ? $"Login appears to have failed: {ExtractLine(text, err)}"
+                : $"Login could not be confirmed — selector '{cfg.LoggedInSelector}' not found on '{_page.Url}'. " +
+                  "Set Ahk.LoggedInSelector to an element unique to the post-login page (see login_login_unverified.html).");
+        }
+    }
+
+    /// <summary>Focus, clear, and type — using real key events so the portal's input handlers fire.</summary>
+    private async Task TypeIntoAsync(IElementHandle element, string text)
+    {
+        await element.ClickAsync();
+        await _page!.Keyboard.DownAsync("Control");
+        await _page.Keyboard.PressAsync("KeyA");
+        await _page.Keyboard.UpAsync("Control");
+        await _page.Keyboard.PressAsync("Delete");
+        await element.TypeAsync(text);
+    }
+
+    /// <summary>Saves a screenshot and the login form HTML to LogDir to make selector debugging concrete.</summary>
+    private async Task DumpLoginFormAsync(string tag)
+    {
+        try
+        {
+            await ScreenshotAsync($"login_{tag}");
+            var html = await _page!.EvaluateFunctionAsync<string>(
+                "() => { const f = document.querySelector('form'); return f ? f.outerHTML : document.body.innerHTML; }");
+            var path = Path.Combine(ResolvePath(_config.Value.LogDir),
+                $"login_{tag}_{DateTime.UtcNow:yyyyMMdd_HHmmss}.html");
+            await File.WriteAllTextAsync(path, html);
+            _logger.LogWarning("[AhkBroker] Dumped login form HTML to {Path}", path);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[AhkBroker] Could not dump login form.");
+        }
     }
 
     // ── BUY ───────────────────────────────────────────────────────────────────
@@ -432,13 +784,9 @@ public sealed class AhkBroker : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (_browser is not null)
-        {
-            try { await _browser.CloseAsync(); }
-            catch { /* best effort */ }
-            _browser.Dispose();
-            _browser = null;
-        }
+        // TeardownAsync also kills the OS process tree, so we don't leave a Chrome holding the
+        // profile lock after shutdown. The PID file is cleared on the next KillPreviousBrowser pass.
+        await TeardownAsync();
         _gate.Dispose();
     }
 }

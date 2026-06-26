@@ -30,4 +30,23 @@ public class AhkConfig
 
     /// <summary>How long to wait for the portal to show an order confirmation/error after submit.</summary>
     public int OrderConfirmTimeoutMs { get; set; } = 8_000;
+
+    // ── Login form selectors ───────────────────────────────────────────────────
+    // Leave empty to use the built-in heuristics. Override only if the heuristics pick the wrong
+    // element — inspect the dumped login_*.html (written to LogDir on a login failure) to find IDs.
+
+    /// <summary>CSS selector for the username input. Empty → heuristic discovery.</summary>
+    public string UsernameSelector { get; set; } = "";
+
+    /// <summary>
+    /// CSS selector for the single-character positional password boxes. The default matches the
+    /// AHK "Web Trade Cast" character grid (maxlength=1 inputs). Only the enabled boxes are filled.
+    /// </summary>
+    public string PasswordBoxSelector { get; set; } = "input[maxlength='1']";
+
+    /// <summary>CSS selector for the Login button. Empty → heuristic (text/value matching "login").</summary>
+    public string LoginButtonSelector { get; set; } = "";
+
+    /// <summary>Selector that exists only once logged in (used to confirm a successful login).</summary>
+    public string LoggedInSelector { get; set; } = "#buysymbol";
 }
