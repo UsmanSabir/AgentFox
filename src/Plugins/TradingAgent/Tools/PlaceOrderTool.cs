@@ -172,14 +172,48 @@ public sealed class PlaceOrderTool : BaseTool
             RawMessage = rawMessage
         };
 
-        OrderResult result;
+        // ── Pair a take-profit SELL with the BUY ("buy at X, sell at Y") ──────
+        // Only when the feature is on, this is a BUY, and a positive target was given. The exit order
+        // is value-capped like any other: if it would exceed the cap we skip pairing it (and say why)
+        // rather than firing an oversized exit, but the BUY still proceeds.
+        TradingSignal? sellSignal = null;
+        object? sellSkipped       = null;
+        if (opts.AutoPlaceTargetSell && action == "BUY" && target is > 0)
+        {
+            var sellValue = quantity * target.Value;
+            if (sellValue > ahk.MaxOrderValuePkr)
+            {
+                _logger.LogWarning(
+                    "[PlaceOrder] Target SELL value {Value:N0} PKR exceeds cap {Cap:N0} PKR — not paired.",
+                    sellValue, ahk.MaxOrderValuePkr);
+                sellSkipped = new
+                {
+                    placed = false,
+                    reason = $"Target sell value {sellValue:N0} PKR exceeds limit of {ahk.MaxOrderValuePkr:N0} PKR."
+                };
+            }
+            else
+            {
+                sellSignal = new TradingSignal
+                {
+                    Action     = "SELL",
+                    Symbol     = symbol,
+                    EntryPrice = target,
+                    Quantity   = quantity,
+                    OrderType  = "LIMIT",
+                    Confidence = "HIGH"
+                };
+            }
+        }
+
+        // Place the BUY and (when paired) the SELL in ONE browser session. stopOnFailure means the
+        // SELL is not attempted if the BUY fails — never a naked exit order.
+        var signals = sellSignal is null ? new[] { signal } : new[] { signal, sellSignal };
+
+        IReadOnlyList<OrderResult> results;
         try
         {
-            result = await _broker.PlaceOrderAsync(signal);
-
-            _logger.LogInformation(
-                "[PlaceOrder] {Action} {Symbol} x{Qty} @ {Price} — Success={Success}",
-                action, symbol, quantity, price, result.Success);
+            results = await _broker.PlaceOrdersAsync(signals, stopOnFailure: true);
         }
         catch (Exception ex)
         {
@@ -187,13 +221,41 @@ public sealed class PlaceOrderTool : BaseTool
             return ToolResult.Fail($"Broker error: {ex.Message}");
         }
 
-        // ── Follow-up take-profit SELL ────────────────────────────────────────
-        // A "buy at X, sell at Y" tip is a BUY now plus a SELL limit at the target. Only attempt the
-        // sell when the BUY actually succeeded, the action is BUY, a target was given, and the feature
-        // is enabled — so a failed/blocked buy never leaves a naked sell order.
-        object? followUpSell = null;
-        if (opts.AutoPlaceTargetSell && result.Success && action == "BUY" && target is > 0)
-            followUpSell = await PlaceTargetSellAsync(symbol, quantity, target.Value, ahk);
+        var result = results[0];
+        _logger.LogInformation(
+            "[PlaceOrder] {Action} {Symbol} x{Qty} @ {Price} — Success={Success}",
+            action, symbol, quantity, price, result.Success);
+
+        // Report on the paired sell: its outcome if it ran, why it was skipped (cap), or that the buy
+        // failed so it was not attempted.
+        object? followUpSell = sellSkipped;
+        if (sellSignal is not null)
+        {
+            if (results.Count > 1)
+            {
+                var sell = results[1];
+                _logger.LogInformation(
+                    "[PlaceOrder] Follow-up SELL {Symbol} x{Qty} @ {Price} — Success={Success}",
+                    symbol, quantity, target, sell.Success);
+
+                followUpSell = new
+                {
+                    placed            = true,
+                    success           = sell.Success,
+                    order_id          = sell.OrderId,
+                    action            = sell.Action,
+                    symbol            = sell.Symbol,
+                    price             = target,
+                    message           = sell.Message,
+                    screenshot_before = sell.ScreenshotBefore,
+                    screenshot_after  = sell.ScreenshotAfter
+                };
+            }
+            else
+            {
+                followUpSell = new { placed = false, reason = "Buy order did not succeed; take-profit sell skipped." };
+            }
+        }
 
         return ToolResult.Ok(JsonSerializer.Serialize(new
         {
@@ -206,65 +268,6 @@ public sealed class PlaceOrderTool : BaseTool
             screenshot_after  = result.ScreenshotAfter,
             follow_up_sell    = followUpSell
         }));
-    }
-
-    /// <summary>
-    /// Places the take-profit SELL limit order that pairs with a just-executed BUY. Returns a small
-    /// object describing the outcome (or why it was not placed) for inclusion in the tool result. The
-    /// exit order is value-capped like any other; if it exceeds the cap it is reported, not placed, so
-    /// the operator can size it manually rather than firing an oversized order.
-    /// </summary>
-    private async Task<object> PlaceTargetSellAsync(string symbol, int quantity, decimal target, AhkConfig ahk)
-    {
-        var sellValue = quantity * target;
-        if (sellValue > ahk.MaxOrderValuePkr)
-        {
-            _logger.LogWarning(
-                "[PlaceOrder] Follow-up SELL value {Value:N0} PKR exceeds cap {Cap:N0} PKR — not placed.",
-                sellValue, ahk.MaxOrderValuePkr);
-            return new
-            {
-                placed = false,
-                reason = $"Target sell value {sellValue:N0} PKR exceeds limit of {ahk.MaxOrderValuePkr:N0} PKR."
-            };
-        }
-
-        var sellSignal = new TradingSignal
-        {
-            Action     = "SELL",
-            Symbol     = symbol,
-            EntryPrice = target,
-            Quantity   = quantity,
-            OrderType  = "LIMIT",
-            Confidence = "HIGH"
-        };
-
-        try
-        {
-            var sell = await _broker.PlaceOrderAsync(sellSignal);
-
-            _logger.LogInformation(
-                "[PlaceOrder] Follow-up SELL {Symbol} x{Qty} @ {Price} — Success={Success}",
-                symbol, quantity, target, sell.Success);
-
-            return new
-            {
-                placed            = true,
-                success           = sell.Success,
-                order_id          = sell.OrderId,
-                action            = sell.Action,
-                symbol            = sell.Symbol,
-                price             = target,
-                message           = sell.Message,
-                screenshot_before = sell.ScreenshotBefore,
-                screenshot_after  = sell.ScreenshotAfter
-            };
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "[PlaceOrder] Follow-up SELL failed for {Symbol}.", symbol);
-            return new { placed = false, reason = $"Broker error placing target sell: {ex.Message}" };
-        }
     }
 
     private static bool MeetsConfidence(string actual, string minimum) =>
