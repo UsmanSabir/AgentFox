@@ -20,20 +20,13 @@ public class EmbeddingF32Test
 
         // Check it's the same length
         Assert.Equal(floats.Values.Length, bytes.Values.Length);
-        Assert.Equal(bytes.Buffer.Length, bytes.Values.Length + 4); // 1 byte per value, plus 4 for magnitude
+        Assert.Equal(bytes.Buffer.Length, bytes.Values.Length * sizeof(float)); // 4 bytes per float value
         Assert.Equal(bytes.Buffer.Length, EmbeddingF32.GetBufferByteLength(floats.Values.Length));
 
-        // Work out how we expect the floats to be scaled
-        var expectedScaleFactor = sbyte.MaxValue / Math.Abs(TensorPrimitives.MaxMagnitude(floats.Values.Span));
-        var scaledFloats = new float[floats.Values.Length];
-        TensorPrimitives.Multiply(floats.Values.Span, expectedScaleFactor, scaledFloats);
-
-        // Check the bytes match this. We'll allow up to 1 off due to rounding differences.
+        // Check the buffer byte content represents the same float values
         for (var i = 0; i < floats.Values.Length; i++)
         {
-            var actualByte = bytes.Values.Span[i];
-            var expectedByte = (sbyte)scaledFloats[i];
-            Assert.InRange(actualByte, expectedByte - 1, expectedByte + 1);
+            Assert.Equal(floats.Values.Span[i], bytes.Values.Span[i]);
         }
     }
 
