@@ -5,7 +5,10 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
-    <OutputPath>D:\RnD\CSharpClaw\src\Agent\bin\Debug\net8.0\plugins\</OutputPath>
+    <!-- Deploy the plugin (and its dependencies, via CopyLocalLockFileAssemblies) directly into
+         the host's plugins/ folder, which PluginLoader scans at AppContext.BaseDirectory/plugins.
+         Path is relative to this project and tracks the host's Configuration/TFM. -->
+    <OutputPath>..\..\Agent\bin\$(Configuration)\$(TargetFramework)\plugins\</OutputPath>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <AppendConfigurationToOutputPath>false</AppendConfigurationToOutputPath>
   </PropertyGroup>
