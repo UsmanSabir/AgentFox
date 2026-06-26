@@ -89,15 +89,19 @@ public sealed class PlaceOrderTool : BaseTool
         if (string.IsNullOrEmpty(action) || string.IsNullOrEmpty(symbol))
             return ToolResult.Fail("'action' and 'symbol' are required.");
 
-        _ = int.TryParse(arguments.GetValueOrDefault("quantity")?.ToString(), out var quantity);
-        if (quantity <= 0) quantity = ahk.DefaultQty;
+        // Reject a malformed quantity rather than silently substituting DefaultQty — a bad signal
+        // should not turn into a real order at the default size.
+        if (!int.TryParse(arguments.GetValueOrDefault("quantity")?.ToString(), out var quantity) || quantity <= 0)
+            return ToolResult.Fail($"Invalid 'quantity' — must be a positive integer (got '{arguments.GetValueOrDefault("quantity")}').");
 
         decimal? price = null;
         if (arguments.TryGetValue("price", out var priceRaw) && priceRaw is not null)
         {
             try { price = Convert.ToDecimal(priceRaw); }
-            catch { /* market order if price is unparseable */ }
+            catch { /* treated as a market order below */ }
         }
+
+        var isMarket = orderType == "MARKET" || !price.HasValue;
 
         // ── 2. Confidence gate ────────────────────────────────────────────────
         if (!MeetsConfidence(confidence, opts.MinConfidence))
@@ -110,9 +114,23 @@ public sealed class PlaceOrderTool : BaseTool
         }
 
         // ── 3. Order value cap ────────────────────────────────────────────────
-        if (price.HasValue)
+        // A market order has no known price, so its value cannot be capped. Block it unless the
+        // operator has explicitly opted in via Ahk.AllowMarketOrders — otherwise a single market
+        // order could exceed MaxOrderValuePkr without ever tripping the cap.
+        if (isMarket)
         {
-            var orderValue = quantity * price.Value;
+            if (!ahk.AllowMarketOrders)
+                return ToolResult.Fail(
+                    "Market orders are disabled (Ahk.AllowMarketOrders=false). Provide a limit 'price' " +
+                    "so the order value can be checked against MaxOrderValuePkr.");
+
+            _logger.LogWarning(
+                "[PlaceOrder] MARKET order for {Symbol} x{Qty} — value cap cannot be enforced.",
+                symbol, quantity);
+        }
+        else
+        {
+            var orderValue = quantity * price!.Value;
             if (orderValue > ahk.MaxOrderValuePkr)
             {
                 _logger.LogWarning(
@@ -137,7 +155,9 @@ public sealed class PlaceOrderTool : BaseTool
             Symbol     = symbol,
             EntryPrice = price,
             Quantity   = quantity,
-            OrderType  = orderType,
+            // Normalise so the broker's market-vs-limit decision matches the gate above:
+            // a "LIMIT" with no usable price is executed (and was value-checked) as a market order.
+            OrderType  = isMarket ? "MARKET" : "LIMIT",
             Confidence = confidence,
             RawMessage = rawMessage
         };

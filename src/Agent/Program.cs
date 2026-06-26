@@ -668,8 +668,24 @@ class Program
         // which plugin tools/channels to register would silently drop them all.
         foreach (var dll in Directory.GetFiles(pluginFolder, "*.dll", SearchOption.AllDirectories))
         {
-            var context  = new PluginLoadContext(dll);
-            var assembly = context.LoadFromAssemblyPath(dll);
+            // Skip non-plugin payloads that legitimately live under plugins/ — e.g. a Chromium
+            // browser downloaded by a plugin into plugins/Chrome/... Those native .dll files are
+            // not managed assemblies and have hundreds of entries; loading them is both pointless
+            // and throws BadImageFormatException.
+            if (dll.Contains($"{Path.DirectorySeparatorChar}Chrome{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            Assembly assembly;
+            try
+            {
+                var context = new PluginLoadContext(dll);
+                assembly = context.LoadFromAssemblyPath(dll);
+            }
+            catch (Exception ex) when (ex is BadImageFormatException or FileLoadException)
+            {
+                // Native DLL or otherwise not a loadable managed assembly — skip it.
+                continue;
+            }
 
             Type[] types;
             try
