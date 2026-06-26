@@ -46,8 +46,8 @@ public class ManageChannelTool : BaseTool
         {
             var parts = _channelProviderCatalog.Providers.Select(provider =>
             {
-                var schema = string.Join(", ", provider.GetConfigSchema().Select(field =>
-                    $"{field.Key}{(field.Value.Required ? "*" : "")}"));
+                var schema = string.Join(", ", provider.GetConfigSchema().Select(f =>
+                    $"{f.Key}{(f.Value.Required ? "*" : "")}"));
                 return $"{provider.ChannelType}: {{{schema}}}";
             });
 

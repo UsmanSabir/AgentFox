@@ -36,14 +36,13 @@ public class TavilySearchTool(IConfiguration configuration) : BaseTool
                 Environment.GetEnvironmentVariable("TAVILY_API_KEY") ??
                 _apiKey ?? throw new InvalidOperationException("TAVILY_API_KEY environment variable is not found.");
 
-            using var client = new TavilyClient(_httpClient);
+            using var client = new TavilyClient(httpClient: _httpClient, apiKey: apiKey);
             var depth = configuration["Tavily:SearchDepth"];
             var includeAnswer= configuration.GetValue<bool>("Tavily:IncludeAnswer", true);
             var maxResults= configuration.GetValue<int>("Tavily:MaxResults", 5);
-            var searchDepth = depth?.ToLower().Trim() == "advanced" ? SearchRequestSearchDepth.Advanced : SearchRequestSearchDepth.Basic;
-            var searchRequest = new SearchRequest()
+            var searchDepth = depth?.ToLower().Trim() == "advanced" ? CreateSearchRequestSearchDepth.Advanced : CreateSearchRequestSearchDepth.Basic;
+            var searchRequest = new CreateSearchRequest()
             {
-                ApiKey = apiKey,
                 Query = query,
                 IncludeImages = false,
                 MaxResults = maxResults,
@@ -51,7 +50,7 @@ public class TavilySearchTool(IConfiguration configuration) : BaseTool
                 IncludeAnswer = includeAnswer
             };
 
-            var searchResult = await client.SearchAsync(searchRequest, cts.Token);
+            var searchResult = await client.CreateSearchAsync(searchRequest, cancellationToken: cts.Token);
             var content = JsonSerializer.Serialize(searchResult.Results);
 
             //foreach (var result in searchResult.Results)
