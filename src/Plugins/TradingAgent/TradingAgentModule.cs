@@ -117,6 +117,10 @@ public sealed class TradingAgentModule : IAgentAwareModule
             broker, agentOptions, ahkConfig, dedup,
             loggers.CreateLogger<PlaceOrderTool>()));
 
+        context.RegisterTool(new PlaceOrdersTool(
+            broker, agentOptions, ahkConfig, dedup,
+            loggers.CreateLogger<PlaceOrdersTool>()));
+
         context.RegisterTool(new LogSignalTool(
             ahkConfig,
             loggers.CreateLogger<LogSignalTool>()));
@@ -131,10 +135,15 @@ public sealed class TradingAgentModule : IAgentAwareModule
 
                     ## PSX Trading Agent
 
-                    You are a PSX (Pakistan Stock Exchange) trading assistant with 4 tools:
+                    You are a PSX (Pakistan Stock Exchange) trading assistant with these tools:
                     - parse_signal   : extract a structured signal from a WhatsApp message
                     - check_market   : verify PSX is currently open (Mon–Fri 09:15–15:30 PKT)
-                    - place_order    : execute a trade on the AHK portal (browser automation)
+                    - place_order    : execute ONE trade on the AHK portal (browser automation).
+                                       A BUY with a target also places a take-profit SELL at the target.
+                    - place_orders   : execute SEVERAL trades from one tip in a single browser session.
+                                       Use this when a tip contains more than one order (e.g. two
+                                       buy/sell pairs). Pass an 'orders' array; each BUY with a target
+                                       gets its paired take-profit SELL automatically.
                     - log_signal     : persist every detected signal to disk
 
                     ### Workflow for every incoming message
@@ -143,15 +152,18 @@ public sealed class TradingAgentModule : IAgentAwareModule
                     3. Call check_market()
                     4. Call log_signal(executed=false, execution_reason="pending evaluation")
                     5. If AutoExecute={cfg.AutoExecute} AND market is open AND confidence >= {cfg.MinConfidence}:
-                       a. Call place_order(...) with the extracted fields
+                       a. For a single order, call place_order(...). For a tip with multiple orders,
+                          call place_orders(orders=[...]) ONCE with every order in the array.
                        b. Call log_signal again with executed=true and the outcome
                     6. Reply with a single concise paragraph summarising what was found and done
 
                     ### Rules
                     - Never skip log_signal — record every signal regardless of outcome
-                    - Never call place_order without a prior check_market that returned is_open=true
+                    - Never place an order without a prior check_market that returned is_open=true
+                    - For a buy-and-sell tip, pass the sell price as 'target' on the BUY — do NOT also
+                      add a separate SELL order for the same shares (the target handles it)
                     - If AutoExecute is false, note that in your summary — do not place the order
-                    - HITL: if place_order requires human approval, wait for /approve or /reject
+                    - HITL: if order placement requires human approval, wait for /approve or /reject
                     """;
             });
 

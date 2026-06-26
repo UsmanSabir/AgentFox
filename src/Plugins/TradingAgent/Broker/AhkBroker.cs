@@ -258,50 +258,60 @@ public sealed class AhkBroker : IAsyncDisposable
         (await PlaceOrdersAsync(new[] { signal })).Single();
 
     /// <summary>
-    /// Places one or more orders within a SINGLE browser session: the browser is launched once, the
-    /// session prepared once, every signal submitted in order, and the browser torn down once at the
-    /// end (when CloseBrowserAfterOrder is set). This is what lets a "buy at X, sell at Y" tip place
-    /// both orders without re-launching/re-logging-in between them.
-    ///
-    /// With <paramref name="stopOnFailure"/> (default true) the sequence halts at the first order that
-    /// does not succeed — so a follow-up take-profit SELL is never placed if its BUY failed. The
-    /// returned list holds one <see cref="OrderResult"/> per order actually attempted.
+    /// Places a flat list of orders within a SINGLE browser session. With <paramref name="stopOnFailure"/>
+    /// (default true) the whole list is one dependent sequence that halts at the first failure — so a
+    /// follow-up take-profit SELL is never placed if its BUY failed. With it false each order is
+    /// independent. Returns one <see cref="OrderResult"/> per order actually attempted.
     /// </summary>
     public async Task<IReadOnlyList<OrderResult>> PlaceOrdersAsync(
         IReadOnlyList<TradingSignal> signals, bool stopOnFailure = true)
     {
-        var results = new List<OrderResult>(signals.Count);
+        // Model the flag as grouping: stop-on-failure ⇒ one dependent group; otherwise ⇒ each order
+        // its own independent group. Then flatten the per-group results back to a flat list.
+        var groups = stopOnFailure
+            ? new[] { signals }
+            : signals.Select(s => (IReadOnlyList<TradingSignal>)new[] { s }).ToArray();
+
+        var grouped = await PlaceOrderGroupsAsync(groups);
+        return grouped.SelectMany(g => g).ToList();
+    }
+
+    /// <summary>
+    /// Places independent GROUPS of orders in one browser session: launched once, session prepared
+    /// once, torn down once at the end (when CloseBrowserAfterOrder is set). WITHIN a group orders run
+    /// in sequence and stop at the first failure (a buy→sell pair: the sell is skipped if the buy
+    /// fails). ACROSS groups execution always continues (independent positions). Each submit runs
+    /// EXACTLY ONCE and is never auto-retried. Returns the results for each group, aligned to the input.
+    /// </summary>
+    public async Task<IReadOnlyList<IReadOnlyList<OrderResult>>> PlaceOrderGroupsAsync(
+        IReadOnlyList<IReadOnlyList<TradingSignal>> groups)
+    {
+        var output = new List<IReadOnlyList<OrderResult>>(groups.Count);
 
         await _gate.WaitAsync();
         try
         {
-            // Readiness — launch + login — is safe to retry, so a dead/locked/stray browser is
-            // restarted rather than failing the order. Each submit below runs EXACTLY ONCE and is
-            // never auto-retried, to avoid double execution if a browser error happens after submit.
+            // Readiness — launch + login — is safe to retry, so a dead/locked/stray browser is restarted
+            // rather than failing the batch.
             await PrepareSessionWithRetryAsync();
 
-            foreach (var signal in signals)
+            foreach (var group in groups)
             {
-                var result = signal.Action.ToUpperInvariant() switch
+                var groupResults = new List<OrderResult>(group.Count);
+                foreach (var signal in group)
                 {
-                    "BUY"  => await PlaceBuyAsync(signal),
-                    "SELL" => await PlaceSellAsync(signal),
-                    _      => new OrderResult
-                    {
-                        Success = false,
-                        Message = $"Unsupported action '{signal.Action}'. Only BUY and SELL are supported."
-                    }
-                };
-
-                results.Add(result);
-                if (stopOnFailure && !result.Success) break;
+                    var result = await DispatchOrderAsync(signal);
+                    groupResults.Add(result);
+                    if (!result.Success) break; // dependent within a group
+                }
+                output.Add(groupResults);
             }
 
-            return results;
+            return output;
         }
         finally
         {
-            // Close the browser once the whole sequence is done (on-demand lifecycle). The next call
+            // Close the browser once the whole batch is done (on-demand lifecycle). The next call
             // relaunches and the persisted profile usually keeps us logged in. Disable via
             // CloseBrowserAfterOrder.
             if (_config.Value.CloseBrowserAfterOrder)
@@ -310,6 +320,19 @@ public sealed class AhkBroker : IAsyncDisposable
             _gate.Release();
         }
     }
+
+    /// <summary>Routes a single signal to the BUY/SELL placement. ASSUMES the gate is held and session ready.</summary>
+    private async Task<OrderResult> DispatchOrderAsync(TradingSignal signal) =>
+        signal.Action.ToUpperInvariant() switch
+        {
+            "BUY"  => await PlaceBuyAsync(signal),
+            "SELL" => await PlaceSellAsync(signal),
+            _      => new OrderResult
+            {
+                Success = false,
+                Message = $"Unsupported action '{signal.Action}'. Only BUY and SELL are supported."
+            }
+        };
 
     /// <summary>
     /// Brings the session to a logged-in, order-ready state. ASSUMES the gate is held. On any
