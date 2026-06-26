@@ -254,31 +254,56 @@ public sealed class AhkBroker : IAsyncDisposable
 
     // ── Order placement ───────────────────────────────────────────────────────
 
-    public async Task<OrderResult> PlaceOrderAsync(TradingSignal signal)
+    public async Task<OrderResult> PlaceOrderAsync(TradingSignal signal) =>
+        (await PlaceOrdersAsync(new[] { signal })).Single();
+
+    /// <summary>
+    /// Places one or more orders within a SINGLE browser session: the browser is launched once, the
+    /// session prepared once, every signal submitted in order, and the browser torn down once at the
+    /// end (when CloseBrowserAfterOrder is set). This is what lets a "buy at X, sell at Y" tip place
+    /// both orders without re-launching/re-logging-in between them.
+    ///
+    /// With <paramref name="stopOnFailure"/> (default true) the sequence halts at the first order that
+    /// does not succeed — so a follow-up take-profit SELL is never placed if its BUY failed. The
+    /// returned list holds one <see cref="OrderResult"/> per order actually attempted.
+    /// </summary>
+    public async Task<IReadOnlyList<OrderResult>> PlaceOrdersAsync(
+        IReadOnlyList<TradingSignal> signals, bool stopOnFailure = true)
     {
+        var results = new List<OrderResult>(signals.Count);
+
         await _gate.WaitAsync();
         try
         {
             // Readiness — launch + login — is safe to retry, so a dead/locked/stray browser is
-            // restarted rather than failing the order. The submit below runs EXACTLY ONCE and is
+            // restarted rather than failing the order. Each submit below runs EXACTLY ONCE and is
             // never auto-retried, to avoid double execution if a browser error happens after submit.
             await PrepareSessionWithRetryAsync();
 
-            return signal.Action.ToUpperInvariant() switch
+            foreach (var signal in signals)
             {
-                "BUY"  => await PlaceBuyAsync(signal),
-                "SELL" => await PlaceSellAsync(signal),
-                _      => new OrderResult
+                var result = signal.Action.ToUpperInvariant() switch
                 {
-                    Success = false,
-                    Message = $"Unsupported action '{signal.Action}'. Only BUY and SELL are supported."
-                }
-            };
+                    "BUY"  => await PlaceBuyAsync(signal),
+                    "SELL" => await PlaceSellAsync(signal),
+                    _      => new OrderResult
+                    {
+                        Success = false,
+                        Message = $"Unsupported action '{signal.Action}'. Only BUY and SELL are supported."
+                    }
+                };
+
+                results.Add(result);
+                if (stopOnFailure && !result.Success) break;
+            }
+
+            return results;
         }
         finally
         {
-            // Close the browser once the order is done (on-demand lifecycle). The next order relaunches
-            // and the persisted profile usually keeps us logged in. Disable via CloseBrowserAfterOrder.
+            // Close the browser once the whole sequence is done (on-demand lifecycle). The next call
+            // relaunches and the persisted profile usually keeps us logged in. Disable via
+            // CloseBrowserAfterOrder.
             if (_config.Value.CloseBrowserAfterOrder)
                 await TeardownAsync();
 

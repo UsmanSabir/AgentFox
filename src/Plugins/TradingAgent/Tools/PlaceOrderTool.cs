@@ -40,7 +40,9 @@ public sealed class PlaceOrderTool : BaseTool
         "Place a BUY or SELL order on the Arif Habib Kornasif (AHK) trading portal " +
         "using browser automation. Enforces AutoExecute flag, MinConfidence gate, " +
         "order value cap, and duplicate filter. Only call this when check_market " +
-        "has confirmed the market is open.";
+        "has confirmed the market is open. When a BUY tip also gives a target/sell " +
+        "price (e.g. 'buy at 50, sell at 55'), pass it as 'target' and a take-profit " +
+        "SELL limit order is placed automatically after the BUY succeeds.";
 
     public override Dictionary<string, ToolParameter> Parameters => new()
     {
@@ -48,6 +50,7 @@ public sealed class PlaceOrderTool : BaseTool
         ["symbol"]      = new() { Type = "string",  Description = "PSX ticker symbol e.g. OGDC",                   Required = true  },
         ["quantity"]    = new() { Type = "number",  Description = "Number of shares",                              Required = true  },
         ["price"]       = new() { Type = "number",  Description = "Limit price in PKR. Omit for market order.",    Required = false },
+        ["target"]      = new() { Type = "number",  Description = "Take-profit/sell price. If given with a BUY, a SELL limit order is placed at this price after the BUY succeeds.", Required = false },
         ["order_type"]  = new() { Type = "string",  Description = "LIMIT or MARKET",                               Required = true  },
         ["confidence"]  = new() { Type = "string",  Description = "Signal confidence: HIGH, MEDIUM, or LOW",       Required = true  },
         ["raw_message"] = new() { Type = "string",  Description = "Original message text (for duplicate check).",  Required = false },
@@ -99,6 +102,13 @@ public sealed class PlaceOrderTool : BaseTool
         {
             try { price = Convert.ToDecimal(priceRaw); }
             catch { /* treated as a market order below */ }
+        }
+
+        decimal? target = null;
+        if (arguments.TryGetValue("target", out var targetRaw) && targetRaw is not null)
+        {
+            try { target = Convert.ToDecimal(targetRaw); }
+            catch { /* unparseable target — no follow-up sell */ }
         }
 
         var isMarket = orderType == "MARKET" || !price.HasValue;
@@ -162,29 +172,98 @@ public sealed class PlaceOrderTool : BaseTool
             RawMessage = rawMessage
         };
 
+        OrderResult result;
         try
         {
-            var result = await _broker.PlaceOrderAsync(signal);
+            result = await _broker.PlaceOrderAsync(signal);
 
             _logger.LogInformation(
                 "[PlaceOrder] {Action} {Symbol} x{Qty} @ {Price} — Success={Success}",
                 action, symbol, quantity, price, result.Success);
-
-            return ToolResult.Ok(JsonSerializer.Serialize(new
-            {
-                success           = result.Success,
-                order_id          = result.OrderId,
-                action            = result.Action,
-                symbol            = result.Symbol,
-                message           = result.Message,
-                screenshot_before = result.ScreenshotBefore,
-                screenshot_after  = result.ScreenshotAfter
-            }));
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "[PlaceOrder] Broker error for {Action} {Symbol}.", action, symbol);
             return ToolResult.Fail($"Broker error: {ex.Message}");
+        }
+
+        // ── Follow-up take-profit SELL ────────────────────────────────────────
+        // A "buy at X, sell at Y" tip is a BUY now plus a SELL limit at the target. Only attempt the
+        // sell when the BUY actually succeeded, the action is BUY, a target was given, and the feature
+        // is enabled — so a failed/blocked buy never leaves a naked sell order.
+        object? followUpSell = null;
+        if (opts.AutoPlaceTargetSell && result.Success && action == "BUY" && target is > 0)
+            followUpSell = await PlaceTargetSellAsync(symbol, quantity, target.Value, ahk);
+
+        return ToolResult.Ok(JsonSerializer.Serialize(new
+        {
+            success           = result.Success,
+            order_id          = result.OrderId,
+            action            = result.Action,
+            symbol            = result.Symbol,
+            message           = result.Message,
+            screenshot_before = result.ScreenshotBefore,
+            screenshot_after  = result.ScreenshotAfter,
+            follow_up_sell    = followUpSell
+        }));
+    }
+
+    /// <summary>
+    /// Places the take-profit SELL limit order that pairs with a just-executed BUY. Returns a small
+    /// object describing the outcome (or why it was not placed) for inclusion in the tool result. The
+    /// exit order is value-capped like any other; if it exceeds the cap it is reported, not placed, so
+    /// the operator can size it manually rather than firing an oversized order.
+    /// </summary>
+    private async Task<object> PlaceTargetSellAsync(string symbol, int quantity, decimal target, AhkConfig ahk)
+    {
+        var sellValue = quantity * target;
+        if (sellValue > ahk.MaxOrderValuePkr)
+        {
+            _logger.LogWarning(
+                "[PlaceOrder] Follow-up SELL value {Value:N0} PKR exceeds cap {Cap:N0} PKR — not placed.",
+                sellValue, ahk.MaxOrderValuePkr);
+            return new
+            {
+                placed = false,
+                reason = $"Target sell value {sellValue:N0} PKR exceeds limit of {ahk.MaxOrderValuePkr:N0} PKR."
+            };
+        }
+
+        var sellSignal = new TradingSignal
+        {
+            Action     = "SELL",
+            Symbol     = symbol,
+            EntryPrice = target,
+            Quantity   = quantity,
+            OrderType  = "LIMIT",
+            Confidence = "HIGH"
+        };
+
+        try
+        {
+            var sell = await _broker.PlaceOrderAsync(sellSignal);
+
+            _logger.LogInformation(
+                "[PlaceOrder] Follow-up SELL {Symbol} x{Qty} @ {Price} — Success={Success}",
+                symbol, quantity, target, sell.Success);
+
+            return new
+            {
+                placed            = true,
+                success           = sell.Success,
+                order_id          = sell.OrderId,
+                action            = sell.Action,
+                symbol            = sell.Symbol,
+                price             = target,
+                message           = sell.Message,
+                screenshot_before = sell.ScreenshotBefore,
+                screenshot_after  = sell.ScreenshotAfter
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[PlaceOrder] Follow-up SELL failed for {Symbol}.", symbol);
+            return new { placed = false, reason = $"Broker error placing target sell: {ex.Message}" };
         }
     }
 
