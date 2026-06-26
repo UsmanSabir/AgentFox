@@ -102,17 +102,9 @@ public sealed class TradingAgentModule : IAgentAwareModule
         var dedup         = _services!.GetRequiredService<DuplicateSignalFilter>();
         var loggers       = _services!.GetRequiredService<ILoggerFactory>();
 
-        // Initialize AHK browser session in the background — do not block agent startup
-        _ = Task.Run(async () =>
-        {
-            try { await broker.InitializeAsync(); }
-            catch (Exception ex)
-            {
-                loggers.CreateLogger<TradingAgentModule>()
-                    .LogError(ex, "[TradingAgent] AhkBroker initialization failed. " +
-                                  "Browser will not be available until the error is resolved.");
-            }
-        });
+        // The browser is launched ON DEMAND by PlaceOrderAsync and torn down once the order finishes
+        // (see AhkConfig.CloseBrowserAfterOrder). We deliberately do NOT start it at agent startup, so
+        // no Chromium window appears until an order is actually placed.
 
         // Register the four trading tools
         context.RegisterTool(new ParseSignalTool(

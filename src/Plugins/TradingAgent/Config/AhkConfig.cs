@@ -31,6 +31,25 @@ public class AhkConfig
     /// <summary>How long to wait for the portal to show an order confirmation/error after submit.</summary>
     public int OrderConfirmTimeoutMs { get; set; } = 8_000;
 
+    /// <summary>
+    /// Launch the browser only when an order is placed and close it once the order finishes (default
+    /// true). The persisted profile keeps the session authenticated, so the next order re-launches and
+    /// usually skips the full login. Set false to keep one long-lived browser session across orders.
+    /// </summary>
+    public bool CloseBrowserAfterOrder { get; set; } = true;
+
+    // ── Order form selectors ────────────────────────────────────────────────────
+    // The buy/sell field ids (#buysymbol, #buyvolume, …) are stable on the AHK portal and used
+    // directly. The submit button, however, has NO id — its only distinguishing feature is its
+    // exact visible text ("BUY"/"SELL"). Leave these empty to use that exact-text matching; set a
+    // CSS selector only if the portal later gives the submit button a stable id/class.
+
+    /// <summary>CSS selector for the BUY submit button. Empty → match the button whose text is exactly "BUY".</summary>
+    public string BuySubmitSelector { get; set; } = "";
+
+    /// <summary>CSS selector for the SELL submit button. Empty → match the button whose text is exactly "SELL".</summary>
+    public string SellSubmitSelector { get; set; } = "";
+
     // ── Login form selectors ───────────────────────────────────────────────────
     // Leave empty to use the built-in heuristics. Override only if the heuristics pick the wrong
     // element — inspect the dumped login_*.html (written to LogDir on a login failure) to find IDs.
@@ -47,6 +66,10 @@ public class AhkConfig
     /// <summary>CSS selector for the Login button. Empty → heuristic (text/value matching "login").</summary>
     public string LoginButtonSelector { get; set; } = "";
 
-    /// <summary>Selector that exists only once logged in (used to confirm a successful login).</summary>
-    public string LoggedInSelector { get; set; } = "#buysymbol";
+    /// <summary>
+    /// Selector that exists only once logged in (used to confirm a successful login). Defaults to the
+    /// toolbar "Buy Order" button (#buyorder), which is always present on the trading screen — unlike
+    /// the modal field #buysymbol, which only exists while the buy dialog is open.
+    /// </summary>
+    public string LoggedInSelector { get; set; } = "#buyorder";
 }

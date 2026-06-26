@@ -19,10 +19,9 @@ namespace TradingAgent.Broker;
 ///   BUY   : #buysymbol       #buyvolume      #buyprice      #buylimitprice    #buyPIN
 ///   SELL  : #sellsymbol      #sellvolume     #sellprice     #selllimitprice   #sellPIN
 ///
-/// Submit button: ID not yet confirmed — inspect with:
-///   document.querySelectorAll('button')
-///     .forEach(b => console.log(b.id, b.className, b.textContent.trim()))
-/// Current attempts: #buySubmitBtn, #sellSubmitBtn, then text-content fallback via JS.
+/// Submit button: has NO id. Identified by its exact visible text "BUY"/"SELL" (a substring match
+/// is unsafe — the toolbar "Buy Order"/"Sell Order" buttons also contain "Buy" and only re-open the
+/// dialog). Override via Ahk.BuySubmitSelector / SellSubmitSelector if it ever gains a stable id.
 /// </summary>
 public sealed class AhkBroker : IAsyncDisposable
 {
@@ -278,6 +277,11 @@ public sealed class AhkBroker : IAsyncDisposable
         }
         finally
         {
+            // Close the browser once the order is done (on-demand lifecycle). The next order relaunches
+            // and the persisted profile usually keeps us logged in. Disable via CloseBrowserAfterOrder.
+            if (_config.Value.CloseBrowserAfterOrder)
+                await TeardownAsync();
+
             _gate.Release();
         }
     }
@@ -331,6 +335,15 @@ public sealed class AhkBroker : IAsyncDisposable
 
         await _page!.GoToAsync(cfg.PortalUrl, WaitUntilNavigation.Networkidle0);
         _logger.LogInformation("[AhkBroker] Login page loaded: {Url}", _page.Url);
+
+        // A persisted profile may still be authenticated (cookies survive a browser close). In that
+        // case the portal lands directly on the trading screen with no login form, so trying to fill
+        // credentials would fail with "username field not found". Detect that and skip login.
+        if (await IsLoggedInAsync())
+        {
+            _logger.LogInformation("[AhkBroker] Already authenticated via persisted session — skipping credential entry.");
+            return;
+        }
 
         // 1. Username — discovered robustly (a wrong/redirected PortalUrl shows up here as "not found").
         var userHandle = await FindUsernameFieldAsync(cfg);
@@ -565,6 +578,13 @@ public sealed class AhkBroker : IAsyncDisposable
         _logger.LogInformation("[AhkBroker] BUY {Symbol} x{Qty} @ {Price} ({Type})",
             signal.Symbol, qty, signal.EntryPrice, signal.OrderType);
 
+        // When the session is already logged in the dialog is closed and its fields are hidden in the
+        // DOM — open it first so the fields and the BUY button are actually interactable.
+        await OpenOrderDialogAsync("buy");
+
+        // Set order type explicitly so a stale "Market"/"Limit" from a prior order can't misroute this one.
+        await SelectByVisibleTextAsync("#buyordertype", isLimit ? "Limit" : "Market");
+
         await FillFieldAsync("#buysymbol", signal.Symbol);
         await Task.Delay(800); // wait for autocomplete dropdown
         await _page!.Keyboard.PressAsync("Tab");
@@ -583,6 +603,7 @@ public sealed class AhkBroker : IAsyncDisposable
         var before = await ScreenshotAsync("pre_buy");
 
         await ClickSubmitAsync("buy");
+        await ConfirmOrderAsync("Buy");
 
         var outcome = await ReadOrderOutcomeAsync(cfg.OrderConfirmTimeoutMs);
         var after   = await ScreenshotAsync("post_buy");
@@ -610,6 +631,13 @@ public sealed class AhkBroker : IAsyncDisposable
         _logger.LogInformation("[AhkBroker] SELL {Symbol} x{Qty} @ {Price} ({Type})",
             signal.Symbol, qty, signal.EntryPrice, signal.OrderType);
 
+        // When the session is already logged in the dialog is closed and its fields are hidden in the
+        // DOM — open it first so the fields and the SELL button are actually interactable.
+        await OpenOrderDialogAsync("sell");
+
+        // Set order type explicitly so a stale "Market"/"Limit" from a prior order can't misroute this one.
+        await SelectByVisibleTextAsync("#sellordertype", isLimit ? "Limit" : "Market");
+
         await FillFieldAsync("#sellsymbol", signal.Symbol);
         await Task.Delay(800);
         await _page!.Keyboard.PressAsync("Tab");
@@ -628,6 +656,7 @@ public sealed class AhkBroker : IAsyncDisposable
         var before = await ScreenshotAsync("pre_sell");
 
         await ClickSubmitAsync("sell");
+        await ConfirmOrderAsync("Sell");
 
         var outcome = await ReadOrderOutcomeAsync(cfg.OrderConfirmTimeoutMs);
         var after   = await ScreenshotAsync("post_sell");
@@ -647,41 +676,212 @@ public sealed class AhkBroker : IAsyncDisposable
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Ctrl+A to select all existing text, then type the new value.
-    /// Safer than TypeAsync alone (which appends) or raw JS value injection (which skips events).
+    /// Clears the field, then types the new value with real key events (so the portal's
+    /// input/autocomplete handlers fire), and verifies the value stuck — refilling once if not.
+    ///
+    /// Keyboard Ctrl+A select-all is unreliable on the portal's autocomplete (#buysymbol) and number
+    /// (#buyprice/#buylimitprice) fields: when the selection doesn't take, TypeAsync APPENDS to the
+    /// existing text. That produced "LUCKLUCK" symbols and doubled prices, and also clobbers the
+    /// last-trade price the portal auto-fills into #buyprice on symbol resolution. We instead select
+    /// all via triple-click + el.select() and press Backspace to guarantee an empty field first.
     /// </summary>
     private async Task FillFieldAsync(string selector, string value)
     {
-        await _page!.FocusAsync(selector);
-        await _page.Keyboard.DownAsync("Control");
-        await _page.Keyboard.PressAsync("KeyA");
-        await _page.Keyboard.UpAsync("Control");
-        await _page.TypeAsync(selector, value);
+        var el = await _page!.QuerySelectorAsync(selector)
+                 ?? throw new InvalidOperationException($"Order field '{selector}' not found on the form.");
+
+        await ClearAndTypeAsync(el, selector, value);
+
+        // Read back; if the field holds something other than our value (stale text not cleared, or an
+        // async portal re-populate), clear and type once more. One retry — never an infinite fight.
+        var actual = await el.EvaluateFunctionAsync<string>("e => (e.value ?? '').toString()");
+        if (!string.Equals(actual?.Trim(), value.Trim(), StringComparison.Ordinal))
+        {
+            await Task.Delay(150);
+            await ClearAndTypeAsync(el, selector, value);
+        }
     }
 
     /// <summary>
-    /// Click the submit button. Tries the confirmed ID first, then falls back to a
-    /// JS text-content search. Update the confirmed ID after inspecting the live portal.
+    /// Clears a single-line field with real key events, then types the value. End→Shift+Home selects
+    /// the whole current value and Backspace deletes it; doing this via key events (rather than
+    /// keyboard Ctrl+A, which the portal's autocomplete/number fields often ignore) reliably empties
+    /// the field so TypeAsync replaces rather than appends.
     /// </summary>
-    private async Task ClickSubmitAsync(string side)
+    private async Task ClearAndTypeAsync(IElementHandle el, string selector, string value)
     {
-        var confirmedId = side == "buy" ? "#buySubmitBtn" : "#sellSubmitBtn";
-        var sideText    = side == "buy" ? "Buy"          : "Sell";
+        await el.ClickAsync();                        // focus the field
+        await _page!.Keyboard.PressAsync("End");      // caret to end
+        await _page.Keyboard.DownAsync("Shift");
+        await _page.Keyboard.PressAsync("Home");      // select the entire value
+        await _page.Keyboard.UpAsync("Shift");
+        await _page.Keyboard.PressAsync("Backspace"); // delete the selection (no-op if already empty)
+        await el.TypeAsync(value);
+    }
+
+    /// <summary>
+    /// Opens the BUY/SELL order dialog by clicking its toolbar button (#buyorder / #sellorder) and
+    /// waits for the symbol field to become visible. No-ops if the dialog is already open. Required
+    /// when the session is restored already-logged-in: nothing else opens the modal, so its fields
+    /// stay hidden and uninteractable.
+    /// </summary>
+    private async Task OpenOrderDialogAsync(string side)
+    {
+        var openBtn = side == "buy" ? "#buyorder"  : "#sellorder";
+        var field   = side == "buy" ? "#buysymbol" : "#sellsymbol";
+
+        if (await IsVisibleAsync(field)) return; // already open
+
+        await _page!.ClickAsync(openBtn);
 
         try
         {
-            await _page!.ClickAsync(confirmedId);
+            await _page.WaitForSelectorAsync(field,
+                new WaitForSelectorOptions { Visible = true, Timeout = 5_000 });
         }
         catch
         {
-            // Fallback: find any button whose visible text matches the side
-            await _page!.EvaluateFunctionAsync($@"() => {{
-                const buttons = Array.from(
-                    document.querySelectorAll('button, input[type=""submit""], input[type=""button""]'));
-                const btn = buttons.find(b =>
-                    /{sideText}/i.test(b.textContent || b.value || ''));
-                if (btn) btn.click();
-            }}");
+            await DumpOrderFormAsync($"no_{side}_dialog");
+            throw new InvalidOperationException(
+                $"Could not open the {side.ToUpperInvariant()} order dialog ({openBtn} → {field} not visible). " +
+                $"See dumped order_no_{side}_dialog.html.");
+        }
+    }
+
+    /// <summary>True if the element exists and is rendered (offsetParent set, i.e. not display:none / hidden modal).</summary>
+    private async Task<bool> IsVisibleAsync(string selector)
+    {
+        try
+        {
+            return await _page!.EvaluateFunctionAsync<bool>(
+                "(sel) => { const el = document.querySelector(sel); return !!el && el.offsetParent !== null; }",
+                selector);
+        }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// Click the order submit button. The AHK portal's submit button has NO id — its only reliable
+    /// marker is its exact visible text ("BUY"/"SELL"). A substring match is unsafe: the toolbar
+    /// buttons "Buy Order" / "LB Buy Order" also contain "Buy" and merely re-open the dialog, so a
+    /// loose match clicks the wrong button and the order never submits. We therefore match the text
+    /// EXACTLY. A configured selector (Ahk.BuySubmitSelector / SellSubmitSelector) overrides this.
+    /// </summary>
+    private async Task ClickSubmitAsync(string side)
+    {
+        var cfg        = _config.Value;
+        var configured = side == "buy" ? cfg.BuySubmitSelector : cfg.SellSubmitSelector;
+        if (!string.IsNullOrWhiteSpace(configured))
+        {
+            await _page!.ClickAsync(configured);
+            return;
+        }
+
+        var word = side == "buy" ? "BUY" : "SELL";
+        var clicked = await _page!.EvaluateFunctionAsync<bool>(@"(word) => {
+            const btns = Array.from(document.querySelectorAll(
+                ""button, input[type='submit'], input[type='button']""));
+            const visible = e => e.offsetParent !== null && !e.disabled;
+            const btn = btns.find(b => visible(b) &&
+                (b.textContent || b.value || '').trim().toUpperCase() === word);
+            if (btn) { btn.click(); return true; }
+            return false;
+        }", word);
+
+        if (!clicked)
+        {
+            await DumpOrderFormAsync($"no_{side}_submit");
+            throw new InvalidOperationException(
+                $"{word} submit button not found (no button with exact text '{word}'). " +
+                $"See dumped order_no_{side}_submit.html, or set Ahk.{(side == "buy" ? "Buy" : "Sell")}SubmitSelector.");
+        }
+    }
+
+    /// <summary>
+    /// After the submit click the portal shows a SweetAlert2 confirmation prompt
+    /// ("Are you sure? You want to execute Buy/Sell order!") with Cancel / OK buttons. The order does
+    /// NOT execute until OK is pressed, so we wait for that prompt and click OK exactly once. A
+    /// confirmation is told apart from a result popup by having a VISIBLE Cancel button. No-op if no
+    /// prompt appears (so the EXACTLY-ONCE submit guarantee is preserved — we never re-click submit).
+    /// </summary>
+    private async Task ConfirmOrderAsync(string side)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (DateTime.UtcNow < deadline)
+        {
+            bool clicked;
+            try
+            {
+                // The portal uses the legacy "sweetalert" library (swal-* classes). A confirmation
+                // prompt has a visible cancel button alongside the confirm button — click confirm.
+                // A text-based match (OK/Yes next to Cancel) is kept as a fallback for any other dialog.
+                clicked = await _page!.EvaluateFunctionAsync<bool>(@"() => {
+                    const visible = e => e && e.offsetParent !== null;
+                    const swalConfirm = document.querySelector('.swal-button--confirm');
+                    const swalCancel  = document.querySelector('.swal-button--cancel');
+                    if (visible(swalConfirm) && visible(swalCancel)) { swalConfirm.click(); return true; }
+
+                    const label = e => (e.textContent || e.value || '').trim().toLowerCase();
+                    const btns = Array.from(document.querySelectorAll(
+                        ""button, input[type='button'], input[type='submit'], a[role='button']"")).filter(visible);
+                    const hasCancel = btns.some(b => label(b) === 'cancel');
+                    const ok = btns.find(b => label(b) === 'ok' || label(b) === 'yes');
+                    if (hasCancel && ok) { ok.click(); return true; }
+                    return false;
+                }");
+            }
+            catch { clicked = false; }
+
+            if (clicked)
+            {
+                _logger.LogInformation("[AhkBroker] Confirmed {Side} execution (clicked OK on the 'Are you sure?' prompt).", side);
+                return;
+            }
+
+            await Task.Delay(200);
+        }
+
+        _logger.LogInformation("[AhkBroker] No {Side} confirmation prompt appeared within 5s (already handled or none required).", side);
+    }
+
+    /// <summary>
+    /// Sets a &lt;select&gt; to the option whose visible text matches (case-insensitive) and fires a
+    /// change event so the portal's handlers run. Logs a warning rather than throwing if the option
+    /// or element is missing, so a dropdown the portal already defaults correctly never blocks an order.
+    /// </summary>
+    private async Task SelectByVisibleTextAsync(string selector, string visibleText)
+    {
+        var ok = await _page!.EvaluateFunctionAsync<bool>(@"(sel, text) => {
+            const el = document.querySelector(sel);
+            if (!el || !el.options) return false;
+            const opt = Array.from(el.options).find(o =>
+                (o.textContent || '').trim().toLowerCase() === text.toLowerCase());
+            if (!opt) return false;
+            el.value = opt.value;
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            return true;
+        }", selector, visibleText);
+
+        if (!ok)
+            _logger.LogWarning("[AhkBroker] Could not set dropdown {Selector} to '{Text}' (leaving portal default).",
+                selector, visibleText);
+    }
+
+    /// <summary>Saves a screenshot and the order dialog HTML to LogDir to make selector debugging concrete.</summary>
+    private async Task DumpOrderFormAsync(string tag)
+    {
+        try
+        {
+            await ScreenshotAsync($"order_{tag}");
+            var html = await _page!.EvaluateFunctionAsync<string>("() => document.body.innerHTML");
+            var path = Path.Combine(ResolvePath(_config.Value.LogDir),
+                $"order_{tag}_{DateTime.UtcNow:yyyyMMdd_HHmmss}.html");
+            await File.WriteAllTextAsync(path, html);
+            _logger.LogWarning("[AhkBroker] Dumped order form HTML to {Path}", path);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[AhkBroker] Could not dump order form.");
         }
     }
 
@@ -689,10 +889,16 @@ public sealed class AhkBroker : IAsyncDisposable
     // portal's exact wording. The design is fail-safe: errors take precedence and are matched
     // broadly, success requires a specific phrase, and anything ambiguous is reported as
     // unconfirmed (Success=false) rather than a silent success.
+    // NOTE: these must be DISTINCTIVE phrases, never words that are permanent page furniture. The AHK
+    // trading grid always shows column headers "Lower Lock" / "Upper Cap", so those words can't be
+    // markers — they'd flag every order as an error. Validation popups use specific wording instead
+    // ("Price should be between Upper and Lower lock", "Volume should be…", etc.).
     private static readonly string[] _errorMarkers =
     [
         "error", "invalid", "insufficient", "failed", "incorrect", "rejected",
-        "not allowed", "exceeds", "market is closed", "session expired", "try again"
+        "not allowed", "exceeds", "market is closed", "session expired", "try again",
+        "should be between", "price should", "volume should", "quantity should",
+        "out of range", "not in range", "not enough", "cannot be"
     ];
 
     private static readonly string[] _successMarkers =
@@ -719,6 +925,17 @@ public sealed class AhkBroker : IAsyncDisposable
 
         while (DateTime.UtcNow < deadline)
         {
+            // 1. A result popup (SweetAlert2-style: red ✗ / green ✓ with a message and an OK button)
+            //    is the portal's explicit verdict. Read and classify it, then dismiss it so a leftover
+            //    modal can't block the next order.
+            var popup = await ReadResultPopupAsync();
+            if (popup is not null)
+            {
+                await DismissPopupAsync();
+                return popup;
+            }
+
+            // 2. Fall back to scanning the page text for a distinctive confirmation/rejection phrase.
             try
             {
                 lastText = await _page!.EvaluateFunctionAsync<string>(
@@ -730,13 +947,17 @@ public sealed class AhkBroker : IAsyncDisposable
 
             var err = _errorMarkers.FirstOrDefault(m => lower.Contains(m));
             if (err is not null)
+            {
+                await DismissPopupAsync();
                 return new OrderOutcome(false, $"Order rejected: {ExtractLine(lastText, err)}", null);
+            }
 
             var ok = _successMarkers.FirstOrDefault(m => lower.Contains(m));
             if (ok is not null)
             {
                 var match = _orderIdRegex.Match(lastText);
                 var id    = match.Success ? match.Groups[1].Value : null;
+                await DismissPopupAsync();
                 return new OrderOutcome(true, $"Order confirmed: {ExtractLine(lastText, ok)}", id);
             }
 
@@ -746,6 +967,78 @@ public sealed class AhkBroker : IAsyncDisposable
         return new OrderOutcome(false,
             "Order submitted but no confirmation or error was detected within the timeout. " +
             "Verify manually (see screenshots).", null);
+    }
+
+    /// <summary>
+    /// Reads a legacy-sweetalert (swal-*) result popup if one is visible, classifying it by its icon
+    /// (error/warning/success) and returning its title+message. Returns null when no popup is shown,
+    /// so the caller falls back to scanning the page text. If the portal swaps dialog libraries this
+    /// no-ops harmlessly (no false positive) and the page-text keyword scan still catches the verdict.
+    /// </summary>
+    private async Task<OrderOutcome?> ReadResultPopupAsync()
+    {
+        string raw;
+        try
+        {
+            raw = await _page!.EvaluateFunctionAsync<string>(@"() => {
+                const pop = document.querySelector('.swal-modal');
+                if (!pop || pop.offsetParent === null) return '';
+                // Skip a confirmation prompt (it has a visible Cancel button) — that is handled by
+                // ConfirmOrderAsync, not an order verdict. Only single-OK popups are results.
+                const cancel = pop.querySelector('.swal-button--cancel');
+                if (cancel && cancel.offsetParent !== null) return '';
+                const title = (pop.querySelector('.swal-title') || {}).innerText || '';
+                const body  = (pop.querySelector('.swal-text')  || {}).innerText || '';
+                const msg = (title + ' ' + body).replace(/\s+/g, ' ').trim();
+                let kind = 'POPUP';
+                if (pop.querySelector('.swal-icon--error, .swal-icon--warning')) kind = 'ERROR';
+                else if (pop.querySelector('.swal-icon--success'))              kind = 'OK';
+                return kind + '::' + msg;
+            }") ?? "";
+        }
+        catch { return null; }
+
+        var sep = raw.IndexOf("::", StringComparison.Ordinal);
+        if (sep < 0) return null;
+
+        var kind = raw[..sep];
+        var msg  = raw[(sep + 2)..].Trim();
+        if (msg.Length > 200) msg = msg[..200];
+
+        return kind switch
+        {
+            "OK"    => new OrderOutcome(true,  $"Order confirmed: {msg}",
+                                        _orderIdRegex.Match(msg) is { Success: true } m ? m.Groups[1].Value : null),
+            "ERROR" => new OrderOutcome(false, $"Order rejected: {msg}", null),
+            _       => new OrderOutcome(false, $"Order returned an unclassified popup: {msg}", null),
+        };
+    }
+
+    /// <summary>
+    /// Clicks the OK button of a single-OK result popup so it can't block the next order. A popup with
+    /// a visible Cancel button is a confirmation prompt and is left for ConfirmOrderAsync. Best-effort.
+    /// </summary>
+    private async Task DismissPopupAsync()
+    {
+        try
+        {
+            await _page!.EvaluateFunctionAsync(@"() => {
+                const visible = e => e && e.offsetParent !== null;
+                // Legacy sweetalert: leave confirmation prompts (with a cancel button) for ConfirmOrderAsync.
+                const swalCancel  = document.querySelector('.swal-button--cancel');
+                if (visible(swalCancel)) return;
+                const swalConfirm = document.querySelector('.swal-button--confirm');
+                if (visible(swalConfirm)) { swalConfirm.click(); return; }
+
+                const label = e => (e.textContent || e.value || '').trim().toLowerCase();
+                const btns = Array.from(document.querySelectorAll(
+                    ""button, input[type='button'], input[type='submit'], a[role='button']"")).filter(visible);
+                if (btns.some(b => label(b) === 'cancel')) return; // confirmation prompt — not ours to dismiss
+                const ok = btns.find(b => label(b) === 'ok');
+                if (ok) ok.click();
+            }");
+        }
+        catch { /* best effort */ }
     }
 
     /// <summary>Returns the first text line containing <paramref name="marker"/>, trimmed and length-capped.</summary>

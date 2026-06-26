@@ -8,7 +8,13 @@ public class PluginLoadContext : AssemblyLoadContext
     private readonly AssemblyDependencyResolver _resolver;
 
     public PluginLoadContext(string pluginPath)
-        : base(isCollectible: true) // allows unloading
+        // Non-collectible on purpose. Plugins are loaded once at startup and never unloaded (nothing
+        // calls Unload()). A COLLECTIBLE context can transition to an "unloading" state, and because
+        // plugins load some dependencies LAZILY (PuppeteerSharp pulls in WebDriverBiDi only at
+        // Puppeteer.LaunchAsync, the first time an order is placed), that later load then throws
+        // "AssemblyLoadContext is unloading or was already unloaded". Non-collectible removes the
+        // entire failure mode; the small memory cost is irrelevant since these live for the app's life.
+        : base(isCollectible: false)
     {
         _resolver = new AssemblyDependencyResolver(pluginPath);
     }

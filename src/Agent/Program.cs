@@ -675,6 +675,17 @@ class Program
             if (dll.Contains($"{Path.DirectorySeparatorChar}Chrome{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
                 continue;
 
+            // Only treat a DLL as a plugin entry assembly if it ships its own dependency manifest
+            // ({name}.deps.json). The transitive dependency DLLs copied alongside a plugin
+            // (PuppeteerSharp, WebDriverBiDi, Discord.*, …) have no deps.json and must NOT each get
+            // their own load context: loaded standalone they become orphaned collectible contexts
+            // that the GC unloads, after which a plugin's later attempt to load that same dependency
+            // (e.g. PuppeteerSharp pulling in WebDriverBiDi at Puppeteer.LaunchAsync) throws
+            // "An operation is not legal in the current state." Dependencies resolve correctly on
+            // demand through the owning plugin's context via its AssemblyDependencyResolver.
+            if (!File.Exists(Path.ChangeExtension(dll, ".deps.json")))
+                continue;
+
             Assembly assembly;
             try
             {
