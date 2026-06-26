@@ -319,11 +319,12 @@ class Program
             enabledModuleAssemblies.Add(module.GetType().Assembly);
         }
 
-        foreach (var toolType in pluginDiscovery.ToolTypes.Where(t => enabledModuleAssemblies.Contains(t.Assembly)))
-        {
-            builder.Services.AddSingleton(typeof(ITool), toolType);
-        }
-
+        // NOTE: Plugin tools are NOT registered into DI here. Nothing resolves IEnumerable<ITool>
+        // from the container — the ToolRegistry is populated by direct Register() calls and by each
+        // plugin's IAgentAwareModule.OnAgentReadyAsync -> IPluginContext.RegisterTool(...). Registering
+        // the tool types as ITool singletons would only force ValidateOnBuild to eagerly construct them
+        // (which fails for tools whose constructor pulls in plugin-versioned dependencies such as
+        // Microsoft.Extensions.AI.Abstractions) without ever wiring them into the agent.
         foreach (var providerType in pluginDiscovery.ChannelProviderTypes.Where(t => enabledModuleAssemblies.Contains(t.Assembly)))
         {
             builder.Services.AddSingleton(typeof(IChannelProvider), providerType);
@@ -642,7 +643,6 @@ class Program
 
     private sealed record PluginDiscovery(
         List<IAppModule> Modules,
-        List<Type> ToolTypes,
         List<Type> ChannelProviderTypes);
 
     private static PluginDiscovery LoadPluginsAndModules(WebApplicationBuilder builder)
@@ -650,23 +650,50 @@ class Program
         var pluginFolder = Path.Combine(AppContext.BaseDirectory, "plugins");
         Directory.CreateDirectory(pluginFolder);
 
-        // Create a temporary service provider for tool instantiation
+        // Create a temporary service provider for plugin module instantiation
         var tempServices = new ServiceCollection();
         tempServices.AddSingleton(builder.Configuration.GetSection("Plugins"));
         var tempProvider = tempServices.BuildServiceProvider();
 
-        var pluginLoader = new PluginLoader(tempProvider);
-        var toolLoader = new ToolLoader();
-        var channelProviderLoader = new ChannelProviderLoader();
+        var pluginModules = new List<IAppModule>();
+        var providerTypes = new List<Type>();
 
-        var pluginModules = pluginLoader.LoadModules(pluginFolder);
-        // Register modules
+        // Load each plugin DLL exactly once into a single PluginLoadContext and pull the
+        // module, tool and channel-provider types from that same assembly instance.
+        //
+        // This is critical: an AssemblyLoadContext produces a *distinct* Assembly object per
+        // context even for the same file. If modules, tools and providers were discovered via
+        // separate load contexts (as they were previously), then module.GetType().Assembly would
+        // never equal toolType.Assembly, and the assembly-identity gating in Main that decides
+        // which plugin tools/channels to register would silently drop them all.
+        foreach (var dll in Directory.GetFiles(pluginFolder, "*.dll", SearchOption.AllDirectories))
+        {
+            var context  = new PluginLoadContext(dll);
+            var assembly = context.LoadFromAssemblyPath(dll);
+
+            Type[] types;
+            try
+            {
+                types = assembly.GetTypes();
+            }
+            catch (ReflectionTypeLoadException ex)
+            {
+                types = ex.Types.Where(t => t != null).ToArray()!;
+            }
+
+            foreach (var type in types.Where(t => t is { IsAbstract: false, IsInterface: false }))
+            {
+                if (typeof(IAppModule).IsAssignableFrom(type))
+                    pluginModules.Add((IAppModule)ActivatorUtilities.CreateInstance(tempProvider, type)!);
+                else if (typeof(IChannelProvider).IsAssignableFrom(type))
+                    providerTypes.Add(type);
+            }
+        }
+
+        // Built-in modules (cli/web/webhook) live in the host assembly and are always available.
         var allModules = ModuleLoader.LoadModules();
         allModules.AddRange(pluginModules);
 
-        var pluginToolTypes = toolLoader.LoadTools(pluginFolder);
-        var providerTypes = channelProviderLoader.LoadProviderTypes(pluginFolder);
-
-        return new PluginDiscovery(allModules, pluginToolTypes, providerTypes);
+        return new PluginDiscovery(allModules, providerTypes);
     }
 }

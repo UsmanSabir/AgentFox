@@ -108,14 +108,18 @@ public sealed class ParseSignalTool : BaseTool
         string rawJson;
         try
         {
+            // NOTE: No ResponseFormat is set. The default IChatClient is whatever the host's "LLM"
+            // section resolves to (Ollama, OpenAI-compatible, etc.), and not every endpoint accepts
+            // response_format: {"type":"json_object"} — Docker Model Runner, for example, returns 400
+            // ("must be 'json_schema' or 'text'"). The extraction prompt already constrains output to
+            // raw JSON; StripJsonFence + the tolerant deserialize below handle any stray formatting.
             var response = await _chatClient.GetResponseAsync(
                 [
                     new ChatMessage(ChatRole.System, ExtractionSystemPrompt),
                     new ChatMessage(ChatRole.User, message)
-                ],
-                new ChatOptions { ResponseFormat = ChatResponseFormat.Json });
+                ]);
 
-            rawJson = response.Text ?? "";
+            rawJson = StripJsonFence(response.Text ?? "");
         }
         catch (Exception ex)
         {
@@ -143,5 +147,24 @@ public sealed class ParseSignalTool : BaseTool
             signal.Confidence, signal.ConfidenceReason);
 
         return ToolResult.Ok(JsonSerializer.Serialize(signal, _snakeOptions));
+    }
+
+    /// <summary>
+    /// Normalises an LLM response into a bare JSON object. Strips a surrounding
+    /// markdown code fence (```json ... ```) and any prose before/after the object
+    /// by slicing to the outermost '{' .. '}'. Returns the input unchanged when no
+    /// braces are found (the caller's deserialize then falls back to is_signal=false).
+    /// </summary>
+    private static string StripJsonFence(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return text;
+
+        var start = text.IndexOf('{');
+        var end   = text.LastIndexOf('}');
+
+        return start >= 0 && end > start
+            ? text.Substring(start, end - start + 1)
+            : text.Trim();
     }
 }
