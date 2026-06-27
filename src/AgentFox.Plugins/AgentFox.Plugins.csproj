@@ -12,6 +12,7 @@
 
   <ItemGroup>
     <PackageReference Include="Discord.Net" Version="3.20.1" />
+    <PackageReference Include="Microsoft.Agents.AI.Harness" Version="1.11.1-preview.260625.1" />
     <PackageReference Include="Microsoft.Extensions.Http.Resilience" Version="10.7.0" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
   </ItemGroup>
