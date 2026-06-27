@@ -57,9 +57,9 @@ public sealed class PlaceOrdersTool : BaseTool
         {
             Type        = "array",
             Required    = true,
-            Description = "The orders to place, in order. Each: action (BUY/SELL), symbol, " +
-                          "price (limit; omit for market), optional quantity (OMIT to auto-size from the per-stock budget), " +
-                          "optional target (take-profit sell price for a BUY), order_type.",
+            Description = "The orders to place, in order. Each: action (BUY/SELL), symbol, this tip's own " +
+                          "confidence, price (limit; omit for market), optional quantity (OMIT to auto-size from " +
+                          "the per-stock budget), optional target (take-profit sell price for a BUY), order_type.",
             JsonSchema  = """
                 {
                   "type": "array",
@@ -69,17 +69,18 @@ public sealed class PlaceOrdersTool : BaseTool
                     "properties": {
                       "action":     { "type": "string", "enum": ["BUY", "SELL"] },
                       "symbol":     { "type": "string", "description": "PSX ticker e.g. LUCK" },
+                      "confidence": { "type": "string", "enum": ["HIGH", "MEDIUM", "LOW", "NONE"], "description": "THIS tip's own confidence. Each order is gated against MinConfidence individually." },
                       "quantity":   { "type": "number", "description": "Number of shares. Omit to auto-size from the per-stock budget using the limit price." },
                       "price":      { "type": "number", "description": "Limit price in PKR. Omit for market order." },
                       "target":     { "type": "number", "description": "Take-profit/sell price. Pairs a SELL with a BUY." },
                       "order_type": { "type": "string", "enum": ["LIMIT", "MARKET"] }
                     },
-                    "required": ["action", "symbol"]
+                    "required": ["action", "symbol", "confidence"]
                   }
                 }
                 """
         },
-        ["confidence"]  = new() { Type = "string", Description = "Overall signal confidence: HIGH, MEDIUM, or LOW.", Required = true  },
+        ["confidence"]  = new() { Type = "string", Description = "Fallback confidence for orders that don't carry their own. Optional — prefer per-order confidence.", Required = false },
         ["raw_message"] = new() { Type = "string", Description = "Original message text (for duplicate check).",     Required = false },
     };
 
@@ -101,6 +102,7 @@ public sealed class PlaceOrdersTool : BaseTool
     private sealed record OrderInput(
         string? Action,
         string? Symbol,
+        string? Confidence,
         int? Quantity,
         decimal? Price,
         decimal? Target,
@@ -112,14 +114,15 @@ public sealed class PlaceOrdersTool : BaseTool
         var ahk  = _ahkConfig.Value;
 
         // ── Batch-wide gates (run once) ───────────────────────────────────────
+        // AutoExecute and the duplicate filter are properties of the MESSAGE, so they gate the whole
+        // batch. Confidence is per-tip and is gated individually in BuildGroup — a single weak tip no
+        // longer blocks the strong ones in the same message. A batch-level 'confidence' (if supplied) is
+        // only a fallback for orders that omit their own.
         if (!opts.AutoExecute)
             return ToolResult.Ok(Skipped("AutoExecute is disabled. Signals logged but not executed."));
 
-        var confidence = arguments.GetValueOrDefault("confidence")?.ToString()?.ToUpperInvariant() ?? "NONE";
-        var rawMessage = arguments.GetValueOrDefault("raw_message")?.ToString() ?? "";
-
-        if (!MeetsConfidence(confidence, opts.MinConfidence))
-            return ToolResult.Ok(Skipped($"Confidence '{confidence}' is below minimum '{opts.MinConfidence}'."));
+        var batchConfidence = arguments.GetValueOrDefault("confidence")?.ToString()?.ToUpperInvariant();
+        var rawMessage      = arguments.GetValueOrDefault("raw_message")?.ToString() ?? "";
 
         if (!string.IsNullOrEmpty(rawMessage) && _dedup.IsDuplicate(rawMessage))
             return ToolResult.Ok(Skipped("Identical signal already processed within the last hour."));
@@ -139,10 +142,14 @@ public sealed class PlaceOrdersTool : BaseTool
         if (orders.Count == 0)
             return ToolResult.Fail("'orders' must contain at least one order.");
 
+        // ── Resolve live prices for BUY tips that gave no entry price ("accumulate on dips") ──
+        // Only when AutoBuyWithoutEntryPrice is on; otherwise those orders are logged, not executed.
+        var livePrices = await ResolveLivePricesAsync(orders, opts);
+
         // ── Validate each order into a group (or a skip reason) ────────────────
-        var validated = orders.Select(o => (order: o, plan: BuildGroup(o, opts, ahk))).ToList();
-        var groups    = validated.Where(v => v.plan.group is not null)
-                                 .Select(v => v.plan.group!)
+        var validated = orders.Select(o => (order: o, plan: BuildGroup(o, opts, ahk, livePrices, batchConfidence))).ToList();
+        var groups    = validated.Where(v => v.plan.Group is not null)
+                                 .Select(v => v.plan.Group!)
                                  .ToList();
 
         // ── Execute the runnable groups in one session ────────────────────────
@@ -164,9 +171,9 @@ public sealed class PlaceOrdersTool : BaseTool
         var gi = 0;
         foreach (var (order, plan) in validated)
         {
-            if (plan.group is null)
+            if (plan.Group is null)
             {
-                report.Add(new { action = order.Action, symbol = order.Symbol, placed = false, reason = plan.skip });
+                report.Add(new { action = order.Action, symbol = order.Symbol, placed = false, reason = plan.Skip });
                 continue;
             }
 
@@ -179,54 +186,121 @@ public sealed class PlaceOrdersTool : BaseTool
         return ToolResult.Ok(JsonSerializer.Serialize(new { orders = report }));
     }
 
+    /// <summary>The outcome of validating one order: an execution group, or a skip reason.</summary>
+    private sealed record OrderPlan(
+        IReadOnlyList<TradingSignal>? Group,
+        string? Skip,
+        bool PairedSell,
+        bool ResolvedFromMarket);
+
+    /// <summary>
+    /// Fetches the live last-trade price for every BUY order that named a stock but gave no entry price
+    /// (and is not an explicit market order). Returns empty when the feature is off
+    /// (AutoBuyWithoutEntryPrice=false) or there is nothing to resolve — BuildGroup then skips those
+    /// orders (logged, not executed) rather than guessing a price.
+    /// </summary>
+    private async Task<IReadOnlyDictionary<string, decimal?>> ResolveLivePricesAsync(
+        IReadOnlyList<OrderInput> orders, TradingAgentOptions opts)
+    {
+        if (!opts.AutoBuyWithoutEntryPrice)
+            return new Dictionary<string, decimal?>();
+
+        var symbols = orders
+            .Where(o => o.Action?.ToUpperInvariant() == "BUY"
+                        && !o.Price.HasValue
+                        && (o.OrderType?.ToUpperInvariant() ?? "LIMIT") != "MARKET")
+            .Select(o => o.Symbol?.Trim().ToUpperInvariant() ?? "")
+            .Where(s => s.Length > 0)
+            .Distinct()
+            .ToList();
+
+        if (symbols.Count == 0)
+            return new Dictionary<string, decimal?>();
+
+        try
+        {
+            return await _broker.GetMarketPricesAsync(symbols);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[PlaceOrders] Could not fetch live prices for {Count} symbol(s).", symbols.Count);
+            return new Dictionary<string, decimal?>();
+        }
+    }
+
     /// <summary>
     /// Validates one input order and builds its execution group: null group + a skip reason when the
-    /// order is invalid or breaches a gate; otherwise [primary] or [BUY, take-profit SELL]. The bool
-    /// says whether a take-profit sell was paired (needed to report "buy failed → sell skipped").
+    /// order is invalid or breaches a gate; otherwise [primary] or [BUY, take-profit SELL]. When the
+    /// order gave no entry price, the limit is resolved from the live market price (less the dip
+    /// discount) and no take-profit SELL is paired — that limit rests below market and may not fill.
     /// </summary>
-    private (IReadOnlyList<TradingSignal>? group, string? skip, bool pairedSell) BuildGroup(
-        OrderInput o, TradingAgentOptions opts, AhkConfig ahk)
+    private OrderPlan BuildGroup(
+        OrderInput o, TradingAgentOptions opts, AhkConfig ahk,
+        IReadOnlyDictionary<string, decimal?> livePrices, string? batchConfidence)
     {
         var action = o.Action?.ToUpperInvariant() ?? "";
         var symbol = o.Symbol?.ToUpperInvariant() ?? "";
 
         if (action is not ("BUY" or "SELL") || string.IsNullOrEmpty(symbol))
-            return (null, $"Invalid order — action must be BUY/SELL and symbol is required (got action='{o.Action}', symbol='{o.Symbol}').", false);
+            return new(null, $"Invalid order — action must be BUY/SELL and symbol is required (got action='{o.Action}', symbol='{o.Symbol}').", false, false);
+
+        // Per-tip confidence gate: this order's own confidence (falling back to a batch-level value, then
+        // NONE) must meet MinConfidence. One weak tip is skipped without affecting the others.
+        var confidence = (o.Confidence ?? batchConfidence ?? "NONE").ToUpperInvariant();
+        if (!MeetsConfidence(confidence, opts.MinConfidence))
+            return new(null, $"Confidence '{confidence}' is below minimum '{opts.MinConfidence}'.", false, false);
 
         var orderType = o.OrderType?.ToUpperInvariant() ?? "LIMIT";
-        var isMarket  = orderType == "MARKET" || !o.Price.HasValue;
 
-        // Quantity is optional: an explicit positive value is honoured; a present-but-non-positive
-        // value is rejected; when omitted the position is sized from the per-stock budget and the limit
-        // price (deterministic math), which needs a price — a market order must carry an explicit qty.
+        // Resolve a missing entry price for a BUY ("accumulate on dips") from the live market price,
+        // less the configured dip discount, so the order rests just below market.
+        decimal? price         = o.Price;
+        var resolvedFromMarket = false;
+        if (action == "BUY" && !price.HasValue && orderType != "MARKET")
+        {
+            if (!opts.AutoBuyWithoutEntryPrice)
+                return new(null, "No entry price in tip and AutoBuyWithoutEntryPrice is disabled — logged for manual review, not executed.", false, false);
+
+            if (!livePrices.TryGetValue(symbol, out var live) || live is not > 0)
+                return new(null, $"Could not read a live market price for {symbol} to size a no-entry-price BUY.", false, false);
+
+            var dip = Math.Clamp(ahk.DipDiscountPercent, 0m, 100m) / 100m;
+            price = Math.Round(live.Value * (1m - dip), 2, MidpointRounding.AwayFromZero);
+            resolvedFromMarket = true;
+        }
+
+        var isMarket = orderType == "MARKET" || !price.HasValue;
+
+        // Quantity: explicit positive honoured; present-but-non-positive rejected; omitted ⇒ sized from
+        // the per-stock budget and the limit price (a market order needs an explicit quantity).
         int qty;
         if (o.Quantity.HasValue)
         {
             if (o.Quantity.Value <= 0)
-                return (null, $"Invalid quantity '{o.Quantity}' — must be a positive integer.", false);
+                return new(null, $"Invalid quantity '{o.Quantity}' — must be a positive integer.", false, resolvedFromMarket);
             qty = o.Quantity.Value;
         }
         else
         {
             if (isMarket)
-                return (null, "Cannot size from the per-stock budget without a limit price (market order). Provide a price or an explicit quantity.", false);
+                return new(null, "Cannot size from the per-stock budget without a limit price (market order). Provide a price or an explicit quantity.", false, resolvedFromMarket);
 
-            var sized = PositionSizer.ComputeQuantity(ahk.PerStockBudgetPkr, o.Price!.Value, ahk.BudgetBufferPercent);
+            var sized = PositionSizer.ComputeQuantity(ahk.PerStockBudgetPkr, price!.Value, ahk.BudgetBufferPercent);
             if (sized is null)
-                return (null, $"Per-stock budget {ahk.PerStockBudgetPkr:N0} PKR (less {ahk.BudgetBufferPercent}% buffer) is too small to buy one share at {o.Price!.Value:F2} PKR.", false);
+                return new(null, $"Per-stock budget {ahk.PerStockBudgetPkr:N0} PKR (less {ahk.BudgetBufferPercent}% buffer) is too small to buy one share at {price!.Value:F2} PKR.", false, resolvedFromMarket);
             qty = sized.Value;
         }
 
         if (isMarket)
         {
             if (!ahk.AllowMarketOrders)
-                return (null, "Market orders are disabled (Ahk.AllowMarketOrders=false). Provide a limit price.", false);
+                return new(null, "Market orders are disabled (Ahk.AllowMarketOrders=false). Provide a limit price.", false, resolvedFromMarket);
         }
         else
         {
-            var value = qty * o.Price!.Value;
+            var value = qty * price!.Value;
             if (value > ahk.MaxOrderValuePkr)
-                return (null, $"Order value {value:N0} PKR exceeds limit of {ahk.MaxOrderValuePkr:N0} PKR.", false);
+                return new(null, $"Order value {value:N0} PKR exceeds limit of {ahk.MaxOrderValuePkr:N0} PKR.", false, resolvedFromMarket);
         }
 
         var group = new List<TradingSignal>
@@ -235,19 +309,19 @@ public sealed class PlaceOrdersTool : BaseTool
             {
                 Action     = action,
                 Symbol     = symbol,
-                EntryPrice = o.Price,
+                EntryPrice = price,
                 Quantity   = qty,
                 OrderType  = isMarket ? "MARKET" : "LIMIT",
                 Confidence = "HIGH"
             }
         };
 
-        // Pair a take-profit SELL with a BUY that carries a target. The sell exits exactly the shares
-        // the BUY (already cap-checked) acquired — it is not new exposure — so it is deliberately NOT
-        // re-checked against MaxOrderValuePkr. (target > entry, so its value always exceeds the buy's
-        // and would otherwise be wrongly blocked whenever the budget sits near the cap.)
+        // Pair a take-profit SELL with a BUY that carries a target — EXCEPT when the entry was resolved
+        // from the market at a dip discount: that limit rests below market and may not fill, so pairing a
+        // sell would risk selling shares not yet held. The sell exits exactly the shares the BUY acquired,
+        // so it is intentionally NOT re-checked against MaxOrderValuePkr.
         var pairedSell = false;
-        if (opts.AutoPlaceTargetSell && action == "BUY" && o.Target is > 0)
+        if (opts.AutoPlaceTargetSell && action == "BUY" && o.Target is > 0 && !resolvedFromMarket)
         {
             group.Add(new TradingSignal
             {
@@ -261,18 +335,18 @@ public sealed class PlaceOrdersTool : BaseTool
             pairedSell = true;
         }
 
-        return (group, null, pairedSell);
+        return new(group, null, pairedSell, resolvedFromMarket);
     }
 
     private static object BuildOrderReport(
         OrderInput order,
-        (IReadOnlyList<TradingSignal>? group, string? skip, bool pairedSell) plan,
+        OrderPlan plan,
         IReadOnlyList<OrderResult> results)
     {
         var primary = results[0];
 
         object? followUpSell = null;
-        if (plan.pairedSell)
+        if (plan.PairedSell)
         {
             if (results.Count > 1)
             {
@@ -282,7 +356,9 @@ public sealed class PlaceOrdersTool : BaseTool
                     placed            = true,
                     success           = sell.Success,
                     order_id          = sell.OrderId,
-                    price             = order.Target,
+                    price             = sell.SubmittedPrice ?? order.Target,
+                    requested_price   = order.Target,
+                    price_adjustment  = sell.PriceAdjustment,
                     message           = sell.Message,
                     screenshot_before = sell.ScreenshotBefore,
                     screenshot_after  = sell.ScreenshotAfter
@@ -293,19 +369,28 @@ public sealed class PlaceOrdersTool : BaseTool
                 followUpSell = new { placed = false, reason = "Buy order did not succeed; take-profit sell skipped." };
             }
         }
+        else if (plan.ResolvedFromMarket && order.Target is > 0)
+        {
+            followUpSell = new { placed = false, reason = "Entry resolved from live market at a dip — take-profit SELL not auto-placed (the limit may not fill yet)." };
+        }
 
         return new
         {
-            action            = primary.Action,
-            symbol            = primary.Symbol,
-            quantity          = plan.group![0].Quantity,
-            auto_sized        = order.Quantity is null,
-            success           = primary.Success,
-            order_id          = primary.OrderId,
-            message           = primary.Message,
-            screenshot_before = primary.ScreenshotBefore,
-            screenshot_after  = primary.ScreenshotAfter,
-            follow_up_sell    = followUpSell
+            action                     = primary.Action,
+            symbol                     = primary.Symbol,
+            confidence                 = order.Confidence,
+            quantity                   = plan.Group![0].Quantity,
+            price                      = primary.SubmittedPrice ?? plan.Group![0].EntryPrice,
+            requested_price            = plan.Group![0].EntryPrice,
+            price_adjustment           = primary.PriceAdjustment,
+            auto_sized                 = order.Quantity is null,
+            entry_resolved_from_market = plan.ResolvedFromMarket,
+            success                    = primary.Success,
+            order_id                   = primary.OrderId,
+            message                    = primary.Message,
+            screenshot_before          = primary.ScreenshotBefore,
+            screenshot_after           = primary.ScreenshotAfter,
+            follow_up_sell             = followUpSell
         };
     }
 

@@ -33,21 +33,28 @@ public sealed class ParseSignalTool : BaseTool
         You are a PSX (Pakistan Stock Exchange) trading signal parser.
         Extract structured signals from WhatsApp group messages and return JSON only — no markdown, no explanation.
 
-        Return exactly this JSON shape:
+        Return EXACTLY this JSON shape — ALWAYS the wrapper object, even for one tip or none:
         {
-          "is_signal":         bool,
-          "action":            "BUY" | "SELL" | "HOLD" | "UNKNOWN",
-          "symbol":            string,
-          "entry_price":       number | null,
-          "target":            number | null,
-          "stop_loss":         number | null,
-          "quantity":          number | null,
-          "order_type":        "LIMIT" | "MARKET",
-          "confidence":        "HIGH" | "MEDIUM" | "LOW" | "NONE",
-          "confidence_reason": string
+          "signals": [
+            {
+              "is_signal":         bool,
+              "action":            "BUY" | "SELL" | "HOLD" | "UNKNOWN",
+              "symbol":            string,
+              "entry_price":       number | null,
+              "target":            number | null,
+              "stop_loss":         number | null,
+              "quantity":          number | null,
+              "order_type":        "LIMIT" | "MARKET",
+              "confidence":        "HIGH" | "MEDIUM" | "LOW" | "NONE",
+              "confidence_reason": string
+            }
+          ]
         }
 
-        FIRST decide is_signal. Only an ACTIONABLE per-stock instruction is a signal.
+        ONE array element PER named stock. A single message often carries SEVERAL tips
+        (e.g. "OGDC ... PSO ...") — emit one object for each. A message with no tradeable tip → "signals": [].
+
+        FIRST decide, for each candidate stock, whether it is a signal. Only an ACTIONABLE per-stock instruction is a signal.
 
         is_signal = TRUE only when BOTH are present:
           1. a clear action on a SPECIFIC named PSX stock — buy / accumulate / add → BUY,
@@ -74,11 +81,11 @@ public sealed class ParseSignalTool : BaseTool
           A missing quantity is normal and does NOT lower confidence — the executor sizes the position
           from the configured per-stock budget.
 
-        Confidence rules:
-        - HIGH:   action + symbol + an entry price OR accumulation range all clearly present
-        - MEDIUM: action + symbol clearly present, but no entry price/zone at all
-        - LOW:    symbol present but action is unclear or absent
-        - NONE:   not a trading signal at all
+        Confidence rules (a missing entry price does NOT lower confidence — it is resolved at execution):
+        - HIGH:   a clear action (buy/accumulate or sell/book-profit) + a specific PSX stock are present
+        - MEDIUM: a stock is named and buy/sell is implied, but the action wording is not explicit
+        - LOW:    a stock is named but there is no action at all
+        - NONE:   not a trading signal
 
         PSX symbols (non-exhaustive):
         OGDC PPL MARI POL PSO HBL UBL MCB ABL NBP MEBL BAFL LUCK DGKC MLCF
@@ -102,9 +109,10 @@ public sealed class ParseSignalTool : BaseTool
     public override string Name => "parse_signal";
 
     public override string Description =>
-        "Parse a WhatsApp message and extract a structured PSX trading signal. " +
-        "Returns action, symbol, entry price, target, stop-loss, order type, " +
-        "confidence (HIGH/MEDIUM/LOW/NONE), and a one-sentence confidence reason. " +
+        "Parse a WhatsApp message and extract ALL structured PSX trading signals it contains. " +
+        "Returns { is_signal, count, signals[] } — one entry per named stock, each with action, " +
+        "symbol, entry price, target, stop-loss, order type, and confidence. A message may hold " +
+        "several tips (split automatically) or none (signals is empty — discard the message). " +
         "Always call this first on any message that might contain a trading tip.";
 
     public override Dictionary<string, ToolParameter> Parameters => new()
@@ -154,66 +162,122 @@ public sealed class ParseSignalTool : BaseTool
             return ToolResult.Fail($"Signal parsing failed: {ex.Message}");
         }
 
-        TradingSignal signal;
-        try
-        {
-            signal = JsonSerializer.Deserialize<TradingSignal>(rawJson, _snakeOptions)
-                     ?? new TradingSignal { IsSignal = false };
-        }
-        catch (JsonException)
-        {
-            _logger.LogWarning("[ParseSignal] Could not deserialize LLM response: {Json}", rawJson);
-            signal = new TradingSignal { IsSignal = false };
-        }
+        var parsed = ParseSignals(rawJson);
+        if (parsed.Count == 0)
+            _logger.LogWarning("[ParseSignal] No signals parsed from response: {Json}", rawJson);
 
-        signal.RawMessage = message;
-
-        // Deterministic backstop. The classifier runs on a cheap local model that occasionally flags
-        // market-outlook/news/chatter as a tradeable tip. A real, executable per-stock signal needs BOTH
-        // a concrete BUY/SELL action AND a ticker — so anything missing either (index commentary with no
-        // symbol, a HOLD, news) is forced to a non-signal here, regardless of what the LLM returned. This
-        // is the layer the workflow trusts to "discard non-tip messages"; it can only ever discard, never
-        // promote, so it cannot turn noise into an order.
-        signal.Symbol = (signal.Symbol ?? "").Trim().ToUpperInvariant();
-        signal.Action = (signal.Action ?? "UNKNOWN").Trim().ToUpperInvariant();
-        var hasAction = signal.Action is "BUY" or "SELL";
-        var hasSymbol = !string.IsNullOrWhiteSpace(signal.Symbol);
-        if (signal.IsSignal && (!hasAction || !hasSymbol))
+        // Deterministic backstop, applied PER candidate. The classifier runs on a cheap local model that
+        // occasionally flags market-outlook/news/chatter as a tradeable tip. A real, executable per-stock
+        // signal needs BOTH a concrete BUY/SELL action AND a ticker — so anything missing either (index
+        // commentary with no symbol, a HOLD, news) is forced to a non-signal here, regardless of what the
+        // LLM returned. This is the layer the workflow trusts to "discard non-tip messages"; it can only
+        // ever discard, never promote, so it cannot turn noise into an order.
+        var actionable = new List<TradingSignal>();
+        foreach (var signal in parsed)
         {
+            signal.RawMessage = message;
+            signal.Symbol = (signal.Symbol ?? "").Trim().ToUpperInvariant();
+            signal.Action = (signal.Action ?? "UNKNOWN").Trim().ToUpperInvariant();
+
+            var hasAction = signal.Action is "BUY" or "SELL";
+            var hasSymbol = !string.IsNullOrWhiteSpace(signal.Symbol);
+            if (!signal.IsSignal || !hasAction || !hasSymbol)
+            {
+                _logger.LogInformation(
+                    "[ParseSignal] Discarded candidate (is_signal={IsSignal} action='{Action}' symbol='{Symbol}') — " +
+                    "not a per-stock BUY/SELL tip.",
+                    signal.IsSignal, signal.Action, signal.Symbol);
+                continue;
+            }
+
+            actionable.Add(signal);
             _logger.LogInformation(
-                "[ParseSignal] Discarded as non-actionable (action='{Action}', symbol='{Symbol}') — " +
-                "not a per-stock BUY/SELL tip (market outlook, news, or chatter).",
-                signal.Action, signal.Symbol);
-
-            signal.IsSignal   = false;
-            signal.Action     = "UNKNOWN";
-            signal.Confidence = "NONE";
-            if (string.IsNullOrWhiteSpace(signal.ConfidenceReason))
-                signal.ConfidenceReason =
-                    "Not an actionable per-stock trading tip (market outlook, news, or general chatter).";
+                "[ParseSignal] Signal: {Action} {Symbol} entry={Entry} target={Target} conf={Confidence} | {Reason}",
+                signal.Action, signal.Symbol, signal.EntryPrice, signal.Target,
+                signal.Confidence, signal.ConfidenceReason);
         }
 
-        _logger.LogInformation(
-            "[ParseSignal] is_signal={IsSignal} action={Action} symbol={Symbol} conf={Confidence} | {Reason}",
-            signal.IsSignal, signal.Action, signal.Symbol,
-            signal.Confidence, signal.ConfidenceReason);
+        // Project each actionable signal to the snake_case shape the order tools/agent consume.
+        var projected = actionable.Select(s => new
+        {
+            action            = s.Action,
+            symbol            = s.Symbol,
+            entry_price       = s.EntryPrice,
+            target            = s.Target,
+            stop_loss         = s.StopLoss,
+            quantity          = s.Quantity,
+            order_type        = s.OrderType,
+            confidence        = s.Confidence,
+            confidence_reason = s.ConfidenceReason
+        });
 
-        return ToolResult.Ok(JsonSerializer.Serialize(signal, _snakeOptions));
+        return ToolResult.Ok(JsonSerializer.Serialize(new
+        {
+            is_signal = actionable.Count > 0,
+            count     = actionable.Count,
+            signals   = projected
+        }, _snakeOptions));
     }
 
     /// <summary>
-    /// Normalises an LLM response into a bare JSON object. Strips a surrounding
-    /// markdown code fence (```json ... ```) and any prose before/after the object
-    /// by slicing to the outermost '{' .. '}'. Returns the input unchanged when no
-    /// braces are found (the caller's deserialize then falls back to is_signal=false).
+    /// Tolerantly turns the model's JSON into a list of candidate signals. Accepts the documented
+    /// wrapper <c>{ "signals": [ ... ] }</c>, a bare array <c>[ ... ]</c>, or a single object
+    /// <c>{ ... }</c> (older shape). Returns an empty list when nothing usable is found.
+    /// </summary>
+    private static List<TradingSignal> ParseSignals(string rawJson)
+    {
+        if (string.IsNullOrWhiteSpace(rawJson)) return new();
+
+        // 1) Wrapper object { "signals": [...] }
+        try
+        {
+            var wrap = JsonSerializer.Deserialize<ParseResult>(rawJson, _snakeOptions);
+            if (wrap?.Signals is not null) return wrap.Signals;
+        }
+        catch (JsonException) { /* try the next shape */ }
+
+        // 2) Bare array [...]
+        try
+        {
+            var arr = JsonSerializer.Deserialize<List<TradingSignal>>(rawJson, _snakeOptions);
+            if (arr is not null) return arr;
+        }
+        catch (JsonException) { /* try the next shape */ }
+
+        // 3) Single object {...}
+        try
+        {
+            var one = JsonSerializer.Deserialize<TradingSignal>(rawJson, _snakeOptions);
+            if (one is not null) return new() { one };
+        }
+        catch (JsonException) { /* give up */ }
+
+        return new();
+    }
+
+    private sealed class ParseResult
+    {
+        public List<TradingSignal>? Signals { get; set; }
+    }
+
+    /// <summary>
+    /// Normalises an LLM response into a bare JSON value. Strips a surrounding markdown code fence
+    /// (```json ... ```) and any prose before/after by slicing to the outermost JSON object OR array —
+    /// whichever opens first ('{'/'['). Returns the input unchanged when no JSON delimiters are found
+    /// (the caller's tolerant deserialize then yields no signals).
     /// </summary>
     private static string StripJsonFence(string text)
     {
         if (string.IsNullOrWhiteSpace(text))
             return text;
 
-        var start = text.IndexOf('{');
-        var end   = text.LastIndexOf('}');
+        // Choose the delimiter pair for whichever value opens first.
+        var firstObj = text.IndexOf('{');
+        var firstArr = text.IndexOf('[');
+
+        var useArray = firstArr >= 0 && (firstObj < 0 || firstArr < firstObj);
+        var start    = useArray ? firstArr : firstObj;
+        var end      = useArray ? text.LastIndexOf(']') : text.LastIndexOf('}');
 
         return start >= 0 && end > start
             ? text.Substring(start, end - start + 1)

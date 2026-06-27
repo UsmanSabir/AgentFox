@@ -24,6 +24,22 @@ public class AhkConfig
     /// fees and price drift so the actual fill stays under budget. Default 2%.
     /// </summary>
     public decimal BudgetBufferPercent { get; set; } = 2m;
+
+    /// <summary>
+    /// When a BUY tip names a stock and a clear buy intent but gives NO entry price ("accumulate on
+    /// dips"), the limit is set to the live last-trade price read from the portal, LESS this percentage,
+    /// so the order rests just below market to catch a dip. Default 1%. Set 0 to buy at the live price.
+    /// Only used when <c>TradingAgent.AutoBuyWithoutEntryPrice</c> is enabled.
+    /// </summary>
+    public decimal DipDiscountPercent { get; set; } = 1m;
+
+    /// <summary>
+    /// Clamp a limit price into the day's price band before submitting: a SELL above the Upper Cap is
+    /// lowered to the cap, a BUY below the Lower Lock is raised to the lock. PSX rejects any order outside
+    /// the band (so e.g. a take-profit above today's cap would fail). Default true. When the band can't be
+    /// read from the dialog, the price is left as-is. Set false to always submit the exact requested price.
+    /// </summary>
+    public bool ClampPriceToBand { get; set; } = true;
     public string SessionDir { get; set; } = "session_ahk";
     public string LogDir { get; set; } = "logs/trading";
 

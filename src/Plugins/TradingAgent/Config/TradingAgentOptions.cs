@@ -21,4 +21,14 @@ public class TradingAgentOptions
     /// sell is only attempted when the BUY actually succeeded. Set false to place only the BUY.
     /// </summary>
     public bool AutoPlaceTargetSell { get; set; } = true;
+
+    /// <summary>
+    /// How to handle a BUY tip that names a stock with a clear buy intent but gives NO entry price
+    /// (e.g. "accumulate on dips"). When true, the entry is resolved from the live market price less
+    /// <c>Ahk.DipDiscountPercent</c> and the order is placed (budget-sized). When false (default) the tip
+    /// is recognized and logged but NOT executed, so a human can place it manually. Because a
+    /// dip-discounted limit rests below market and may not fill, no take-profit SELL is auto-paired for
+    /// these orders even when a target is given.
+    /// </summary>
+    public bool AutoBuyWithoutEntryPrice { get; set; } = false;
 }

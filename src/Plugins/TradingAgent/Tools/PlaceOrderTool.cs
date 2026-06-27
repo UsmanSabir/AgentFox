@@ -108,8 +108,6 @@ public sealed class PlaceOrderTool : BaseTool
             catch { /* unparseable target — no follow-up sell */ }
         }
 
-        var isMarket = orderType == "MARKET" || !price.HasValue;
-
         // Quantity is OPTIONAL. An explicit positive value is honoured; a present-but-invalid value is
         // rejected (a bad signal must not turn into a real order at some default size); when omitted the
         // position is sized from the per-stock budget below — but only after the confidence gate passes.
@@ -129,6 +127,33 @@ public sealed class PlaceOrderTool : BaseTool
             return ToolResult.Ok(Skipped(
                 $"Confidence '{confidence}' is below minimum '{opts.MinConfidence}'."));
         }
+
+        // ── Resolve a missing entry price for a BUY ("accumulate on dips") from the live market ──
+        // No explicit price + a limit BUY ⇒ read the live last-trade price and place the limit a dip
+        // below it. Governed by AutoBuyWithoutEntryPrice: off ⇒ log for manual review, don't execute.
+        var resolvedFromMarket = false;
+        if (action == "BUY" && !price.HasValue && orderType != "MARKET")
+        {
+            if (!opts.AutoBuyWithoutEntryPrice)
+                return ToolResult.Ok(Skipped(
+                    "Tip has no entry price and AutoBuyWithoutEntryPrice is disabled — logged for manual review, not executed."));
+
+            decimal? live = null;
+            try { live = (await _broker.GetMarketPricesAsync(new[] { symbol })).GetValueOrDefault(symbol); }
+            catch (Exception ex) { _logger.LogError(ex, "[PlaceOrder] Live price fetch failed for {Symbol}.", symbol); }
+
+            if (live is not > 0)
+                return ToolResult.Fail($"Could not read a live market price for {symbol} to size a no-entry-price BUY.");
+
+            var dip = Math.Clamp(ahk.DipDiscountPercent, 0m, 100m) / 100m;
+            price = Math.Round(live.Value * (1m - dip), 2, MidpointRounding.AwayFromZero);
+            resolvedFromMarket = true;
+            _logger.LogInformation(
+                "[PlaceOrder] Resolved {Symbol} entry from live {Live} → {Price} (dip {Dip}%).",
+                symbol, live, price, ahk.DipDiscountPercent);
+        }
+
+        var isMarket = orderType == "MARKET" || !price.HasValue;
 
         // ── Budget-based position sizing ──────────────────────────────────────
         // When no explicit quantity was supplied, derive the share count from the per-stock budget and
@@ -210,9 +235,11 @@ public sealed class PlaceOrderTool : BaseTool
         // sells EXACTLY the shares the BUY just acquired — it is the exit of an already cap-checked
         // position, not new exposure — so it is deliberately NOT re-checked against MaxOrderValuePkr.
         // (Since target > entry, the sell value always exceeds the buy value and would otherwise be
-        // wrongly blocked whenever the budget sits near the cap.)
+        // wrongly blocked whenever the budget sits near the cap.) EXCEPTION: when the entry was resolved
+        // from the live market at a dip discount, the buy limit rests below market and may not fill, so
+        // no take-profit sell is paired (it would risk selling shares not yet held).
         TradingSignal? sellSignal = null;
-        if (opts.AutoPlaceTargetSell && action == "BUY" && target is > 0)
+        if (opts.AutoPlaceTargetSell && action == "BUY" && target is > 0 && !resolvedFromMarket)
         {
             sellSignal = new TradingSignal
             {
@@ -264,7 +291,9 @@ public sealed class PlaceOrderTool : BaseTool
                     order_id          = sell.OrderId,
                     action            = sell.Action,
                     symbol            = sell.Symbol,
-                    price             = target,
+                    price             = sell.SubmittedPrice ?? target,
+                    requested_price   = target,
+                    price_adjustment  = sell.PriceAdjustment,
                     message           = sell.Message,
                     screenshot_before = sell.ScreenshotBefore,
                     screenshot_after  = sell.ScreenshotAfter
@@ -282,9 +311,12 @@ public sealed class PlaceOrderTool : BaseTool
             order_id          = result.OrderId,
             action            = result.Action,
             symbol            = result.Symbol,
-            quantity          = quantity,
-            price             = price,
-            auto_sized        = autoSized,
+            quantity                   = quantity,
+            price                      = result.SubmittedPrice ?? price,
+            requested_price            = price,
+            price_adjustment           = result.PriceAdjustment,
+            auto_sized                 = autoSized,
+            entry_resolved_from_market = resolvedFromMarket,
             message           = result.Message,
             screenshot_before = result.ScreenshotBefore,
             screenshot_after  = result.ScreenshotAfter,

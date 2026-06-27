@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -321,6 +322,174 @@ public sealed class AhkBroker : IAsyncDisposable
         }
     }
 
+    // ── Live price lookup ───────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Reads the live last-trade price for each symbol in ONE browser session, by opening the BUY
+    /// dialog and letting the portal auto-fill <c>#buyprice</c> when the symbol resolves. Nothing is
+    /// submitted — this only inspects the form. Used to size/price a BUY tip that gave no entry price
+    /// ("accumulate on dips"). A symbol whose price could not be read maps to null.
+    /// </summary>
+    public async Task<IReadOnlyDictionary<string, decimal?>> GetMarketPricesAsync(
+        IReadOnlyList<string> symbols)
+    {
+        var prices = new Dictionary<string, decimal?>(StringComparer.OrdinalIgnoreCase);
+        if (symbols.Count == 0) return prices;
+
+        await _gate.WaitAsync();
+        try
+        {
+            await PrepareSessionWithRetryAsync();
+            await OpenOrderDialogAsync("buy");
+
+            foreach (var symbol in symbols
+                         .Select(s => s?.Trim().ToUpperInvariant() ?? "")
+                         .Where(s => s.Length > 0)
+                         .Distinct())
+            {
+                prices[symbol] = await ReadLastTradePriceAsync(symbol);
+            }
+
+            return prices;
+        }
+        finally
+        {
+            if (_config.Value.CloseBrowserAfterOrder)
+                await TeardownAsync();
+            _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Types <paramref name="symbol"/> into the (already open) BUY dialog, waits for the portal to
+    /// resolve it and auto-fill <c>#buyprice</c> with the last-trade price, and parses that value.
+    /// ASSUMES the gate is held and the dialog is open. Returns null if no positive price appears.
+    /// </summary>
+    private async Task<decimal?> ReadLastTradePriceAsync(string symbol)
+    {
+        await FillFieldAsync("#buysymbol", symbol);
+        await Task.Delay(800);                 // autocomplete dropdown
+        await _page!.Keyboard.PressAsync("Tab");
+        await Task.Delay(500);                 // portal populates #buyprice with the last trade price
+
+        var raw = await _page.EvaluateFunctionAsync<string>(
+            "() => { const e = document.querySelector('#buyprice'); return e ? (e.value || '') : ''; }") ?? "";
+
+        // Strip thousands separators / stray characters, keep digits and a single decimal point.
+        var cleaned = Regex.Replace(raw, @"[^0-9.]", "");
+        if (decimal.TryParse(cleaned, NumberStyles.Any, CultureInfo.InvariantCulture, out var price) && price > 0m)
+        {
+            _logger.LogInformation("[AhkBroker] Live price for {Symbol}: {Price} (raw '{Raw}').", symbol, price, raw);
+            return price;
+        }
+
+        _logger.LogWarning("[AhkBroker] Could not read a live price for {Symbol} (raw '{Raw}').", symbol, raw);
+        return null;
+    }
+
+    // ── Price-band clamp ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Resolves the limit price to submit, clamping it into the day's price band (Lower Lock / Upper Cap)
+    /// when <see cref="AhkConfig.ClampPriceToBand"/> is on and the band can be read from the open dialog.
+    /// A price above the Upper Cap is lowered to the cap; a price below the Lower Lock is raised to the
+    /// lock (PSX rejects anything outside the band). Returns the (possibly unchanged) price and a note
+    /// describing any clamp, or null. ASSUMES the dialog is open and the symbol resolved.
+    /// </summary>
+    private async Task<(decimal price, string? note)> ResolveLimitPriceAsync(decimal requested, string side)
+    {
+        if (!_config.Value.ClampPriceToBand)
+            return (requested, null);
+
+        var (lowerLock, upperCap) = await ReadPriceBandAsync(side);
+
+        if (upperCap is > 0 && requested > upperCap.Value)
+        {
+            var note = $"Limit clamped down from {requested:F2} to the day's Upper Cap {upperCap.Value:F2}.";
+            _logger.LogWarning("[AhkBroker] {Note}", note);
+            return (upperCap.Value, note);
+        }
+
+        if (lowerLock is > 0 && requested < lowerLock.Value)
+        {
+            var note = $"Limit clamped up from {requested:F2} to the day's Lower Lock {lowerLock.Value:F2}.";
+            _logger.LogWarning("[AhkBroker] {Note}", note);
+            return (lowerLock.Value, note);
+        }
+
+        return (requested, null);
+    }
+
+    /// <summary>
+    /// Reads the day's Lower Lock and Upper Cap for the resolved symbol from the order dialog. Reads the
+    /// confirmed stable element ids first — SELL: <c>#sf-selluppercap</c> / <c>#sf-selllowerlock</c>,
+    /// BUY: <c>#bf-uppercap</c> / <c>#bf-lowerlock</c> — and falls back to matching the
+    /// "Lower Lock"/"Upper Cap" columns in the quote table if an id is missing. Returns (null, null) when
+    /// the band can't be found, so the caller leaves the price unchanged. <paramref name="side"/> is
+    /// "buy" or "sell".
+    /// </summary>
+    private async Task<(decimal? lowerLock, decimal? upperCap)> ReadPriceBandAsync(string side)
+    {
+        var s = string.Equals(side, "sell", StringComparison.OrdinalIgnoreCase) ? "sell" : "buy";
+        string raw;
+        try
+        {
+            raw = await _page!.EvaluateFunctionAsync<string>(@"(side) => {
+                const txt   = el => el ? (el.innerText || el.value || '').trim() : '';
+                const byId  = id => txt(document.getElementById(id));
+
+                // 1) Confirmed stable element ids — note the buy/sell ids do NOT share a pattern.
+                const ids = side === 'sell'
+                    ? { up: 'sf-selluppercap', lo: 'sf-selllowerlock' }
+                    : { up: 'bf-uppercap',     lo: 'bf-lowerlock' };
+                let up = byId(ids.up);
+                let lo = byId(ids.lo);
+
+                // 2) Fallback: match the quote-table header columns if an id is missing/renamed.
+                if (!up || !lo) {
+                    const norm = x => (x || '').replace(/\s+/g, ' ').trim().toLowerCase();
+                    for (const t of Array.from(document.querySelectorAll('table'))) {
+                        const rows = Array.from(t.rows || []);
+                        if (rows.length < 2) continue;
+                        const headers = Array.from(rows[0].cells || []).map(c => norm(c.innerText));
+                        const upIdx = headers.findIndex(h => h.includes('upper') && (h.includes('cap') || h.includes('lock')));
+                        const loIdx = headers.findIndex(h => h.includes('lower') && h.includes('lock'));
+                        if (upIdx < 0 && loIdx < 0) continue;
+                        for (let r = 1; r < rows.length; r++) {
+                            const cells = rows[r].cells;
+                            if (!cells || cells.length <= Math.max(upIdx, loIdx)) continue;
+                            if (!up && upIdx >= 0) up = txt(cells[upIdx]);
+                            if (!lo && loIdx >= 0) lo = txt(cells[loIdx]);
+                            if (up && lo) break;
+                        }
+                        if (up || lo) break;
+                    }
+                }
+                return (lo || '') + '|' + (up || '');
+            }", s) ?? "";
+        }
+        catch { return (null, null); }
+
+        if (string.IsNullOrWhiteSpace(raw)) return (null, null);
+
+        var parts = raw.Split('|');
+        var lower = parts.Length > 0 ? ParseBandValue(parts[0]) : null;
+        var upper = parts.Length > 1 ? ParseBandValue(parts[1]) : null;
+
+        if (lower is not null || upper is not null)
+            _logger.LogInformation("[AhkBroker] Price band: LowerLock={Lower} UpperCap={Upper}.", lower, upper);
+
+        return (lower, upper);
+    }
+
+    /// <summary>Parses a band cell value, stripping thousands separators and stray characters.</summary>
+    private static decimal? ParseBandValue(string raw)
+    {
+        var cleaned = Regex.Replace(raw ?? "", @"[^0-9.]", "");
+        return decimal.TryParse(cleaned, NumberStyles.Any, CultureInfo.InvariantCulture, out var v) && v > 0m
+            ? v : (decimal?)null;
+    }
+
     /// <summary>Routes a single signal to the BUY/SELL placement. ASSUMES the gate is held and session ready.</summary>
     private async Task<OrderResult> DispatchOrderAsync(TradingSignal signal) =>
         signal.Action.ToUpperInvariant() switch
@@ -639,9 +808,15 @@ public sealed class AhkBroker : IAsyncDisposable
 
         await FillFieldAsync("#buyvolume", qty.ToString());
 
+        decimal? requestedPrice = null, submittedPrice = null;
+        string?  priceAdjustment = null;
         if (isLimit && signal.EntryPrice.HasValue)
         {
-            var price = signal.EntryPrice.Value.ToString("F2");
+            requestedPrice = signal.EntryPrice.Value;
+            (var finalPrice, priceAdjustment) = await ResolveLimitPriceAsync(requestedPrice.Value, "buy");
+            submittedPrice = finalPrice;
+
+            var price = finalPrice.ToString("F2");
             await FillFieldAsync("#buyprice",      price);
             await FillFieldAsync("#buylimitprice", price);
         }
@@ -664,7 +839,10 @@ public sealed class AhkBroker : IAsyncDisposable
             Symbol           = signal.Symbol,
             Message          = outcome.Message ?? $"BUY {signal.Symbol} x{qty}: outcome unconfirmed.",
             ScreenshotBefore = before,
-            ScreenshotAfter  = after
+            ScreenshotAfter  = after,
+            RequestedPrice   = requestedPrice,
+            SubmittedPrice   = submittedPrice,
+            PriceAdjustment  = priceAdjustment
         };
     }
 
@@ -692,9 +870,15 @@ public sealed class AhkBroker : IAsyncDisposable
 
         await FillFieldAsync("#sellvolume", qty.ToString());
 
+        decimal? requestedPrice = null, submittedPrice = null;
+        string?  priceAdjustment = null;
         if (isLimit && signal.EntryPrice.HasValue)
         {
-            var price = signal.EntryPrice.Value.ToString("F2");
+            requestedPrice = signal.EntryPrice.Value;
+            (var finalPrice, priceAdjustment) = await ResolveLimitPriceAsync(requestedPrice.Value, "sell");
+            submittedPrice = finalPrice;
+
+            var price = finalPrice.ToString("F2");
             await FillFieldAsync("#sellprice",      price);
             await FillFieldAsync("#selllimitprice", price);
         }
@@ -717,7 +901,10 @@ public sealed class AhkBroker : IAsyncDisposable
             Symbol           = signal.Symbol,
             Message          = outcome.Message ?? $"SELL {signal.Symbol} x{qty}: outcome unconfirmed.",
             ScreenshotBefore = before,
-            ScreenshotAfter  = after
+            ScreenshotAfter  = after,
+            RequestedPrice   = requestedPrice,
+            SubmittedPrice   = submittedPrice,
+            PriceAdjustment  = priceAdjustment
         };
     }
 
