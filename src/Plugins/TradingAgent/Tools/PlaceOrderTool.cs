@@ -33,6 +33,7 @@ public sealed class PlaceOrderTool : BaseTool
     private readonly IOptions<TradingAgentOptions> _agentOptions;
     private readonly IOptions<AhkConfig> _ahkConfig;
     private readonly DuplicateSignalFilter _dedup;
+    private readonly PendingTakeProfitStore _pendingSells;
     private readonly ILogger<PlaceOrderTool> _logger;
 
     public override string Name => "place_order";
@@ -63,12 +64,14 @@ public sealed class PlaceOrderTool : BaseTool
         IOptions<TradingAgentOptions> agentOptions,
         IOptions<AhkConfig> ahkConfig,
         DuplicateSignalFilter dedup,
+        PendingTakeProfitStore pendingSells,
         ILogger<PlaceOrderTool> logger)
     {
         _broker       = broker;
         _agentOptions = agentOptions;
         _ahkConfig    = ahkConfig;
         _dedup        = dedup;
+        _pendingSells = pendingSells;
         _logger       = logger;
     }
 
@@ -284,6 +287,14 @@ public sealed class PlaceOrderTool : BaseTool
                     "[PlaceOrder] Follow-up SELL {Symbol} x{Qty} @ {Price} — Success={Success}",
                     symbol, quantity, target, sell.Success);
 
+                // If the sell failed transiently (the buy limit hasn't filled yet → "insufficient
+                // exposure"), queue it for background retry instead of just reporting failure.
+                var retryScheduled = !sell.Success
+                    && opts.RetryFailedTakeProfit
+                    && PendingTakeProfitStore.IsRetryable(sell.Message)
+                    && _pendingSells.Schedule(symbol, quantity, target!.Value,
+                                              opts.TakeProfitRetryIntervalMinutes, rawMessage);
+
                 followUpSell = new
                 {
                     placed            = true,
@@ -294,6 +305,7 @@ public sealed class PlaceOrderTool : BaseTool
                     price             = sell.SubmittedPrice ?? target,
                     requested_price   = target,
                     price_adjustment  = sell.PriceAdjustment,
+                    retry_scheduled   = retryScheduled,
                     message           = sell.Message,
                     screenshot_before = sell.ScreenshotBefore,
                     screenshot_after  = sell.ScreenshotAfter

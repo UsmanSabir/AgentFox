@@ -31,4 +31,20 @@ public class TradingAgentOptions
     /// these orders even when a target is given.
     /// </summary>
     public bool AutoBuyWithoutEntryPrice { get; set; } = false;
+
+    /// <summary>
+    /// When a paired take-profit SELL can't be placed immediately (its BUY limit hasn't filled yet, so the
+    /// account shows no shares — "insufficient exposure"), persist it and retry in the background until the
+    /// broker accepts it. Default true. Only transient failures are queued; a permanent rejection is not.
+    /// </summary>
+    public bool RetryFailedTakeProfit { get; set; } = true;
+
+    /// <summary>Minutes between take-profit retry attempts (only while the market is open). Default 10.</summary>
+    public int TakeProfitRetryIntervalMinutes { get; set; } = 10;
+
+    /// <summary>
+    /// Maximum take-profit retry attempts before giving up (logged). At the default 10-min interval, 36
+    /// attempts ≈ one full trading session. Attempts accrue only while the market is open.
+    /// </summary>
+    public int TakeProfitRetryMaxAttempts { get; set; } = 36;
 }

@@ -39,6 +39,7 @@ public sealed class PlaceOrdersTool : BaseTool
     private readonly IOptions<TradingAgentOptions> _agentOptions;
     private readonly IOptions<AhkConfig> _ahkConfig;
     private readonly DuplicateSignalFilter _dedup;
+    private readonly PendingTakeProfitStore _pendingSells;
     private readonly ILogger<PlaceOrdersTool> _logger;
 
     public override string Name => "place_orders";
@@ -89,12 +90,14 @@ public sealed class PlaceOrdersTool : BaseTool
         IOptions<TradingAgentOptions> agentOptions,
         IOptions<AhkConfig> ahkConfig,
         DuplicateSignalFilter dedup,
+        PendingTakeProfitStore pendingSells,
         ILogger<PlaceOrdersTool> logger)
     {
         _broker       = broker;
         _agentOptions = agentOptions;
         _ahkConfig    = ahkConfig;
         _dedup        = dedup;
+        _pendingSells = pendingSells;
         _logger       = logger;
     }
 
@@ -177,7 +180,22 @@ public sealed class PlaceOrdersTool : BaseTool
                 continue;
             }
 
-            report.Add(BuildOrderReport(order, plan, grouped[gi++]));
+            var results = grouped[gi++];
+
+            // If the paired take-profit SELL failed transiently (its BUY hasn't filled yet), queue it for
+            // background retry instead of just reporting the failure.
+            var retryScheduled = false;
+            if (plan.PairedSell && results.Count > 1 && !results[1].Success
+                && opts.RetryFailedTakeProfit
+                && PendingTakeProfitStore.IsRetryable(results[1].Message)
+                && order.Target is > 0)
+            {
+                retryScheduled = _pendingSells.Schedule(
+                    plan.Group[0].Symbol, plan.Group[0].Quantity ?? 0, order.Target.Value,
+                    opts.TakeProfitRetryIntervalMinutes, rawMessage);
+            }
+
+            report.Add(BuildOrderReport(order, plan, results, retryScheduled));
         }
 
         var placed   = report.Count(r => r.GetType().GetProperty("success")?.GetValue(r) is true);
@@ -341,7 +359,8 @@ public sealed class PlaceOrdersTool : BaseTool
     private static object BuildOrderReport(
         OrderInput order,
         OrderPlan plan,
-        IReadOnlyList<OrderResult> results)
+        IReadOnlyList<OrderResult> results,
+        bool retryScheduled)
     {
         var primary = results[0];
 
@@ -359,6 +378,7 @@ public sealed class PlaceOrdersTool : BaseTool
                     price             = sell.SubmittedPrice ?? order.Target,
                     requested_price   = order.Target,
                     price_adjustment  = sell.PriceAdjustment,
+                    retry_scheduled   = retryScheduled,
                     message           = sell.Message,
                     screenshot_before = sell.ScreenshotBefore,
                     screenshot_after  = sell.ScreenshotAfter

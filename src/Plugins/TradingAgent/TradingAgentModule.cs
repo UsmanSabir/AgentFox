@@ -9,6 +9,7 @@ using TradingAgent.Broker;
 using TradingAgent.Config;
 using TradingAgent.Safety;
 using TradingAgent.Tools;
+using TradingAgent.Trading;
 
 namespace TradingAgent;
 
@@ -81,6 +82,11 @@ public sealed class TradingAgentModule : IAgentAwareModule
             var opts = sp.GetRequiredService<IOptions<TradingAgentOptions>>().Value;
             return new DuplicateSignalFilter(TimeSpan.FromMinutes(opts.DuplicateWindowMinutes));
         });
+
+        // Disk-backed queue of take-profit sells awaiting retry, plus the background worker that retries
+        // them while the market is open (placed via the host's IHostedService pipeline on app start).
+        services.AddSingleton<PendingTakeProfitStore>();
+        services.AddHostedService<TakeProfitRetryWorker>();
     }
 
     public void MapEndpoints(IEndpointRouteBuilder endpoints) { }
@@ -100,6 +106,7 @@ public sealed class TradingAgentModule : IAgentAwareModule
         var ahkConfig     = _services!.GetRequiredService<IOptions<AhkConfig>>();
         var broker        = _services!.GetRequiredService<AhkBroker>();
         var dedup         = _services!.GetRequiredService<DuplicateSignalFilter>();
+        var pendingSells  = _services!.GetRequiredService<PendingTakeProfitStore>();
         var loggers       = _services!.GetRequiredService<ILoggerFactory>();
 
         // The browser is launched ON DEMAND by PlaceOrderAsync and torn down once the order finishes
@@ -114,11 +121,11 @@ public sealed class TradingAgentModule : IAgentAwareModule
         context.RegisterTool(new CheckMarketTool());
 
         context.RegisterTool(new PlaceOrderTool(
-            broker, agentOptions, ahkConfig, dedup,
+            broker, agentOptions, ahkConfig, dedup, pendingSells,
             loggers.CreateLogger<PlaceOrderTool>()));
 
         context.RegisterTool(new PlaceOrdersTool(
-            broker, agentOptions, ahkConfig, dedup,
+            broker, agentOptions, ahkConfig, dedup, pendingSells,
             loggers.CreateLogger<PlaceOrdersTool>()));
 
         context.RegisterTool(new LogSignalTool(
@@ -186,6 +193,9 @@ public sealed class TradingAgentModule : IAgentAwareModule
                     - If an order result carries a 'price_adjustment' note (the limit was clamped into the
                       day's price band, e.g. a take-profit above the Upper Cap), surface it to the user
                       verbatim in your summary so they know the exact price that was placed
+                    - If a take-profit sell shows retry_scheduled=true, tell the user it failed to place
+                      now (usually the BUY limit hasn't filled yet) but will be retried automatically in
+                      the background until it's accepted — they do NOT need to place it manually
                     - HITL: if order placement requires human approval, wait for /approve or /reject
                     """;
             });
