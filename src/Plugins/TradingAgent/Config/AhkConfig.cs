@@ -10,6 +10,20 @@ public class AhkConfig
     public string TradingPin { get; set; } = "";
     public int DefaultQty { get; set; } = 100;
     public decimal MaxOrderValuePkr { get; set; } = 50_000m;
+
+    /// <summary>
+    /// Target spend per stock (PKR) used to size an order when the signal carries no explicit share
+    /// count. Shares = floor((PerStockBudgetPkr × (1 − BudgetBufferPercent/100)) ÷ limit price). The
+    /// resulting order value is still checked against <see cref="MaxOrderValuePkr"/>, so keep the cap
+    /// at or above the budget or every auto-sized order will be blocked.
+    /// </summary>
+    public decimal PerStockBudgetPkr { get; set; } = 50_000m;
+
+    /// <summary>
+    /// Headroom kept aside when sizing from <see cref="PerStockBudgetPkr"/> (percent). Leaves room for
+    /// fees and price drift so the actual fill stays under budget. Default 2%.
+    /// </summary>
+    public decimal BudgetBufferPercent { get; set; } = 2m;
     public string SessionDir { get; set; } = "session_ahk";
     public string LogDir { get; set; } = "logs/trading";
 

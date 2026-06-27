@@ -6,6 +6,7 @@ using TradingAgent.Broker;
 using TradingAgent.Config;
 using TradingAgent.Models;
 using TradingAgent.Safety;
+using TradingAgent.Trading;
 
 namespace TradingAgent.Tools;
 
@@ -56,8 +57,9 @@ public sealed class PlaceOrdersTool : BaseTool
         {
             Type        = "array",
             Required    = true,
-            Description = "The orders to place, in order. Each: action (BUY/SELL), symbol, quantity, " +
-                          "price (limit; omit for market), optional target (take-profit sell price for a BUY), order_type.",
+            Description = "The orders to place, in order. Each: action (BUY/SELL), symbol, " +
+                          "price (limit; omit for market), optional quantity (OMIT to auto-size from the per-stock budget), " +
+                          "optional target (take-profit sell price for a BUY), order_type.",
             JsonSchema  = """
                 {
                   "type": "array",
@@ -67,12 +69,12 @@ public sealed class PlaceOrdersTool : BaseTool
                     "properties": {
                       "action":     { "type": "string", "enum": ["BUY", "SELL"] },
                       "symbol":     { "type": "string", "description": "PSX ticker e.g. LUCK" },
-                      "quantity":   { "type": "number", "description": "Number of shares" },
+                      "quantity":   { "type": "number", "description": "Number of shares. Omit to auto-size from the per-stock budget using the limit price." },
                       "price":      { "type": "number", "description": "Limit price in PKR. Omit for market order." },
                       "target":     { "type": "number", "description": "Take-profit/sell price. Pairs a SELL with a BUY." },
                       "order_type": { "type": "string", "enum": ["LIMIT", "MARKET"] }
                     },
-                    "required": ["action", "symbol", "quantity"]
+                    "required": ["action", "symbol"]
                   }
                 }
                 """
@@ -191,12 +193,29 @@ public sealed class PlaceOrdersTool : BaseTool
         if (action is not ("BUY" or "SELL") || string.IsNullOrEmpty(symbol))
             return (null, $"Invalid order — action must be BUY/SELL and symbol is required (got action='{o.Action}', symbol='{o.Symbol}').", false);
 
-        if (o.Quantity is not > 0)
-            return (null, $"Invalid quantity '{o.Quantity}' — must be a positive integer.", false);
-
-        var qty       = o.Quantity.Value;
         var orderType = o.OrderType?.ToUpperInvariant() ?? "LIMIT";
         var isMarket  = orderType == "MARKET" || !o.Price.HasValue;
+
+        // Quantity is optional: an explicit positive value is honoured; a present-but-non-positive
+        // value is rejected; when omitted the position is sized from the per-stock budget and the limit
+        // price (deterministic math), which needs a price — a market order must carry an explicit qty.
+        int qty;
+        if (o.Quantity.HasValue)
+        {
+            if (o.Quantity.Value <= 0)
+                return (null, $"Invalid quantity '{o.Quantity}' — must be a positive integer.", false);
+            qty = o.Quantity.Value;
+        }
+        else
+        {
+            if (isMarket)
+                return (null, "Cannot size from the per-stock budget without a limit price (market order). Provide a price or an explicit quantity.", false);
+
+            var sized = PositionSizer.ComputeQuantity(ahk.PerStockBudgetPkr, o.Price!.Value, ahk.BudgetBufferPercent);
+            if (sized is null)
+                return (null, $"Per-stock budget {ahk.PerStockBudgetPkr:N0} PKR (less {ahk.BudgetBufferPercent}% buffer) is too small to buy one share at {o.Price!.Value:F2} PKR.", false);
+            qty = sized.Value;
+        }
 
         if (isMarket)
         {
@@ -223,30 +242,23 @@ public sealed class PlaceOrdersTool : BaseTool
             }
         };
 
-        // Pair a take-profit SELL with a BUY that carries a target (and stays within the value cap).
+        // Pair a take-profit SELL with a BUY that carries a target. The sell exits exactly the shares
+        // the BUY (already cap-checked) acquired — it is not new exposure — so it is deliberately NOT
+        // re-checked against MaxOrderValuePkr. (target > entry, so its value always exceeds the buy's
+        // and would otherwise be wrongly blocked whenever the budget sits near the cap.)
         var pairedSell = false;
         if (opts.AutoPlaceTargetSell && action == "BUY" && o.Target is > 0)
         {
-            var sellValue = qty * o.Target.Value;
-            if (sellValue <= ahk.MaxOrderValuePkr)
+            group.Add(new TradingSignal
             {
-                group.Add(new TradingSignal
-                {
-                    Action     = "SELL",
-                    Symbol     = symbol,
-                    EntryPrice = o.Target,
-                    Quantity   = qty,
-                    OrderType  = "LIMIT",
-                    Confidence = "HIGH"
-                });
-                pairedSell = true;
-            }
-            else
-            {
-                _logger.LogWarning(
-                    "[PlaceOrders] Target SELL for {Symbol} value {Value:N0} exceeds cap {Cap:N0} — buy placed without paired sell.",
-                    symbol, sellValue, ahk.MaxOrderValuePkr);
-            }
+                Action     = "SELL",
+                Symbol     = symbol,
+                EntryPrice = o.Target,
+                Quantity   = qty,
+                OrderType  = "LIMIT",
+                Confidence = "HIGH"
+            });
+            pairedSell = true;
         }
 
         return (group, null, pairedSell);
@@ -286,6 +298,8 @@ public sealed class PlaceOrdersTool : BaseTool
         {
             action            = primary.Action,
             symbol            = primary.Symbol,
+            quantity          = plan.group![0].Quantity,
+            auto_sized        = order.Quantity is null,
             success           = primary.Success,
             order_id          = primary.OrderId,
             message           = primary.Message,

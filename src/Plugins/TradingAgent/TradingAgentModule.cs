@@ -147,8 +147,14 @@ public sealed class TradingAgentModule : IAgentAwareModule
                     - log_signal     : persist every detected signal to disk
 
                     ### Workflow for every incoming message
+                    Messages arrive automatically and are a MIX of tradeable tips and noise (market
+                    outlook, support/resistance commentary, news/announcements, images, chatter). Only a
+                    clear BUY/SELL tip on a named PSX stock is actionable — everything else is discarded.
+
                     1. Call parse_signal(message) — always, even if the message looks like noise
-                    2. If is_signal=false: state briefly that no signal was detected, then stop
+                    2. If is_signal=false: this is NOT a tradeable tip — DISCARD it. Do NOT call
+                       check_market, log_signal, or place_order. Reply with at most one short sentence
+                       (e.g. "No actionable signal — ignored.") and stop.
                     3. Call check_market()
                     4. Call log_signal(executed=false, execution_reason="pending evaluation")
                     5. If AutoExecute={cfg.AutoExecute} AND market is open AND confidence >= {cfg.MinConfidence}:
@@ -156,6 +162,15 @@ public sealed class TradingAgentModule : IAgentAwareModule
                           call place_orders(orders=[...]) ONCE with every order in the array.
                        b. Call log_signal again with executed=true and the outcome
                     6. Reply with a single concise paragraph summarising what was found and done
+
+                    ### Position sizing — DO NOT ask the user for quantity
+                    - Quantity is sized AUTOMATICALLY from the per-stock budget (PerStockBudgetPkr).
+                      OMIT the 'quantity' argument on place_order/place_orders and the executor computes
+                      the share count from the limit 'price'. Only pass 'quantity' when the tip itself
+                      states an explicit share count.
+                    - ALWAYS pass a limit 'price' — it is required for budget sizing. Use the entry_price
+                      from parse_signal (the upper bound of any accumulation zone). Never ask the user to
+                      supply a price, quantity, or target that the signal already implies; just execute.
 
                     ### Rules
                     - Never skip log_signal — record every signal regardless of outcome

@@ -6,6 +6,7 @@ using TradingAgent.Broker;
 using TradingAgent.Config;
 using TradingAgent.Models;
 using TradingAgent.Safety;
+using TradingAgent.Trading;
 
 namespace TradingAgent.Tools;
 
@@ -40,7 +41,8 @@ public sealed class PlaceOrderTool : BaseTool
         "Place a BUY or SELL order on the Arif Habib Kornasif (AHK) trading portal " +
         "using browser automation. Enforces AutoExecute flag, MinConfidence gate, " +
         "order value cap, and duplicate filter. Only call this when check_market " +
-        "has confirmed the market is open. When a BUY tip also gives a target/sell " +
+        "has confirmed the market is open. Omit 'quantity' to auto-size the position " +
+        "from the configured per-stock budget using the limit price. When a BUY tip also gives a target/sell " +
         "price (e.g. 'buy at 50, sell at 55'), pass it as 'target' and a take-profit " +
         "SELL limit order is placed automatically after the BUY succeeds.";
 
@@ -48,7 +50,7 @@ public sealed class PlaceOrderTool : BaseTool
     {
         ["action"]      = new() { Type = "string",  Description = "BUY or SELL",                                   Required = true  },
         ["symbol"]      = new() { Type = "string",  Description = "PSX ticker symbol e.g. OGDC",                   Required = true  },
-        ["quantity"]    = new() { Type = "number",  Description = "Number of shares",                              Required = true  },
+        ["quantity"]    = new() { Type = "number",  Description = "Number of shares. OMIT to auto-size from the per-stock budget (PerStockBudgetPkr) using the limit price — only pass this when the tip states an explicit share count.", Required = false },
         ["price"]       = new() { Type = "number",  Description = "Limit price in PKR. Omit for market order.",    Required = false },
         ["target"]      = new() { Type = "number",  Description = "Take-profit/sell price. If given with a BUY, a SELL limit order is placed at this price after the BUY succeeds.", Required = false },
         ["order_type"]  = new() { Type = "string",  Description = "LIMIT or MARKET",                               Required = true  },
@@ -92,11 +94,6 @@ public sealed class PlaceOrderTool : BaseTool
         if (string.IsNullOrEmpty(action) || string.IsNullOrEmpty(symbol))
             return ToolResult.Fail("'action' and 'symbol' are required.");
 
-        // Reject a malformed quantity rather than silently substituting DefaultQty — a bad signal
-        // should not turn into a real order at the default size.
-        if (!int.TryParse(arguments.GetValueOrDefault("quantity")?.ToString(), out var quantity) || quantity <= 0)
-            return ToolResult.Fail($"Invalid 'quantity' — must be a positive integer (got '{arguments.GetValueOrDefault("quantity")}').");
-
         decimal? price = null;
         if (arguments.TryGetValue("price", out var priceRaw) && priceRaw is not null)
         {
@@ -113,6 +110,16 @@ public sealed class PlaceOrderTool : BaseTool
 
         var isMarket = orderType == "MARKET" || !price.HasValue;
 
+        // Quantity is OPTIONAL. An explicit positive value is honoured; a present-but-invalid value is
+        // rejected (a bad signal must not turn into a real order at some default size); when omitted the
+        // position is sized from the per-stock budget below — but only after the confidence gate passes.
+        var quantityArg      = arguments.GetValueOrDefault("quantity");
+        var quantityProvided = quantityArg is not null && !string.IsNullOrWhiteSpace(quantityArg.ToString());
+        var quantity         = 0;
+        if (quantityProvided &&
+            (!int.TryParse(quantityArg!.ToString(), out quantity) || quantity <= 0))
+            return ToolResult.Fail($"Invalid 'quantity' — must be a positive integer (got '{quantityArg}').");
+
         // ── 2. Confidence gate ────────────────────────────────────────────────
         if (!MeetsConfidence(confidence, opts.MinConfidence))
         {
@@ -121,6 +128,32 @@ public sealed class PlaceOrderTool : BaseTool
                 confidence, opts.MinConfidence);
             return ToolResult.Ok(Skipped(
                 $"Confidence '{confidence}' is below minimum '{opts.MinConfidence}'."));
+        }
+
+        // ── Budget-based position sizing ──────────────────────────────────────
+        // When no explicit quantity was supplied, derive the share count from the per-stock budget and
+        // the limit price (deterministic math, never the LLM). Requires a price — a market order has no
+        // price to size against, so it must carry an explicit quantity instead.
+        var autoSized = false;
+        if (!quantityProvided)
+        {
+            if (isMarket)
+                return ToolResult.Fail(
+                    "Cannot size an order from the per-stock budget without a limit 'price' (market order). " +
+                    "Provide a 'price', or an explicit 'quantity'.");
+
+            var sized = PositionSizer.ComputeQuantity(ahk.PerStockBudgetPkr, price!.Value, ahk.BudgetBufferPercent);
+            if (sized is null)
+                return ToolResult.Fail(
+                    $"Per-stock budget {ahk.PerStockBudgetPkr:N0} PKR (less {ahk.BudgetBufferPercent}% buffer) " +
+                    $"is too small to buy even one share of {symbol} at {price!.Value:F2} PKR.");
+
+            quantity  = sized.Value;
+            autoSized = true;
+            _logger.LogInformation(
+                "[PlaceOrder] Auto-sized {Symbol}: {Qty} share(s) @ {Price} ≈ {Value:N0} PKR " +
+                "from budget {Budget:N0} PKR (buffer {Buffer}%).",
+                symbol, quantity, price, quantity * price!.Value, ahk.PerStockBudgetPkr, ahk.BudgetBufferPercent);
         }
 
         // ── 3. Order value cap ────────────────────────────────────────────────
@@ -173,37 +206,23 @@ public sealed class PlaceOrderTool : BaseTool
         };
 
         // ── Pair a take-profit SELL with the BUY ("buy at X, sell at Y") ──────
-        // Only when the feature is on, this is a BUY, and a positive target was given. The exit order
-        // is value-capped like any other: if it would exceed the cap we skip pairing it (and say why)
-        // rather than firing an oversized exit, but the BUY still proceeds.
+        // Only when the feature is on, this is a BUY, and a positive target was given. The take-profit
+        // sells EXACTLY the shares the BUY just acquired — it is the exit of an already cap-checked
+        // position, not new exposure — so it is deliberately NOT re-checked against MaxOrderValuePkr.
+        // (Since target > entry, the sell value always exceeds the buy value and would otherwise be
+        // wrongly blocked whenever the budget sits near the cap.)
         TradingSignal? sellSignal = null;
-        object? sellSkipped       = null;
         if (opts.AutoPlaceTargetSell && action == "BUY" && target is > 0)
         {
-            var sellValue = quantity * target.Value;
-            if (sellValue > ahk.MaxOrderValuePkr)
+            sellSignal = new TradingSignal
             {
-                _logger.LogWarning(
-                    "[PlaceOrder] Target SELL value {Value:N0} PKR exceeds cap {Cap:N0} PKR — not paired.",
-                    sellValue, ahk.MaxOrderValuePkr);
-                sellSkipped = new
-                {
-                    placed = false,
-                    reason = $"Target sell value {sellValue:N0} PKR exceeds limit of {ahk.MaxOrderValuePkr:N0} PKR."
-                };
-            }
-            else
-            {
-                sellSignal = new TradingSignal
-                {
-                    Action     = "SELL",
-                    Symbol     = symbol,
-                    EntryPrice = target,
-                    Quantity   = quantity,
-                    OrderType  = "LIMIT",
-                    Confidence = "HIGH"
-                };
-            }
+                Action     = "SELL",
+                Symbol     = symbol,
+                EntryPrice = target,
+                Quantity   = quantity,
+                OrderType  = "LIMIT",
+                Confidence = "HIGH"
+            };
         }
 
         // Place the BUY and (when paired) the SELL in ONE browser session. stopOnFailure means the
@@ -228,7 +247,7 @@ public sealed class PlaceOrderTool : BaseTool
 
         // Report on the paired sell: its outcome if it ran, why it was skipped (cap), or that the buy
         // failed so it was not attempted.
-        object? followUpSell = sellSkipped;
+        object? followUpSell = null;
         if (sellSignal is not null)
         {
             if (results.Count > 1)
@@ -263,6 +282,9 @@ public sealed class PlaceOrderTool : BaseTool
             order_id          = result.OrderId,
             action            = result.Action,
             symbol            = result.Symbol,
+            quantity          = quantity,
+            price             = price,
+            auto_sized        = autoSized,
             message           = result.Message,
             screenshot_before = result.ScreenshotBefore,
             screenshot_after  = result.ScreenshotAfter,

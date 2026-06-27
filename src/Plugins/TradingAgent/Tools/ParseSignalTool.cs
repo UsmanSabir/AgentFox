@@ -47,9 +47,36 @@ public sealed class ParseSignalTool : BaseTool
           "confidence_reason": string
         }
 
+        FIRST decide is_signal. Only an ACTIONABLE per-stock instruction is a signal.
+
+        is_signal = TRUE only when BOTH are present:
+          1. a clear action on a SPECIFIC named PSX stock — buy / accumulate / add → BUY,
+             sell / book profit / exit / niklo → SELL, and
+          2. a recognizable PSX ticker or company name (see list below).
+
+        is_signal = FALSE (set action="UNKNOWN", confidence="NONE", symbol="") for everything else:
+          - Market / index OUTLOOK or commentary: KSE-100 levels, "important resistance level",
+            "support area", "bullish/bearish points", index targets. Index points (large 4–6 digit
+            numbers like 182500, 175185, 173000) are NOT share prices — never read them as entry/target.
+          - News, announcements, official statements, summits, MoUs, agreements, articles, forwards.
+          - Image/document/link captions with no explicit stock action.
+          - Greetings, questions, opinions, P&L chat, or anything lacking a buy/sell on a named stock.
+
+        When in doubt, is_signal=FALSE. Skipping a borderline message is far safer than trading on noise.
+
+        Range & quantity handling (PSX tips usually give zones, not exact numbers):
+        - entry_price: if a buy/accumulation RANGE is given (e.g. "accumulate around 20.5-21",
+          "buy 20.5 to 21"), set entry_price to the UPPER bound (21). For a single number, use it as-is.
+          This becomes the limit price, so the upper bound guarantees a fill anywhere in the zone.
+        - target: if multiple targets or a target RANGE is given (e.g. "Targets: 22.50 - 24.50"),
+          set target to the FIRST/LOWER target (22.50) — the nearest, most-likely-to-fill take-profit.
+        - quantity: leave null UNLESS the tip states an explicit share count (e.g. "buy 500 shares").
+          A missing quantity is normal and does NOT lower confidence — the executor sizes the position
+          from the configured per-stock budget.
+
         Confidence rules:
-        - HIGH:   action + symbol + entry price all clearly and unambiguously present
-        - MEDIUM: action + symbol clearly present, entry price inferred or absent
+        - HIGH:   action + symbol + an entry price OR accumulation range all clearly present
+        - MEDIUM: action + symbol clearly present, but no entry price/zone at all
         - LOW:    symbol present but action is unclear or absent
         - NONE:   not a trading signal at all
 
@@ -140,6 +167,31 @@ public sealed class ParseSignalTool : BaseTool
         }
 
         signal.RawMessage = message;
+
+        // Deterministic backstop. The classifier runs on a cheap local model that occasionally flags
+        // market-outlook/news/chatter as a tradeable tip. A real, executable per-stock signal needs BOTH
+        // a concrete BUY/SELL action AND a ticker — so anything missing either (index commentary with no
+        // symbol, a HOLD, news) is forced to a non-signal here, regardless of what the LLM returned. This
+        // is the layer the workflow trusts to "discard non-tip messages"; it can only ever discard, never
+        // promote, so it cannot turn noise into an order.
+        signal.Symbol = (signal.Symbol ?? "").Trim().ToUpperInvariant();
+        signal.Action = (signal.Action ?? "UNKNOWN").Trim().ToUpperInvariant();
+        var hasAction = signal.Action is "BUY" or "SELL";
+        var hasSymbol = !string.IsNullOrWhiteSpace(signal.Symbol);
+        if (signal.IsSignal && (!hasAction || !hasSymbol))
+        {
+            _logger.LogInformation(
+                "[ParseSignal] Discarded as non-actionable (action='{Action}', symbol='{Symbol}') — " +
+                "not a per-stock BUY/SELL tip (market outlook, news, or chatter).",
+                signal.Action, signal.Symbol);
+
+            signal.IsSignal   = false;
+            signal.Action     = "UNKNOWN";
+            signal.Confidence = "NONE";
+            if (string.IsNullOrWhiteSpace(signal.ConfidenceReason))
+                signal.ConfidenceReason =
+                    "Not an actionable per-stock trading tip (market outlook, news, or general chatter).";
+        }
 
         _logger.LogInformation(
             "[ParseSignal] is_signal={IsSignal} action={Action} symbol={Symbol} conf={Confidence} | {Reason}",
