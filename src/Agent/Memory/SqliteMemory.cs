@@ -67,6 +67,9 @@ public class SqliteLongTermMemory : IMemory, IDisposable
     public SqliteLongTermMemory(string? dbPath = null, IEmbeddingService? embeddingService = null)
     {
         var path = dbPath ?? "long_term_memory.db";
+        var dir = Path.GetDirectoryName(Path.GetFullPath(path));
+        if (!string.IsNullOrEmpty(dir))
+            Directory.CreateDirectory(dir);
         _connectionString = $"Data Source={path};Mode=ReadWriteCreate;Cache=Shared";
         _embedding = embeddingService ?? new NullEmbeddingService();
         InitializeSchema();
