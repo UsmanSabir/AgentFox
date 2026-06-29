@@ -321,8 +321,21 @@ class Program
         }
 
         // ── Load modules ──────────────────────────────────────────────────────
-        var enabledModules = configuration["Modules"]?.Split(',') ?? new[] { "cli", "web" };
-        bool requiresWeb   = enabledModules.Contains("api") || enabledModules.Contains("web");
+        // All discovered modules (built-in + plugins) are ENABLED BY DEFAULT. Opt OUT specific
+        // ones with a "DisabledModules" CSV (e.g. "web,webhook"). The legacy opt-in "Modules"
+        // key is still honored for back-compat: if present, ONLY those are enabled.
+        var disabledModules = (configuration["DisabledModules"] ?? string.Empty)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var legacyEnabledModules = configuration["Modules"]?
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        bool IsModuleEnabled(string name) => legacyEnabledModules is { Count: > 0 }
+            ? legacyEnabledModules.Contains(name)
+            : !disabledModules.Contains(name);
+
+        bool requiresWeb   = IsModuleEnabled("api") || IsModuleEnabled("web");
         var pluginDiscovery = LoadPluginsAndModules(builder);
         var modules         = pluginDiscovery.Modules;
 
@@ -333,16 +346,30 @@ class Program
         if (requiresWeb)
             builder.WebHost.UseUrls($"http://*:{serviceCfg.Port}");
 
-        // Expose module list for CliWorker plugin notification
-        builder.Services.AddSingleton<IEnumerable<IAppModule>>(modules);
+        // Expose ONLY enabled modules to DI consumers (AgentOrchestrator's OnAgentReadyAsync
+        // notification, CliWorker). A disabled module must not receive lifecycle callbacks.
+        var activeModules = modules.Where(m => IsModuleEnabled(m.Name)).ToList();
+        builder.Services.AddSingleton<IEnumerable<IAppModule>>(activeModules);
 
-        var enabledModulesSet = enabledModules.ToHashSet(StringComparer.OrdinalIgnoreCase);
         var enabledModuleAssemblies = new HashSet<Assembly>();
 
-        foreach (var module in modules.Where(m => enabledModulesSet.Contains(m.Name)))
+        foreach (var module in modules.Where(m => IsModuleEnabled(m.Name)))
         {
             module.RegisterServices(builder.Services, configuration);
             enabledModuleAssemblies.Add(module.GetType().Assembly);
+        }
+
+        // A plugin module that is explicitly disabled is skipped on purpose; tell the user so a
+        // dropped-in plugin that does nothing isn't a mystery.
+        var hostAssembly = typeof(Program).Assembly;
+        var enableHint = legacyEnabledModules is { Count: > 0 }
+            ? "remove it from \"DisabledModules\" or add it to \"Modules\""
+            : "remove it from \"DisabledModules\"";
+        foreach (var module in modules.Where(m =>
+                     m.GetType().Assembly != hostAssembly && !IsModuleEnabled(m.Name)))
+        {
+            AnsiConsole.MarkupLineInterpolated(
+                $"[yellow]⚠ Plugin module '{module.Name}' is disabled[/] [dim]({enableHint} to enable).[/]");
         }
 
         // NOTE: Plugin tools are NOT registered into DI here. Nothing resolves IEnumerable<ITool>
@@ -389,7 +416,7 @@ class Program
             app.UseRouting();
 
             var apiGroup = app.MapGroup("/api");
-            foreach (var module in modules.Where(m => enabledModules.Contains(m.Name)))
+            foreach (var module in modules.Where(m => IsModuleEnabled(m.Name)))
                 module.MapEndpoints(apiGroup);
 
             // SPA fallback — all non-API routes resolve to index.html.
@@ -402,7 +429,7 @@ class Program
         }
 
         // Notify modules of startup (IAppModule.StartAsync)
-        foreach (var module in modules.Where(m => enabledModules.Contains(m.Name)))
+        foreach (var module in modules.Where(m => IsModuleEnabled(m.Name)))
             await module.StartAsync(app.Services);
 
         // RunAsync starts all IHostedService instances (CliWorker, etc.) and the web server.
@@ -683,6 +710,8 @@ class Program
 
         var pluginModules = new List<IAppModule>();
         var providerTypes = new List<Type>();
+        var loadedPlugins = new List<string>();
+        var skippedNoDeps = 0;
 
         // Load each plugin DLL exactly once into a single PluginLoadContext and pull the
         // module, tool and channel-provider types from that same assembly instance.
@@ -710,7 +739,10 @@ class Program
             // "An operation is not legal in the current state." Dependencies resolve correctly on
             // demand through the owning plugin's context via its AssemblyDependencyResolver.
             if (!File.Exists(Path.ChangeExtension(dll, ".deps.json")))
+            {
+                skippedNoDeps++;
                 continue;
+            }
 
             Assembly assembly;
             try
@@ -741,7 +773,17 @@ class Program
                 else if (typeof(IChannelProvider).IsAssignableFrom(type))
                     providerTypes.Add(type);
             }
+            loadedPlugins.Add(Path.GetFileNameWithoutExtension(dll));
         }
+
+        // Surface discovery results — this method was previously silent, so a mis-copied plugin
+        // (just the .dll without its .deps.json + dependencies) looked like nothing happened.
+        if (loadedPlugins.Count > 0)
+            AnsiConsole.MarkupLineInterpolated(
+                $"[green]✓[/] Loaded {loadedPlugins.Count} plugin(s): {string.Join(", ", loadedPlugins)}");
+        else if (skippedNoDeps > 0)
+            AnsiConsole.MarkupLineInterpolated(
+                $"[yellow]⚠ Found {skippedNoDeps} DLL(s) under 'plugins' but none had a sibling '.deps.json', so none were loaded.[/]\n[dim]  Copy each plugin's entire publish output (DLL + its .deps.json + dependencies), not just the .dll.[/]");
 
         // Built-in modules (cli/web/webhook) live in the host assembly and are always available.
         var allModules = ModuleLoader.LoadModules();

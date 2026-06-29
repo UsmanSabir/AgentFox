@@ -472,13 +472,22 @@ public sealed class AgentOrchestrator : IHostedService
 
         foreach (var m in awareModules)
         {
+            var before = _toolRegistry.GetAll().Count;
             try
             {
                 await m.OnAgentReadyAsync(context);
+                var added = _toolRegistry.GetAll().Count - before;
+                AnsiConsole.MarkupLineInterpolated(
+                    $"[green]✓[/] Plugin '{m.Name}' registered {added} tool(s).");
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Plugin {Module}.OnAgentReadyAsync threw an exception.", m.Name);
+                // Also surface on the console — a plugin whose OnAgentReadyAsync throws registers
+                // none of its tools, which otherwise looks like "the plugin loaded but does nothing"
+                // with no visible reason.
+                AnsiConsole.MarkupLineInterpolated(
+                    $"[yellow]⚠ Plugin '{m.Name}' failed to register its tools:[/] [red]{ex.Message}[/]");
             }
         }
     }
