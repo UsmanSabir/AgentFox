@@ -168,6 +168,32 @@ class Program
         AnsiConsole.MarkupLine("[bold green]✓[/] AgentFox initialized successfully.");
         AnsiConsole.WriteLine();
 
+        // ── First-run setup: local embedding model missing ───────────────────
+        // The single-file exe degrades gracefully (vector search off) instead of
+        // crashing; here we offer to download/restore the model interactively.
+        // Skipped for --doctor (it has its own fix) and non-interactive sessions.
+        if (!runDoctor && AnsiConsole.Profile.Capabilities.Interactive)
+        {
+            var embeddingProvider = EmbeddingServiceFactory.ResolveConfig(configuration)
+                .Provider.Trim().ToLowerInvariant();
+            if (embeddingProvider == "local" && !ModelSetup.IsAvailable())
+            {
+                AnsiConsole.MarkupLine("[yellow]⚠ The local embedding model is not set up[/] — vector search is disabled.");
+                if (AnsiConsole.Confirm("Download / restore it now ([dim]~22 MB[/])?", defaultValue: true))
+                {
+                    if (await ModelSetup.EnsureAsync())
+                        AnsiConsole.MarkupLine("[green]✓[/] Embedding model ready. [dim]Restart AgentFox to enable vector search.[/]");
+                    else
+                        AnsiConsole.MarkupLine("[dim]You can retry later with [bold]AgentFox doctor --fix[/].[/]");
+                }
+                else
+                {
+                    AnsiConsole.MarkupLine("[dim]Skipped. Run [bold]AgentFox doctor --fix[/] anytime to set it up.[/]");
+                }
+                AnsiConsole.WriteLine();
+            }
+        }
+
         // ── --doctor mode (runs before web host, then exits) ──────────────────
         if (runDoctor)
         {

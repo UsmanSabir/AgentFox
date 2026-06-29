@@ -64,16 +64,106 @@ public sealed partial class LocalEmbedder : IDisposable
         _tokenizerPool = new DefaultObjectPool<BertTokenizer>(new BertTokenizerPooledObjectPolicy(vocabPath, _options.CaseSensitive));
     }
 
+    // A valid model file is well above this; build-time placeholder/dummy files (used when the
+    // download is blocked, e.g. behind a proxy) are 0–4 bytes. Treat those as "not present" so we
+    // fall through to extraction/download instead of handing a corrupt file to OnnxRuntime.
+    private const long MinValidModelFileBytes = 1024;
+
+    private static bool IsUsableModelFile(string path)
+    {
+        var info = new FileInfo(path);
+        return info.Exists && info.Length >= MinValidModelFileBytes;
+    }
+
     private static string GetFullPathToModelFile(string modelName, string fileName)
     {
-        var baseDir = AppContext.BaseDirectory;
-        var fullPath = Path.Combine(baseDir, "LocalEmbeddingsModel", modelName, fileName);
-        if (!File.Exists(fullPath))
-        {
-            throw new InvalidOperationException($"Required file {fullPath} does not exist");
-        }
+        // 1. Loose file next to the app (dev / framework-dependent publish — Content copy).
+        var localPath = Path.Combine(AppContext.BaseDirectory, "LocalEmbeddingsModel", modelName, fileName);
+        if (IsUsableModelFile(localPath))
+            return localPath;
 
-        return fullPath;
+        // 2. Per-user writable data dir (single-file publish self-extract, or doctor repair).
+        var dataPath = Path.Combine(GetModelDataDirectory(modelName), fileName);
+        if (IsUsableModelFile(dataPath))
+            return dataPath;
+
+        // 3. Extract from the copy embedded in this assembly (single exe — first run).
+        if (TryExtractEmbeddedModelFile(modelName, fileName, dataPath, force: false))
+            return dataPath;
+
+        throw new InvalidOperationException(
+            $"Required embedding model file '{fileName}' for model '{modelName}' was not found. " +
+            $"Looked next to the app ('{localPath}') and in the data directory ('{dataPath}'), " +
+            $"and no embedded copy is available. Run 'AgentFox doctor --fix' to download it.");
+    }
+
+    /// <summary>
+    /// Per-user writable directory the model is extracted to when it can't be found next to the app
+    /// (the single-file-exe case). e.g. %LOCALAPPDATA%\AgentFox\LocalEmbeddingsModel\&lt;modelName&gt;.
+    /// </summary>
+    public static string GetModelDataDirectory(string modelName = "default")
+    {
+        var root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (string.IsNullOrEmpty(root))
+            root = AppContext.BaseDirectory;
+        return Path.Combine(root, "AgentFox", "LocalEmbeddingsModel", modelName);
+    }
+
+    /// <summary>
+    /// True when both model files for <paramref name="modelName"/> can be resolved (extracting the
+    /// embedded copy if needed). Lets callers (e.g. the doctor) probe without constructing a session.
+    /// </summary>
+    public static bool TryEnsureModelFiles(string modelName = "default")
+    {
+        try
+        {
+            GetFullPathToModelFile(modelName, "model.onnx");
+            GetFullPathToModelFile(modelName, "vocab.txt");
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Re-extracts the embedded model copy to the data directory, overwriting any existing files.
+    /// Returns true only if an embedded copy exists and both files were written. Used by doctor repair.
+    /// </summary>
+    public static bool ExtractEmbeddedModel(string modelName = "default", bool force = true)
+    {
+        var dir = GetModelDataDirectory(modelName);
+        var model = TryExtractEmbeddedModelFile(modelName, "model.onnx", Path.Combine(dir, "model.onnx"), force);
+        var vocab = TryExtractEmbeddedModelFile(modelName, "vocab.txt", Path.Combine(dir, "vocab.txt"), force);
+        return model && vocab;
+    }
+
+    private static bool TryExtractEmbeddedModelFile(string modelName, string fileName, string destPath, bool force)
+    {
+        if (!force && IsUsableModelFile(destPath))
+            return true;
+
+        var asm = typeof(LocalEmbedder).Assembly;
+        var resourceName = $"LocalEmbeddingsModel.{modelName}.{fileName}";
+        using var stream = asm.GetManifestResourceStream(resourceName);
+        if (stream is null)
+            return false;
+
+        Directory.CreateDirectory(Path.GetDirectoryName(destPath)!);
+
+        // Write to a temp file then move, so an interrupted extraction can't leave a half-written
+        // model that later looks valid.
+        var tmpPath = destPath + ".tmp";
+        using (var fs = File.Create(tmpPath))
+            stream.CopyTo(fs);
+
+        if (File.Exists(destPath))
+            File.Delete(destPath);
+        File.Move(tmpPath, destPath);
+
+        // Reject an embedded placeholder (e.g. a proxy-blocked build that bundled a dummy).
+        return IsUsableModelFile(destPath);
     }
 
     public EmbeddingF32 Embed(string inputText)

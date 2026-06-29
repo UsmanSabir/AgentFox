@@ -4,6 +4,7 @@ using OllamaSharp;
 using OllamaSharp.Models;
 using OpenAI;
 using OpenAI.Embeddings;
+using Spectre.Console;
 using System.ClientModel;
 using System.Diagnostics;
 
@@ -136,19 +137,25 @@ public class EmbeddingConfig
 
 public static class EmbeddingServiceFactory
 {
+    /// <summary>
+    /// Resolves the effective embedding config: prefer a named model from Models:{ModelRef},
+    /// fall back to Memory:Embedding.
+    /// </summary>
+    public static EmbeddingConfig ResolveConfig(IConfiguration configuration)
+    {
+        var modelRef = configuration["Memory:ModelRef"];
+        if (!string.IsNullOrWhiteSpace(modelRef))
+            return configuration.GetSection($"Models:{modelRef}").Get<EmbeddingConfig>() ?? new EmbeddingConfig();
+        return configuration.GetSection("Memory:Embedding").Get<EmbeddingConfig>() ?? new EmbeddingConfig();
+    }
+
     public static IEmbeddingService Create(IConfiguration configuration)
     {
-        // Resolve config: prefer a named model from Models:{ModelRef}, fall back to Memory:Embedding.
-        var modelRef = configuration["Memory:ModelRef"];
-        EmbeddingConfig config;
-        if (!string.IsNullOrWhiteSpace(modelRef))
-            config = configuration.GetSection($"Models:{modelRef}").Get<EmbeddingConfig>() ?? new EmbeddingConfig();
-        else
-            config = configuration.GetSection("Memory:Embedding").Get<EmbeddingConfig>() ?? new EmbeddingConfig();
+        var config = ResolveConfig(configuration);
 
         return config.Provider.Trim().ToLowerInvariant() switch
         {
-            "local" => new LocalEmbeddingService(),
+            "local" => TryCreateLocal(),
             "ollama" => new OllamaEmbeddingService(config.BaseUrl, config.Model),
             "openai" => new OpenAIEmbeddingService(
                 config.ApiKey ?? Environment.GetEnvironmentVariable("OPENAI_API_KEY") ?? string.Empty,
@@ -156,5 +163,25 @@ public static class EmbeddingServiceFactory
                 config.BaseUrl),
             _ => new NullEmbeddingService()
         };
+    }
+
+    /// <summary>
+    /// Builds the local embedder, degrading to a no-op service if the model is unavailable
+    /// (e.g. a freshly-copied single-file exe before the model is extracted/downloaded).
+    /// This keeps the app running — 'doctor --fix' repairs the model and a restart re-enables it.
+    /// </summary>
+    private static IEmbeddingService TryCreateLocal()
+    {
+        try
+        {
+            return new LocalEmbeddingService();
+        }
+        catch (Exception ex)
+        {
+            AnsiConsole.MarkupLineInterpolated(
+                $"[yellow]⚠ Local embedding model unavailable — vector search disabled.[/] [dim]({ex.Message})[/]");
+            AnsiConsole.MarkupLine("[dim]  Run [bold]AgentFox doctor --fix[/] to download/restore the model.[/]");
+            return new NullEmbeddingService();
+        }
     }
 }

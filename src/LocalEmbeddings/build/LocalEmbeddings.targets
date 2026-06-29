@@ -21,7 +21,16 @@
         <LocalEmbeddingsVocabPath Condition="'$(LocalEmbeddingsVocabPath)' == ''">$(LocalEmbeddingsModelCacheDir)$([System.Text.RegularExpressions.Regex]::Replace($(LocalEmbeddingsVocabUrl), "[^a-zA-Z0-9\.]", "_"))</LocalEmbeddingsVocabPath>
     </PropertyGroup>
 
-    <Target Name="AttachEmbeddingsContentFiles" BeforeTargets="AssignTargetPaths" DependsOnTargets="AcquireLocalEmbeddingsModel; AcquireLocalEmbeddingsVocab">
+    <!--
+        Non-single-file builds (dev `dotnet build`, framework-dependent publish):
+        ship the model as loose Content files next to the app. LocalEmbedder finds
+        them under AppContext.BaseDirectory\LocalEmbeddingsModel\<name>\ — fast path,
+        no runtime extraction.
+    -->
+    <Target Name="AttachEmbeddingsContentFiles"
+            BeforeTargets="AssignTargetPaths"
+            DependsOnTargets="AcquireLocalEmbeddingsModel; AcquireLocalEmbeddingsVocab"
+            Condition="'$(PublishSingleFile)' != 'true'">
         <ItemGroup>
             <Content CopyToOutputDirectory="PreserveNewest"
                      Include="$(LocalEmbeddingsModelPath)"
@@ -29,6 +38,24 @@
             <Content CopyToOutputDirectory="PreserveNewest"
                      Include="$(LocalEmbeddingsVocabPath)"
                      TargetPath="LocalEmbeddingsModel\$(LocalEmbeddingsModelName)\vocab.txt" />
+        </ItemGroup>
+    </Target>
+
+    <!--
+        Single-file publish: embed the model into LocalEmbeddings.dll (which is bundled
+        into the single exe). LocalEmbedder extracts these to %LOCALAPPDATA%\AgentFox on
+        first run. LogicalName must match LocalEmbedder.TryExtractEmbeddedModelFile:
+        "LocalEmbeddingsModel.<modelName>.<fileName>".
+    -->
+    <Target Name="EmbedLocalEmbeddingsModel"
+            BeforeTargets="AssignTargetPaths"
+            DependsOnTargets="AcquireLocalEmbeddingsModel; AcquireLocalEmbeddingsVocab"
+            Condition="'$(PublishSingleFile)' == 'true'">
+        <ItemGroup>
+            <EmbeddedResource Include="$(LocalEmbeddingsModelPath)"
+                              LogicalName="LocalEmbeddingsModel.$(LocalEmbeddingsModelName).model.onnx" />
+            <EmbeddedResource Include="$(LocalEmbeddingsVocabPath)"
+                              LogicalName="LocalEmbeddingsModel.$(LocalEmbeddingsModelName).vocab.txt" />
         </ItemGroup>
     </Target>
 

@@ -28,10 +28,60 @@ public class WorkspaceManager
             }
         }
 
-        // If no workspaces configured, default to current directory
-        if (_allowedWorkspaces.Count == 0)
+        EnsureUsablePrimaryWorkspace();
+    }
+
+    /// <summary>
+    /// Guarantees <c>_allowedWorkspaces[0]</c> is a directory we can actually write to.
+    /// A published exe may carry a stale absolute path in appsettings.json (e.g. a dev
+    /// machine's drive that doesn't exist on the user's box); without this the first
+    /// write — the SQLite memory DB — throws and crashes startup. We promote the first
+    /// usable configured workspace, else fall back to a writable per-user location.
+    /// </summary>
+    private void EnsureUsablePrimaryWorkspace()
+    {
+        var usable = _allowedWorkspaces.FindIndex(TryEnsureDirectory);
+        if (usable == 0)
+            return;
+        if (usable > 0)
         {
-            _allowedWorkspaces.Add(AppContext.BaseDirectory);
+            var ws = _allowedWorkspaces[usable];
+            _allowedWorkspaces.RemoveAt(usable);
+            _allowedWorkspaces.Insert(0, ws);
+            return;
+        }
+
+        // No configured workspace is usable — fall back so the app still runs.
+        foreach (var candidate in DefaultWorkspaceCandidates())
+        {
+            if (TryEnsureDirectory(candidate))
+            {
+                _allowedWorkspaces.Insert(0, candidate);
+                return;
+            }
+        }
+        _allowedWorkspaces.Insert(0, AppContext.BaseDirectory);
+    }
+
+    private static IEnumerable<string> DefaultWorkspaceCandidates()
+    {
+        yield return Environment.CurrentDirectory;
+        var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (!string.IsNullOrEmpty(local))
+            yield return Path.Combine(local, "AgentFox");
+        yield return AppContext.BaseDirectory;
+    }
+
+    private static bool TryEnsureDirectory(string path)
+    {
+        try
+        {
+            Directory.CreateDirectory(path);
+            return true;
+        }
+        catch
+        {
+            return false;
         }
     }
 

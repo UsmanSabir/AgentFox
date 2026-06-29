@@ -14,6 +14,11 @@
     <!-- Usage: dotnet publish -c Release -r win-x64 -p:PublishSingleFile=true -->
     <PublishSingleFile>false</PublishSingleFile>
 
+    <!-- Bundle native libs (e_sqlite3.dll, onnxruntime*.dll) INTO the single exe;
+         they self-extract to a temp dir at runtime. Without this they remain loose
+         files next to the exe and a bare exe throws DllNotFoundException. -->
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+
     <!-- Required for ManifestEmbeddedFileProvider to serve wwwroot from inside the exe -->
     <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
   </PropertyGroup>
