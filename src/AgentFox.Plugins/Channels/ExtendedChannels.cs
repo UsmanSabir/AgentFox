@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using Discord;
 using Discord.Webhook;
@@ -16,6 +17,15 @@ public class DiscordChannel : Channel
     private readonly List<ChannelMessage> _receivedMessages = new();
     private bool _stopReconnecting;
     private bool _reconnecting;
+
+    // Durable in-memory outbound buffer: messages that can't be delivered right now (channel
+    // down / reconnecting) are queued here and flushed, in order, once the gateway is Ready
+    // again — so a reply is never silently lost across a transient disconnect.
+    private readonly ConcurrentQueue<PendingOutbound> _pendingOutbound = new();
+    private readonly SemaphoreSlim _flushLock = new(1, 1);
+    private const int MaxPendingOutbound = 200;
+
+    private sealed record PendingOutbound(string Content, ulong? ReplyToMessageId);
 
     public DiscordChannel(string botToken, ulong guildId, ulong channelId)
     {
@@ -155,6 +165,11 @@ public class DiscordChannel : Channel
 
         IsConnected = true;
         Debug.WriteLine($"[Discord] Ready - guild '{guild.Name}', channel '#{_textChannel.Name}'.");
+
+        // Drain anything that was buffered while the channel was down.
+        if (!_pendingOutbound.IsEmpty)
+            _ = FlushPendingOutboundAsync();
+
         return Task.CompletedTask;
     }
 
@@ -227,47 +242,73 @@ public class DiscordChannel : Channel
         }
     }
 
+    // A long-running agent turn can outlast a transient Discord gateway drop: by the time
+    // the reply is delivered the socket may be mid-reconnect (OnDisconnectedAsync backs off
+    // up to 120s). Rather than throwing instantly and losing the message, wait briefly for
+    // the connection (and a fresh _textChannel) to be restored.
+    private static readonly TimeSpan SendConnectionWait = TimeSpan.FromSeconds(90);
+
+    private async Task<bool> WaitForConnectionAsync(TimeSpan timeout)
+    {
+        if (IsConnected && _textChannel != null)
+            return true;
+
+        var sw = Stopwatch.StartNew();
+        while (sw.Elapsed < timeout && !_stopReconnecting)
+        {
+            await Task.Delay(500);
+            if (IsConnected && _textChannel != null)
+                return true;
+        }
+
+        return IsConnected && _textChannel != null;
+    }
+
     public override async Task SendReplyAsync(ChannelMessage originalMessage, string content)
     {
-        if (!IsConnected || _textChannel == null)
-            throw new InvalidOperationException("Discord channel is not connected");
-
-        if (originalMessage.Metadata == null
-            || !originalMessage.Metadata.TryGetValue("messageId", out var msgIdStr)
-            || !ulong.TryParse(msgIdStr, out var msgId))
+        ulong? replyTo = null;
+        if (originalMessage.Metadata != null
+            && originalMessage.Metadata.TryGetValue("messageId", out var msgIdStr)
+            && ulong.TryParse(msgIdStr, out var msgId))
         {
-            await SendMessageAsync(content);
+            replyTo = msgId;
+        }
+
+        if (!IsConnected || _textChannel == null)
+            await WaitForConnectionAsync(SendConnectionWait);
+
+        if (!IsConnected || _textChannel == null)
+        {
+            BufferOutbound(content, replyTo);
             return;
         }
 
         try
         {
-            var reference = new MessageReference(messageId: msgId, channelId: _channelId);
-            await _textChannel.SendMessageAsync(text: content, messageReference: reference);
+            await SendDirectAsync(content, replyTo);
         }
-        catch
+        catch (Exception ex)
         {
-            await SendMessageAsync(content);
+            // Socket may have dropped mid-send — keep the message and retry on reconnect.
+            Debug.WriteLine($"[Discord] Reply send failed, buffering: {ex.Message}");
+            BufferOutbound(content, replyTo);
         }
     }
 
     public override async Task<ChannelMessage> SendMessageAsync(string content)
     {
+        if (!IsConnected || _textChannel == null)
+            await WaitForConnectionAsync(SendConnectionWait);
+
+        if (!IsConnected || _textChannel == null)
+        {
+            BufferOutbound(content, replyToMessageId: null);
+            return QueuedMessage(content);
+        }
+
         try
         {
-            if (!IsConnected || _textChannel == null)
-                throw new InvalidOperationException("Discord channel is not connected");
-
-            if (string.IsNullOrWhiteSpace(content))
-                content = "[Empty Response]";
-
-            const int maxLength = 2000;
-            var messages = SplitMessage(content, maxLength);
-
-            IMessage? lastMessage = null;
-            foreach (var msg in messages)
-                lastMessage = await _textChannel.SendMessageAsync(msg);
-
+            var lastMessage = await SendDirectAsync(content, replyToMessageId: null);
             if (lastMessage == null)
                 throw new InvalidOperationException("Failed to send message");
 
@@ -284,9 +325,99 @@ public class DiscordChannel : Channel
         }
         catch (Exception ex)
         {
-            throw new InvalidOperationException($"Failed to send message: {ex.Message}", ex);
+            Debug.WriteLine($"[Discord] Send failed, buffering: {ex.Message}");
+            BufferOutbound(content, replyToMessageId: null);
+            return QueuedMessage(content);
         }
     }
+
+    // Core send: splits long content into Discord's 2000-char chunks and attaches the reply
+    // reference (if any) to the first chunk. Used by both the live path and the buffer flush.
+    private async Task<IMessage?> SendDirectAsync(string content, ulong? replyToMessageId)
+    {
+        if (_textChannel == null)
+            throw new InvalidOperationException("Discord channel is not connected");
+
+        if (string.IsNullOrWhiteSpace(content))
+            content = "[Empty Response]";
+
+        const int maxLength = 2000;
+        var messages = SplitMessage(content, maxLength);
+
+        var reference = replyToMessageId.HasValue
+            ? new MessageReference(messageId: replyToMessageId.Value, channelId: _channelId)
+            : null;
+
+        IMessage? lastMessage = null;
+        for (var i = 0; i < messages.Count; i++)
+        {
+            var refForChunk = i == 0 ? reference : null;
+            try
+            {
+                lastMessage = await _textChannel.SendMessageAsync(text: messages[i], messageReference: refForChunk);
+            }
+            catch when (refForChunk != null)
+            {
+                // The referenced message may have been deleted — resend this chunk without it.
+                lastMessage = await _textChannel.SendMessageAsync(messages[i]);
+            }
+        }
+
+        return lastMessage;
+    }
+
+    private void BufferOutbound(string content, ulong? replyToMessageId)
+    {
+        if (string.IsNullOrWhiteSpace(content))
+            return;
+
+        // Bound the buffer so a prolonged outage can't grow it without limit.
+        while (_pendingOutbound.Count >= MaxPendingOutbound && _pendingOutbound.TryDequeue(out _))
+        {
+        }
+
+        _pendingOutbound.Enqueue(new PendingOutbound(content, replyToMessageId));
+        Debug.WriteLine($"[Discord] Buffered outbound message (queue depth {_pendingOutbound.Count}).");
+    }
+
+    private async Task FlushPendingOutboundAsync()
+    {
+        // Only one flush at a time; a second trigger just returns and lets the first drain.
+        if (!await _flushLock.WaitAsync(0))
+            return;
+
+        try
+        {
+            // Peek-then-dequeue: an item is removed only after it is confirmed sent, so a
+            // failure mid-flush leaves it (and the rest) queued for the next reconnect.
+            while (IsConnected && _textChannel != null && _pendingOutbound.TryPeek(out var pending))
+            {
+                try
+                {
+                    await SendDirectAsync(pending.Content, pending.ReplyToMessageId);
+                    _pendingOutbound.TryDequeue(out _);
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"[Discord] Flush failed, will retry on next reconnect: {ex.Message}");
+                    break;
+                }
+            }
+        }
+        finally
+        {
+            _flushLock.Release();
+        }
+    }
+
+    private ChannelMessage QueuedMessage(string content) => new()
+    {
+        Id = string.Empty,
+        ChannelId = ChannelId,
+        Content = content,
+        Timestamp = DateTime.UtcNow,
+        Type = MessageType.Text
+    };
 
     public override async Task<List<ChannelMessage>> ReceiveMessagesAsync()
     {

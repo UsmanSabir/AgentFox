@@ -168,6 +168,32 @@ class Program
         AnsiConsole.MarkupLine("[bold green]✓[/] AgentFox initialized successfully.");
         AnsiConsole.WriteLine();
 
+        // ── First-run setup: local embedding model missing ───────────────────
+        // The single-file exe degrades gracefully (vector search off) instead of
+        // crashing; here we offer to download/restore the model interactively.
+        // Skipped for --doctor (it has its own fix) and non-interactive sessions.
+        if (!runDoctor && AnsiConsole.Profile.Capabilities.Interactive)
+        {
+            var embeddingProvider = EmbeddingServiceFactory.ResolveConfig(configuration)
+                .Provider.Trim().ToLowerInvariant();
+            if (embeddingProvider == "local" && !ModelSetup.IsAvailable())
+            {
+                AnsiConsole.MarkupLine("[yellow]⚠ The local embedding model is not set up[/] — vector search is disabled.");
+                if (AnsiConsole.Confirm("Download / restore it now ([dim]~22 MB[/])?", defaultValue: true))
+                {
+                    if (await ModelSetup.EnsureAsync())
+                        AnsiConsole.MarkupLine("[green]✓[/] Embedding model ready. [dim]Restart AgentFox to enable vector search.[/]");
+                    else
+                        AnsiConsole.MarkupLine("[dim]You can retry later with [bold]AgentFox doctor --fix[/].[/]");
+                }
+                else
+                {
+                    AnsiConsole.MarkupLine("[dim]Skipped. Run [bold]AgentFox doctor --fix[/] anytime to set it up.[/]");
+                }
+                AnsiConsole.WriteLine();
+            }
+        }
+
         // ── --doctor mode (runs before web host, then exits) ──────────────────
         if (runDoctor)
         {
@@ -278,6 +304,7 @@ class Program
         // Agent holder + channel manager holder + scheduling holder + IAgentService (used by WebModule /chat)
         builder.Services.AddSingleton<PendingNotificationStore>();
         builder.Services.AddSingleton<HitlManager>();
+        builder.Services.AddSingleton<AgentFox.Planning.PlanStateStore>();
         builder.Services.AddSingleton<FoxAgentHolder>();
         builder.Services.AddSingleton<ChannelManagerHolder>();
         builder.Services.AddSingleton<SchedulingHolder>();
@@ -294,9 +321,23 @@ class Program
         }
 
         // ── Load modules ──────────────────────────────────────────────────────
-        var enabledModules = configuration["Modules"]?.Split(',') ?? new[] { "cli", "web" };
-        bool requiresWeb   = enabledModules.Contains("api") || enabledModules.Contains("web");
-        var modules        = LoadPluginsAndModules(builder);
+        // All discovered modules (built-in + plugins) are ENABLED BY DEFAULT. Opt OUT specific
+        // ones with a "DisabledModules" CSV (e.g. "web,webhook"). The legacy opt-in "Modules"
+        // key is still honored for back-compat: if present, ONLY those are enabled.
+        var disabledModules = (configuration["DisabledModules"] ?? string.Empty)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var legacyEnabledModules = configuration["Modules"]?
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        bool IsModuleEnabled(string name) => legacyEnabledModules is { Count: > 0 }
+            ? legacyEnabledModules.Contains(name)
+            : !disabledModules.Contains(name);
+
+        bool requiresWeb   = IsModuleEnabled("api") || IsModuleEnabled("web");
+        var pluginDiscovery = LoadPluginsAndModules(builder);
+        var modules         = pluginDiscovery.Modules;
 
         // Bind the HTTP listener to Services.Port (default 8080) when the web layer is active.
         // Precedence (highest → lowest): --urls CLI arg  >  ASPNETCORE_URLS env  >  UseUrls()  >  applicationUrl in launchSettings.json
@@ -305,11 +346,42 @@ class Program
         if (requiresWeb)
             builder.WebHost.UseUrls($"http://*:{serviceCfg.Port}");
 
-        // Expose module list for CliWorker plugin notification
-        builder.Services.AddSingleton<IEnumerable<IAppModule>>(modules);
+        // Expose ONLY enabled modules to DI consumers (AgentOrchestrator's OnAgentReadyAsync
+        // notification, CliWorker). A disabled module must not receive lifecycle callbacks.
+        var activeModules = modules.Where(m => IsModuleEnabled(m.Name)).ToList();
+        builder.Services.AddSingleton<IEnumerable<IAppModule>>(activeModules);
 
-        foreach (var module in modules.Where(m => enabledModules.Contains(m.Name)))
+        var enabledModuleAssemblies = new HashSet<Assembly>();
+
+        foreach (var module in modules.Where(m => IsModuleEnabled(m.Name)))
+        {
             module.RegisterServices(builder.Services, configuration);
+            enabledModuleAssemblies.Add(module.GetType().Assembly);
+        }
+
+        // A plugin module that is explicitly disabled is skipped on purpose; tell the user so a
+        // dropped-in plugin that does nothing isn't a mystery.
+        var hostAssembly = typeof(Program).Assembly;
+        var enableHint = legacyEnabledModules is { Count: > 0 }
+            ? "remove it from \"DisabledModules\" or add it to \"Modules\""
+            : "remove it from \"DisabledModules\"";
+        foreach (var module in modules.Where(m =>
+                     m.GetType().Assembly != hostAssembly && !IsModuleEnabled(m.Name)))
+        {
+            AnsiConsole.MarkupLineInterpolated(
+                $"[yellow]⚠ Plugin module '{module.Name}' is disabled[/] [dim]({enableHint} to enable).[/]");
+        }
+
+        // NOTE: Plugin tools are NOT registered into DI here. Nothing resolves IEnumerable<ITool>
+        // from the container — the ToolRegistry is populated by direct Register() calls and by each
+        // plugin's IAgentAwareModule.OnAgentReadyAsync -> IPluginContext.RegisterTool(...). Registering
+        // the tool types as ITool singletons would only force ValidateOnBuild to eagerly construct them
+        // (which fails for tools whose constructor pulls in plugin-versioned dependencies such as
+        // Microsoft.Extensions.AI.Abstractions) without ever wiring them into the agent.
+        foreach (var providerType in pluginDiscovery.ChannelProviderTypes.Where(t => enabledModuleAssemblies.Contains(t.Assembly)))
+        {
+            builder.Services.AddSingleton(typeof(IChannelProvider), providerType);
+        }
 
         // ── Build and configure the web application ───────────────────────────
         var app = builder.Build();
@@ -344,7 +416,7 @@ class Program
             app.UseRouting();
 
             var apiGroup = app.MapGroup("/api");
-            foreach (var module in modules.Where(m => enabledModules.Contains(m.Name)))
+            foreach (var module in modules.Where(m => IsModuleEnabled(m.Name)))
                 module.MapEndpoints(apiGroup);
 
             // SPA fallback — all non-API routes resolve to index.html.
@@ -357,7 +429,7 @@ class Program
         }
 
         // Notify modules of startup (IAppModule.StartAsync)
-        foreach (var module in modules.Where(m => enabledModules.Contains(m.Name)))
+        foreach (var module in modules.Where(m => IsModuleEnabled(m.Name)))
             await module.StartAsync(app.Services);
 
         // RunAsync starts all IHostedService instances (CliWorker, etc.) and the web server.
@@ -622,38 +694,101 @@ class Program
     // Plugin / module loader
     // ─────────────────────────────────────────────────────────────────────────
 
-    private static List<IAppModule> LoadPluginsAndModules(WebApplicationBuilder builder)
+    private sealed record PluginDiscovery(
+        List<IAppModule> Modules,
+        List<Type> ChannelProviderTypes);
+
+    private static PluginDiscovery LoadPluginsAndModules(WebApplicationBuilder builder)
     {
         var pluginFolder = Path.Combine(AppContext.BaseDirectory, "plugins");
         Directory.CreateDirectory(pluginFolder);
 
-        // Create a temporary service provider for tool instantiation
+        // Create a temporary service provider for plugin module instantiation
         var tempServices = new ServiceCollection();
         tempServices.AddSingleton(builder.Configuration.GetSection("Plugins"));
         var tempProvider = tempServices.BuildServiceProvider();
 
-        var pluginLoader = new PluginLoader(tempProvider);
-        var toolLoader = new ToolLoader(tempProvider);
-        var channelProviderLoader = new ChannelProviderLoader();
+        var pluginModules = new List<IAppModule>();
+        var providerTypes = new List<Type>();
+        var loadedPlugins = new List<string>();
+        var skippedNoDeps = 0;
 
-        var pluginModules = pluginLoader.LoadModules(pluginFolder);
-        // Register modules
+        // Load each plugin DLL exactly once into a single PluginLoadContext and pull the
+        // module, tool and channel-provider types from that same assembly instance.
+        //
+        // This is critical: an AssemblyLoadContext produces a *distinct* Assembly object per
+        // context even for the same file. If modules, tools and providers were discovered via
+        // separate load contexts (as they were previously), then module.GetType().Assembly would
+        // never equal toolType.Assembly, and the assembly-identity gating in Main that decides
+        // which plugin tools/channels to register would silently drop them all.
+        foreach (var dll in Directory.GetFiles(pluginFolder, "*.dll", SearchOption.AllDirectories))
+        {
+            // Skip non-plugin payloads that legitimately live under plugins/ — e.g. a Chromium
+            // browser downloaded by a plugin into plugins/Chrome/... Those native .dll files are
+            // not managed assemblies and have hundreds of entries; loading them is both pointless
+            // and throws BadImageFormatException.
+            if (dll.Contains($"{Path.DirectorySeparatorChar}Chrome{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            // Only treat a DLL as a plugin entry assembly if it ships its own dependency manifest
+            // ({name}.deps.json). The transitive dependency DLLs copied alongside a plugin
+            // (PuppeteerSharp, WebDriverBiDi, Discord.*, …) have no deps.json and must NOT each get
+            // their own load context: loaded standalone they become orphaned collectible contexts
+            // that the GC unloads, after which a plugin's later attempt to load that same dependency
+            // (e.g. PuppeteerSharp pulling in WebDriverBiDi at Puppeteer.LaunchAsync) throws
+            // "An operation is not legal in the current state." Dependencies resolve correctly on
+            // demand through the owning plugin's context via its AssemblyDependencyResolver.
+            if (!File.Exists(Path.ChangeExtension(dll, ".deps.json")))
+            {
+                skippedNoDeps++;
+                continue;
+            }
+
+            Assembly assembly;
+            try
+            {
+                var context = new PluginLoadContext(dll);
+                assembly = context.LoadFromAssemblyPath(dll);
+            }
+            catch (Exception ex) when (ex is BadImageFormatException or FileLoadException)
+            {
+                // Native DLL or otherwise not a loadable managed assembly — skip it.
+                continue;
+            }
+
+            Type[] types;
+            try
+            {
+                types = assembly.GetTypes();
+            }
+            catch (ReflectionTypeLoadException ex)
+            {
+                types = ex.Types.Where(t => t != null).ToArray()!;
+            }
+
+            foreach (var type in types.Where(t => t is { IsAbstract: false, IsInterface: false }))
+            {
+                if (typeof(IAppModule).IsAssignableFrom(type))
+                    pluginModules.Add((IAppModule)ActivatorUtilities.CreateInstance(tempProvider, type)!);
+                else if (typeof(IChannelProvider).IsAssignableFrom(type))
+                    providerTypes.Add(type);
+            }
+            loadedPlugins.Add(Path.GetFileNameWithoutExtension(dll));
+        }
+
+        // Surface discovery results — this method was previously silent, so a mis-copied plugin
+        // (just the .dll without its .deps.json + dependencies) looked like nothing happened.
+        if (loadedPlugins.Count > 0)
+            AnsiConsole.MarkupLineInterpolated(
+                $"[green]✓[/] Loaded {loadedPlugins.Count} plugin(s): {string.Join(", ", loadedPlugins)}");
+        else if (skippedNoDeps > 0)
+            AnsiConsole.MarkupLineInterpolated(
+                $"[yellow]⚠ Found {skippedNoDeps} DLL(s) under 'plugins' but none had a sibling '.deps.json', so none were loaded.[/]\n[dim]  Copy each plugin's entire publish output (DLL + its .deps.json + dependencies), not just the .dll.[/]");
+
+        // Built-in modules (cli/web/webhook) live in the host assembly and are always available.
         var allModules = ModuleLoader.LoadModules();
         allModules.AddRange(pluginModules);
 
-        var pluginTools = toolLoader.LoadTools(pluginFolder);
-
-        // Register tools
-        foreach (var tool in pluginTools)
-        {
-            builder.Services.AddSingleton(typeof(ITool), tool);
-        }
-
-        foreach (var providerType in channelProviderLoader.LoadProviderTypes(pluginFolder))
-        {
-            builder.Services.AddSingleton(typeof(IChannelProvider), providerType);
-        }
-
-        return allModules;
+        return new PluginDiscovery(allModules, providerTypes);
     }
 }

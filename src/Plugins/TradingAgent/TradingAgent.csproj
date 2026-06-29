@@ -4,11 +4,27 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <!-- Deploy the plugin (and its dependencies, via CopyLocalLockFileAssemblies) directly into
+         the host's plugins/ folder, which PluginLoader scans at AppContext.BaseDirectory/plugins.
+         Path is relative to this project and tracks the host's Configuration/TFM. -->
+    <OutputPath>..\..\Agent\bin\$(Configuration)\$(TargetFramework)\plugins\</OutputPath>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AppendConfigurationToOutputPath>false</AppendConfigurationToOutputPath>
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Microsoft.Agents.AI.Harness" Version="1.11.1-preview.260625.1" />
     <PackageReference Include="PuppeteerSharp" Version="25.1.2" />
+    <!-- Must match the version the HOST resolves (currently 10.6.0). PluginLoadContext delegates
+         all Microsoft.Extensions.* assemblies to the host's default load context so plugin and host
+         share one IChatClient type; .NET roll-forward only binds UP, so a plugin built against a
+         HIGHER version than the host ships fails with FileNotFoundException at OnAgentReadyAsync. -->
     <PackageReference Include="Microsoft.Extensions.AI.Abstractions" Version="10.7.0" />
+    <!-- BackgroundService / IHostedService for the take-profit retry worker. Pinned to the host's
+         Microsoft.Extensions.* version (10.0.9); PluginLoadContext delegates these to the host's load
+         context at runtime, and roll-forward only binds UP, so never build against a higher version. -->
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.9" />
   </ItemGroup>
 
   <ItemGroup>

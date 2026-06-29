@@ -159,6 +159,18 @@ public class ChannelManager
 
         try
         {
+            // Immediate receipt acknowledgement — the full agent turn can take minutes
+            // (browser automation, LLM calls), so confirm up front that the message landed
+            // and is being worked on. Buffered by the channel if it's momentarily down.
+            try
+            {
+                await channel.SendReplyAsync(message, "📥 Received — processing…");
+            }
+            catch (Exception ackEx)
+            {
+                _logger?.LogWarning(ackEx, "Failed to send receipt ack for {MessageId}", message.Id);
+            }
+
             if (_gateway != null)
             {
                 var task = await _gateway.ProcessChannelMessageAsync(message, channel, agent.Id);

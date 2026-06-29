@@ -5,6 +5,7 @@ using AgentFox.LLM;
 using AgentFox.MCP;
 using AgentFox.Memory;
 using AgentFox.Models;
+using AgentFox.Planning;
 using AgentFox.Plugins.Channels;
 using AgentFox.Plugins.Interfaces;
 using AgentFox.Runtime;
@@ -56,6 +57,7 @@ public sealed class AgentOrchestrator : IHostedService
     private readonly ILogger<AgentOrchestrator> _logger;
 
     private readonly HitlManager _hitlManager;
+    private readonly PlanStateStore _planStore;
 
     // Built during InitializeAsync, used by StopAsync
     private ChannelManager? _channelManager;
@@ -87,9 +89,11 @@ public sealed class AgentOrchestrator : IHostedService
         ILoggerFactory loggerFactory,
         ILogger<AgentOrchestrator> logger,
         PendingNotificationStore pendingNotifications,
-        HitlManager hitlManager)
+        HitlManager hitlManager,
+        PlanStateStore planStore)
     {
         _hitlManager          = hitlManager;
+        _planStore            = planStore;
         _chatClient           = chatClient;
         _toolRegistry         = toolRegistry;
         _skillRegistry        = skillRegistry;
@@ -225,6 +229,22 @@ public sealed class AgentOrchestrator : IHostedService
                 _sessionManager,
                 _loggerFactory.CreateLogger<RequestHumanInputTool>()));
 
+            // ── Plan/execute workflow tool (research → plan → execute) ─────────
+            var planConfig = _configuration.GetSection("Plan").Get<PlanConfig>() ?? new PlanConfig();
+            if (planConfig.Enabled)
+            {
+                var hitlConfig = _configuration.GetSection("Hitl").Get<HitlConfig>() ?? new HitlConfig();
+                var bypass = new HitlBypassPolicy(hitlConfig);
+                _toolRegistry.Register(new SubmitPlanTool(
+                    _planStore,
+                    _hitlManager,
+                    bypass,
+                    roleProvider: () => _agentHolder.Agent?.Role,
+                    _channelManager,
+                    _sessionManager,
+                    _loggerFactory.CreateLogger<SubmitPlanTool>()));
+            }
+
             // ── Build system prompt (includes channel tools with live channel list) ──
             _systemPrompt = new SystemPromptBuilder()
                 .WithPersona(SystemPromptConfig.AgentPrompts.DeveloperAssistant)
@@ -351,23 +371,46 @@ public sealed class AgentOrchestrator : IHostedService
         if (withLogger)
             builder = builder.WithLogger(_loggerFactory.CreateLogger<FoxAgent>());
 
-        // ── HITL Mode 1: policy-based tool approval gate ──────────────────────
-        var hitlConfig = _configuration.GetSection("Hitl").Get<HitlConfig>();
-        if (hitlConfig is { Enabled: true } && hitlConfig.RequireApprovalForTools.Count > 0)
-        {
-            var watchedTools = new HashSet<string>(
-                hitlConfig.RequireApprovalForTools,
-                StringComparer.OrdinalIgnoreCase);
+        // ── HITL Mode 1 + plan/execute gate ───────────────────────────────────
+        // One gate serves two concerns:
+        //   • Plan enforcement — mutating tools are blocked until the session's plan is approved.
+        //   • Per-tool approval — watched tools require an explicit human /approve.
+        // Trusted contexts (HitlBypassPolicy) skip the human step entirely.
+        var hitlConfig = _configuration.GetSection("Hitl").Get<HitlConfig>() ?? new HitlConfig();
+        var planCfg    = _configuration.GetSection("Plan").Get<PlanConfig>() ?? new PlanConfig();
+        var bypass     = new HitlBypassPolicy(hitlConfig);
 
+        var watchedTools = new HashSet<string>(
+            hitlConfig.Enabled ? hitlConfig.RequireApprovalForTools : Enumerable.Empty<string>(),
+            StringComparer.OrdinalIgnoreCase);
+        var mutatingTools = new HashSet<string>(
+            planCfg.Enabled ? planCfg.MutatingTools : Enumerable.Empty<string>(),
+            StringComparer.OrdinalIgnoreCase);
+
+        if (watchedTools.Count > 0 || mutatingTools.Count > 0)
+        {
             builder = builder.WithToolApprovalGate(async (toolName, args, ct) =>
             {
+                var sessionKey  = FoxAgent.CurrentSessionKey.Value;
+                var sessionInfo = sessionKey != null ? _sessionManager.GetSession(sessionKey) : null;
+
+                // 1) Plan enforcement — mutating tools need an approved plan for this session.
+                //    Bypass does NOT skip this: a trusted session still flows through submit_plan,
+                //    where its plan auto-approves and flips the phase to Execute.
+                if (mutatingTools.Contains(toolName)
+                    && _planStore.For(sessionKey ?? string.Empty).Phase != PlanPhase.Execute)
+                {
+                    return false; // surfaced to the model; the plan-phase prompt tells it to submit_plan
+                }
+
+                // 2) Per-tool human approval.
                 if (!watchedTools.Contains(toolName))
                     return true; // not a watched tool — pass through
 
-                var sessionKey  = FoxAgent.CurrentSessionKey.Value;
-                var sessionInfo = sessionKey != null ? _sessionManager.GetSession(sessionKey) : null;
-                var channelId   = sessionInfo?.ChannelId;
+                if (bypass.IsBypassed(sessionInfo, _agentHolder.Agent?.Role))
+                    return true; // trusted session/agent — skip the human
 
+                var channelId   = sessionInfo?.ChannelId;
                 var approvalId  = Guid.NewGuid().ToString("N")[..8].ToUpper();
                 var argsPreview = args.Count == 0
                     ? string.Empty
@@ -406,6 +449,10 @@ public sealed class AgentOrchestrator : IHostedService
             });
         }
 
+        // Steer the model per plan phase (research / awaiting / execute).
+        if (planCfg.Enabled)
+            builder = builder.WithPromptContributor(new PlanPhaseContributor(_planStore));
+
         return builder.Build();
     }
 
@@ -425,13 +472,22 @@ public sealed class AgentOrchestrator : IHostedService
 
         foreach (var m in awareModules)
         {
+            var before = _toolRegistry.GetAll().Count;
             try
             {
                 await m.OnAgentReadyAsync(context);
+                var added = _toolRegistry.GetAll().Count - before;
+                AnsiConsole.MarkupLineInterpolated(
+                    $"[green]✓[/] Plugin '{m.Name}' registered {added} tool(s).");
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Plugin {Module}.OnAgentReadyAsync threw an exception.", m.Name);
+                // Also surface on the console — a plugin whose OnAgentReadyAsync throws registers
+                // none of its tools, which otherwise looks like "the plugin loaded but does nothing"
+                // with no visible reason.
+                AnsiConsole.MarkupLineInterpolated(
+                    $"[yellow]⚠ Plugin '{m.Name}' failed to register its tools:[/] [red]{ex.Message}[/]");
             }
         }
     }

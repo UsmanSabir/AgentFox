@@ -2,6 +2,7 @@ namespace AgentFox.Doctor.Checks;
 
 using AgentFox.Doctor;
 using AgentFox.Memory;
+using LocalEmbeddings;
 using Microsoft.Extensions.Configuration;
 
 public class EmbeddingHealthCheck : IHealthCheckable
@@ -26,9 +27,21 @@ public class EmbeddingHealthCheck : IHealthCheckable
     {
         var results = new List<HealthCheckResult>();
 
-        // 1. Null provider = vector search disabled
+        // 1. No live embedder. Distinguish "Local configured but model missing" (repairable)
+        //    from "intentionally not configured".
         if (_embeddingService is NullEmbeddingService)
         {
+            var provider = EmbeddingServiceFactory.ResolveConfig(_config).Provider.Trim().ToLowerInvariant();
+            if (provider == "local" && !LocalEmbedder.TryEnsureModelFiles())
+            {
+                results.Add(new HealthCheckResult(
+                    HealthStatus.Critical, "Embedding Service",
+                    "Local embedding model files are missing — vector search disabled.",
+                    CanAutoFix: true,
+                    FixDescription: "Download / restore the local embedding model (~22 MB)"));
+                return results;
+            }
+
             results.Add(new HealthCheckResult(
                 HealthStatus.Warning, "Embedding Service",
                 "No embedding model configured — vector search disabled. Set Models:Embedding in appsettings.json"));
@@ -87,6 +100,16 @@ public class EmbeddingHealthCheck : IHealthCheckable
 
     public async Task<FixResult> TryFixAsync(HealthCheckResult result, CancellationToken ct = default)
     {
+        // Missing local model — download/restore it. A restart is needed to pick up the
+        // now-available embedder (the service was built as a no-op this run).
+        if (result.Status == HealthStatus.Critical && !LocalEmbedder.TryEnsureModelFiles())
+        {
+            var ok = await ModelSetup.EnsureAsync(ct: ct);
+            return ok
+                ? new FixResult(true, "Local embedding model restored.", RequiresRestart: true)
+                : new FixResult(false, "Could not download or restore the embedding model.");
+        }
+
         if (_sqliteMemory == null)
             return new FixResult(false, "No SQLite memory instance available");
 
