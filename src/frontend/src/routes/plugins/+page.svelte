@@ -287,7 +287,7 @@
         <textarea
           class="config-textarea"
           bind:value={configJson}
-          placeholder='{"key": "value"}'
+          placeholder={'{ "key": "value" }'}
         ></textarea>
       </div>
     {:else}

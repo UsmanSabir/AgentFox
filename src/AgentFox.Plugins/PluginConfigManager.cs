@@ -51,6 +51,9 @@ public class PluginConfigManager
                     var data = JsonSerializer.Deserialize<PluginConfigData>(content, JsonOptions);
                     if (data?.PluginName != null)
                     {
+                        // Deserialized values arrive as JsonElement; collapse to CLR primitives
+                        // so consumers can pattern-match (e.g. `is bool`/`is string`).
+                        data.Config = NormalizeConfig(data.Config);
                         _configs.TryAdd(data.PluginName, data);
                         _logger.LogDebug("Loaded plugin config: {Plugin}", data.PluginName);
                     }
@@ -65,6 +68,38 @@ public class PluginConfigManager
         {
             _logger.LogWarning(ex, "Failed to load plugin configs");
         }
+    }
+
+    /// <summary>
+    /// System.Text.Json deserialization (from disk) and ASP.NET request binding both produce
+    /// <see cref="JsonElement"/> values inside a <c>Dictionary&lt;string, object?&gt;</c>, never
+    /// primitive CLR types. Consumers pattern-match on bool/string/number, so collapse each
+    /// JsonElement to its underlying primitive before the config is stored or handed out.
+    /// </summary>
+    private static Dictionary<string, object?> NormalizeConfig(Dictionary<string, object?> config)
+    {
+        var result = new Dictionary<string, object?>(config.Count);
+        foreach (var kv in config)
+            result[kv.Key] = NormalizeValue(kv.Value);
+        return result;
+    }
+
+    private static object? NormalizeValue(object? value)
+    {
+        if (value is not JsonElement je)
+            return value;
+
+        return je.ValueKind switch
+        {
+            JsonValueKind.True   => true,
+            JsonValueKind.False  => false,
+            JsonValueKind.String => je.GetString(),
+            JsonValueKind.Null   => null,
+            JsonValueKind.Number => je.TryGetInt64(out var l) ? l : je.GetDouble(),
+            JsonValueKind.Array  => je.EnumerateArray().Select(e => NormalizeValue(e)).ToList(),
+            JsonValueKind.Object => je.EnumerateObject().ToDictionary(p => p.Name, p => NormalizeValue(p.Value)),
+            _                    => je.ToString()
+        };
     }
 
     /// <summary>Get current configuration for a plugin.</summary>
@@ -97,7 +132,9 @@ public class PluginConfigManager
             var data = new PluginConfigData
             {
                 PluginName = pluginName,
-                Config = config,
+                // ASP.NET request binding also yields JsonElement values; normalize so the
+                // in-memory copy (and the next GetConfig) exposes plain CLR primitives.
+                Config = NormalizeConfig(config),
                 LastUpdatedAt = DateTimeOffset.UtcNow
             };
 

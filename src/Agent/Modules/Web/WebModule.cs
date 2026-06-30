@@ -424,7 +424,7 @@ public class WebModule : IAppModule
 
         endpoints.MapGet("/plugin-sessions", (AgentFox.Plugins.PluginSessionStore sessionStore) =>
         {
-            var allSessions = sessionStore.GetActiveSessions("");
+            var allSessions = sessionStore.GetAllSessions();
             return Results.Ok(allSessions);
         });
 

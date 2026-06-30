@@ -115,45 +115,52 @@ public sealed class TradingAgentModule : IAgentAwareModule
         // (see AhkConfig.CloseBrowserAfterOrder). We deliberately do NOT start it at agent startup, so
         // no Chromium window appears until an order is actually placed.
 
-        // Register the four trading tools
-        context.RegisterTool(new ParseSignalTool(
-            chatClient,
-            loggers.CreateLogger<ParseSignalTool>()));
+        // Register the four trading tools, capturing their names so the audit hooks below
+        // can filter to THIS plugin's tools. The hook registry is global to the agent, so
+        // without this filter every built-in tool (read_file, shell, …) would be recorded
+        // under "trading-agent", polluting the audit trail.
+        var tradingTools = new ITool[]
+        {
+            new ParseSignalTool(chatClient, loggers.CreateLogger<ParseSignalTool>()),
+            new CheckMarketTool(),
+            new PlaceOrderTool(broker, agentOptions, ahkConfig, dedup, pendingSells,
+                loggers.CreateLogger<PlaceOrderTool>()),
+            new PlaceOrdersTool(broker, agentOptions, ahkConfig, dedup, pendingSells,
+                loggers.CreateLogger<PlaceOrdersTool>()),
+            new LogSignalTool(ahkConfig, loggers.CreateLogger<LogSignalTool>()),
+        };
 
-        context.RegisterTool(new CheckMarketTool());
-
-        context.RegisterTool(new PlaceOrderTool(
-            broker, agentOptions, ahkConfig, dedup, pendingSells,
-            loggers.CreateLogger<PlaceOrderTool>()));
-
-        context.RegisterTool(new PlaceOrdersTool(
-            broker, agentOptions, ahkConfig, dedup, pendingSells,
-            loggers.CreateLogger<PlaceOrdersTool>()));
-
-        context.RegisterTool(new LogSignalTool(
-            ahkConfig,
-            loggers.CreateLogger<LogSignalTool>()));
+        var ownToolNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var tool in tradingTools)
+        {
+            context.RegisterTool(tool);
+            ownToolNames.Add(tool.Name);
+        }
 
         // ── Tool execution tracking (audit & observability) ────────────────────
-        context.OnToolPreExecute(async (toolName, args, executionId) =>
+        // sessionId is currently a single module-level key — the hook signature does not
+        // carry the conversation id, so all trading-tool runs land in one "default" session.
+        const string sessionId = "default";
+
+        context.OnToolPreExecute((toolName, args, executionId) =>
         {
-            // For now we track at module level; sessionId comes from the HTTP request context
-            // In a real implementation, sessionId would be propagated through IPluginContext
-            // For now we use a module-level session key
-            sessionStore.OnToolStart("trading-agent", "default", toolName, args, executionId);
-            await Task.CompletedTask;
+            if (ownToolNames.Contains(toolName))
+                sessionStore.OnToolStart("trading-agent", sessionId, toolName, args, executionId);
+            return Task.CompletedTask;
         });
 
-        context.OnToolPostExecute(async (toolName, result, ms, executionId) =>
+        context.OnToolPostExecute((toolName, result, ms, executionId) =>
         {
-            sessionStore.OnToolComplete("trading-agent", "default", toolName, result, ms, executionId);
-            await Task.CompletedTask;
+            if (ownToolNames.Contains(toolName))
+                sessionStore.OnToolComplete("trading-agent", sessionId, toolName, result, ms, executionId);
+            return Task.CompletedTask;
         });
 
-        context.OnToolError(async (toolName, error, ms, executionId) =>
+        context.OnToolError((toolName, error, ms, executionId) =>
         {
-            sessionStore.OnToolError("trading-agent", "default", toolName, error, ms, executionId);
-            await Task.CompletedTask;
+            if (ownToolNames.Contains(toolName))
+                sessionStore.OnToolError("trading-agent", sessionId, toolName, error, ms, executionId);
+            return Task.CompletedTask;
         });
 
         // ── Dynamic system prompt (configurable from web UI) ──────────────────

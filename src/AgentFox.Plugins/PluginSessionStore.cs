@@ -40,16 +40,16 @@ public class PluginSessionStore
             Status = ToolExecutionStatus.Running
         };
 
-        var key = (pluginName, sessionId);
-        _executions.AddOrUpdate(key,
-            new List<ToolExecution> { execution },
-            (_, list) =>
-            {
-                list.Add(execution);
-                return list;
-            });
+        // The hook registry is global and fires for tools across every execution lane
+        // (main / sub-agent / background), so these stores can be hit concurrently — and a
+        // web client may read the same session at the same time. Lock the per-session list
+        // for every structural change, and the session for counter writes.
+        var list = _executions.GetOrAdd((pluginName, sessionId), _ => new List<ToolExecution>());
+        lock (list)
+            list.Add(execution);
 
-        session.ToolCount++;
+        lock (session)
+            session.ToolCount++;
         _logger.LogDebug("[{Plugin}:{Session}] Tool {Tool} started (exec={ExecId})", pluginName, sessionId, toolName, executionId);
     }
 
@@ -63,17 +63,21 @@ public class PluginSessionStore
         var key = (pluginName, sessionId);
         if (_executions.TryGetValue(key, out var list))
         {
-            var exec = list.FirstOrDefault(e => e.ExecutionId == executionId);
-            if (exec != null)
+            lock (list)
             {
-                exec.Status = ToolExecutionStatus.Completed;
-                exec.Result = result;
-                exec.ExecutionTimeMs = executionTimeMs;
-                exec.CompletedAt = DateTimeOffset.UtcNow;
+                var exec = list.FirstOrDefault(e => e.ExecutionId == executionId);
+                if (exec != null)
+                {
+                    exec.Status = ToolExecutionStatus.Completed;
+                    exec.Result = result;
+                    exec.ExecutionTimeMs = executionTimeMs;
+                    exec.CompletedAt = DateTimeOffset.UtcNow;
+                }
             }
         }
 
-        session.SuccessfulToolCount++;
+        lock (session)
+            session.SuccessfulToolCount++;
         _logger.LogDebug("[{Plugin}:{Session}] Tool {Tool} completed in {Ms}ms (exec={ExecId})", pluginName, sessionId, toolName, executionTimeMs, executionId);
     }
 
@@ -87,17 +91,21 @@ public class PluginSessionStore
         var key = (pluginName, sessionId);
         if (_executions.TryGetValue(key, out var list))
         {
-            var exec = list.FirstOrDefault(e => e.ExecutionId == executionId);
-            if (exec != null)
+            lock (list)
             {
-                exec.Status = ToolExecutionStatus.Failed;
-                exec.Error = error;
-                exec.ExecutionTimeMs = executionTimeMs;
-                exec.CompletedAt = DateTimeOffset.UtcNow;
+                var exec = list.FirstOrDefault(e => e.ExecutionId == executionId);
+                if (exec != null)
+                {
+                    exec.Status = ToolExecutionStatus.Failed;
+                    exec.Error = error;
+                    exec.ExecutionTimeMs = executionTimeMs;
+                    exec.CompletedAt = DateTimeOffset.UtcNow;
+                }
             }
         }
 
-        session.FailedToolCount++;
+        lock (session)
+            session.FailedToolCount++;
         _logger.LogWarning("[{Plugin}:{Session}] Tool {Tool} failed: {Error} (exec={ExecId})", pluginName, sessionId, toolName, error, executionId);
     }
 
@@ -109,7 +117,11 @@ public class PluginSessionStore
             return null;
 
         var exKey = (pluginName, sessionId);
-        var execs = _executions.TryGetValue(exKey, out var list) ? list.OrderBy(e => e.StartedAt).ToList() : new();
+        List<ToolExecution> execs;
+        if (_executions.TryGetValue(exKey, out var list))
+            lock (list) execs = list.OrderBy(e => e.StartedAt).ToList();
+        else
+            execs = new();
 
         return new PluginSessionDetail
         {
@@ -125,31 +137,36 @@ public class PluginSessionStore
     }
 
     /// <summary>Get all active sessions for a plugin.</summary>
-    public IEnumerable<PluginSessionSummary> GetActiveSessions(string pluginName)
+    public IEnumerable<PluginSessionSummary> GetActiveSessions(string pluginName) =>
+        BuildSummaries(_sessions.Values.Where(s => s.PluginName == pluginName));
+
+    /// <summary>Get all active sessions across every plugin (used by the "list all" endpoint).</summary>
+    public IEnumerable<PluginSessionSummary> GetAllSessions() =>
+        BuildSummaries(_sessions.Values);
+
+    private IEnumerable<PluginSessionSummary> BuildSummaries(IEnumerable<PluginSession> sessions)
     {
-        var sessions = _sessions.Values
-            .Where(s => s.PluginName == pluginName)
+        return sessions
             .OrderByDescending(s => s.CreatedAt)
-            .ToList();
-
-        return sessions.Select(s =>
-        {
-            var exKey = (pluginName, s.SessionId);
-            var latestExec = _executions.TryGetValue(exKey, out var list)
-                ? list.OrderByDescending(e => e.StartedAt).FirstOrDefault()
-                : null;
-
-            return new PluginSessionSummary
+            .Select(s =>
             {
-                PluginName = s.PluginName,
-                SessionId = s.SessionId,
-                CreatedAt = s.CreatedAt,
-                LastActivityAt = latestExec?.CompletedAt ?? s.CreatedAt,
-                ToolCount = s.ToolCount,
-                SuccessfulToolCount = s.SuccessfulToolCount,
-                FailedToolCount = s.FailedToolCount
-            };
-        });
+                var exKey = (s.PluginName, s.SessionId);
+                ToolExecution? latestExec = null;
+                if (_executions.TryGetValue(exKey, out var list))
+                    lock (list) latestExec = list.OrderByDescending(e => e.StartedAt).FirstOrDefault();
+
+                return new PluginSessionSummary
+                {
+                    PluginName = s.PluginName,
+                    SessionId = s.SessionId,
+                    CreatedAt = s.CreatedAt,
+                    LastActivityAt = latestExec?.CompletedAt ?? s.CreatedAt,
+                    ToolCount = s.ToolCount,
+                    SuccessfulToolCount = s.SuccessfulToolCount,
+                    FailedToolCount = s.FailedToolCount
+                };
+            })
+            .ToList();
     }
 
     /// <summary>Get aggregate statistics for a plugin across all sessions.</summary>

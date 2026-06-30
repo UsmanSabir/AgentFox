@@ -957,13 +957,27 @@ public class AgentBuilder
                     $"Tool '{toolName}' was blocked — not approved by user.");
         }
 
+        // Tool-execution lifecycle hooks. Plugins subscribe via IPluginContext
+        // (OnToolPreExecute/OnToolPostExecute/OnToolError) which lands in this same
+        // HookRegistry; without invoking them here those handlers never fire — i.e. plugin
+        // observability/audit trails would silently record nothing. The Invoke* methods
+        // already swallow handler exceptions, so they cannot break tool execution.
+        var executionId = Guid.NewGuid().ToString("N");
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        await _toolRegistry.HookRegistry.InvokeToolPreExecuteAsync(toolName, arguments, executionId);
         try
         {
             var result = await tool.ExecuteAsync(arguments);
+            sw.Stop();
+            await _toolRegistry.HookRegistry.InvokeToolPostExecuteAsync(
+                toolName, result, sw.ElapsedMilliseconds, executionId);
             return result;
         }
         catch (Exception ex)
         {
+            sw.Stop();
+            await _toolRegistry.HookRegistry.InvokeToolErrorAsync(
+                toolName, ex.Message, sw.ElapsedMilliseconds, executionId);
             _logger?.LogError(ex, $"Error executing tool {toolName}");
             return ToolResult.Fail($"Error: {ex.Message}");
         }
