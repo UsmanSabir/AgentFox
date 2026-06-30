@@ -108,6 +108,8 @@ public sealed class TradingAgentModule : IAgentAwareModule
         var dedup         = _services!.GetRequiredService<DuplicateSignalFilter>();
         var pendingSells  = _services!.GetRequiredService<PendingTakeProfitStore>();
         var loggers       = _services!.GetRequiredService<ILoggerFactory>();
+        var sessionStore  = _services!.GetRequiredService<AgentFox.Plugins.PluginSessionStore>();
+        var configMgr     = _services!.GetRequiredService<AgentFox.Plugins.PluginConfigManager>();
 
         // The browser is launched ON DEMAND by PlaceOrderAsync and torn down once the order finishes
         // (see AhkConfig.CloseBrowserAfterOrder). We deliberately do NOT start it at agent startup, so
@@ -132,12 +134,44 @@ public sealed class TradingAgentModule : IAgentAwareModule
             ahkConfig,
             loggers.CreateLogger<LogSignalTool>()));
 
-        // Inject trading workflow into agent system prompt
+        // ── Tool execution tracking (audit & observability) ────────────────────
+        context.OnToolPreExecute(async (toolName, args, executionId) =>
+        {
+            // For now we track at module level; sessionId comes from the HTTP request context
+            // In a real implementation, sessionId would be propagated through IPluginContext
+            // For now we use a module-level session key
+            sessionStore.OnToolStart("trading-agent", "default", toolName, args, executionId);
+            await Task.CompletedTask;
+        });
+
+        context.OnToolPostExecute(async (toolName, result, ms, executionId) =>
+        {
+            sessionStore.OnToolComplete("trading-agent", "default", toolName, result, ms, executionId);
+            await Task.CompletedTask;
+        });
+
+        context.OnToolError(async (toolName, error, ms, executionId) =>
+        {
+            sessionStore.OnToolError("trading-agent", "default", toolName, error, ms, executionId);
+            await Task.CompletedTask;
+        });
+
+        // ── Dynamic system prompt (configurable from web UI) ──────────────────
         context.ContributeToSystemPrompt(
             contributorId: "trading-agent",
             fragmentProvider: () =>
             {
                 var cfg = agentOptions.Value;
+                var customConfig = configMgr.GetConfig("trading-agent");
+
+                // Allow runtime overrides via web UI config (optional)
+                var autoExecute = customConfig.ContainsKey("autoExecute") && customConfig["autoExecute"] is bool b
+                    ? b
+                    : cfg.AutoExecute;
+                var minConfidence = customConfig.ContainsKey("minConfidence") && customConfig["minConfidence"] is string s
+                    ? s
+                    : cfg.MinConfidence;
+
                 return $"""
 
                     ## PSX Trading Agent
@@ -165,7 +199,7 @@ public sealed class TradingAgentModule : IAgentAwareModule
                        sentence (e.g. "No actionable signal — ignored.") and stop.
                     3. Call check_market()
                     4. Call log_signal(executed=false, execution_reason="pending evaluation") for each signal
-                    5. If AutoExecute={cfg.AutoExecute} AND market is open AND confidence >= {cfg.MinConfidence}:
+                    5. If AutoExecute={autoExecute} AND market is open AND confidence >= {minConfidence}:
                        a. Call place_orders(orders=[...]) ONCE, mapping EVERY entry in signals[] to an
                           order (symbol, price=entry_price, target, order_type, AND that signal's own
                           confidence). Each order is gated on its OWN confidence, so include it per order —

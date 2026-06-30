@@ -310,6 +310,15 @@ class Program
         builder.Services.AddSingleton<SchedulingHolder>();
         builder.Services.AddSingleton<AgentFox.Plugins.Interfaces.IAgentService, FoxAgentService>();
 
+        // Plugin session tracking and configuration management
+        builder.Services.AddSingleton<AgentFox.Plugins.PluginSessionStore>();
+        builder.Services.AddSingleton(sp =>
+        {
+            var workspaceDir = sp.GetRequiredService<WorkspaceManager>();
+            var configDir = Path.Combine(workspaceDir.ResolvePath(""), "plugin-configs");
+            return new AgentFox.Plugins.PluginConfigManager(configDir, sp.GetRequiredService<ILogger<AgentFox.Plugins.PluginConfigManager>>());
+        });
+
         // AgentOrchestrator — builds the main agent, starts the command processor,
         // and connects channels. Runs in every mode (cli, web, api, service).
         builder.Services.AddHostedService<AgentOrchestrator>();

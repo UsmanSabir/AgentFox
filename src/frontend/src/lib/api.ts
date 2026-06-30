@@ -115,6 +115,55 @@ export interface CronJobRequest {
   task: string;
 }
 
+// ── Plugin Sessions & Config ──────────────────────────────────────────────
+
+export interface ToolExecution {
+  executionId: string;
+  toolName: string;
+  arguments: Record<string, unknown>;
+  startedAt: string;
+  completedAt?: string;
+  executionTimeMs: number;
+  status: 'Running' | 'Completed' | 'Failed';
+  result?: string;
+  error?: string;
+}
+
+export interface PluginSessionSummary {
+  pluginName: string;
+  sessionId: string;
+  createdAt: string;
+  lastActivityAt: string;
+  toolCount: number;
+  successfulToolCount: number;
+  failedToolCount: number;
+}
+
+export interface PluginSessionDetail extends PluginSessionSummary {
+  executions: ToolExecution[];
+}
+
+export interface PluginSessionStats {
+  pluginName: string;
+  activeSessionCount: number;
+  totalToolInvocations: number;
+  successfulInvocations: number;
+  failedInvocations: number;
+  successRate: number;
+}
+
+export interface PluginConfigResponse {
+  pluginName: string;
+  config: Record<string, unknown>;
+  lastUpdatedAt: string;
+  isDefault: boolean;
+}
+
+export interface PluginConfigUpdateRequest {
+  config: Record<string, unknown>;
+  merge?: boolean;
+}
+
 export interface ChannelInfo {
   id: string;
   name: string;
@@ -206,6 +255,22 @@ export const api = {
     list:   ()                         => get<CronJobInfo[]>('/cron'),
     add:    (req: CronJobRequest)      => post<{ success: boolean }>('/cron', req),
     remove: (name: string)             => del<{ success: boolean }>(`/cron/${encodeURIComponent(name)}`),
+  },
+
+  // ── Plugin Sessions (audit trail & tracking) ──────────────────────────
+  pluginSessions: {
+    listAll:    ()                                => get<PluginSessionSummary[]>('/plugin-sessions'),
+    listByPlugin: (pluginName: string)            => get<PluginSessionSummary[]>(`/plugin-sessions/${encodeURIComponent(pluginName)}`),
+    getDetail:  (pluginName: string, sessionId: string) => get<PluginSessionDetail>(`/plugin-sessions/${encodeURIComponent(pluginName)}/${encodeURIComponent(sessionId)}`),
+    getStats:   (pluginName: string)              => get<PluginSessionStats>(`/plugin-sessions/${encodeURIComponent(pluginName)}/stats`),
+  },
+
+  // ── Plugin Configuration (dynamic, web-ui configurable) ────────────────
+  pluginConfig: {
+    listAll:    ()                                => get<PluginConfigResponse[]>('/plugin-config'),
+    get:        (pluginName: string)              => get<PluginConfigResponse>(`/plugin-config/${encodeURIComponent(pluginName)}`),
+    update:     (pluginName: string, req: PluginConfigUpdateRequest) => post<{ success: boolean; message: string }>(`/plugin-config/${encodeURIComponent(pluginName)}`, req),
+    remove:     (pluginName: string)              => del<{ success: boolean }>(`/plugin-config/${encodeURIComponent(pluginName)}`),
   }
 };
 

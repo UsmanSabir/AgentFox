@@ -419,6 +419,86 @@ public class WebModule : IAppModule
             var removed = scheduling.CronScheduler!.RemoveJob(name);
             return removed ? Results.Ok(new { success = true }) : Results.NotFound();
         });
+
+        // ── Plugin Sessions (tracking and audit trail) ──────────────────────────
+
+        endpoints.MapGet("/plugin-sessions", (AgentFox.Plugins.PluginSessionStore sessionStore) =>
+        {
+            var allSessions = sessionStore.GetActiveSessions("");
+            return Results.Ok(allSessions);
+        });
+
+        endpoints.MapGet("/plugin-sessions/{pluginName}", (
+            string pluginName,
+            AgentFox.Plugins.PluginSessionStore sessionStore) =>
+        {
+            var sessions = sessionStore.GetActiveSessions(pluginName);
+            return Results.Ok(sessions);
+        });
+
+        endpoints.MapGet("/plugin-sessions/{pluginName}/{sessionId}", (
+            string pluginName,
+            string sessionId,
+            AgentFox.Plugins.PluginSessionStore sessionStore) =>
+        {
+            var session = sessionStore.GetSession(pluginName, sessionId);
+            if (session == null)
+                return Results.NotFound(new { error = "Session not found" });
+
+            return Results.Ok(session);
+        });
+
+        endpoints.MapGet("/plugin-sessions/{pluginName}/stats", (
+            string pluginName,
+            AgentFox.Plugins.PluginSessionStore sessionStore) =>
+        {
+            var stats = sessionStore.GetStats(pluginName);
+            return Results.Ok(stats);
+        });
+
+        // ── Plugin Configuration (dynamic, updatable from web UI) ───────────────
+
+        endpoints.MapGet("/plugin-config", (AgentFox.Plugins.PluginConfigManager configMgr) =>
+        {
+            var configs = configMgr.GetAllConfigs();
+            return Results.Ok(configs);
+        });
+
+        endpoints.MapGet("/plugin-config/{pluginName}", (
+            string pluginName,
+            AgentFox.Plugins.PluginConfigManager configMgr) =>
+        {
+            var config = configMgr.GetConfigWithSchema(pluginName);
+            return Results.Ok(config);
+        });
+
+        endpoints.MapPost("/plugin-config/{pluginName}", async (
+            string pluginName,
+            AgentFox.Plugins.PluginConfigUpdateRequest req,
+            AgentFox.Plugins.PluginConfigManager configMgr) =>
+        {
+            if (req.Config == null || req.Config.Count == 0)
+                return Results.BadRequest(new { error = "Config object cannot be empty" });
+
+            bool success;
+            if (req.Merge)
+                success = await configMgr.MergeConfigAsync(pluginName, req.Config);
+            else
+                success = await configMgr.SaveConfigAsync(pluginName, req.Config);
+
+            if (!success)
+                return Results.StatusCode(500);
+
+            return Results.Ok(new { success = true, message = "Configuration updated" });
+        });
+
+        endpoints.MapDelete("/plugin-config/{pluginName}", (
+            string pluginName,
+            AgentFox.Plugins.PluginConfigManager configMgr) =>
+        {
+            var deleted = configMgr.DeleteConfig(pluginName);
+            return deleted ? Results.Ok(new { success = true }) : Results.NotFound();
+        });
     }
 
     public Task StartAsync(IServiceProvider services) => Task.CompletedTask;
