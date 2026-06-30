@@ -60,3 +60,4 @@ nunit-*.xml
 appsettings.*.json
 /src/AgentFox.sln.DotSettings.user
 /src/LocalEmbeddings/.cache
+/src/Agent/wwwroot/
