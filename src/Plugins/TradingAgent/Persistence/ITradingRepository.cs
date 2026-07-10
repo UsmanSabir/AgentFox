@@ -1,6 +1,7 @@
 namespace TradingAgent.Persistence;
 
 using TradingAgent.Manager;
+using TradingAgent.Reconciliation;
 
 public interface ITradingRepository
 {
@@ -11,6 +12,10 @@ public interface ITradingRepository
         CancellationToken ct = default);
 
     Task<TradingLedgerStatus> GetStatusAsync(CancellationToken ct = default);
+
+    Task RecordReconciliationAsync(
+        BrokerReconciliationSnapshot snapshot,
+        CancellationToken ct = default);
 
     Task<ExecutionClaim> TryBeginExecutionAsync(
         string idempotencyKey,

@@ -10,7 +10,7 @@ The specialist is intentionally read/proposal-only. It never receives browser ex
 WhatsApp Group
   → 3rd-party bridge (WPPConnect / Baileys)
   → signed POST /webhook/whatsapp-bridge
-  → gateway routes directly to isolated trading-agent
+  → gateway enqueues the isolated trading-agent on the Specialist command lane
       parse_signal   — AI extracts symbol, action, price, confidence
       check_market   — deterministic regular sessions + configured exceptions
       log_signal     — records the signal
@@ -76,6 +76,9 @@ Add the following sections to `appsettings.json`.
     "RequireConfiguredSymbols": true,
     "MaxOrdersPerBatch":      10,
     "MaxBatchValuePkr":       250000,
+    "RequireReconciliationHealthy": true,
+    "ReconciliationIntervalSeconds": 60,
+    "ReconciliationMaxAgeSeconds": 180,
     "MarketHolidays":         [],
     "MarketSessionOverrides": []
   },
@@ -100,6 +103,7 @@ Add the following sections to `appsettings.json`.
 | `AllowedSymbols` | `[]` | Explicit execution universe. Empty fails closed when `RequireConfiguredSymbols=true`. |
 | `MarketHolidays` | `[]` | Operator-maintained closed dates in `yyyy-MM-dd` form. |
 | `MarketSessionOverrides` | `[]` | Date-specific `Closed` or `Sessions` overrides such as `09:30-13:00`. |
+| `RequireReconciliationHealthy` | `true` | Blocks live modes when broker fills, positions, and balances cannot be reconciled. The current AHK browser adapter reports unsupported, so live entry execution remains fail-closed. |
 | `MinConfidence` | `HIGH` | Minimum signal confidence required before placing an order (`HIGH`, `MEDIUM`, `LOW`). |
 | `ParserModelKey` | `CheapModel` | Reserved for future use — will resolve to a named model from the `Models` config section once `IModelClientFactory` is available in AgentFox.Plugins. Currently uses the default `IChatClient`. |
 | `DuplicateWindowMinutes` | `60` | Identical messages received within this window are silently discarded. |

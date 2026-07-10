@@ -3,6 +3,7 @@ using AgentFox.Plugins.Interfaces;
 using TradingAgent.Config;
 using TradingAgent.Market;
 using TradingAgent.Persistence;
+using TradingAgent.Reconciliation;
 
 namespace TradingAgent.Tools;
 
@@ -11,15 +12,18 @@ public sealed class GetTradingStatusTool : BaseTool
     private readonly ITradingRepository _repository;
     private readonly TradingPolicyProvider _policyProvider;
     private readonly IMarketCalendar _calendar;
+    private readonly TradingReconciliationState _reconciliation;
 
     public GetTradingStatusTool(
         ITradingRepository repository,
         TradingPolicyProvider policyProvider,
-        IMarketCalendar calendar)
+        IMarketCalendar calendar,
+        TradingReconciliationState reconciliation)
     {
         _repository = repository;
         _policyProvider = policyProvider;
         _calendar = calendar;
+        _reconciliation = reconciliation;
     }
 
     public override string Name => "get_trading_status";
@@ -40,6 +44,7 @@ public sealed class GetTradingStatusTool : BaseTool
             policy_version = policy.Version,
             market_open = market.IsOpen,
             market_reason = market.Reason,
+            reconciliation = _reconciliation.Current,
             ledger = status
         }));
     }

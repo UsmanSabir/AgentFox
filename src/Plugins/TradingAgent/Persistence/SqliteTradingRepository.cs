@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using TradingAgent.Config;
 using TradingAgent.Manager;
+using TradingAgent.Reconciliation;
 
 namespace TradingAgent.Persistence;
 
@@ -123,6 +124,25 @@ public sealed class SqliteTradingRepository : ITradingRepository
         await reader.ReadAsync(ct);
         return new TradingLedgerStatus(
             reader.GetInt32(0), reader.GetInt32(1), reader.GetInt32(2), reader.GetInt32(3), DateTime.UtcNow);
+    }
+
+    public async Task RecordReconciliationAsync(
+        BrokerReconciliationSnapshot snapshot,
+        CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO reconciliation_runs
+                (reconciliation_id, state, details_json, started_utc, completed_utc)
+            VALUES ($id, $state, $details, $checked, $checked)
+            """;
+        command.Parameters.AddWithValue("$id", Guid.NewGuid().ToString("N"));
+        command.Parameters.AddWithValue("$state", snapshot.Healthy ? "healthy" : "unhealthy");
+        command.Parameters.AddWithValue("$details", snapshot.DetailsJson);
+        command.Parameters.AddWithValue("$checked", snapshot.CheckedUtc.ToString("O"));
+        await command.ExecuteNonQueryAsync(ct);
     }
 
     public async Task CompleteExecutionAsync(

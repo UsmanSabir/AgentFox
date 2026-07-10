@@ -8,6 +8,8 @@ using TradingAgent.Market;
 using TradingAgent.Models;
 using TradingAgent.Persistence;
 using TradingAgent.Risk;
+using TradingAgent.Reconciliation;
+using Microsoft.Extensions.Options;
 
 namespace TradingAgent.Manager;
 
@@ -23,6 +25,8 @@ public sealed class TradingManager
     private readonly IMarketCalendar _calendar;
     private readonly TradingPolicyProvider _policyProvider;
     private readonly ITradingRiskEngine _riskEngine;
+    private readonly TradingReconciliationState _reconciliation;
+    private readonly IOptions<TradingAgentOptions> _options;
     private readonly ILogger<TradingManager> _logger;
 
     public TradingManager(
@@ -31,6 +35,8 @@ public sealed class TradingManager
         IMarketCalendar calendar,
         TradingPolicyProvider policyProvider,
         ITradingRiskEngine riskEngine,
+        TradingReconciliationState reconciliation,
+        IOptions<TradingAgentOptions> options,
         ILogger<TradingManager> logger)
     {
         _broker = broker;
@@ -38,6 +44,8 @@ public sealed class TradingManager
         _calendar = calendar;
         _policyProvider = policyProvider;
         _riskEngine = riskEngine;
+        _reconciliation = reconciliation;
+        _options = options;
         _logger = logger;
     }
 
@@ -69,6 +77,17 @@ public sealed class TradingManager
         if (mode == "APPROVALREQUIRED" && authorization?.Method != "host-tool-gate")
             return TradingExecutionResult.Rejected(policy.Version,
                 "ApprovalRequired mode needs an authorization from the host tool-approval gate.");
+
+        if (mode is "APPROVALREQUIRED" or "BOUNDEDAUTO"
+            && _options.Value.RequireReconciliationHealthy)
+        {
+            var reconciliation = _reconciliation.Current;
+            var maxAge = TimeSpan.FromSeconds(Math.Max(10, _options.Value.ReconciliationMaxAgeSeconds));
+            if (!reconciliation.Supported || !reconciliation.Healthy
+                || DateTime.UtcNow - reconciliation.CheckedUtc > maxAge)
+                return TradingExecutionResult.Rejected(policy.Version,
+                    "Broker reconciliation is not healthy: " + reconciliation.Reason);
+        }
 
         var market = _calendar.GetStatus();
         if (!market.IsOpen)

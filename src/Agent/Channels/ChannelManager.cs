@@ -117,6 +117,7 @@ public class ChannelManager
             _logger?.LogWarning("HandleMessage: agent not yet available, dropping message {MessageId}", message.Id);
             return;
         }
+        var messageContent = message.Content ?? string.Empty;
 
         // ── HITL interception — runs before gateway/queue routing ─────────────
         if (_hitlManager != null)
@@ -124,7 +125,7 @@ public class ChannelManager
             var channelId = string.IsNullOrEmpty(message.ChannelId)
                 ? channel.ChannelId
                 : message.ChannelId;
-            var content = message.Content?.Trim() ?? string.Empty;
+            var content = messageContent.Trim();
 
             // Mode 1: /approve <id> [feedback]
             if (content.StartsWith("/approve ", StringComparison.OrdinalIgnoreCase))
@@ -185,8 +186,24 @@ public class ChannelManager
                 var sessionId = _sessionManager?.GetOrCreateChannelSession(
                     sessionChannelId, $"{channel.Name}:{specialist.Id}", specialist.Id)
                     ?? Guid.NewGuid().ToString("N");
-                var response = await _agentRegistry!.RunAsync(
-                    specialist.Id, message.Content ?? string.Empty, sessionId);
+                string response;
+                if (_commandQueue is not null)
+                {
+                    var command = new SpecialistAgentCommand
+                    {
+                        SessionKey = sessionId,
+                        AgentId = specialist.Id,
+                        Input = messageContent,
+                        TimeoutSeconds = 300
+                    };
+                    _commandQueue.Enqueue(command);
+                    response = await command.ResultSource.Task;
+                }
+                else
+                {
+                    response = await _agentRegistry!.RunAsync(
+                        specialist.Id, messageContent, sessionId);
+                }
                 await channel.SendReplyAsync(message, response);
                 _logger?.LogInformation(
                     "Channel message {MessageId} routed directly to specialist {AgentId}.",
@@ -217,14 +234,14 @@ public class ChannelManager
                 if (_commandQueue != null)
                 {
                     var tcs = new TaskCompletionSource<AgentResult>(TaskCreationOptions.RunContinuationsAsynchronously);
-                    var cmd = AgentCommand.CreateMainCommand(sessionId, agent.Id, message.Content);
+                    var cmd = AgentCommand.CreateMainCommand(sessionId, agent.Id, messageContent);
                     cmd.ResultSource = tcs;
                     _commandQueue.Enqueue(cmd);
                     result = await tcs.Task;
                 }
                 else
                 {
-                    result = await agent.ProcessAsync(message.Content, sessionId);
+                    result = await agent.ProcessAsync(messageContent, sessionId);
                 }
 
                 await channel.SendReplyAsync(message, result.Output);

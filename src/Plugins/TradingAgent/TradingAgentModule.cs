@@ -11,6 +11,7 @@ using TradingAgent.Manager;
 using TradingAgent.Market;
 using TradingAgent.Persistence;
 using TradingAgent.Risk;
+using TradingAgent.Reconciliation;
 using TradingAgent.Safety;
 using TradingAgent.Tools;
 using TradingAgent.Trading;
@@ -81,11 +82,14 @@ public sealed class TradingAgentModule : IAgentAwareModule
             config.GetSection($"Plugins:{AhkConfig.SectionName}"));
 
         services.AddSingleton<AhkBroker>();
-        services.AddSingleton<IBrokerAdapter, AhkBrowserBrokerAdapter>();
+        services.AddSingleton<AhkBrowserBrokerAdapter>();
+        services.AddSingleton<IBrokerAdapter>(sp => sp.GetRequiredService<AhkBrowserBrokerAdapter>());
+        services.AddSingleton<IBrokerStateReader>(sp => sp.GetRequiredService<AhkBrowserBrokerAdapter>());
         services.AddSingleton<IMarketCalendar, PsxMarketCalendar>();
         services.AddSingleton<TradingPolicyProvider>();
         services.AddSingleton<ITradingRepository, SqliteTradingRepository>();
         services.AddSingleton<ITradingRiskEngine, TradingRiskEngine>();
+        services.AddSingleton<TradingReconciliationState>();
         services.AddSingleton<TradingAgent.Manager.TradingManager>();
 
         services.AddSingleton<DuplicateSignalFilter>(sp =>
@@ -98,6 +102,7 @@ public sealed class TradingAgentModule : IAgentAwareModule
         // them while the market is open (placed via the host's IHostedService pipeline on app start).
         services.AddSingleton<PendingTakeProfitStore>();
         services.AddHostedService<TradingSafetyStartupValidator>();
+        services.AddHostedService<BrokerReconciliationWorker>();
         services.AddHostedService<TakeProfitRetryWorker>();
     }
 
@@ -124,6 +129,7 @@ public sealed class TradingAgentModule : IAgentAwareModule
         var loggers       = _services!.GetRequiredService<ILoggerFactory>();
         var sessionStore  = _services!.GetRequiredService<AgentFox.Plugins.PluginSessionStore>();
         var repository    = _services!.GetRequiredService<ITradingRepository>();
+        var reconciliation = _services!.GetRequiredService<TradingReconciliationState>();
 
         // The browser is launched ON DEMAND by PlaceOrderAsync and torn down once the order finishes
         // (see AhkConfig.CloseBrowserAfterOrder). We deliberately do NOT start it at agent startup, so
@@ -143,7 +149,7 @@ public sealed class TradingAgentModule : IAgentAwareModule
                 loggers.CreateLogger<PlaceOrdersTool>()),
             new LogSignalTool(ahkConfig, loggers.CreateLogger<LogSignalTool>()),
             new CreateTradeProposalTool(repository, policy),
-            new GetTradingStatusTool(repository, policy, calendar),
+            new GetTradingStatusTool(repository, policy, calendar, reconciliation),
         };
 
         var ownToolNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -192,6 +198,7 @@ public sealed class TradingAgentModule : IAgentAwareModule
                 ? null
                 : agentOptions.Value.ParserModelKey,
             MaxIterations = 8,
+            MaxConcurrentTurns = 1,
             SystemPrompt = $"""
                 You are the isolated PSX Trading Agent for AgentFox.
 

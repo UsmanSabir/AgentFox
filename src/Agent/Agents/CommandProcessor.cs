@@ -53,6 +53,7 @@ public class CommandProcessorConfig
     {
         // Main is always serial — one agent turn at a time
         [CommandLane.Main]       = LanePolicy.Serial(pollingDelayMs: 10),
+        [CommandLane.Specialist] = LanePolicy.Parallel(maxConcurrency: 3, pollingDelayMs: 10),
         // Subagents run in parallel up to a cap driven by SubAgentConfiguration
         [CommandLane.Subagent]   = LanePolicy.Parallel(maxConcurrency: 10, pollingDelayMs: 10),
         // Long-running tools can overlap
@@ -71,6 +72,7 @@ public class CommandProcessorConfig
             LanePolicies = new()
             {
                 [CommandLane.Main]       = LanePolicy.Serial(pollingDelayMs: 10),
+                [CommandLane.Specialist] = LanePolicy.Parallel(maxConcurrency: 3, pollingDelayMs: 10),
                 [CommandLane.Subagent]   = LanePolicy.Parallel(subAgentConfig.MaxConcurrentSubAgents, pollingDelayMs: 10),
                 [CommandLane.Tool]       = LanePolicy.Parallel(maxConcurrency: 5,  pollingDelayMs: 10),
                 [CommandLane.Background] = LanePolicy.Parallel(maxConcurrency: 3,  pollingDelayMs: 20),

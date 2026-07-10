@@ -14,6 +14,7 @@ using TradingAgent.Market;
 using TradingAgent.Models;
 using TradingAgent.Persistence;
 using TradingAgent.Risk;
+using TradingAgent.Reconciliation;
 
 namespace AgentFox.ChannelTests;
 
@@ -138,6 +139,7 @@ public sealed class TradingManagerSafetyTests
             var manager = new TradingAgent.Manager.TradingManager(
                 broker, repository, new AlwaysOpenCalendar(), policy,
                 new TradingRiskEngine(Options.Create(new AhkConfig()), options),
+                new TradingReconciliationState(), options,
                 NullLogger<TradingAgent.Manager.TradingManager>.Instance);
             IReadOnlyList<IReadOnlyList<TradingSignal>> groups =
             [
@@ -197,6 +199,85 @@ public sealed class TradingManagerSafetyTests
         var result = killed.Validate(groups);
         Assert.IsFalse(result.Allowed);
         Assert.IsTrue(result.Violations.Any(x => x.Contains("kill switch", StringComparison.OrdinalIgnoreCase)));
+    }
+
+    [TestMethod]
+    public async Task SpecialistCommand_UsesDedicatedQueueLane()
+    {
+        var queue = new CommandQueue();
+        using var processor = new CommandProcessor(queue);
+        processor.RegisterLaneHandler(CommandLane.Specialist, (command, _) =>
+        {
+            var specialist = (SpecialistAgentCommand)command;
+            specialist.ResultSource.TrySetResult($"handled:{specialist.AgentId}:{specialist.Input}");
+            return Task.CompletedTask;
+        });
+        processor.Start();
+        try
+        {
+            var command = new SpecialistAgentCommand
+            {
+                SessionKey = "specialist:test:session",
+                AgentId = "trading-agent",
+                Input = "status"
+            };
+            queue.Enqueue(command);
+            var result = await command.ResultSource.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+            Assert.AreEqual(CommandLane.Specialist, command.Lane);
+            Assert.AreEqual("handled:trading-agent:status", result);
+        }
+        finally
+        {
+            await processor.StopAsync(TimeSpan.FromSeconds(2));
+        }
+    }
+
+    [TestMethod]
+    public async Task LiveExecution_FailsClosedWhenBrokerReconciliationIsUnsupported()
+    {
+        var temp = TempDirectory();
+        try
+        {
+            var configured = new TradingAgentOptions
+            {
+                AutoExecute = true,
+                ExecutionMode = "ApprovalRequired",
+                DatabasePath = Path.Combine(temp, "trading.db"),
+                AllowedSymbols = ["OGDC"],
+                RequireReconciliationHealthy = true
+            };
+            var options = Options.Create(configured);
+            var pluginConfig = new PluginConfigManager(
+                Path.Combine(temp, "plugin-config"), NullLogger<PluginConfigManager>.Instance);
+            var repository = new SqliteTradingRepository(
+                options, new ConfigurationBuilder().Build(), NullLogger<SqliteTradingRepository>.Instance);
+            var broker = new RecordingBroker();
+            var manager = new TradingAgent.Manager.TradingManager(
+                broker, repository, new AlwaysOpenCalendar(),
+                new TradingPolicyProvider(options, pluginConfig),
+                new TradingRiskEngine(Options.Create(new AhkConfig()), options),
+                new TradingReconciliationState(), options,
+                NullLogger<TradingAgent.Manager.TradingManager>.Instance);
+            IReadOnlyList<IReadOnlyList<TradingSignal>> groups =
+            [
+                new List<TradingSignal>
+                {
+                    new() { Action = "BUY", Symbol = "OGDC", Quantity = 10, EntryPrice = 100, OrderType = "LIMIT" }
+                }
+            ];
+
+            var result = await manager.ExecuteGroupsAsync(
+                groups, "source-message-live", ExecutionAuthorization.HostToolGate("test-approver"));
+
+            Assert.IsFalse(result.Executed);
+            Assert.IsFalse(broker.WasCalled);
+            StringAssert.Contains(result.Reason, "reconciliation");
+        }
+        finally
+        {
+            Directory.Delete(temp, recursive: true);
+        }
     }
 
     private static PsxMarketCalendar Calendar(TradingAgentOptions options) =>

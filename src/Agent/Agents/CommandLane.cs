@@ -11,6 +11,12 @@ public enum CommandLane
     /// Main agent execution lane - highest priority, typically 1 task at a time
     /// </summary>
     Main,
+
+    /// <summary>
+    /// Persistent plugin specialist execution lane. Channel-routed specialist turns use this lane
+    /// so they receive queueing, concurrency, cancellation, and graceful-drain behavior.
+    /// </summary>
+    Specialist,
     
     /// <summary>
     /// Sub-agent execution lane - dedicated lane for spawned sub-agents to run concurrently

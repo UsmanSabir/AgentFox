@@ -12,6 +12,8 @@ public sealed class SpecialistAgentRegistry : IAgentRegistry
         new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, ITool>> _tools =
         new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _concurrencyGates =
+        new(StringComparer.OrdinalIgnoreCase);
 
     public void Register(SpecialistAgentDescriptor descriptor)
     {
@@ -28,7 +30,7 @@ public sealed class SpecialistAgentRegistry : IAgentRegistry
         _descriptors.Values.FirstOrDefault(d =>
             d.ChannelTypes.Contains(channelType, StringComparer.OrdinalIgnoreCase));
 
-    public Task<string> RunAsync(
+    public async Task<string> RunAsync(
         string agentId,
         string input,
         string? conversationId = null,
@@ -36,7 +38,14 @@ public sealed class SpecialistAgentRegistry : IAgentRegistry
     {
         if (!_runners.TryGetValue(agentId, out var runner))
             throw new InvalidOperationException($"Specialist agent '{agentId}' is not active.");
-        return runner(input, conversationId, ct);
+        var descriptor = _descriptors[agentId];
+        var gate = _concurrencyGates.GetOrAdd(agentId,
+            _ => new SemaphoreSlim(
+                Math.Clamp(descriptor.MaxConcurrentTurns, 1, 32),
+                Math.Clamp(descriptor.MaxConcurrentTurns, 1, 32)));
+        await gate.WaitAsync(ct);
+        try { return await runner(input, conversationId, ct); }
+        finally { gate.Release(); }
     }
 
     internal void Activate(

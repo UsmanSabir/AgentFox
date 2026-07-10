@@ -572,6 +572,34 @@ public sealed class AgentOrchestrator : IHostedService
     {
         var isInteractive = !Console.IsInputRedirected;
 
+        // Persistent specialist lane: channel-routed specialist turns use the same queue processor
+        // as the main agent while retaining independent concurrency and timeout controls.
+        _commandProcessor.RegisterLaneHandler(CommandLane.Specialist, async (command, ct) =>
+        {
+            if (command is not SpecialistAgentCommand specialist) return;
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TimeSpan.FromSeconds(Math.Max(1, specialist.TimeoutSeconds)));
+            try
+            {
+                var result = await _specialistAgents.RunAsync(
+                    specialist.AgentId, specialist.Input, specialist.SessionKey, timeout.Token);
+                specialist.ResultSource.TrySetResult(result);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                specialist.ResultSource.TrySetCanceled(ct);
+            }
+            catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+            {
+                specialist.ResultSource.TrySetException(new TimeoutException(
+                    $"Specialist '{specialist.AgentId}' timed out after {specialist.TimeoutSeconds} seconds."));
+            }
+            catch (Exception ex)
+            {
+                specialist.ResultSource.TrySetException(ex);
+            }
+        });
+
         // Sub-agent lane: execute spawned sub-agents
         _commandProcessor.RegisterLaneHandler(CommandLane.Subagent, async (command, ct) =>
         {

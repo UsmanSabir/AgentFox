@@ -88,6 +88,12 @@ public class TradingAgentOptions
 
     public int MaxOrdersPerBatch { get; set; } = 10;
     public decimal MaxBatchValuePkr { get; set; } = 250_000m;
+
+    /// <summary>Block ApprovalRequired and BoundedAuto unless broker reconciliation is healthy.</summary>
+    public bool RequireReconciliationHealthy { get; set; } = true;
+
+    public int ReconciliationIntervalSeconds { get; set; } = 60;
+    public int ReconciliationMaxAgeSeconds { get; set; } = 180;
 }
 
 public sealed class MarketSessionOverride

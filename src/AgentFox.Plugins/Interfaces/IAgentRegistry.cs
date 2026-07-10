@@ -12,6 +12,7 @@ public sealed class SpecialistAgentDescriptor
     public IReadOnlyList<string> RouteHints { get; init; } = [];
     public string? ModelKey { get; init; }
     public int MaxIterations { get; init; } = 8;
+    public int MaxConcurrentTurns { get; init; } = 1;
 }
 
 /// <summary>
