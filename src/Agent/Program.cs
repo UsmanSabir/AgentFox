@@ -9,6 +9,7 @@ using AgentFox.MCP;
 using AgentFox.Memory;
 using AgentFox.Models;
 using AgentFox.Modules.Loaders;
+using AgentFox.Modules.Web;
 using AgentFox.Channels;
 using AgentFox.Plugins.Channels;
 using AgentFox.Plugins.Interfaces;
@@ -71,6 +72,7 @@ class Program
         // ── Web application builder (single DI container for the whole process) ─
         var builder       = WebApplication.CreateBuilder(args);
         var configuration = builder.Configuration;
+        builder.Services.AddManagementAuthentication(configuration);
 
         // ── Logging setup ─────────────────────────────────────────────────────
         // WebApplicationBuilder registers Console/Debug providers by default.
@@ -426,8 +428,10 @@ class Program
             }
 
             app.UseRouting();
+            app.UseAuthentication();
+            app.UseAuthorization();
 
-            var apiGroup = app.MapGroup("/api");
+            var apiGroup = app.MapGroup("/api").RequireAuthorization("ManagementViewer");
             foreach (var module in modules.Where(m => IsModuleEnabled(m.Name)))
                 module.MapEndpoints(apiGroup);
 

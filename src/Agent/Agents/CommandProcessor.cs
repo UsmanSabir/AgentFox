@@ -109,6 +109,7 @@ public class CommandProcessor : IDisposable
 
     // Global in-flight task registry (taskId → task) used for graceful drain
     private readonly ConcurrentDictionary<Guid, Task> _inflight = new();
+    private readonly ConcurrentDictionary<CommandLane, int> _activeByLane = new();
 
     // Lane pump tasks (one per lane)
     private readonly List<Task> _laneLoops = [];
@@ -215,6 +216,16 @@ public class CommandProcessor : IDisposable
         ActiveCommands = _inflight.Count,
     };
 
+    public IReadOnlyList<CommandLaneStatistics> GetLaneStatistics() =>
+        Enum.GetValues<CommandLane>()
+            .Select(lane => new CommandLaneStatistics(
+                lane.ToString(),
+                _commandQueue.GetQueueCount(lane),
+                _activeByLane.GetValueOrDefault(lane),
+                _config.LanePolicies.GetValueOrDefault(lane, LanePolicy.Serial()).MaxConcurrency,
+                _handlers.GetValueOrDefault(lane) is not null))
+            .ToList();
+
     // ── Core pump ────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -276,6 +287,7 @@ public class CommandProcessor : IDisposable
     {
         try
         {
+            _activeByLane.AddOrUpdate(lane, 1, (_, current) => current + 1);
             _logger?.LogDebug("Executing {Lane} command {RunId}", lane, command.RunId);
             await handler(command, ct).ConfigureAwait(false);
             Interlocked.Increment(ref _totalProcessed);
@@ -291,6 +303,7 @@ public class CommandProcessor : IDisposable
         }
         finally
         {
+            _activeByLane.AddOrUpdate(lane, 0, (_, current) => Math.Max(0, current - 1));
             semaphore.Release();
             _inflight.TryRemove(taskId, out _);
         }
@@ -308,6 +321,13 @@ public class CommandProcessor : IDisposable
         foreach (var s in _semaphores.Values) s.Dispose();
     }
 }
+
+public sealed record CommandLaneStatistics(
+    string Lane,
+    int QueuedCommands,
+    int ActiveCommands,
+    int MaxConcurrency,
+    bool HandlerRegistered);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Statistics

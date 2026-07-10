@@ -80,6 +80,49 @@ public sealed class AhkBroker : IAsyncDisposable
     }
 
     /// <summary>
+    /// Opens a broker session and verifies authentication without opening an order dialog or
+    /// submitting an order. Intended for startup diagnostics and opt-in integration tests.
+    /// </summary>
+    public async Task<AhkLoginVerificationResult> VerifyLoginAsync(
+        bool forceRestart = false,
+        CancellationToken ct = default)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            var cfg = _config.Value;
+            if (string.IsNullOrWhiteSpace(cfg.PortalUrl))
+                throw new InvalidOperationException("AHK PortalUrl is required.");
+
+            await EnsureBrowserAsync(forceRestart, ct);
+            if (!IsHealthy())
+                throw new InvalidOperationException("Browser unavailable after launch.");
+
+            if (!await IsLoggedInAsync())
+            {
+                if (string.IsNullOrWhiteSpace(cfg.Username) || string.IsNullOrWhiteSpace(cfg.Password))
+                    throw new InvalidOperationException(
+                        "AHK Username and Password are required when no authenticated session exists.");
+                await LoginAsync();
+            }
+
+            if (!await IsLoggedInAsync())
+                throw new InvalidOperationException(
+                    $"AHK login could not be verified with selector '{cfg.LoggedInSelector}'.");
+
+            return new AhkLoginVerificationResult(
+                true,
+                _page?.Url ?? cfg.PortalUrl,
+                cfg.LoggedInSelector,
+                DateTime.UtcNow);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>
     /// (Re)launches the browser if needed. ASSUMES the caller holds <see cref="_gate"/> — it must
     /// never take the gate itself (it is also called from the order path which already holds it).
     /// Any stray browser this broker left running on a previous run is killed first, and stale
@@ -1318,3 +1361,9 @@ public sealed class AhkBroker : IAsyncDisposable
         _gate.Dispose();
     }
 }
+
+public sealed record AhkLoginVerificationResult(
+    bool Authenticated,
+    string CurrentUrl,
+    string VerifiedSelector,
+    DateTime CheckedUtc);

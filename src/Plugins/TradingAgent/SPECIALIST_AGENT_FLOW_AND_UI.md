@@ -11,7 +11,7 @@ The direct channel flow follows the shared command queue using the dedicated `Sp
 UI management is currently **partial**:
 
 - Generic plugin configuration and plugin-session audit APIs exist.
-- Frontend API client methods exist for those APIs.
+- The existing Plugins page uses those APIs to show session audit details and edit raw JSON configuration.
 - There is no complete specialist-agent or trading-manager screen.
 - There are no dedicated authenticated APIs for proposals, approvals, risk policy, reconciliation, positions, orders, or the kill switch.
 
@@ -243,8 +243,8 @@ Broker state remains authoritative for actual cash, positions, open orders, fill
 
 | Capability | Backend today | UI today | Status |
 |---|---|---|---|
-| List/update/delete generic plugin config | `/plugin-config` APIs | API client exists, no discovered management page | Partial |
-| Inspect plugin sessions and tool executions | `/plugin-sessions` APIs | API client exists, no discovered management page | Partial |
+| List/update/delete generic plugin config | `/plugin-config` APIs | Plugins page provides a raw JSON editor | Available, but unsuitable for trading controls |
+| Inspect plugin sessions and tool executions | `/plugin-sessions` APIs | Plugins page shows sessions, statistics, and execution detail | Available |
 | View registered specialist descriptors | No dedicated endpoint | No | Missing |
 | View Specialist queue depth/running commands | No dedicated endpoint | No | Missing |
 | Change specialist prompt/tool allowlist/routes/concurrency | Code/startup descriptor | No | Missing |
@@ -259,6 +259,8 @@ Broker state remains authoritative for actual cash, positions, open orders, fill
 Therefore, the trading specialist is operationally manageable through configuration and conversational tools, but **not yet completely manageable through the web UI**.
 
 The generic plugin-config API should not become the trading control plane. It is suitable for low-risk presentation or prompt settings. Trading policy changes and execution commands need typed validation, authorization, audit records, and concurrency checks.
+
+The current web startup maps the `/api` group without evident authentication or authorization middleware. That is acceptable only for a trusted local development surface. Authentication and server-side authorization are a release blocker before exposing trading mutations or binding the management server beyond localhost.
 
 ## 9. Recommended UI architecture
 
@@ -430,3 +432,273 @@ The management UI is complete when:
 - secrets never appear in page payloads, logs, or audit details;
 - Paper and Shadow workflows can be operated end-to-end before any Live control is exposed.
 
+## 14. Repository-specific implementation plan
+
+### Implementation status (2026-07-11)
+
+The first safe management milestone is implemented:
+
+- optional API-key authentication with hierarchical Viewer/Analyst/Trader/RiskManager/Administrator roles;
+- authorization applied to the management `/api` group, with inbound channel webhook POSTs explicitly left to their transport-level authentication;
+- browser-session API-key support in Settings;
+- specialist runtime status and per-command-lane queue metrics endpoints;
+- Agents UI sections for specialist isolation, tools, routes, concurrency, activity, failures, and queues;
+- typed SQLite query methods for proposals, executions, reconciliation runs, and order events;
+- plugin-owned read-only `/trading` endpoints;
+- a read-only Trading Manager dashboard for safety state, proposals, executions, reconciliation, and audit history;
+- reconciliation freshness and kill-switch state included in live-readiness calculation;
+- tests for management authentication, role inheritance, queue reporting, specialist reporting, and typed ledger queries.
+
+Management authentication remains disabled in the sample local configuration for backward-compatible localhost development. Set `Web:ManagementAuth:Enabled` to `true` and configure a strong API key before exposing the service. Proposal mutations, persisted kill-switch commands, versioned policy editing, broker portfolio reads, and live controls remain gated by the later work packages below. The current AHK adapter still cannot satisfy live reconciliation, so live execution remains fail-closed.
+
+This plan turns the UI design into reviewable implementation slices. Each slice should compile and test independently. Do not expose live execution controls merely because their pages render; enable them only after the security and broker-readiness gates are complete.
+
+### Work package 0: protect the management surface
+
+**Goal:** establish an authenticated identity and server-enforced roles before adding trading mutations.
+
+Backend work:
+
+1. Add the chosen ASP.NET Core authentication scheme in `src/Agent/Program.cs`.
+2. Add `UseAuthentication()` and `UseAuthorization()` before mapping `/api`.
+3. Require a default authorization policy for management endpoints; explicitly decide whether `/health` remains anonymous.
+4. Define policies for `Viewer`, `Analyst`, `Trader`, `RiskManager`, and `Administrator`.
+5. Add anti-CSRF protection if browser cookies are used. If bearer tokens are used, document secure token storage and expiry.
+6. Bind non-development web hosts to localhost by default and require explicit configuration to expose them remotely.
+7. Add a request audit service that records actor ID, role, request ID, action, target, outcome, timestamp, and redacted metadata.
+
+Frontend work:
+
+1. Add authentication state and expired-session handling to `src/frontend/src/lib/stores.ts`.
+2. Update the fetch helpers in `src/frontend/src/lib/api.ts` to send credentials/tokens and surface structured `401`, `403`, `409`, and safety-gate errors.
+3. Hide controls the current user cannot invoke, while treating backend authorization as authoritative.
+
+Tests:
+
+- anonymous mutation is rejected;
+- each role has exactly its intended permissions;
+- read-only users cannot approve, change policy, or deactivate the kill switch;
+- audit records contain actor/action/outcome but no credentials or webhook secrets;
+- remote binding is opt-in.
+
+**Exit gate:** no trading mutation endpoint is merged without these protections, except behind a development-only feature flag that is off by default.
+
+### Work package 1: specialist runtime observability
+
+**Goal:** make the implemented specialist registration and queue flow visible without adding control-plane mutations.
+
+Backend work:
+
+1. Add a runtime status DTO rather than returning `SpecialistAgentDescriptor` directly. Exclude full system prompts and sensitive configuration.
+2. Extend `IAgentRegistry` or introduce a host-side diagnostics interface for activation state, active turns, last turn, failures, and latency.
+3. Add read-only endpoints to `src/Agent/Modules/Web/WebModule.cs`:
+   - `GET /specialist-agents`;
+   - `GET /specialist-agents/{agentId}`;
+   - `GET /command-queues`.
+4. Return queue counts from `ICommandQueue.GetQueueCount` for every `CommandLane`.
+5. Add running-command counts to `CommandProcessor`; do not expose message content in queue metrics.
+6. Update the existing `/agents` response or Agents page contract so specialist agents are distinguishable from main and transient subagents.
+
+Frontend work:
+
+1. Add specialist and queue DTOs/methods in `src/frontend/src/lib/api.ts`.
+2. Extend `src/frontend/src/routes/agents/+page.svelte` with Main, Specialist, and Subagent sections.
+3. Show activation state, allowed tools, channel routes, concurrency, active turns, queued commands, last activity, latency, and last error.
+4. Poll every 5–10 seconds initially. Introduce SSE only after the read model is stable.
+
+Tests:
+
+- registered-but-not-activated and activated states serialize correctly;
+- tool allowlists and routes are returned, but system prompts are not;
+- all command lanes appear, including an empty Specialist lane;
+- active/running counters return to zero after cancellation and timeout;
+- frontend renders loading, empty, degraded, and healthy states.
+
+**Exit gate:** a user can verify that `trading-agent` is active, isolated, routed, and using the Specialist lane.
+
+### Work package 2: trading read model and query APIs
+
+**Goal:** provide stable typed queries for the dashboard, proposals, executions, reconciliation, and audit history.
+
+Persistence work:
+
+1. Add query DTOs and paginated methods to `src/Plugins/TradingAgent/Persistence/ITradingRepository.cs` for proposals, executions, events, and reconciliation runs.
+2. Add schema migrations/version tracking to `SqliteTradingRepository`; do not rely only on ad hoc `CREATE TABLE IF NOT EXISTS` once UI contracts depend on the schema.
+3. Add indexes for proposal state/created time, execution state/created time, correlation ID, idempotency key, and reconciliation time.
+4. Keep raw broker payloads internal and map them to redacted response DTOs.
+
+Service work:
+
+1. Add `ITradingManagementService` as the single query/command facade used by web endpoints. It should call `TradingManager` and the repository rather than duplicating safety rules in `WebModule`.
+2. Create a plugin-neutral endpoint registration mechanism if the host should not reference TradingAgent types directly. Recommended: add an optional plugin endpoint contributor contract and let the TradingAgent module map `/trading/*` routes.
+3. Add typed read endpoints for status, proposals, executions, reconciliation, and audit events.
+4. Return pagination metadata, correlation IDs, UTC timestamps, policy versions, and explicit reconciliation freshness.
+
+Frontend work:
+
+1. Add a `/trading` route and Trading navigation item in `src/frontend/src/lib/components/Sidebar.svelte`.
+2. Add shared trading API types and calls in `src/frontend/src/lib/api.ts` or split the growing client into `src/frontend/src/lib/api/trading.ts`.
+3. Build `src/frontend/src/routes/trading/+page.svelte` as a safety-first overview.
+4. Build read-only proposal, execution, reconciliation, and audit views under `src/frontend/src/routes/trading/`.
+5. Put mode, kill switch, broker health, and reconciliation freshness in a persistent summary banner.
+
+Tests:
+
+- pagination and filters are deterministic;
+- no raw secrets or sensitive payload fields are returned;
+- timestamps are UTC and status enums are stable;
+- a database restart preserves read-model state;
+- stale, unsupported, failed, and healthy reconciliation states render distinctly.
+
+**Exit gate:** Disabled, Paper, and Shadow operation can be inspected completely through the UI without querying SQLite manually.
+
+### Work package 3: proposal commands
+
+**Goal:** allow authorized users to create, reject, and expire proposals safely. Approval can be implemented here for Paper mode but must remain disabled for live mode until later gates pass.
+
+Backend work:
+
+1. Replace the opaque proposal JSON storage contract with a versioned typed proposal model while retaining the original payload for audit compatibility if required.
+2. Add proposal version/hash, expiry, actor, origin, correlation ID, and state-transition fields.
+3. Implement command methods on `ITradingManagementService`:
+   - create proposal;
+   - reject proposal;
+   - expire proposal;
+   - approve proposal.
+4. Require `Idempotency-Key` for creates and approvals and `If-Match` or an expected proposal version/hash for transitions.
+5. Execute each transition and audit append in one SQLite transaction.
+6. Return `409 Conflict` for stale versions and already-terminal proposals.
+7. Ensure approval invokes `TradingManager`; the endpoint must never call `IBrokerAdapter` directly.
+
+Frontend work:
+
+1. Build typed proposal forms with units, symbol validation, and a calculated notional preview.
+2. Build an immutable proposal detail and transition timeline.
+3. Require a confirmation dialog showing exact side, symbol, quantity, order type, and notional before approval.
+4. On `409`, discard the stale action, reload the proposal, and clearly explain what changed.
+5. Display deterministic safety-gate failures without offering a client-side bypass.
+
+Tests:
+
+- duplicate create and approve requests are idempotent;
+- two simultaneous approvals produce at most one execution claim;
+- stale approvals return `409`;
+- expired or rejected proposals cannot execute;
+- UI confirmation displays the same version/hash sent to the server;
+- direct broker calls are impossible from endpoint handlers.
+
+**Exit gate:** proposal lifecycle works end-to-end in Paper mode with immutable audit history and no duplicate order.
+
+### Work package 4: kill switch and versioned risk policy
+
+**Goal:** replace raw JSON edits with safe, typed operational controls.
+
+Backend work:
+
+1. Persist kill-switch state in the trading ledger so it survives process restarts.
+2. Implement activate/deactivate commands on `ITradingManagementService`.
+3. Permit broad authorized activation; require elevated permission, reason, and healthy reconciliation for deactivation.
+4. Create immutable risk-policy versions with draft, active, and superseded states.
+5. Validate units, numeric ranges, cross-field invariants, symbol lists, market timezone, and execution-mode transitions server-side.
+6. Capture a field-level diff, author, reason, and activation timestamp.
+7. Stop reading execution-critical values from generic plugin config once the versioned provider is active.
+
+Frontend work:
+
+1. Add a persistent, high-visibility kill-switch control to the trading shell.
+2. Add typed policy forms; do not expose policy JSON as the normal editing workflow.
+3. Show current versus proposed policy diff and identify risk-loosening changes.
+4. Add a second confirmation for kill-switch deactivation and live-mode activation.
+
+Tests:
+
+- kill-switch state survives restart and blocks all execution paths;
+- activation works while broker/reconciliation is degraded;
+- deactivation fails while reconciliation is unhealthy;
+- invalid or risk-inconsistent policies cannot be saved or activated;
+- a running request rechecks kill-switch state immediately before broker submission;
+- generic plugin config cannot override active execution policy.
+
+**Exit gate:** operational policy and emergency stop are manageable through typed, audited controls.
+
+### Work package 5: broker read model and reconciliation
+
+**Goal:** establish reliable broker truth, which is mandatory for live execution.
+
+Broker work:
+
+1. Implement reliable read methods for balances, positions, open orders, fills, order status, and cancellations.
+2. Prefer a broker-supported API over UI/AHK scraping. If AHK remains, keep live mode prohibited until it can produce complete, stable, uniquely identified records.
+3. Normalize broker identifiers and timestamps and preserve the raw source record in restricted logs/storage for investigations.
+4. Make reconciliation compare local submissions with broker orders/fills and compare computed positions/balances with broker state.
+5. Record discrepancies with severity and block live execution on unresolved material differences.
+
+Frontend work:
+
+1. Build portfolio and order pages that show local and broker values side by side.
+2. Add reconciliation history and discrepancy detail.
+3. Add an authorized manual reconciliation command; do not allow UI users to mark a discrepancy resolved without a recorded reason and evidence.
+
+Tests:
+
+- disconnect, timeout, partial fill, late fill, cancellation, duplicate callback, unknown broker order, and process restart;
+- stale snapshot rejection;
+- rounding and currency precision;
+- unresolved discrepancy blocks approval/execution;
+- reconciliation catches a locally accepted order missing at the broker.
+
+**Exit gate:** reconciliation is supported, healthy, fresh, and proven under failure tests. Until then, live controls remain disabled in both backend and UI.
+
+### Work package 6: live rollout and real-time operations
+
+**Goal:** introduce live operation gradually after all safety gates pass.
+
+1. Add SSE events for specialist health, queue counts, proposals, executions, fills, reconciliation, and kill-switch changes.
+2. Run Shadow mode for an agreed observation period and compare expected versus broker-observed decisions.
+3. Enable `ApprovalRequired` only for a small symbol allowlist and low notional cap.
+4. Add operational alerts for reconciliation staleness, unknown executions, rejected broker submissions, daily-loss proximity, and queue backlog.
+5. Document incident response, broker outage behavior, credential rotation, database backup/restore, and kill-switch drills.
+6. Consider `BoundedAuto` only after ApprovalRequired live evidence is reviewed and an explicit production policy version is activated.
+
+Tests and drills:
+
+- browser disconnect during approval does not lose or duplicate state;
+- process crash immediately before and after broker submission;
+- database backup and restore followed by reconciliation;
+- kill-switch activation during queue backlog and during broker latency;
+- authorization revocation takes effect without waiting for a browser refresh;
+- bounded-auto limits hold under concurrent signals.
+
+**Exit gate:** live approval mode has explicit operational sign-off. BoundedAuto is a separate later decision, not an automatic consequence of completing the UI.
+
+## 15. Suggested pull-request sequence
+
+Keep changes small enough to review safety boundaries independently:
+
+1. `security/web-management-auth`
+2. `specialists/runtime-observability`
+3. `trading/query-read-model`
+4. `ui/trading-read-only-dashboard`
+5. `trading/typed-proposal-lifecycle`
+6. `ui/trading-proposal-workflow`
+7. `trading/kill-switch-policy-versioning`
+8. `ui/trading-risk-controls`
+9. `trading/broker-read-reconciliation`
+10. `trading/live-approval-rollout`
+
+Every pull request should include migrations where needed, API contract tests, authorization tests, failure-path tests, frontend state handling, and an update to this document's support matrix.
+
+## 16. Definition of done for the implementation project
+
+The UI implementation project is done only when all of the following are true:
+
+- repository query and command contracts are typed and versioned;
+- the management API is authenticated and mutations are role-protected;
+- specialist and command-queue health are visible;
+- proposal lifecycle, policy, kill switch, reconciliation, orders, portfolio, and audit history are manageable in the UI;
+- every mutation is idempotent, concurrency-safe, and audited;
+- the UI never bypasses `TradingManager` or talks directly to a broker adapter;
+- restart and failure-path tests pass;
+- Disabled/Paper/Shadow workflows pass acceptance testing;
+- live execution remains fail-closed until broker reconciliation satisfies Work package 5;
+- operational documentation and kill-switch drills are complete.

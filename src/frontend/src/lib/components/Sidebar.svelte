@@ -15,7 +15,8 @@
     Heart,
     CalendarClock,
     Radio,
-    Cpu
+    Cpu,
+    TrendingUp
   } from 'lucide-svelte';
 
   const navItems = [
@@ -26,6 +27,7 @@
     { href: '/skills',      label: 'Skills',     icon: Puzzle },
     { href: '/tools',       label: 'Tools',      icon: Wrench },
     { href: '/plugins',     label: 'Plugins',    icon: Cpu },
+    { href: '/trading',     label: 'Trading',    icon: TrendingUp },
     { href: '/mcp',         label: 'MCP',        icon: Server },
     { href: '/channels',    label: 'Channels',   icon: Radio },
     { href: '/heartbeats',  label: 'Heartbeats', icon: Heart },

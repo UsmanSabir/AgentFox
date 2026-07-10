@@ -117,6 +117,46 @@ public sealed class TradingManagerSafetyTests
     }
 
     [TestMethod]
+    public async Task SqliteLedger_ExposesTypedOperationalReadModel()
+    {
+        var temp = TempDirectory();
+        try
+        {
+            var options = Options.Create(new TradingAgentOptions
+            {
+                DatabasePath = Path.Combine(temp, "trading.db")
+            });
+            var repository = new SqliteTradingRepository(
+                options, new ConfigurationBuilder().Build(), NullLogger<SqliteTradingRepository>.Instance);
+
+            var proposalId = await repository.CreateProposalAsync(
+                "proposal-key", "{\"orders\":[{\"symbol\":\"OGDC\"}]}", "policy-1");
+            var claim = await repository.TryBeginExecutionAsync(
+                "execution-key", "{\"symbol\":\"OGDC\"}", "policy-1");
+            await repository.CompleteExecutionAsync(claim.ExecutionId, "accepted", "{\"success\":true}");
+            await repository.AppendEventAsync(claim.ExecutionId, "accepted", "{\"brokerOrderId\":\"paper-1\"}");
+            await repository.RecordReconciliationAsync(new BrokerReconciliationSnapshot(
+                true, true, "ok", DateTime.UtcNow, "{\"positions\":0}"));
+
+            var proposals = await repository.GetProposalsAsync();
+            var executions = await repository.GetExecutionsAsync();
+            var events = await repository.GetEventsAsync();
+            var reconciliations = await repository.GetReconciliationRunsAsync();
+
+            Assert.AreEqual(proposalId, proposals.Single().ProposalId);
+            Assert.AreEqual("OGDC", proposals.Single().Proposal.GetProperty("orders")[0].GetProperty("symbol").GetString());
+            Assert.AreEqual("accepted", executions.Single().State);
+            Assert.IsTrue(executions.Single().Result?.GetProperty("success").GetBoolean());
+            Assert.AreEqual("accepted", events.Single().EventType);
+            Assert.AreEqual("healthy", reconciliations.Single().State);
+        }
+        finally
+        {
+            Directory.Delete(temp, recursive: true);
+        }
+    }
+
+    [TestMethod]
     public async Task TradingManager_PaperModePersistsWithoutCallingBroker()
     {
         var temp = TempDirectory();
@@ -177,6 +217,11 @@ public sealed class TradingManagerSafetyTests
 
         Assert.AreEqual("trading-agent", registry.ResolveForChannel("WHATSAPP-BRIDGE")?.Id);
         Assert.IsNull(registry.ResolveForChannel("telegram"));
+
+        var runtime = ((SpecialistAgentRegistry)registry).GetRuntimeStatuses().Single();
+        Assert.IsFalse(runtime.IsActive);
+        Assert.AreEqual(1, runtime.MaxConcurrentTurns);
+        Assert.AreEqual(0, runtime.TotalTurns);
     }
 
     [TestMethod]
@@ -226,6 +271,10 @@ public sealed class TradingManagerSafetyTests
 
             Assert.AreEqual(CommandLane.Specialist, command.Lane);
             Assert.AreEqual("handled:trading-agent:status", result);
+            var specialistLane = processor.GetLaneStatistics().Single(x => x.Lane == "Specialist");
+            Assert.AreEqual(0, specialistLane.QueuedCommands);
+            Assert.IsTrue(specialistLane.HandlerRegistered);
+            Assert.AreEqual(3, specialistLane.MaxConcurrency);
         }
         finally
         {

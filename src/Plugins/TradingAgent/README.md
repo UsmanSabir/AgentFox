@@ -33,6 +33,31 @@ WhatsApp Group
 - A 3rd-party WhatsApp bridge that can POST to an HTTP endpoint (see [Bridge Setup](#bridge-setup))
 - AgentFox running in `webhook` module mode
 
+### Verify an AHK test-account login
+
+The integration suite includes an opt-in login-only smoke test. It launches the configured browser,
+logs into AHK, verifies `Ahk.LoggedInSelector`, and closes the browser. It does not open an order
+dialog and cannot submit an order.
+
+Copy the variable names from `tests/AgentFox.ChannelTests/ahk-login-test.env.example` into your
+shell environment and supply the test-account values. Credentials and the trading PIN must never be
+committed to `appsettings.json`, the example file, or test source.
+
+PowerShell example:
+
+```powershell
+$env:AHK_TEST_LOGIN_ENABLED = "true"
+$env:AHK_TEST_USERNAME = "your-test-account"
+$env:AHK_TEST_PASSWORD = "your-test-password"
+$env:AHK_TEST_TRADING_PIN = "your-test-pin"
+$env:AHK_TEST_CHROME_PATH = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+dotnet run --project tests/AgentFox.ChannelTests/AgentFox.ChannelTests.csproj -- --filter AhkLogin
+```
+
+`AHK_TEST_TRADING_PIN` is accepted so the complete test-account credential set can be supplied, but
+the login probe never reads it into an order form. If the portal requires CAPTCHA, OTP, or another
+interactive challenge, the smoke test will fail rather than bypassing that control.
+
 ---
 
 ## Installation

@@ -2,6 +2,8 @@ using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using System.Globalization;
+using System.Text.Json;
 using TradingAgent.Config;
 using TradingAgent.Manager;
 using TradingAgent.Reconciliation;
@@ -124,6 +126,107 @@ public sealed class SqliteTradingRepository : ITradingRepository
         await reader.ReadAsync(ct);
         return new TradingLedgerStatus(
             reader.GetInt32(0), reader.GetInt32(1), reader.GetInt32(2), reader.GetInt32(3), DateTime.UtcNow);
+    }
+
+    public async Task<IReadOnlyList<TradeProposalRecord>> GetProposalsAsync(
+        int limit = 100,
+        CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT proposal_id, status, proposal_json, policy_version, created_utc, updated_utc
+            FROM trade_proposals
+            ORDER BY created_utc DESC
+            LIMIT $limit
+            """;
+        command.Parameters.AddWithValue("$limit", Math.Clamp(limit, 1, 500));
+        var records = new List<TradeProposalRecord>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            records.Add(new TradeProposalRecord(
+                reader.GetString(0), reader.GetString(1), ParseJson(reader.GetString(2)),
+                reader.GetString(3), ParseUtc(reader.GetString(4)), ParseUtc(reader.GetString(5))));
+        }
+        return records;
+    }
+
+    public async Task<IReadOnlyList<TradingExecutionRecord>> GetExecutionsAsync(
+        int limit = 100,
+        CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT execution_id, state, request_json, result_json, policy_version, created_utc, updated_utc
+            FROM trading_executions
+            ORDER BY created_utc DESC
+            LIMIT $limit
+            """;
+        command.Parameters.AddWithValue("$limit", Math.Clamp(limit, 1, 500));
+        var records = new List<TradingExecutionRecord>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            records.Add(new TradingExecutionRecord(
+                reader.GetString(0), reader.GetString(1), ParseJson(reader.GetString(2)),
+                reader.IsDBNull(3) ? null : ParseJson(reader.GetString(3)), reader.GetString(4),
+                ParseUtc(reader.GetString(5)), ParseUtc(reader.GetString(6))));
+        }
+        return records;
+    }
+
+    public async Task<IReadOnlyList<TradingEventRecord>> GetEventsAsync(
+        int limit = 200,
+        CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT event_id, execution_id, event_type, payload_json, created_utc
+            FROM trading_order_events
+            ORDER BY event_id DESC
+            LIMIT $limit
+            """;
+        command.Parameters.AddWithValue("$limit", Math.Clamp(limit, 1, 1000));
+        var records = new List<TradingEventRecord>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            records.Add(new TradingEventRecord(
+                reader.GetInt64(0), reader.GetString(1), reader.GetString(2),
+                ParseJson(reader.GetString(3)), ParseUtc(reader.GetString(4))));
+        }
+        return records;
+    }
+
+    public async Task<IReadOnlyList<ReconciliationRunRecord>> GetReconciliationRunsAsync(
+        int limit = 100,
+        CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT reconciliation_id, state, details_json, started_utc, completed_utc
+            FROM reconciliation_runs
+            ORDER BY started_utc DESC
+            LIMIT $limit
+            """;
+        command.Parameters.AddWithValue("$limit", Math.Clamp(limit, 1, 500));
+        var records = new List<ReconciliationRunRecord>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            records.Add(new ReconciliationRunRecord(
+                reader.GetString(0), reader.GetString(1), ParseJson(reader.GetString(2)),
+                ParseUtc(reader.GetString(3)), reader.IsDBNull(4) ? null : ParseUtc(reader.GetString(4))));
+        }
+        return records;
     }
 
     public async Task RecordReconciliationAsync(
@@ -287,6 +390,12 @@ public sealed class SqliteTradingRepository : ITradingRepository
                 );
                 CREATE INDEX IF NOT EXISTS ix_trading_order_events_execution
                     ON trading_order_events(execution_id, event_id);
+                CREATE INDEX IF NOT EXISTS ix_trade_proposals_status_created
+                    ON trade_proposals(status, created_utc DESC);
+                CREATE INDEX IF NOT EXISTS ix_trading_executions_state_created
+                    ON trading_executions(state, created_utc DESC);
+                CREATE INDEX IF NOT EXISTS ix_reconciliation_runs_started
+                    ON reconciliation_runs(started_utc DESC);
                 """;
             await command.ExecuteNonQueryAsync(ct);
             _initialized = true;
@@ -315,4 +424,14 @@ public sealed class SqliteTradingRepository : ITradingRepository
             ?.FirstOrDefault(w => !string.IsNullOrWhiteSpace(w));
         return string.IsNullOrWhiteSpace(first) ? AppContext.BaseDirectory : Path.GetFullPath(first);
     }
+
+    private static JsonElement ParseJson(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        return document.RootElement.Clone();
+    }
+
+    private static DateTime ParseUtc(string value) =>
+        DateTime.Parse(value, CultureInfo.InvariantCulture,
+            DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal);
 }

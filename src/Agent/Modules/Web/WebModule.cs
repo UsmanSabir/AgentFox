@@ -270,6 +270,30 @@ public class WebModule : IAppModule
             return Results.Ok(list);
         });
 
+        endpoints.MapGet("/specialist-agents", (SpecialistAgentRegistry registry) =>
+            Results.Ok(registry.GetRuntimeStatuses()));
+
+        endpoints.MapGet("/specialist-agents/{agentId}", (
+            string agentId,
+            SpecialistAgentRegistry registry) =>
+        {
+            var status = registry.GetRuntimeStatuses().FirstOrDefault(x =>
+                x.Id.Equals(agentId, StringComparison.OrdinalIgnoreCase));
+            return status is null
+                ? Results.NotFound(new { error = "specialist_agent_not_found" })
+                : Results.Ok(status);
+        });
+
+        endpoints.MapGet("/command-queues", (
+            ICommandQueue queue,
+            CommandProcessor processor) => Results.Ok(new
+        {
+            totalQueuedCommands = queue.GetTotalQueueCount(),
+            processor = processor.GetStatistics(),
+            lanes = processor.GetLaneStatistics(),
+            checkedUtc = DateTime.UtcNow
+        }));
+
         // ── Pending notifications (background sub-agent results) ─────────────
         // Clients poll this after spawning a background sub-agent to receive the
         // result once it arrives. Each call drains the queue (deliver-once).

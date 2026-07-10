@@ -1,5 +1,7 @@
 using AgentFox.Plugins.Interfaces;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -106,7 +108,70 @@ public sealed class TradingAgentModule : IAgentAwareModule
         services.AddHostedService<TakeProfitRetryWorker>();
     }
 
-    public void MapEndpoints(IEndpointRouteBuilder endpoints) { }
+    public void MapEndpoints(IEndpointRouteBuilder endpoints)
+    {
+        var trading = endpoints.MapGroup("/trading")
+            .RequireAuthorization("ManagementViewer");
+
+        trading.MapGet("/status", async (
+            ITradingRepository repository,
+            TradingPolicyProvider policyProvider,
+            IMarketCalendar calendar,
+            TradingReconciliationState reconciliation,
+            IOptions<TradingAgentOptions> options,
+            CancellationToken ct) =>
+        {
+            var ledger = await repository.GetStatusAsync(ct);
+            var policy = policyProvider.Current();
+            var market = calendar.GetStatus();
+            var brokerState = reconciliation.Current;
+            var configured = options.Value;
+            var reconciliationFresh = DateTime.UtcNow - brokerState.CheckedUtc
+                <= TimeSpan.FromSeconds(Math.Max(10, configured.ReconciliationMaxAgeSeconds));
+            var liveMode = policy.ExecutionMode.Equals("ApprovalRequired", StringComparison.OrdinalIgnoreCase)
+                || policy.ExecutionMode.Equals("BoundedAuto", StringComparison.OrdinalIgnoreCase);
+            return Results.Ok(new
+            {
+                policy,
+                ledger,
+                market,
+                reconciliation = brokerState,
+                killSwitch = configured.KillSwitch,
+                reconciliationFresh,
+                liveExecutionReady = liveMode
+                    && policy.AutoExecute
+                    && !configured.KillSwitch
+                    && brokerState.Supported
+                    && brokerState.Healthy
+                    && reconciliationFresh,
+                checkedUtc = DateTime.UtcNow
+            });
+        });
+
+        trading.MapGet("/proposals", async (
+            int? limit,
+            ITradingRepository repository,
+            CancellationToken ct) =>
+            Results.Ok(await repository.GetProposalsAsync(limit ?? 100, ct)));
+
+        trading.MapGet("/executions", async (
+            int? limit,
+            ITradingRepository repository,
+            CancellationToken ct) =>
+            Results.Ok(await repository.GetExecutionsAsync(limit ?? 100, ct)));
+
+        trading.MapGet("/events", async (
+            int? limit,
+            ITradingRepository repository,
+            CancellationToken ct) =>
+            Results.Ok(await repository.GetEventsAsync(limit ?? 200, ct)));
+
+        trading.MapGet("/reconciliation", async (
+            int? limit,
+            ITradingRepository repository,
+            CancellationToken ct) =>
+            Results.Ok(await repository.GetReconciliationRunsAsync(limit ?? 100, ct)));
+    }
 
     public Task StartAsync(IServiceProvider services)
     {
