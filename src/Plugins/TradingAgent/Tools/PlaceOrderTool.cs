@@ -4,6 +4,7 @@ using Microsoft.Extensions.Options;
 using System.Text.Json;
 using TradingAgent.Broker;
 using TradingAgent.Config;
+using TradingAgent.Manager;
 using TradingAgent.Models;
 using TradingAgent.Safety;
 using TradingAgent.Trading;
@@ -29,10 +30,10 @@ public sealed class PlaceOrderTool : BaseTool
         ["NONE"] = 0, ["LOW"] = 1, ["MEDIUM"] = 2, ["HIGH"] = 3
     };
 
-    private readonly AhkBroker _broker;
+    private readonly TradingAgent.Manager.TradingManager _manager;
     private readonly IOptions<TradingAgentOptions> _agentOptions;
+    private readonly TradingPolicyProvider _policyProvider;
     private readonly IOptions<AhkConfig> _ahkConfig;
-    private readonly DuplicateSignalFilter _dedup;
     private readonly PendingTakeProfitStore _pendingSells;
     private readonly ILogger<PlaceOrderTool> _logger;
 
@@ -60,17 +61,17 @@ public sealed class PlaceOrderTool : BaseTool
     };
 
     public PlaceOrderTool(
-        AhkBroker broker,
+        TradingAgent.Manager.TradingManager manager,
         IOptions<TradingAgentOptions> agentOptions,
+        TradingPolicyProvider policyProvider,
         IOptions<AhkConfig> ahkConfig,
-        DuplicateSignalFilter dedup,
         PendingTakeProfitStore pendingSells,
         ILogger<PlaceOrderTool> logger)
     {
-        _broker       = broker;
+        _manager      = manager;
         _agentOptions = agentOptions;
+        _policyProvider = policyProvider;
         _ahkConfig    = ahkConfig;
-        _dedup        = dedup;
         _pendingSells = pendingSells;
         _logger       = logger;
     }
@@ -79,10 +80,11 @@ public sealed class PlaceOrderTool : BaseTool
         Dictionary<string, object?> arguments)
     {
         var opts = _agentOptions.Value;
+        var policy = _policyProvider.Current();
         var ahk  = _ahkConfig.Value;
 
         // ── 1. AutoExecute gate ───────────────────────────────────────────────
-        if (!opts.AutoExecute)
+        if (!policy.AutoExecute)
         {
             _logger.LogInformation("[PlaceOrder] AutoExecute=false — order skipped.");
             return ToolResult.Ok(Skipped("AutoExecute is disabled. Signal logged but not executed."));
@@ -122,13 +124,13 @@ public sealed class PlaceOrderTool : BaseTool
             return ToolResult.Fail($"Invalid 'quantity' — must be a positive integer (got '{quantityArg}').");
 
         // ── 2. Confidence gate ────────────────────────────────────────────────
-        if (!MeetsConfidence(confidence, opts.MinConfidence))
+        if (!MeetsConfidence(confidence, policy.MinConfidence))
         {
             _logger.LogInformation(
                 "[PlaceOrder] Confidence '{Conf}' below threshold '{Min}' — skipped.",
-                confidence, opts.MinConfidence);
+                confidence, policy.MinConfidence);
             return ToolResult.Ok(Skipped(
-                $"Confidence '{confidence}' is below minimum '{opts.MinConfidence}'."));
+                $"Confidence '{confidence}' is below minimum '{policy.MinConfidence}'."));
         }
 
         // ── Resolve a missing entry price for a BUY ("accumulate on dips") from the live market ──
@@ -137,12 +139,12 @@ public sealed class PlaceOrderTool : BaseTool
         var resolvedFromMarket = false;
         if (action == "BUY" && !price.HasValue && orderType != "MARKET")
         {
-            if (!opts.AutoBuyWithoutEntryPrice)
+            if (!policy.AutoBuyWithoutEntryPrice)
                 return ToolResult.Ok(Skipped(
                     "Tip has no entry price and AutoBuyWithoutEntryPrice is disabled — logged for manual review, not executed."));
 
             decimal? live = null;
-            try { live = (await _broker.GetMarketPricesAsync(new[] { symbol })).GetValueOrDefault(symbol); }
+            try { live = (await _manager.GetMarketPricesAsync(new[] { symbol })).GetValueOrDefault(symbol); }
             catch (Exception ex) { _logger.LogError(ex, "[PlaceOrder] Live price fetch failed for {Symbol}.", symbol); }
 
             if (live is not > 0)
@@ -212,13 +214,6 @@ public sealed class PlaceOrderTool : BaseTool
             }
         }
 
-        // ── 4. Duplicate filter ───────────────────────────────────────────────
-        if (!string.IsNullOrEmpty(rawMessage) && _dedup.IsDuplicate(rawMessage))
-        {
-            _logger.LogInformation("[PlaceOrder] Duplicate signal — skipped.");
-            return ToolResult.Ok(Skipped("Identical signal already processed within the last hour."));
-        }
-
         // ── Execute ───────────────────────────────────────────────────────────
         var signal = new TradingSignal
         {
@@ -242,7 +237,7 @@ public sealed class PlaceOrderTool : BaseTool
         // from the live market at a dip discount, the buy limit rests below market and may not fill, so
         // no take-profit sell is paired (it would risk selling shares not yet held).
         TradingSignal? sellSignal = null;
-        if (opts.AutoPlaceTargetSell && action == "BUY" && target is > 0 && !resolvedFromMarket)
+        if (policy.AutoPlaceTargetSell && action == "BUY" && target is > 0 && !resolvedFromMarket)
         {
             sellSignal = new TradingSignal
             {
@@ -262,7 +257,14 @@ public sealed class PlaceOrderTool : BaseTool
         IReadOnlyList<OrderResult> results;
         try
         {
-            results = await _broker.PlaceOrdersAsync(signals, stopOnFailure: true);
+            var execution = await _manager.ExecuteGroupsAsync(
+                new[] { (IReadOnlyList<TradingSignal>)signals }, rawMessage,
+                ExecutionAuthorization.HostToolGate());
+            if (!execution.Executed)
+                return ToolResult.Ok(Skipped(execution.Reason));
+            results = execution.Groups.FirstOrDefault() ?? Array.Empty<OrderResult>();
+            if (results.Count == 0)
+                return ToolResult.Fail("Trading manager returned no order result.");
         }
         catch (Exception ex)
         {
@@ -290,10 +292,10 @@ public sealed class PlaceOrderTool : BaseTool
                 // If the sell failed transiently (the buy limit hasn't filled yet → "insufficient
                 // exposure"), queue it for background retry instead of just reporting failure.
                 var retryScheduled = !sell.Success
-                    && opts.RetryFailedTakeProfit
+                    && policy.RetryFailedTakeProfit
                     && PendingTakeProfitStore.IsRetryable(sell.Message)
                     && _pendingSells.Schedule(symbol, quantity, target!.Value,
-                                              opts.TakeProfitRetryIntervalMinutes, rawMessage);
+                                              policy.TakeProfitRetryIntervalMinutes, rawMessage);
 
                 followUpSell = new
                 {

@@ -3,6 +3,8 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using TradingAgent.Broker;
 using TradingAgent.Config;
+using TradingAgent.Manager;
+using TradingAgent.Market;
 using TradingAgent.Models;
 
 namespace TradingAgent.Trading;
@@ -17,18 +19,24 @@ namespace TradingAgent.Trading;
 public sealed class TakeProfitRetryWorker : BackgroundService
 {
     private readonly PendingTakeProfitStore _store;
-    private readonly AhkBroker _broker;
+    private readonly TradingAgent.Manager.TradingManager _manager;
+    private readonly IMarketCalendar _calendar;
+    private readonly TradingPolicyProvider _policyProvider;
     private readonly IOptions<TradingAgentOptions> _opts;
     private readonly ILogger<TakeProfitRetryWorker> _logger;
 
     public TakeProfitRetryWorker(
         PendingTakeProfitStore store,
-        AhkBroker broker,
+        TradingAgent.Manager.TradingManager manager,
+        IMarketCalendar calendar,
+        TradingPolicyProvider policyProvider,
         IOptions<TradingAgentOptions> opts,
         ILogger<TakeProfitRetryWorker> logger)
     {
         _store  = store;
-        _broker = broker;
+        _manager = manager;
+        _calendar = calendar;
+        _policyProvider = policyProvider;
         _opts   = opts;
         _logger = logger;
     }
@@ -60,7 +68,17 @@ public sealed class TakeProfitRetryWorker : BackgroundService
 
                 // Only spin up the browser when the market is open — a sell can't fill (or even be
                 // placed) otherwise, and we don't want attempts to expire against a closed market.
-                if (!PsxMarketClock.IsOpen()) continue;
+                if (!_calendar.GetStatus().IsOpen) continue;
+
+                // Background order submission is autonomous by definition. ApprovalRequired mode
+                // must not be bypassed by a hosted worker.
+                if (!_policyProvider.Current().ExecutionMode.Equals(
+                        "BoundedAuto", StringComparison.OrdinalIgnoreCase))
+                {
+                    _logger.LogWarning(
+                        "[TakeProfit] Pending exits exist, but background submission requires ExecutionMode=BoundedAuto.");
+                    continue;
+                }
 
                 foreach (var pending in _store.GetDue(DateTime.UtcNow))
                 {
@@ -92,7 +110,11 @@ public sealed class TakeProfitRetryWorker : BackgroundService
         OrderResult result;
         try
         {
-            result = await _broker.PlaceOrderAsync(signal);
+            var execution = await _manager.ExecuteGroupsAsync(
+                new[] { (IReadOnlyList<TradingSignal>)new[] { signal } },
+                $"take-profit:{pending.Id}:attempt:{pending.Attempts + 1}");
+            result = execution.Groups.FirstOrDefault()?.FirstOrDefault()
+                ?? new OrderResult { Success = false, Message = execution.Reason };
         }
         catch (Exception ex)
         {

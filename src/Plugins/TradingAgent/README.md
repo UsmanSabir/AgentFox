@@ -1,26 +1,33 @@
 # TradingAgent Plugin
 
-AgentFox plugin that monitors a WhatsApp group for PSX (Pakistan Stock Exchange) trading signals and executes orders on the [Arif Habib Kornasif (AHK)](https://www.ahktrading.com) portal via browser automation.
+AgentFox plugin that registers an isolated PSX specialist, persists non-executable proposals, and places authorized orders through a deterministic, SQLite-backed Trading Manager and AHK browser adapter.
+
+The specialist is intentionally read/proposal-only. It never receives browser execution tools. Live compatibility tools and background exits still cross the Trading Manager boundary, which enforces policy, market eligibility, risk, durable idempotency, and audit events.
 
 ## How it works
 
 ```
 WhatsApp Group
   → 3rd-party bridge (WPPConnect / Baileys)
-  → POST /webhook/whatsapp-bridge
-  → TradingAgent plugin
+  → signed POST /webhook/whatsapp-bridge
+  → gateway routes directly to isolated trading-agent
       parse_signal   — AI extracts symbol, action, price, confidence
-      check_market   — verifies PSX is open (Mon–Fri 09:15–15:30 PKT)
-      log_signal     — records every signal to disk
-      place_order    — fills AHK order form via Chromium automation
-                       (HITL approval prompt sent back to channel if enabled)
+      check_market   — deterministic regular sessions + configured exceptions
+      log_signal     — records the signal
+      create_trade_proposal — persists a non-executable proposal
+
+  Authorized compatibility execution / bounded exit worker
+  → Trading Manager
+      policy + configured universe + risk + calendar + SQLite idempotency
+  → AHK broker adapter
+  → accepted/failed/unknown result persisted for reconciliation
 ```
 
 ---
 
 ## Prerequisites
 
-- .NET 8 runtime
+- .NET 10 runtime
 - Chromium or Google Chrome installed (PuppeteerSharp can also download Chromium automatically)
 - An active AHK trading account
 - A 3rd-party WhatsApp bridge that can POST to an HTTP endpoint (see [Bridge Setup](#bridge-setup))
@@ -60,9 +67,17 @@ Add the following sections to `appsettings.json`.
 "Plugins": {
   "TradingAgent": {
     "AutoExecute":            false,
+    "ExecutionMode":          "Disabled",
     "MinConfidence":          "HIGH",
     "ParserModelKey":         "CheapModel",
-    "DuplicateWindowMinutes": 60
+    "DuplicateWindowMinutes": 60,
+    "DatabasePath":           "trading/trading.db",
+    "AllowedSymbols":         ["OGDC", "PPL"],
+    "RequireConfiguredSymbols": true,
+    "MaxOrdersPerBatch":      10,
+    "MaxBatchValuePkr":       250000,
+    "MarketHolidays":         [],
+    "MarketSessionOverrides": []
   },
   "Ahk": {
     "PortalUrl":        "https://www.ahktrading.com",
@@ -80,6 +95,11 @@ Add the following sections to `appsettings.json`.
 | Key | Default | Description |
 |---|---|---|
 | `AutoExecute` | `false` | Set to `true` to allow the agent to call `place_order`. When `false` the agent logs signals but never trades. |
+| `ExecutionMode` | `Disabled` | `Disabled`, `Paper`, `Shadow`, `ApprovalRequired`, or `BoundedAuto`. `AutoExecute` remains an additional hard off-switch. |
+| `DatabasePath` | `trading/trading.db` | SQLite operational ledger. WAL mode and durable idempotency are enabled automatically. |
+| `AllowedSymbols` | `[]` | Explicit execution universe. Empty fails closed when `RequireConfiguredSymbols=true`. |
+| `MarketHolidays` | `[]` | Operator-maintained closed dates in `yyyy-MM-dd` form. |
+| `MarketSessionOverrides` | `[]` | Date-specific `Closed` or `Sessions` overrides such as `09:30-13:00`. |
 | `MinConfidence` | `HIGH` | Minimum signal confidence required before placing an order (`HIGH`, `MEDIUM`, `LOW`). |
 | `ParserModelKey` | `CheapModel` | Reserved for future use — will resolve to a named model from the `Models` config section once `IModelClientFactory` is available in AgentFox.Plugins. Currently uses the default `IChatClient`. |
 | `DuplicateWindowMinutes` | `60` | Identical messages received within this window are silently discarded. |
@@ -95,8 +115,12 @@ Add the following sections to `appsettings.json`.
   {
     "Type":        "whatsapp-bridge",
     "Enabled":     true,
-    "CallbackUrl": "",
-    "GroupFilter": "PSX Signals"
+      "CallbackUrl": "",
+      "GroupFilter": "PSX Signals",
+      "RequireSignature": "true",
+      "WebhookSecretEnvironmentVariable": "AGENTFOX_TRADING_WEBHOOK_SECRET",
+      "MaxClockSkewSeconds": "120",
+      "AllowedSenders": "923001234567"
   }
 ]
 ```
@@ -105,6 +129,9 @@ Add the following sections to `appsettings.json`.
 |---|---|---|
 | `CallbackUrl` | No | HTTP endpoint on the bridge for outbound messages (HITL approval prompts). POST body: `{ "text": "..." }`. Leave empty to disable outbound. |
 | `GroupFilter` | No | Only process messages from this WhatsApp group name. Leave empty to accept all groups. |
+| `RequireSignature` | No | Defaults to `true`. Unsigned webhooks are rejected. |
+| `WebhookSecretEnvironmentVariable` | No | Environment variable containing the HMAC secret. Defaults to `AGENTFOX_TRADING_WEBHOOK_SECRET`. |
+| `AllowedSenders` | No | Optional comma-separated sender allowlist. |
 
 ### 4. HITL (Human-in-the-Loop) approval
 
@@ -113,7 +140,7 @@ The HITL gate is handled by AgentFox's built-in tool approval system — no extr
 ```json
 "Hitl": {
   "Enabled": true,
-  "RequireApprovalForTools": ["place_order"]
+  "RequireApprovalForTools": ["place_order", "place_orders"]
 }
 ```
 
@@ -140,7 +167,7 @@ To disable HITL and let the agent trade automatically:
 }
 ```
 
-> **Warning**: disabling HITL with `AutoExecute: true` means the agent will place real orders without asking. Start with `AutoExecute: false` until you have verified the full signal-to-log flow.
+> **Warning**: `ApprovalRequired` refuses startup unless HITL is enabled and both compatibility execution tools are watched. `BoundedAuto` is reserved for versioned automated workflows and must not be enabled merely to bypass approval.
 
 ---
 
@@ -153,6 +180,7 @@ POST /webhook/whatsapp-bridge
 Content-Type: application/json
 
 {
+  "id":        "bridge-stable-message-id",
   "from":      "923001234567",
   "group":     "PSX Signals",
   "body":      "BUY OGDC @ 165 target 185 sl 158",
@@ -160,8 +188,16 @@ Content-Type: application/json
 }
 ```
 
+The request must include:
+
+- `X-AgentFox-Timestamp`: current Unix seconds.
+- `X-AgentFox-Signature`: `sha256=` followed by the hexadecimal HMAC-SHA256 of `<timestamp>.<raw-body>` using the configured secret.
+
+The stable `id` is mandatory and replayed IDs are rejected.
+
 | Field | Required | Description |
 |---|---|---|
+| `id` | **Yes** | Stable source message identifier used for replay protection. |
 | `body` | **Yes** | The message text. |
 | `from` | No | Sender phone number (used as `SenderId` on the channel message). |
 | `group` | No | Group name (matched against `GroupFilter` if set). |
@@ -171,12 +207,29 @@ Content-Type: application/json
 
 ```javascript
 // Node.js — WPPConnect
+const crypto = require('crypto');
 const axios = require('axios');
+const secret = process.env.AGENTFOX_TRADING_WEBHOOK_SECRET;
+
+async function postSigned(payload) {
+  const body = JSON.stringify(payload);
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const signature = crypto.createHmac('sha256', secret)
+    .update(`${timestamp}.${body}`).digest('hex');
+  await axios.post('http://your-agentfox-host:8080/webhook/whatsapp-bridge', body, {
+    headers: {
+      'Content-Type': 'application/json',
+      'X-AgentFox-Timestamp': timestamp,
+      'X-AgentFox-Signature': `sha256=${signature}`
+    }
+  });
+}
 
 client.onMessage(async (message) => {
   if (!message.isGroupMsg) return;
 
-  await axios.post('http://your-agentfox-host:8080/webhook/whatsapp-bridge', {
+  await postSigned({
+    id:        message.id,
     from:      message.sender.id,
     group:     message.chat.name,
     body:      message.body,
@@ -189,6 +242,25 @@ client.onMessage(async (message) => {
 
 ```javascript
 // Node.js — Baileys
+const crypto = require('crypto');
+const secret = process.env.AGENTFOX_TRADING_WEBHOOK_SECRET;
+
+async function postSigned(payload) {
+  const body = JSON.stringify(payload);
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const signature = crypto.createHmac('sha256', secret)
+    .update(`${timestamp}.${body}`).digest('hex');
+  await fetch('http://your-agentfox-host:8080/webhook/whatsapp-bridge', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-AgentFox-Timestamp': timestamp,
+      'X-AgentFox-Signature': `sha256=${signature}`
+    },
+    body
+  });
+}
+
 sock.ev.on('messages.upsert', async ({ messages }) => {
   for (const msg of messages) {
     if (!msg.key.remoteJid?.endsWith('@g.us')) continue;  // groups only
@@ -199,15 +271,12 @@ sock.ev.on('messages.upsert', async ({ messages }) => {
 
     if (!body) continue;
 
-    await fetch('http://your-agentfox-host:8080/webhook/whatsapp-bridge', {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        from:      msg.key.participant,
-        group:     msg.key.remoteJid,
-        body,
-        timestamp: String(msg.messageTimestamp)
-      })
+    await postSigned({
+      id:        msg.key.id,
+      from:      msg.key.participant,
+      group:     msg.key.remoteJid,
+      body,
+      timestamp: String(msg.messageTimestamp)
     });
   }
 });
@@ -279,8 +348,11 @@ All gates are evaluated in `PlaceOrderTool` before the browser is touched:
 | Confidence gate | `TradingAgent.MinConfidence` | Returns `skipped` |
 | Order value cap | `Ahk.MaxOrderValuePkr` | Returns an error — order blocked |
 | Duplicate filter | `TradingAgent.DuplicateWindowMinutes` | Returns `skipped` |
-| HITL approval | `Hitl.RequireApprovalForTools` | AgentFox blocks tool execution until `/approve` |
-| Market hours | PSX Mon–Fri 09:15–15:30 PKT | Agent is instructed never to call `place_order` without a prior `check_market` returning `is_open: true` |
+| HITL approval | `Hitl.RequireApprovalForTools` | ApprovalRequired startup validates both execution tool names |
+| Market calendar | regular sessions + configured holidays/overrides | Trading Manager checks deterministically immediately before execution |
+| Configured universe | `TradingAgent.AllowedSymbols` | Empty or unknown universe fails closed by default |
+| Kill switch | `TradingAgent.KillSwitch` | Blocks all orders independently of the LLM |
+| Durable idempotency | SQLite unique key | Restarts and repeated signals return the persisted result instead of resubmitting |
 
 ---
 
@@ -290,7 +362,7 @@ All gates are evaluated in `PlaceOrderTool` before the browser is touched:
 2. Send a test signal via the bridge: `BUY OGDC @ 165 target 185 sl 158`
 3. Verify the agent calls `parse_signal` → `check_market` → `log_signal` and produces a correct summary
 4. Check `logs/trading/signals_YYYYMMDD.jsonl` for the recorded entry
-5. Enable `AutoExecute: true` and add `HITL.RequireApprovalForTools: ["place_order"]`
+5. Configure `AllowedSymbols`, set `ExecutionMode: "ApprovalRequired"`, enable `AutoExecute`, and add both `place_order` and `place_orders` to HITL
 6. Send another test signal and confirm the HITL approval prompt arrives on the channel
 7. Approve with `/approve <id>` and verify the browser opens and fills the AHK form
 8. Confirm the submit button selector (see [AHK Submit Button](#ahk-submit-button))

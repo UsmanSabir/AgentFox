@@ -2,6 +2,7 @@ using AgentFox.Agents;
 using AgentFox.Hitl;
 using AgentFox.Models;
 using AgentFox.Plugins.Channels;
+using AgentFox.Plugins.Interfaces;
 using AgentFox.Sessions;
 using Microsoft.Extensions.Logging;
 
@@ -20,6 +21,7 @@ public class ChannelManager
     private readonly ICommandQueue? _commandQueue;
     private readonly ILogger? _logger;
     private HitlManager? _hitlManager;
+    private readonly IAgentRegistry? _agentRegistry;
 
     public IReadOnlyDictionary<string, Channel> Channels => _channels;
     public ChannelMessageGateway? Gateway => _gateway;
@@ -33,11 +35,13 @@ public class ChannelManager
         Func<FoxAgent?> agentFactory,
         SessionManager? sessionManager = null,
         ICommandQueue? commandQueue = null,
+        IAgentRegistry? agentRegistry = null,
         ILogger? logger = null)
     {
         _agentFactory = agentFactory;
         _sessionManager = sessionManager;
         _commandQueue = commandQueue;
+        _agentRegistry = agentRegistry;
         _logger = logger;
     }
 
@@ -45,8 +49,9 @@ public class ChannelManager
         FoxAgent agent,
         SessionManager? sessionManager = null,
         ICommandQueue? commandQueue = null,
+        IAgentRegistry? agentRegistry = null,
         ILogger? logger = null)
-        : this(() => agent, sessionManager, commandQueue, logger)
+        : this(() => agent, sessionManager, commandQueue, agentRegistry, logger)
     {
     }
 
@@ -169,6 +174,24 @@ public class ChannelManager
             catch (Exception ackEx)
             {
                 _logger?.LogWarning(ackEx, "Failed to send receipt ack for {MessageId}", message.Id);
+            }
+
+            var specialist = _agentRegistry?.ResolveForChannel(channel.Type);
+            if (specialist is not null)
+            {
+                var sessionChannelId = string.IsNullOrEmpty(message.ChannelId)
+                    ? channel.ChannelId
+                    : message.ChannelId;
+                var sessionId = _sessionManager?.GetOrCreateChannelSession(
+                    sessionChannelId, $"{channel.Name}:{specialist.Id}", specialist.Id)
+                    ?? Guid.NewGuid().ToString("N");
+                var response = await _agentRegistry!.RunAsync(
+                    specialist.Id, message.Content ?? string.Empty, sessionId);
+                await channel.SendReplyAsync(message, response);
+                _logger?.LogInformation(
+                    "Channel message {MessageId} routed directly to specialist {AgentId}.",
+                    message.Id, specialist.Id);
+                return;
             }
 
             if (_gateway != null)

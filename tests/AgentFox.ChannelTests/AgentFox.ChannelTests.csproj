@@ -21,6 +21,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Agent\AgentFox.csproj" />
+    <ProjectReference Include="..\..\src\Plugins\TradingAgent\TradingAgent.csproj" />
   </ItemGroup>
 
   <ItemGroup>

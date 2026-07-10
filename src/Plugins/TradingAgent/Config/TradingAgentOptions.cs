@@ -47,4 +47,52 @@ public class TradingAgentOptions
     /// attempts ≈ one full trading session. Attempts accrue only while the market is open.
     /// </summary>
     public int TakeProfitRetryMaxAttempts { get; set; } = 36;
+
+    /// <summary>
+    /// Operational mode for the deterministic trading manager. Supported values are Disabled,
+    /// Paper, Shadow, ApprovalRequired, and BoundedAuto. The legacy AutoExecute switch is still
+    /// honoured as an additional hard off-switch; both controls must allow execution.
+    /// </summary>
+    public string ExecutionMode { get; set; } = "Disabled";
+
+    /// <summary>SQLite database path used by the operational trading ledger.</summary>
+    public string DatabasePath { get; set; } = "trading/trading.db";
+
+    /// <summary>
+    /// Explicit PSX holidays in yyyy-MM-dd form. The calendar fails closed for an invalid entry.
+    /// Keep this list current until an authoritative calendar feed is configured.
+    /// </summary>
+    public List<string> MarketHolidays { get; set; } = [];
+
+    /// <summary>
+    /// Date-specific market overrides for holidays, Ramadan timings, and emergency schedule changes.
+    /// </summary>
+    public List<MarketSessionOverride> MarketSessionOverrides { get; set; } = [];
+
+    /// <summary>
+    /// Reject execution when calendar configuration contains an invalid date or time range.
+    /// </summary>
+    public bool FailClosedOnCalendarError { get; set; } = true;
+
+    /// <summary>Require signed WhatsApp bridge webhooks by default.</summary>
+    public bool RequireSignedWebhooks { get; set; } = true;
+
+    /// <summary>Emergency execution stop independent of AutoExecute and the LLM.</summary>
+    public bool KillSwitch { get; set; }
+
+    /// <summary>Only these PSX symbols may pass deterministic risk validation.</summary>
+    public List<string> AllowedSymbols { get; set; } = [];
+
+    /// <summary>Fail closed when AllowedSymbols is empty (recommended).</summary>
+    public bool RequireConfiguredSymbols { get; set; } = true;
+
+    public int MaxOrdersPerBatch { get; set; } = 10;
+    public decimal MaxBatchValuePkr { get; set; } = 250_000m;
+}
+
+public sealed class MarketSessionOverride
+{
+    public string Date { get; set; } = "";
+    public bool Closed { get; set; }
+    public List<string> Sessions { get; set; } = [];
 }

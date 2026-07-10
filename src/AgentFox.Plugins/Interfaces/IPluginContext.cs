@@ -15,6 +15,18 @@ public interface IPluginContext
     /// <summary>Register a tool into the agent's tool registry at runtime.</summary>
     void RegisterTool(ITool tool);
 
+    /// <summary>
+    /// Register a tool for an isolated specialist only. It is not exposed to the main agent unless
+    /// separately registered with RegisterTool.
+    /// </summary>
+    void RegisterAgentTool(string agentId, ITool tool);
+
+    /// <summary>
+    /// Register a persistent specialist-agent descriptor. The host builds an isolated runtime after
+    /// all agent-aware plugins have completed registration.
+    /// </summary>
+    void RegisterAgent(SpecialistAgentDescriptor descriptor);
+
     // ── Dynamic system-prompt injection ─────────────────────────────────────
 
     /// <summary>

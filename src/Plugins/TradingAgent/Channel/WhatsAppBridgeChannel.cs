@@ -1,5 +1,8 @@
 using AgentFox.Plugins.Channels;
 using Microsoft.Extensions.Logging;
+using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 
 namespace TradingAgent.Channel;
@@ -26,9 +29,21 @@ public sealed class WhatsAppBridgeChannel : AgentFox.Plugins.Channels.Channel
     private readonly string? _callbackUrl;
     private readonly string? _groupFilter;
     private readonly ILogger _logger;
+    private readonly bool _requireSignature;
+    private readonly byte[]? _webhookSecret;
+    private readonly int _maxClockSkewSeconds;
+    private readonly IReadOnlySet<string> _allowedSenders;
+    private readonly ConcurrentDictionary<string, DateTime> _seenMessageIds = new();
     private readonly HttpClient _http = new();
 
-    public WhatsAppBridgeChannel(string? callbackUrl, string? groupFilter, ILogger logger)
+    public WhatsAppBridgeChannel(
+        string? callbackUrl,
+        string? groupFilter,
+        ILogger logger,
+        bool requireSignature = true,
+        string? webhookSecret = null,
+        int maxClockSkewSeconds = 120,
+        IReadOnlySet<string>? allowedSenders = null)
     {
         Type = "whatsapp-bridge";
         Name = "whatsapp-bridge";
@@ -36,6 +51,10 @@ public sealed class WhatsAppBridgeChannel : AgentFox.Plugins.Channels.Channel
         _callbackUrl = callbackUrl;
         _groupFilter = groupFilter;
         _logger = logger;
+        _requireSignature = requireSignature;
+        _webhookSecret = string.IsNullOrWhiteSpace(webhookSecret) ? null : Encoding.UTF8.GetBytes(webhookSecret);
+        _maxClockSkewSeconds = Math.Clamp(maxClockSkewSeconds, 10, 3600);
+        _allowedSenders = allowedSenders ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     }
 
     public override Task<bool> ConnectAsync()
@@ -44,7 +63,12 @@ public sealed class WhatsAppBridgeChannel : AgentFox.Plugins.Channels.Channel
         _logger.LogInformation(
             "[WhatsAppBridge] Ready. Inbound: POST /webhook/whatsapp-bridge" +
             (string.IsNullOrEmpty(_groupFilter) ? "" : $" | GroupFilter: {_groupFilter}") +
-            (string.IsNullOrEmpty(_callbackUrl) ? " | Outbound: disabled" : $" | Outbound: {_callbackUrl}"));
+            (string.IsNullOrEmpty(_callbackUrl) ? " | Outbound: disabled" : $" | Outbound: {_callbackUrl}") +
+            (_requireSignature ? " | Signature: required" : " | Signature: disabled"));
+
+        if (_requireSignature && _webhookSecret is null)
+            _logger.LogError(
+                "[WhatsAppBridge] Signature verification is required but the configured secret environment variable is empty. All inbound webhooks will be rejected.");
         return Task.FromResult(true);
     }
 
@@ -90,6 +114,13 @@ public sealed class WhatsAppBridgeChannel : AgentFox.Plugins.Channels.Channel
         IReadOnlyDictionary<string, string> headers,
         CancellationToken ct = default)
     {
+        var authenticationError = ValidateAuthentication(body, headers);
+        if (authenticationError is not null)
+        {
+            _logger.LogWarning("[WhatsAppBridge] Rejected webhook: {Reason}", authenticationError);
+            return Task.FromResult(WebhookResult.Failed(authenticationError));
+        }
+
         BridgePayload? payload;
         try
         {
@@ -105,6 +136,13 @@ public sealed class WhatsAppBridgeChannel : AgentFox.Plugins.Channels.Channel
         if (string.IsNullOrWhiteSpace(payload?.Body))
             return Task.FromResult(WebhookResult.Failed("Missing or empty 'body' field."));
 
+        if (string.IsNullOrWhiteSpace(payload.Id))
+            return Task.FromResult(WebhookResult.Failed("Missing stable source message 'id'."));
+
+        if (_allowedSenders.Count > 0 &&
+            (string.IsNullOrWhiteSpace(payload.From) || !_allowedSenders.Contains(payload.From)))
+            return Task.FromResult(WebhookResult.Failed("Sender is not authorized."));
+
         // Silently accept messages from non-matching groups — not an error
         if (!string.IsNullOrEmpty(_groupFilter) &&
             !string.Equals(payload.Group, _groupFilter, StringComparison.OrdinalIgnoreCase))
@@ -116,8 +154,13 @@ public sealed class WhatsAppBridgeChannel : AgentFox.Plugins.Channels.Channel
             ? DateTimeOffset.FromUnixTimeSeconds(unix).UtcDateTime
             : DateTime.UtcNow;
 
+        EvictSeenMessageIds();
+        if (!_seenMessageIds.TryAdd(payload.Id, DateTime.UtcNow))
+            return Task.FromResult(WebhookResult.Failed("Replayed source message id."));
+
         var message = new ChannelMessage
         {
+            Id        = payload.Id,
             ChannelId = ChannelId,
             SenderId  = payload.From ?? "unknown",
             Content   = payload.Body,
@@ -135,9 +178,50 @@ public sealed class WhatsAppBridgeChannel : AgentFox.Plugins.Channels.Channel
 
     private sealed class BridgePayload
     {
+        public string? Id        { get; set; }
         public string? From      { get; set; }
         public string? Group     { get; set; }
         public string? Body      { get; set; }
         public string? Timestamp { get; set; }
+    }
+
+    private string? ValidateAuthentication(
+        string body,
+        IReadOnlyDictionary<string, string> headers)
+    {
+        if (!_requireSignature) return null;
+        if (_webhookSecret is null) return "Webhook signature secret is not configured.";
+        if (!headers.TryGetValue("X-AgentFox-Timestamp", out var timestamp)
+            || !long.TryParse(timestamp, out var unix))
+            return "Missing or invalid X-AgentFox-Timestamp header.";
+
+        var age = Math.Abs((DateTimeOffset.UtcNow - DateTimeOffset.FromUnixTimeSeconds(unix)).TotalSeconds);
+        if (age > _maxClockSkewSeconds)
+            return "Webhook timestamp is outside the permitted clock skew.";
+
+        if (!headers.TryGetValue("X-AgentFox-Signature", out var supplied))
+            return "Missing X-AgentFox-Signature header.";
+
+        supplied = supplied.StartsWith("sha256=", StringComparison.OrdinalIgnoreCase)
+            ? supplied[7..]
+            : supplied;
+        byte[] suppliedBytes;
+        try { suppliedBytes = Convert.FromHexString(supplied); }
+        catch (FormatException) { return "Invalid webhook signature format."; }
+
+        var payload = Encoding.UTF8.GetBytes($"{timestamp}.{body}");
+        var expected = HMACSHA256.HashData(_webhookSecret, payload);
+        return suppliedBytes.Length == expected.Length
+               && CryptographicOperations.FixedTimeEquals(suppliedBytes, expected)
+            ? null
+            : "Invalid webhook signature.";
+    }
+
+    private void EvictSeenMessageIds()
+    {
+        var cutoff = DateTime.UtcNow.AddHours(-24);
+        foreach (var item in _seenMessageIds)
+            if (item.Value < cutoff)
+                _seenMessageIds.TryRemove(item.Key, out _);
     }
 }

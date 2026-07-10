@@ -25,6 +25,10 @@
          Microsoft.Extensions.* version (10.0.9); PluginLoadContext delegates these to the host's load
          context at runtime, and roll-forward only binds UP, so never build against a higher version. -->
     <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.9" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.9" />
+    <!-- Override Microsoft.Data.Sqlite's minimum native bundle with the maintained release;
+         2.1.11 is deprecated and affected by GHSA-2m69-gcr7-jv3q. -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.3" />
   </ItemGroup>
 
   <ItemGroup>
