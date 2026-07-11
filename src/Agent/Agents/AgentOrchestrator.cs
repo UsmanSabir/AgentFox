@@ -2,6 +2,7 @@ using AgentFox.Channels;
 using AgentFox.Helpers;
 using AgentFox.Hitl;
 using AgentFox.LLM;
+using AgentFox.Learning;
 using AgentFox.MCP;
 using AgentFox.Memory;
 using AgentFox.Models;
@@ -56,6 +57,7 @@ public sealed class AgentOrchestrator : IHostedService
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<AgentOrchestrator> _logger;
     private readonly SpecialistAgentRegistry _specialistAgents;
+    private readonly ExperienceLearningService _experienceLearning;
 
     private readonly HitlManager _hitlManager;
     private readonly PlanStateStore _planStore;
@@ -87,6 +89,7 @@ public sealed class AgentOrchestrator : IHostedService
         SchedulingHolder schedulingHolder,
         ChannelProviderCatalog channelProviderCatalog,
         SpecialistAgentRegistry specialistAgents,
+        ExperienceLearningService experienceLearning,
         IEnumerable<IAppModule> modules,
         ILoggerFactory loggerFactory,
         ILogger<AgentOrchestrator> logger,
@@ -118,6 +121,7 @@ public sealed class AgentOrchestrator : IHostedService
         _logger               = logger;
         _pendingNotifications = pendingNotifications;
         _specialistAgents = specialistAgents;
+        _experienceLearning = experienceLearning;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -379,6 +383,7 @@ public sealed class AgentOrchestrator : IHostedService
             .WithChatClient(client)
             .WithWorkspaceManager(_workspaceManager)
             .WithSessionManager(_sessionManager)
+            .WithExperienceLearning(_experienceLearning)
             .WithCompactionFromConfig(_configuration);
 
         if (withLogger)
@@ -550,6 +555,7 @@ public sealed class AgentOrchestrator : IHostedService
                 .WithConversationStore(_sessionStore)
                 .WithWorkspaceManager(_workspaceManager)
                 .WithSessionManager(_sessionManager)
+                .WithExperienceLearning(_experienceLearning)
                 .Build();
 
             _specialistAgents.Activate(descriptor.Id, async (input, conversationId, cancellationToken) =>

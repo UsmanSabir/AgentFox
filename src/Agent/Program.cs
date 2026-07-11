@@ -5,6 +5,7 @@ using AgentFox.Doctor.Checks;
 using AgentFox.Doctor.Onboarding;
 using AgentFox.Helpers;
 using AgentFox.LLM;
+using AgentFox.Learning;
 using AgentFox.MCP;
 using AgentFox.Memory;
 using AgentFox.Models;
@@ -247,6 +248,11 @@ class Program
         builder.Services.AddSingleton(skillRegistry!);
         builder.Services.AddSingleton(mcpManager!);
         builder.Services.AddSingleton(memory!);
+        builder.Services.AddSingleton<IExperienceStore>(sp =>
+            new JsonExperienceStore(Path.Combine(
+                sp.GetRequiredService<WorkspaceManager>().ResolvePath(""),
+                "learning", "experiences.json")));
+        builder.Services.AddSingleton<ExperienceLearningService>();
         builder.Services.AddSingleton<IChannelProvider, TelegramChannelProvider>();
         builder.Services.AddSingleton<IChannelProvider, SlackChannelProvider>();
         builder.Services.AddSingleton<IChannelProvider, DiscordChannelProvider>();
