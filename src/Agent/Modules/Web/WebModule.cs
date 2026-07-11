@@ -51,6 +51,7 @@ public class WebModule : IAppModule
 
         endpoints.MapPost("/chat", async (
             IAgentService agentService,
+            SessionManager sessionManager,
             ChatRequest req,
             CancellationToken ct) =>
         {
@@ -66,7 +67,7 @@ public class WebModule : IAppModule
                 // Pre-generate a conversation ID so the same session is reused across turns.
                 // If the client already has one (follow-up message) we keep it; otherwise we
                 // mint a new one here and return it so the client can send it on the next turn.
-                var conversationId = req.ConversationId ?? Guid.NewGuid().ToString("N");
+                var conversationId = sessionManager.GetOrCreateWebSession("main", req.ConversationId);
                 var reply = await agentService.RunAsync(req.Message, conversationId, ct);
                 return Results.Ok(new ChatResponse
                 {
@@ -94,6 +95,7 @@ public class WebModule : IAppModule
         endpoints.MapPost("/chat/stream", async (
     ChatRequest req,
     IAgentService agentService,
+    SessionManager sessionManager,
     HttpContext httpContext,
     CancellationToken ct) =>
         {
@@ -112,7 +114,7 @@ public class WebModule : IAppModule
             try
             {
                 // Pre-generate a conversation ID so the same session is reused across turns.
-                var conversationId = req.ConversationId ?? Guid.NewGuid().ToString("N");
+                var conversationId = sessionManager.GetOrCreateWebSession("main", req.ConversationId);
 
                 await agentService.StreamAsync(
                     req.Message,
@@ -197,7 +199,9 @@ public class WebModule : IAppModule
         // ── Sessions ──────────────────────────────────────────────────────────
         endpoints.MapGet("/sessions", (SessionManager sessionManager) =>
         {
-            var sessions = sessionManager.GetAllSessions().Select(s => new
+            var sessions = sessionManager.GetAllSessions()
+                .OrderByDescending(s => s.LastActivityAt)
+                .Select(s => new
             {
                 id         = s.SessionId,
                 agentId    = s.AgentId,
@@ -208,6 +212,40 @@ public class WebModule : IAppModule
                 channelType = s.ChannelType
             });
             return Results.Ok(sessions);
+        });
+
+        endpoints.MapGet("/session-messages", (
+            string conversationId,
+            SessionManager sessionManager,
+            MarkdownSessionStore sessionStore) =>
+        {
+            if (!SessionManager.IsSafeSessionId(conversationId))
+                return Results.BadRequest(new { error = "invalid_session_id" });
+
+            var session = sessionManager.GetSession(conversationId);
+            if (session is null)
+                return Results.NotFound(new { error = "session_not_found" });
+            if (session.Status == SessionStatus.Archived)
+                return Results.Conflict(new { error = "session_archived", message = "Resume the session before loading messages." });
+
+            return Results.Ok(new
+            {
+                conversationId,
+                agentId = session.AgentId,
+                messages = sessionStore.GetConversationMessages(conversationId)
+            });
+        });
+
+        endpoints.MapPost("/sessions/resume", (
+            ResumeSessionRequest req,
+            SessionManager sessionManager) =>
+        {
+            if (!SessionManager.IsSafeSessionId(req.ConversationId))
+                return Results.BadRequest(new { error = "invalid_session_id" });
+
+            return sessionManager.ResumeSession(req.ConversationId)
+                ? Results.Ok(new { success = true, conversationId = req.ConversationId })
+                : Results.NotFound(new { error = "session_not_found_or_unavailable" });
         });
 
         // ── MCP Servers ───────────────────────────────────────────────────────
@@ -282,6 +320,56 @@ public class WebModule : IAppModule
             return status is null
                 ? Results.NotFound(new { error = "specialist_agent_not_found" })
                 : Results.Ok(status);
+        });
+
+        endpoints.MapPost("/specialist-agents/{agentId}/chat", async (
+            string agentId,
+            ChatRequest req,
+            SpecialistAgentRegistry registry,
+            SessionManager sessionManager,
+            ICommandQueue commandQueue,
+            CancellationToken ct) =>
+        {
+            if (string.IsNullOrWhiteSpace(req.Message))
+                return Results.BadRequest(new ChatResponse { Success = false, Error = "Message must not be empty." });
+
+            var descriptor = registry.GetDescriptors().FirstOrDefault(x =>
+                x.Id.Equals(agentId, StringComparison.OrdinalIgnoreCase));
+            if (descriptor is null)
+                return Results.NotFound(new { error = "specialist_agent_not_found" });
+
+            var prefix = $"specialist/{SessionManager.Sanitize(descriptor.Id)}/";
+            var requested = req.ConversationId;
+            if (!string.IsNullOrWhiteSpace(requested) &&
+                !requested.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                return Results.BadRequest(new { error = "session_agent_mismatch" });
+
+            var conversationId = requested ?? $"{prefix}web_{Guid.NewGuid():N}";
+            sessionManager.GetOrCreateWebSession(descriptor.Id, conversationId);
+
+            var command = new SpecialistAgentCommand
+            {
+                SessionKey = conversationId,
+                AgentId = descriptor.Id,
+                Input = req.Message,
+                TimeoutSeconds = 300
+            };
+            commandQueue.Enqueue(command);
+
+            try
+            {
+                var reply = await command.ResultSource.Task.WaitAsync(ct);
+                return Results.Ok(new ChatResponse
+                {
+                    Response = reply,
+                    ConversationId = conversationId,
+                    Success = true
+                });
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return Results.Ok(new ChatResponse { Success = false, Error = ex.Message, ConversationId = conversationId });
+            }
         });
 
         endpoints.MapGet("/command-queues", (
@@ -482,17 +570,31 @@ public class WebModule : IAppModule
 
         // ── Plugin Configuration (dynamic, updatable from web UI) ───────────────
 
-        endpoints.MapGet("/plugin-config", (AgentFox.Plugins.PluginConfigManager configMgr) =>
+        endpoints.MapGet("/plugin-config", (
+            AgentFox.Plugins.PluginConfigManager configMgr,
+            IEnumerable<AgentFox.Plugins.IPluginConfigDefinitionProvider> definitionProviders) =>
         {
-            var configs = configMgr.GetAllConfigs();
-            return Results.Ok(configs);
+            var definitions = definitionProviders.SelectMany(provider => provider.GetDefinitions()).ToList();
+            var definedNames = definitions.Select(definition => definition.PluginName)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var result = definitions.Select(definition => BuildPluginConfigResponse(configMgr, definition))
+                .Cast<object>()
+                .Concat(configMgr.GetAllConfigs()
+                    .Where(config => !definedNames.Contains(config.PluginName))
+                    .Cast<object>());
+            return Results.Ok(result);
         });
 
         endpoints.MapGet("/plugin-config/{pluginName}", (
             string pluginName,
-            AgentFox.Plugins.PluginConfigManager configMgr) =>
+            AgentFox.Plugins.PluginConfigManager configMgr,
+            IEnumerable<AgentFox.Plugins.IPluginConfigDefinitionProvider> definitionProviders) =>
         {
-            var config = configMgr.GetConfigWithSchema(pluginName);
+            var definition = definitionProviders.SelectMany(provider => provider.GetDefinitions())
+                .FirstOrDefault(item => item.PluginName.Equals(pluginName, StringComparison.OrdinalIgnoreCase));
+            var config = definition is null
+                ? configMgr.GetConfigWithSchema(pluginName)
+                : BuildPluginConfigResponse(configMgr, definition);
             return Results.Ok(config);
         });
 
@@ -514,7 +616,7 @@ public class WebModule : IAppModule
                 return Results.StatusCode(500);
 
             return Results.Ok(new { success = true, message = "Configuration updated" });
-        });
+        }).RequireAuthorization("ManagementAdministrator");
 
         endpoints.MapDelete("/plugin-config/{pluginName}", (
             string pluginName,
@@ -522,7 +624,30 @@ public class WebModule : IAppModule
         {
             var deleted = configMgr.DeleteConfig(pluginName);
             return deleted ? Results.Ok(new { success = true }) : Results.NotFound();
-        });
+        }).RequireAuthorization("ManagementAdministrator");
+    }
+
+    private static object BuildPluginConfigResponse(
+        AgentFox.Plugins.PluginConfigManager configManager,
+        AgentFox.Plugins.PluginConfigDefinition definition)
+    {
+        var stored = configManager.GetConfigWithSchema(definition.PluginName);
+        var effective = definition.Fields.ToDictionary(
+            field => field.Key,
+            field => stored.Config.TryGetValue(field.Key, out var value) ? value : field.DefaultValue);
+        foreach (var item in stored.Config)
+            effective.TryAdd(item.Key, item.Value);
+
+        return new
+        {
+            pluginName = definition.PluginName,
+            displayName = definition.DisplayName,
+            description = definition.Description,
+            config = effective,
+            fields = definition.Fields,
+            lastUpdatedAt = stored.LastUpdatedAt,
+            isDefault = stored.IsDefault
+        };
     }
 
     public Task StartAsync(IServiceProvider services) => Task.CompletedTask;
@@ -535,6 +660,8 @@ public record HeartbeatRequest(
     string Task,
     int IntervalSeconds = 60,
     int MaxMissed = 3);
+
+public record ResumeSessionRequest(string ConversationId);
 
 public record HeartbeatUpdateRequest(
     string? Task = null,

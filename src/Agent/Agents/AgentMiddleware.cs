@@ -134,21 +134,28 @@ internal sealed class DynamicAgentMiddleware : DelegatingChatClient
         IEnumerable<ChatMessage> messages,
         ChatOptions? options = null,
         CancellationToken cancellationToken = default)
-        => base.GetResponseAsync(messages, PrepareOptions(options), cancellationToken);
+    {
+        var messageList = messages as IReadOnlyList<ChatMessage> ?? messages.ToList();
+        return base.GetResponseAsync(
+            messageList,
+            PrepareOptions(options, ShouldForceDelegation(messageList)),
+            cancellationToken);
+    }
 
     public override async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
         IEnumerable<ChatMessage> messages,
         ChatOptions? options = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        var prepared = PrepareOptions(options);
-        await foreach (var update in base.GetStreamingResponseAsync(messages, prepared, cancellationToken))
+        var messageList = messages as IReadOnlyList<ChatMessage> ?? messages.ToList();
+        var prepared = PrepareOptions(options, ShouldForceDelegation(messageList));
+        await foreach (var update in base.GetStreamingResponseAsync(messageList, prepared, cancellationToken))
             yield return update;
     }
 
     // ── Private helpers ──────────────────────────────────────────────────────
 
-    private ChatOptions PrepareOptions(ChatOptions? options)
+    private ChatOptions PrepareOptions(ChatOptions? options, bool forceDelegation)
     {
         // Inject MCP tools into the ORIGINAL options in-place BEFORE cloning.
         //
@@ -160,17 +167,38 @@ internal sealed class DynamicAgentMiddleware : DelegatingChatClient
         // Mutating `options.Tools` here (before Clone()) propagates the tools to both the
         // outer dispatcher and the LLM request.
         if (options != null)
+        {
             InjectMcpToolsInPlace(options);
+            InjectDynamicTools(options);
+        }
 
         var opts = options?.Clone() ?? new ChatOptions();
+
+        if (forceDelegation)
+        {
+            // LM Studio's OpenAI-compatible endpoint accepts tool_choice="required" but some
+            // versions reject the named-function object emitted by RequireSpecific.
+            var required = ChatToolMode.RequireAny;
+            opts.ToolMode = required;
+        }
 
         // For the null-options edge case (no outer dispatcher), seed MCP tools on the new object.
         if (options is null && _cachedMcpTools.Count > 0)
             opts.Tools = [.._cachedMcpTools];
 
-        InjectDynamicTools(opts);
+        if (options is null)
+            InjectDynamicTools(opts);
         InjectPromptAddons(opts);
         return opts;
+    }
+
+    private bool ShouldForceDelegation(IReadOnlyList<ChatMessage> messages)
+    {
+        if (messages.Count == 0 || messages[^1].Role != ChatRole.User) return false;
+        var input = messages[^1].Text;
+        if (string.IsNullOrWhiteSpace(input)) return false;
+        return _toolRegistry.GetAll().OfType<DelegateToAgentTool>()
+            .Any(tool => tool.ShouldRequireDelegation(input));
     }
 
     /// <summary>
@@ -234,7 +262,14 @@ internal sealed class DynamicAgentMiddleware : DelegatingChatClient
         // MCP tools are already in opts (cloned from mutated original) — do not re-add.
 
         if (_cachedNewTools.Count > 0)
-            options.Tools = [..(options.Tools ?? []), .._cachedNewTools];
+        {
+            var existing = (options.Tools ?? [])
+                .Select(tool => tool.Name)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var missing = _cachedNewTools.Where(tool => !existing.Contains(tool.Name)).ToList();
+            if (missing.Count > 0)
+                options.Tools = [..(options.Tools ?? []), ..missing];
+        }
     }
 
     /// <summary>

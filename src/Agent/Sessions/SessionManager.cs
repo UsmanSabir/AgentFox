@@ -68,6 +68,7 @@ public class SessionManager : IDisposable
         Directory.CreateDirectory(_archiveDir);
 
         LoadIndex();
+        DiscoverUnindexedSessions();
 
         _bgTimer = new System.Timers.Timer(_config.BackgroundCheckIntervalSeconds * 1000);
         _bgTimer.Elapsed += OnBackgroundTick;
@@ -143,6 +144,49 @@ public class SessionManager : IDisposable
 
         _index[sessionId] = session;
         SaveIndexAsync();
+        return sessionId;
+    }
+
+    /// <summary>
+    /// Returns an existing web session or registers a new one. Web clients may send a known
+    /// session ID to continue a conversation; unknown IDs are registered before the agent runs.
+    /// </summary>
+    public string GetOrCreateWebSession(string agentId, string? requestedSessionId = null)
+    {
+        var sessionId = string.IsNullOrWhiteSpace(requestedSessionId)
+            ? $"web_{Guid.NewGuid():N}"
+            : requestedSessionId.Trim();
+
+        EnsureSafeSessionId(sessionId);
+
+        if (_index.TryGetValue(sessionId, out var existing))
+        {
+            var mainAgentCanResume = agentId.Equals("main", StringComparison.OrdinalIgnoreCase) &&
+                                     !sessionId.StartsWith("specialist/", StringComparison.OrdinalIgnoreCase);
+            if (!mainAgentCanResume &&
+                !string.Equals(existing.AgentId, agentId, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException(
+                    $"Session '{sessionId}' belongs to agent '{existing.AgentId}', not '{agentId}'.");
+
+            if (existing.Status == SessionStatus.Archived && !ResumeSession(sessionId))
+                throw new InvalidOperationException($"Archived session '{sessionId}' could not be resumed.");
+
+            TouchSession(sessionId);
+            return sessionId;
+        }
+
+        _index[sessionId] = new SessionInfo
+        {
+            SessionId = sessionId,
+            LogicalKey = $"web:{sessionId}",
+            Origin = SessionOrigin.Web,
+            Status = SessionStatus.Active,
+            AgentId = agentId,
+            CreatedAt = DateTime.UtcNow,
+            LastActivityAt = DateTime.UtcNow
+        };
+        SaveIndexAsync();
+        _logger?.LogInformation("Created web session {SessionId} for agent {AgentId}", sessionId, agentId);
         return sessionId;
     }
 
@@ -270,6 +314,9 @@ public class SessionManager : IDisposable
             SessionOrigin.Console =>
                 CreateFreshConsoleSession(old.AgentId),
 
+            SessionOrigin.Web =>
+                GetOrCreateWebSession(old.AgentId),
+
             _ => CreateFreshSession(old.Origin, old.LogicalKey, old.AgentId)
         };
 
@@ -315,6 +362,38 @@ public class SessionManager : IDisposable
         SaveIndexAsync();
     }
 
+    /// <summary>Restores an archived session file and marks the session active again.</summary>
+    public bool ResumeSession(string sessionId)
+    {
+        if (!_index.TryGetValue(sessionId, out var info)) return false;
+        if (info.Status != SessionStatus.Archived)
+        {
+            TouchSession(sessionId);
+            return true;
+        }
+
+        if (string.IsNullOrWhiteSpace(info.ArchivePath)) return false;
+
+        var archiveRoot = Path.GetFullPath(_archiveDir) + Path.DirectorySeparatorChar;
+        var source = Path.GetFullPath(Path.Combine(_archiveDir, info.ArchivePath));
+        if (!source.StartsWith(archiveRoot, StringComparison.OrdinalIgnoreCase) || !File.Exists(source))
+            return false;
+
+        var destination = ConversationFilePath(sessionId);
+        Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+        if (File.Exists(destination)) return false;
+
+        File.Move(source, destination);
+        info.Status = SessionStatus.Active;
+        info.LastActivityAt = DateTime.UtcNow;
+        info.ArchivePath = null;
+        info.AbortedAt = null;
+        info.AbortReason = null;
+        SaveIndexAsync();
+        _logger?.LogInformation("Resumed archived session {SessionId}", sessionId);
+        return true;
+    }
+
     /// <summary>Returns the SessionInfo for a conversation ID, or null if unknown.</summary>
     public SessionInfo? GetSession(string sessionId) =>
         _index.TryGetValue(sessionId, out var info) ? info : null;
@@ -346,9 +425,14 @@ public class SessionManager : IDisposable
     /// </summary>
     public string ConversationFilePath(string sessionId)
     {
+        EnsureSafeSessionId(sessionId);
         var rel = sessionId.Replace('/', Path.DirectorySeparatorChar)
                            .Replace('\\', Path.DirectorySeparatorChar);
-        return Path.Combine(_sessionDir, rel + ".md");
+        var root = Path.GetFullPath(_sessionDir) + Path.DirectorySeparatorChar;
+        var path = Path.GetFullPath(Path.Combine(_sessionDir, rel + ".md"));
+        if (!path.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException("Session ID resolves outside the session directory.", nameof(sessionId));
+        return path;
     }
 
     // -------------------------------------------------------------------------
@@ -467,27 +551,57 @@ public class SessionManager : IDisposable
         }
     }
 
+    /// <summary>
+    /// Imports persisted conversation files created by older web builds that did not register
+    /// their IDs in index.json. Known indexed sessions are left untouched.
+    /// </summary>
+    private void DiscoverUnindexedSessions()
+    {
+        var discovered = false;
+        foreach (var file in Directory.EnumerateFiles(_sessionDir, "*.md", SearchOption.AllDirectories))
+        {
+            var relative = Path.GetRelativePath(_sessionDir, file);
+            var id = relative[..^3].Replace(Path.DirectorySeparatorChar, '/');
+            if (_index.ContainsKey(id) || !IsSafeSessionId(id)) continue;
+
+            var segments = id.Split('/');
+            var isSpecialist = segments.Length >= 3 &&
+                               segments[0].Equals("specialist", StringComparison.OrdinalIgnoreCase);
+            _index[id] = new SessionInfo
+            {
+                SessionId = id,
+                LogicalKey = $"web:{id}",
+                Origin = SessionOrigin.Web,
+                Status = SessionStatus.Idle,
+                AgentId = isSpecialist ? segments[1] : "main",
+                CreatedAt = File.GetCreationTimeUtc(file),
+                LastActivityAt = File.GetLastWriteTimeUtc(file)
+            };
+            discovered = true;
+        }
+
+        if (discovered) SaveIndexAsync();
+    }
+
     private void SaveIndexAsync()
     {
-        // Fire-and-forget with semaphore to prevent concurrent writes
-        _ = Task.Run(async () =>
+        // The index is small; persist synchronously so a successful lifecycle operation is durable
+        // before returning and disposal cannot race a background write.
+        _saveLock.Wait();
+        try
         {
-            await _saveLock.WaitAsync();
-            try
-            {
-                var idx = new SessionIndex { Sessions = _index.Values.ToList() };
-                var json = JsonSerializer.Serialize(idx, JsonOpts);
-                await File.WriteAllTextAsync(IndexPath(), json);
-            }
-            catch (Exception ex)
-            {
-                _logger?.LogError(ex, "Failed to save session index");
-            }
-            finally
-            {
-                _saveLock.Release();
-            }
-        });
+            var idx = new SessionIndex { Sessions = _index.Values.ToList() };
+            var json = JsonSerializer.Serialize(idx, JsonOpts);
+            File.WriteAllText(IndexPath(), json);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Failed to save session index");
+        }
+        finally
+        {
+            _saveLock.Release();
+        }
     }
 
     private string IndexPath() => Path.Combine(_sessionDir, "index.json");
@@ -519,6 +633,23 @@ public class SessionManager : IDisposable
             .ToHashSet();
         var chars = input.Select(c => invalid.Contains(c) ? '_' : c).ToArray();
         return new string(chars).Trim('_');
+    }
+
+    public static bool IsSafeSessionId(string sessionId)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId) || sessionId.Length > 256 || sessionId.Contains('\\'))
+            return false;
+
+        return sessionId.Split('/').All(segment =>
+            segment.Length is > 0 and <= 100 &&
+            segment is not "." and not ".." &&
+            segment.All(c => char.IsLetterOrDigit(c) || c is '_' or '-' or '.'));
+    }
+
+    public static void EnsureSafeSessionId(string sessionId)
+    {
+        if (!IsSafeSessionId(sessionId))
+            throw new ArgumentException("Session ID contains unsupported characters.", nameof(sessionId));
     }
 
     // -------------------------------------------------------------------------

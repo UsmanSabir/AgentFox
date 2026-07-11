@@ -41,6 +41,16 @@ public sealed class DelegateToAgentTool : BaseTool
         }
     };
 
+    /// <summary>Returns true when a registered specialist declares an exact high-confidence route hint.</summary>
+    public bool ShouldRequireDelegation(string input)
+    {
+        var tokens = input.Split(
+            input.Where(c => !char.IsLetterOrDigit(c)).Distinct().ToArray(),
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return _registry.GetDescriptors().Any(agent => agent.StrongRouteHints.Any(hint =>
+            tokens.Contains(hint, StringComparer.OrdinalIgnoreCase)));
+    }
+
     protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
     {
         var id = arguments.GetValueOrDefault("agent_id")?.ToString();

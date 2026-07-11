@@ -9,6 +9,7 @@ export const sidebarCollapsed = writable(false);
 
 // ── Active conversation ID ────────────────────────────────────────────────
 export const activeConversationId = writable<string | undefined>(undefined);
+export const activeAgentId = writable('main');
 
 // ── Chat history (in-memory for current session) ──────────────────────────
 export interface ChatMessage {
@@ -22,6 +23,12 @@ export interface ChatMessage {
 }
 
 export const chatMessages = writable<ChatMessage[]>([]);
+
+export function resetChat(agentId = 'main') {
+  chatMessages.set([]);
+  activeConversationId.set(undefined);
+  activeAgentId.set(agentId);
+}
 
 export function addUserMessage(content: string): string {
   const id = crypto.randomUUID();

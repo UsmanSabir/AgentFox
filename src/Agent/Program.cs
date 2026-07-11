@@ -536,6 +536,7 @@ class Program
         var systemPrompt = new SystemPromptBuilder()
             .WithPersona(SystemPromptConfig.AgentPrompts.DeveloperAssistant)
             .WithAllTools(toolRegistry)
+            .WithToolInstructions(false)
             .WithSkillsIndex(skillRegistry.GetSkillManifests())
             .WithConstraints(
                 "Always verify changes before executing destructive operations",
@@ -543,7 +544,8 @@ class Program
                 "Ask for clarification when requirements are ambiguous",
                 "Use add_memory to save important user facts or preferences to long-term memory.",
                 "Use search_memory to recall past information or facts when requested.",
-                "Use get_all_memories to retrieve everything stored in long-term memory.")
+                "Use get_all_memories to retrieve everything stored in long-term memory.",
+                "Reply in the same language as the user's latest message unless the user asks for another language.")
             .Build();
 
         var chatClient = LLMFactory.CreateFromConfiguration(configuration);

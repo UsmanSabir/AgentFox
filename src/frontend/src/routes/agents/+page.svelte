@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api } from '$lib/api';
-  import { agents } from '$lib/stores';
+  import { agents, resetChat } from '$lib/stores';
   import StatusBadge from '$lib/components/StatusBadge.svelte';
-  import { Bot, RefreshCw, Users, Cpu, Activity } from 'lucide-svelte';
+  import { Bot, RefreshCw, Users, Cpu, Activity, MessageSquare } from 'lucide-svelte';
+  import { goto } from '$app/navigation';
   import type { AgentInfo, SpecialistAgentInfo, CommandQueueStatus } from '$lib/api';
 
   let loading = true;
@@ -29,6 +30,11 @@
   }
 
   onMount(load);
+
+  function chatWith(agentId: string) {
+    resetChat(agentId);
+    goto('/chat');
+  }
 
   $: agentList = $agents;
   $: main  = agentList.find(a => a.role === 'main');
@@ -117,6 +123,9 @@
               </div>
               <div class="specialist-meta">Routes: {specialist.channelTypes.join(', ') || 'main-agent delegation only'} · concurrency {specialist.maxConcurrentTurns}</div>
               {#if specialist.lastError}<div class="specialist-error">{specialist.lastError}</div>{/if}
+              <button class="btn btn-sm specialist-chat" on:click={() => chatWith(specialist.id)} disabled={!specialist.isActive}>
+                <MessageSquare size={13} /> Chat
+              </button>
             </div>
           {/each}
         </div>

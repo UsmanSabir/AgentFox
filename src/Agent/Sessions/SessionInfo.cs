@@ -27,6 +27,9 @@ public enum SessionStatus
 [JsonConverter(typeof(JsonStringEnumConverter))]
 public enum SessionOrigin
 {
+    /// <summary>Interactive conversation created by the management web UI.</summary>
+    Web,
+
     /// <summary>Interactive REPL / console input.</summary>
     Console,
 

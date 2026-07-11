@@ -104,6 +104,17 @@ export interface SessionInfo {
   channelType?: string;
 }
 
+export interface ConversationMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export interface ConversationMessagesResponse {
+  conversationId: string;
+  agentId: string;
+  messages: ConversationMessage[];
+}
+
 export interface McpServerInfo {
   name: string;
   toolCount: number;
@@ -196,9 +207,23 @@ export interface PluginSessionStats {
 
 export interface PluginConfigResponse {
   pluginName: string;
+  displayName?: string;
+  description?: string;
   config: Record<string, unknown>;
+  fields?: PluginConfigField[];
   lastUpdatedAt: string;
   isDefault: boolean;
+}
+
+export interface PluginConfigField {
+  key: string;
+  label: string;
+  description: string;
+  type: 'string' | 'boolean' | 'number' | 'select';
+  defaultValue?: unknown;
+  options: string[];
+  sensitive: boolean;
+  runtimeEditable: boolean;
 }
 
 export interface PluginConfigUpdateRequest {
@@ -356,11 +381,17 @@ export const api = {
   status:   () => get<AgentStatus>('/status'),
   agents:   () => get<AgentInfo[]>('/agents'),
   specialistAgents: () => get<SpecialistAgentInfo[]>('/specialist-agents'),
+  specialistChat: (agentId: string, message: string, conversationId?: string) =>
+    post<ChatResponse>(`/specialist-agents/${encodeURIComponent(agentId)}/chat`, { message, conversationId }),
   commandQueues: () => get<CommandQueueStatus>('/command-queues'),
   tools:    () => get<ToolInfo[]>('/tools'),
   skills:   () => get<SkillInfo[]>('/skills'),
   memory:   () => get<MemoryEntry[]>('/memory'),
   sessions: () => get<SessionInfo[]>('/sessions'),
+  sessionMessages: (conversationId: string) =>
+    get<ConversationMessagesResponse>(`/session-messages?conversationId=${encodeURIComponent(conversationId)}`),
+  resumeSession: (conversationId: string) =>
+    post<{ success: boolean; conversationId: string }>('/sessions/resume', { conversationId }),
   mcp:      () => get<McpStatus>('/mcp'),
   channels: () => get<ChannelsStatus>('/channels'),
   pendingNotifications: (conversationId: string) =>

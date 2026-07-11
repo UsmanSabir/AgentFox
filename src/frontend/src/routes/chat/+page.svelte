@@ -1,12 +1,12 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from 'svelte';
-  import { streamChat, api } from '$lib/api';
+  import { streamChat, api, type SessionInfo, type SpecialistAgentInfo } from '$lib/api';
   import {
     chatMessages, addUserMessage, addAssistantMessage, addBackgroundResultMessage,
-    appendToken, finalizeMessage, activeConversationId, agentReady
+    appendToken, finalizeMessage, activeConversationId, activeAgentId, agentReady, resetChat
   } from '$lib/stores';
   import {
-    Send, RotateCcw, StopCircle, Bot, User, Copy, Check, Zap
+    Send, RotateCcw, StopCircle, Bot, User, Copy, Check, Zap, History, Plus, X
   } from 'lucide-svelte';
 
   let inputEl: HTMLTextAreaElement;
@@ -16,10 +16,18 @@
   let abortCtrl: AbortController | null = null;
   let copiedId: string | null = null;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let sessions: SessionInfo[] = [];
+  let specialists: SpecialistAgentInfo[] = [];
+  let showSessions = false;
+  let loadingSession = false;
 
   $: messages     = $chatMessages;
   $: convId       = $activeConversationId;
   $: agentIsReady = $agentReady;
+  $: selectedAgentId = $activeAgentId;
+  $: selectedAgentName = selectedAgentId === 'main'
+    ? 'AgentFox'
+    : specialists.find(agent => agent.id === selectedAgentId)?.name ?? selectedAgentId;
 
   // Start / restart polling whenever the conversation ID changes.
   // Polling is intentionally keyed to the conversation, not to isStreaming,
@@ -30,8 +38,9 @@
     if (cid) pollTimer = setInterval(() => pollPending(cid), 3000);
   }
 
-  onMount(() => {
+  onMount(async () => {
     inputEl?.focus();
+    await Promise.all([loadSessions(), loadSpecialists()]);
   });
 
   onDestroy(() => {
@@ -70,19 +79,29 @@
     abortCtrl   = new AbortController();
 
     try {
-      const gen = streamChat(text, convId, abortCtrl.signal);
-
-      for await (const event of gen) {
-        if (event.type === 'token') {
-          appendToken(assistantId, event.token);
-          await scrollToBottom();
-        } else if (event.type === 'done') {
-          if (event.conversationId) activeConversationId.set(event.conversationId);
+      if (selectedAgentId === 'main') {
+        const gen = streamChat(text, convId, abortCtrl.signal);
+        for await (const event of gen) {
+          if (event.type === 'token') {
+            appendToken(assistantId, event.token);
+            await scrollToBottom();
+          } else if (event.type === 'done') {
+            if (event.conversationId) activeConversationId.set(event.conversationId);
+            finalizeMessage(assistantId);
+            break;
+          } else if (event.type === 'error') {
+            finalizeMessage(assistantId, event.error);
+            break;
+          }
+        }
+      } else {
+        const response = await api.specialistChat(selectedAgentId, text, convId);
+        if (response.conversationId) activeConversationId.set(response.conversationId);
+        if (response.success) {
+          appendToken(assistantId, response.response);
           finalizeMessage(assistantId);
-          break;
-        } else if (event.type === 'error') {
-          finalizeMessage(assistantId, event.error);
-          break;
+        } else {
+          finalizeMessage(assistantId, response.error ?? 'Specialist request failed');
         }
       }
     } catch (err: unknown) {
@@ -98,6 +117,7 @@
       await scrollToBottom();
       await tick();
       inputEl?.focus();
+      await loadSessions();
     }
   }
 
@@ -106,8 +126,42 @@
   }
 
   function clearChat() {
-    chatMessages.set([]);
-    activeConversationId.set(undefined);
+    resetChat(selectedAgentId);
+  }
+
+  async function loadSessions() {
+    try { sessions = await api.sessions(); } catch { sessions = []; }
+  }
+
+  async function loadSpecialists() {
+    try { specialists = await api.specialistAgents(); } catch { specialists = []; }
+  }
+
+  async function openSession(session: SessionInfo) {
+    if (isStreaming || loadingSession) return;
+    loadingSession = true;
+    try {
+      if (session.status.toLowerCase() === 'archived') await api.resumeSession(session.id);
+      const history = await api.sessionMessages(session.id);
+      activeAgentId.set(specialists.some(agent => agent.id === history.agentId) ? history.agentId : 'main');
+      activeConversationId.set(history.conversationId);
+      chatMessages.set(history.messages.map(item => ({
+        id: crypto.randomUUID(),
+        role: item.role,
+        content: item.content,
+        timestamp: new Date(session.lastActive)
+      })));
+      showSessions = false;
+      await loadSessions();
+      await scrollToBottom();
+    } finally {
+      loadingSession = false;
+    }
+  }
+
+  function changeAgent(event: Event) {
+    const id = (event.currentTarget as HTMLSelectElement).value;
+    resetChat(id);
   }
 
   function handleKeyDown(e: KeyboardEvent) {
@@ -134,19 +188,58 @@
 </script>
 
 <div class="chat-shell">
-  <!-- Conversation ID strip -->
-  {#if convId}
-    <div class="conv-strip">
+  <div class="chat-toolbar">
+    <button class="toolbar-btn" on:click={() => showSessions = !showSessions} title="Browse sessions">
+      <History size={14} /> Sessions
+    </button>
+    <label class="agent-picker">
+      <span>Agent</span>
+      <select value={selectedAgentId} on:change={changeAgent} disabled={isStreaming}>
+        <option value="main">AgentFox</option>
+        {#each specialists as specialist}
+          <option value={specialist.id}>{specialist.name}</option>
+        {/each}
+      </select>
+    </label>
+    {#if convId}
       <span class="conv-label">Session:</span>
       <code class="conv-id">{convId}</code>
-      <button class="icon-btn" on:click={clearChat} title="Clear conversation">
-        <RotateCcw size={13} />
-      </button>
-    </div>
-  {/if}
+    {/if}
+    <button class="toolbar-btn new-chat-btn" on:click={clearChat} disabled={isStreaming} title="Start a new chat">
+      <Plus size={14} /> New chat
+    </button>
+  </div>
 
-  <!-- Messages -->
-  <div class="messages-wrap" bind:this={scrollEl}>
+  <div class="chat-main">
+    {#if showSessions}
+      <aside class="session-panel fade-in">
+        <div class="session-panel-head">
+          <div><strong>Sessions</strong><span>{sessions.length}</span></div>
+          <button class="icon-btn" on:click={() => showSessions = false} title="Close"><X size={15} /></button>
+        </div>
+        <div class="session-list">
+          {#if sessions.length === 0}
+            <p class="session-empty">No saved sessions yet.</p>
+          {:else}
+            {#each sessions as session (session.id)}
+              <button
+                class="session-item"
+                class:active={session.id === convId}
+                on:click={() => openSession(session)}
+                disabled={loadingSession || isStreaming}
+              >
+                <span class="session-item-title">{session.id}</span>
+                <span class="session-item-meta">{session.origin} · {session.status}</span>
+                <span class="session-item-time">{new Date(session.lastActive).toLocaleString()}</span>
+              </button>
+            {/each}
+          {/if}
+        </div>
+      </aside>
+    {/if}
+
+    <!-- Messages -->
+    <div class="messages-wrap" bind:this={scrollEl}>
     {#if messages.length === 0}
       <div class="intro fade-in">
         <div class="intro-icon">
@@ -182,7 +275,7 @@
             </div>
             <div class="message-body">
               <div class="message-meta">
-                <span class="message-role">{msg.role === 'user' ? 'You' : 'AgentFox'}</span>
+                <span class="message-role">{msg.role === 'user' ? 'You' : selectedAgentName}</span>
                 {#if msg.isBackgroundResult}
                   <span class="bg-badge">background result</span>
                 {/if}
@@ -218,6 +311,7 @@
         {/each}
       </div>
     {/if}
+    </div>
   </div>
 
   <!-- Input bar -->
@@ -266,20 +360,45 @@
   .chat-shell {
     display: flex;
     flex-direction: column;
+    position: relative;
     height: calc(100vh - var(--header-h));
     overflow: hidden;
   }
 
-  /* Session strip */
-  .conv-strip {
+  .chat-toolbar {
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    padding: 0.375rem 1.5rem;
+    min-height: 42px;
+    padding: 0.375rem 1rem;
     background: var(--surface);
     border-bottom: 1px solid var(--border);
     font-size: 0.75rem;
     color: var(--text-3);
+  }
+  .toolbar-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.3rem 0.55rem;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-md);
+    background: var(--surface-2);
+    color: var(--text-2);
+    cursor: pointer;
+    font-size: 0.75rem;
+  }
+  .toolbar-btn:hover { color: var(--text); border-color: var(--border-high); }
+  .toolbar-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .new-chat-btn { margin-left: auto; color: var(--primary); }
+  .agent-picker { display: flex; align-items: center; gap: 0.4rem; }
+  .agent-picker select {
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--border-md);
+    border-radius: var(--radius-sm);
+    padding: 0.25rem 1.8rem 0.25rem 0.45rem;
+    font-size: 0.75rem;
   }
   .conv-label { color: var(--text-3); }
   .conv-id {
@@ -288,7 +407,56 @@
     padding: 0.1em 0.4em;
     border-radius: 4px;
     color: var(--text-2);
+    max-width: 38vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
+  .chat-main { display: flex; flex: 1; min-height: 0; overflow: hidden; }
+  .session-panel {
+    width: 290px;
+    flex-shrink: 0;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .session-panel-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.8rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .session-panel-head > div { display: flex; align-items: center; gap: 0.45rem; }
+  .session-panel-head span {
+    font-size: 0.65rem;
+    color: var(--text-3);
+    background: var(--surface-2);
+    border-radius: 99px;
+    padding: 0.1rem 0.4rem;
+  }
+  .session-list { overflow-y: auto; padding: 0.45rem; }
+  .session-item {
+    width: 100%;
+    text-align: left;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--text);
+    padding: 0.65rem;
+    cursor: pointer;
+  }
+  .session-item:hover { background: var(--surface-2); border-color: var(--border); }
+  .session-item.active { background: var(--primary-dim); border-color: rgba(129,140,248,0.35); }
+  .session-item:disabled { opacity: 0.55; cursor: wait; }
+  .session-item-title { font-family: monospace; font-size: 0.72rem; word-break: break-all; }
+  .session-item-meta, .session-item-time { color: var(--text-3); font-size: 0.65rem; }
+  .session-empty { color: var(--text-3); font-size: 0.75rem; padding: 1rem; text-align: center; }
   .icon-btn {
     background: transparent;
     border: none;
@@ -306,8 +474,15 @@
   /* Messages area */
   .messages-wrap {
     flex: 1;
+    min-width: 0;
     overflow-y: auto;
     padding: 1.5rem;
+  }
+
+  @media (max-width: 760px) {
+    .session-panel { position: absolute; z-index: 20; inset: 42px auto 0 0; box-shadow: 12px 0 30px rgba(0,0,0,0.35); }
+    .conv-label, .conv-id { display: none; }
+    .agent-picker > span { display: none; }
   }
 
   /* Intro / empty state */

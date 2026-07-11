@@ -1,4 +1,5 @@
 using AgentFox.Plugins.Interfaces;
+using AgentFox.Plugins;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -89,6 +90,7 @@ public sealed class TradingAgentModule : IAgentAwareModule
         services.AddSingleton<IBrokerStateReader>(sp => sp.GetRequiredService<AhkBrowserBrokerAdapter>());
         services.AddSingleton<IMarketCalendar, PsxMarketCalendar>();
         services.AddSingleton<TradingPolicyProvider>();
+        services.AddSingleton<IPluginConfigDefinitionProvider, TradingPluginConfigDefinitionProvider>();
         services.AddSingleton<ITradingRepository, SqliteTradingRepository>();
         services.AddSingleton<ITradingRiskEngine, TradingRiskEngine>();
         services.AddSingleton<TradingReconciliationState>();
@@ -258,6 +260,7 @@ public sealed class TradingAgentModule : IAgentAwareModule
             Description = "Handles PSX questions, signal parsing, market-status checks, and trade proposals.",
             ChannelTypes = ["whatsapp-bridge"],
             RouteHints = ["PSX", "stock", "portfolio", "trade", "buy", "sell", "market"],
+            StrongRouteHints = ["PSX"],
             ToolNames = ["parse_signal", "check_market", "log_signal", "create_trade_proposal", "get_trading_status"],
             ModelKey = string.IsNullOrWhiteSpace(agentOptions.Value.ParserModelKey)
                 ? null
@@ -292,8 +295,9 @@ public sealed class TradingAgentModule : IAgentAwareModule
             fragmentProvider: () => """
 
                 ## Trading specialist routing
-                Delegate PSX, stock-trading, signal, portfolio, buy/sell, and market-status requests to
-                the registered `trading-agent` through delegate_to_agent. Do not directly invoke trading
+                For PSX, stock-trading, signal, portfolio, buy/sell, and market-status requests, immediately
+                call `delegate_to_agent` with agent_id `trading-agent`. Do not announce, imitate, or print the
+                call as text. Do not ask for confirmation before delegating. Do not directly invoke trading
                 execution tools from the general-agent workflow.
                 """);
 
