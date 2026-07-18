@@ -14,7 +14,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Agents.AI.Harness" Version="1.11.1-preview.260625.1" />
+    <PackageReference Include="Microsoft.Agents.AI.Harness" Version="1.13.0-preview.260703.1" />
     <PackageReference Include="PuppeteerSharp" Version="25.3.4" />
     <!-- Must match the version the HOST resolves (currently 10.6.0). PluginLoadContext delegates
          all Microsoft.Extensions.* assemblies to the host's default load context so plugin and host
