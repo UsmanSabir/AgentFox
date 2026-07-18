@@ -101,6 +101,20 @@ public class TradingAgentOptions
 
     public int ReconciliationIntervalSeconds { get; set; } = 60;
     public int ReconciliationMaxAgeSeconds { get; set; } = 180;
+
+    // ── Stock research (research_stock tool) ──────────────────────────────────
+
+    /// <summary>Base URL of the official PSX data portal used for quotes and price history.</summary>
+    public string PsxDataBaseUrl { get; set; } = "https://dps.psx.com.pk";
+
+    /// <summary>
+    /// Also pull recent company and market headlines (Google News RSS, keyless) into the research
+    /// evidence. Disable to research from PSX price data only (e.g. no outbound internet policy).
+    /// </summary>
+    public bool ResearchNewsEnabled { get; set; } = true;
+
+    /// <summary>Maximum headlines per news query fed to the research assessment. Default 8.</summary>
+    public int ResearchHeadlineCount { get; set; } = 8;
 }
 
 public sealed class MarketSessionOverride

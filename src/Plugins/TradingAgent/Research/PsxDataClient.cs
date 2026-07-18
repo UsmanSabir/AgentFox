@@ -1,0 +1,240 @@
+using System.Globalization;
+using System.Text.Json;
+using System.Xml.Linq;
+using AgentFox.Http;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using TradingAgent.Config;
+
+namespace TradingAgent.Research;
+
+/// <summary>
+/// Price/volume summary for one symbol computed from the PSX data portal's EOD and intraday
+/// time series. All fields are nullable: a null means "the feed did not provide it", and the
+/// research prompt tells the model to treat that as unknown.
+/// </summary>
+public sealed record PsxQuoteSummary
+{
+    public string Symbol { get; init; } = "";
+    public decimal? LastPrice { get; init; }
+    public decimal? PreviousClose { get; init; }
+    public decimal? DayChangePercent { get; init; }
+    public decimal? WeekChangePercent { get; init; }
+    public decimal? MonthChangePercent { get; init; }
+    public decimal? High52Week { get; init; }
+    public decimal? Low52Week { get; init; }
+    public long? LastVolume { get; init; }
+    public long? AverageDailyVolume30D { get; init; }
+    public string? Error { get; init; }
+}
+
+public sealed record NewsHeadline(string Title, string? Source, DateTime? PublishedUtc);
+
+/// <summary>Everything gathered for one research request, ready to hand to the LLM analyst step.</summary>
+public sealed record StockResearchData
+{
+    public PsxQuoteSummary Quote { get; init; } = new();
+    public PsxQuoteSummary IndexQuote { get; init; } = new();
+    public IReadOnlyList<NewsHeadline> CompanyNews { get; init; } = [];
+    public IReadOnlyList<NewsHeadline> MarketNews { get; init; } = [];
+    public DateTime RetrievedAtUtc { get; init; } = DateTime.UtcNow;
+}
+
+/// <summary>
+/// Fetches market data from the official PSX data portal (dps.psx.com.pk) and recent headlines
+/// from Google News RSS. No API key required for either. Every fetch is independent and
+/// fail-soft: a dead feed degrades the research evidence, it never throws out of
+/// <see cref="GatherAsync"/>.
+/// </summary>
+public sealed class PsxDataClient
+{
+    private const string Kse100Symbol = "KSE100";
+
+    private readonly IOptions<TradingAgentOptions> _options;
+    private readonly ILogger<PsxDataClient> _logger;
+    private readonly HttpClient _http;
+
+    public PsxDataClient(IOptions<TradingAgentOptions> options, ILogger<PsxDataClient> logger)
+    {
+        _options = options;
+        _logger = logger;
+        _http = HttpResilienceFactory.Create(TimeSpan.FromSeconds(25));
+        // Google News RSS (and some CDNs in front of the PSX portal) reject requests without a UA.
+        _http.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (compatible; AgentFox-TradingResearch/1.0)");
+    }
+
+    public async Task<StockResearchData> GatherAsync(string symbol, CancellationToken ct = default)
+    {
+        symbol = symbol.Trim().ToUpperInvariant();
+
+        var quoteTask   = GetQuoteSummaryAsync(symbol, ct);
+        var indexTask   = GetQuoteSummaryAsync(Kse100Symbol, ct);
+        var newsTask    = _options.Value.ResearchNewsEnabled
+            ? GetNewsAsync($"\"{symbol}\" PSX Pakistan stock", ct)
+            : Task.FromResult<IReadOnlyList<NewsHeadline>>([]);
+        var marketTask  = _options.Value.ResearchNewsEnabled
+            ? GetNewsAsync("Pakistan Stock Exchange KSE-100", ct)
+            : Task.FromResult<IReadOnlyList<NewsHeadline>>([]);
+
+        await Task.WhenAll(quoteTask, indexTask, newsTask, marketTask);
+
+        return new StockResearchData
+        {
+            Quote          = await quoteTask,
+            IndexQuote     = await indexTask,
+            CompanyNews    = await newsTask,
+            MarketNews     = await marketTask,
+            RetrievedAtUtc = DateTime.UtcNow
+        };
+    }
+
+    // ── PSX data portal ───────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Builds a quote summary from the portal's EOD series (trend, 52-week range) topped up with the
+    /// latest intraday tick when available. Series shape: {"status":1,"data":[[unixTs, price, volume],…]}.
+    /// </summary>
+    public async Task<PsxQuoteSummary> GetQuoteSummaryAsync(string symbol, CancellationToken ct = default)
+    {
+        try
+        {
+            var eod = await FetchSeriesAsync($"timeseries/eod/{symbol}", ct);
+            var intraday = await FetchSeriesAsync($"timeseries/int/{symbol}", ct);
+
+            if (eod.Count == 0 && intraday.Count == 0)
+                return new PsxQuoteSummary
+                {
+                    Symbol = symbol,
+                    Error = "The PSX data portal returned no price data for this symbol — verify the ticker."
+                };
+
+            // Both series are ordered newest-first by the portal; sort defensively anyway.
+            eod = eod.OrderByDescending(p => p.Ts).ToList();
+            intraday = intraday.OrderByDescending(p => p.Ts).ToList();
+
+            var lastTick   = intraday.FirstOrDefault() ?? eod.First();
+            var lastPrice  = lastTick.Price;
+
+            // "Previous close" = most recent EOD strictly older than the last tick's day.
+            var lastDay    = DateTimeOffset.FromUnixTimeSeconds(lastTick.Ts).UtcDateTime.Date;
+            var prevClose  = eod.FirstOrDefault(p =>
+                DateTimeOffset.FromUnixTimeSeconds(p.Ts).UtcDateTime.Date < lastDay)?.Price;
+
+            var yearAgo    = DateTimeOffset.UtcNow.AddYears(-1).ToUnixTimeSeconds();
+            var yearSeries = eod.Where(p => p.Ts >= yearAgo).ToList();
+
+            return new PsxQuoteSummary
+            {
+                Symbol                = symbol,
+                LastPrice             = lastPrice,
+                PreviousClose         = prevClose,
+                DayChangePercent      = PercentChange(prevClose, lastPrice),
+                WeekChangePercent     = PercentChange(CloseDaysAgo(eod, 7), lastPrice),
+                MonthChangePercent    = PercentChange(CloseDaysAgo(eod, 30), lastPrice),
+                High52Week            = yearSeries.Count > 0 ? yearSeries.Max(p => p.Price) : null,
+                Low52Week             = yearSeries.Count > 0 ? yearSeries.Min(p => p.Price) : null,
+                LastVolume            = eod.FirstOrDefault()?.Volume,
+                AverageDailyVolume30D = AverageVolume(eod, 30)
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[PsxData] Quote fetch failed for {Symbol}.", symbol);
+            return new PsxQuoteSummary { Symbol = symbol, Error = $"PSX data fetch failed: {ex.Message}" };
+        }
+    }
+
+    private sealed record SeriesPoint(long Ts, decimal Price, long Volume);
+
+    private async Task<List<SeriesPoint>> FetchSeriesAsync(string path, CancellationToken ct)
+    {
+        var baseUrl = _options.Value.PsxDataBaseUrl.TrimEnd('/');
+        using var response = await _http.GetAsync($"{baseUrl}/{path}", ct);
+        response.EnsureSuccessStatusCode();
+
+        await using var stream = await response.Content.ReadAsStreamAsync(ct);
+        using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
+
+        if (!doc.RootElement.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array)
+            return [];
+
+        var points = new List<SeriesPoint>(data.GetArrayLength());
+        foreach (var row in data.EnumerateArray())
+        {
+            if (row.ValueKind != JsonValueKind.Array || row.GetArrayLength() < 2) continue;
+            var cells = row.EnumerateArray().ToArray();
+            if (!TryDecimal(cells[1], out var price)) continue;
+            if (!TryLong(cells[0], out var ts)) continue;
+            TryLong(cells.Length > 2 ? cells[2] : default, out var volume);
+            points.Add(new SeriesPoint(ts, price, volume));
+        }
+
+        return points;
+    }
+
+    private static bool TryDecimal(JsonElement el, out decimal value)
+    {
+        value = 0m;
+        return el.ValueKind switch
+        {
+            JsonValueKind.Number => el.TryGetDecimal(out value),
+            JsonValueKind.String => decimal.TryParse(el.GetString(), NumberStyles.Any, CultureInfo.InvariantCulture, out value),
+            _ => false
+        };
+    }
+
+    private static bool TryLong(JsonElement el, out long value)
+    {
+        value = 0;
+        if (el.ValueKind == JsonValueKind.Number)
+        {
+            if (el.TryGetInt64(out value)) return true;
+            if (el.TryGetDecimal(out var d)) { value = (long)d; return true; }
+        }
+        return el.ValueKind == JsonValueKind.String && long.TryParse(el.GetString(), out value);
+    }
+
+    private static decimal? CloseDaysAgo(List<SeriesPoint> eodNewestFirst, int days)
+    {
+        var cutoff = DateTimeOffset.UtcNow.AddDays(-days).ToUnixTimeSeconds();
+        return eodNewestFirst.FirstOrDefault(p => p.Ts <= cutoff)?.Price;
+    }
+
+    private static long? AverageVolume(List<SeriesPoint> eodNewestFirst, int days)
+    {
+        var window = eodNewestFirst.Take(days).Where(p => p.Volume > 0).ToList();
+        return window.Count == 0 ? null : (long)window.Average(p => p.Volume);
+    }
+
+    private static decimal? PercentChange(decimal? from, decimal? to) =>
+        from is > 0 && to is not null ? Math.Round((to.Value - from.Value) / from.Value * 100m, 2) : null;
+
+    // ── News (Google News RSS — keyless) ──────────────────────────────────────
+
+    private async Task<IReadOnlyList<NewsHeadline>> GetNewsAsync(string query, CancellationToken ct)
+    {
+        try
+        {
+            var url = "https://news.google.com/rss/search?q=" + Uri.EscapeDataString(query) +
+                      "&hl=en-PK&gl=PK&ceid=PK:en";
+            var xml = await _http.GetStringAsync(url, ct);
+            var feed = XDocument.Parse(xml);
+
+            return feed.Descendants("item")
+                .Take(Math.Max(1, _options.Value.ResearchHeadlineCount))
+                .Select(item => new NewsHeadline(
+                    item.Element("title")?.Value.Trim() ?? "",
+                    item.Elements().FirstOrDefault(e => e.Name.LocalName == "source")?.Value.Trim(),
+                    DateTime.TryParse(item.Element("pubDate")?.Value, CultureInfo.InvariantCulture,
+                        DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var dt)
+                        ? dt : null))
+                .Where(h => h.Title.Length > 0)
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[PsxData] News fetch failed for query '{Query}'.", query);
+            return [];
+        }
+    }
+}
