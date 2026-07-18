@@ -57,6 +57,12 @@ security boundaries.
   default.
 - Introduce a small `HarnessAgentFactory`/adapter that returns the existing
   `AIAgent` abstraction while isolating `AsHarnessAgent` and preview API use.
+- Adopt a preview-package version policy. The
+  `Microsoft.Agents.AI.Harness` version is currently repeated in three
+  `.csproj` files; move it to central package management
+  (`Directory.Packages.props`), pin it, and take preview bumps only as a
+  deliberate change with a named owner and a smoke-test gate (build, adapter
+  compatibility tests, and the Phase 0 policy-bypass tests all green).
 - Define named profiles instead of a global on/off switch:
   - `main-safe`: Harness features disabled until individually approved.
   - `trading-research`: read-only research and reporting only.
@@ -89,10 +95,29 @@ increasing trading authority.
 - Use isolated, minimal background agents for per-symbol research. Their only
   output should be factual, attributable research returned to the main
   specialist for synthesis.
+- Treat research output as untrusted data, never as instructions. Market and
+  news content is external, attacker-reachable text; a research summary can
+  carry injected directives ("ignore risk limits…") into the main specialist,
+  which sits upstream of real trade proposals. Tag research output with
+  provenance (source, symbol, retrieval time, producing agent), render it to
+  the main specialist as quoted data, and rely on the plan gate, risk engine,
+  and HITL — not the research profile's read-only scope — as the control for
+  anything it influences downstream.
+- Cap research fan-out with an explicit resource budget per session: maximum
+  concurrent background agents, maximum tokens per research task, and an
+  overall per-request budget. Harness background agents must inherit the same
+  limits `SubAgentManager` enforces for existing sub-agents; a multi-symbol
+  request must degrade (queue or truncate) rather than amplify cost
+  unboundedly.
 
 **Exit criteria:** Users can request multi-symbol research and report generation
 with a trace linking every result to the initiating session, while the harness
 profile has no route to broker execution.
+
+**Checkpoint:** After the pilot, compare against the existing sub-agent
+research path. If the harness profile shows no measurable win in reliability,
+latency, token use, or audit quality, stop here: keep the adapter as a
+research-only feature and do not proceed to Phases 2–5.
 
 ### Phase 2 — Governed Trading Skills and Reporting
 
@@ -122,6 +147,11 @@ the main prompt remains small; execution privileges remain unchanged.
 **Goal:** Make trade approval specific, immutable, and auditable before any
 convenience approval feature is considered.
 
+This phase does not depend on Harness adoption. It hardens the existing
+`HitlManager`/`TradingManager` path and is valuable even if the roadmap is
+abandoned at an earlier checkpoint — start it in parallel with Phase 0 rather
+than sequencing it after skills.
+
 - Continue using AgentFox HITL as the only authority for live trading approval.
 - Approve an immutable, one-time order intent containing at least:
   - proposal ID and source message identity;
@@ -148,7 +178,10 @@ broker submission.
 - Run side-by-side evaluation against the existing `AgentBuilder` pipeline.
 - Explicitly configure every Harness default:
   - provide AgentFox session-backed chat history;
-  - set compaction limits per configured model;
+  - set compaction limits per configured model. Harness compaction is a
+    context-window optimization only and must never become the system of
+    record: the AgentFox session store remains the complete, authoritative
+    history that session recovery depends on;
   - disable file access, file memory, skill discovery, hosted web search, and
     shell until their AgentFox equivalent is intentionally bridged;
   - use a named OpenTelemetry source;
@@ -161,6 +194,11 @@ broker submission.
 **Exit criteria:** Harness mode matches or exceeds existing behaviour for the
 approved profile without losing tool authorization, session continuity, or
 plugin audit records.
+
+**Checkpoint:** If the side-by-side evaluation shows no measurable improvement
+for the main agent, keep the existing `AgentBuilder` pipeline as the default
+and limit Harness to the profiles that already proved out. Phase 5 proceeds
+only for capabilities with a demonstrated need.
 
 ### Phase 5 — Advanced Sandboxed Capabilities
 
@@ -195,12 +233,17 @@ model, integration tests, telemetry, and kill switch.
 ## Recommended Initial Backlog
 
 1. Add `HarnessOptions` and a disabled-by-default profile selector.
-2. Implement and test the AgentFox-to-Harness tool bridge.
-3. Add trace/correlation IDs through trading proposal and execution flows.
-4. Build the read-only `TradingResearchHarness` pilot.
-5. Create and test the first PSX research and portfolio-report skills.
-6. Design immutable approval-intent records before exposing any Harness
-   approval convenience feature.
+2. Design and implement immutable approval-intent records (Phase 3) — starts
+   now, in parallel; it hardens the existing trading path and does not depend
+   on Harness.
+3. Move the `Microsoft.Agents.AI.Harness` version to
+   `Directory.Packages.props` and document the preview-bump policy.
+4. Implement and test the AgentFox-to-Harness tool bridge.
+5. Add trace/correlation IDs through trading proposal and execution flows.
+6. Build the read-only `TradingResearchHarness` pilot, including provenance
+   tagging of research output and sub-agent resource budgets.
+7. Evaluate the Phase 1 checkpoint before investing in skills.
+8. Create and test the first PSX research and portfolio-report skills.
 
 ## References
 
