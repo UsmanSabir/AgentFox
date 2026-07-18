@@ -41,6 +41,7 @@ public sealed class PlaceOrdersTool : BaseTool
     private readonly TradingPolicyProvider _policyProvider;
     private readonly IOptions<AhkConfig> _ahkConfig;
     private readonly PendingTakeProfitStore _pendingSells;
+    private readonly ApprovalIntentRegistry _intentRegistry;
     private readonly ILogger<PlaceOrdersTool> _logger;
 
     public override string Name => "place_orders";
@@ -92,6 +93,7 @@ public sealed class PlaceOrdersTool : BaseTool
         TradingPolicyProvider policyProvider,
         IOptions<AhkConfig> ahkConfig,
         PendingTakeProfitStore pendingSells,
+        ApprovalIntentRegistry intentRegistry,
         ILogger<PlaceOrdersTool> logger)
     {
         _manager      = manager;
@@ -99,6 +101,7 @@ public sealed class PlaceOrdersTool : BaseTool
         _policyProvider = policyProvider;
         _ahkConfig    = ahkConfig;
         _pendingSells = pendingSells;
+        _intentRegistry = intentRegistry;
         _logger       = logger;
     }
 
@@ -164,8 +167,14 @@ public sealed class PlaceOrdersTool : BaseTool
             }
             else
             {
+                // Bind this validated batch to an immutable, one-time, expiring intent. TradingManager
+                // recomputes the hash before submission, so any drift after this point is rejected.
+                var intent = ApprovalIntent.Create(groups, rawMessage, policy.Version,
+                    TimeSpan.FromSeconds(Math.Max(10, opts.ApprovalIntentTtlSeconds)));
+                _intentRegistry.Register(intent);
+
                 var execution = await _manager.ExecuteGroupsAsync(
-                    groups, rawMessage, ExecutionAuthorization.HostToolGate());
+                    groups, rawMessage, ExecutionAuthorization.HostToolGate(intent: intent));
                 if (!execution.Executed)
                     return ToolResult.Ok(Skipped(execution.Reason));
                 grouped = execution.Groups;

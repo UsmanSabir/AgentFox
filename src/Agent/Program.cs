@@ -316,6 +316,12 @@ class Program
             sp.GetRequiredService<SpecialistAgentRegistry>());
         builder.Services.AddSingleton<HitlManager>();
         builder.Services.AddSingleton<AgentFox.Planning.PlanStateStore>();
+
+        // Optional HarnessAgent execution profile (roadmap Phase 0). Disabled by default —
+        // the factory throws unless Harness:Enabled=true, so registering it is behaviour-neutral.
+        builder.Services.Configure<AgentFox.Harness.HarnessOptions>(
+            configuration.GetSection(AgentFox.Harness.HarnessOptions.SectionName));
+        builder.Services.AddSingleton<AgentFox.Harness.HarnessAgentFactory>();
         builder.Services.AddSingleton<FoxAgentHolder>();
         builder.Services.AddSingleton<ChannelManagerHolder>();
         builder.Services.AddSingleton<SchedulingHolder>();

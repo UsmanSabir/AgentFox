@@ -179,7 +179,7 @@ public sealed class TradingManagerSafetyTests
             var manager = new TradingAgent.Manager.TradingManager(
                 broker, repository, new AlwaysOpenCalendar(), policy,
                 new TradingRiskEngine(Options.Create(new AhkConfig()), options),
-                new TradingReconciliationState(), options,
+                new TradingReconciliationState(), new ApprovalIntentRegistry(), options,
                 NullLogger<TradingAgent.Manager.TradingManager>.Instance);
             IReadOnlyList<IReadOnlyList<TradingSignal>> groups =
             [
@@ -302,11 +302,13 @@ public sealed class TradingManagerSafetyTests
             var repository = new SqliteTradingRepository(
                 options, new ConfigurationBuilder().Build(), NullLogger<SqliteTradingRepository>.Instance);
             var broker = new RecordingBroker();
+            var policyProvider = new TradingPolicyProvider(options, pluginConfig);
+            var intentRegistry = new ApprovalIntentRegistry();
             var manager = new TradingAgent.Manager.TradingManager(
                 broker, repository, new AlwaysOpenCalendar(),
-                new TradingPolicyProvider(options, pluginConfig),
+                policyProvider,
                 new TradingRiskEngine(Options.Create(new AhkConfig()), options),
-                new TradingReconciliationState(), options,
+                new TradingReconciliationState(), intentRegistry, options,
                 NullLogger<TradingAgent.Manager.TradingManager>.Instance);
             IReadOnlyList<IReadOnlyList<TradingSignal>> groups =
             [
@@ -316,8 +318,14 @@ public sealed class TradingManagerSafetyTests
                 }
             ];
 
+            // A valid approval intent so the execution reaches the reconciliation check.
+            var intent = ApprovalIntent.Create(
+                groups, "source-message-live", policyProvider.Current().Version, TimeSpan.FromMinutes(2));
+            intentRegistry.Register(intent);
+
             var result = await manager.ExecuteGroupsAsync(
-                groups, "source-message-live", ExecutionAuthorization.HostToolGate("test-approver"));
+                groups, "source-message-live",
+                ExecutionAuthorization.HostToolGate("test-approver", intent));
 
             Assert.IsFalse(result.Executed);
             Assert.IsFalse(broker.WasCalled);

@@ -7,9 +7,9 @@ execution profile behind AgentFox's existing agent facade. Do not replace the
 current main-agent or trading-execution architecture wholesale.
 
 AgentFox already references `Microsoft.Agents.AI.Harness`
-(`1.11.1-preview.260625.1`) in the host, shared plugin project, and
-`TradingAgent`. The package is not currently instantiated with
-`AsHarnessAgent`.
+(`1.13.0-preview.260703.1`, pinned centrally in `Directory.Packages.props`) in
+the host, shared plugin project, and `TradingAgent`. `AsHarnessAgent` is used
+only inside the `HarnessAgentFactory` adapter.
 
 HarnessAgent provides a composed pipeline for function invocation, persistent
 chat history, context compaction, todo and mode tracking, file access and
@@ -232,13 +232,16 @@ model, integration tests, telemetry, and kill switch.
 
 ## Recommended Initial Backlog
 
-1. Add `HarnessOptions` and a disabled-by-default profile selector.
-2. Design and implement immutable approval-intent records (Phase 3) — starts
-   now, in parallel; it hardens the existing trading path and does not depend
-   on Harness.
-3. Move the `Microsoft.Agents.AI.Harness` version to
-   `Directory.Packages.props` and document the preview-bump policy.
-4. Implement and test the AgentFox-to-Harness tool bridge.
+1. ~~Add `HarnessOptions` and a disabled-by-default profile selector.~~ Done —
+   `src/Agent/Harness/`, bound from the `Harness` config section.
+2. ~~Design and implement immutable approval-intent records (Phase 3).~~ Done —
+   `ApprovalIntent`/`ApprovalIntentRegistry`; `TradingManager` revalidates hash,
+   policy version, expiry, and single-use before submission.
+3. ~~Move package versions to `Directory.Packages.props` and document the
+   preview-bump policy.~~ Done — full central package management at repo root.
+4. ~~Implement and test the AgentFox-to-Harness tool bridge.~~ Done —
+   `AgentBuilder.CreateGatewayTools()`/`ExecuteThroughGatewayAsync()`; bypass
+   tests in `HarnessAdapterTests`.
 5. Add trace/correlation IDs through trading proposal and execution flows.
 6. Build the read-only `TradingResearchHarness` pilot, including provenance
    tagging of research output and sub-agent resource budgets.

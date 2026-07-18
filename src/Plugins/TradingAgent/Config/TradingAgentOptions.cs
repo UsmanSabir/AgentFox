@@ -43,6 +43,13 @@ public class TradingAgentOptions
     public int TakeProfitRetryIntervalMinutes { get; set; } = 10;
 
     /// <summary>
+    /// Seconds an approval intent stays valid between validation and broker submission
+    /// (ApprovalRequired mode). Expired intents are rejected and need re-approval. Default 120,
+    /// floored at 10.
+    /// </summary>
+    public int ApprovalIntentTtlSeconds { get; set; } = 120;
+
+    /// <summary>
     /// Maximum take-profit retry attempts before giving up (logged). At the default 10-min interval, 36
     /// attempts ≈ one full trading session. Attempts accrue only while the market is open.
     /// </summary>

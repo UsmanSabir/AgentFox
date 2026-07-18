@@ -26,6 +26,7 @@ public sealed class TradingManager
     private readonly TradingPolicyProvider _policyProvider;
     private readonly ITradingRiskEngine _riskEngine;
     private readonly TradingReconciliationState _reconciliation;
+    private readonly ApprovalIntentRegistry _intentRegistry;
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly ILogger<TradingManager> _logger;
 
@@ -36,6 +37,7 @@ public sealed class TradingManager
         TradingPolicyProvider policyProvider,
         ITradingRiskEngine riskEngine,
         TradingReconciliationState reconciliation,
+        ApprovalIntentRegistry intentRegistry,
         IOptions<TradingAgentOptions> options,
         ILogger<TradingManager> logger)
     {
@@ -45,6 +47,7 @@ public sealed class TradingManager
         _policyProvider = policyProvider;
         _riskEngine = riskEngine;
         _reconciliation = reconciliation;
+        _intentRegistry = intentRegistry;
         _options = options;
         _logger = logger;
     }
@@ -74,9 +77,20 @@ public sealed class TradingManager
             return TradingExecutionResult.Rejected(policy.Version,
                 "Pre-trade risk validation failed: " + string.Join(" ", risk.Violations));
 
-        if (mode == "APPROVALREQUIRED" && authorization?.Method != "host-tool-gate")
-            return TradingExecutionResult.Rejected(policy.Version,
-                "ApprovalRequired mode needs an authorization from the host tool-approval gate.");
+        if (mode == "APPROVALREQUIRED")
+        {
+            if (authorization?.Method != "host-tool-gate")
+                return TradingExecutionResult.Rejected(policy.Version,
+                    "ApprovalRequired mode needs an authorization from the host tool-approval gate.");
+
+            var intentFailure = ValidateApprovalIntent(
+                authorization.Intent, groups, sourceMessage, policy.Version);
+            if (intentFailure is not null)
+            {
+                _logger.LogWarning("[TradingManager] Approval intent rejected: {Reason}", intentFailure);
+                return TradingExecutionResult.Rejected(policy.Version, intentFailure);
+            }
+        }
 
         if (mode is "APPROVALREQUIRED" or "BOUNDEDAUTO"
             && _options.Value.RequireReconciliationHealthy)
@@ -169,6 +183,38 @@ public sealed class TradingManager
         var json = JsonSerializer.Serialize(result, Json);
         await _repository.CompleteExecutionAsync(result.ExecutionId, state, json, ct);
         await _repository.AppendEventAsync(result.ExecutionId, state, json, ct);
+    }
+
+    /// <summary>
+    /// Revalidates the immutable approval intent immediately before submission. The intent must
+    /// exist, be unexpired, match the current policy version, hash-match the exact groups being
+    /// submitted, and never have been consumed before. Returns a rejection reason, or null when valid.
+    /// </summary>
+    private string? ValidateApprovalIntent(
+        ApprovalIntent? intent,
+        IReadOnlyList<IReadOnlyList<TradingSignal>> groups,
+        string? sourceMessage,
+        string policyVersion)
+    {
+        if (intent is null)
+            return "ApprovalRequired mode needs an immutable approval intent bound to the validated orders.";
+
+        if (DateTime.UtcNow > intent.ExpiresUtc)
+            return $"Approval intent {intent.IntentId} expired at {intent.ExpiresUtc:O}; re-approval is required.";
+
+        if (!string.Equals(intent.PolicyVersion, policyVersion, StringComparison.Ordinal))
+            return $"Approval intent {intent.IntentId} was approved under policy '{intent.PolicyVersion}' " +
+                   $"but the current policy is '{policyVersion}'; re-approval is required.";
+
+        var currentHash = ApprovalIntent.ComputeHash(groups, sourceMessage, policyVersion);
+        if (!string.Equals(intent.IntegrityHash, currentHash, StringComparison.Ordinal))
+            return $"Approval intent {intent.IntentId} integrity hash does not match the submitted orders; " +
+                   "the request was modified after approval.";
+
+        if (!_intentRegistry.TryConsume(intent.IntentId, out _))
+            return $"Approval intent {intent.IntentId} was already consumed or never registered; replay rejected.";
+
+        return null;
     }
 
     private static string BuildIdempotencyKey(string? sourceMessage, string requestJson, string policyVersion)

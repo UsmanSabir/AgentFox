@@ -35,6 +35,7 @@ public sealed class PlaceOrderTool : BaseTool
     private readonly TradingPolicyProvider _policyProvider;
     private readonly IOptions<AhkConfig> _ahkConfig;
     private readonly PendingTakeProfitStore _pendingSells;
+    private readonly ApprovalIntentRegistry _intentRegistry;
     private readonly ILogger<PlaceOrderTool> _logger;
 
     public override string Name => "place_order";
@@ -66,6 +67,7 @@ public sealed class PlaceOrderTool : BaseTool
         TradingPolicyProvider policyProvider,
         IOptions<AhkConfig> ahkConfig,
         PendingTakeProfitStore pendingSells,
+        ApprovalIntentRegistry intentRegistry,
         ILogger<PlaceOrderTool> logger)
     {
         _manager      = manager;
@@ -73,6 +75,7 @@ public sealed class PlaceOrderTool : BaseTool
         _policyProvider = policyProvider;
         _ahkConfig    = ahkConfig;
         _pendingSells = pendingSells;
+        _intentRegistry = intentRegistry;
         _logger       = logger;
     }
 
@@ -257,9 +260,17 @@ public sealed class PlaceOrderTool : BaseTool
         IReadOnlyList<OrderResult> results;
         try
         {
+            IReadOnlyList<IReadOnlyList<TradingSignal>> groups = new[] { (IReadOnlyList<TradingSignal>)signals };
+
+            // Bind this validated request to an immutable, one-time, expiring intent. TradingManager
+            // recomputes the hash before submission, so any drift after this point is rejected.
+            var intent = ApprovalIntent.Create(groups, rawMessage, policy.Version,
+                TimeSpan.FromSeconds(Math.Max(10, opts.ApprovalIntentTtlSeconds)));
+            _intentRegistry.Register(intent);
+
             var execution = await _manager.ExecuteGroupsAsync(
-                new[] { (IReadOnlyList<TradingSignal>)signals }, rawMessage,
-                ExecutionAuthorization.HostToolGate());
+                groups, rawMessage,
+                ExecutionAuthorization.HostToolGate(intent: intent));
             if (!execution.Executed)
                 return ToolResult.Ok(Skipped(execution.Reason));
             results = execution.Groups.FirstOrDefault() ?? Array.Empty<OrderResult>();

@@ -94,6 +94,7 @@ public sealed class TradingAgentModule : IAgentAwareModule
         services.AddSingleton<ITradingRepository, SqliteTradingRepository>();
         services.AddSingleton<ITradingRiskEngine, TradingRiskEngine>();
         services.AddSingleton<TradingReconciliationState>();
+        services.AddSingleton<ApprovalIntentRegistry>();
         services.AddSingleton<TradingAgent.Manager.TradingManager>();
 
         services.AddSingleton<DuplicateSignalFilter>(sp =>
@@ -211,8 +212,10 @@ public sealed class TradingAgentModule : IAgentAwareModule
             new ParseSignalTool(chatClient, loggers.CreateLogger<ParseSignalTool>()),
             new CheckMarketTool(calendar),
             new PlaceOrderTool(manager, agentOptions, policy, ahkConfig, pendingSells,
+                _services!.GetRequiredService<ApprovalIntentRegistry>(),
                 loggers.CreateLogger<PlaceOrderTool>()),
             new PlaceOrdersTool(manager, agentOptions, policy, ahkConfig, pendingSells,
+                _services!.GetRequiredService<ApprovalIntentRegistry>(),
                 loggers.CreateLogger<PlaceOrdersTool>()),
             new LogSignalTool(ahkConfig, loggers.CreateLogger<LogSignalTool>()),
             new CreateTradeProposalTool(repository, policy),

@@ -23,8 +23,10 @@ public sealed record ExecutionClaim(
 public sealed record ExecutionAuthorization(
     string Method,
     string Actor,
-    DateTime AuthorizedUtc)
+    DateTime AuthorizedUtc,
+    ApprovalIntent? Intent = null)
 {
-    public static ExecutionAuthorization HostToolGate(string actor = "agentfox-hitl") =>
-        new("host-tool-gate", actor, DateTime.UtcNow);
+    public static ExecutionAuthorization HostToolGate(
+        string actor = "agentfox-hitl", ApprovalIntent? intent = null) =>
+        new("host-tool-gate", actor, DateTime.UtcNow, intent);
 }

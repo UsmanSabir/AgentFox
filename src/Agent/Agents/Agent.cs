@@ -707,6 +707,39 @@ public class AgentBuilder
         return this;
     }
 
+    /// <summary>
+    /// Executes a tool through the canonical gateway pipeline: registry/skill lookup, the
+    /// plan/HITL approval gate, plugin lifecycle hooks, and experience learning. This is the
+    /// only entry point external agent runtimes (e.g. the Harness adapter) may use to run
+    /// AgentFox tools — never call <c>ITool.ExecuteAsync</c> directly from a bridge.
+    /// </summary>
+    public Task<ToolResult> ExecuteThroughGatewayAsync(
+        string toolName, Dictionary<string, object?> arguments, CancellationToken ct = default)
+        => ExecuteToolAsync(toolName, arguments, ct);
+
+    /// <summary>
+    /// Wraps every currently available tool (registry + enabled skills) as an
+    /// <see cref="AITool"/> whose invocation runs through the same gateway pipeline as the
+    /// built agent's own tools. Used by the Harness adapter so bridged tools cannot bypass
+    /// AgentFox policy gates.
+    /// </summary>
+    public IReadOnlyList<AITool> CreateGatewayTools()
+    {
+        var bridged = new List<AITool>();
+        foreach (var toolDefinition in GetAvailableTools())
+        {
+            try
+            {
+                bridged.Add(CreateAgentTool(toolDefinition));
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(ex, "Failed to bridge tool {ToolName} for gateway use", toolDefinition.Name);
+            }
+        }
+        return bridged;
+    }
+
     public AgentBuilder WithHistoryProvider(ChatHistoryProvider chatHistoryProvider)
     {
         _chatHistoryProvider = chatHistoryProvider;
