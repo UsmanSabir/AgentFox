@@ -4,10 +4,14 @@ param(
     [string]$InstallDir = $env:AGENTFOX_INSTALL_DIR,
     [string]$BinaryUrl = $env:AGENTFOX_BINARY_URL,
     [switch]$BuildFromSource,
-    [switch]$SkipService
+    [switch]$SkipService,
+    [switch]$NoTrading
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Allow the one-liner (irm | iex) to opt out of the Trading plugin via env var.
+if (-not $NoTrading -and $env:AGENTFOX_NO_TRADING -eq '1') { $NoTrading = $true }
 
 if (-not $RepoUrl) { $RepoUrl = 'https://github.com/UsmanSabir/AgentFox.git' }
 
@@ -175,11 +179,18 @@ if (-not $installed) {
 
     # Publish the Trading plugin into plugins/ so the runtime plugin loader discovers it.
     $pluginProject = Join-Path $sourceRoot 'src/Plugins/TradingAgent/TradingAgent.csproj'
-    if (Test-Path $pluginProject) {
+    if (-not $NoTrading -and (Test-Path $pluginProject)) {
         $pluginDir = Join-Path $resolvedInstallDir 'plugins/TradingAgent'
         Write-Info 'Publishing Trading plugin into plugins/TradingAgent'
         & dotnet publish $pluginProject -c Release -r $rid --self-contained false -o $pluginDir --verbosity minimal
     }
+}
+
+# The prebuilt archive bundles the Trading plugin; strip it for a core-only install.
+$tradingPluginDir = Join-Path $resolvedInstallDir 'plugins/TradingAgent'
+if ($NoTrading -and (Test-Path $tradingPluginDir)) {
+    Write-Info 'Removing Trading plugin (-NoTrading)'
+    Remove-Item $tradingPluginDir -Recurse -Force
 }
 
 $launcher = Join-Path $resolvedInstallDir 'agentfox.cmd'
@@ -200,8 +211,13 @@ Write-Host "Install directory: $resolvedInstallDir" -ForegroundColor Green
 Write-Host 'Run it with:' -ForegroundColor Yellow
 Write-Host "  $resolvedInstallDir\agentfox.cmd" -ForegroundColor Yellow
 Write-Host ''
-Write-Host 'Trading plugin is enabled for LIVE auto-execution (AutoExecute=true, ExecutionMode=BoundedAuto).' -ForegroundColor Red
-Write-Host 'Configure Plugins.TradingAgent.AllowedSymbols and Ahk credentials in appsettings.json before sending signals.' -ForegroundColor Red
+if ($NoTrading) {
+    Write-Host 'Trading plugin NOT installed (-NoTrading). Re-run the installer without -NoTrading to add it.' -ForegroundColor Yellow
+}
+else {
+    Write-Host 'Trading plugin is enabled for LIVE auto-execution (AutoExecute=true, ExecutionMode=BoundedAuto).' -ForegroundColor Red
+    Write-Host 'Configure Plugins.TradingAgent.AllowedSymbols and Ahk credentials in appsettings.json before sending signals.' -ForegroundColor Red
+}
 
 if (-not $SkipService) {
     Write-Host 'To install as a Windows service later, run:' -ForegroundColor DarkYellow

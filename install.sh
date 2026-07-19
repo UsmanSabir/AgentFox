@@ -6,6 +6,21 @@ BRANCH="${AGENTFOX_BRANCH:-}"
 INSTALL_DIR="${AGENTFOX_INSTALL_DIR:-$HOME/.agentfox}"
 BINARY_URL="${AGENTFOX_BINARY_URL:-}"
 BUILD_FROM_SOURCE="${AGENTFOX_BUILD_FROM_SOURCE:-0}"
+WITH_TRADING=1
+if [ "${AGENTFOX_NO_TRADING:-0}" = "1" ]; then
+  WITH_TRADING=0
+fi
+
+for arg in "$@"; do
+  case "$arg" in
+    --no-trading) WITH_TRADING=0 ;;
+    --with-trading) WITH_TRADING=1 ;;
+    *)
+      echo "Unknown option: $arg (supported: --no-trading, --with-trading)" >&2
+      exit 1
+      ;;
+  esac
+done
 
 info() {
   echo "==> $*"
@@ -203,11 +218,19 @@ if [ "$INSTALLED" -eq 0 ]; then
   cp -R "$PUBLISH_DIR"/. "$INSTALL_DIR"/
 
   # Publish the Trading plugin into plugins/ so the runtime plugin loader discovers it.
-  PLUGIN_PROJECT="$SOURCE_ROOT/src/Plugins/TradingAgent/TradingAgent.csproj"
-  if [ -f "$PLUGIN_PROJECT" ]; then
-    info "Publishing Trading plugin into plugins/TradingAgent"
-    dotnet publish "$PLUGIN_PROJECT" -c Release -r "$RID" --self-contained false -o "$INSTALL_DIR/plugins/TradingAgent" --verbosity minimal
+  if [ "$WITH_TRADING" = "1" ]; then
+    PLUGIN_PROJECT="$SOURCE_ROOT/src/Plugins/TradingAgent/TradingAgent.csproj"
+    if [ -f "$PLUGIN_PROJECT" ]; then
+      info "Publishing Trading plugin into plugins/TradingAgent"
+      dotnet publish "$PLUGIN_PROJECT" -c Release -r "$RID" --self-contained false -o "$INSTALL_DIR/plugins/TradingAgent" --verbosity minimal
+    fi
   fi
+fi
+
+# The prebuilt archive bundles the Trading plugin; strip it for a core-only install.
+if [ "$WITH_TRADING" != "1" ] && [ -d "$INSTALL_DIR/plugins/TradingAgent" ]; then
+  info "Removing Trading plugin (--no-trading)"
+  rm -rf "$INSTALL_DIR/plugins/TradingAgent"
 fi
 
 # Ensure the native launcher is executable (prebuilt archives may not preserve the bit).
@@ -233,5 +256,9 @@ echo "Install directory: $INSTALL_DIR"
 echo 'Run it with:'
 echo "  $INSTALL_DIR/agentfox"
 echo
-echo 'Trading plugin is enabled for LIVE auto-execution (AutoExecute=true, ExecutionMode=BoundedAuto).'
-echo 'Configure Plugins.TradingAgent.AllowedSymbols and Ahk credentials in appsettings.json before sending signals.'
+if [ "$WITH_TRADING" = "1" ]; then
+  echo 'Trading plugin is enabled for LIVE auto-execution (AutoExecute=true, ExecutionMode=BoundedAuto).'
+  echo 'Configure Plugins.TradingAgent.AllowedSymbols and Ahk credentials in appsettings.json before sending signals.'
+else
+  echo 'Trading plugin NOT installed (--no-trading). Re-run the installer without --no-trading to add it.'
+fi
