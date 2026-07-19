@@ -1,11 +1,18 @@
 <script lang="ts">
   import '../app.css';
   import Sidebar from '$lib/components/Sidebar.svelte';
-  import { sidebarCollapsed, agentStatus } from '$lib/stores';
+  import { sidebarCollapsed, agentStatus, resetChat } from '$lib/stores';
   import { api } from '$lib/api';
   import { onMount } from 'svelte';
   import { page } from '$app/stores';
   import { MessageSquare } from 'lucide-svelte';
+  import { goto } from '$app/navigation';
+
+  function startNewChat(event: MouseEvent) {
+    event.preventDefault();
+    resetChat();
+    goto('/chat');
+  }
 
   // Poll agent status every 5 s
   onMount(() => {
@@ -55,7 +62,7 @@
       </div>
       <div class="header-right">
         <!-- Quick chat shortcut -->
-        <a href="/chat" class="chat-shortcut" title="Open Chat">
+        <a href="/chat" class="chat-shortcut" title="Start a new chat" on:click={startNewChat}>
           <MessageSquare size={16} />
           <span>New chat</span>
         </a>

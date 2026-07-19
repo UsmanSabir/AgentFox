@@ -6,7 +6,7 @@ import { defineConfig, loadEnv } from 'vite';
 // BACKEND_URL is intentionally NOT prefixed with VITE_ — it stays server-side
 // (used only for the dev proxy) and is never bundled into the browser output.
 export default defineConfig(({ mode }) => {
-	const env = loadEnv(mode, process.cwd(), ''); // load all env vars (no prefix filter)
+	const env = loadEnv(mode, '.', ''); // Vite resolves this from the frontend project root
 	const backendUrl = env.BACKEND_URL ?? 'http://localhost:5000';
 
 	return {

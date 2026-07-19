@@ -102,4 +102,82 @@ public class AhkConfig
     /// the modal field #buysymbol, which only exists while the buy dialog is open.
     /// </summary>
     public string LoggedInSelector { get; set; } = "#buyorder";
+
+    // ── Portfolio / balance (Exposure dialog) ──────────────────────────────────
+    // The AHK portfolio lives in the "Exposure" modal (confirmed from the live portal DOM):
+    // click #exposure in the menu, pick the account in #expaccount (the change event triggers the
+    // data load), then flip to the Open Position tab and back to Collaterals — only after that does
+    // the portal render the collaterals grid (#collateralstable) and the exposure summary panels
+    // (#exposuretable1..3, where "Net Cash" lives). The defaults encode exactly that flow; every
+    // step stays configurable in case the portal changes. On an extraction miss the broker dumps
+    // portfolio_*.html + a screenshot into LogDir for selector re-discovery.
+
+    /// <summary>
+    /// Absolute or portal-relative URL of a page showing holdings and balance. Empty (default) →
+    /// the portfolio is a dialog on the trading screen, opened via <see cref="PortfolioNavSelector"/>.
+    /// </summary>
+    public string PortfolioUrl { get; set; } = "";
+
+    /// <summary>
+    /// CSS selector of a collapsed sidebar/hamburger toggle that must be clicked to REVEAL the
+    /// portfolio menu item before it can be clicked. On the AHK portal the "Exposure" item lives in
+    /// a slide-out left menu that is hidden until the ☰ toggle is clicked. Empty → the menu item is
+    /// assumed already reachable. Set this to the ☰ button's selector if the dialog never opens.
+    /// </summary>
+    public string PortfolioMenuToggleSelector { get; set; } = "";
+
+    /// <summary>
+    /// CSS selector of the menu element that opens the Exposure/portfolio dialog. Its click handler
+    /// (site.js OpenExposureModalPopUp) builds the dialog's dynamic content and shows the modal; the
+    /// broker fires it with a dispatched MouseEvent (see AhkBroker.ClickViaDomAsync).
+    /// </summary>
+    public string PortfolioNavSelector { get; set; } = "#exposure";
+
+    /// <summary>
+    /// CSS selector of the account dropdown inside the dialog. The first option with a non-"0"
+    /// value is selected (option value "0" is the "Select Account" placeholder). Empty → skip.
+    /// </summary>
+    public string PortfolioAccountSelectSelector { get; set; } = "#expaccount";
+
+    /// <summary>
+    /// Elements clicked, in order, after the account is selected. The AHK dialog only renders the
+    /// collaterals grid after flipping to Open Position and back to Collaterals (#collat).
+    /// </summary>
+    public List<string> PortfolioTabSequence { get; set; } = ["a[href='#openposition']", "#collat"];
+
+    /// <summary>CSS selector of the holdings table. Empty → pick the best-scoring table by header names.</summary>
+    public string HoldingsTableSelector { get; set; } = "#collateralstable";
+
+    /// <summary>
+    /// Exact column-header → field mapping for the holdings grid (case-insensitive header match).
+    /// Keys are the internal field kinds: symbol, quantity, avgPrice, currentPrice, currentValue,
+    /// investment, profitLoss. Defaults match the AHK collaterals grid; kinds not mapped here fall
+    /// back to header-synonym heuristics. NOTE: on the AHK grid "Unsettled" is the unrealized P/L
+    /// ((MTM_Price − Ave_Rate_Buy) × Qty, confirmed against live data) — never map profitLoss to
+    /// "P/L_Settled", which is realized-only and normally 0.
+    /// </summary>
+    public Dictionary<string, string> HoldingsColumnMap { get; set; } = new()
+    {
+        ["symbol"]       = "Symbol",
+        ["quantity"]     = "Total_Qty",
+        ["avgPrice"]     = "Ave_Rate_Buy",
+        ["currentPrice"] = "MTM_Price",
+        ["currentValue"] = "Amount",
+        ["profitLoss"]   = "Unsettled",
+    };
+
+    /// <summary>
+    /// CSS selector of the element (panel) containing the cash amount. Defaults to the first
+    /// exposure summary panel. Empty → the whole page text is scanned instead.
+    /// </summary>
+    public string AvailableBalanceSelector { get; set; } = "#exposuretable1";
+
+    /// <summary>
+    /// Label whose adjacent number is the available cash. The AHK exposure panel shows
+    /// "Net Cash" (no "Available …" wording exists on this portal).
+    /// </summary>
+    public string AvailableBalanceLabel { get; set; } = "Net Cash";
+
+    /// <summary>How long to wait for the dialog/grid to render after each navigation step (ms).</summary>
+    public int PortfolioLoadTimeoutMs { get; set; } = 10_000;
 }

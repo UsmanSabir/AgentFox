@@ -80,6 +80,49 @@ public sealed class AhkBroker : IAsyncDisposable
     }
 
     /// <summary>
+    /// Opens a broker session and verifies authentication without opening an order dialog or
+    /// submitting an order. Intended for startup diagnostics and opt-in integration tests.
+    /// </summary>
+    public async Task<AhkLoginVerificationResult> VerifyLoginAsync(
+        bool forceRestart = false,
+        CancellationToken ct = default)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            var cfg = _config.Value;
+            if (string.IsNullOrWhiteSpace(cfg.PortalUrl))
+                throw new InvalidOperationException("AHK PortalUrl is required.");
+
+            await EnsureBrowserAsync(forceRestart, ct);
+            if (!IsHealthy())
+                throw new InvalidOperationException("Browser unavailable after launch.");
+
+            if (!await IsLoggedInAsync())
+            {
+                if (string.IsNullOrWhiteSpace(cfg.Username) || string.IsNullOrWhiteSpace(cfg.Password))
+                    throw new InvalidOperationException(
+                        "AHK Username and Password are required when no authenticated session exists.");
+                await LoginAsync();
+            }
+
+            if (!await IsLoggedInAsync())
+                throw new InvalidOperationException(
+                    $"AHK login could not be verified with selector '{cfg.LoggedInSelector}'.");
+
+            return new AhkLoginVerificationResult(
+                true,
+                _page?.Url ?? cfg.PortalUrl,
+                cfg.LoggedInSelector,
+                DateTime.UtcNow);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>
     /// (Re)launches the browser if needed. ASSUMES the caller holds <see cref="_gate"/> — it must
     /// never take the gate itself (it is also called from the order path which already holds it).
     /// Any stray browser this broker left running on a previous run is killed first, and stale
@@ -385,6 +428,581 @@ public sealed class AhkBroker : IAsyncDisposable
 
         _logger.LogWarning("[AhkBroker] Could not read a live price for {Symbol} (raw '{Raw}').", symbol, raw);
         return null;
+    }
+
+    // ── Portfolio / balance ───────────────────────────────────────────────────
+
+    // Header-synonym map used to recognize the holdings grid and its columns without hard-coding
+    // the portal's exact wording. Order matters: more specific kinds (market value) are matched
+    // before generic ones (price) so "Market Value" is never consumed as a price column.
+    private static readonly (string Kind, string[] Synonyms)[] _holdingsColumns =
+    [
+        ("symbol",       ["symbol", "scrip", "stock", "company", "code"]),
+        ("quantity",     ["qty", "quantity", "volume", "shares", "holding", "position"]),
+        ("investment",   ["investment", "cost value", "buy value", "buy amount", "total cost", "cost amount"]),
+        ("currentValue", ["market value", "current value", "mkt value", "value"]),
+        ("avgPrice",     ["avg", "average", "cost price", "buy rate", "purchase", "cost"]),
+        ("currentPrice", ["market rate", "current rate", "market price", "current price", "last price", "last rate", "close", "rate", "price"]),
+        ("profitLoss",   ["p/l", "p&l", "profit", "gain", "unrealized"]),
+    ];
+
+    private static readonly string[] _balanceKeywords =
+    [
+        "available amount", "available cash", "available limit", "available balance",
+        "avail amount", "buying power", "cash balance", "available"
+    ];
+
+    /// <summary>
+    /// Reads the account's available cash and current holdings (symbol, shares, cost, market value)
+    /// from the portal in one browser session. Read-only — nothing is clicked except an optional
+    /// configured portfolio nav element. Column mapping is heuristic (see <see cref="_holdingsColumns"/>);
+    /// when the holdings grid or the balance cannot be found, the page HTML + a screenshot are dumped
+    /// to LogDir so the real selectors can be configured (Ahk.HoldingsTableSelector etc.), and the
+    /// snapshot carries a warning instead of invented numbers.
+    /// </summary>
+    public async Task<PortfolioSnapshot> GetPortfolioAsync()
+    {
+        await _gate.WaitAsync();
+        try
+        {
+            await PrepareSessionWithRetryAsync();
+            await NavigateToPortfolioViewAsync();
+            return await ExtractPortfolioAsync();
+        }
+        finally
+        {
+            if (_config.Value.CloseBrowserAfterOrder)
+                await TeardownAsync();
+            _gate.Release();
+        }
+    }
+
+
+    /// <summary>
+    /// Brings the portfolio data on screen. AHK flow (defaults): click the #exposure menu item to
+    /// open the Exposure dialog, select the account in #expaccount (its change event triggers the
+    /// data load), flip to Open Position and back to Collaterals (the grid only renders after that),
+    /// then wait — bounded — for grid rows to appear. A configured PortfolioUrl replaces the menu
+    /// click with a navigation; the account/tab steps still run when their selectors exist.
+    /// ASSUMES the gate is held.
+    /// </summary>
+    private async Task NavigateToPortfolioViewAsync()
+    {
+        var cfg = _config.Value;
+        var timeout = Math.Max(1_000, cfg.PortfolioLoadTimeoutMs);
+
+        if (!string.IsNullOrWhiteSpace(cfg.PortfolioUrl))
+        {
+            var url = Uri.TryCreate(cfg.PortfolioUrl, UriKind.Absolute, out var abs)
+                ? abs.ToString()
+                : new Uri(new Uri(cfg.PortalUrl), cfg.PortfolioUrl).ToString();
+            await _page!.GoToAsync(url, new NavigationOptions
+            {
+                Timeout = timeout,
+                WaitUntil = [WaitUntilNavigation.Networkidle2]
+            });
+        }
+        else if (!string.IsNullOrWhiteSpace(cfg.PortfolioNavSelector))
+        {
+            // The "Exposure" item lives in a slide-out sidebar. Open it first if a toggle is
+            // configured, so the menu item is rendered/visible before we click it.
+            if (!string.IsNullOrWhiteSpace(cfg.PortfolioMenuToggleSelector))
+            {
+                if (await ClickViaDomAsync(cfg.PortfolioMenuToggleSelector))
+                    await Task.Delay(600); // sidebar slide-out animation
+                else
+                    _logger.LogWarning(
+                        "[AhkBroker] Menu toggle '{Selector}' not found — trying the nav item directly.",
+                        cfg.PortfolioMenuToggleSelector);
+            }
+
+            // Wait for the nav item to exist (it may be lazily rendered when the menu opens).
+            try
+            {
+                await _page!.WaitForSelectorAsync(cfg.PortfolioNavSelector,
+                    new WaitForSelectorOptions { Timeout = Math.Min(timeout, 5_000) });
+            }
+            catch (Exception) { /* fall through — the open attempt below reports if it's truly absent */ }
+
+            if (!await OpenPortfolioDialogAsync(cfg, timeout))
+            {
+                await DumpPortfolioPageAsync("no_dialog");
+            }
+        }
+        else
+        {
+            // No explicit target: give the current screen a moment to finish rendering.
+            await Task.Delay(1_000);
+        }
+
+        await SelectPortfolioAccountAsync(cfg);
+        await RunPortfolioTabSequenceAsync(cfg);
+        await WaitForHoldingsRowsAsync(cfg, timeout);
+    }
+
+    /// <summary>
+    /// Opens the AHK Exposure dialog and returns true once its scaffold exists. The "Exposure" menu
+    /// item (#exposure) has an addEventListener('click') that calls the site's OpenExposureModalPopUp():
+    /// it shows the modal AND builds the #exposuredynamic scaffold (tabs + #collateralstable) the data
+    /// AJAX later writes into. Confirmed against the live portal: only a dispatched, bubbling
+    /// MouseEvent fires that handler — a bare element.click() does not, and Puppeteer's ClickAsync
+    /// can't reach the element because the sidebar is parked off-screen (left:-200). The success
+    /// signal is the holdings table EXISTING (not visible: DataTables keeps the scroll header
+    /// zero-height). Retries a few times to absorb the handler binding slightly after page load.
+    /// </summary>
+    private async Task<bool> OpenPortfolioDialogAsync(AhkConfig cfg, int timeout)
+    {
+        var scaffoldSelector = !string.IsNullOrWhiteSpace(cfg.HoldingsTableSelector)
+            ? cfg.HoldingsTableSelector
+            : cfg.PortfolioAccountSelectSelector;
+
+        for (var attempt = 1; attempt <= 4; attempt++)
+        {
+            var fired = await ClickViaDomAsync(cfg.PortfolioNavSelector);
+            if (!fired)
+            {
+                _logger.LogWarning(
+                    "[AhkBroker] PortfolioNavSelector '{Selector}' not found on the page (attempt {Attempt}).",
+                    cfg.PortfolioNavSelector, attempt);
+            }
+            else if (await WaitForExistsAsync(scaffoldSelector, Math.Min(timeout, 3_000)))
+            {
+                return true;
+            }
+
+            await Task.Delay(800);
+        }
+
+        _logger.LogWarning(
+            "[AhkBroker] Exposure dialog scaffold '{Selector}' never appeared after triggering '{Nav}'.",
+            scaffoldSelector, cfg.PortfolioNavSelector);
+        return false;
+    }
+
+    /// <summary>Waits until the selector matches an element in the DOM (visible or not). Empty/timeout → false.</summary>
+    private async Task<bool> WaitForExistsAsync(string selector, int timeoutMs)
+    {
+        if (string.IsNullOrWhiteSpace(selector)) return false;
+        try
+        {
+            await _page!.WaitForSelectorAsync(selector,
+                new WaitForSelectorOptions { Timeout = Math.Max(500, timeoutMs) });
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Fires the site's click handler on the first match by dispatching a full bubbling MouseEvent
+    /// (plus a jQuery-triggered click for delegated handlers). This runs the handler regardless of
+    /// the element's visibility/viewport position — needed for the off-screen sidebar menu item and
+    /// Bootstrap tab triggers that Puppeteer's ClickAsync can't reach. A bare element.click() is
+    /// deliberately NOT used: on the AHK portal it does not invoke the Exposure open handler.
+    /// Returns false only when the selector matches nothing.
+    /// </summary>
+    private async Task<bool> ClickViaDomAsync(string selector) =>
+        await _page!.EvaluateFunctionAsync<bool>(
+            """
+            (sel) => {
+                const el = document.querySelector(sel);
+                if (!el) return false;
+                try {
+                    el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                } catch (e) {}
+                for (const jq of [window.jQuery, window.$].filter(Boolean)) {
+                    try { jq(el).trigger('click'); } catch (e) {}
+                }
+                return true;
+            }
+            """, selector);
+
+    /// <summary>
+    /// Picks the first real account in the dialog's account dropdown — option value "0" is the
+    /// "Select Account" placeholder. SelectAsync fires the change event the portal listens on to
+    /// load the exposure panels and collaterals. No-op when the dropdown is absent/unconfigured.
+    /// </summary>
+    private async Task SelectPortfolioAccountAsync(AhkConfig cfg)
+    {
+        if (string.IsNullOrWhiteSpace(cfg.PortfolioAccountSelectSelector)) return;
+
+        var values = await _page!.EvaluateFunctionAsync<string[]>(
+            """
+            (sel) => {
+                const e = document.querySelector(sel);
+                return e && e.options ? Array.from(e.options).map(o => o.value) : [];
+            }
+            """, cfg.PortfolioAccountSelectSelector) ?? [];
+
+        var account = values.FirstOrDefault(v => !string.IsNullOrWhiteSpace(v) && v != "0");
+        if (account is null)
+        {
+            if (values.Length > 0)
+                _logger.LogWarning(
+                    "[AhkBroker] Account dropdown '{Selector}' has no selectable account (options: {Options}).",
+                    cfg.PortfolioAccountSelectSelector, string.Join(",", values));
+            return;
+        }
+
+        await _page.SelectAsync(cfg.PortfolioAccountSelectSelector, account);
+
+        // SelectAsync dispatches a native change event; also nudge the jQuery .change() handler the
+        // portal binds, in case it listens only on its own jQuery instance. Either one triggers the
+        // AJAX that fills the exposure panels and collaterals grid.
+        await _page.EvaluateFunctionAsync(
+            """
+            (sel) => {
+                for (const jq of [window.jQuery, window.$].filter(Boolean)) {
+                    try { jq(sel).trigger('change'); } catch (e) {}
+                }
+            }
+            """, cfg.PortfolioAccountSelectSelector);
+
+        await Task.Delay(1_500); // exposure panels + collaterals load via AJAX after the change event
+    }
+
+    /// <summary>
+    /// Replays the tab flips the portal needs before it renders the collaterals grid (observed on
+    /// the live portal: Open Position, then back to Collaterals). Missing elements are skipped with
+    /// a log line so a portal change degrades gracefully instead of failing the read.
+    /// </summary>
+    private async Task RunPortfolioTabSequenceAsync(AhkConfig cfg)
+    {
+        foreach (var selector in cfg.PortfolioTabSequence.Where(s => !string.IsNullOrWhiteSpace(s)))
+        {
+            if (!await ClickViaDomAsync(selector))
+            {
+                _logger.LogWarning("[AhkBroker] Portfolio tab '{Selector}' not found — skipping.", selector);
+                continue;
+            }
+            await Task.Delay(700);
+        }
+    }
+
+    /// <summary>
+    /// Bounded poll for data rows in the holdings table body. A genuinely empty portfolio exhausts
+    /// the timeout (accepted cost — it is indistinguishable from slow AJAX from out here).
+    /// </summary>
+    private async Task WaitForHoldingsRowsAsync(AhkConfig cfg, int timeoutMs)
+    {
+        if (string.IsNullOrWhiteSpace(cfg.HoldingsTableSelector)) return;
+
+        var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+        while (DateTime.UtcNow < deadline)
+        {
+            var rows = await _page!.EvaluateFunctionAsync<int>(
+                """
+                (sel) => {
+                    const t = document.querySelector(sel);
+                    return t && t.tBodies && t.tBodies.length ? t.tBodies[0].rows.length : 0;
+                }
+                """, cfg.HoldingsTableSelector);
+            if (rows > 0) return;
+            await Task.Delay(400);
+        }
+
+        _logger.LogWarning(
+            "[AhkBroker] No rows appeared in '{Selector}' within {Timeout}ms — portfolio may be empty.",
+            cfg.HoldingsTableSelector, timeoutMs);
+    }
+
+    /// <summary>Scrapes balance + holdings from the current page. ASSUMES the gate is held.</summary>
+    private async Task<PortfolioSnapshot> ExtractPortfolioAsync()
+    {
+        var cfg = _config.Value;
+        var warnings = new List<string>();
+
+        // Every table on the page as rows of cell text (first row = header). Plain string arrays keep
+        // the Puppeteer→.NET deserialization trivial and version-proof.
+        // Cell text prefers innerText but falls back to textContent: DataTables clones the header
+        // into a zero-height "sizing" row inside the scroll body's table, and innerText of those
+        // hidden cells is empty — textContent still carries the column names.
+        var tables = await _page!.EvaluateFunctionAsync<string[][][]>(
+            """
+            (tableSelector) => {
+                const norm = t => (t || '').trim().replace(/\s+/g, ' ');
+                const cellText = c => norm(c.innerText) || norm(c.textContent);
+                const grab = t => Array.from(t.rows)
+                    .filter(r => r.cells.length >= 2)
+                    .map(r => Array.from(r.cells).map(cellText));
+                if (tableSelector) {
+                    const el = document.querySelector(tableSelector);
+                    return el ? [grab(el)] : [];
+                }
+                return Array.from(document.querySelectorAll('table')).map(grab);
+            }
+            """,
+            string.IsNullOrWhiteSpace(cfg.HoldingsTableSelector) ? null : cfg.HoldingsTableSelector) ?? [];
+
+        var holdings = new List<HoldingPosition>();
+        var best = PickHoldingsTable(tables, cfg.HoldingsColumnMap);
+        if (best is null)
+        {
+            warnings.Add(string.IsNullOrWhiteSpace(cfg.HoldingsTableSelector)
+                ? "No table on the page looked like a holdings grid (need at least symbol + quantity columns). " +
+                  "Inspect the dumped portfolio_*.html in LogDir and set Ahk.HoldingsTableSelector / Ahk.PortfolioNavSelector."
+                : $"Ahk.HoldingsTableSelector '{cfg.HoldingsTableSelector}' matched no usable table on the page.");
+            await DumpPortfolioPageAsync("no_holdings_table");
+        }
+        else
+        {
+            holdings.AddRange(ParseHoldings(best.Value.Table, best.Value.ColumnMap));
+            if (holdings.Count == 0)
+                warnings.Add("A holdings grid was found but contained no parseable position rows (empty portfolio?).");
+        }
+
+        var (balance, balanceSource) = await ReadAvailableBalanceAsync(cfg);
+        if (balance is null)
+        {
+            warnings.Add("Available balance could not be read. Inspect the dumped portfolio_*.html in LogDir " +
+                         "and set Ahk.AvailableBalanceSelector.");
+            await DumpPortfolioPageAsync("no_balance");
+        }
+
+        var totalInvestment  = SumIfAny(holdings, h => h.InvestmentValue);
+        var totalValue       = SumIfAny(holdings, h => h.CurrentValue);
+
+        _logger.LogInformation(
+            "[AhkBroker] Portfolio read: balance={Balance} holdings={Count} warnings={Warnings}",
+            balance, holdings.Count, warnings.Count);
+
+        return new PortfolioSnapshot
+        {
+            AvailableBalancePkr = balance,
+            BalanceSource       = balanceSource,
+            Holdings            = holdings,
+            TotalInvestment     = totalInvestment,
+            TotalCurrentValue   = totalValue,
+            RetrievedAtUtc      = DateTime.UtcNow,
+            Warnings            = warnings
+        };
+    }
+
+    /// <summary>
+    /// Scores every scraped table's header row against <see cref="_holdingsColumns"/> and returns the
+    /// best one with its column→kind map. A table qualifies only when both a symbol and a quantity
+    /// column are recognized — that pair is what distinguishes a holdings grid from the market-watch
+    /// and order-book tables that share the same screen.
+    /// </summary>
+    private static (string[][] Table, Dictionary<int, string> ColumnMap)? PickHoldingsTable(
+        string[][][] tables, IReadOnlyDictionary<string, string> explicitMap)
+    {
+        (string[][] Table, Dictionary<int, string> Map)? best = null;
+        var bestScore = 0;
+
+        foreach (var table in tables)
+        {
+            if (table.Length < 1) continue;
+            var headers = table[0];
+            var map = MapColumns(headers, explicitMap);
+            if (!map.ContainsValue("symbol") || !map.ContainsValue("quantity")) continue;
+
+            // Prefer the table that resolves the most distinct financial columns, then the taller one.
+            var score = map.Count * 1_000 + table.Length;
+            if (score > bestScore)
+            {
+                bestScore = score;
+                best = (table, map);
+            }
+        }
+
+        return best is null ? null : (best.Value.Table, best.Value.Map);
+    }
+
+    /// <summary>
+    /// Maps header-cell index → column kind. The configured exact-name map is applied first — it is
+    /// authoritative for the known AHK grid, where synonym matching would misfire (e.g. the generic
+    /// "rate" synonym would bind currentPrice to "Ave_Rate_Buy" instead of "MTM_Price"). Header
+    /// synonyms then fill only the kinds the explicit map left unresolved. Each kind and each
+    /// column is assigned at most once.
+    /// </summary>
+    private static Dictionary<int, string> MapColumns(
+        string[] headers, IReadOnlyDictionary<string, string> explicitMap)
+    {
+        var map = new Dictionary<int, string>();
+        var taken = new HashSet<string>();
+
+        foreach (var (kind, headerName) in explicitMap)
+        {
+            if (string.IsNullOrWhiteSpace(headerName)) continue;
+            for (var i = 0; i < headers.Length; i++)
+            {
+                if (map.ContainsKey(i)) continue;
+                if (headers[i].Equals(headerName.Trim(), StringComparison.OrdinalIgnoreCase))
+                {
+                    map[i] = kind;
+                    taken.Add(kind);
+                    break;
+                }
+            }
+        }
+
+        foreach (var (kind, synonyms) in _holdingsColumns)
+        {
+            if (taken.Contains(kind)) continue;
+            for (var i = 0; i < headers.Length; i++)
+            {
+                if (map.ContainsKey(i)) continue;
+                var header = headers[i].ToLowerInvariant();
+                if (header.Length == 0) continue;
+                if (synonyms.Any(header.Contains))
+                {
+                    map[i] = kind;
+                    taken.Add(kind);
+                    break;
+                }
+            }
+        }
+
+        return map;
+    }
+
+    private static List<HoldingPosition> ParseHoldings(string[][] table, Dictionary<int, string> map)
+    {
+        var holdings = new List<HoldingPosition>();
+
+        foreach (var row in table.Skip(1))
+        {
+            string? Cell(string kind)
+            {
+                var idx = map.FirstOrDefault(kv => kv.Value == kind, new(-1, "")).Key;
+                return idx >= 0 && idx < row.Length ? row[idx] : null;
+            }
+
+            var symbol = (Cell("symbol") ?? "").Trim().ToUpperInvariant();
+            // Skip repeated header rows, totals/footer rows and anything that isn't a ticker.
+            if (symbol.Length is 0 or > 12) continue;
+            if (!Regex.IsMatch(symbol, @"^[A-Z][A-Z0-9.\-]*$")) continue;
+            if (symbol is "TOTAL" or "SYMBOL" or "SCRIP") continue;
+
+            var qty        = ParseAmount(Cell("quantity"));
+            if (qty is null or <= 0) continue;
+
+            var avgPrice   = ParseAmount(Cell("avgPrice"));
+            var investment = ParseAmount(Cell("investment")) ?? (avgPrice is not null ? avgPrice * qty : null);
+            var price      = ParseAmount(Cell("currentPrice"));
+            var value      = ParseAmount(Cell("currentValue")) ?? (price is not null ? price * qty : null);
+            var pl         = ParseAmount(Cell("profitLoss")) ??
+                             (value is not null && investment is not null ? value - investment : null);
+
+            holdings.Add(new HoldingPosition
+            {
+                Symbol            = symbol,
+                Quantity          = qty,
+                AverageBuyPrice   = avgPrice ?? (investment is not null && qty > 0 ? Math.Round(investment.Value / qty.Value, 4) : null),
+                InvestmentValue   = investment,
+                CurrentPrice      = price ?? (value is not null && qty > 0 ? Math.Round(value.Value / qty.Value, 4) : null),
+                CurrentValue      = value,
+                ProfitLoss        = pl,
+                ProfitLossPercent = pl is not null && investment is > 0
+                    ? Math.Round(pl.Value / investment.Value * 100m, 2)
+                    : null
+            });
+        }
+
+        return holdings;
+    }
+
+    /// <summary>
+    /// Reads the cash amount by finding the configured label's line inside the configured scope
+    /// element (AHK: the "Net Cash" row of the #exposuretable1 summary panel — innerText renders
+    /// each table row as "Net Cash\t255.00"). Falls back to generic balance keywords, and to the
+    /// whole page text when the scope selector matches nothing. Returns the value plus the line it
+    /// was read from (audit trail).
+    /// </summary>
+    private async Task<(decimal? Balance, string? Source)> ReadAvailableBalanceAsync(AhkConfig cfg)
+    {
+        var scope = "";
+        if (!string.IsNullOrWhiteSpace(cfg.AvailableBalanceSelector))
+        {
+            scope = await _page!.EvaluateFunctionAsync<string>(
+                "(sel) => { const e = document.querySelector(sel); return e ? (e.innerText || e.textContent || '') : ''; }",
+                cfg.AvailableBalanceSelector) ?? "";
+        }
+        if (string.IsNullOrWhiteSpace(scope))
+        {
+            scope = await _page!.EvaluateFunctionAsync<string>(
+                "() => (document.body && document.body.innerText) ? document.body.innerText : ''") ?? "";
+        }
+
+        var labels = new List<string>();
+        if (!string.IsNullOrWhiteSpace(cfg.AvailableBalanceLabel))
+            labels.Add(cfg.AvailableBalanceLabel.Trim());
+        labels.AddRange(_balanceKeywords);
+
+        var lines = scope.Split('\n')
+            .Select(l => l.Trim())
+            .Where(l => l.Length > 0)
+            .ToArray();
+
+        foreach (var label in labels)
+        {
+            for (var i = 0; i < lines.Length; i++)
+            {
+                if (!lines[i].Contains(label, StringComparison.OrdinalIgnoreCase)) continue;
+
+                // The amount usually sits on the same line (table cells collapse to one innerText
+                // line); some layouts put it on the following line.
+                var value = FirstAmountIn(lines[i]) ??
+                            (i + 1 < lines.Length ? FirstAmountIn(lines[i + 1]) : null);
+                if (value is not null)
+                {
+                    var source = lines[i].Length > 160 ? lines[i][..160] : lines[i];
+                    return (value, source);
+                }
+            }
+        }
+
+        return (null, null);
+    }
+
+    private static decimal? FirstAmountIn(string line)
+    {
+        var match = Regex.Match(line, @"-?[0-9][0-9,]*(?:\.[0-9]+)?");
+        return match.Success ? ParseAmount(match.Value) : null;
+    }
+
+    /// <summary>Parses "12,345.67", "Rs. 12,345.67" or "(1,234)" (negative) into a decimal; null when not numeric.</summary>
+    private static decimal? ParseAmount(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+
+        var negative = raw.Contains('(') && raw.Contains(')') || raw.Contains('-');
+        var cleaned = Regex.Replace(raw, @"[^0-9.]", "");
+        if (cleaned.Length == 0) return null;
+
+        // Guard against multi-number strings collapsing into nonsense ("12.34.56").
+        if (cleaned.Count(c => c == '.') > 1) return null;
+
+        if (!decimal.TryParse(cleaned, NumberStyles.Any, CultureInfo.InvariantCulture, out var value))
+            return null;
+
+        return negative ? -value : value;
+    }
+
+    private static decimal? SumIfAny<T>(IReadOnlyList<T> items, Func<T, decimal?> selector)
+    {
+        var values = items.Select(selector).Where(v => v is not null).ToList();
+        return values.Count == 0 ? null : values.Sum();
+    }
+
+    private async Task DumpPortfolioPageAsync(string tag)
+    {
+        try
+        {
+            await ScreenshotAsync($"portfolio_{tag}");
+            var html = await _page!.EvaluateFunctionAsync<string>("() => document.body.innerHTML");
+            var path = Path.Combine(ResolvePath(_config.Value.LogDir),
+                $"portfolio_{tag}_{DateTime.UtcNow:yyyyMMdd_HHmmss}.html");
+            await File.WriteAllTextAsync(path, html);
+            _logger.LogWarning("[AhkBroker] Dumped portfolio page HTML to {Path}", path);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[AhkBroker] Could not dump portfolio page.");
+        }
     }
 
     // ── Price-band clamp ──────────────────────────────────────────────────────
@@ -1318,3 +1936,9 @@ public sealed class AhkBroker : IAsyncDisposable
         _gate.Dispose();
     }
 }
+
+public sealed record AhkLoginVerificationResult(
+    bool Authenticated,
+    string CurrentUrl,
+    string VerifiedSelector,
+    DateTime CheckedUtc);

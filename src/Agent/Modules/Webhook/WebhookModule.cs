@@ -110,7 +110,7 @@ public class WebhookModule : IAppModule
 
             // 200 OK — processing continues asynchronously in the command queue
             return Results.Ok(new { accepted = true, channel = channelName });
-        });
+        }).AllowAnonymous();
 
         // GET /webhook/{channelName}/status — lightweight probe for webhook registration
         endpoints.MapGet("/webhook/{channelName}/status", (

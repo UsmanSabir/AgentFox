@@ -14,17 +14,21 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Agents.AI.Harness" Version="1.11.1-preview.260625.1" />
-    <PackageReference Include="PuppeteerSharp" Version="25.1.2" />
+    <PackageReference Include="Microsoft.Agents.AI.Harness" />
+    <PackageReference Include="PuppeteerSharp" />
     <!-- Must match the version the HOST resolves (currently 10.6.0). PluginLoadContext delegates
          all Microsoft.Extensions.* assemblies to the host's default load context so plugin and host
          share one IChatClient type; .NET roll-forward only binds UP, so a plugin built against a
          HIGHER version than the host ships fails with FileNotFoundException at OnAgentReadyAsync. -->
-    <PackageReference Include="Microsoft.Extensions.AI.Abstractions" Version="10.7.0" />
+    <PackageReference Include="Microsoft.Extensions.AI.Abstractions" />
     <!-- BackgroundService / IHostedService for the take-profit retry worker. Pinned to the host's
          Microsoft.Extensions.* version (10.0.9); PluginLoadContext delegates these to the host's load
          context at runtime, and roll-forward only binds UP, so never build against a higher version. -->
-    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.9" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" />
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+    <!-- Override Microsoft.Data.Sqlite's minimum native bundle with the maintained release;
+         2.1.11 is deprecated and affected by GHSA-2m69-gcr7-jv3q. -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" />
   </ItemGroup>
 
   <ItemGroup>

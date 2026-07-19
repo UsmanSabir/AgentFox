@@ -4,6 +4,7 @@ using Microsoft.Extensions.Options;
 using System.Text.Json;
 using TradingAgent.Broker;
 using TradingAgent.Config;
+using TradingAgent.Manager;
 using TradingAgent.Models;
 using TradingAgent.Safety;
 using TradingAgent.Trading;
@@ -35,11 +36,12 @@ public sealed class PlaceOrdersTool : BaseTool
         PropertyNameCaseInsensitive = true
     };
 
-    private readonly AhkBroker _broker;
+    private readonly TradingAgent.Manager.TradingManager _manager;
     private readonly IOptions<TradingAgentOptions> _agentOptions;
+    private readonly TradingPolicyProvider _policyProvider;
     private readonly IOptions<AhkConfig> _ahkConfig;
-    private readonly DuplicateSignalFilter _dedup;
     private readonly PendingTakeProfitStore _pendingSells;
+    private readonly ApprovalIntentRegistry _intentRegistry;
     private readonly ILogger<PlaceOrdersTool> _logger;
 
     public override string Name => "place_orders";
@@ -86,18 +88,20 @@ public sealed class PlaceOrdersTool : BaseTool
     };
 
     public PlaceOrdersTool(
-        AhkBroker broker,
+        TradingAgent.Manager.TradingManager manager,
         IOptions<TradingAgentOptions> agentOptions,
+        TradingPolicyProvider policyProvider,
         IOptions<AhkConfig> ahkConfig,
-        DuplicateSignalFilter dedup,
         PendingTakeProfitStore pendingSells,
+        ApprovalIntentRegistry intentRegistry,
         ILogger<PlaceOrdersTool> logger)
     {
-        _broker       = broker;
+        _manager      = manager;
         _agentOptions = agentOptions;
+        _policyProvider = policyProvider;
         _ahkConfig    = ahkConfig;
-        _dedup        = dedup;
         _pendingSells = pendingSells;
+        _intentRegistry = intentRegistry;
         _logger       = logger;
     }
 
@@ -114,6 +118,7 @@ public sealed class PlaceOrdersTool : BaseTool
     protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
     {
         var opts = _agentOptions.Value;
+        var policy = _policyProvider.Current();
         var ahk  = _ahkConfig.Value;
 
         // ── Batch-wide gates (run once) ───────────────────────────────────────
@@ -121,14 +126,11 @@ public sealed class PlaceOrdersTool : BaseTool
         // batch. Confidence is per-tip and is gated individually in BuildGroup — a single weak tip no
         // longer blocks the strong ones in the same message. A batch-level 'confidence' (if supplied) is
         // only a fallback for orders that omit their own.
-        if (!opts.AutoExecute)
+        if (!policy.AutoExecute)
             return ToolResult.Ok(Skipped("AutoExecute is disabled. Signals logged but not executed."));
 
         var batchConfidence = arguments.GetValueOrDefault("confidence")?.ToString()?.ToUpperInvariant();
         var rawMessage      = arguments.GetValueOrDefault("raw_message")?.ToString() ?? "";
-
-        if (!string.IsNullOrEmpty(rawMessage) && _dedup.IsDuplicate(rawMessage))
-            return ToolResult.Ok(Skipped("Identical signal already processed within the last hour."));
 
         // ── Parse the orders array (robust to whatever concrete type it arrives as) ──
         List<OrderInput> orders;
@@ -147,10 +149,10 @@ public sealed class PlaceOrdersTool : BaseTool
 
         // ── Resolve live prices for BUY tips that gave no entry price ("accumulate on dips") ──
         // Only when AutoBuyWithoutEntryPrice is on; otherwise those orders are logged, not executed.
-        var livePrices = await ResolveLivePricesAsync(orders, opts);
+        var livePrices = await ResolveLivePricesAsync(orders, policy);
 
         // ── Validate each order into a group (or a skip reason) ────────────────
-        var validated = orders.Select(o => (order: o, plan: BuildGroup(o, opts, ahk, livePrices, batchConfidence))).ToList();
+        var validated = orders.Select(o => (order: o, plan: BuildGroup(o, policy, ahk, livePrices, batchConfidence))).ToList();
         var groups    = validated.Where(v => v.plan.Group is not null)
                                  .Select(v => v.plan.Group!)
                                  .ToList();
@@ -159,9 +161,24 @@ public sealed class PlaceOrdersTool : BaseTool
         IReadOnlyList<IReadOnlyList<OrderResult>> grouped;
         try
         {
-            grouped = groups.Count > 0
-                ? await _broker.PlaceOrderGroupsAsync(groups)
-                : Array.Empty<IReadOnlyList<OrderResult>>();
+            if (groups.Count == 0)
+            {
+                grouped = Array.Empty<IReadOnlyList<OrderResult>>();
+            }
+            else
+            {
+                // Bind this validated batch to an immutable, one-time, expiring intent. TradingManager
+                // recomputes the hash before submission, so any drift after this point is rejected.
+                var intent = ApprovalIntent.Create(groups, rawMessage, policy.Version,
+                    TimeSpan.FromSeconds(Math.Max(10, opts.ApprovalIntentTtlSeconds)));
+                _intentRegistry.Register(intent);
+
+                var execution = await _manager.ExecuteGroupsAsync(
+                    groups, rawMessage, ExecutionAuthorization.HostToolGate(intent: intent));
+                if (!execution.Executed)
+                    return ToolResult.Ok(Skipped(execution.Reason));
+                grouped = execution.Groups;
+            }
         }
         catch (Exception ex)
         {
@@ -186,13 +203,13 @@ public sealed class PlaceOrdersTool : BaseTool
             // background retry instead of just reporting the failure.
             var retryScheduled = false;
             if (plan.PairedSell && results.Count > 1 && !results[1].Success
-                && opts.RetryFailedTakeProfit
+                && policy.RetryFailedTakeProfit
                 && PendingTakeProfitStore.IsRetryable(results[1].Message)
                 && order.Target is > 0)
             {
                 retryScheduled = _pendingSells.Schedule(
                     plan.Group[0].Symbol, plan.Group[0].Quantity ?? 0, order.Target.Value,
-                    opts.TakeProfitRetryIntervalMinutes, rawMessage);
+                    policy.TakeProfitRetryIntervalMinutes, rawMessage);
             }
 
             report.Add(BuildOrderReport(order, plan, results, retryScheduled));
@@ -218,9 +235,9 @@ public sealed class PlaceOrdersTool : BaseTool
     /// orders (logged, not executed) rather than guessing a price.
     /// </summary>
     private async Task<IReadOnlyDictionary<string, decimal?>> ResolveLivePricesAsync(
-        IReadOnlyList<OrderInput> orders, TradingAgentOptions opts)
+        IReadOnlyList<OrderInput> orders, TradingPolicySnapshot policy)
     {
-        if (!opts.AutoBuyWithoutEntryPrice)
+        if (!policy.AutoBuyWithoutEntryPrice)
             return new Dictionary<string, decimal?>();
 
         var symbols = orders
@@ -237,7 +254,7 @@ public sealed class PlaceOrdersTool : BaseTool
 
         try
         {
-            return await _broker.GetMarketPricesAsync(symbols);
+            return await _manager.GetMarketPricesAsync(symbols);
         }
         catch (Exception ex)
         {
@@ -253,7 +270,7 @@ public sealed class PlaceOrdersTool : BaseTool
     /// discount) and no take-profit SELL is paired — that limit rests below market and may not fill.
     /// </summary>
     private OrderPlan BuildGroup(
-        OrderInput o, TradingAgentOptions opts, AhkConfig ahk,
+        OrderInput o, TradingPolicySnapshot policy, AhkConfig ahk,
         IReadOnlyDictionary<string, decimal?> livePrices, string? batchConfidence)
     {
         var action = o.Action?.ToUpperInvariant() ?? "";
@@ -265,8 +282,8 @@ public sealed class PlaceOrdersTool : BaseTool
         // Per-tip confidence gate: this order's own confidence (falling back to a batch-level value, then
         // NONE) must meet MinConfidence. One weak tip is skipped without affecting the others.
         var confidence = (o.Confidence ?? batchConfidence ?? "NONE").ToUpperInvariant();
-        if (!MeetsConfidence(confidence, opts.MinConfidence))
-            return new(null, $"Confidence '{confidence}' is below minimum '{opts.MinConfidence}'.", false, false);
+        if (!MeetsConfidence(confidence, policy.MinConfidence))
+            return new(null, $"Confidence '{confidence}' is below minimum '{policy.MinConfidence}'.", false, false);
 
         var orderType = o.OrderType?.ToUpperInvariant() ?? "LIMIT";
 
@@ -276,7 +293,7 @@ public sealed class PlaceOrdersTool : BaseTool
         var resolvedFromMarket = false;
         if (action == "BUY" && !price.HasValue && orderType != "MARKET")
         {
-            if (!opts.AutoBuyWithoutEntryPrice)
+            if (!policy.AutoBuyWithoutEntryPrice)
                 return new(null, "No entry price in tip and AutoBuyWithoutEntryPrice is disabled — logged for manual review, not executed.", false, false);
 
             if (!livePrices.TryGetValue(symbol, out var live) || live is not > 0)
@@ -339,7 +356,7 @@ public sealed class PlaceOrdersTool : BaseTool
         // sell would risk selling shares not yet held. The sell exits exactly the shares the BUY acquired,
         // so it is intentionally NOT re-checked against MaxOrderValuePkr.
         var pairedSell = false;
-        if (opts.AutoPlaceTargetSell && action == "BUY" && o.Target is > 0 && !resolvedFromMarket)
+        if (policy.AutoPlaceTargetSell && action == "BUY" && o.Target is > 0 && !resolvedFromMarket)
         {
             group.Add(new TradingSignal
             {

@@ -1,6 +1,6 @@
 using AgentFox.Plugins.Interfaces;
 using System.Text.Json;
-using TradingAgent.Trading;
+using TradingAgent.Market;
 
 namespace TradingAgent.Tools;
 
@@ -11,6 +11,10 @@ namespace TradingAgent.Tools;
 /// </summary>
 public sealed class CheckMarketTool : BaseTool
 {
+    private readonly IMarketCalendar _calendar;
+
+    public CheckMarketTool(IMarketCalendar calendar) => _calendar = calendar;
+
     public override string Name => "check_market";
 
     public override string Description =>
@@ -23,14 +27,16 @@ public sealed class CheckMarketTool : BaseTool
     protected override Task<ToolResult> ExecuteInternalAsync(
         Dictionary<string, object?> arguments)
     {
-        var status = PsxMarketClock.Now();
+        var status = _calendar.GetStatus();
 
         var result = new
         {
             is_open          = status.IsOpen,
             current_time_pkt = status.PktNow.ToString("yyyy-MM-dd HH:mm:ss"),
             day              = status.PktNow.DayOfWeek.ToString(),
-            reason           = status.Reason
+            reason           = status.Reason,
+            next_open_pkt    = status.NextOpenPkt?.ToString("yyyy-MM-dd HH:mm:ss"),
+            schedule_source  = status.ScheduleSource
         };
 
         return Task.FromResult(ToolResult.Ok(JsonSerializer.Serialize(result)));

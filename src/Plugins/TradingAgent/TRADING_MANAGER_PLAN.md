@@ -7,6 +7,27 @@
 - Recommended rollout: incremental, beginning with safety fixes and paper trading
 - Live autonomous trading status: not approved by this plan until all production gates are satisfied
 
+## Implementation progress (2026-07-10)
+
+Implemented in the repository:
+
+- Fail-closed execution defaults, startup safety validation, corrected regular PSX sessions, configured holidays/overrides, configured-symbol universe, batch limits, and global kill switch.
+- Signed WhatsApp webhook verification, timestamp freshness, sender allowlist, stable source IDs, and replay rejection.
+- Deterministic TradingManager boundary with versioned runtime policy, independent risk validation, explicit ApprovalRequired authorization record, SQLite WAL ledger, durable idempotency, event history, proposal persistence, and accepted/failed/unknown outcomes.
+- Maintained SQLite native bundle override replacing the vulnerable transitive version.
+- Persistent specialist-agent registry, isolated tool registries, main-agent delegation tool, and direct routing of whatsapp-bridge to the isolated trading-agent.
+- Dedicated Specialist command lane with independent concurrency, timeout, cancellation, and graceful-drain behavior for channel-routed specialist turns. Main-agent delegation remains inline within its tool call to avoid a serial Main-lane deadlock.
+- Reconciliation health worker and persisted reconciliation runs. The current AHK browser adapter explicitly reports reconciliation as unsupported, which blocks ApprovalRequired and BoundedAuto when the default health requirement is enabled.
+- Read/proposal-only trading specialist tools for parsing, calendar status, logging, persisted proposals, and ledger status. Browser execution tools are not exposed to the specialist or main agent.
+- Background take-profit execution restricted to BoundedAuto mode and routed through TradingManager.
+- Automated coverage for market sessions, holidays, signed/replayed webhooks, concurrent idempotency claims, paper execution, configured-universe/kill-switch risk, and specialist channel resolution.
+
+Still gated rather than automatically enabled:
+
+- Live entry execution from the specialist. This remains intentionally unavailable until approval records are tied transactionally to exact proposal hashes.
+- Actual broker fills, positions, balances, and cancellations. The reconciliation framework is implemented, but the current AHK browser surface does not expose a reliable supported query API, so it deliberately remains unhealthy rather than fabricating broker state.
+- Paper/shadow observation periods, approved-live pilot, and BoundedAuto rollout. These are operational qualification stages, not code switches, and require real market data, broker coordination, and operator sign-off.
+
 ## Executive recommendation
 
 Convert the current TradingAgent plugin into two cooperating components:

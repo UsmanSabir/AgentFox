@@ -1,4 +1,5 @@
 using AgentFox.LLM;
+using AgentFox.Learning;
 using AgentFox.MCP;
 using AgentFox.Memory;
 using AgentFox.Models;
@@ -86,6 +87,7 @@ public class FoxAgent
     private readonly ChatClientAgent _chatAgent;
     private readonly ILogger<FoxAgent>? _logger;
     private WorkspaceManager _workspaceManager;
+    private readonly ExperienceLearningService? _experienceLearning;
 
     /// <summary>
     /// Ambient session key for the currently executing agent turn.
@@ -124,7 +126,7 @@ public class FoxAgent
     /// </summary>
     public PromptContributorRegistry PromptContributors { get; }
 
-    public FoxAgent(ChatClientAgent agent, AgentConfig config, IConversationStore store, string defaultConversationId, WorkspaceManager workspaceManager, PromptContributorRegistry promptContributors, ILogger<FoxAgent>? logger = null)
+    public FoxAgent(ChatClientAgent agent, AgentConfig config, IConversationStore store, string defaultConversationId, WorkspaceManager workspaceManager, PromptContributorRegistry promptContributors, ILogger<FoxAgent>? logger = null, ExperienceLearningService? experienceLearning = null)
     {
         _agent = new Agent
         {
@@ -137,6 +139,7 @@ public class FoxAgent
         _workspaceManager = workspaceManager;
         PromptContributors = promptContributors;
         _logger = logger;
+        _experienceLearning = experienceLearning;
     }
 
     /// <summary>
@@ -201,6 +204,7 @@ public class FoxAgent
         double TimeoutSeconds = 3600;
         cts.CancelAfter(TimeSpan.FromSeconds(TimeoutSeconds));
         var timeoutToken = cts.Token;
+        var experienceTurn = _experienceLearning?.BeginTurn(task, Name);
 
         try
         {
@@ -226,7 +230,10 @@ public class FoxAgent
 
             // Proactive recall: inject relevant long-term memories as context preamble
             var memoryContext = await BuildMemoryContextAsync(_agent.Memory, task);
-            var augmentedTask = string.IsNullOrEmpty(memoryContext) ? task : memoryContext + task;
+            var learnedBaseline = _experienceLearning is null
+                ? string.Empty
+                : await _experienceLearning.BuildBaselineAsync(task, timeoutToken);
+            var augmentedTask = memoryContext + learnedBaseline + task;
 
             // Write the original user message to a sidecar .pending file before the LLM call.
             // If the process crashes mid-response, the pending file lets startup recovery
@@ -303,6 +310,8 @@ public class FoxAgent
             _logger?.LogInformation("Agent '{AgentName}' completed task in conversation {ConversationId}", Name, conversationId);
 
             var result = new AgentResult { Success = true, Output = responseText };
+            if (_experienceLearning != null)
+                await _experienceLearning.CompleteAsync(experienceTurn, true, timeoutToken);
             return result;
         }
         catch (OperationCanceledException)
@@ -316,6 +325,10 @@ public class FoxAgent
             _logger?.LogError(ex, "Agent '{AgentName}' failed to process task in conversation {ConversationId}", Name, conversationId);
             SessionManager?.MarkAborted(conversationId, ex.Message);
             throw;
+        }
+        finally
+        {
+            _experienceLearning?.EndTurn(experienceTurn);
         }
     }
 
@@ -355,7 +368,7 @@ public class FoxAgent
         };
 
         var subAgent = SpawnSubAgentInternal(_agent, agentConfig);
-        var foxSubAgent = new FoxAgent(_chatAgent, subAgent.Config, ConversationStore, Guid.NewGuid().ToString("N"), _workspaceManager, PromptContributors)
+        var foxSubAgent = new FoxAgent(_chatAgent, subAgent.Config, ConversationStore, Guid.NewGuid().ToString("N"), _workspaceManager, PromptContributors, experienceLearning: _experienceLearning)
         {
             Role = config.Role ?? Role  // Inherit role from parent by default
         };
@@ -558,6 +571,7 @@ public class AgentBuilder
     private ChatHistoryProvider? _chatHistoryProvider;
     private WorkspaceManager _workspaceManager;
     private SessionManager? _sessionManager;
+    private ExperienceLearningService? _experienceLearning;
     private readonly PromptContributorRegistry _promptContributorRegistry = new();
     private SkillRegistry? _pendingSkillsRegistry; // set by WithSkillsRegistry, consumed in Build()
 
@@ -674,6 +688,12 @@ public class AgentBuilder
         return this;
     }
 
+    public AgentBuilder WithExperienceLearning(ExperienceLearningService experienceLearning)
+    {
+        _experienceLearning = experienceLearning;
+        return this;
+    }
+
     /// <summary>
     /// Installs a gate that is evaluated before every tool execution.
     /// Return <c>true</c> to allow the tool to run, <c>false</c> to block it.
@@ -685,6 +705,39 @@ public class AgentBuilder
     {
         _toolApprovalGate = gate;
         return this;
+    }
+
+    /// <summary>
+    /// Executes a tool through the canonical gateway pipeline: registry/skill lookup, the
+    /// plan/HITL approval gate, plugin lifecycle hooks, and experience learning. This is the
+    /// only entry point external agent runtimes (e.g. the Harness adapter) may use to run
+    /// AgentFox tools — never call <c>ITool.ExecuteAsync</c> directly from a bridge.
+    /// </summary>
+    public Task<ToolResult> ExecuteThroughGatewayAsync(
+        string toolName, Dictionary<string, object?> arguments, CancellationToken ct = default)
+        => ExecuteToolAsync(toolName, arguments, ct);
+
+    /// <summary>
+    /// Wraps every currently available tool (registry + enabled skills) as an
+    /// <see cref="AITool"/> whose invocation runs through the same gateway pipeline as the
+    /// built agent's own tools. Used by the Harness adapter so bridged tools cannot bypass
+    /// AgentFox policy gates.
+    /// </summary>
+    public IReadOnlyList<AITool> CreateGatewayTools()
+    {
+        var bridged = new List<AITool>();
+        foreach (var toolDefinition in GetAvailableTools())
+        {
+            try
+            {
+                bridged.Add(CreateAgentTool(toolDefinition));
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(ex, "Failed to bridge tool {ToolName} for gateway use", toolDefinition.Name);
+            }
+        }
+        return bridged;
     }
 
     public AgentBuilder WithHistoryProvider(ChatHistoryProvider chatHistoryProvider)
@@ -945,7 +998,9 @@ public class AgentBuilder
                 _logger?.LogWarning($"Tool '{toolName}' not found. Global tools: {toolNames}. Skill tools: {skillToolsInfo}");
             }
 
-            return ToolResult.Fail($"Tool not found: {toolName}");
+            var missing = ToolResult.Fail($"Tool not found: {toolName}");
+            _experienceLearning?.RecordCurrent(toolName, arguments, missing);
+            return missing;
         }
 
         // ── HITL approval gate (Mode 1) ──────────────────────────────────────
@@ -971,6 +1026,7 @@ public class AgentBuilder
             sw.Stop();
             await _toolRegistry.HookRegistry.InvokeToolPostExecuteAsync(
                 toolName, result, sw.ElapsedMilliseconds, executionId);
+            _experienceLearning?.RecordCurrent(toolName, arguments, result);
             return result;
         }
         catch (Exception ex)
@@ -979,7 +1035,9 @@ public class AgentBuilder
             await _toolRegistry.HookRegistry.InvokeToolErrorAsync(
                 toolName, ex.Message, sw.ElapsedMilliseconds, executionId);
             _logger?.LogError(ex, $"Error executing tool {toolName}");
-            return ToolResult.Fail($"Error: {ex.Message}");
+            var failed = ToolResult.Fail($"Error: {ex.Message}");
+            _experienceLearning?.RecordCurrent(toolName, arguments, failed);
+            return failed;
         }
     }
 
@@ -1334,7 +1392,7 @@ public class AgentBuilder
         _logger?.LogInformation("Building FoxAgent '{AgentName}' with {ToolCount} tools", _config.Name, tools.Count);
 
         
-        var foxAgent = new FoxAgent(agent, _config, _conversationStore!, "main", _workspaceManager, _promptContributorRegistry, _logger);
+        var foxAgent = new FoxAgent(agent, _config, _conversationStore!, "main", _workspaceManager, _promptContributorRegistry, _logger, _experienceLearning);
 
         if (_sessionManager != null)
             foxAgent.SessionManager = _sessionManager;

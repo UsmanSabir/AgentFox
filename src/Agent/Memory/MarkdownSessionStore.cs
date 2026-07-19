@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
+using AgentFox.Sessions;
 
 namespace AgentFox.Memory;
 
@@ -209,6 +210,26 @@ public sealed class MarkdownSessionStore : IConversationStore
             .Select(rel => rel[..^3]) // strip .md
             .Select(rel => rel.Replace(Path.DirectorySeparatorChar, '/'));
         return _cache.Keys.Union(fromFiles).Distinct();
+    }
+
+    /// <summary>Returns user-visible text messages for a persisted conversation.</summary>
+    public IReadOnlyList<ConversationMessageSnapshot> GetConversationMessages(string conversationId)
+    {
+        SessionManager.EnsureSafeSessionId(conversationId);
+        if (!_messages.TryGetValue(conversationId, out var messages))
+        {
+            var path = FilePath(conversationId);
+            if (!File.Exists(path)) return [];
+            messages = ParseFile(path);
+        }
+
+        return messages
+            .Where(message => message.Role == ChatRole.User || message.Role == ChatRole.Assistant)
+            .Select(message => new ConversationMessageSnapshot(
+                message.Role == ChatRole.User ? "user" : "assistant",
+                message.Text?.Trim() ?? string.Empty))
+            .Where(message => !string.IsNullOrWhiteSpace(message.Content))
+            .ToList();
     }
 
     public void DeleteSession(string conversationId)
@@ -444,9 +465,13 @@ public sealed class MarkdownSessionStore : IConversationStore
     /// </summary>
     private string FilePath(string id)
     {
+        SessionManager.EnsureSafeSessionId(id);
         var rel = id.Replace('/', Path.DirectorySeparatorChar)
                     .Replace('\\', Path.DirectorySeparatorChar);
-        var path = Path.Combine(_directory, rel + ".md");
+        var root = Path.GetFullPath(_directory) + Path.DirectorySeparatorChar;
+        var path = Path.GetFullPath(Path.Combine(_directory, rel + ".md"));
+        if (!path.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException("Conversation ID resolves outside the session directory.", nameof(id));
         // Ensure the sub-directory exists before callers try to write
         var dir = Path.GetDirectoryName(path)!;
         if (!Directory.Exists(dir))
@@ -467,3 +492,5 @@ public sealed class MarkdownSessionStore : IConversationStore
         [property: JsonPropertyName("callId")] string? CallId,
         [property: JsonPropertyName("result")] string? Result);
 }
+
+public sealed record ConversationMessageSnapshot(string Role, string Content);

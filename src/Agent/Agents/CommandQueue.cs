@@ -51,7 +51,14 @@ public class CommandQueue : ICommandQueue
     private readonly object _lockObj = new();
     
     // Lane priority for dequeue operations (lower index = higher priority)
-    private static readonly CommandLane[] LanePriority = { CommandLane.Main, CommandLane.Subagent, CommandLane.Tool, CommandLane.Background };
+    private static readonly CommandLane[] LanePriority =
+    {
+        CommandLane.Main,
+        CommandLane.Specialist,
+        CommandLane.Subagent,
+        CommandLane.Tool,
+        CommandLane.Background
+    };
     
     public CommandQueue()
     {

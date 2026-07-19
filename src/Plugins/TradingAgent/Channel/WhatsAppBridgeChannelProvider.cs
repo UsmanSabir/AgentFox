@@ -34,6 +34,26 @@ public sealed class WhatsAppBridgeChannelProvider : IChannelProvider
                 Description = "Only process messages from this WhatsApp group name. " +
                               "Leave empty to accept all groups.",
                 Required = false
+            },
+            ["RequireSignature"] = new()
+            {
+                Description = "Require X-AgentFox-Timestamp and X-AgentFox-Signature HMAC headers (default true).",
+                Required = false
+            },
+            ["WebhookSecretEnvironmentVariable"] = new()
+            {
+                Description = "Environment variable containing the webhook HMAC secret.",
+                Required = false
+            },
+            ["MaxClockSkewSeconds"] = new()
+            {
+                Description = "Maximum accepted timestamp age in seconds (default 120).",
+                Required = false
+            },
+            ["AllowedSenders"] = new()
+            {
+                Description = "Optional comma-separated sender allowlist.",
+                Required = false
             }
         };
 
@@ -43,8 +63,26 @@ public sealed class WhatsAppBridgeChannelProvider : IChannelProvider
     {
         config.TryGetValue("CallbackUrl", out var callbackUrl);
         config.TryGetValue("GroupFilter", out var groupFilter);
+        config.TryGetValue("RequireSignature", out var requireSignatureRaw);
+        config.TryGetValue("WebhookSecretEnvironmentVariable", out var secretEnvironmentVariable);
+        config.TryGetValue("MaxClockSkewSeconds", out var maxClockSkewRaw);
+        config.TryGetValue("AllowedSenders", out var allowedSendersRaw);
+
+        var requireSignature = !bool.TryParse(requireSignatureRaw, out var parsedRequired) || parsedRequired;
+        var maxClockSkew = int.TryParse(maxClockSkewRaw, out var parsedSkew)
+            ? Math.Clamp(parsedSkew, 10, 3600)
+            : 120;
+        var secretVariable = string.IsNullOrWhiteSpace(secretEnvironmentVariable)
+            ? "AGENTFOX_TRADING_WEBHOOK_SECRET"
+            : secretEnvironmentVariable.Trim();
+        var webhookSecret = Environment.GetEnvironmentVariable(secretVariable);
+        var allowedSenders = (allowedSendersRaw ?? "")
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         var logger = context.LoggerFactory.CreateLogger(nameof(WhatsAppBridgeChannel));
-        return (new WhatsAppBridgeChannel(callbackUrl, groupFilter, logger), null);
+        return (new WhatsAppBridgeChannel(
+            callbackUrl, groupFilter, logger, requireSignature, webhookSecret,
+            maxClockSkew, allowedSenders), null);
     }
 }

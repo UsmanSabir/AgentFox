@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api } from '$lib/api';
+  import { api, getManagementApiKey, setManagementApiKey } from '$lib/api';
   import { onMount } from 'svelte';
   import { agentStatus } from '$lib/stores';
   import {
@@ -11,6 +11,14 @@
   let health: { status: string; timestamp: string } | null = null;
   let loading = true;
   let healthLoading = true;
+  let managementApiKey = '';
+  let apiKeySaved = false;
+
+  function saveManagementKey() {
+    setManagementApiKey(managementApiKey);
+    apiKeySaved = true;
+    setTimeout(() => apiKeySaved = false, 2000);
+  }
 
   async function load() {
     loading = true;
@@ -36,6 +44,7 @@
   }
 
   onMount(() => {
+    managementApiKey = getManagementApiKey();
     load();
     checkHealth();
   });
@@ -132,6 +141,19 @@
   <div class="sections">
     <section class="info-section">
       <h2 class="section-heading">
+        <Key size={14} />
+        Management API authentication
+      </h2>
+      <p class="auth-copy">When management authentication is enabled on the server, enter an API key for this browser session. The key is kept in session storage and cleared when the browser session ends.</p>
+      <div class="auth-row">
+        <input class="auth-input" type="password" bind:value={managementApiKey} placeholder="X-AgentFox-Api-Key" autocomplete="off" />
+        <button class="btn btn-primary" on:click={saveManagementKey}>{apiKeySaved ? 'Saved' : 'Save for session'}</button>
+        <button class="btn btn-ghost" on:click={() => { managementApiKey = ''; saveManagementKey(); }}>Clear</button>
+      </div>
+    </section>
+
+    <section class="info-section">
+      <h2 class="section-heading">
         <Globe size={14} />
         API Endpoints
       </h2>
@@ -226,6 +248,10 @@
 
 <style>
   .mb-6 { margin-bottom: 1.5rem; }
+
+  .auth-copy { color: var(--text-2); font-size: 0.8125rem; margin: 0 0 0.75rem; }
+  .auth-row { display: flex; gap: 0.5rem; align-items: center; }
+  .auth-input { flex: 1; min-width: 180px; padding: 0.55rem 0.7rem; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--surface-2); color: var(--text); }
 
   .card-header {
     display: flex;

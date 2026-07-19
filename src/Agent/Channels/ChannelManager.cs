@@ -2,6 +2,7 @@ using AgentFox.Agents;
 using AgentFox.Hitl;
 using AgentFox.Models;
 using AgentFox.Plugins.Channels;
+using AgentFox.Plugins.Interfaces;
 using AgentFox.Sessions;
 using Microsoft.Extensions.Logging;
 
@@ -20,6 +21,7 @@ public class ChannelManager
     private readonly ICommandQueue? _commandQueue;
     private readonly ILogger? _logger;
     private HitlManager? _hitlManager;
+    private readonly IAgentRegistry? _agentRegistry;
 
     public IReadOnlyDictionary<string, Channel> Channels => _channels;
     public ChannelMessageGateway? Gateway => _gateway;
@@ -33,11 +35,13 @@ public class ChannelManager
         Func<FoxAgent?> agentFactory,
         SessionManager? sessionManager = null,
         ICommandQueue? commandQueue = null,
+        IAgentRegistry? agentRegistry = null,
         ILogger? logger = null)
     {
         _agentFactory = agentFactory;
         _sessionManager = sessionManager;
         _commandQueue = commandQueue;
+        _agentRegistry = agentRegistry;
         _logger = logger;
     }
 
@@ -45,8 +49,9 @@ public class ChannelManager
         FoxAgent agent,
         SessionManager? sessionManager = null,
         ICommandQueue? commandQueue = null,
+        IAgentRegistry? agentRegistry = null,
         ILogger? logger = null)
-        : this(() => agent, sessionManager, commandQueue, logger)
+        : this(() => agent, sessionManager, commandQueue, agentRegistry, logger)
     {
     }
 
@@ -112,6 +117,7 @@ public class ChannelManager
             _logger?.LogWarning("HandleMessage: agent not yet available, dropping message {MessageId}", message.Id);
             return;
         }
+        var messageContent = message.Content ?? string.Empty;
 
         // ── HITL interception — runs before gateway/queue routing ─────────────
         if (_hitlManager != null)
@@ -119,7 +125,7 @@ public class ChannelManager
             var channelId = string.IsNullOrEmpty(message.ChannelId)
                 ? channel.ChannelId
                 : message.ChannelId;
-            var content = message.Content?.Trim() ?? string.Empty;
+            var content = messageContent.Trim();
 
             // Mode 1: /approve <id> [feedback]
             if (content.StartsWith("/approve ", StringComparison.OrdinalIgnoreCase))
@@ -171,6 +177,40 @@ public class ChannelManager
                 _logger?.LogWarning(ackEx, "Failed to send receipt ack for {MessageId}", message.Id);
             }
 
+            var specialist = _agentRegistry?.ResolveForChannel(channel.Type);
+            if (specialist is not null)
+            {
+                var sessionChannelId = string.IsNullOrEmpty(message.ChannelId)
+                    ? channel.ChannelId
+                    : message.ChannelId;
+                var sessionId = _sessionManager?.GetOrCreateChannelSession(
+                    sessionChannelId, $"{channel.Name}:{specialist.Id}", specialist.Id)
+                    ?? Guid.NewGuid().ToString("N");
+                string response;
+                if (_commandQueue is not null)
+                {
+                    var command = new SpecialistAgentCommand
+                    {
+                        SessionKey = sessionId,
+                        AgentId = specialist.Id,
+                        Input = messageContent,
+                        TimeoutSeconds = 300
+                    };
+                    _commandQueue.Enqueue(command);
+                    response = await command.ResultSource.Task;
+                }
+                else
+                {
+                    response = await _agentRegistry!.RunAsync(
+                        specialist.Id, messageContent, sessionId);
+                }
+                await channel.SendReplyAsync(message, response);
+                _logger?.LogInformation(
+                    "Channel message {MessageId} routed directly to specialist {AgentId}.",
+                    message.Id, specialist.Id);
+                return;
+            }
+
             if (_gateway != null)
             {
                 var task = await _gateway.ProcessChannelMessageAsync(message, channel, agent.Id);
@@ -194,14 +234,14 @@ public class ChannelManager
                 if (_commandQueue != null)
                 {
                     var tcs = new TaskCompletionSource<AgentResult>(TaskCreationOptions.RunContinuationsAsynchronously);
-                    var cmd = AgentCommand.CreateMainCommand(sessionId, agent.Id, message.Content);
+                    var cmd = AgentCommand.CreateMainCommand(sessionId, agent.Id, messageContent);
                     cmd.ResultSource = tcs;
                     _commandQueue.Enqueue(cmd);
                     result = await tcs.Task;
                 }
                 else
                 {
-                    result = await agent.ProcessAsync(message.Content, sessionId);
+                    result = await agent.ProcessAsync(messageContent, sessionId);
                 }
 
                 await channel.SendReplyAsync(message, result.Output);

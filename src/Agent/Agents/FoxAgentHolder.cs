@@ -84,19 +84,28 @@ internal sealed class PluginContextAdapter : IPluginContext
 {
     private readonly ToolRegistry _toolRegistry;
     private readonly PromptContributorRegistry _promptRegistry;
+    private readonly SpecialistAgentRegistry _agentRegistry;
 
     public PluginContextAdapter(
         ToolRegistry toolRegistry,
         PromptContributorRegistry promptRegistry,
-        IConversationStore conversationStore)
+        IConversationStore conversationStore,
+        SpecialistAgentRegistry agentRegistry)
     {
         _toolRegistry = toolRegistry;
         _promptRegistry = promptRegistry;
+        _agentRegistry = agentRegistry;
         Conversations = new ConversationReaderAdapter(conversationStore);
     }
 
     // ── Tool registration ────────────────────────────────────────────────────
     public void RegisterTool(ITool tool) => _toolRegistry.Register(tool);
+
+    public void RegisterAgentTool(string agentId, ITool tool) =>
+        _agentRegistry.RegisterTool(agentId, tool);
+
+    public void RegisterAgent(SpecialistAgentDescriptor descriptor) =>
+        _agentRegistry.Register(descriptor);
 
     // ── Dynamic prompt injection ─────────────────────────────────────────────
     public void ContributeToSystemPrompt(string contributorId, Func<string?> fragmentProvider) =>

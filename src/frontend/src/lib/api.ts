@@ -32,6 +32,48 @@ export interface AgentInfo {
   subAgentCount?: number;
 }
 
+export interface SpecialistAgentInfo {
+  id: string;
+  name: string;
+  description: string;
+  isActive: boolean;
+  modelKey?: string;
+  toolNames: string[];
+  channelTypes: string[];
+  routeHints: string[];
+  maxIterations: number;
+  maxConcurrentTurns: number;
+  waitingTurns: number;
+  activeTurns: number;
+  totalTurns: number;
+  failedTurns: number;
+  activatedUtc?: string;
+  lastActivityUtc?: string;
+  lastDurationMilliseconds: number;
+  lastError?: string;
+}
+
+export interface CommandLaneInfo {
+  lane: string;
+  queuedCommands: number;
+  activeCommands: number;
+  maxConcurrency: number;
+  handlerRegistered: boolean;
+}
+
+export interface CommandQueueStatus {
+  totalQueuedCommands: number;
+  processor: {
+    totalProcessed: number;
+    totalFailed: number;
+    uptime: string;
+    queuedCommands: number;
+    activeCommands: number;
+  };
+  lanes: CommandLaneInfo[];
+  checkedUtc: string;
+}
+
 export interface ToolInfo {
   name: string;
   description: string;
@@ -60,6 +102,17 @@ export interface SessionInfo {
   createdAt: string;
   lastActive: string;
   channelType?: string;
+}
+
+export interface ConversationMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export interface ConversationMessagesResponse {
+  conversationId: string;
+  agentId: string;
+  messages: ConversationMessage[];
 }
 
 export interface McpServerInfo {
@@ -154,9 +207,23 @@ export interface PluginSessionStats {
 
 export interface PluginConfigResponse {
   pluginName: string;
+  displayName?: string;
+  description?: string;
   config: Record<string, unknown>;
+  fields?: PluginConfigField[];
   lastUpdatedAt: string;
   isDefault: boolean;
+}
+
+export interface PluginConfigField {
+  key: string;
+  label: string;
+  description: string;
+  type: 'string' | 'boolean' | 'number' | 'select';
+  defaultValue?: unknown;
+  options: string[];
+  sensitive: boolean;
+  runtimeEditable: boolean;
 }
 
 export interface PluginConfigUpdateRequest {
@@ -191,10 +258,102 @@ export interface PendingNotificationsResponse {
   notifications: PendingNotification[];
 }
 
+export interface TradingStatus {
+  policy: {
+    autoExecute: boolean;
+    executionMode: string;
+    minConfidence: string;
+    version: string;
+  };
+  ledger: {
+    pendingProposals: number;
+    submittingExecutions: number;
+    unknownExecutions: number;
+    acceptedExecutions: number;
+    checkedUtc: string;
+  };
+  market: {
+    isOpen: boolean;
+    pktNow: string;
+    reason: string;
+    nextOpenPkt?: string;
+    scheduleSource: string;
+  };
+  reconciliation: {
+    supported: boolean;
+    healthy: boolean;
+    reason: string;
+    checkedUtc: string;
+    detailsJson: string;
+  };
+  killSwitch: boolean;
+  reconciliationFresh: boolean;
+  liveExecutionReady: boolean;
+  checkedUtc: string;
+}
+
+export interface TradeProposal {
+  proposalId: string;
+  status: string;
+  proposal: {
+    orders?: Array<Record<string, unknown>>;
+    source_message?: string;
+    rationale?: string;
+  };
+  policyVersion: string;
+  createdUtc: string;
+  updatedUtc: string;
+}
+
+export interface TradingExecution {
+  executionId: string;
+  state: string;
+  request: unknown;
+  result?: unknown;
+  policyVersion: string;
+  createdUtc: string;
+  updatedUtc: string;
+}
+
+export interface TradingEvent {
+  eventId: number;
+  executionId: string;
+  eventType: string;
+  payload: unknown;
+  createdUtc: string;
+}
+
+export interface ReconciliationRun {
+  reconciliationId: string;
+  state: string;
+  details: unknown;
+  startedUtc: string;
+  completedUtc?: string;
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────
 
+export function setManagementApiKey(key: string) {
+  if (typeof sessionStorage === 'undefined') return;
+  if (key.trim()) sessionStorage.setItem('agentfox.managementApiKey', key.trim());
+  else sessionStorage.removeItem('agentfox.managementApiKey');
+}
+
+export function getManagementApiKey(): string {
+  if (typeof sessionStorage === 'undefined') return '';
+  return sessionStorage.getItem('agentfox.managementApiKey') ?? '';
+}
+
+function requestHeaders(json = false): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (json) headers['Content-Type'] = 'application/json';
+  const key = getManagementApiKey();
+  if (key) headers['X-AgentFox-Api-Key'] = key;
+  return headers;
+}
+
 async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`);
+  const res = await fetch(`${BASE}${path}`, { headers: requestHeaders() });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json() as Promise<T>;
 }
@@ -202,7 +361,7 @@ async function get<T>(path: string): Promise<T> {
 async function post<T>(path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: requestHeaders(true),
     body:    body !== undefined ? JSON.stringify(body) : undefined
   });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
@@ -210,7 +369,7 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
 }
 
 async function del<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, { method: 'DELETE' });
+  const res = await fetch(`${BASE}${path}`, { method: 'DELETE', headers: requestHeaders() });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json() as Promise<T>;
 }
@@ -221,10 +380,18 @@ export const api = {
   health:   () => get<{ status: string; timestamp: string }>('/health'),
   status:   () => get<AgentStatus>('/status'),
   agents:   () => get<AgentInfo[]>('/agents'),
+  specialistAgents: () => get<SpecialistAgentInfo[]>('/specialist-agents'),
+  specialistChat: (agentId: string, message: string, conversationId?: string) =>
+    post<ChatResponse>(`/specialist-agents/${encodeURIComponent(agentId)}/chat`, { message, conversationId }),
+  commandQueues: () => get<CommandQueueStatus>('/command-queues'),
   tools:    () => get<ToolInfo[]>('/tools'),
   skills:   () => get<SkillInfo[]>('/skills'),
   memory:   () => get<MemoryEntry[]>('/memory'),
   sessions: () => get<SessionInfo[]>('/sessions'),
+  sessionMessages: (conversationId: string) =>
+    get<ConversationMessagesResponse>(`/session-messages?conversationId=${encodeURIComponent(conversationId)}`),
+  resumeSession: (conversationId: string) =>
+    post<{ success: boolean; conversationId: string }>('/sessions/resume', { conversationId }),
   mcp:      () => get<McpStatus>('/mcp'),
   channels: () => get<ChannelsStatus>('/channels'),
   pendingNotifications: (conversationId: string) =>
@@ -233,7 +400,7 @@ export const api = {
   chat: async (req: ChatRequest): Promise<ChatResponse> => {
     const res = await fetch(`${BASE}/chat`, {
       method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: requestHeaders(true),
       body:    JSON.stringify(req)
     });
     return res.json();
@@ -271,6 +438,14 @@ export const api = {
     get:        (pluginName: string)              => get<PluginConfigResponse>(`/plugin-config/${encodeURIComponent(pluginName)}`),
     update:     (pluginName: string, req: PluginConfigUpdateRequest) => post<{ success: boolean; message: string }>(`/plugin-config/${encodeURIComponent(pluginName)}`, req),
     remove:     (pluginName: string)              => del<{ success: boolean }>(`/plugin-config/${encodeURIComponent(pluginName)}`),
+  },
+
+  trading: {
+    status:         ()                    => get<TradingStatus>('/trading/status'),
+    proposals:      (limit = 100)         => get<TradeProposal[]>(`/trading/proposals?limit=${limit}`),
+    executions:     (limit = 100)         => get<TradingExecution[]>(`/trading/executions?limit=${limit}`),
+    events:         (limit = 200)         => get<TradingEvent[]>(`/trading/events?limit=${limit}`),
+    reconciliation: (limit = 100)         => get<ReconciliationRun[]>(`/trading/reconciliation?limit=${limit}`),
   }
 };
 
@@ -289,7 +464,7 @@ export async function* streamChat(
 ): AsyncGenerator<StreamEvent> {
   const res = await fetch(`${BASE}/chat/stream`, {
     method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: requestHeaders(true),
     body:    JSON.stringify({ message, conversationId }),
     signal
   });

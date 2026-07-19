@@ -17,6 +17,7 @@
 
   let editingConfig: PluginConfigResponse | null = null;
   let configJson = '';
+  let formValues: Record<string, unknown> = {};
 
   async function loadSessions() {
     try {
@@ -64,13 +65,18 @@
 
   function editConfig(config: PluginConfigResponse) {
     editingConfig = config;
+    formValues = { ...config.config };
     configJson = JSON.stringify(config.config, null, 2);
+  }
+
+  function setField(key: string, value: unknown) {
+    formValues = { ...formValues, [key]: value };
   }
 
   async function saveConfig() {
     if (!editingConfig) return;
     try {
-      const parsed = JSON.parse(configJson);
+      const parsed = editingConfig.fields?.length ? formValues : JSON.parse(configJson);
       await api.pluginConfig.update(editingConfig.pluginName, {
         config: parsed,
         merge: true
@@ -275,7 +281,7 @@
       <div class="config-editor fade-in">
         <div class="editor-header">
           <div>
-            <div class="editor-title">{editingConfig.pluginName}</div>
+            <div class="editor-title">{editingConfig.displayName ?? editingConfig.pluginName}</div>
             <div class="editor-subtitle">Last updated: {formatDate(editingConfig.lastUpdatedAt)}</div>
           </div>
           <div class="editor-actions">
@@ -284,20 +290,66 @@
           </div>
         </div>
 
-        <textarea
-          class="config-textarea"
-          bind:value={configJson}
-          placeholder={'{ "key": "value" }'}
-        ></textarea>
+        {#if editingConfig.fields?.length}
+          {#if editingConfig.pluginName === 'trading-agent'}
+            <div class="config-notice">
+              These are runtime policy overrides. Credentials, risk limits, approvals, and the kill switch remain in the dedicated Trading controls.
+            </div>
+          {/if}
+          <div class="config-fields">
+            {#each editingConfig.fields as field}
+              <label class="config-field">
+                <span class="field-copy">
+                  <strong>{field.label}</strong>
+                  <small>{field.description}</small>
+                </span>
+                {#if field.type === 'boolean'}
+                  <input
+                    type="checkbox"
+                    checked={Boolean(formValues[field.key])}
+                    disabled={!field.runtimeEditable}
+                    on:change={(event) => setField(field.key, (event.currentTarget as HTMLInputElement).checked)}
+                  />
+                {:else if field.type === 'select'}
+                  <select
+                    value={String(formValues[field.key] ?? '')}
+                    disabled={!field.runtimeEditable}
+                    on:change={(event) => setField(field.key, (event.currentTarget as HTMLSelectElement).value)}
+                  >
+                    {#each field.options as option}<option value={option}>{option}</option>{/each}
+                  </select>
+                {:else}
+                  <input
+                    type={field.type === 'number' ? 'number' : field.sensitive ? 'password' : 'text'}
+                    value={String(formValues[field.key] ?? '')}
+                    disabled={!field.runtimeEditable}
+                    on:input={(event) => setField(field.key, field.type === 'number'
+                      ? Number((event.currentTarget as HTMLInputElement).value)
+                      : (event.currentTarget as HTMLInputElement).value)}
+                  />
+                {/if}
+              </label>
+            {/each}
+          </div>
+        {:else}
+          <textarea
+            class="config-textarea"
+            bind:value={configJson}
+            placeholder={'{ "key": "value" }'}
+          ></textarea>
+        {/if}
       </div>
     {:else}
       <div class="configs-list">
         {#each configs as config (config.pluginName)}
           <div class="config-card card card-hover">
             <div class="config-header">
-              <div class="config-name">{config.pluginName}</div>
+              <div>
+                <div class="config-name">{config.displayName ?? config.pluginName}</div>
+                {#if config.description}<div class="config-description">{config.description}</div>{/if}
+              </div>
               {#if config.isDefault}
-                <span class="badge-default">Default</span>
+                <span class="badge-default">Using defaults</span>
               {/if}
             </div>
             <div class="config-body">
@@ -615,6 +667,11 @@
     color: var(--text);
     font-size: 0.9375rem;
   }
+  .config-description {
+    color: var(--text-3);
+    font-size: 0.75rem;
+    margin-top: 0.2rem;
+  }
 
   .badge-default {
     background: var(--primary-dim);
@@ -709,6 +766,40 @@
     border-color: var(--primary);
     box-shadow: 0 0 0 2px var(--primary-dim);
   }
+  .config-notice {
+    padding: 0.75rem 0.9rem;
+    margin-bottom: 1rem;
+    border: 1px solid rgba(251,191,36,0.25);
+    background: rgba(251,191,36,0.08);
+    color: var(--text-2);
+    border-radius: 6px;
+    font-size: 0.78rem;
+    line-height: 1.5;
+  }
+  .config-fields { display: flex; flex-direction: column; gap: 0.75rem; }
+  .config-field {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1.5rem;
+    padding: 0.85rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface-2);
+  }
+  .field-copy { display: flex; flex-direction: column; gap: 0.25rem; }
+  .field-copy strong { color: var(--text); font-size: 0.84rem; }
+  .field-copy small { color: var(--text-3); line-height: 1.4; }
+  .config-field select, .config-field input[type='text'],
+  .config-field input[type='password'], .config-field input[type='number'] {
+    min-width: 190px;
+    border: 1px solid var(--border-md);
+    background: var(--surface);
+    color: var(--text);
+    border-radius: 5px;
+    padding: 0.45rem 0.6rem;
+  }
+  .config-field input[type='checkbox'] { width: 18px; height: 18px; accent-color: var(--primary); }
 
   /* Loading State */
   .loading-state {

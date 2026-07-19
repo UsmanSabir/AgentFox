@@ -5,10 +5,12 @@ using AgentFox.Doctor.Checks;
 using AgentFox.Doctor.Onboarding;
 using AgentFox.Helpers;
 using AgentFox.LLM;
+using AgentFox.Learning;
 using AgentFox.MCP;
 using AgentFox.Memory;
 using AgentFox.Models;
 using AgentFox.Modules.Loaders;
+using AgentFox.Modules.Web;
 using AgentFox.Channels;
 using AgentFox.Plugins.Channels;
 using AgentFox.Plugins.Interfaces;
@@ -71,6 +73,7 @@ class Program
         // ── Web application builder (single DI container for the whole process) ─
         var builder       = WebApplication.CreateBuilder(args);
         var configuration = builder.Configuration;
+        builder.Services.AddManagementAuthentication(configuration);
 
         // ── Logging setup ─────────────────────────────────────────────────────
         // WebApplicationBuilder registers Console/Debug providers by default.
@@ -245,6 +248,11 @@ class Program
         builder.Services.AddSingleton(skillRegistry!);
         builder.Services.AddSingleton(mcpManager!);
         builder.Services.AddSingleton(memory!);
+        builder.Services.AddSingleton<IExperienceStore>(sp =>
+            new JsonExperienceStore(Path.Combine(
+                sp.GetRequiredService<WorkspaceManager>().ResolvePath(""),
+                "learning", "experiences.json")));
+        builder.Services.AddSingleton<ExperienceLearningService>();
         builder.Services.AddSingleton<IChannelProvider, TelegramChannelProvider>();
         builder.Services.AddSingleton<IChannelProvider, SlackChannelProvider>();
         builder.Services.AddSingleton<IChannelProvider, DiscordChannelProvider>();
@@ -303,8 +311,17 @@ class Program
 
         // Agent holder + channel manager holder + scheduling holder + IAgentService (used by WebModule /chat)
         builder.Services.AddSingleton<PendingNotificationStore>();
+        builder.Services.AddSingleton<SpecialistAgentRegistry>();
+        builder.Services.AddSingleton<AgentFox.Plugins.Interfaces.IAgentRegistry>(sp =>
+            sp.GetRequiredService<SpecialistAgentRegistry>());
         builder.Services.AddSingleton<HitlManager>();
         builder.Services.AddSingleton<AgentFox.Planning.PlanStateStore>();
+
+        // Optional HarnessAgent execution profile (roadmap Phase 0). Disabled by default —
+        // the factory throws unless Harness:Enabled=true, so registering it is behaviour-neutral.
+        builder.Services.Configure<AgentFox.Harness.HarnessOptions>(
+            configuration.GetSection(AgentFox.Harness.HarnessOptions.SectionName));
+        builder.Services.AddSingleton<AgentFox.Harness.HarnessAgentFactory>();
         builder.Services.AddSingleton<FoxAgentHolder>();
         builder.Services.AddSingleton<ChannelManagerHolder>();
         builder.Services.AddSingleton<SchedulingHolder>();
@@ -423,8 +440,10 @@ class Program
             }
 
             app.UseRouting();
+            app.UseAuthentication();
+            app.UseAuthorization();
 
-            var apiGroup = app.MapGroup("/api");
+            var apiGroup = app.MapGroup("/api").RequireAuthorization("ManagementViewer");
             foreach (var module in modules.Where(m => IsModuleEnabled(m.Name)))
                 module.MapEndpoints(apiGroup);
 
@@ -529,6 +548,7 @@ class Program
         var systemPrompt = new SystemPromptBuilder()
             .WithPersona(SystemPromptConfig.AgentPrompts.DeveloperAssistant)
             .WithAllTools(toolRegistry)
+            .WithToolInstructions(false)
             .WithSkillsIndex(skillRegistry.GetSkillManifests())
             .WithConstraints(
                 "Always verify changes before executing destructive operations",
@@ -536,7 +556,8 @@ class Program
                 "Ask for clarification when requirements are ambiguous",
                 "Use add_memory to save important user facts or preferences to long-term memory.",
                 "Use search_memory to recall past information or facts when requested.",
-                "Use get_all_memories to retrieve everything stored in long-term memory.")
+                "Use get_all_memories to retrieve everything stored in long-term memory.",
+                "Reply in the same language as the user's latest message unless the user asks for another language.")
             .Build();
 
         var chatClient = LLMFactory.CreateFromConfiguration(configuration);

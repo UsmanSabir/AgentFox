@@ -69,16 +69,138 @@ AgentFox/
 
 ## Installation
 
+The bundled installers build and install **AgentFox with the Trading plugin enabled by default**
+(`Modules: "cli,web,trading-agent"`) and make sure every dependency is present on the machine.
+
+**What the installer does for you**
+
+1. Ensures the **.NET SDK 10.0** is installed — if missing, it is fetched from `dot.net` into `~/.dotnet` and added to `PATH`.
+2. **Downloads a prebuilt AgentFox binary** (with the Trading plugin) from the repo's GitHub Releases for your OS/architecture.
+3. If no prebuilt binary is available (or `-BuildFromSource` is set), it ensures **Git**, clones the source, and builds it locally.
+4. Installs the launcher (`AgentFox.exe` / `AgentFox`) plus the Trading plugin into the install directory.
+5. Drops an `agentfox` launcher you can run from anywhere.
+
+Default install directory: `~/.agentfox` (`%USERPROFILE%\.agentfox` on Windows). The prebuilt archive is
+expected at `…/releases/latest/download/agentfox-<rid>.zip` (Windows) or `agentfox-<rid>.tar.gz` (Linux/macOS),
+where `<rid>` is `win-x64`, `win-arm64`, `linux-x64`, `linux-arm64`, `osx-x64`, or `osx-arm64`. Override the
+source with `-BinaryUrl` / `AGENTFOX_BINARY_URL`.
+
+> ⚠️ **Trading plugin is configured for LIVE auto-execution.** The bundled `appsettings.json` ships with
+> `Plugins.TradingAgent.AutoExecute: true` and `ExecutionMode: "BoundedAuto"`. Before sending any signal you
+> **must** review and set `AllowedSymbols`, the `Ahk` broker credentials, and the order value caps — see
+> [`src/Plugins/TradingAgent/README.md`](src/Plugins/TradingAgent/README.md). Live AHK order placement also
+> requires **Google Chrome / Chromium** on the machine. To run without trading, set `ExecutionMode: "Disabled"`
+> (or `"Paper"` for simulation) and `AutoExecute: false`.
+
+### Windows (PowerShell)
+
+Run in an **elevated** PowerShell (needed so dependencies and, optionally, the Windows service can be installed):
+
+```powershell
+# One-line install (downloads the installer and runs it; it clones + builds AgentFox)
+irm https://raw.githubusercontent.com/UsmanSabir/AgentFox/main/install.ps1 | iex
+```
+
+To pass options (custom install dir, branch, skip the service hint), download first and run with parameters:
+
+```powershell
+irm https://raw.githubusercontent.com/UsmanSabir/AgentFox/main/install.ps1 -OutFile install.ps1
+.\install.ps1 -InstallDir "C:\Tools\AgentFox" -Branch main -SkipService
+```
+
+Run it:
+
+```powershell
+& "$HOME\.agentfox\agentfox.cmd"
+# Install as a Windows service (optional):
+& "$HOME\.agentfox\agentfox.cmd" --install-service
+```
+
+### Linux (bash)
+
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/AgentFox.git
+# One-line install (installs git + .NET 10 SDK via your package manager, then clones + builds)
+curl -fsSL https://raw.githubusercontent.com/UsmanSabir/AgentFox/main/install.sh | bash
+```
+
+Supported package managers for the Git/curl step: `apt-get`, `dnf`, `yum`, `apk` (uses `sudo` when not root).
+To customize, download and run with environment variables:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/UsmanSabir/AgentFox/main/install.sh -o install.sh
+AGENTFOX_INSTALL_DIR="$HOME/apps/agentfox" AGENTFOX_BRANCH=main bash install.sh
+```
+
+Run it:
+
+```bash
+~/.agentfox/agentfox
+```
+
+### From a local clone (Windows / Linux / macOS)
+
+If you already have the repository checked out, run the installer from inside it — no clone step is performed:
+
+```bash
+git clone https://github.com/UsmanSabir/AgentFox.git
+cd AgentFox
+
+# Windows
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+
+# Linux
+bash ./install.sh
+```
+
+### macOS (bash)
+
+The shell installer now detects macOS and uses the correct `osx-arm64` / `osx-x64` runtime IDs (Git is
+installed via Homebrew if missing):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/UsmanSabir/AgentFox/main/install.sh -o install.sh
+bash ./install.sh
+~/.agentfox/agentfox
+```
+
+To force a source build instead of a prebuilt download:
+
+```bash
+AGENTFOX_BUILD_FROM_SOURCE=1 bash ./install.sh
+```
+
+### Installer options
+
+| Option (PowerShell) | Env var (both) | Default | Description |
+|---|---|---|---|
+| `-RepoUrl <url>` | `AGENTFOX_REPO_URL` | `https://github.com/UsmanSabir/AgentFox.git` | Source repo to clone when building from source. |
+| `-Branch <name>` | `AGENTFOX_BRANCH` | default branch | Branch to clone (shallow). |
+| `-InstallDir <path>` | `AGENTFOX_INSTALL_DIR` | `~/.agentfox` | Where AgentFox is installed. |
+| `-BinaryUrl <url>` | `AGENTFOX_BINARY_URL` | GitHub Releases latest | Direct URL to a prebuilt archive to download. |
+| `-BuildFromSource` | `AGENTFOX_BUILD_FROM_SOURCE=1` | off | Skip the prebuilt download and always build from source. |
+| `-SkipService` | — | off | Suppress the "install as a Windows service" hint (Windows only). |
+
+### Building & publishing release binaries
+
+To produce the prebuilt archives the installers download (and publish them to GitHub Releases for all
+six OS/arch targets), see [RELEASING.md](RELEASING.md). In short — push a tag and CI does the rest:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0   # triggers .github/workflows/release.yml
+```
+
+### Quick start (any platform, dev mode)
+
+```bash
+git clone https://github.com/UsmanSabir/AgentFox.git
 cd AgentFox
 
 # Build the project
-dotnet build
+dotnet build src/AgentFox.sln
 
 # Run in interactive mode
-dotnet run
+dotnet run --project src/Agent
 ```
 
 ## Usage
@@ -265,8 +387,10 @@ agent.WithHybridMemory(shortTermSize: 50, longTermPath: "memory.json");
 
 ## Requirements
 
-- .NET 8.0 or later
-- Windows/macOS/Linux
+- .NET SDK 10.0 or later (the installer will fetch it automatically if missing)
+- Git (installed automatically by the installer)
+- Windows / macOS / Linux
+- Google Chrome or Chromium — only required for live AHK trading execution
 
 ## License
 

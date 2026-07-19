@@ -1,16 +1,12 @@
 namespace TradingAgent.Trading;
 
 /// <summary>
-/// Single source of truth for PSX trading hours: Monday–Friday, 09:15–15:30 Pakistan Standard Time
-/// (UTC+5, no DST). Used by both the check_market tool and the take-profit retry worker so they never
-/// disagree about whether the market is open.
+/// Legacy static compatibility clock. New execution code must use IMarketCalendar so configured
+/// holidays and special sessions are enforced. This wrapper implements the current regular schedule.
 /// </summary>
 public static class PsxMarketClock
 {
     private static readonly TimeZoneInfo Pkt = ResolvePkt();
-
-    private static readonly TimeOnly OpenTime  = new(9, 15);
-    private static readonly TimeOnly CloseTime = new(15, 30);
 
     public readonly record struct MarketStatus(bool IsOpen, DateTime PktNow, string Reason);
 
@@ -18,18 +14,26 @@ public static class PsxMarketClock
     public static MarketStatus Now()
     {
         var pktNow    = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, Pkt);
-        var isWeekday = pktNow.DayOfWeek is >= DayOfWeek.Monday and <= DayOfWeek.Friday;
         var tod       = TimeOnly.FromDateTime(pktNow);
-        var inHours   = tod >= OpenTime && tod <= CloseTime;
-        var isOpen    = isWeekday && inHours;
+        var sessions  = pktNow.DayOfWeek switch
+        {
+            DayOfWeek.Monday or DayOfWeek.Tuesday or DayOfWeek.Wednesday or DayOfWeek.Thursday =>
+                new[] { (new TimeOnly(9, 32), new TimeOnly(15, 30)) },
+            DayOfWeek.Friday =>
+                new[]
+                {
+                    (new TimeOnly(9, 17), new TimeOnly(12, 0)),
+                    (new TimeOnly(14, 32), new TimeOnly(16, 30))
+                },
+            _ => Array.Empty<(TimeOnly, TimeOnly)>()
+        };
+        var isOpen = sessions.Any(s => tod >= s.Item1 && tod < s.Item2);
 
         var reason = isOpen
-            ? $"PSX is open. Current time: {tod:HH:mm} PKT."
-            : !isWeekday
+            ? $"PSX regular market is open. Current time: {tod:HH:mm} PKT."
+            : sessions.Length == 0
                 ? $"PSX is closed on {pktNow.DayOfWeek}s."
-                : tod < OpenTime
-                    ? $"Pre-market. Opens at 09:15 PKT. Current: {tod:HH:mm} PKT."
-                    : $"After-hours. Closed at 15:30 PKT. Current: {tod:HH:mm} PKT.";
+                : $"PSX regular market is outside an open session. Current: {tod:HH:mm} PKT.";
 
         return new MarketStatus(isOpen, pktNow, reason);
     }
