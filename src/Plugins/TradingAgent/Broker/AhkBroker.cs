@@ -1,9 +1,9 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Text.RegularExpressions;
+using AgentFox.Plugins;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using PuppeteerSharp;
 using TradingAgent.Config;
 using TradingAgent.Models;
@@ -26,7 +26,9 @@ namespace TradingAgent.Broker;
 /// </summary>
 public sealed class AhkBroker : IAsyncDisposable
 {
-    private readonly IOptions<AhkConfig> _config;
+    // Live view (appsettings + browser-editable runtime overlay). Read at use time so
+    // credential/portal changes made in the web UI apply to the next browser session.
+    private readonly IRuntimePluginOptions<AhkConfig> _config;
     private readonly ILogger<AhkBroker> _logger;
     private readonly string _workspaceRoot;
 
@@ -39,7 +41,7 @@ public sealed class AhkBroker : IAsyncDisposable
     private IPage? _page;
     private bool _initialized;
 
-    public AhkBroker(IOptions<AhkConfig> config, IConfiguration configuration, ILogger<AhkBroker> logger)
+    public AhkBroker(IRuntimePluginOptions<AhkConfig> config, IConfiguration configuration, ILogger<AhkBroker> logger)
     {
         _config = config;
         _logger = logger;
@@ -80,6 +82,40 @@ public sealed class AhkBroker : IAsyncDisposable
     }
 
     /// <summary>
+    /// Tears down any live browser and deletes the persisted profile so the next session performs a
+    /// fresh login. Called when broker credentials change at runtime — the persisted profile keeps
+    /// the OLD authenticated session alive, so it must not survive a credential rotation.
+    /// </summary>
+    public async Task InvalidateSessionAsync(CancellationToken ct = default)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            var sessionDir = ResolvePath(_config.Current.SessionDir);
+            await TeardownAsync();
+            KillPreviousBrowser(sessionDir);
+            try
+            {
+                if (Directory.Exists(sessionDir))
+                    Directory.Delete(sessionDir, recursive: true);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "[AhkBroker] Could not delete session profile {Dir}; the next launch will still re-login if the old session is invalid.",
+                    sessionDir);
+            }
+
+            _logger.LogInformation(
+                "[AhkBroker] Session invalidated — the next broker operation will log in with the current credentials.");
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>
     /// Opens a broker session and verifies authentication without opening an order dialog or
     /// submitting an order. Intended for startup diagnostics and opt-in integration tests.
     /// </summary>
@@ -90,7 +126,7 @@ public sealed class AhkBroker : IAsyncDisposable
         await _gate.WaitAsync(ct);
         try
         {
-            var cfg = _config.Value;
+            var cfg = _config.Current;
             if (string.IsNullOrWhiteSpace(cfg.PortalUrl))
                 throw new InvalidOperationException("AHK PortalUrl is required.");
 
@@ -133,7 +169,7 @@ public sealed class AhkBroker : IAsyncDisposable
     {
         if (!forceRestart && IsHealthy()) return;
 
-        var cfg        = _config.Value;
+        var cfg        = _config.Current;
         var sessionDir = ResolvePath(cfg.SessionDir);
         Directory.CreateDirectory(sessionDir);
         Directory.CreateDirectory(ResolvePath(cfg.LogDir));
@@ -358,7 +394,7 @@ public sealed class AhkBroker : IAsyncDisposable
             // Close the browser once the whole batch is done (on-demand lifecycle). The next call
             // relaunches and the persisted profile usually keeps us logged in. Disable via
             // CloseBrowserAfterOrder.
-            if (_config.Value.CloseBrowserAfterOrder)
+            if (_config.Current.CloseBrowserAfterOrder)
                 await TeardownAsync();
 
             _gate.Release();
@@ -397,7 +433,7 @@ public sealed class AhkBroker : IAsyncDisposable
         }
         finally
         {
-            if (_config.Value.CloseBrowserAfterOrder)
+            if (_config.Current.CloseBrowserAfterOrder)
                 await TeardownAsync();
             _gate.Release();
         }
@@ -471,7 +507,7 @@ public sealed class AhkBroker : IAsyncDisposable
         }
         finally
         {
-            if (_config.Value.CloseBrowserAfterOrder)
+            if (_config.Current.CloseBrowserAfterOrder)
                 await TeardownAsync();
             _gate.Release();
         }
@@ -488,7 +524,7 @@ public sealed class AhkBroker : IAsyncDisposable
     /// </summary>
     private async Task NavigateToPortfolioViewAsync()
     {
-        var cfg = _config.Value;
+        var cfg = _config.Current;
         var timeout = Math.Max(1_000, cfg.PortfolioLoadTimeoutMs);
 
         if (!string.IsNullOrWhiteSpace(cfg.PortfolioUrl))
@@ -711,7 +747,7 @@ public sealed class AhkBroker : IAsyncDisposable
     /// <summary>Scrapes balance + holdings from the current page. ASSUMES the gate is held.</summary>
     private async Task<PortfolioSnapshot> ExtractPortfolioAsync()
     {
-        var cfg = _config.Value;
+        var cfg = _config.Current;
         var warnings = new List<string>();
 
         // Every table on the page as rows of cell text (first row = header). Plain string arrays keep
@@ -994,7 +1030,7 @@ public sealed class AhkBroker : IAsyncDisposable
         {
             await ScreenshotAsync($"portfolio_{tag}");
             var html = await _page!.EvaluateFunctionAsync<string>("() => document.body.innerHTML");
-            var path = Path.Combine(ResolvePath(_config.Value.LogDir),
+            var path = Path.Combine(ResolvePath(_config.Current.LogDir),
                 $"portfolio_{tag}_{DateTime.UtcNow:yyyyMMdd_HHmmss}.html");
             await File.WriteAllTextAsync(path, html);
             _logger.LogWarning("[AhkBroker] Dumped portfolio page HTML to {Path}", path);
@@ -1016,7 +1052,7 @@ public sealed class AhkBroker : IAsyncDisposable
     /// </summary>
     private async Task<(decimal price, string? note)> ResolveLimitPriceAsync(decimal requested, string side)
     {
-        if (!_config.Value.ClampPriceToBand)
+        if (!_config.Current.ClampPriceToBand)
             return (requested, null);
 
         var (lowerLock, upperCap) = await ReadPriceBandAsync(side);
@@ -1158,14 +1194,14 @@ public sealed class AhkBroker : IAsyncDisposable
     {
         try
         {
-            return await _page!.QuerySelectorAsync(_config.Value.LoggedInSelector) is not null;
+            return await _page!.QuerySelectorAsync(_config.Current.LoggedInSelector) is not null;
         }
         catch { return false; }
     }
 
     private async Task LoginAsync()
     {
-        var cfg = _config.Value;
+        var cfg = _config.Current;
         _logger.LogInformation("[AhkBroker] Logging in to {Url}", cfg.PortalUrl);
 
         await _page!.GoToAsync(cfg.PortalUrl, WaitUntilNavigation.Networkidle0);
@@ -1391,7 +1427,7 @@ public sealed class AhkBroker : IAsyncDisposable
             await ScreenshotAsync($"login_{tag}");
             var html = await _page!.EvaluateFunctionAsync<string>(
                 "() => { const f = document.querySelector('form'); return f ? f.outerHTML : document.body.innerHTML; }");
-            var path = Path.Combine(ResolvePath(_config.Value.LogDir),
+            var path = Path.Combine(ResolvePath(_config.Current.LogDir),
                 $"login_{tag}_{DateTime.UtcNow:yyyyMMdd_HHmmss}.html");
             await File.WriteAllTextAsync(path, html);
             _logger.LogWarning("[AhkBroker] Dumped login form HTML to {Path}", path);
@@ -1406,7 +1442,7 @@ public sealed class AhkBroker : IAsyncDisposable
 
     private async Task<OrderResult> PlaceBuyAsync(TradingSignal signal)
     {
-        var cfg     = _config.Value;
+        var cfg     = _config.Current;
         var qty     = signal.Quantity ?? cfg.DefaultQty;
         var isLimit = !signal.OrderType.Equals("MARKET", StringComparison.OrdinalIgnoreCase);
 
@@ -1468,7 +1504,7 @@ public sealed class AhkBroker : IAsyncDisposable
 
     private async Task<OrderResult> PlaceSellAsync(TradingSignal signal)
     {
-        var cfg     = _config.Value;
+        var cfg     = _config.Current;
         var qty     = signal.Quantity ?? cfg.DefaultQty;
         var isLimit = !signal.OrderType.Equals("MARKET", StringComparison.OrdinalIgnoreCase);
 
@@ -1622,7 +1658,7 @@ public sealed class AhkBroker : IAsyncDisposable
     /// </summary>
     private async Task ClickSubmitAsync(string side)
     {
-        var cfg        = _config.Value;
+        var cfg        = _config.Current;
         var configured = side == "buy" ? cfg.BuySubmitSelector : cfg.SellSubmitSelector;
         if (!string.IsNullOrWhiteSpace(configured))
         {
@@ -1727,7 +1763,7 @@ public sealed class AhkBroker : IAsyncDisposable
         {
             await ScreenshotAsync($"order_{tag}");
             var html = await _page!.EvaluateFunctionAsync<string>("() => document.body.innerHTML");
-            var path = Path.Combine(ResolvePath(_config.Value.LogDir),
+            var path = Path.Combine(ResolvePath(_config.Current.LogDir),
                 $"order_{tag}_{DateTime.UtcNow:yyyyMMdd_HHmmss}.html");
             await File.WriteAllTextAsync(path, html);
             _logger.LogWarning("[AhkBroker] Dumped order form HTML to {Path}", path);
@@ -1912,7 +1948,7 @@ public sealed class AhkBroker : IAsyncDisposable
     private async Task<string> ScreenshotAsync(string prefix)
     {
         var path = Path.Combine(
-            ResolvePath(_config.Value.LogDir),
+            ResolvePath(_config.Current.LogDir),
             $"{prefix}_{DateTime.UtcNow:yyyyMMdd_HHmmss}.png");
         try
         {

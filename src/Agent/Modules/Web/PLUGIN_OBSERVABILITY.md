@@ -203,6 +203,25 @@ Update plugin configuration. Changes apply immediately.
 - `config` (object, required) — Configuration object with key-value pairs
 - `merge` (boolean, default=true) — If true, merge with existing config; if false, replace entirely
 
+**Sensitive fields.** For plugins that publish a config definition (`IPluginConfigDefinitionProvider`),
+the following rules apply:
+
+- Only keys defined in the schema with `RuntimeEditable = true` are accepted; everything else in
+  `config` is silently dropped.
+- Fields marked `Sensitive = true` (passwords, PINs, API keys) are never returned by the GET
+  endpoints — a stored value is replaced with the mask placeholder `********`. Sending that
+  placeholder back means "keep the stored value unchanged"; sending a new string replaces it;
+  sending an empty string clears the runtime override (the plugin falls back to appsettings).
+- Sensitive values are encrypted at rest (AES-GCM) in the `plugin-configs` JSON files, keyed by
+  `plugin-configs/.plugin-secrets.key`. Deleting the key file makes stored secrets unreadable —
+  they are then treated as unset and must be re-entered.
+
+**Live consumption.** Plugins read runtime values through `IRuntimePluginOptions<T>`
+(registered via `services.AddRuntimePluginOptions<T>("plugin-name")`), which overlays the stored
+config onto the `IOptions<T>` appsettings baseline at read time — so saved changes apply without a
+restart. Side effects (e.g. the trading plugin discarding its authenticated broker session when
+credentials change) hook `PluginConfigManager.OnConfigChanged`.
+
 **Response:**
 ```json
 {

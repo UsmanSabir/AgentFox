@@ -345,7 +345,14 @@ class Program
         {
             var workspaceDir = sp.GetRequiredService<WorkspaceManager>();
             var configDir = Path.Combine(workspaceDir.ResolvePath(""), "plugin-configs");
-            return new AgentFox.Plugins.PluginConfigManager(configDir, sp.GetRequiredService<ILogger<AgentFox.Plugins.PluginConfigManager>>());
+            var secretProtector = new AgentFox.Plugins.AesPluginSecretProtector(
+                Path.Combine(configDir, ".plugin-secrets.key"),
+                sp.GetRequiredService<ILogger<AgentFox.Plugins.AesPluginSecretProtector>>());
+            return new AgentFox.Plugins.PluginConfigManager(
+                configDir,
+                sp.GetRequiredService<ILogger<AgentFox.Plugins.PluginConfigManager>>(),
+                sp.GetServices<AgentFox.Plugins.IPluginConfigDefinitionProvider>(),
+                secretProtector);
         });
 
         // AgentOrchestrator — builds the main agent, starts the command processor,

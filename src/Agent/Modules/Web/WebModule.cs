@@ -601,16 +601,23 @@ public class WebModule : IAppModule
         endpoints.MapPost("/plugin-config/{pluginName}", async (
             string pluginName,
             AgentFox.Plugins.PluginConfigUpdateRequest req,
-            AgentFox.Plugins.PluginConfigManager configMgr) =>
+            AgentFox.Plugins.PluginConfigManager configMgr,
+            IEnumerable<AgentFox.Plugins.IPluginConfigDefinitionProvider> definitionProviders) =>
         {
             if (req.Config == null || req.Config.Count == 0)
                 return Results.BadRequest(new { error = "Config object cannot be empty" });
 
+            var definition = definitionProviders.SelectMany(provider => provider.GetDefinitions())
+                .FirstOrDefault(item => item.PluginName.Equals(pluginName, StringComparison.OrdinalIgnoreCase));
+            var config = SanitizeIncomingConfig(definition, req.Config, configMgr.GetConfig(pluginName));
+            if (config.Count == 0)
+                return Results.BadRequest(new { error = "No editable configuration values in request" });
+
             bool success;
             if (req.Merge)
-                success = await configMgr.MergeConfigAsync(pluginName, req.Config);
+                success = await configMgr.MergeConfigAsync(pluginName, config);
             else
-                success = await configMgr.SaveConfigAsync(pluginName, req.Config);
+                success = await configMgr.SaveConfigAsync(pluginName, config);
 
             if (!success)
                 return Results.StatusCode(500);
@@ -638,6 +645,14 @@ public class WebModule : IAppModule
         foreach (var item in stored.Config)
             effective.TryAdd(item.Key, item.Value);
 
+        // Never send stored secrets to the browser — replace with the mask placeholder,
+        // which SanitizeIncomingConfig recognizes on the way back as "unchanged".
+        foreach (var field in definition.Fields.Where(f => f.Sensitive))
+        {
+            if (effective.TryGetValue(field.Key, out var value) && value is string { Length: > 0 })
+                effective[field.Key] = AgentFox.Plugins.PluginConfigSecrets.Mask;
+        }
+
         return new
         {
             pluginName = definition.PluginName,
@@ -649,6 +664,52 @@ public class WebModule : IAppModule
             isDefault = stored.IsDefault
         };
     }
+
+    /// <summary>
+    /// For plugins with a config definition, keeps only defined, runtime-editable fields and
+    /// resolves the sensitive-field mask placeholder back to the stored value (i.e. "unchanged").
+    /// Plugins without a definition are schema-less and pass through untouched.
+    /// </summary>
+    private static Dictionary<string, object?> SanitizeIncomingConfig(
+        AgentFox.Plugins.PluginConfigDefinition? definition,
+        Dictionary<string, object?> incoming,
+        Dictionary<string, object?> stored)
+    {
+        if (definition is null)
+            return incoming;
+
+        var fields = definition.Fields
+            .GroupBy(f => f.Key, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+
+        var result = new Dictionary<string, object?>();
+        foreach (var (key, value) in incoming)
+        {
+            if (!fields.TryGetValue(key, out var field) || !field.RuntimeEditable)
+                continue;
+
+            if (field.Sensitive && IsSecretMask(value))
+            {
+                // Round-tripped placeholder: keep whatever is stored (explicit copy so the
+                // secret survives a non-merge save too).
+                if (stored.TryGetValue(key, out var existing))
+                    result[key] = existing;
+                continue;
+            }
+
+            result[key] = value;
+        }
+        return result;
+    }
+
+    // Request-bound dictionary values arrive as JsonElement, not string.
+    private static bool IsSecretMask(object? value) => value switch
+    {
+        string s => s == AgentFox.Plugins.PluginConfigSecrets.Mask,
+        System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.String } je =>
+            je.GetString() == AgentFox.Plugins.PluginConfigSecrets.Mask,
+        _ => false
+    };
 
     public Task StartAsync(IServiceProvider services) => Task.CompletedTask;
 }

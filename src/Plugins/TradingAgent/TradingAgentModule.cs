@@ -85,6 +85,12 @@ public sealed class TradingAgentModule : IAgentAwareModule
         services.Configure<AhkConfig>(
             config.GetSection($"Plugins:{AhkConfig.SectionName}"));
 
+        // Live AhkConfig view: appsettings baseline + the browser-editable overlay stored under
+        // "trading-agent-broker" (portal URL and credentials). AhkBroker reads it at use time, so
+        // credential changes saved in the web UI apply without a restart.
+        services.AddRuntimePluginOptions<AhkConfig>(
+            TradingPluginConfigDefinitionProvider.BrokerPluginName);
+
         services.AddSingleton<AhkBroker>();
         services.AddSingleton<AhkBrowserBrokerAdapter>();
         services.AddSingleton<IBrokerAdapter>(sp => sp.GetRequiredService<AhkBrowserBrokerAdapter>());
@@ -181,8 +187,40 @@ public sealed class TradingAgentModule : IAgentAwareModule
     public Task StartAsync(IServiceProvider services)
     {
         _services = services;
+        RegisterBrokerCredentialChangeListener(services);
         return Task.CompletedTask;
     }
+
+    /// <summary>
+    /// When the broker connection config changes in the web UI, drop the persisted AHK browser
+    /// profile: it holds a session authenticated with the OLD credentials, and the next order must
+    /// log in fresh with the new ones. Non-credential edits to other trading config never reach
+    /// this listener (it watches only the broker plugin-config), and no-op saves are filtered by
+    /// comparing the effective connection values.
+    /// </summary>
+    private static void RegisterBrokerCredentialChangeListener(IServiceProvider services)
+    {
+        var configManager  = services.GetRequiredService<PluginConfigManager>();
+        var runtimeOptions = services.GetRequiredService<IRuntimePluginOptions<AhkConfig>>();
+        var broker         = services.GetRequiredService<AhkBroker>();
+        var logger         = services.GetRequiredService<ILogger<TradingAgentModule>>();
+
+        var last = ConnectionFingerprint(runtimeOptions.Current);
+        configManager.OnConfigChanged(TradingPluginConfigDefinitionProvider.BrokerPluginName, async () =>
+        {
+            var current = ConnectionFingerprint(runtimeOptions.Current);
+            if (current == last)
+                return;
+
+            last = current;
+            logger.LogInformation("[TradingAgent] Broker connection settings changed — invalidating AHK browser session.");
+            await broker.InvalidateSessionAsync();
+        });
+    }
+
+    private static (string PortalUrl, string Username, string Password, string TradingPin)
+        ConnectionFingerprint(AhkConfig cfg) =>
+        (cfg.PortalUrl, cfg.Username, cfg.Password, cfg.TradingPin);
 
     // ── IAgentAwareModule ─────────────────────────────────────────────────────
 

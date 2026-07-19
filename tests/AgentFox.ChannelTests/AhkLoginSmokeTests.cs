@@ -1,6 +1,6 @@
+using AgentFox.Plugins;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
-using Microsoft.Extensions.Options;
 using TradingAgent.Broker;
 using TradingAgent.Config;
 
@@ -50,7 +50,7 @@ public sealed class AhkLoginSmokeTests
                 .Build();
 
             await using var broker = new AhkBroker(
-                Options.Create(config), hostConfig, NullLogger<AhkBroker>.Instance);
+                new FixedRuntimeOptions(config), hostConfig, NullLogger<AhkBroker>.Instance);
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(120));
             var result = await broker.VerifyLoginAsync(forceRestart: true, timeout.Token);
 
@@ -63,6 +63,11 @@ public sealed class AhkLoginSmokeTests
             try { Directory.Delete(temp, recursive: true); }
             catch { /* browser teardown can briefly retain profile files on Windows */ }
         }
+    }
+
+    private sealed class FixedRuntimeOptions(AhkConfig config) : IRuntimePluginOptions<AhkConfig>
+    {
+        public AhkConfig Current => config;
     }
 
     private static string RequiredEnvironmentVariable(string name)

@@ -13,6 +13,9 @@ public class PluginConfigManager
 {
     private readonly string _configDirectory;
     private readonly ILogger<PluginConfigManager> _logger;
+    private readonly IPluginSecretProtector? _secretProtector;
+    private readonly IEnumerable<IPluginConfigDefinitionProvider> _definitionProviders;
+    private readonly Lazy<Dictionary<string, HashSet<string>>> _sensitiveKeys;
     private readonly ConcurrentDictionary<string, PluginConfigData> _configs = new();
     private readonly ConcurrentDictionary<string, List<Func<Task>>> _configChangeListeners = new();
 
@@ -22,10 +25,19 @@ public class PluginConfigManager
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
     };
 
-    public PluginConfigManager(string configDirectory, ILogger<PluginConfigManager> logger)
+    public PluginConfigManager(
+        string configDirectory,
+        ILogger<PluginConfigManager> logger,
+        IEnumerable<IPluginConfigDefinitionProvider>? definitionProviders = null,
+        IPluginSecretProtector? secretProtector = null)
     {
         _configDirectory = configDirectory;
         _logger = logger;
+        _definitionProviders = definitionProviders ?? [];
+        _secretProtector = secretProtector;
+        // Definitions may depend on options not yet safe to resolve at construction; build the
+        // sensitive-key map on first save instead.
+        _sensitiveKeys = new Lazy<Dictionary<string, HashSet<string>>>(BuildSensitiveKeyMap);
 
         // Ensure config directory exists
         Directory.CreateDirectory(configDirectory);
@@ -53,7 +65,7 @@ public class PluginConfigManager
                     {
                         // Deserialized values arrive as JsonElement; collapse to CLR primitives
                         // so consumers can pattern-match (e.g. `is bool`/`is string`).
-                        data.Config = NormalizeConfig(data.Config);
+                        data.Config = UnprotectConfig(NormalizeConfig(data.Config));
                         _configs.TryAdd(data.PluginName, data);
                         _logger.LogDebug("Loaded plugin config: {Plugin}", data.PluginName);
                     }
@@ -140,8 +152,17 @@ public class PluginConfigManager
 
             _configs.AddOrUpdate(pluginName, data, (_, _) => data);
 
+            // The in-memory copy stays plaintext for consumers; sensitive values are
+            // encrypted only in the persisted file.
+            var persisted = new PluginConfigData
+            {
+                PluginName = data.PluginName,
+                Config = ProtectConfig(pluginName, data.Config),
+                LastUpdatedAt = data.LastUpdatedAt
+            };
+
             var filePath = Path.Combine(_configDirectory, $"{pluginName}.plugin-config.json");
-            var json = JsonSerializer.Serialize(data, JsonOptions);
+            var json = JsonSerializer.Serialize(persisted, JsonOptions);
             await File.WriteAllTextAsync(filePath, json);
 
             _logger.LogInformation("[{Plugin}] Configuration updated and persisted", pluginName);
@@ -213,6 +234,77 @@ public class PluginConfigManager
                 _logger.LogError(ex, "Config change listener failed for {Plugin}", pluginName);
             }
         }
+    }
+
+    /// <summary>Keys declared <see cref="PluginConfigFieldDefinition.Sensitive"/> for a plugin.</summary>
+    public IReadOnlySet<string> GetSensitiveKeys(string pluginName) =>
+        _sensitiveKeys.Value.TryGetValue(pluginName, out var keys)
+            ? keys
+            : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+    private Dictionary<string, HashSet<string>> BuildSensitiveKeyMap()
+    {
+        var map = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var provider in _definitionProviders)
+        {
+            try
+            {
+                foreach (var definition in provider.GetDefinitions())
+                {
+                    var keys = map.TryGetValue(definition.PluginName, out var existing)
+                        ? existing
+                        : map[definition.PluginName] = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var field in definition.Fields.Where(f => f.Sensitive))
+                        keys.Add(field.Key);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Failed to read config definitions from {Provider}", provider.GetType().Name);
+            }
+        }
+        return map;
+    }
+
+    /// <summary>Encrypt sensitive string values for the on-disk copy. No-op without a protector.</summary>
+    private Dictionary<string, object?> ProtectConfig(string pluginName, Dictionary<string, object?> config)
+    {
+        if (_secretProtector is null)
+            return config;
+
+        var sensitiveKeys = GetSensitiveKeys(pluginName);
+        if (sensitiveKeys.Count == 0)
+            return config;
+
+        var result = new Dictionary<string, object?>(config.Count);
+        foreach (var (key, value) in config)
+        {
+            result[key] = sensitiveKeys.Contains(key)
+                          && value is string s
+                          && s.Length > 0
+                          && !_secretProtector.IsProtected(s)
+                ? _secretProtector.Protect(s)
+                : value;
+        }
+        return result;
+    }
+
+    /// <summary>Decrypt any encrypted values loaded from disk (self-describing "enc:" prefix).</summary>
+    private Dictionary<string, object?> UnprotectConfig(Dictionary<string, object?> config)
+    {
+        if (_secretProtector is null)
+            return config;
+
+        var result = new Dictionary<string, object?>(config.Count);
+        foreach (var (key, value) in config)
+        {
+            if (value is string s && _secretProtector.IsProtected(s))
+                result[key] = _secretProtector.TryUnprotect(s, out var plaintext) ? plaintext : string.Empty;
+            else
+                result[key] = value;
+        }
+        return result;
     }
 
     /// <summary>Get all plugin configs.</summary>
