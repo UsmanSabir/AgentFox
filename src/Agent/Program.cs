@@ -129,11 +129,23 @@ class Program
                 a.Equals("--api-key",   StringComparison.OrdinalIgnoreCase));
 
             if (commandMode)
+            {
                 await wizard.RunCommandModeAsync(args);
-            else
-                await wizard.RunInteractiveModeAsync();
+                return 0;
+            }
 
-            return 0;
+            var onboarding = await wizard.RunInteractiveModeAsync();
+            if (!onboarding.StartAgentNow)
+                return 0;
+
+            // Continue into normal startup with the settings the wizard just wrote.
+            // The default providers loaded {cwd}/appsettings.json at builder creation
+            // (possibly before the file existed, or from a different directory than the
+            // wizard's target); re-adding appCfgPath last makes the wizard's file
+            // authoritative and freshly loaded.
+            builder.Configuration.AddJsonFile(appCfgPath, optional: true, reloadOnChange: true);
+            AnsiConsole.MarkupLine("[bold green]✓[/] Setup complete — starting AgentFox...");
+            AnsiConsole.WriteLine();
         }
 
         // ── Pre-build async services ──────────────────────────────────────────

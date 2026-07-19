@@ -5,13 +5,15 @@ param(
     [string]$BinaryUrl = $env:AGENTFOX_BINARY_URL,
     [switch]$BuildFromSource,
     [switch]$SkipService,
-    [switch]$NoTrading
+    [switch]$NoTrading,
+    [switch]$SkipOnboarding
 )
 
 $ErrorActionPreference = 'Stop'
 
-# Allow the one-liner (irm | iex) to opt out of the Trading plugin via env var.
+# Allow the one-liner (irm | iex) to opt out via env vars.
 if (-not $NoTrading -and $env:AGENTFOX_NO_TRADING -eq '1') { $NoTrading = $true }
+if (-not $SkipOnboarding -and $env:AGENTFOX_SKIP_ONBOARDING -eq '1') { $SkipOnboarding = $true }
 
 if (-not $RepoUrl) { $RepoUrl = 'https://github.com/UsmanSabir/AgentFox.git' }
 
@@ -208,18 +210,30 @@ if exist "%AGENTFOX_HOME%\AgentFox.exe" (
 Write-Host ''
 Write-Host 'AgentFox installed successfully.' -ForegroundColor Green
 Write-Host "Install directory: $resolvedInstallDir" -ForegroundColor Green
-Write-Host 'Run it with:' -ForegroundColor Yellow
-Write-Host "  $resolvedInstallDir\agentfox.cmd" -ForegroundColor Yellow
 Write-Host ''
 if ($NoTrading) {
     Write-Host 'Trading plugin NOT installed (-NoTrading). Re-run the installer without -NoTrading to add it.' -ForegroundColor Yellow
 }
 else {
     Write-Host 'Trading plugin is enabled for LIVE auto-execution (AutoExecute=true, ExecutionMode=BoundedAuto).' -ForegroundColor Red
-    Write-Host 'Configure Plugins.TradingAgent.AllowedSymbols and Ahk credentials in appsettings.json before sending signals.' -ForegroundColor Red
+    Write-Host 'The setup wizard below can switch it to Paper mode and collect AHK credentials, PIN and allowed symbols.' -ForegroundColor Red
 }
 
-if (-not $SkipService) {
-    Write-Host 'To install as a Windows service later, run:' -ForegroundColor DarkYellow
-    Write-Host "  $resolvedInstallDir\agentfox.cmd --install-service" -ForegroundColor DarkYellow
+# ── Onboarding ────────────────────────────────────────────────────────────────
+# The wizard configures the LLM, plugin credentials, and (optionally) the Windows
+# service. It offers to start the agent when done — if it installs and starts the
+# service, the gateway is already listening and no second instance is launched.
+if (-not $SkipOnboarding -and [Environment]::UserInteractive) {
+    Write-Host ''
+    Write-Info 'Starting the AgentFox setup wizard (re-run any time with: agentfox.cmd --onboarding) ...'
+    & $launcher --onboarding
+}
+else {
+    Write-Host ''
+    Write-Host 'Next steps:' -ForegroundColor Yellow
+    Write-Host "  $resolvedInstallDir\agentfox.cmd --onboarding    # interactive setup (LLM, plugin credentials, service)" -ForegroundColor Yellow
+    Write-Host "  $resolvedInstallDir\agentfox.cmd                 # start the agent (web UI on port 8080 by default)" -ForegroundColor Yellow
+    if (-not $SkipService) {
+        Write-Host "  $resolvedInstallDir\agentfox.cmd --install-service    # run AgentFox as a Windows service" -ForegroundColor DarkYellow
+    }
 }

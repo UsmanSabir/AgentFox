@@ -15,7 +15,12 @@ A powerful multi-agent AI framework in C# with support for sub-agents, memory, M
 ## Installation
 
 The installer checks dependencies (.NET SDK 10.0, Git), downloads a prebuilt binary from GitHub
-Releases (or builds from source), and drops an `agentfox` launcher into `~/.agentfox`.
+Releases (or builds from source), and drops an `agentfox` launcher into `~/.agentfox`. When run
+in a terminal it finishes by launching the interactive setup wizard, which configures the LLM
+provider, plugin credentials (e.g. the Trading plugin's AHK login, PIN and allowed symbols), and
+optionally installs the system service — then either starts the agent or, if the service is
+already running, points you at the web UI. Pass `-SkipOnboarding` / `--skip-onboarding` to skip
+the wizard; re-run it any time with `agentfox --onboarding`.
 
 ### Windows (PowerShell)
 
@@ -86,6 +91,7 @@ bash ./install.sh --no-trading   # without trading
 | `-RepoUrl <url>` | `AGENTFOX_REPO_URL` | this repo | Source repo to clone when building from source. |
 | `-Branch <name>` | `AGENTFOX_BRANCH` | default branch | Branch to clone (shallow). |
 | `-SkipService` | — | off | Suppress the Windows service hint (Windows only). |
+| `-SkipOnboarding` | `--skip-onboarding` / `AGENTFOX_SKIP_ONBOARDING=1` | wizard runs | Don't launch the interactive setup wizard after install. |
 
 ### ⚠️ Trading plugin safety
 

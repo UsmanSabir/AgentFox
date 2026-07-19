@@ -37,12 +37,13 @@ public static class OnboardingUI
     public static void PrintWarning(string message)
         => AnsiConsole.MarkupLine($"  [blue]│[/]   [yellow]⚠[/] {Markup.Escape(message)}");
 
-    public static void PrintDone(string configPath)
+    public static void PrintDone(string configPath, bool showRestartHint = true)
     {
         AnsiConsole.MarkupLine("  [blue]│[/]");
         AnsiConsole.MarkupLine($"  [blue]◆[/] [bold green]Configuration saved![/]");
         AnsiConsole.MarkupLine($"  [blue]│[/]   [dim]{Markup.Escape(configPath)}[/]");
-        AnsiConsole.MarkupLine("  [blue]│[/]   [dim]Restart AgentFox to apply the new settings.[/]");
+        if (showRestartHint)
+            AnsiConsole.MarkupLine("  [blue]│[/]   [dim]Restart AgentFox to apply the new settings.[/]");
         AnsiConsole.WriteLine();
     }
 

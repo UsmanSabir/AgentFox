@@ -14,9 +14,29 @@ using AgentFox.Runtime.Services;
 /// </list>
 /// </para>
 /// </summary>
+/// <summary>Outcome of the interactive wizard, used by Program to decide what happens next.</summary>
+public sealed class OnboardingResult
+{
+    /// <summary>User asked for the agent to start in this process right away.</summary>
+    public bool StartAgentNow { get; init; }
+
+    /// <summary>
+    /// The wizard installed AND started the system service — the gateway is already listening
+    /// on <see cref="Port"/>, so starting a second in-process instance would collide on the port.
+    /// </summary>
+    public bool ServiceRunning { get; init; }
+
+    public int Port { get; init; } = 8080;
+}
+
 public class OnboardingWizard
 {
     private readonly string _configFilePath;
+
+    // Set by the service step; drives the gateway-aware completion flow.
+    private bool _serviceInstalled;
+    private bool _serviceStarted;
+    private int? _servicePort;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -101,7 +121,7 @@ public class OnboardingWizard
     // ── Interactive wizard ────────────────────────────────────────────────────
 
     /// <summary>Full interactive wizard — shows a menu after the mandatory LLM step.</summary>
-    public async Task RunInteractiveModeAsync(CancellationToken ct = default)
+    public async Task<OnboardingResult> RunInteractiveModeAsync(CancellationToken ct = default)
     {
         OnboardingUI.PrintBanner();
         var config = ReadOrCreateConfig();
@@ -120,6 +140,15 @@ public class OnboardingWizard
             ("composio",   "Composio  ⟶  GitHub, Slack, Gmail & 100+ more", RunComposioStepAsync),
             ("mcp",        "MCP servers  (advanced)",                      RunMcpStepAsync),
         };
+
+        // Installed plugins (plugins/ next to the binary) get a guided config step at the
+        // top of the menu — credentials, PINs and safety limits are collected here instead
+        // of being hand-edited into appsettings.json.
+        var installedPlugins = DetectInstalledPlugins();
+        if (installedPlugins.Count > 0)
+            steps.Insert(0, ("plugins",
+                $"Plugins  ({string.Join(", ", installedPlugins)})",
+                RunPluginsStepAsync));
 
         var done = new HashSet<string>(StringComparer.Ordinal);
 
@@ -146,7 +175,47 @@ public class OnboardingWizard
         }
 
         WriteConfig(config);
-        OnboardingUI.PrintDone(_configFilePath);
+        OnboardingUI.PrintDone(_configFilePath, showRestartHint: false);
+        return FinishInteractive(config);
+    }
+
+    // ── Completion: start the agent (gateway-aware) ───────────────────────────
+
+    private OnboardingResult FinishInteractive(JsonObject config)
+    {
+        int port = _servicePort ?? ReadInt(config["Services"] as JsonObject, "Port", 8080);
+
+        // The service step already started the gateway on this port — a second
+        // in-process instance would fight it for the port, so just point at the UI.
+        if (_serviceStarted)
+        {
+            OnboardingUI.PrintSuccess("AgentFox is already running as a background service.");
+            OnboardingUI.PrintInfo($"Web UI:  http://localhost:{port}");
+            OnboardingUI.PrintInfo("Manage it with:  agentfox --service-status / --stop-service / --restart-service");
+            OnboardingUI.PrintLine();
+            return new OnboardingResult { ServiceRunning = true, Port = port };
+        }
+
+        bool start = OnboardingUI.Confirm("Start AgentFox now?", defaultValue: true);
+        if (start)
+        {
+            OnboardingUI.PrintInfo($"Once running, the web UI is at:  http://localhost:{port}");
+        }
+        else
+        {
+            OnboardingUI.PrintInfo($"Start it any time with:  {GetLauncherHint()}");
+            if (_serviceInstalled)
+                OnboardingUI.PrintInfo("Or start the installed service:  agentfox --start-service");
+        }
+        OnboardingUI.PrintLine();
+        return new OnboardingResult { StartAgentNow = start, Port = port };
+    }
+
+    private static string GetLauncherHint()
+    {
+        string launcher = OperatingSystem.IsWindows() ? "agentfox.cmd" : "agentfox";
+        string path = Path.Combine(AppContext.BaseDirectory, launcher);
+        return File.Exists(path) ? path : Path.GetFileName(Environment.ProcessPath ?? "agentfox");
     }
 
     // ── Step: Language model (mandatory) ─────────────────────────────────────
@@ -296,6 +365,163 @@ public class OnboardingWizard
         return Task.CompletedTask;
     }
 
+    // ── Step: Plugins ─────────────────────────────────────────────────────────
+
+    private static string PluginsRoot => Path.Combine(AppContext.BaseDirectory, "plugins");
+
+    /// <summary>Plugin folders under plugins/ (excluding non-plugin payloads like the downloaded Chromium).</summary>
+    internal static List<string> DetectInstalledPlugins()
+    {
+        if (!Directory.Exists(PluginsRoot)) return [];
+        return Directory.GetDirectories(PluginsRoot)
+            .Select(d => Path.GetFileName(d)!)
+            .Where(n => !n.Equals("Chrome", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private Task RunPluginsStepAsync(JsonObject config, CancellationToken ct)
+    {
+        var plugins = DetectInstalledPlugins();
+        OnboardingUI.PrintStepHeader("Plugin Configuration",
+            $"Installed plugin(s): {string.Join(", ", plugins)}");
+
+        foreach (var plugin in plugins)
+        {
+            if (plugin.Equals("TradingAgent", StringComparison.OrdinalIgnoreCase))
+                ConfigureTradingPlugin(config);
+            else
+                OnboardingUI.PrintInfo(
+                    $"'{plugin}' has no guided setup — configure it under Plugins:{plugin} in appsettings.json.");
+        }
+
+        OnboardingUI.PrintLine();
+        return Task.CompletedTask;
+    }
+
+    private static void ConfigureTradingPlugin(JsonObject config)
+    {
+        OnboardingUI.PrintStepHeader("Trading plugin  (AHK / PSX)",
+            "Places PSX orders through the AHK web portal. Everything here can be changed later under Plugins in appsettings.json.");
+
+        if (!OnboardingUI.Confirm("Configure the Trading plugin now?", defaultValue: true))
+        {
+            OnboardingUI.PrintInfo("Skipped. Configure Plugins:TradingAgent and Plugins:Ahk in appsettings.json before sending signals.");
+            OnboardingUI.PrintLine();
+            return;
+        }
+
+        var pluginsNode = GetOrCreateObject(config, "Plugins");
+        var trading     = GetOrCreateObject(pluginsNode, "TradingAgent");
+        var ahk         = GetOrCreateObject(pluginsNode, "Ahk");
+
+        // Execution mode ───────────────────────────────────────────────────────
+        string currentMode = ReadString(trading, "ExecutionMode") ?? "Disabled";
+        OnboardingUI.PrintInfo($"Current execution mode: {currentMode}");
+        OnboardingUI.PrintLine();
+
+        var modeChoice = OnboardingUI.Choose("How should trade signals be executed?",
+        [
+            "Paper  —  simulate orders only  (recommended to start)",
+            "Disabled  —  load the plugin but never execute",
+            "ApprovalRequired  —  a human approves every live order",
+            "BoundedAuto  —  LIVE auto-execution within configured risk bounds",
+        ]);
+        string mode = modeChoice.Split(' ')[0];
+        bool live   = mode is "ApprovalRequired" or "BoundedAuto";
+
+        trading["ExecutionMode"] = mode;
+        trading["AutoExecute"]   = live;
+
+        if (mode == "ApprovalRequired")
+        {
+            // The startup safety validator refuses ApprovalRequired unless HITL
+            // watches both order tools — wire that up so the config actually boots.
+            var hitl = GetOrCreateObject(config, "Hitl");
+            hitl["Enabled"] = true;
+            if (hitl["RequireApprovalForTools"] is not JsonArray tools)
+            {
+                tools = new JsonArray();
+                hitl["RequireApprovalForTools"] = tools;
+            }
+            foreach (var tool in new[] { "place_order", "place_orders" })
+            {
+                if (!tools.Any(t => string.Equals(t?.ToString(), tool, StringComparison.OrdinalIgnoreCase)))
+                    tools.Add(tool);
+            }
+            OnboardingUI.PrintSuccess("Human-in-the-loop approval enabled for place_order / place_orders.");
+        }
+
+        // AHK portal credentials ───────────────────────────────────────────────
+        if (mode != "Disabled" &&
+            OnboardingUI.Confirm("Configure AHK portal credentials now (needed for orders and portfolio reads)?",
+                defaultValue: live))
+        {
+            OnboardingUI.PrintLine();
+
+            string defaultPortal = ReadString(ahk, "PortalUrl") is { Length: > 0 } p ? p : "https://web.ahletrade.com/";
+            ahk["PortalUrl"] = OnboardingUI.AskText("Portal URL:", defaultPortal) ?? defaultPortal;
+
+            string? existingUser = ReadString(ahk, "Username");
+            var user = OnboardingUI.AskText("AHK username:",
+                string.IsNullOrWhiteSpace(existingUser) ? null : existingUser);
+            if (!string.IsNullOrWhiteSpace(user)) ahk["Username"] = user;
+
+            if (!string.IsNullOrWhiteSpace(ReadString(ahk, "Password")))
+                OnboardingUI.PrintInfo("Press Enter to keep the existing password.");
+            var password = OnboardingUI.AskText("AHK password:", secret: true);
+            if (!string.IsNullOrWhiteSpace(password)) ahk["Password"] = password;
+
+            if (!string.IsNullOrWhiteSpace(ReadString(ahk, "TradingPin")))
+                OnboardingUI.PrintInfo("Press Enter to keep the existing trading PIN.");
+            var pin = OnboardingUI.AskText("Trading PIN:", secret: true);
+            if (!string.IsNullOrWhiteSpace(pin)) ahk["TradingPin"] = pin;
+        }
+
+        // Symbols & limits (live modes fail closed without symbols) ────────────
+        if (live)
+        {
+            OnboardingUI.PrintLine();
+            OnboardingUI.PrintInfo("Live execution fails closed: orders are blocked until AllowedSymbols is configured.");
+
+            var existingSymbols = (trading["AllowedSymbols"] as JsonArray)?
+                .Select(n => n?.ToString())
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .ToList() ?? [];
+            if (existingSymbols.Count > 0)
+                OnboardingUI.PrintInfo($"Currently allowed: {string.Join(", ", existingSymbols)}");
+
+            var symbolsInput = OnboardingUI.AskText("Allowed PSX symbols  (comma-separated, e.g. OGDC, PPL, HUBC):");
+            if (!string.IsNullOrWhiteSpace(symbolsInput))
+            {
+                var arr = new JsonArray();
+                foreach (var s in symbolsInput.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                    arr.Add(JsonValue.Create(s.ToUpperInvariant()));
+                trading["AllowedSymbols"] = arr;
+            }
+            else if (existingSymbols.Count == 0)
+            {
+                OnboardingUI.PrintWarning("No symbols configured — every live order will be rejected until AllowedSymbols is set.");
+            }
+
+            var maxStr = OnboardingUI.AskText("Max value per order (PKR):",
+                ReadDecimal(ahk, "MaxOrderValuePkr", 50_000m).ToString("0"));
+            if (decimal.TryParse(maxStr, out var maxVal) && maxVal > 0)
+                ahk["MaxOrderValuePkr"] = maxVal;
+
+            var budgetStr = OnboardingUI.AskText("Budget per stock when a signal has no quantity (PKR):",
+                ReadDecimal(ahk, "PerStockBudgetPkr", 50_000m).ToString("0"));
+            if (decimal.TryParse(budgetStr, out var budget) && budget > 0)
+                ahk["PerStockBudgetPkr"] = budget;
+        }
+
+        OnboardingUI.PrintLine();
+        if (mode == "BoundedAuto")
+            OnboardingUI.PrintWarning("BoundedAuto places REAL orders automatically. Review Plugins:TradingAgent limits before sending signals.");
+        OnboardingUI.PrintSuccess($"Trading plugin: ExecutionMode = {mode}");
+        OnboardingUI.PrintLine();
+    }
+
     // ── Step: System service ──────────────────────────────────────────────────
 
     private async Task RunServiceStepAsync(JsonObject config, CancellationToken ct)
@@ -400,31 +626,38 @@ public class OnboardingWizard
         };
 
         ServiceResult? result = null;
+        ServiceResult? startResult = null;
         await OnboardingUI.RunWithSpinner($"Installing {platform} service...", async () =>
         {
             var manager = ServiceManagerFactory.Create(serviceConfig);
             result = await manager.InstallAsync();
             if (result?.Success == true)
             {
-                try
-                {
-                    var serviceResult = await manager.StartAsync();
-                    if (!serviceResult.Success)
-                    {
-                        // Service started successfully
-                        OnboardingUI.PrintWarning( "Failed to start service. " + serviceResult.Message + ". "+ serviceResult.Details);
-                    }
-                }
-                catch{ /* Ignore error */ }
+                try { startResult = await manager.StartAsync(); }
+                catch { /* Reported below as "installed but not started". */ }
             }
         });
 
         if (result?.Success == true)
         {
+            _serviceInstalled = true;
+            _serviceStarted   = startResult?.Success == true;
+            _servicePort      = port;
+
             OnboardingUI.PrintSuccess(result.Message);
             if (!string.IsNullOrWhiteSpace(result.Details))
                 OnboardingUI.PrintInfo(result.Details);
-            OnboardingUI.PrintSuccess("Service installed. Start it now with:  agentfox --start-service");
+
+            if (_serviceStarted)
+            {
+                OnboardingUI.PrintSuccess($"Service installed and running — web UI at http://localhost:{port}");
+            }
+            else
+            {
+                if (!string.IsNullOrWhiteSpace(startResult?.Message))
+                    OnboardingUI.PrintWarning($"Service installed but could not be started: {startResult.Message}");
+                OnboardingUI.PrintInfo("Start it with:  agentfox --start-service");
+            }
         }
         else
         {
@@ -624,6 +857,23 @@ public class OnboardingWizard
         if (!string.IsNullOrWhiteSpace(baseUrl)) node["BaseUrl"] = baseUrl;
         return node;
     }
+
+    private static JsonObject GetOrCreateObject(JsonObject parent, string key)
+    {
+        if (parent[key] is JsonObject existing) return existing;
+        var created = new JsonObject();
+        parent[key] = created;
+        return created;
+    }
+
+    private static string? ReadString(JsonObject obj, string key)
+        => obj[key] is JsonValue v && v.TryGetValue<string>(out var s) ? s : null;
+
+    private static decimal ReadDecimal(JsonObject obj, string key, decimal fallback)
+        => obj[key] is JsonValue v && v.TryGetValue<decimal>(out var d) ? d : fallback;
+
+    private static int ReadInt(JsonObject? obj, string key, int fallback)
+        => obj?[key] is JsonValue v && v.TryGetValue<int>(out var i) ? i : fallback;
 
     private static string FirstExample(string examples)
         => examples.Contains('/')

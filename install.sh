@@ -10,13 +10,15 @@ WITH_TRADING=1
 if [ "${AGENTFOX_NO_TRADING:-0}" = "1" ]; then
   WITH_TRADING=0
 fi
+SKIP_ONBOARDING="${AGENTFOX_SKIP_ONBOARDING:-0}"
 
 for arg in "$@"; do
   case "$arg" in
     --no-trading) WITH_TRADING=0 ;;
     --with-trading) WITH_TRADING=1 ;;
+    --skip-onboarding) SKIP_ONBOARDING=1 ;;
     *)
-      echo "Unknown option: $arg (supported: --no-trading, --with-trading)" >&2
+      echo "Unknown option: $arg (supported: --no-trading, --with-trading, --skip-onboarding)" >&2
       exit 1
       ;;
   esac
@@ -253,12 +255,27 @@ chmod +x "$INSTALL_DIR/agentfox"
 echo
 echo 'AgentFox installed successfully.'
 echo "Install directory: $INSTALL_DIR"
-echo 'Run it with:'
-echo "  $INSTALL_DIR/agentfox"
 echo
 if [ "$WITH_TRADING" = "1" ]; then
   echo 'Trading plugin is enabled for LIVE auto-execution (AutoExecute=true, ExecutionMode=BoundedAuto).'
-  echo 'Configure Plugins.TradingAgent.AllowedSymbols and Ahk credentials in appsettings.json before sending signals.'
+  echo 'The setup wizard can switch it to Paper mode and collect AHK credentials, PIN and allowed symbols.'
 else
   echo 'Trading plugin NOT installed (--no-trading). Re-run the installer without --no-trading to add it.'
+fi
+
+# ── Onboarding ────────────────────────────────────────────────────────────────
+# The wizard configures the LLM, plugin credentials, and (optionally) the system
+# service. It offers to start the agent when done — if it installs and starts the
+# service, the gateway is already listening and no second instance is launched.
+# With `curl | bash` stdin is the pipe, so the wizard reads from /dev/tty instead;
+# without any usable terminal (CI), print the commands and exit.
+if [ "$SKIP_ONBOARDING" != "1" ] && { [ -t 0 ] || [ -t 1 ]; } && [ -e /dev/tty ]; then
+  echo
+  info "Starting the AgentFox setup wizard (re-run any time with: agentfox --onboarding) ..."
+  "$INSTALL_DIR/agentfox" --onboarding < /dev/tty > /dev/tty 2>&1 || true
+else
+  echo
+  echo 'Next steps:'
+  echo "  $INSTALL_DIR/agentfox --onboarding    # interactive setup (LLM, plugin credentials, service)"
+  echo "  $INSTALL_DIR/agentfox                 # start the agent (web UI on port 8080 by default)"
 fi
