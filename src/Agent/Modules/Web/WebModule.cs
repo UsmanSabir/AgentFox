@@ -26,6 +26,13 @@ public class WebModule : IAppModule
     /// <summary>Schema tag stamped on exported session bundles and required on import.</summary>
     private const string SessionExportSchema = "agentfox.session.v1";
 
+    /// <summary>
+    /// camelCase JSON options for SSE payloads, so nested objects (e.g. ResearchReference's
+    /// Url/Title/Source) serialize consistently with the rest of the API instead of falling
+    /// back to PascalCase under a bare JsonSerializer.Serialize call.
+    /// </summary>
+    private static readonly JsonSerializerOptions SseJsonOptions = new(JsonSerializerDefaults.Web);
+
     public void RegisterServices(IServiceCollection services, IConfiguration config)
     {
         services.AddEndpointsApiExplorer();
@@ -138,7 +145,7 @@ public class WebModule : IAppModule
                     async token =>
                     {
                         if (ct.IsCancellationRequested) return;
-                        var data = JsonSerializer.Serialize(new { token });
+                        var data = JsonSerializer.Serialize(new { token }, SseJsonOptions);
                         await httpContext.Response.WriteAsync($"data: {data}\n\n", ct);
                         await httpContext.Response.Body.FlushAsync(ct);
                     },
@@ -151,7 +158,7 @@ public class WebModule : IAppModule
                     done = true,
                     conversationId,
                     references = reply.References
-                });
+                }, SseJsonOptions);
                 await httpContext.Response.WriteAsync($"event: done\ndata: {donePayload}\n\n", ct);
                 await httpContext.Response.Body.FlushAsync(ct);
             }
@@ -161,7 +168,7 @@ public class WebModule : IAppModule
             }
             catch (Exception ex)
             {
-                var errPayload = JsonSerializer.Serialize(new { error = ex.Message });
+                var errPayload = JsonSerializer.Serialize(new { error = ex.Message }, SseJsonOptions);
                 try
                 {
                     await httpContext.Response.WriteAsync($"event: error\ndata: {errPayload}\n\n", ct);
