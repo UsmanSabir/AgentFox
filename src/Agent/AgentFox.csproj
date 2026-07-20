@@ -7,7 +7,14 @@
     <Nullable>enable</Nullable>
     <RootNamespace>AgentFox</RootNamespace>
     <AssemblyName>AgentFox</AssemblyName>
-    <Version>1.0.0</Version>
+    <!-- Base version. The CI release workflow (.github/workflows/release.yml) overrides
+         Version / InformationalVersion per build to auto-increment
+         (e.g. 1.0.<run_number>+<sha>). Local builds use this value as-is.
+         Bump MAJOR.MINOR here; the CI patch component comes from the build run number. -->
+    <VersionPrefix>1.0.0</VersionPrefix>
+    <!-- Keep InformationalVersion exactly as set (CI passes "x.y.z+sha"); without this
+         the SDK auto-appends the full git commit, producing a messy double suffix. -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <Description>AgentFox - Multi-agent framework with sub-agents, memory, MCP support, and channel integrations</Description>
 
     <!-- Single-file publish: framework-dependent, platform-specific RID required -->

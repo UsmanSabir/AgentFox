@@ -21,7 +21,15 @@ export interface AgentStatus {
   name: string;
   id?: string;
   ready: boolean;
+  version?: string;
   uptime: string;
+}
+
+export interface VersionInfo {
+  version: string;
+  full: string;
+  commit: string;
+  display: string;
 }
 
 export interface AgentInfo {
@@ -377,7 +385,8 @@ async function del<T>(path: string): Promise<T> {
 // ── Endpoints ─────────────────────────────────────────────────────────────
 
 export const api = {
-  health:   () => get<{ status: string; timestamp: string }>('/health'),
+  health:   () => get<{ status: string; version: string; timestamp: string }>('/health'),
+  version:  () => get<VersionInfo>('/version'),
   status:   () => get<AgentStatus>('/status'),
   agents:   () => get<AgentInfo[]>('/agents'),
   specialistAgents: () => get<SpecialistAgentInfo[]>('/specialist-agents'),

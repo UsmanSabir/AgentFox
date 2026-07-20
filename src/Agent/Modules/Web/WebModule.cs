@@ -1,3 +1,4 @@
+using AgentFox.Helpers;
 using AgentFox.MCP;
 using AgentFox.Memory;
 using AgentFox.Plugins.Models;
@@ -31,7 +32,17 @@ public class WebModule : IAppModule
     {
         // ── Health ────────────────────────────────────────────────────────────
         endpoints.MapGet("/health", () =>
-            Results.Ok(new { status = "Ok", timestamp = DateTimeOffset.UtcNow }));
+            Results.Ok(new { status = "Ok", version = VersionInfo.Version, timestamp = DateTimeOffset.UtcNow }));
+
+        // ── Version ───────────────────────────────────────────────────────────
+        endpoints.MapGet("/version", () =>
+            Results.Ok(new
+            {
+                version = VersionInfo.Version,
+                full    = VersionInfo.Full,
+                commit  = VersionInfo.Commit,
+                display = VersionInfo.Display
+            }));
 
         // ── Status ────────────────────────────────────────────────────────────
         endpoints.MapGet("/status", (FoxAgentHolder holder) =>
@@ -43,6 +54,7 @@ public class WebModule : IAppModule
                 name    = agent?.Name ?? "AgentFox",
                 id      = agent?.Id,
                 ready   = agent != null,
+                version = VersionInfo.Version,
                 uptime  = DateTimeOffset.UtcNow
             });
         });

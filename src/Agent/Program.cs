@@ -72,6 +72,15 @@ class Program
 
         // ── Web application builder (single DI container for the whole process) ─
         var builder       = WebApplication.CreateBuilder(args);
+
+        // WebApplication.CreateBuilder loads appsettings.json from the *content root*
+        // (the current working directory), NOT the install directory. When the exe is
+        // launched from PATH (cwd = %USERPROFILE%) or as a service (cwd = System32),
+        // the user's real config in the install dir is never seen and every model falls
+        // back to the Ollama default (localhost:11434). Add the resolved install-dir file
+        // last so it is authoritative on every startup, not just during onboarding.
+        builder.Configuration.AddJsonFile(appCfgPath, optional: true, reloadOnChange: true);
+
         var configuration = builder.Configuration;
         builder.Services.AddManagementAuthentication(configuration);
 
@@ -431,6 +440,11 @@ class Program
         // ── Build and configure the web application ───────────────────────────
         var app = builder.Build();
 
+        // Record the build version in the logs so it shows up in service mode too
+        // (the console banner is suppressed when running as a Windows/systemd service).
+        app.Services.GetService<ILogger<Program>>()?
+            .LogInformation("AgentFox {Version}", VersionInfo.Full);
+
         if (requiresWeb)
         {
             // Serve wwwroot from embedded resources (single-file publish) or from disk (dev / regular publish).
@@ -501,22 +515,8 @@ class Program
         });
 
         AnsiConsole.MarkupLine("[dim]  Sub-agents · Memory · MCP · Skills · Channel Integrations[/]");
+        AnsiConsole.MarkupLineInterpolated($"[dim]  {VersionInfo.Display}[/]");
         AnsiConsole.WriteLine();
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Configuration
-    // ─────────────────────────────────────────────────────────────────────────
-
-    static IConfiguration BuildConfiguration()
-    {
-        var envName = Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT") ?? "Production";
-        return new ConfigurationBuilder()
-            .SetBasePath(AppContext.BaseDirectory)
-            .AddJsonFile("appsettings.json", optional: true, reloadOnChange: true)
-            .AddJsonFile($"appsettings.{envName}.json", optional: true, reloadOnChange: true)
-            .AddEnvironmentVariables()
-            .Build();
     }
 
     // ─────────────────────────────────────────────────────────────────────────

@@ -1,6 +1,8 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { page } from '$app/stores';
   import { sidebarCollapsed } from '$lib/stores';
+  import { api } from '$lib/api';
   import {
     LayoutDashboard,
     MessageSquare,
@@ -37,6 +39,17 @@
 
   $: collapsed = $sidebarCollapsed;
   $: current  = $page.url.pathname;
+
+  // Live build version from the backend; falls back to the label below if unreachable.
+  let version = 'v1.0.0';
+  onMount(async () => {
+    try {
+      const info = await api.version();
+      if (info?.display) version = info.display;
+    } catch {
+      // keep fallback — version endpoint unavailable (e.g. not yet authenticated)
+    }
+  });
 
   function isActive(href: string) {
     if (href === '/') return current === '/';
@@ -87,7 +100,7 @@
   <!-- Footer version -->
   {#if !collapsed}
     <div class="sidebar-footer">
-      <span class="version">v1.0.0</span>
+      <span class="version" title={version}>{version}</span>
     </div>
   {/if}
 </aside>
