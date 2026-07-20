@@ -19,7 +19,6 @@ public sealed class ReferencesSidecarTests
     // append path so GetConversationMessages has assistant snapshots to attach references to.
     private static void SeedTwoTurns(MarkdownSessionStore store, string convId)
     {
-        var provider = store.HistoryProvider;
         // Turn 1
         store.AppendForTest(convId, new ChatMessage(ChatRole.User, "research OGDC"));
         store.AppendForTest(convId, new ChatMessage(ChatRole.Assistant, "OGDC looks fine."));
