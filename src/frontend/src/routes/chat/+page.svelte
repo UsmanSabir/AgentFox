@@ -201,6 +201,10 @@
       alert('Session name cannot be empty.');
       return;
     }
+    if (title.trim().length > 120) {
+      alert('Session name cannot exceed 120 characters.');
+      return;
+    }
 
     try {
       await api.renameSession(session.id, title.trim());

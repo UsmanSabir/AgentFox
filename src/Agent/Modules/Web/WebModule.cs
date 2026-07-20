@@ -335,6 +335,12 @@ public class WebModule : IAppModule
                 return Results.BadRequest(new { error = "invalid_schema" });
             if (string.IsNullOrWhiteSpace(req.TranscriptMarkdown))
                 return Results.BadRequest(new { error = "empty_transcript" });
+            if (req.Session?.Title?.Trim().Length > SessionManager.MaxSessionTitleLength)
+                return Results.BadRequest(new
+                {
+                    error = "session_title_too_long",
+                    maxLength = SessionManager.MaxSessionTitleLength
+                });
 
             var newId = sessionManager.ImportSession(
                 req.Session?.AgentId,

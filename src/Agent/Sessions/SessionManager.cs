@@ -488,9 +488,7 @@ public class SessionManager : IDisposable
         _index[newId] = new SessionInfo
         {
             SessionId = newId,
-            Title = string.IsNullOrWhiteSpace(title)
-                ? null
-                : title.Trim()[..Math.Min(title.Trim().Length, MaxSessionTitleLength)],
+            Title = NormalizeOptionalTitle(title),
             LogicalKey = $"web:{newId}",
             Origin = SessionOrigin.Web,
             Status = SessionStatus.Idle,
@@ -777,6 +775,17 @@ public class SessionManager : IDisposable
     {
         if (!IsSafeSessionId(sessionId))
             throw new ArgumentException("Session ID contains unsupported characters.", nameof(sessionId));
+    }
+
+    private static string? NormalizeOptionalTitle(string? title)
+    {
+        if (string.IsNullOrWhiteSpace(title)) return null;
+
+        var normalizedTitle = title.Trim();
+        if (normalizedTitle.Length > MaxSessionTitleLength)
+            throw new ArgumentException(
+                $"Session title cannot exceed {MaxSessionTitleLength} characters.", nameof(title));
+        return normalizedTitle;
     }
 
     // -------------------------------------------------------------------------
