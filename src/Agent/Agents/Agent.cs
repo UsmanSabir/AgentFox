@@ -16,6 +16,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using AgentFox.Plugins.Interfaces;
+using AgentFox.Plugins.Research;
 using SystemPromptBuilder = AgentFox.LLM.SystemPromptBuilder;
 
 namespace AgentFox.Agents;
@@ -208,6 +209,7 @@ public class FoxAgent
 
         try
         {
+            using var referenceScope = ResearchReferenceScope.Begin();
             var agent = _chatAgent;
 
             // Retrieve the cached session. On a cache miss (first call or after restart),
@@ -309,7 +311,8 @@ public class FoxAgent
             SessionManager?.TouchSession(conversationId);
             _logger?.LogInformation("Agent '{AgentName}' completed task in conversation {ConversationId}", Name, conversationId);
 
-            var result = new AgentResult { Success = true, Output = responseText };
+            var references = ResearchReferenceScope.Current?.Snapshot().ToList() ?? new List<ResearchReference>();
+            var result = new AgentResult { Success = true, Output = responseText, References = references };
             if (_experienceLearning != null)
                 await _experienceLearning.CompleteAsync(experienceTurn, true, timeoutToken);
             return result;
