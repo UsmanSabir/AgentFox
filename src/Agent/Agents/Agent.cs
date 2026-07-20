@@ -207,6 +207,7 @@ public class FoxAgent
         var timeoutToken = cts.Token;
         var experienceTurn = _experienceLearning?.BeginTurn(task, Name);
 
+        AgentSession? session = null;
         try
         {
             using var referenceScope = ResearchReferenceScope.Begin();
@@ -215,7 +216,7 @@ public class FoxAgent
             // Retrieve the cached session. On a cache miss (first call or after restart),
             // create a fresh session and restore any persisted messages from disk so the
             // ChatHistoryProvider sees the full prior history before RunAsync is called.
-            var session = ConversationStore.GetSession(conversationId);
+            session = ConversationStore.GetSession(conversationId);
             if (session == null)
             {
                 _logger?.LogDebug("Creating new conversation session for {ConversationId}", conversationId);
@@ -225,6 +226,14 @@ public class FoxAgent
                 await ConversationStore.RestoreAsync(conversationId, session);
                 ConversationStore.SaveSession(conversationId, session);
             }
+
+            // Persist the raw user message to a sidecar .pending file *before* any
+            // failure-prone work (memory recall, baseline building, the LLM call). If the
+            // turn then throws, hangs, or the process is killed, the message survives and can
+            // be surfaced when the conversation is reloaded and recovered on the next start —
+            // instead of the whole turn vanishing from the transcript. We persist `task`
+            // (not `augmentedTask`) so the memory preamble is rebuilt fresh on retry.
+            (ConversationStore as Memory.MarkdownSessionStore)?.PersistIncomingUserMessage(conversationId, task);
 
             var runOptions = new AgentRunOptions();
             //TODO: Look into prompt caching
@@ -236,12 +245,6 @@ public class FoxAgent
                 ? string.Empty
                 : await _experienceLearning.BuildBaselineAsync(task, timeoutToken);
             var augmentedTask = memoryContext + learnedBaseline + task;
-
-            // Write the original user message to a sidecar .pending file before the LLM call.
-            // If the process crashes mid-response, the pending file lets startup recovery
-            // detect the interrupted task and offer to resume it.
-            // We persist `task` (not `augmentedTask`) so the memory preamble is rebuilt fresh on retry.
-            (ConversationStore as Memory.MarkdownSessionStore)?.PersistIncomingUserMessage(conversationId, task);
 
             string responseText;
 
@@ -334,6 +337,19 @@ public class FoxAgent
         }
         finally
         {
+            // Best-effort flush: persist any messages the history provider recorded for this
+            // turn even when a later step (reference persistence, post-processing) threw or the
+            // turn was cancelled. SaveSession is delta-based and idempotent, so on the normal
+            // success path (already saved above) this is a no-op.
+            if (session != null)
+            {
+                try { ConversationStore.SaveSession(conversationId, session); }
+                catch (Exception flushEx)
+                {
+                    _logger?.LogError(flushEx,
+                        "Failed to flush conversation {ConversationId} during turn teardown", conversationId);
+                }
+            }
             _experienceLearning?.EndTurn(experienceTurn);
         }
     }

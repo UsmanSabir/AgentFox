@@ -10,10 +10,9 @@ namespace AgentFox.TavilySearch;
 /// <summary>
 /// AgentFox plugin module that exposes the <see cref="TavilySearchTool"/> (tavily_search).
 ///
-/// <see cref="TavilySearchTool"/> throws from its constructor when no key is present, so this
-/// module registers the tool only when a Tavily key is configured — either the "TAVILY_API_KEY"
-/// environment variable or a "Tavily:ApiKey" config value. Without a key it logs a hint and stays
-/// inert, letting the plugin ship enabled-by-default without crashing unconfigured installs.
+/// Registers the shared REST provider and tool only when a Tavily key is configured — either the
+/// "TAVILY_API_KEY" environment variable or a "Plugins:Tavily:ApiKey" config value. Without a key
+/// it logs a hint and stays inert, letting the plugin ship without breaking unconfigured installs.
 /// </summary>
 public sealed class TavilySearchModule : IAgentAwareModule
 {
@@ -23,9 +22,7 @@ public sealed class TavilySearchModule : IAgentAwareModule
 
     public void RegisterServices(IServiceCollection services, IConfiguration config)
     {
-        var apiKey = Environment.GetEnvironmentVariable("TAVILY_API_KEY")
-            ?? config["Tavily:ApiKey"]
-            ?? config["Plugins:Tavily:ApiKey"];
+        var apiKey = TavilyWebSearchProvider.ResolveApiKey(config);
         if (!string.IsNullOrWhiteSpace(apiKey))
             services.AddSingleton<IWebSearchProvider, TavilyWebSearchProvider>();
     }
@@ -46,7 +43,8 @@ public sealed class TavilySearchModule : IAgentAwareModule
         if (provider is null)
         {
             logger.LogInformation(
-                "[TavilySearch] tavily_search tool not registered — set TAVILY_API_KEY or \"Tavily:ApiKey\" to enable it.");
+                "[TavilySearch] tavily_search tool not registered — set TAVILY_API_KEY or " +
+                "\"Plugins:Tavily:ApiKey\" to enable it.");
             return Task.CompletedTask;
         }
 

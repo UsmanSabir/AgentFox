@@ -390,7 +390,22 @@ public class SessionManager : IDisposable
 
         var destination = ConversationFilePath(sessionId);
         Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-        if (File.Exists(destination)) return false;
+        if (File.Exists(destination))
+        {
+            // The active file already exists at the destination (e.g. a prior resume moved
+            // it but the process crashed before the index was saved). The content for this
+            // session is already in place, so treat this as resumed instead of failing.
+            info.Status = SessionStatus.Active;
+            info.LastActivityAt = DateTime.UtcNow;
+            info.ArchivePath = null;
+            info.AbortedAt = null;
+            info.AbortReason = null;
+            SaveIndexAsync();
+            _logger?.LogWarning(
+                "Resume for {SessionId}: active file already present at {Destination}; marking active without moving archive copy.",
+                sessionId, destination);
+            return true;
+        }
 
         File.Move(source, destination);
         info.Status = SessionStatus.Active;
@@ -472,23 +487,30 @@ public class SessionManager : IDisposable
 
     /// <summary>
     /// Returns the raw Markdown transcript for a session, reading from the archive
-    /// directory when the session is archived. Null if the session or its file is missing.
+    /// directory when the session is archived. Null only if the session itself is
+    /// unknown; a tracked session with no persisted messages yet returns an empty
+    /// string rather than null, since "no transcript file" is not the same as
+    /// "session doesn't exist" (e.g. a session archived before its first message,
+    /// or an active session that hasn't written anything to disk yet).
     /// </summary>
     public string? ReadTranscript(string sessionId)
     {
         if (!_index.TryGetValue(sessionId, out var info)) return null;
 
-        if (info.Status == SessionStatus.Archived && !string.IsNullOrWhiteSpace(info.ArchivePath))
+        if (info.Status == SessionStatus.Archived)
         {
-            var archiveRoot = Path.GetFullPath(_archiveDir) + Path.DirectorySeparatorChar;
-            var src = Path.GetFullPath(Path.Combine(_archiveDir, info.ArchivePath));
-            if (src.StartsWith(archiveRoot, StringComparison.OrdinalIgnoreCase) && File.Exists(src))
-                return File.ReadAllText(src, System.Text.Encoding.UTF8);
-            return null;
+            if (!string.IsNullOrWhiteSpace(info.ArchivePath))
+            {
+                var archiveRoot = Path.GetFullPath(_archiveDir) + Path.DirectorySeparatorChar;
+                var src = Path.GetFullPath(Path.Combine(_archiveDir, info.ArchivePath));
+                if (src.StartsWith(archiveRoot, StringComparison.OrdinalIgnoreCase) && File.Exists(src))
+                    return File.ReadAllText(src, System.Text.Encoding.UTF8);
+            }
+            return string.Empty;
         }
 
         var path = ConversationFilePath(sessionId);
-        return File.Exists(path) ? File.ReadAllText(path, System.Text.Encoding.UTF8) : null;
+        return File.Exists(path) ? File.ReadAllText(path, System.Text.Encoding.UTF8) : string.Empty;
     }
 
     /// <summary>

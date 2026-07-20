@@ -10,6 +10,7 @@ using AgentFox.Agents;
 using IAgentService = AgentFox.Plugins.Interfaces.IAgentService;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -133,6 +134,13 @@ public class WebModule : IAppModule
             httpContext.Response.Headers.CacheControl = "no-cache";
             httpContext.Response.Headers.Connection = "keep-alive";
             httpContext.Response.Headers["X-Accel-Buffering"] = "no"; // disable nginx buffering
+
+            // Opt this response out of server-side buffering. Without this, the ASP.NET
+            // pipeline may hold written chunks and only release them when the response
+            // completes, so the client receives every token at once at the end instead of
+            // as they stream. This is the piece that makes each FlushAsync below actually
+            // reach the wire immediately.
+            httpContext.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
 
             try
             {

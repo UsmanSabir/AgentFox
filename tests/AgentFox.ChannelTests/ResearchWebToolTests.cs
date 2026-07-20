@@ -71,6 +71,29 @@ public sealed class ResearchWebToolTests
         StringAssert.Contains(result.Error, "query");
     }
 
+    [TestMethod]
+    public async Task Search_ZeroResults_IsFailureNotEmptySuccess()
+    {
+        var provider = new FakeProvider(new WebSearchResponse(
+            "simple query",
+            [],
+            null,
+            "fake",
+            DateTime.UtcNow));
+        var tool = new ResearchWebTool(
+            provider,
+            Options.Create(new TradingAgentOptions()),
+            NullLogger<ResearchWebTool>.Instance);
+
+        var result = await tool.ExecuteAsync(new Dictionary<string, object?>
+        {
+            ["query"] = "simple query"
+        });
+
+        Assert.IsFalse(result.Success);
+        StringAssert.Contains(result.Error, "zero sourced results");
+    }
+
     private sealed class FakeProvider(WebSearchResponse? response = null) : IWebSearchProvider
     {
         private readonly WebSearchResponse _response = response ?? new(

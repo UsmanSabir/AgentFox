@@ -56,7 +56,6 @@
     <PackageVersion Include="Newtonsoft.Json" Version="13.0.4" />
     <PackageVersion Include="PuppeteerSharp" Version="25.3.4" />
     <PackageVersion Include="Spectre.Console" Version="0.57.2" />
-    <PackageVersion Include="Tavily" Version="1.0.1" />
     <PackageVersion Include="YamlDotNet" Version="18.1.0" />
 
     <!-- Tests -->
