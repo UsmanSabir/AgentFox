@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using AgentFox.Http;
 using Microsoft.Extensions.Logging;
@@ -28,16 +29,34 @@ public sealed record PsxQuoteSummary
     public string? Error { get; init; }
 }
 
-public sealed record NewsHeadline(string Title, string? Source, DateTime? PublishedUtc);
+public sealed record NewsHeadline(string Title, string? Source, DateTime? PublishedUtc, string? Url = null);
+
+/// <summary>
+/// Listing status of a security on the PSX. Derived from the portal's company page, which renders a
+/// status badge (e.g. DELISTED) next to the company name. <see cref="IsDelisted"/> is nullable:
+/// null means the status could not be determined (page unreachable/unparseable), and the research
+/// step treats that as unknown rather than assuming the stock is tradable.
+/// </summary>
+public sealed record PsxListingStatus
+{
+    public string Symbol { get; init; } = "";
+    public bool? IsDelisted { get; init; }
+    public string? StatusLabel { get; init; }
+    public string? Error { get; init; }
+}
 
 /// <summary>Everything gathered for one research request, ready to hand to the LLM analyst step.</summary>
 public sealed record StockResearchData
 {
     public PsxQuoteSummary Quote { get; init; } = new();
     public PsxQuoteSummary IndexQuote { get; init; } = new();
+    public PsxListingStatus ListingStatus { get; init; } = new();
     public IReadOnlyList<NewsHeadline> CompanyNews { get; init; } = [];
     public IReadOnlyList<NewsHeadline> MarketNews { get; init; } = [];
     public DateTime RetrievedAtUtc { get; init; } = DateTime.UtcNow;
+
+    /// <summary>The web endpoints consulted for this gather (PSX portal series + company page), for citation.</summary>
+    public IReadOnlyList<string> SourceUrls { get; init; } = [];
 }
 
 /// <summary>
@@ -69,6 +88,7 @@ public sealed class PsxDataClient
 
         var quoteTask   = GetQuoteSummaryAsync(symbol, ct);
         var indexTask   = GetQuoteSummaryAsync(Kse100Symbol, ct);
+        var listingTask = GetListingStatusAsync(symbol, ct);
         var newsTask    = _options.Value.ResearchNewsEnabled
             ? GetNewsAsync($"\"{symbol}\" PSX Pakistan stock", ct)
             : Task.FromResult<IReadOnlyList<NewsHeadline>>([]);
@@ -76,15 +96,31 @@ public sealed class PsxDataClient
             ? GetNewsAsync("Pakistan Stock Exchange KSE-100", ct)
             : Task.FromResult<IReadOnlyList<NewsHeadline>>([]);
 
-        await Task.WhenAll(quoteTask, indexTask, newsTask, marketTask);
+        await Task.WhenAll(quoteTask, indexTask, listingTask, newsTask, marketTask);
+
+        var baseUrl = _options.Value.PsxDataBaseUrl.TrimEnd('/');
+        var sourceUrls = new List<string>
+        {
+            $"{baseUrl}/timeseries/eod/{symbol}",
+            $"{baseUrl}/timeseries/int/{symbol}",
+            $"{baseUrl}/company/{symbol}",
+            $"{baseUrl}/timeseries/eod/{Kse100Symbol}"
+        };
+        if (_options.Value.ResearchNewsEnabled)
+        {
+            sourceUrls.Add(NewsFeedUrl($"\"{symbol}\" PSX Pakistan stock"));
+            sourceUrls.Add(NewsFeedUrl("Pakistan Stock Exchange KSE-100"));
+        }
 
         return new StockResearchData
         {
             Quote          = await quoteTask,
             IndexQuote     = await indexTask,
+            ListingStatus  = await listingTask,
             CompanyNews    = await newsTask,
             MarketNews     = await marketTask,
-            RetrievedAtUtc = DateTime.UtcNow
+            RetrievedAtUtc = DateTime.UtcNow,
+            SourceUrls     = sourceUrls
         };
     }
 
@@ -209,31 +245,112 @@ public sealed class PsxDataClient
     private static decimal? PercentChange(decimal? from, decimal? to) =>
         from is > 0 && to is not null ? Math.Round((to.Value - from.Value) / from.Value * 100m, 2) : null;
 
+    // ── Listing status (PSX company page) ──────────────────────────────────────
+
+    /// <summary>
+    /// Fetches the PSX company page and derives listing status (delisted or not). Fail-soft: an
+    /// unreachable page yields <see cref="PsxListingStatus.IsDelisted"/> = null (unknown), never an
+    /// exception, so it degrades the research evidence rather than aborting <see cref="GatherAsync"/>.
+    /// </summary>
+    public async Task<PsxListingStatus> GetListingStatusAsync(string symbol, CancellationToken ct = default)
+    {
+        try
+        {
+            var baseUrl = _options.Value.PsxDataBaseUrl.TrimEnd('/');
+            var html = await _http.GetStringAsync($"{baseUrl}/company/{symbol}", ct);
+            return ParseListingStatus(symbol, html);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[PsxData] Listing-status fetch failed for {Symbol}.", symbol);
+            return new PsxListingStatus
+            {
+                Symbol = symbol,
+                IsDelisted = null,
+                Error = $"Listing-status fetch failed: {ex.Message}"
+            };
+        }
+    }
+
+    // The portal renders a status badge next to the company name for non-normal listings, e.g.
+    // <div class="tag tag--skim tag--del">DELISTED</div>. Match the delisted modifier class (guarding
+    // against longer tokens like "tag--delta") corroborated by the visible DELISTED label.
+    private static readonly Regex DelistedClassRegex =
+        new(@"tag--del(?![\w-])", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex DelistedLabelRegex =
+        new(@">\s*DELISTED\s*<", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// Parses a PSX company page for delisted status. Pure/deterministic so it can be unit-tested
+    /// without network access. Returns IsDelisted = null when the page is empty/unusable.
+    /// </summary>
+    public static PsxListingStatus ParseListingStatus(string symbol, string? html)
+    {
+        symbol = symbol.Trim().ToUpperInvariant();
+
+        if (string.IsNullOrWhiteSpace(html))
+            return new PsxListingStatus
+            {
+                Symbol = symbol,
+                IsDelisted = null,
+                Error = "The PSX company page returned no content — listing status is unknown."
+            };
+
+        var delisted = DelistedClassRegex.IsMatch(html) || DelistedLabelRegex.IsMatch(html);
+
+        return new PsxListingStatus
+        {
+            Symbol = symbol,
+            IsDelisted = delisted,
+            StatusLabel = delisted ? "DELISTED" : null
+        };
+    }
+
     // ── News (Google News RSS — keyless) ──────────────────────────────────────
 
     private async Task<IReadOnlyList<NewsHeadline>> GetNewsAsync(string query, CancellationToken ct)
     {
         try
         {
-            var url = "https://news.google.com/rss/search?q=" + Uri.EscapeDataString(query) +
-                      "&hl=en-PK&gl=PK&ceid=PK:en";
+            var url = NewsFeedUrl(query);
             var xml = await _http.GetStringAsync(url, ct);
-            var feed = XDocument.Parse(xml);
+            return ParseNewsFeed(xml, Math.Max(1, _options.Value.ResearchHeadlineCount));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[PsxData] News fetch failed for query '{Query}'.", query);
+            return [];
+        }
+    }
 
+    /// <summary>Builds the keyless Google News RSS search URL for a query.</summary>
+    public static string NewsFeedUrl(string query) =>
+        "https://news.google.com/rss/search?q=" + Uri.EscapeDataString(query) + "&hl=en-PK&gl=PK&ceid=PK:en";
+
+    /// <summary>
+    /// Parses a Google News RSS document into headlines. Pure/deterministic so it can be unit-tested
+    /// without network access. Each item's &lt;link&gt; is captured as <see cref="NewsHeadline.Url"/>.
+    /// Returns an empty list for unparseable XML.
+    /// </summary>
+    public static IReadOnlyList<NewsHeadline> ParseNewsFeed(string xml, int max)
+    {
+        try
+        {
+            var feed = XDocument.Parse(xml);
             return feed.Descendants("item")
-                .Take(Math.Max(1, _options.Value.ResearchHeadlineCount))
+                .Take(Math.Max(1, max))
                 .Select(item => new NewsHeadline(
                     item.Element("title")?.Value.Trim() ?? "",
                     item.Elements().FirstOrDefault(e => e.Name.LocalName == "source")?.Value.Trim(),
                     DateTime.TryParse(item.Element("pubDate")?.Value, CultureInfo.InvariantCulture,
                         DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var dt)
-                        ? dt : null))
+                        ? dt : null,
+                    item.Element("link")?.Value.Trim()))
                 .Where(h => h.Title.Length > 0)
                 .ToList();
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-            _logger.LogWarning(ex, "[PsxData] News fetch failed for query '{Query}'.", query);
             return [];
         }
     }

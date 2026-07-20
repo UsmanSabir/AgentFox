@@ -1,12 +1,14 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from 'svelte';
   import { streamChat, api, type SessionInfo, type SpecialistAgentInfo } from '$lib/api';
+  import { renderMarkdown } from '$lib/markdown';
   import {
     chatMessages, addUserMessage, addAssistantMessage, addBackgroundResultMessage,
     appendToken, finalizeMessage, activeConversationId, activeAgentId, agentReady, resetChat
   } from '$lib/stores';
   import {
-    Send, RotateCcw, StopCircle, Bot, User, Copy, Check, Zap, History, Plus, X
+    Send, RotateCcw, StopCircle, Bot, User, Copy, Check, Zap, History, Plus, X,
+    Download, Upload, Trash2
   } from 'lucide-svelte';
 
   let inputEl: HTMLTextAreaElement;
@@ -20,6 +22,7 @@
   let specialists: SpecialistAgentInfo[] = [];
   let showSessions = false;
   let loadingSession = false;
+  let importInput: HTMLInputElement;
 
   $: messages     = $chatMessages;
   $: convId       = $activeConversationId;
@@ -61,9 +64,26 @@
     }
   }
 
-  async function scrollToBottom() {
+  // Whether the view should follow new content. Stays true while the user is
+  // at (or near) the bottom; flips off if they scroll up to read history.
+  let autoStick = true;
+
+  function onScroll() {
+    if (!scrollEl) return;
+    const distanceFromBottom =
+      scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight;
+    autoStick = distanceFromBottom < 80;
+  }
+
+  async function scrollToBottom(force = false) {
+    if (force) autoStick = true;
+    if (!autoStick) return;
+    // Wait for Svelte to flush the DOM, then for the browser to lay it out,
+    // so scrollHeight reflects the newly rendered content before we jump.
     await tick();
-    if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
+    requestAnimationFrame(() => {
+      if (autoStick && scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
+    });
   }
 
   async function send() {
@@ -72,7 +92,7 @@
 
     message = '';
     addUserMessage(text);
-    await scrollToBottom();
+    await scrollToBottom(true);
 
     const assistantId = addAssistantMessage('', true);
     isStreaming = true;
@@ -153,10 +173,58 @@
       })));
       showSessions = false;
       await loadSessions();
-      await scrollToBottom();
+      await scrollToBottom(true);
     } finally {
       loadingSession = false;
     }
+  }
+
+  async function exportSession(session: SessionInfo, event: Event) {
+    event.stopPropagation();
+    try {
+      await api.exportSession(session.id);
+    } catch (err) {
+      alert('Export failed: ' + (err instanceof Error ? err.message : String(err)));
+    }
+  }
+
+  async function deleteSession(session: SessionInfo, event: Event) {
+    event.stopPropagation();
+    if (isStreaming || loadingSession) return;
+    if (!confirm(`Delete session "${session.id}"? This permanently removes its transcript and cannot be undone.`))
+      return;
+    try {
+      await api.deleteSession(session.id);
+      if (session.id === convId) resetChat(selectedAgentId);
+      await loadSessions();
+    } catch (err) {
+      alert('Delete failed: ' + (err instanceof Error ? err.message : String(err)));
+    }
+  }
+
+  function triggerImport() {
+    importInput?.click();
+  }
+
+  async function handleImportFile(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = ''; // allow re-importing the same file later
+    if (!file || isStreaming) return;
+
+    let newId: string | null = null;
+    try {
+      const envelope = JSON.parse(await file.text());
+      const result = await api.importSession(envelope);
+      newId = result.conversationId;
+      await loadSessions();
+    } catch (err) {
+      alert('Import failed: ' + (err instanceof Error ? err.message : String(err)));
+      return;
+    }
+
+    const imported = sessions.find(s => s.id === newId);
+    if (imported) await openSession(imported);
   }
 
   function changeAgent(event: Event) {
@@ -215,23 +283,53 @@
       <aside class="session-panel fade-in">
         <div class="session-panel-head">
           <div><strong>Sessions</strong><span>{sessions.length}</span></div>
-          <button class="icon-btn" on:click={() => showSessions = false} title="Close"><X size={15} /></button>
+          <div class="session-head-actions">
+            <button class="toolbar-btn" on:click={triggerImport} title="Import a session from a file">
+              <Upload size={13} /> Import
+            </button>
+            <button class="icon-btn" on:click={() => showSessions = false} title="Close"><X size={15} /></button>
+          </div>
         </div>
+        <input
+          type="file"
+          accept="application/json,.json"
+          bind:this={importInput}
+          on:change={handleImportFile}
+          hidden
+        />
         <div class="session-list">
           {#if sessions.length === 0}
             <p class="session-empty">No saved sessions yet.</p>
           {:else}
             {#each sessions as session (session.id)}
-              <button
-                class="session-item"
-                class:active={session.id === convId}
-                on:click={() => openSession(session)}
-                disabled={loadingSession || isStreaming}
-              >
-                <span class="session-item-title">{session.id}</span>
-                <span class="session-item-meta">{session.origin} · {session.status}</span>
-                <span class="session-item-time">{new Date(session.lastActive).toLocaleString()}</span>
-              </button>
+              <div class="session-row" class:active={session.id === convId}>
+                <button
+                  class="session-item"
+                  on:click={() => openSession(session)}
+                  disabled={loadingSession || isStreaming}
+                >
+                  <span class="session-item-title">{session.id}</span>
+                  <span class="session-item-meta">{session.origin} · {session.status}</span>
+                  <span class="session-item-time">{new Date(session.lastActive).toLocaleString()}</span>
+                </button>
+                <div class="session-actions">
+                  <button
+                    class="icon-btn"
+                    on:click={(e) => exportSession(session, e)}
+                    title="Export session to file"
+                  >
+                    <Download size={14} />
+                  </button>
+                  <button
+                    class="icon-btn danger"
+                    on:click={(e) => deleteSession(session, e)}
+                    disabled={isStreaming || loadingSession}
+                    title="Delete session"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              </div>
             {/each}
           {/if}
         </div>
@@ -239,7 +337,7 @@
     {/if}
 
     <!-- Messages -->
-    <div class="messages-wrap" bind:this={scrollEl}>
+    <div class="messages-wrap" bind:this={scrollEl} on:scroll={onScroll}>
     {#if messages.length === 0}
       <div class="intro fade-in">
         <div class="intro-icon">
@@ -284,11 +382,13 @@
 
               {#if msg.error}
                 <div class="message-error">{msg.error}</div>
+              {:else if msg.role === 'user'}
+                <div class="message-content user-text">{msg.content}</div>
               {:else}
                 <div
-                  class="message-content prose"
+                  class="message-content markdown"
                   class:stream-cursor={msg.streaming && msg.content.length > 0}
-                >{msg.content}{#if msg.streaming && msg.content.length === 0}<span class="typing-dots"><span></span><span></span><span></span></span>{/if}</div>
+                >{#if msg.content.length > 0}{@html renderMarkdown(msg.content)}{:else if msg.streaming}<span class="typing-dots"><span></span><span></span><span></span></span>{/if}</div>
               {/if}
 
               {#if !msg.streaming && msg.role === 'assistant' && !msg.error}
@@ -437,23 +537,45 @@
     border-radius: 99px;
     padding: 0.1rem 0.4rem;
   }
-  .session-list { overflow-y: auto; padding: 0.45rem; }
+  .session-list { overflow-y: auto; padding: 0.45rem; display: flex; flex-direction: column; gap: 0.15rem; }
+  .session-head-actions { display: flex; align-items: center; gap: 0.35rem; }
+
+  .session-row {
+    display: flex;
+    align-items: stretch;
+    gap: 0.2rem;
+    border: 1px solid transparent;
+    border-radius: 7px;
+  }
+  .session-row:hover { background: var(--surface-2); border-color: var(--border); }
+  .session-row.active { background: var(--primary-dim); border-color: rgba(129,140,248,0.35); }
+
   .session-item {
-    width: 100%;
+    flex: 1;
+    min-width: 0;
     text-align: left;
     display: flex;
     flex-direction: column;
     gap: 0.2rem;
-    border: 1px solid transparent;
+    border: none;
     border-radius: 7px;
     background: transparent;
     color: var(--text);
     padding: 0.65rem;
     cursor: pointer;
   }
-  .session-item:hover { background: var(--surface-2); border-color: var(--border); }
-  .session-item.active { background: var(--primary-dim); border-color: rgba(129,140,248,0.35); }
   .session-item:disabled { opacity: 0.55; cursor: wait; }
+
+  .session-actions {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.1rem;
+    padding: 0.3rem 0.35rem 0.3rem 0;
+  }
+  .session-actions .icon-btn { padding: 0.25rem; }
+  .session-actions .icon-btn.danger:hover { color: var(--danger); }
   .session-item-title { font-family: monospace; font-size: 0.72rem; word-break: break-all; }
   .session-item-meta, .session-item-time { color: var(--text-3); font-size: 0.65rem; }
   .session-empty { color: var(--text-3); font-size: 0.75rem; padding: 1rem; text-align: center; }
@@ -632,8 +754,89 @@
     font-size: 0.875rem;
     line-height: 1.65;
     color: var(--text);
-    white-space: pre-wrap;
     word-break: break-word;
+    overflow-wrap: anywhere;
+  }
+
+  /* User messages are plain text — preserve their line breaks. */
+  .message-content.user-text { white-space: pre-wrap; }
+
+  /* Rendered markdown (assistant / background results) */
+  .markdown :global(> *:first-child) { margin-top: 0; }
+  .markdown :global(> *:last-child) { margin-bottom: 0; }
+  .markdown :global(p) { margin: 0 0 0.75em; }
+  .markdown :global(h1),
+  .markdown :global(h2),
+  .markdown :global(h3),
+  .markdown :global(h4) {
+    margin: 1.1em 0 0.5em;
+    line-height: 1.3;
+    font-weight: 700;
+  }
+  .markdown :global(h1) { font-size: 1.25em; }
+  .markdown :global(h2) { font-size: 1.15em; }
+  .markdown :global(h3) { font-size: 1.05em; }
+  .markdown :global(h4) { font-size: 1em; }
+  .markdown :global(ul),
+  .markdown :global(ol) { margin: 0 0 0.75em; padding-left: 1.4em; }
+  .markdown :global(li) { margin: 0.2em 0; }
+  .markdown :global(li > p) { margin: 0; }
+  .markdown :global(a) { color: var(--primary); text-decoration: underline; }
+  .markdown :global(strong) { font-weight: 700; }
+  .markdown :global(blockquote) {
+    margin: 0 0 0.75em;
+    padding: 0.1em 0.9em;
+    border-left: 3px solid var(--border-high);
+    color: var(--text-2);
+  }
+  .markdown :global(hr) {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 1em 0;
+  }
+  .markdown :global(code) {
+    font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    font-size: 0.85em;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.1em 0.35em;
+  }
+  .markdown :global(pre) {
+    margin: 0 0 0.75em;
+    padding: 0.75rem 0.9rem;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow-x: auto;
+  }
+  .markdown :global(pre code) {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: 0.85em;
+  }
+  /* Tables (GFM) — scroll horizontally on overflow instead of breaking layout */
+  .markdown :global(table) {
+    display: block;
+    width: max-content;
+    max-width: 100%;
+    overflow-x: auto;
+    border-collapse: collapse;
+    margin: 0 0 0.75em;
+    font-size: 0.82em;
+  }
+  .markdown :global(th),
+  .markdown :global(td) {
+    border: 1px solid var(--border);
+    padding: 0.4em 0.65em;
+    text-align: left;
+    vertical-align: top;
+  }
+  .markdown :global(th) {
+    background: var(--surface-2);
+    font-weight: 600;
+    white-space: nowrap;
   }
 
   .message.user .message-content {

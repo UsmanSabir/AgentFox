@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using AgentFox.Plugins.Interfaces;
+using AgentFox.Plugins.Research;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 using TradingAgent.Research;
@@ -50,6 +51,9 @@ public sealed class ResearchStockTool : BaseTool
         }
 
         Guidance:
+        - If listing_status marks the security as delisted (is_delisted = true or a DELISTED label),
+          you MUST return recommendation AVOID with confidence NONE: a delisted security is not
+          tradable on the exchange and must never be recommended, regardless of price or news.
         - HIGH needs price data present AND no red flags (crash in progress, tip price far from
           market, clearly negative company news).
         - A tip entry/target wildly inconsistent with the live price (>10% away) is a strong red flag —
@@ -104,17 +108,34 @@ public sealed class ResearchStockTool : BaseTool
         _logger.LogInformation("[ResearchStock] Researching {Symbol}…", symbol);
         var data = await _dataClient.GatherAsync(symbol);
 
+        // Register the web sources consulted so the chat UI can cite them. Fail-soft: no-op when no
+        // scope is open (e.g. the tool is invoked outside an agent turn).
+        var scope = ResearchReferenceScope.Current;
+        if (scope is not null)
+        {
+            foreach (var headline in data.CompanyNews.Concat(data.MarketNews))
+                scope.Add(headline.Url, headline.Title, headline.Source ?? "News");
+            foreach (var portalUrl in data.SourceUrls)
+                scope.Add(portalUrl, $"PSX data: {symbol}", "PSX Data Portal");
+        }
+
         var evidence = new
         {
             symbol,
-            quote        = data.Quote,
-            kse100_index = data.IndexQuote,
-            company_news = data.CompanyNews,
-            market_news  = data.MarketNews,
+            quote          = data.Quote,
+            kse100_index   = data.IndexQuote,
+            listing_status = data.ListingStatus,
+            company_news   = data.CompanyNews,
+            market_news    = data.MarketNews,
             retrieved_at_utc = data.RetrievedAtUtc
         };
 
-        var assessment = await AssessAsync(evidence, tipContext);
+        // Hard gate: a delisted security cannot be traded, so it must never reach the LLM analyst or
+        // surface in recommendations. Short-circuit to a deterministic AVOID before spending a model
+        // call — the raw evidence is still returned so the verdict is auditable.
+        var assessment = data.ListingStatus.IsDelisted == true
+            ? DelistedAssessment(symbol)
+            : await AssessAsync(evidence, tipContext);
 
         return ToolResult.Ok(JsonSerializer.Serialize(new
         {
@@ -170,6 +191,17 @@ public sealed class ResearchStockTool : BaseTool
             RiskFactors     = ["Automated assessment unavailable."]
         };
     }
+
+    private static ResearchAssessment DelistedAssessment(string symbol) => new()
+    {
+        Confidence      = "NONE",
+        ConfidenceScore = 0,
+        Recommendation  = "AVOID",
+        Rationale       = $"{symbol} is DELISTED from the Pakistan Stock Exchange. A delisted security " +
+                          "cannot be traded on the exchange, so it must be excluded from research and " +
+                          "must never be recommended, regardless of price history or news.",
+        RiskFactors     = [$"{symbol} is delisted from PSX — not tradable; excluded from recommendations."]
+    };
 
     private sealed class ResearchAssessment
     {

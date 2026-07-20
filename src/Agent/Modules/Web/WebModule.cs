@@ -23,6 +23,9 @@ public class WebModule : IAppModule
 {
     public string Name => "web";
 
+    /// <summary>Schema tag stamped on exported session bundles and required on import.</summary>
+    private const string SessionExportSchema = "agentfox.session.v1";
+
     public void RegisterServices(IServiceCollection services, IConfiguration config)
     {
         services.AddEndpointsApiExplorer();
@@ -83,9 +86,10 @@ public class WebModule : IAppModule
                 var reply = await agentService.RunAsync(req.Message, conversationId, ct);
                 return Results.Ok(new ChatResponse
                 {
-                    Response = reply,
+                    Response = reply.Output,
                     ConversationId = conversationId,
-                    Success = true
+                    Success = true,
+                    References = reply.References
                 });
             }
             catch (Exception ex)
@@ -128,7 +132,7 @@ public class WebModule : IAppModule
                 // Pre-generate a conversation ID so the same session is reused across turns.
                 var conversationId = sessionManager.GetOrCreateWebSession("main", req.ConversationId);
 
-                await agentService.StreamAsync(
+                var reply = await agentService.StreamAsync(
                     req.Message,
                     conversationId,
                     async token =>
@@ -145,7 +149,8 @@ public class WebModule : IAppModule
                 var donePayload = JsonSerializer.Serialize(new
                 {
                     done = true,
-                    conversationId
+                    conversationId,
+                    references = reply.References
                 });
                 await httpContext.Response.WriteAsync($"event: done\ndata: {donePayload}\n\n", ct);
                 await httpContext.Response.Body.FlushAsync(ct);
@@ -258,6 +263,75 @@ public class WebModule : IAppModule
             return sessionManager.ResumeSession(req.ConversationId)
                 ? Results.Ok(new { success = true, conversationId = req.ConversationId })
                 : Results.NotFound(new { error = "session_not_found_or_unavailable" });
+        });
+
+        endpoints.MapGet("/session-export", (
+            string conversationId,
+            SessionManager sessionManager) =>
+        {
+            if (!SessionManager.IsSafeSessionId(conversationId))
+                return Results.BadRequest(new { error = "invalid_session_id" });
+
+            var session = sessionManager.GetSession(conversationId);
+            if (session is null)
+                return Results.NotFound(new { error = "session_not_found" });
+
+            var transcript = sessionManager.ReadTranscript(conversationId);
+            if (transcript is null)
+                return Results.NotFound(new { error = "transcript_not_found" });
+
+            var envelope = new
+            {
+                schema     = SessionExportSchema,
+                exportedAt = DateTime.UtcNow,
+                session    = new
+                {
+                    agentId    = session.AgentId,
+                    origin     = session.Origin.ToString(),
+                    createdAt  = session.CreatedAt,
+                    lastActive = session.LastActivityAt
+                },
+                transcriptMarkdown = transcript
+            };
+
+            var bytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(
+                envelope, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+            var fileName = conversationId.Replace('/', '_') + ".agentfox.json";
+            return Results.File(bytes, "application/json", fileName);
+        });
+
+        endpoints.MapPost("/session-import", (
+            SessionImportRequest req,
+            SessionManager sessionManager) =>
+        {
+            if (req is null || !string.Equals(req.Schema, SessionExportSchema, StringComparison.OrdinalIgnoreCase))
+                return Results.BadRequest(new { error = "invalid_schema" });
+            if (string.IsNullOrWhiteSpace(req.TranscriptMarkdown))
+                return Results.BadRequest(new { error = "empty_transcript" });
+
+            var newId = sessionManager.ImportSession(
+                req.Session?.AgentId,
+                req.TranscriptMarkdown,
+                req.Session?.CreatedAt,
+                req.Session?.LastActive);
+
+            return Results.Ok(new { success = true, conversationId = newId });
+        });
+
+        endpoints.MapDelete("/sessions", (
+            string conversationId,
+            SessionManager sessionManager,
+            MarkdownSessionStore sessionStore) =>
+        {
+            if (!SessionManager.IsSafeSessionId(conversationId))
+                return Results.BadRequest(new { error = "invalid_session_id" });
+
+            var existed = sessionManager.DeleteSession(conversationId);
+            sessionStore.DeleteSession(conversationId); // clear in-memory caches + any residual file
+
+            return existed
+                ? Results.Ok(new { success = true, conversationId })
+                : Results.NotFound(new { error = "session_not_found" });
         });
 
         // ── MCP Servers ───────────────────────────────────────────────────────
@@ -735,6 +809,17 @@ public record HeartbeatRequest(
     int MaxMissed = 3);
 
 public record ResumeSessionRequest(string ConversationId);
+
+public record SessionImportRequest(
+    string? Schema,
+    SessionImportMeta? Session,
+    string? TranscriptMarkdown);
+
+public record SessionImportMeta(
+    string? AgentId,
+    string? Origin,
+    DateTime? CreatedAt,
+    DateTime? LastActive);
 
 public record HeartbeatUpdateRequest(
     string? Task = null,

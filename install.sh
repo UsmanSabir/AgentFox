@@ -251,6 +251,23 @@ if [ "$INSTALLED" -eq 0 ]; then
       dotnet publish "$PLUGIN_PROJECT" -c Release -r "$RID" --self-contained false -o "$INSTALL_DIR/plugins/TradingAgent" --verbosity minimal
     fi
   fi
+
+  # Publish the default bundled plugins into plugins/ so the runtime loader discovers them.
+  # Each lands in its own plugins/<Name> folder with its .deps.json + dependencies. They are
+  # enabled via the "Modules" list in appsettings.json; the key-only search plugins
+  # (Brave/Tavily) stay inert until their API key is configured.
+  for spec in \
+    "src/Plugins/PageAgent/PageAgent.csproj:PageAgent" \
+    "src/Plugins/AgentFox.BraveSearch/AgentFox.BraveSearch.csproj:BraveSearch" \
+    "src/Plugins/AgentFox.TavilySearch/AgentFox.TavilySearch.csproj:TavilySearch" \
+    "src/Plugins/AgentFox.DuckDuckGoSearch/AgentFox.DuckDuckGoSearch.csproj:DuckDuckGoSearch"; do
+    proj="$SOURCE_ROOT/${spec%%:*}"
+    dir="${spec##*:}"
+    if [ -f "$proj" ]; then
+      info "Publishing default plugin into plugins/$dir"
+      dotnet publish "$proj" -c Release -r "$RID" --self-contained false -o "$INSTALL_DIR/plugins/$dir" --verbosity minimal
+    fi
+  done
 fi
 
 # The prebuilt archive bundles the Trading plugin; strip it for a core-only install.

@@ -416,6 +416,105 @@ public class SessionManager : IDisposable
             .ToList();
 
     // -------------------------------------------------------------------------
+    // Public API — export / import / delete
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Returns the raw Markdown transcript for a session, reading from the archive
+    /// directory when the session is archived. Null if the session or its file is missing.
+    /// </summary>
+    public string? ReadTranscript(string sessionId)
+    {
+        if (!_index.TryGetValue(sessionId, out var info)) return null;
+
+        if (info.Status == SessionStatus.Archived && !string.IsNullOrWhiteSpace(info.ArchivePath))
+        {
+            var archiveRoot = Path.GetFullPath(_archiveDir) + Path.DirectorySeparatorChar;
+            var src = Path.GetFullPath(Path.Combine(_archiveDir, info.ArchivePath));
+            if (src.StartsWith(archiveRoot, StringComparison.OrdinalIgnoreCase) && File.Exists(src))
+                return File.ReadAllText(src, System.Text.Encoding.UTF8);
+            return null;
+        }
+
+        var path = ConversationFilePath(sessionId);
+        return File.Exists(path) ? File.ReadAllText(path, System.Text.Encoding.UTF8) : null;
+    }
+
+    /// <summary>
+    /// Registers an imported conversation as a brand-new web session and writes its
+    /// transcript verbatim. Always mints a fresh ID so an import can never overwrite an
+    /// existing session. The transcript is stored as-is (its embedded frontmatter ID is
+    /// cosmetic — parsing keys off the file name, not the frontmatter).
+    /// </summary>
+    public string ImportSession(string? agentId, string transcriptMarkdown,
+        DateTime? createdAt = null, DateTime? lastActive = null)
+    {
+        if (string.IsNullOrWhiteSpace(transcriptMarkdown))
+            throw new ArgumentException("Transcript is empty.", nameof(transcriptMarkdown));
+
+        string newId;
+        do { newId = $"web_{Guid.NewGuid():N}"; } while (_index.ContainsKey(newId));
+
+        var path = ConversationFilePath(newId);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, transcriptMarkdown, System.Text.Encoding.UTF8);
+
+        var now = DateTime.UtcNow;
+        _index[newId] = new SessionInfo
+        {
+            SessionId = newId,
+            LogicalKey = $"web:{newId}",
+            Origin = SessionOrigin.Web,
+            Status = SessionStatus.Idle,
+            AgentId = string.IsNullOrWhiteSpace(agentId) ? "main" : agentId.Trim(),
+            CreatedAt = createdAt ?? now,
+            LastActivityAt = lastActive ?? now
+        };
+        SaveIndexAsync();
+
+        _logger?.LogInformation("Imported session as {SessionId}", newId);
+        return newId;
+    }
+
+    /// <summary>
+    /// Permanently deletes a session: removes its index entry, active transcript,
+    /// pending sidecar, and any archived copy. Returns false if the ID was not tracked.
+    /// </summary>
+    public bool DeleteSession(string sessionId)
+    {
+        if (!_index.TryRemove(sessionId, out var info))
+            return false;
+
+        if (info.ChannelId != null)
+            _channelMap.TryRemove(info.ChannelId, out _);
+
+        if (!string.IsNullOrWhiteSpace(info.ArchivePath))
+        {
+            try
+            {
+                var archiveRoot = Path.GetFullPath(_archiveDir) + Path.DirectorySeparatorChar;
+                var arc = Path.GetFullPath(Path.Combine(_archiveDir, info.ArchivePath));
+                if (arc.StartsWith(archiveRoot, StringComparison.OrdinalIgnoreCase) && File.Exists(arc))
+                    File.Delete(arc);
+            }
+            catch (Exception ex) { _logger?.LogError(ex, "Failed to delete archive for {SessionId}", sessionId); }
+        }
+
+        try
+        {
+            var path = ConversationFilePath(sessionId);
+            if (File.Exists(path)) File.Delete(path);
+            var pending = path + ".pending";
+            if (File.Exists(pending)) File.Delete(pending);
+        }
+        catch (Exception ex) { _logger?.LogError(ex, "Failed to delete transcript for {SessionId}", sessionId); }
+
+        SaveIndexAsync();
+        _logger?.LogInformation("Deleted session {SessionId}", sessionId);
+        return true;
+    }
+
+    // -------------------------------------------------------------------------
     // Path helpers (public so MarkdownSessionStore can share the convention)
     // -------------------------------------------------------------------------
 

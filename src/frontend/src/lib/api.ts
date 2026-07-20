@@ -401,6 +401,26 @@ export const api = {
     get<ConversationMessagesResponse>(`/session-messages?conversationId=${encodeURIComponent(conversationId)}`),
   resumeSession: (conversationId: string) =>
     post<{ success: boolean; conversationId: string }>('/sessions/resume', { conversationId }),
+  importSession: (envelope: unknown) =>
+    post<{ success: boolean; conversationId: string }>('/session-import', envelope),
+  deleteSession: (conversationId: string) =>
+    del<{ success: boolean; conversationId?: string }>(
+      `/sessions?conversationId=${encodeURIComponent(conversationId)}`),
+  exportSession: async (conversationId: string): Promise<void> => {
+    const res = await fetch(
+      `${BASE}/session-export?conversationId=${encodeURIComponent(conversationId)}`,
+      { headers: requestHeaders() });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${conversationId.replace(/\//g, '_')}.agentfox.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  },
   mcp:      () => get<McpStatus>('/mcp'),
   channels: () => get<ChannelsStatus>('/channels'),
   pendingNotifications: (conversationId: string) =>

@@ -1,6 +1,7 @@
 namespace AgentFox.Models;
 
 using AgentFox.Memory;
+using AgentFox.Plugins.Research;
 using AgentFox.Skills;
 using System.Diagnostics;
 
@@ -147,4 +148,5 @@ public class AgentResult
     public string? Error { get; set; }
     public int Iterations { get; set; }
     public TimeSpan Duration { get; set; }
+    public List<ResearchReference> References { get; set; } = new();
 }

@@ -117,6 +117,42 @@ jobs:
           --self-contained false
           -o staging/${{ matrix.rid }}/plugins/TradingAgent
 
+      # Default bundled plugins. Each publishes into its own plugins/<Name> folder (DLL +
+      # .deps.json + dependency closure) so the runtime plugin loader discovers it. They are
+      # enabled by the "Modules" list in appsettings.json; the key-only search plugins
+      # (Brave/Tavily) stay inert until their API key is configured.
+      - name: Publish PageAgent plugin
+        shell: bash
+        run: >
+          dotnet publish src/Plugins/PageAgent/PageAgent.csproj
+          -c Release -r ${{ matrix.rid }}
+          --self-contained false
+          -o staging/${{ matrix.rid }}/plugins/PageAgent
+
+      - name: Publish Brave Search plugin
+        shell: bash
+        run: >
+          dotnet publish src/Plugins/AgentFox.BraveSearch/AgentFox.BraveSearch.csproj
+          -c Release -r ${{ matrix.rid }}
+          --self-contained false
+          -o staging/${{ matrix.rid }}/plugins/BraveSearch
+
+      - name: Publish Tavily Search plugin
+        shell: bash
+        run: >
+          dotnet publish src/Plugins/AgentFox.TavilySearch/AgentFox.TavilySearch.csproj
+          -c Release -r ${{ matrix.rid }}
+          --self-contained false
+          -o staging/${{ matrix.rid }}/plugins/TavilySearch
+
+      - name: Publish DuckDuckGo Search plugin
+        shell: bash
+        run: >
+          dotnet publish src/Plugins/AgentFox.DuckDuckGoSearch/AgentFox.DuckDuckGoSearch.csproj
+          -c Release -r ${{ matrix.rid }}
+          --self-contained false
+          -o staging/${{ matrix.rid }}/plugins/DuckDuckGoSearch
+
       - name: Package (zip)
         if: matrix.archive == 'zip'
         shell: pwsh
