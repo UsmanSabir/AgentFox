@@ -8,12 +8,15 @@ namespace AgentFox.Tools;
 public class WorkspaceManager
 {
     private readonly List<string> _allowedWorkspaces = new();
+    private readonly bool _restrictToWorkspace;
 
     public WorkspaceManager(IConfiguration configuration)
     {
+        _restrictToWorkspace = configuration.GetValue("RestrictToWorkspace", true);
+
         // Load workspaces from configuration (e.g., appsettings.json or Environment Variables)
         var workspaces = configuration.GetSection("Workspaces").Get<string[]>();
-        
+
         if (workspaces != null)
         {
             foreach (var ws in workspaces)
@@ -24,19 +27,71 @@ public class WorkspaceManager
                 }
             }
         }
-        
-        // If no workspaces configured, default to current directory
-        if (_allowedWorkspaces.Count == 0)
+
+        EnsureUsablePrimaryWorkspace();
+    }
+
+    /// <summary>
+    /// Guarantees <c>_allowedWorkspaces[0]</c> is a directory we can actually write to.
+    /// A published exe may carry a stale absolute path in appsettings.json (e.g. a dev
+    /// machine's drive that doesn't exist on the user's box); without this the first
+    /// write — the SQLite memory DB — throws and crashes startup. We promote the first
+    /// usable configured workspace, else fall back to a writable per-user location.
+    /// </summary>
+    private void EnsureUsablePrimaryWorkspace()
+    {
+        var usable = _allowedWorkspaces.FindIndex(TryEnsureDirectory);
+        if (usable == 0)
+            return;
+        if (usable > 0)
         {
-            _allowedWorkspaces.Add(Directory.GetCurrentDirectory());
+            var ws = _allowedWorkspaces[usable];
+            _allowedWorkspaces.RemoveAt(usable);
+            _allowedWorkspaces.Insert(0, ws);
+            return;
+        }
+
+        // No configured workspace is usable — fall back so the app still runs.
+        foreach (var candidate in DefaultWorkspaceCandidates())
+        {
+            if (TryEnsureDirectory(candidate))
+            {
+                _allowedWorkspaces.Insert(0, candidate);
+                return;
+            }
+        }
+        _allowedWorkspaces.Insert(0, AppContext.BaseDirectory);
+    }
+
+    private static IEnumerable<string> DefaultWorkspaceCandidates()
+    {
+        yield return Environment.CurrentDirectory;
+        var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (!string.IsNullOrEmpty(local))
+            yield return Path.Combine(local, "AgentFox");
+        yield return AppContext.BaseDirectory;
+    }
+
+    private static bool TryEnsureDirectory(string path)
+    {
+        try
+        {
+            Directory.CreateDirectory(path);
+            return true;
+        }
+        catch
+        {
+            return false;
         }
     }
 
     /// <summary>
     /// For testing or manual configuration
     /// </summary>
-    public WorkspaceManager(IEnumerable<string> workspaces)
+    public WorkspaceManager(IEnumerable<string> workspaces, bool restrictToWorkspace = true)
     {
+        _restrictToWorkspace = restrictToWorkspace;
+
         foreach (var ws in workspaces)
         {
             if (!string.IsNullOrWhiteSpace(ws))
@@ -44,30 +99,34 @@ public class WorkspaceManager
                 _allowedWorkspaces.Add(Path.GetFullPath(ws));
             }
         }
-        
+
         if (_allowedWorkspaces.Count == 0)
         {
-            _allowedWorkspaces.Add(Directory.GetCurrentDirectory());
+            _allowedWorkspaces.Add(AppContext.BaseDirectory);
         }
     }
 
     /// <summary>
-    /// Checks if a given path is within any of the allowed workspaces
+    /// Checks if a given path is within any of the allowed workspaces.
+    /// Always returns true when RestrictToWorkspace is disabled.
     /// </summary>
     public bool IsPathAllowed(string path)
     {
+        if (!_restrictToWorkspace)
+            return true;
+
         try
         {
             var fullPath = Path.GetFullPath(path);
 
             foreach (var workspace in _allowedWorkspaces)
             {
-                // Ensure directory separator at the end so we don't accidentally allow sibling directories 
+                // Ensure directory separator at the end so we don't accidentally allow sibling directories
                 // e.g. "C:\workspace" allowing "C:\workspace2"
-                var wsDir = workspace.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) 
+                var wsDir = workspace.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
                             + Path.DirectorySeparatorChar;
-                            
-                var targetDir = fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) 
+
+                var targetDir = fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
                               + Path.DirectorySeparatorChar;
 
                 if (targetDir.StartsWith(wsDir, StringComparison.OrdinalIgnoreCase) || targetDir.Equals(wsDir, StringComparison.OrdinalIgnoreCase))

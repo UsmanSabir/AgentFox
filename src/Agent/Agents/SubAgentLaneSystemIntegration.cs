@@ -29,9 +29,7 @@ public class SubAgentLaneSystemIntegration
         // Initialize the command processor
         _commandProcessor = new CommandProcessor(
             _commandQueue,
-            _logger,
-            processingDelayMilliseconds: 10,
-            maxCommandsPerBatch: 5);
+            logger: _logger);
         
         // Initialize the sub-agent manager
         _subAgentManager = new SubAgentManager(
@@ -215,9 +213,8 @@ public class SubAgentLaneSystemIntegration
                 
                 try
                 {
-                    var agent = new Agent { Config = new AgentConfig { Id = agentCmd.AgentId } };
-                    var result = await _agentRuntime.ExecuteAsync(agent, agentCmd.Message).ConfigureAwait(false);
-                    
+                    var result = await _agentRuntime.ExecuteAsync(agentCmd, ct).ConfigureAwait(false);
+
                     _logger?.LogInformation($"Main command completed successfully: {agentCmd.RunId}");
                 }
                 catch (Exception ex)
@@ -237,23 +234,11 @@ public class SubAgentLaneSystemIntegration
                 try
                 {
                     _subAgentManager.OnSubAgentStarted(runId);
-                    
+
                     _logger?.LogInformation($"Executing sub-agent: {agentCmd.SessionKey}");
-                    
-                    // Create sub-agent with inherited configuration
-                    var subAgentConfig = new AgentConfig
-                    {
-                        Name = $"SubAgent-{agentCmd.AgentId}",
-                        Description = "Sub-agent spawned from parent agent",
-                        MaxIterations = 10
-                    };
-                    
-                    var subAgent = _agentRuntime.SpawnSubAgent(
-                        new Agent { Config = new AgentConfig { Id = agentCmd.AgentId } },
-                        subAgentConfig);
-                    
-                    // Execute the sub-agent
-                    var result = await _agentRuntime.ExecuteAsync(subAgent, agentCmd.Message).ConfigureAwait(false);
+
+                    // Delegate to the runtime — FoxAgentExecutor handles model overrides automatically
+                    var result = await _agentRuntime.ExecuteAsync(agentCmd, ct).ConfigureAwait(false);
                     
                     // Notify completion
                     var completionResult = new SubAgentCompletionResult

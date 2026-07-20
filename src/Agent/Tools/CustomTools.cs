@@ -1,5 +1,8 @@
-using AgentFox.Models;
+using AgentFox.Http;
 using System.Net.Http;
+using System.Text.RegularExpressions;
+using AgentFox.Plugins.Interfaces;
+using ToolParameter = AgentFox.Plugins.Interfaces.ToolParameter;
 
 namespace AgentFox.Tools;
 
@@ -52,13 +55,10 @@ public class WebSearchTool : BaseTool
 /// </summary>
 public class FetchUrlTool : BaseTool
 {
-    private static readonly HttpClient _httpClient = new()
-    {
-        Timeout = TimeSpan.FromSeconds(30)
-    };
-    
-    private const int MaxRetries = 3;
-    private const int InitialDelayMs = 1000;
+    // Resilient client: 3 retries with exponential back-off + circuit-breaker.
+    // Per-request timeout is enforced via CancellationTokenSource below.
+    private static readonly HttpClient _httpClient =
+        HttpResilienceFactory.Create(TimeSpan.FromMinutes(5));
 
     public override string Name => "fetch_url";
     public override string Description => "Fetch content from a URL";
@@ -68,77 +68,96 @@ public class FetchUrlTool : BaseTool
         ["timeout_seconds"] = new() { Type = "number", Description = "Timeout in seconds (optional)", Required = false, Default = 30 }
     };
 
+    // ~24k chars ≈ ~6k tokens — safe for most local models (8k–32k context)
+    // while leaving room for the system prompt, tool definitions, and reply.
+    private const int MaxContentChars = 24_000;
+
     protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
     {
         //TODO: use html to markdown converter like https://github.com/mysticmind/reversemarkdown-net or https://github.com/baynezy/Html2Markdown
         var url = arguments["url"]?.ToString();
         if (string.IsNullOrEmpty(url))
             return ToolResult.Fail("No URL provided");
-        
-        // Validate URL format
+
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
             return ToolResult.Fail($"Invalid URL format: {url}");
-        
-        // Get optional timeout
-        var timeoutSeconds = arguments.GetValueOrDefault("timeout_seconds") is double timeout 
-            ? (int)timeout 
+
+        var timeoutSeconds = arguments.GetValueOrDefault("timeout_seconds") is double timeout
+            ? (int)timeout
             : 30;
         timeoutSeconds = Math.Max(5, Math.Min(300, timeoutSeconds));
 
-        // Retry logic with exponential backoff
-        int delayMs = InitialDelayMs;
-        Exception? lastException = null;
-
-        for (int attempt = 1; attempt <= MaxRetries; attempt++)
+        try
         {
-            try
-            {
-                using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds)))
-                using (var response = await _httpClient.GetAsync(uri, cts.Token))
-                {
-                    if (!response.IsSuccessStatusCode)
-                        return ToolResult.Fail($"HTTP Error {(int)response.StatusCode}: {response.ReasonPhrase}");
-                    
-                    // Read content with size limit (10MB max)
-                    var content = await response.Content.ReadAsStringAsync(cts.Token);
-                    
-                    if (content.Length > 10 * 1024 * 1024)
-                        content = content[..(10 * 1024 * 1024)] + "\n... (content truncated - exceeds 10MB limit)";
-                    
-                    return ToolResult.Ok($"""
-                        Fetched: {url}
-                        Status: {(int)response.StatusCode} {response.ReasonPhrase}
-                        Content-Type: {response.Content.Headers.ContentType}
-                        ═════════════════════════════════════
-                        
-                        {content}
-                        """);
-                }
-            }
-            catch (HttpRequestException ex)
-            {
-                lastException = ex;
-                if (attempt < MaxRetries)
-                {
-                    await Task.Delay(delayMs);
-                    delayMs *= 2; // Exponential backoff
-                }
-            }
-            catch (TaskCanceledException)
-            {
-                return ToolResult.Fail($"Request timeout after {timeoutSeconds} seconds");
-            }
-            catch (OperationCanceledException)
-            {
-                return ToolResult.Fail("Request was cancelled");
-            }
-            catch (Exception ex)
-            {
-                return ToolResult.Fail($"Unexpected error: {ex.GetType().Name} - {ex.Message}");
-            }
-        }
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+            using var response = await _httpClient.GetAsync(uri, cts.Token);
 
-        return ToolResult.Fail($"Failed to fetch URL after {MaxRetries} retries: {lastException?.Message}");
+            if (!response.IsSuccessStatusCode)
+                return ToolResult.Fail($"HTTP Error {(int)response.StatusCode}: {response.ReasonPhrase}");
+
+            var contentType = response.Content.Headers.ContentType?.ToString() ?? string.Empty;
+            var raw = await response.Content.ReadAsStringAsync(cts.Token);
+
+            // Strip HTML tags and collapse whitespace so the model sees readable text,
+            // not markup — this reduces token count by 60-80% for typical web pages.
+            var isHtml = contentType.Contains("html", StringComparison.OrdinalIgnoreCase)
+                         || raw.TrimStart().StartsWith('<');
+            var content = isHtml ? StripHtml(raw) : raw;
+
+            var truncated = false;
+            if (content.Length > MaxContentChars)
+            {
+                content = content[..MaxContentChars];
+                truncated = true;
+            }
+
+            var footer = truncated ? $"\n\n[Content truncated at {MaxContentChars:N0} chars]" : string.Empty;
+
+            return ToolResult.Ok($"""
+                Fetched: {url}
+                Status: {(int)response.StatusCode} {response.ReasonPhrase}
+                Content-Type: {contentType}
+                ═════════════════════════════════════
+
+                {content}{footer}
+                """);
+        }
+        catch (TaskCanceledException)
+        {
+            return ToolResult.Fail($"Request timeout after {timeoutSeconds} seconds");
+        }
+        catch (OperationCanceledException)
+        {
+            return ToolResult.Fail("Request was cancelled");
+        }
+        catch (Exception ex)
+        {
+            return ToolResult.Fail($"Failed to fetch URL: {ex.GetType().Name} - {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Strips HTML/XML tags, decodes common entities, and collapses whitespace.
+    /// Produces plain readable text suitable for LLM consumption.
+    /// </summary>
+    private static string StripHtml(string html)
+    {
+        // Remove <script> and <style> blocks entirely
+        var clean = Regex.Replace(html, @"<(script|style)[^>]*>[\s\S]*?</\1>", " ", RegexOptions.IgnoreCase);
+        // Remove all remaining tags
+        clean = Regex.Replace(clean, @"<[^>]+>", " ");
+        // Decode common HTML entities
+        clean = clean
+            .Replace("&amp;",  "&")
+            .Replace("&lt;",   "<")
+            .Replace("&gt;",   ">")
+            .Replace("&quot;", "\"")
+            .Replace("&#39;",  "'")
+            .Replace("&nbsp;", " ");
+        // Collapse whitespace and blank lines
+        clean = Regex.Replace(clean, @"[ \t]+", " ");
+        clean = Regex.Replace(clean, @"\n{3,}", "\n\n");
+        return clean.Trim();
     }
 }
 

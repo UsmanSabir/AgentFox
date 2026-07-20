@@ -1,8 +1,10 @@
+using LocalEmbeddings;
 using Microsoft.Extensions.Configuration;
 using OllamaSharp;
 using OllamaSharp.Models;
 using OpenAI;
 using OpenAI.Embeddings;
+using Spectre.Console;
 using System.ClientModel;
 using System.Diagnostics;
 
@@ -10,18 +12,52 @@ namespace AgentFox.Memory;
 
 /// <summary>
 /// Generates a dense vector embedding for a text string.
-/// Returns null when the provider is unavailable or the call fails.
+/// Returns empty when the provider is unavailable or the call fails.
 /// </summary>
 public interface IEmbeddingService
 {
-    Task<float[]?> GenerateAsync(string text, CancellationToken ct = default);
+    Task<ReadOnlyMemory<float>> GenerateAsync(string text, CancellationToken ct = default);
 }
 
 /// <summary>No-op implementation — vector search is disabled.</summary>
 public sealed class NullEmbeddingService : IEmbeddingService
 {
-    public Task<float[]?> GenerateAsync(string text, CancellationToken ct = default)
-        => Task.FromResult<float[]?>(null);
+    public Task<ReadOnlyMemory<float>> GenerateAsync(string text, CancellationToken ct = default)
+        => Task.FromResult(ReadOnlyMemory<float>.Empty);
+}
+
+/// <summary>Local embeddings using LocalEmbedder.</summary>
+public sealed class LocalEmbeddingService : IEmbeddingService
+{
+    //https://github.com/dotnet/smartcomponents/blob/main/docs/local-embeddings.md
+    private readonly LocalEmbedder _embedder;
+
+    public LocalEmbeddingService()
+    {
+        _embedder = new LocalEmbedder();
+    }
+
+    //public LocalEmbedder Embedder => _embedder;
+
+    public async Task<ReadOnlyMemory<float>> GenerateAsync(string text, CancellationToken ct = default)
+    {
+        try
+        {
+            var embedding = await Task.Run(() => _embedder.GenerateEmbedding(text), ct);
+            return embedding;
+        }
+        catch { return ReadOnlyMemory<float>.Empty; }
+    }
+
+    public SimilarityScore<TItem>[] FindClosestWithScore<TItem, EmbeddingF32>(string query,
+        IEnumerable<(TItem Item, LocalEmbeddings.EmbeddingF32 Embedding)> candidates,
+        int maxResults,
+        float? minSimilarity = null)
+    {
+        LocalEmbeddings.EmbeddingF32 target = _embedder.Embed(query);
+        var closestWithScore = LocalEmbedder.FindClosestWithScore<TItem, LocalEmbeddings.EmbeddingF32>(target, candidates, maxResults, minSimilarity);
+        return closestWithScore;
+    }
 }
 
 /// <summary>Ollama-backed embeddings via OllamaSharp.</summary>
@@ -40,15 +76,15 @@ public sealed class OllamaEmbeddingService : IEmbeddingService
         });
     }
 
-    public async Task<float[]?> GenerateAsync(string text, CancellationToken ct = default)
+    public async Task<ReadOnlyMemory<float>> GenerateAsync(string text, CancellationToken ct = default)
     {
         try
         {
             var response = await _client.EmbedAsync(
                 new EmbedRequest { Model = _model, Input = [text] }, ct);
-            return response?.Embeddings?[0];
+            return response?.Embeddings?[0] ?? ReadOnlyMemory<float>.Empty;
         }
-        catch { return null; }
+        catch { return ReadOnlyMemory<float>.Empty; }
     }
 }
 
@@ -65,26 +101,29 @@ public sealed class OpenAIEmbeddingService : IEmbeddingService
         _client = openAiClient.GetEmbeddingClient(model);
     }
 
-    public async Task<float[]?> GenerateAsync(string text, CancellationToken ct = default)
+    public async Task<ReadOnlyMemory<float>> GenerateAsync(string text, CancellationToken ct = default)
     {
+        if (string.IsNullOrWhiteSpace(text))
+            return ReadOnlyMemory<float>.Empty;
         try
         {
             var result = await _client.GenerateEmbeddingAsync(text, cancellationToken: ct);
-            return result.Value.ToFloats().ToArray();
+            return result.Value.ToFloats();
         }
         catch(Exception ex) 
         { 
             if(Debugger.IsAttached)
                 Debugger.Break();
-            return null; }
+            return ReadOnlyMemory<float>.Empty; 
+        }
     }
 }
 
 /// <summary>Configuration for the embedding provider (nested under "Memory:Embedding").</summary>
 public class EmbeddingConfig
 {
-    /// <summary>"Ollama", "OpenAI", or "None" (default).</summary>
-    public string Provider { get; set; } = "None";
+    /// <summary>"Local", "Ollama", "OpenAI", or "None" (default).</summary>
+    public string Provider { get; set; } = "Local";
 
     /// <summary>Model name — e.g. "nomic-embed-text" for Ollama, "text-embedding-3-small" for OpenAI.</summary>
     public string Model { get; set; } = "nomic-embed-text";
@@ -98,18 +137,25 @@ public class EmbeddingConfig
 
 public static class EmbeddingServiceFactory
 {
+    /// <summary>
+    /// Resolves the effective embedding config: prefer a named model from Models:{ModelRef},
+    /// fall back to Memory:Embedding.
+    /// </summary>
+    public static EmbeddingConfig ResolveConfig(IConfiguration configuration)
+    {
+        var modelRef = configuration["Memory:ModelRef"];
+        if (!string.IsNullOrWhiteSpace(modelRef))
+            return configuration.GetSection($"Models:{modelRef}").Get<EmbeddingConfig>() ?? new EmbeddingConfig();
+        return configuration.GetSection("Memory:Embedding").Get<EmbeddingConfig>() ?? new EmbeddingConfig();
+    }
+
     public static IEmbeddingService Create(IConfiguration configuration)
     {
-        // Resolve config: prefer a named model from Models:{ModelRef}, fall back to Memory:Embedding.
-        var modelRef = configuration["Memory:ModelRef"];
-        EmbeddingConfig config;
-        if (!string.IsNullOrWhiteSpace(modelRef))
-            config = configuration.GetSection($"Models:{modelRef}").Get<EmbeddingConfig>() ?? new EmbeddingConfig();
-        else
-            config = configuration.GetSection("Memory:Embedding").Get<EmbeddingConfig>() ?? new EmbeddingConfig();
+        var config = ResolveConfig(configuration);
 
         return config.Provider.Trim().ToLowerInvariant() switch
         {
+            "local" => TryCreateLocal(),
             "ollama" => new OllamaEmbeddingService(config.BaseUrl, config.Model),
             "openai" => new OpenAIEmbeddingService(
                 config.ApiKey ?? Environment.GetEnvironmentVariable("OPENAI_API_KEY") ?? string.Empty,
@@ -117,5 +163,25 @@ public static class EmbeddingServiceFactory
                 config.BaseUrl),
             _ => new NullEmbeddingService()
         };
+    }
+
+    /// <summary>
+    /// Builds the local embedder, degrading to a no-op service if the model is unavailable
+    /// (e.g. a freshly-copied single-file exe before the model is extracted/downloaded).
+    /// This keeps the app running — 'doctor --fix' repairs the model and a restart re-enables it.
+    /// </summary>
+    private static IEmbeddingService TryCreateLocal()
+    {
+        try
+        {
+            return new LocalEmbeddingService();
+        }
+        catch (Exception ex)
+        {
+            AnsiConsole.MarkupLineInterpolated(
+                $"[yellow]⚠ Local embedding model unavailable — vector search disabled.[/] [dim]({ex.Message})[/]");
+            AnsiConsole.MarkupLine("[dim]  Run [bold]AgentFox doctor --fix[/] to download/restore the model.[/]");
+            return new NullEmbeddingService();
+        }
     }
 }

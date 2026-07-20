@@ -58,3 +58,11 @@ nunit-*.xml
 .vs/
 .claude/
 appsettings.*.json
+/src/AgentFox.sln.DotSettings.user
+/src/LocalEmbeddings/.cache
+/src/Agent/wwwroot/
+#!/src/Agent/wwwroot/
+#!/src/Agent/wwwroot/**
+.pnpm-store/
+*.env
+*.env.local

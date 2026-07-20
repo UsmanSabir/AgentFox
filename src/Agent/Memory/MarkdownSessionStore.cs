@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
+using AgentFox.Sessions;
 
 namespace AgentFox.Memory;
 
@@ -26,6 +27,7 @@ public sealed class MarkdownSessionHistoryProvider : ChatHistoryProvider
     private readonly ConditionalWeakTable<AgentSession, StrongBox<string>> _sessionIds;
     private readonly ConcurrentDictionary<string, List<ChatMessage>> _messages;
 
+    //TODO: evaluate whether we need reducer to prevent unbounded memory growth for long-running sessions with many messages.
     internal MarkdownSessionHistoryProvider(
         ConditionalWeakTable<AgentSession, StrongBox<string>> sessionIds,
         ConcurrentDictionary<string, List<ChatMessage>> messages)
@@ -72,6 +74,11 @@ public sealed class MarkdownSessionHistoryProvider : ChatHistoryProvider
         id = string.Empty;
         return false;
     }
+
+    //private static async Task ReduceMessagesAsync(IChatReducer reducer, State state, CancellationToken cancellationToken = default)
+    //{
+    //    state.Messages = [.. await reducer.ReduceAsync(state.Messages, cancellationToken).ConfigureAwait(false)];
+    //}
 }
 
 // ---------------------------------------------------------------------------
@@ -110,7 +117,7 @@ public sealed class MarkdownSessionHistoryProvider : ChatHistoryProvider
 //   builder.WithConversationStore(store)
 //          .WithHistoryProvider(store.HistoryProvider);
 // ---------------------------------------------------------------------------
-
+// Enhance based on https://github.com/microsoft/agent-framework/blob/main/dotnet/src/Microsoft.Agents.AI.CosmosNoSql/CosmosChatHistoryProvider.cs
 public sealed class MarkdownSessionStore : IConversationStore
 {
     // Shared with MarkdownSessionHistoryProvider
@@ -198,10 +205,31 @@ public sealed class MarkdownSessionStore : IConversationStore
 
     public IEnumerable<string> GetAllSessionIds()
     {
-        var fromFiles = System.IO.Directory.EnumerateFiles(_directory, "*.md")
-            .Select(Path.GetFileNameWithoutExtension)
-            .OfType<string>();
+        var fromFiles = System.IO.Directory.EnumerateFiles(_directory, "*.md", SearchOption.AllDirectories)
+            .Select(f => Path.GetRelativePath(_directory, f))
+            .Select(rel => rel[..^3]) // strip .md
+            .Select(rel => rel.Replace(Path.DirectorySeparatorChar, '/'));
         return _cache.Keys.Union(fromFiles).Distinct();
+    }
+
+    /// <summary>Returns user-visible text messages for a persisted conversation.</summary>
+    public IReadOnlyList<ConversationMessageSnapshot> GetConversationMessages(string conversationId)
+    {
+        SessionManager.EnsureSafeSessionId(conversationId);
+        if (!_messages.TryGetValue(conversationId, out var messages))
+        {
+            var path = FilePath(conversationId);
+            if (!File.Exists(path)) return [];
+            messages = ParseFile(path);
+        }
+
+        return messages
+            .Where(message => message.Role == ChatRole.User || message.Role == ChatRole.Assistant)
+            .Select(message => new ConversationMessageSnapshot(
+                message.Role == ChatRole.User ? "user" : "assistant",
+                message.Text?.Trim() ?? string.Empty))
+            .Where(message => !string.IsNullOrWhiteSpace(message.Content))
+            .ToList();
     }
 
     public void DeleteSession(string conversationId)
@@ -213,6 +241,51 @@ public sealed class MarkdownSessionStore : IConversationStore
         if (File.Exists(path))
             File.Delete(path);
     }
+
+    // ------------------------------------------------------------------
+    // Crash-safe pending message (written before RunAsync, deleted after)
+    // ------------------------------------------------------------------
+
+    /// <summary>
+    /// Atomically records the user message that is about to be processed.
+    /// Must be called immediately before <c>agent.RunAsync</c> so that if the
+    /// process crashes mid-LLM-call, the message is recoverable on the next startup.
+    /// The file is removed by <see cref="ClearPendingUserMessage"/> once the
+    /// turn completes and the session has been saved successfully.
+    /// </summary>
+    public void PersistIncomingUserMessage(string conversationId, string message)
+    {
+        var path = PendingFilePath(conversationId);
+        File.WriteAllText(path, message, Encoding.UTF8);
+    }
+
+    /// <summary>
+    /// Removes the pending-message marker after a successful agent turn.
+    /// No-op when no pending file exists.
+    /// </summary>
+    public void ClearPendingUserMessage(string conversationId)
+    {
+        var path = PendingFilePath(conversationId);
+        if (File.Exists(path))
+            File.Delete(path);
+    }
+
+    /// <summary>
+    /// Returns the original user message that was being processed when the
+    /// previous process terminated (detected via the <c>.pending</c> sidecar file),
+    /// or <c>null</c> if no interrupted turn is detected.
+    /// </summary>
+    public string? GetLastUnrespondedUserMessage(string conversationId)
+    {
+        var path = PendingFilePath(conversationId);
+        if (!File.Exists(path)) return null;
+
+        var text = File.ReadAllText(path, Encoding.UTF8).Trim();
+        return string.IsNullOrEmpty(text) ? null : text;
+    }
+
+    /// <summary>Pending-message sidecar path (<c>{session}.md.pending</c>) for a conversation.</summary>
+    private string PendingFilePath(string conversationId) => FilePath(conversationId) + ".pending";
 
     // ------------------------------------------------------------------
     // Session → conversationId registration
@@ -385,7 +458,26 @@ public sealed class MarkdownSessionStore : IConversationStore
         buf.Clear();
     }
 
-    private string FilePath(string id) => Path.Combine(_directory, $"{id}.md");
+    /// <summary>
+    /// Resolves the .md file path for a conversation ID.
+    /// IDs may include a single directory separator for sub-agent scoping
+    /// (e.g. "agentfox/sa_abc123" → {directory}/agentfox/sa_abc123.md).
+    /// </summary>
+    private string FilePath(string id)
+    {
+        SessionManager.EnsureSafeSessionId(id);
+        var rel = id.Replace('/', Path.DirectorySeparatorChar)
+                    .Replace('\\', Path.DirectorySeparatorChar);
+        var root = Path.GetFullPath(_directory) + Path.DirectorySeparatorChar;
+        var path = Path.GetFullPath(Path.Combine(_directory, rel + ".md"));
+        if (!path.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException("Conversation ID resolves outside the session directory.", nameof(id));
+        // Ensure the sub-directory exists before callers try to write
+        var dir = Path.GetDirectoryName(path)!;
+        if (!Directory.Exists(dir))
+            Directory.CreateDirectory(dir);
+        return path;
+    }
 
     // ------------------------------------------------------------------
     // JSON records for tool call / result lines
@@ -400,3 +492,5 @@ public sealed class MarkdownSessionStore : IConversationStore
         [property: JsonPropertyName("callId")] string? CallId,
         [property: JsonPropertyName("result")] string? Result);
 }
+
+public sealed record ConversationMessageSnapshot(string Role, string Content);

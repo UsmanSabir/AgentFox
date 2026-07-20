@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using AgentFox.Agents;
 using AgentFox.Memory;
+using AgentFox.Plugins.Interfaces;
 using AgentFox.Tools;
 
 namespace AgentFox.Skills;

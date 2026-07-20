@@ -1,0 +1,23 @@
+# TODO List
+- [x] Agent/sub-agent interruption and resume — commands (list/pause/resume/stop/kill), startup recovery
+- [x] TUI (onboarding, agent, doctor and other commands) Spectre.Console
+- [x] Stream response
+- [ ] Add prompt caching
+- [x] Dynamic tools loading and unloading (e.g. for mcp server / plugins etc)
+- [ ] Checkpoints : https://learn.microsoft.com/en-us/agent-framework/workflows/checkpoints?pivots=programming-language-csharp
+- [x] Add health check/doctor on every configurable feature like llm configs, workspace dir, memory etc. Agent modifies/configure itself
+- [x] Plugins support
+- [x] Onboarding Wizard
+- [x] Schedule Heartbeat and periodic tasks test runs
+- [x] Web UI start with relevant skills
+- [ ] Multi-agent workflow -> Planner / retriever / executor / critic or (Research / Synthesis[Coordinator] / Implementation / Verification)
+- Add channels like telegram, slack, whatsapp, ms-teams, ntfy(https://ntfy.sh/ , https://codeberg.org/nwithan8/ntfy-dotnet) etc
+- Agent Skills 
+	- -- https://agentskills.io/home (https://learn.microsoft.com/en-us/agent-framework/agents/skills?pivots=programming-language-csharp)
+	- https://github.com/microsoft/agent-framework/blob/main/dotnet/tests/Microsoft.Agents.AI.UnitTests/AgentSkills/AgentSkillsProviderTests.cs
+	- https://github.com/microsoft/agent-framework/tree/d30103fee6b03e2322dc13d590ef43661692b7c9/dotnet/samples/02-agents/AgentSkills
+- DevUI https://github.com/microsoft/agent-framework/blob/d30103fee6b03e2322dc13d590ef43661692b7c9/dotnet/src/Microsoft.Agents.AI.DevUI/README.md?plain=1#L2
+- MarkdownSessionHistoryProvider (ChatHistoryProvider):  evaluate whether we need reducer to prevent unbounded memory growth for long-running sessions with many messages.
+- [x] Use LocalEmbedder in memory from https://github.com/dotnet/smartcomponents/blob/main/docs/local-embeddings.md | https://github.com/usmansabirnetsol/smartcomponents/blob/main/docs/local-embeddings.md
+- [x] Agent Human in Loop (HITL) support https://learn.microsoft.com/en-us/agent-framework/workflows/human-in-the-loop?pivots=programming-language-csharp
+- Incorporate AgentToolkit https://github.com/microsoft/agent-governance-toolkit

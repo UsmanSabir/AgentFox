@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Tasks;
+using AgentFox.Http;
 using Microsoft.Extensions.Logging;
 
 namespace AgentFox.Skills;
@@ -28,7 +29,7 @@ public class ComposioClient
         _apiKey = apiKey ?? throw new ArgumentNullException(nameof(apiKey));
         _baseUrl = baseUrl ?? DefaultBaseUrl;
         _logger = logger;
-        _httpClient = new HttpClient();
+        _httpClient = HttpResilienceFactory.Create(TimeSpan.FromSeconds(60));
         //_httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {apiKey}");
         _httpClient.DefaultRequestHeaders.Add("Accept", "application/json");
         _httpClient.DefaultRequestHeaders.Add("x-api-key", apiKey);

@@ -6,6 +6,7 @@ using Microsoft.Extensions.Configuration;
 using OllamaSharp;
 using OpenAI;
 using System.ClientModel;
+using Azure.AI.OpenAI;
 
 namespace AgentFox.LLM;
 
@@ -89,9 +90,16 @@ public class LLMFactory
                     var baseUrl = configuration["LLM:BaseUrl"] ?? throw new InvalidOperationException("Azure OpenAI Provider requires BaseUrl in configuration.");
                     var model = configuration["LLM:Model"] ?? throw new InvalidOperationException("Azure OpenAI Provider requires Model name in configuration.");
 
-                    var keyCredential = new ApiKeyCredential(apiKey);
-                    var openAiClient = new OpenAIClient(keyCredential, new OpenAIClientOptions() { Endpoint = new Uri(baseUrl), NetworkTimeout = timeout });
-                    var chatClient = openAiClient.GetChatClient(model);
+                    //var keyCredential = new ApiKeyCredential(apiKey);
+                    //var openAiClient = new OpenAIClient(keyCredential, new OpenAIClientOptions() { Endpoint = new Uri(baseUrl), NetworkTimeout = timeout });
+                    //var chatClient = openAiClient.GetChatClient(model);
+                    //provider = chatClient.AsIChatClient();
+
+                    var azureClient = new AzureOpenAIClient(
+                        new Uri(baseUrl),
+                        new ApiKeyCredential(apiKey));
+
+                    var chatClient = azureClient.GetChatClient(model);
                     provider = chatClient.AsIChatClient();
                     break;
                 }
@@ -141,6 +149,33 @@ public class LLMFactory
         }
 
         return provider;
+    }
+
+    /// <summary>
+    /// Creates a chat client with a model override.
+    /// First looks for a named config under <c>Models:{modelNameOrKey}</c> (e.g. "CheapModel",
+    /// "FastModel", "ReasoningModel"); falls back to the default provider with
+    /// <paramref name="modelNameOrKey"/> used as the literal model name.
+    /// Returns null if the client cannot be created.
+    /// </summary>
+    public static IChatClient? CreateWithModelOverride(IConfiguration configuration, string modelNameOrKey)
+    {
+        // 1. Named model config lookup
+        var modelConfig = configuration.GetSection($"Models:{modelNameOrKey}").Get<ModelConfig>();
+        if (modelConfig != null && !string.IsNullOrEmpty(modelConfig.Model))
+            return CreateChatClient(modelConfig);
+
+        // 2. Fallback: reuse default provider settings, swap model name
+        var fallback = new ModelConfig
+        {
+            Provider = configuration["LLM:Provider"] ?? "ollama",
+            Model = modelNameOrKey,
+            BaseUrl = configuration["LLM:BaseUrl"] ?? "http://localhost:11434",
+            ApiKey = configuration["LLM:ApiKey"],
+            TimeoutSeconds = int.TryParse(configuration["LLM:TimeoutSeconds"], out var t) ? t : 3600
+        };
+
+        return CreateChatClient(fallback);
     }
 
     public static IChatClient? CreateChatClient(ModelConfig modelConfig)

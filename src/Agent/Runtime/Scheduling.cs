@@ -1,6 +1,8 @@
 using System.Timers;
 using System.Text;
 using AgentFox.Agents;
+using AgentFox.Models;
+using AgentFox.Sessions;
 
 namespace AgentFox.Runtime;
 
@@ -13,22 +15,31 @@ public class HeartbeatManager : IDisposable
     private readonly System.Timers.Timer _timer;
     private readonly Dictionary<string, HeartbeatConfig> _heartbeats = new();
     private readonly FoxAgent _agent;
+    private readonly SessionManager? _sessionManager;
+    private readonly ICommandQueue? _commandQueue;
     private readonly string? _beatFilePath;
     private bool _disposed;
-    
+
     public event EventHandler<HeartbeatEventArgs>? HeartbeatTriggered;
     public event EventHandler<HeartbeatMissedEventArgs>? HeartbeatMissed;
     public event EventHandler<HeartbeatAddedEventArgs>? HeartbeatAdded;
     public event EventHandler<HeartbeatRemovedEventArgs>? HeartbeatRemoved;
     public event EventHandler<HeartbeatStatusChangedEventArgs>? HeartbeatStatusChanged;
-    
-    public HeartbeatManager(FoxAgent agent, int intervalSeconds = 60, string? beatFilePath = null)
+
+    public HeartbeatManager(
+        FoxAgent agent,
+        int intervalSeconds = 60,
+        string? beatFilePath = null,
+        SessionManager? sessionManager = null,
+        ICommandQueue? commandQueue = null)
     {
         _agent = agent;
+        _sessionManager = sessionManager;
+        _commandQueue = commandQueue;
         _beatFilePath = beatFilePath ?? Path.Combine(AppContext.BaseDirectory, "Runtime", "Heartbeat.md");
         _timer = new System.Timers.Timer(intervalSeconds * 1000);
         _timer.Elapsed += OnTimerElapsed;
-        
+
         // Load existing heartbeats from file
         LoadHeartbeatsFromFile();
     }
@@ -288,7 +299,30 @@ public class HeartbeatManager : IDisposable
     {
         try
         {
-            var result = await _agent.ExecuteAsync(config.Task);
+            // Each heartbeat run gets a fresh session so runs don't share context
+            var sessionId = _sessionManager?.CreateFreshSession(
+                SessionOrigin.Heartbeat, config.Name, _agent.Id)
+                ?? Guid.NewGuid().ToString("N");
+
+            AgentResult result;
+            if (_commandQueue != null)
+            {
+                var tcs = new TaskCompletionSource<AgentResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var cmd = new AgentCommand
+                {
+                    SessionKey = sessionId,
+                    AgentId = _agent.Id,
+                    Lane = CommandLane.Background,
+                    Message = config.Task,
+                    ResultSource = tcs
+                };
+                _commandQueue.Enqueue(cmd);
+                result = await tcs.Task;
+            }
+            else
+            {
+                result = await _agent.ProcessAsync(config.Task, sessionId);
+            }
             
             config.LastTriggered = DateTime.UtcNow;
             config.MissedCount = 0;
@@ -385,16 +419,29 @@ public class CronScheduler : IDisposable
     private readonly System.Timers.Timer _timer;
     private readonly Dictionary<string, CronJob> _jobs = new();
     private readonly FoxAgent _agent;
+    private readonly SessionManager? _sessionManager;
+    private readonly ICommandQueue? _commandQueue;
+    private readonly string? _jobsFilePath;
     private bool _disposed;
-    
+
     public event EventHandler<CronJobExecutedEventArgs>? JobExecuted;
     public event EventHandler<CronJobErrorEventArgs>? JobError;
-    
-    public CronScheduler(FoxAgent agent, int checkIntervalSeconds = 60)
+
+    public CronScheduler(
+        FoxAgent agent,
+        int checkIntervalSeconds = 60,
+        string? jobsFilePath = null,
+        SessionManager? sessionManager = null,
+        ICommandQueue? commandQueue = null)
     {
         _agent = agent;
+        _sessionManager = sessionManager;
+        _commandQueue = commandQueue;
+        _jobsFilePath = jobsFilePath;
         _timer = new System.Timers.Timer(checkIntervalSeconds * 1000);
         _timer.Elapsed += OnTimerElapsed;
+
+        LoadJobsFromFile();
     }
     
     /// <summary>
@@ -410,8 +457,33 @@ public class CronScheduler : IDisposable
             LastExecuted = DateTime.MinValue,
             NextExecution = CalculateNextExecution(cronExpression)
         };
+        SaveJobsToFile();
     }
     
+    /// <summary>
+    /// Remove a cron job by name. Returns false if not found.
+    /// </summary>
+    public bool RemoveJob(string name)
+    {
+        var removed = _jobs.Remove(name);
+        if (removed) SaveJobsToFile();
+        return removed;
+    }
+
+    /// <summary>
+    /// Get a single job by name, or null if not found.
+    /// </summary>
+    public CronJob? GetJob(string name)
+    {
+        _jobs.TryGetValue(name, out var job);
+        return job;
+    }
+
+    /// <summary>
+    /// Get all registered cron jobs.
+    /// </summary>
+    public IReadOnlyDictionary<string, CronJob> GetJobs() => _jobs;
+
     /// <summary>
     /// Add common cron jobs
     /// </summary>
@@ -446,8 +518,31 @@ public class CronScheduler : IDisposable
         {
             try
             {
-                var result = await _agent.ExecuteAsync(job.Task);
-                
+                // Each cron run gets a fresh session so jobs don't share context
+                var sessionId = _sessionManager?.CreateFreshSession(
+                    SessionOrigin.CronJob, job.Name, _agent.Id)
+                    ?? Guid.NewGuid().ToString("N");
+
+                AgentResult result;
+                if (_commandQueue != null)
+                {
+                    var tcs = new TaskCompletionSource<AgentResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    var cmd = new AgentCommand
+                    {
+                        SessionKey = sessionId,
+                        AgentId = _agent.Id,
+                        Lane = CommandLane.Background,
+                        Message = job.Task,
+                        ResultSource = tcs
+                    };
+                    _commandQueue.Enqueue(cmd);
+                    result = await tcs.Task;
+                }
+                else
+                {
+                    result = await _agent.ProcessAsync(job.Task, sessionId);
+                }
+
                 job.LastExecuted = now;
                 job.NextExecution = CalculateNextExecution(job.CronExpression);
                 
@@ -497,6 +592,89 @@ public class CronScheduler : IDisposable
         return now.AddMinutes(1);
     }
     
+    // ── Persistence ──────────────────────────────────────────────────────────
+
+    private void SaveJobsToFile()
+    {
+        try
+        {
+            if (_jobsFilePath == null) return;
+
+            var dir = Path.GetDirectoryName(_jobsFilePath);
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                Directory.CreateDirectory(dir);
+
+            var sb = new StringBuilder();
+            sb.AppendLine("# Cron Schedule");
+            sb.AppendLine();
+            sb.AppendLine("> Scheduled cron jobs managed by AgentFox. Edit with care — task strings are executed by the agent.");
+            sb.AppendLine();
+            sb.AppendLine("## Jobs");
+            sb.AppendLine();
+
+            if (_jobs.Count == 0)
+            {
+                sb.AppendLine("| Name | Cron | Task |");
+                sb.AppendLine("|------|------|------|");
+                sb.AppendLine("| (none configured) | - | - |");
+            }
+            else
+            {
+                sb.AppendLine("| Name | Cron | Task |");
+                sb.AppendLine("|------|------|------|");
+                foreach (var job in _jobs.Values)
+                    sb.AppendLine($"| {job.Name} | {job.CronExpression} | {job.Task} |");
+            }
+
+            File.WriteAllText(_jobsFilePath, sb.ToString());
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Could not save cron jobs: {ex.Message}");
+        }
+    }
+
+    private void LoadJobsFromFile()
+    {
+        try
+        {
+            if (_jobsFilePath == null || !File.Exists(_jobsFilePath)) return;
+
+            var lines = File.ReadAllLines(_jobsFilePath);
+            var inTable = false;
+
+            foreach (var line in lines)
+            {
+                if (line.Contains("---|")) { inTable = true; continue; }
+                if (!inTable || !line.StartsWith("|") || line.Contains("Name") || line.Contains("(none")) continue;
+
+                var parts = line.Split('|')
+                    .Select(p => p.Trim())
+                    .Where(p => !string.IsNullOrEmpty(p))
+                    .ToArray();
+
+                if (parts.Length < 3) continue;
+
+                var name = parts[0];
+                var cron = parts[1];
+                var task = parts[2];
+
+                _jobs[name] = new CronJob
+                {
+                    Name = name,
+                    CronExpression = cron,
+                    Task = task,
+                    LastExecuted = DateTime.MinValue,
+                    NextExecution = CalculateNextExecution(cron)
+                };
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Could not load cron jobs: {ex.Message}");
+        }
+    }
+
     public void Dispose()
     {
         if (!_disposed)

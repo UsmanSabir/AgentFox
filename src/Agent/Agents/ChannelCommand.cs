@@ -1,4 +1,4 @@
-using AgentFox.Channels;
+using AgentFox.Plugins.Channels;
 
 namespace AgentFox.Agents;
 

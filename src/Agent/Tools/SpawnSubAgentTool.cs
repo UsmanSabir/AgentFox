@@ -1,18 +1,21 @@
 using AgentFox.Agents;
-using AgentFox.Models;
+using AgentFox.Plugins.Interfaces;
+using ToolParameter = AgentFox.Models.ToolParameter;
 
 namespace AgentFox.Tools;
 
 /// <summary>
-/// Tool for spawning sub-agents to handle complex or specialized tasks
+/// Tool for spawning sub-agents to handle complex or specialized tasks.
+/// Accepts a Func&lt;FoxAgent&gt; factory so it can be registered in the ToolRegistry
+/// before the FoxAgent is built, breaking the circular dependency.
 /// </summary>
 public class SpawnSubAgentTool : BaseTool
 {
-    private readonly FoxAgent _agent;
+    private readonly Func<FoxAgent> _agentFactory;
 
-    public SpawnSubAgentTool(FoxAgent agent)
+    public SpawnSubAgentTool(Func<FoxAgent> agentFactory)
     {
-        _agent = agent;
+        _agentFactory = agentFactory;
     }
 
     public override string Name => "spawn_subagent";
@@ -22,7 +25,7 @@ public class SpawnSubAgentTool : BaseTool
         "Use this when a task requires different expertise, extended context, or parallel execution. " +
         "The sub-agent will have access to the parent's tools and can collaborate through shared memory.";
 
-    public override Dictionary<string, ToolParameter> Parameters { get; } = new()
+    public override Dictionary<string, Plugins.Interfaces.ToolParameter> Parameters { get; } = new()
     {
         ["name"] = new() 
         { 
@@ -96,6 +99,24 @@ public class SpawnSubAgentTool : BaseTool
             if (string.IsNullOrWhiteSpace(task))
                 return ToolResult.Fail("Sub-agent task is required");
 
+            // Resolve the agent at execution time (not construction time)
+            var agent = _agentFactory();
+
+            // Inject a planning preamble so the sub-agent breaks the work into steps
+            // before acting, making task handling more structured and reliable.
+            var plannedTask = $"""
+                ## Task
+                {task}
+
+                ## Instructions
+                You are a specialized sub-agent named '{name}'. Your role: {description}
+
+                Before taking any action, briefly outline your plan as a numbered list of steps.
+                Then execute each step in order, using your available tools.
+                After completing all steps, provide a concise summary of what was done and the final result.
+                If you encounter an error or blocker, report it clearly and explain what you tried.
+                """;
+
             // Create spawn config
             var config = new AgentSpawnConfig
             {
@@ -109,10 +130,11 @@ public class SpawnSubAgentTool : BaseTool
             };
 
             // Spawn the sub-agent
-            var subAgent = _agent.SpawnSubAgent(config);
+            var subAgent = agent.SpawnSubAgent(config);
 
-            // Execute the task with the sub-agent asynchronously
-            var result = await subAgent.ExecuteAsync(task);
+            // Execute the task with the sub-agent.
+            // Runs inside the Main lane (tool call); re-enqueueing to Subagent lane would deadlock the serial Main lane.
+            var result = await subAgent.ExecuteAsync(plannedTask);
 
             // Format the response
             var response = $"""

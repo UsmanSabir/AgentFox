@@ -1,3 +1,5 @@
+using AgentFox.Plugins.Interfaces;
+
 namespace AgentFox.Tools;
 
 /// <summary>
@@ -416,7 +418,7 @@ public class ToolEventHookRegistry
     }
     
     /// <summary>
-    /// Clear all hooks
+    /// Clear all hooks (tool, skill, and heartbeat)
     /// </summary>
     public void ClearAllHooks()
     {
@@ -431,6 +433,12 @@ public class ToolEventHookRegistry
             OnSkillPostEnable = null;
             OnSkillError = null;
             OnSkillDisabled = null;
+            OnHeartbeatAdded = null;
+            OnHeartbeatRemoved = null;
+            OnHeartbeatPaused = null;
+            OnHeartbeatResumed = null;
+            OnHeartbeatExecuted = null;
+            OnHeartbeatMissed = null;
         }
     }
 }

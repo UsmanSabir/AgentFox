@@ -1,6 +1,7 @@
+using AgentFox.Tools;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
-using AgentFox.Tools;
+using System.Numerics.Tensors;
 
 namespace AgentFox.Memory;
 
@@ -11,7 +12,7 @@ namespace AgentFox.Memory;
 public class MemoryConfig
 {
     /// <summary>Which backend to use: "Markdown" (default) or "Sqlite"</summary>
-    public string LongTermStorage { get; set; } = "Markdown";
+    public string LongTermStorage { get; set; } = "Sqlite";
 
     /// <summary>Relative path for the markdown file (resolved against workspace)</summary>
     public string MarkdownPath { get; set; } = "LongTermMemory.md";
@@ -66,6 +67,9 @@ public class SqliteLongTermMemory : IMemory, IDisposable
     public SqliteLongTermMemory(string? dbPath = null, IEmbeddingService? embeddingService = null)
     {
         var path = dbPath ?? "long_term_memory.db";
+        var dir = Path.GetDirectoryName(Path.GetFullPath(path));
+        if (!string.IsNullOrEmpty(dir))
+            Directory.CreateDirectory(dir);
         _connectionString = $"Data Source={path};Mode=ReadWriteCreate;Cache=Shared";
         _embedding = embeddingService ?? new NullEmbeddingService();
         InitializeSchema();
@@ -79,6 +83,13 @@ public class SqliteLongTermMemory : IMemory, IDisposable
     {
         // Generate embedding before acquiring the write lock to keep critical section short.
         var vector = await _embedding.GenerateAsync(entry.Content);
+
+        // Write embedding metadata once so doctor can detect dimension mismatches
+        if (vector.Length > 0 && GetMetadata("embedding_dimension") == null)
+        {
+            SetMetadata("embedding_dimension", vector.Length.ToString());
+            SetMetadata("embedding_model", _embedding.GetType().Name);
+        }
 
         await _writeLock.WaitAsync();
         try
@@ -97,12 +108,12 @@ public class SqliteLongTermMemory : IMemory, IDisposable
                     importance = excluded.importance,
                     metadata   = excluded.metadata;
             ";
-            cmd.Parameters.AddWithValue("@id",         entry.Id);
-            cmd.Parameters.AddWithValue("@content",    entry.Content);
-            cmd.Parameters.AddWithValue("@type",       entry.Type.ToString());
-            cmd.Parameters.AddWithValue("@timestamp",  entry.Timestamp.ToString("O"));
+            cmd.Parameters.AddWithValue("@id", entry.Id);
+            cmd.Parameters.AddWithValue("@content", entry.Content);
+            cmd.Parameters.AddWithValue("@type", entry.Type.ToString());
+            cmd.Parameters.AddWithValue("@timestamp", entry.Timestamp.ToString("O"));
             cmd.Parameters.AddWithValue("@importance", entry.Importance);
-            cmd.Parameters.AddWithValue("@metadata",   System.Text.Json.JsonSerializer.Serialize(entry.Metadata));
+            cmd.Parameters.AddWithValue("@metadata", System.Text.Json.JsonSerializer.Serialize(entry.Metadata));
             await cmd.ExecuteNonQueryAsync();
 
             // Store embedding when available
@@ -117,9 +128,9 @@ public class SqliteLongTermMemory : IMemory, IDisposable
                         embedding = excluded.embedding,
                         dims      = excluded.dims;
                 ";
-                vecCmd.Parameters.AddWithValue("@id",        entry.Id);
-                vecCmd.Parameters.AddWithValue("@embedding", FloatsToBlob(vector));
-                vecCmd.Parameters.AddWithValue("@dims",      vector.Length);
+                vecCmd.Parameters.AddWithValue("@id", entry.Id);
+                vecCmd.Parameters.AddWithValue("@embedding", FloatsToBlob(vector.Span));
+                vecCmd.Parameters.AddWithValue("@dims", vector.Length);
                 await vecCmd.ExecuteNonQueryAsync();
             }
 
@@ -137,7 +148,7 @@ public class SqliteLongTermMemory : IMemory, IDisposable
         var queryVector = await _embedding.GenerateAsync(query);
         if (queryVector is { Length: > 0 })
         {
-            var vectorResults = await SearchByVectorAsync(queryVector, limit);
+            var vectorResults = await SearchByVectorAsync(query, queryVector, limit);
             if (vectorResults.Count > 0)
                 return vectorResults;
         }
@@ -198,6 +209,25 @@ public class SqliteLongTermMemory : IMemory, IDisposable
         {
             _writeLock.Release();
         }
+    }
+
+    public void SetMetadata(string key, string value)
+    {
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "INSERT INTO doctor_metadata(key, value) VALUES(@k, @v) ON CONFLICT(key) DO UPDATE SET value=excluded.value;";
+        cmd.Parameters.AddWithValue("@k", key);
+        cmd.Parameters.AddWithValue("@v", value);
+        cmd.ExecuteNonQuery();
+    }
+
+    public string? GetMetadata(string key)
+    {
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT value FROM doctor_metadata WHERE key=@k;";
+        cmd.Parameters.AddWithValue("@k", key);
+        return cmd.ExecuteScalar() as string;
     }
 
     public void Dispose()
@@ -268,6 +298,12 @@ public class SqliteLongTermMemory : IMemory, IDisposable
                     INSERT INTO memories_fts(rowid, content)
                     VALUES (new.rowid, new.content);
                 END;
+
+            -- Key/value store for doctor health-check metadata
+            CREATE TABLE IF NOT EXISTS doctor_metadata (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
         ";
         cmd.ExecuteNonQuery();
     }
@@ -277,7 +313,7 @@ public class SqliteLongTermMemory : IMemory, IDisposable
     /// and returns the top-k entries ranked by:
     ///   score = cosine_similarity × 0.6 + importance × 0.3 + recency_bonus × 0.1
     /// </summary>
-    private async Task<List<MemoryEntry>> SearchByVectorAsync(float[] queryVector, int limit)
+    private async Task<List<MemoryEntry>> SearchByVectorAsync(string query, ReadOnlyMemory<float> queryVector, int limit)
     {
         // Load all vectors in one query (typically < a few thousand rows for a personal agent).
         var vectors = new Dictionary<string, float[]>();
@@ -287,7 +323,7 @@ public class SqliteLongTermMemory : IMemory, IDisposable
         await using var vecReader = await vecCmd.ExecuteReaderAsync();
         while (await vecReader.ReadAsync())
         {
-            var id   = vecReader.GetString(0);
+            var id = vecReader.GetString(0);
             var blob = (byte[])vecReader["embedding"];
             vectors[id] = BlobToFloats(blob);
         }
@@ -304,10 +340,52 @@ public class SqliteLongTermMemory : IMemory, IDisposable
         ";
         var entries = await ReadEntriesAsync(memCmd);
 
-        // Score and rank.
-        var now = DateTime.UtcNow;
-        var minCosine = 0.55f; //0.65f; // safe default
-        
+        #region LocalEmbedder
+
+        // Use LocalEmbedder for Local service
+        //use this block if using quantized vectors and want to leverage LocalEmbedder's optimized similarity search
+        //if (_embedding is LocalEmbeddingService localService)
+        //{
+        //    var embeddedCandidates = entries
+        //        .Where(e => vectors.ContainsKey(e.Id))
+        //        .Select(e => (entry: e, emb: new EmbeddingF32(FloatsToBlob(vectors[e.Id]))))
+        //        .ToList();
+        //    var closestWithScore = localService.FindClosestWithScore<MemoryEntry, EmbeddingF32>(query, embeddedCandidates, limit);
+
+
+        //    if (!closestWithScore.Any())
+        //        return new List<MemoryEntry>();
+
+        //    var candidates = closestWithScore
+        //        .OrderByDescending(c => c.Similarity)
+        //        .ToList();
+
+        //    if (candidates.Count == 0)
+        //        return new List<MemoryEntry>();
+
+        //    var max = candidates.First().Similarity;
+        //    var mean = candidates.Average(x => x.Similarity);
+        //    var std = MathF.Sqrt(candidates.Average(x => MathF.Pow(x.Similarity - mean, 2)));
+
+        //    //adaptive threshold
+        //    var threshold = Math.Max(
+        //        0.60f,                 // hard floor
+        //        max - std * 0.5f       // dynamic band
+        //    );
+
+        //    var filtered = candidates
+        //        .Where(x => x.Similarity >= threshold)
+        //        .Select(x => x.Item)
+        //        .ToList();
+
+        //    return filtered;
+        //}
+
+        #endregion
+
+        #region commented
+
+        // Fallback to manual cosine similarity calculation
         //var scored = entries
         //    .Where(e => vectors.ContainsKey(e.Id))
         //    .Select(e =>
@@ -335,35 +413,40 @@ public class SqliteLongTermMemory : IMemory, IDisposable
         //    .ToList();
         //return scored;
 
-        var candidates = entries
-            .Where(e => vectors.ContainsKey(e.Id))
-            .Select(e =>
-            {
-                var cosine = CosineSimilarity(queryVector, vectors[e.Id]);
-                return (entry: e, cosine);
-            })
-            .OrderByDescending(x => x.cosine)
-            .ToList();
+        #endregion
 
-        if (!candidates.Any())
-            return new List<MemoryEntry>();
+        {
+            var candidates = entries
+                .Where(e => vectors.ContainsKey(e.Id))
+                .Select(e =>
+                {
+                    var cosine = CosineSimilarity(queryVector.Span, vectors[e.Id]);
+                    return (entry: e, cosine);
+                })
+                .OrderByDescending(x => x.cosine)
+                .ToList();
 
-        var max = candidates.First().cosine;
-        var mean = candidates.Average(x => x.cosine);
-        var std = MathF.Sqrt(candidates.Average(x => MathF.Pow(x.cosine - mean, 2)));
+            if (candidates.Count == 0)
+                return new List<MemoryEntry>();
 
-        //adaptive threshold
-        var threshold = Math.Max(
-            minCosine,                 // hard floor
-            max - std * 0.5f       // dynamic band
-        );
+            var max = candidates[0].cosine;
+            var meanF = candidates.Average(x => x.cosine);
+            var stdF = MathF.Sqrt(candidates.Average(x => MathF.Pow(x.cosine - meanF, 2)));
 
-        var filtered = candidates
-            .Where(x => x.cosine >= threshold)
-            .Select(x => x.entry)
-            .ToList();
 
-        return filtered;
+            //adaptive threshold
+            var thresholdF = Math.Max(
+                0.60f, // hard floor
+                max - stdF * 0.5f // dynamic band
+            );
+
+            var filtered = candidates
+                .Where(x => x.cosine >= thresholdF)
+                .Select(x => x.entry)
+                .ToList();
+
+            return filtered;
+        }
     }
 
     /// <summary>
@@ -417,9 +500,9 @@ public class SqliteLongTermMemory : IMemory, IDisposable
         {
             var entry = new MemoryEntry
             {
-                Id         = reader.GetString(0),
-                Content    = reader.GetString(1),
-                Timestamp  = DateTime.Parse(reader.GetString(3), null,
+                Id = reader.GetString(0),
+                Content = reader.GetString(1),
+                Timestamp = DateTime.Parse(reader.GetString(3), null,
                                  System.Globalization.DateTimeStyles.RoundtripKind),
                 Importance = reader.GetDouble(4)
             };
@@ -455,10 +538,10 @@ public class SqliteLongTermMemory : IMemory, IDisposable
     // Vector helpers
     // -------------------------------------------------------------------------
 
-    private static byte[] FloatsToBlob(float[] floats)
+    private static byte[] FloatsToBlob(ReadOnlySpan<float> floats)
     {
         var bytes = new byte[floats.Length * sizeof(float)];
-        Buffer.BlockCopy(floats, 0, bytes, 0, bytes.Length);
+        Buffer.BlockCopy(floats.ToArray(), 0, bytes, 0, bytes.Length);
         return bytes;
     }
 
@@ -469,17 +552,21 @@ public class SqliteLongTermMemory : IMemory, IDisposable
         return floats;
     }
 
-    private static float CosineSimilarity(float[] a, float[] b)
+    private static float CosineSimilarity(ReadOnlySpan<float> a, ReadOnlySpan<float> b)
     {
+        var similarity = TensorPrimitives.CosineSimilarity(a, b);
+        return similarity;
+
         int len = Math.Min(a.Length, b.Length);
         float dot = 0f, normA = 0f, normB = 0f;
         for (int i = 0; i < len; i++)
         {
-            dot   += a[i] * b[i];
+            dot += a[i] * b[i];
             normA += a[i] * a[i];
             normB += b[i] * b[i];
         }
         float denom = MathF.Sqrt(normA) * MathF.Sqrt(normB);
-        return denom < 1e-8f ? 0f : dot / denom;
+        var result = denom < 1e-8f ? 0f : dot / denom;
+        return result;
     }
 }

@@ -1,5 +1,6 @@
-using AgentFox.Models;
 using AgentFox.Memory;
+using AgentFox.Plugins.Interfaces;
+using ToolParameter = AgentFox.Models.ToolParameter;
 
 namespace AgentFox.Tools;
 
@@ -12,7 +13,7 @@ public class AddMemoryTool : BaseTool
 
     public override string Name => "add_memory";
     public override string Description => "Save an important fact, piece of information, or user preference to long-term memory for later recall.";
-    public override Dictionary<string, ToolParameter> Parameters { get; } = new()
+    public override Dictionary<string, Plugins.Interfaces.ToolParameter> Parameters { get; } = new()
     {
         ["content"] = new() { Type = "string", Description = "The information to remember", Required = true },
         ["importance"] = new() { Type = "number", Description = "Importance of this memory from 0.0 to 1.0 (default 0.8)", Required = false, Default = 0.8 }
@@ -66,7 +67,7 @@ public class GetAllMemoriesTool : BaseTool
 
     public override string Name => "get_all_memories";
     public override string Description => "Retrieve every entry stored in long-term memory. Use this to get a complete picture of all remembered facts, preferences, and observations.";
-    public override Dictionary<string, ToolParameter> Parameters { get; } = new();
+    public override Dictionary<string, Plugins.Interfaces.ToolParameter> Parameters { get; } = new();
 
     public GetAllMemoriesTool(IMemory memory)
     {
@@ -101,7 +102,7 @@ public class SearchMemoryTool : BaseTool
 
     public override string Name => "search_memory";
     public override string Description => "Search the agent's long-term and short-term memory for previously remembered facts or context.";
-    public override Dictionary<string, ToolParameter> Parameters { get; } = new()
+    public override Dictionary<string, Plugins.Interfaces.ToolParameter> Parameters { get; } = new()
     {
         ["query"] = new() { Type = "string", Description = "The topic or keyword to search for in memory", Required = true },
         ["limit"] = new() { Type = "number", Description = "Maximum number of results to return", Required = false, Default = 5 }

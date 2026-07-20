@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using AgentFox.Models;
+using AgentFox.Sessions;
 using Microsoft.Extensions.Logging;
 
 namespace AgentFox.Agents;
@@ -44,6 +45,7 @@ public class SubAgentManager : IDisposable
     private readonly ICommandQueue _commandQueue;
     private readonly IAgentRuntime _agentRuntime;
     private readonly SubAgentConfiguration _config;
+    private readonly SessionManager? _sessionManager;
     private readonly ILogger? _logger;
     
     // Active sub-agents tracking
@@ -61,12 +63,14 @@ public class SubAgentManager : IDisposable
         ICommandQueue commandQueue,
         IAgentRuntime agentRuntime,
         SubAgentConfiguration? config = null,
-        ILogger? logger = null)
+        ILogger? logger = null,
+        SessionManager? sessionManager = null)
     {
         _commandQueue = commandQueue ?? throw new ArgumentNullException(nameof(commandQueue));
         _agentRuntime = agentRuntime ?? throw new ArgumentNullException(nameof(agentRuntime));
         _config = config ?? new SubAgentConfiguration();
         _logger = logger;
+        _sessionManager = sessionManager;
         _activeSubAgents = new ConcurrentDictionary<string, SubAgentTask>();
         _childCountPerAgent = new ConcurrentDictionary<string, int>();
         
@@ -159,9 +163,11 @@ public class SubAgentManager : IDisposable
                 };
             }
             
-            // 2. Generate sub-agent session key
+            // 2. Generate sub-agent session key (filesystem-safe, scoped to parent agent directory)
             var subAgentId = Guid.NewGuid().ToString("N");
-            string subAgentSessionKey = $"agent:{parentAgentId}:subagent:{subAgentId}";
+            string subAgentSessionKey = _sessionManager != null
+                ? _sessionManager.CreateSubAgentSession(parentAgentId, subAgentId, parentSessionKey)
+                : $"agent_{parentAgentId}_subagent_{subAgentId}"; // fallback: no colons for Windows FS safety
             
             // 3. Create sub-agent command
             var command = AgentCommand.CreateSubagentCommand(
@@ -179,6 +185,7 @@ public class SubAgentManager : IDisposable
                 SessionKey = subAgentSessionKey,
                 RunId = command.RunId,
                 ParentAgentId = parentAgentId,
+                ParentSessionKey = parentSessionKey,
                 TaskPayload = taskMessage,
                 Model = model ?? _config.DefaultModel,
                 ThinkingLevel = thinkingLevel ?? _config.DefaultThinkingLevel,
@@ -242,7 +249,11 @@ public class SubAgentManager : IDisposable
             task.State = result.Status;
             task.CompletedAt = DateTime.UtcNow;
             task.Completion.SetResult(result);
-            
+
+            // Mark aborted sessions so SessionManager archives them
+            if (result.Status is SubAgentState.Cancelled or SubAgentState.TimedOut or SubAgentState.Failed)
+                _sessionManager?.MarkAborted(task.SessionKey, $"sub-agent {result.Status}");
+
             _logger?.LogInformation($"Sub-agent completed: {runId}, Status={result.Status}");
             
             // ✅ NEW: Invoke result callbacks for result announcement routing
@@ -311,6 +322,61 @@ public class SubAgentManager : IDisposable
     }
     
     /// <summary>
+    /// Pause a sub-agent.  If the task is still pending/queued it will block before
+    /// execution starts.  If already running, execution continues to the end of the
+    /// current turn and then pauses (pause points are between turns inside the executor).
+    /// </summary>
+    public bool PauseSubAgent(string runId)
+    {
+        if (!_activeSubAgents.TryGetValue(runId, out var task)) return false;
+        if (task.State is SubAgentState.Completed or SubAgentState.Failed
+                       or SubAgentState.TimedOut or SubAgentState.Cancelled)
+            return false;
+
+        task.PauseGate.Pause();
+        task.State = SubAgentState.Paused;
+        _logger?.LogInformation("Sub-agent paused: {RunId}", runId);
+        return true;
+    }
+
+    /// <summary>
+    /// Resume a previously paused sub-agent, unblocking its execution gate.
+    /// </summary>
+    public bool ResumeSubAgent(string runId)
+    {
+        if (!_activeSubAgents.TryGetValue(runId, out var task)) return false;
+        if (task.State != SubAgentState.Paused) return false;
+
+        task.State = SubAgentState.Pending; // will transition to Running once dequeued
+        task.PauseGate.Resume();
+        _logger?.LogInformation("Sub-agent resumed: {RunId}", runId);
+        return true;
+    }
+
+    /// <summary>
+    /// Gracefully stop a sub-agent: signals its cancellation token and waits for it
+    /// to complete the current work before returning.
+    /// </summary>
+    public Task<bool> StopSubAgentAsync(string runId) => CancelSubAgentAsync(runId);
+
+    /// <summary>
+    /// Force-kill a sub-agent: signals cancellation and returns immediately without
+    /// waiting for the task to finish.  Use when you need a fire-and-forget abort.
+    /// </summary>
+    public bool KillSubAgent(string runId)
+    {
+        if (!_activeSubAgents.TryGetValue(runId, out var task)) return false;
+
+        _logger?.LogInformation("Killing sub-agent: {RunId}", runId);
+        _sessionManager?.MarkAborted(task.SessionKey, "killed by user");
+
+        // Unblock any pause gate first so the cancellation propagates
+        task.PauseGate.Resume();
+        task.CancellationTokenSource.Cancel();
+        return true;
+    }
+
+    /// <summary>
     /// Cancel a sub-agent execution
     /// </summary>
     public async Task<bool> CancelSubAgentAsync(string runId)
@@ -318,9 +384,14 @@ public class SubAgentManager : IDisposable
         if (_activeSubAgents.TryGetValue(runId, out var task))
         {
             _logger?.LogInformation($"Cancelling sub-agent: {runId}");
-            
+
+            // Mark session as aborted before signalling cancellation
+            _sessionManager?.MarkAborted(task.SessionKey, "user cancelled");
+
+            // Unblock any pause gate first so cancellation propagates
+            task.PauseGate.Resume();
             task.CancellationTokenSource.Cancel();
-            
+
             // Wait for completion or timeout
             try
             {
@@ -330,10 +401,10 @@ public class SubAgentManager : IDisposable
             {
                 _logger?.LogInformation($"Sub-agent cancelled: {runId}");
             }
-            
+
             return true;
         }
-        
+
         return false;
     }
     

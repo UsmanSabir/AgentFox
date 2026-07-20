@@ -1,7 +1,9 @@
 using AgentFox.LLM;
+using AgentFox.Learning;
 using AgentFox.MCP;
 using AgentFox.Memory;
 using AgentFox.Models;
+using AgentFox.Sessions;
 using AgentFox.Skills;
 using AgentFox.Tools;
 using Microsoft.Agents.AI;
@@ -13,6 +15,7 @@ using OpenAI.Chat;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using AgentFox.Plugins.Interfaces;
 using SystemPromptBuilder = AgentFox.LLM.SystemPromptBuilder;
 
 namespace AgentFox.Agents;
@@ -84,6 +87,14 @@ public class FoxAgent
     private readonly ChatClientAgent _chatAgent;
     private readonly ILogger<FoxAgent>? _logger;
     private WorkspaceManager _workspaceManager;
+    private readonly ExperienceLearningService? _experienceLearning;
+
+    /// <summary>
+    /// Ambient session key for the currently executing agent turn.
+    /// Set by <see cref="ProcessAsync"/> so tools can read the originating session
+    /// without being explicitly initialized with it (e.g. SpawnBackgroundSubAgentTool).
+    /// </summary>
+    internal static readonly AsyncLocal<string?> CurrentSessionKey = new();
 
     public string Id => _agent.Config.Id;
     public string Name => _agent.Config.Name;
@@ -102,8 +113,20 @@ public class FoxAgent
     /// </summary>
     public string Role { get; set; } = "default";
 
+    /// <summary>
+    /// Optional session manager. When set, conversation IDs are resolved through it,
+    /// enabling per-channel persistence, idle archiving, and /new /reset support.
+    /// </summary>
+    public SessionManager? SessionManager { get; set; }
 
-    public FoxAgent(ChatClientAgent agent, AgentConfig config, IConversationStore store, string defaultConversationId, WorkspaceManager workspaceManager, ILogger<FoxAgent>? logger = null)
+    /// <summary>
+    /// Runtime prompt contributors. Add <see cref="IPromptContributor"/> instances here
+    /// to inject dynamic content (e.g. connected MCP servers, active plugins) into the
+    /// system prompt before every LLM call without rebuilding the agent.
+    /// </summary>
+    public PromptContributorRegistry PromptContributors { get; }
+
+    public FoxAgent(ChatClientAgent agent, AgentConfig config, IConversationStore store, string defaultConversationId, WorkspaceManager workspaceManager, PromptContributorRegistry promptContributors, ILogger<FoxAgent>? logger = null, ExperienceLearningService? experienceLearning = null)
     {
         _agent = new Agent
         {
@@ -114,7 +137,9 @@ public class FoxAgent
         };
         _chatAgent = agent;
         _workspaceManager = workspaceManager;
+        PromptContributors = promptContributors;
         _logger = logger;
+        _experienceLearning = experienceLearning;
     }
 
     /// <summary>
@@ -136,9 +161,10 @@ public class FoxAgent
     }
 
     /// <summary>
-    /// Execute a task with the agent
+    /// Execute a task with the agent.
+    /// Internal: callers outside this assembly should route through ICommandQueue (Main lane).
     /// </summary>
-    public async Task<AgentResult> ExecuteAsync(string task)
+    internal async Task<AgentResult> ExecuteAsync(string task)
     {
         _logger?.LogInformation("Agent '{AgentName}' executing task: {Task}", Name, task.Length > 100 ? task[..100] + "..." : task);
 
@@ -148,12 +174,29 @@ public class FoxAgent
             _agent.EnabledSkills.AddRange(_agent.Config.SkillRegistry.GetAll());
             _logger?.LogInformation("Auto-populated agent '{AgentName}' with {SkillCount} available skills", Name, _agent.EnabledSkills.Count);
         }
-        return await ProcessAsync(task, _agent.DefaultConversationId);
+        var conversationId = SessionManager != null
+            ? SessionManager.GetOrCreateConsoleSession(_agent.Config.Id)
+            : _agent.DefaultConversationId;
+        return await ProcessAsync(task, conversationId);
     }
 
-    public async Task<AgentResult> ProcessAsync(string task, string? conversationId = null, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// Process a task in a specific conversation session.
+    /// Internal: external callers should route through ICommandQueue; only
+    /// FoxAgentExecutor and SpawnSubAgentTool use this directly (both same assembly).
+    /// </summary>
+    internal async Task<AgentResult> ProcessAsync(string task, string? conversationId = null, StreamingCallbacks? streaming = null, CancellationToken cancellationToken = default)
     {
         conversationId ??= Guid.NewGuid().ToString("N");
+        CurrentSessionKey.Value = conversationId;
+
+        // Handle /new and /reset — archive current session and start a fresh one
+        if (SessionManager != null && SessionManager.IsResetCommand(task))
+        {
+            var newId = SessionManager.ResetSession(conversationId);
+            _logger?.LogInformation("Session reset by user command: {Old} → {New}", conversationId, newId);
+            return new AgentResult { Success = true, Output = $"Session reset. Starting fresh (session: {newId})." };
+        }
 
         _logger?.LogInformation("Agent '{AgentName}' processing task in conversation {ConversationId}", Name, conversationId);
 
@@ -161,6 +204,7 @@ public class FoxAgent
         double TimeoutSeconds = 3600;
         cts.CancelAfter(TimeSpan.FromSeconds(TimeoutSeconds));
         var timeoutToken = cts.Token;
+        var experienceTurn = _experienceLearning?.BeginTurn(task, Name);
 
         try
         {
@@ -181,31 +225,110 @@ public class FoxAgent
             }
 
             var runOptions = new AgentRunOptions();
+            //TODO: Look into prompt caching
+            //runOptions.AdditionalProperties = new AdditionalPropertiesDictionary { { "prompt_cache_key", "my-shared-context-v1" } };
 
             // Proactive recall: inject relevant long-term memories as context preamble
             var memoryContext = await BuildMemoryContextAsync(_agent.Memory, task);
-            var augmentedTask = string.IsNullOrEmpty(memoryContext) ? task : memoryContext + task;
+            var learnedBaseline = _experienceLearning is null
+                ? string.Empty
+                : await _experienceLearning.BuildBaselineAsync(task, timeoutToken);
+            var augmentedTask = memoryContext + learnedBaseline + task;
 
-            var response = await agent.RunAsync(augmentedTask, session, options: runOptions, cancellationToken: timeoutToken);
+            // Write the original user message to a sidecar .pending file before the LLM call.
+            // If the process crashes mid-response, the pending file lets startup recovery
+            // detect the interrupted task and offer to resume it.
+            // We persist `task` (not `augmentedTask`) so the memory preamble is rebuilt fresh on retry.
+            (ConversationStore as Memory.MarkdownSessionStore)?.PersistIncomingUserMessage(conversationId, task);
+
+            string responseText;
+
+            if (streaming != null)
+            {
+                // Streaming path: forward tokens to the caller as they arrive (console/terminal).
+                // RunStreamingAsync handles the full agentic loop (tool calls, retries) just like
+                // RunAsync, but yields ChatResponseUpdate chunks as the model produces them.
+                if (streaming.OnStart != null)
+                    await streaming.OnStart();
+
+                var sb = new StringBuilder();
+                try
+                {
+                    await foreach (var update in agent.RunStreamingAsync(augmentedTask, session, options: runOptions, cancellationToken: timeoutToken))
+                    {
+                        //foreach (var content in update.Contents)
+                        //{
+                        //    if (content.GetType() != typeof(TextContent) && content.GetType() != typeof(TextReasoningContent) && content.GetType() != typeof(UsageContent))
+                        //    {
+                        //        Console.WriteLine($"Streaming content type {content.GetType()}");
+                        //    }
+                        //}
+                        if (streaming.OnReasoning != null)
+                            foreach (var content in update.Contents.OfType<TextReasoningContent>())
+                            {
+                                if (!string.IsNullOrEmpty(content.Text))
+                                {
+                                    await streaming.OnReasoning(content.Text);
+                                }
+                            }
+                        if (streaming.OnToken != null)
+                            foreach (var content in update.Contents.OfType<TextContent>())
+                            {
+                                if (!string.IsNullOrEmpty(content.Text))
+                                {
+                                    sb.Append(content.Text);
+                                    await streaming.OnToken(content.Text);
+                                }
+                            }
+                    }
+                }
+                finally
+                {
+                    // Signal streaming complete *before* any post-processing (session save,
+                    // logging, etc.). This releases the AnsiConsole.Live exclusive context so
+                    // subsequent console writes (e.g. from loggers) do not deadlock.
+                    if (streaming.OnComplete != null)
+                        await streaming.OnComplete();
+                }
+                responseText = sb.Length > 0 ? sb.ToString() : "I apologize, but I wasn't able to generate a response.";
+            }
+            else
+            {
+                // Non-streaming path: channels, CLI, sub-agents — wait for the full response.
+                var response = await agent.RunAsync(augmentedTask, session, options: runOptions, cancellationToken: timeoutToken);
+                responseText = response.Text ?? "I apologize, but I wasn't able to generate a response.";
+            }
 
             // Persist updated session metadata (e.g. lastActiveAt) after each turn.
             ConversationStore.SaveSession(conversationId, session);
 
-            var responseText = response.Text ?? "I apologize, but I wasn't able to generate a response.";
+            // Turn completed successfully — remove the pending marker.
+            (ConversationStore as MarkdownSessionStore)?.ClearPendingUserMessage(conversationId);
+
+            // Keep the session alive in the session manager
+            SessionManager?.TouchSession(conversationId);
             _logger?.LogInformation("Agent '{AgentName}' completed task in conversation {ConversationId}", Name, conversationId);
 
             var result = new AgentResult { Success = true, Output = responseText };
+            if (_experienceLearning != null)
+                await _experienceLearning.CompleteAsync(experienceTurn, true, timeoutToken);
             return result;
         }
         catch (OperationCanceledException)
         {
             _logger?.LogWarning("Agent '{AgentName}' task timed out after {Timeout} seconds", Name, TimeoutSeconds);
+            SessionManager?.MarkAborted(conversationId, "timeout");
             throw;
         }
         catch (Exception ex)
         {
             _logger?.LogError(ex, "Agent '{AgentName}' failed to process task in conversation {ConversationId}", Name, conversationId);
+            SessionManager?.MarkAborted(conversationId, ex.Message);
             throw;
+        }
+        finally
+        {
+            _experienceLearning?.EndTurn(experienceTurn);
         }
     }
 
@@ -245,7 +368,7 @@ public class FoxAgent
         };
 
         var subAgent = SpawnSubAgentInternal(_agent, agentConfig);
-        var foxSubAgent = new FoxAgent(_chatAgent, subAgent.Config, ConversationStore, Guid.NewGuid().ToString("N"), _workspaceManager)
+        var foxSubAgent = new FoxAgent(_chatAgent, subAgent.Config, ConversationStore, Guid.NewGuid().ToString("N"), _workspaceManager, PromptContributors, experienceLearning: _experienceLearning)
         {
             Role = config.Role ?? Role  // Inherit role from parent by default
         };
@@ -440,17 +563,38 @@ public class AgentBuilder
     private readonly AgentConfig _config = new();
     private IMemory? _memory;
     private SkillRegistry? _skillRegistry = null;
-    private MCPClient? _mcpClient;
+    private McpManager? _mcpManager;
     private IConversationStore? _conversationStore;
     private ILogger<FoxAgent>? _logger;
     private IChatClient? _chatClient;
     private CompactionConfig? _compactionConfig;
     private ChatHistoryProvider? _chatHistoryProvider;
     private WorkspaceManager _workspaceManager;
+    private SessionManager? _sessionManager;
+    private ExperienceLearningService? _experienceLearning;
+    private readonly PromptContributorRegistry _promptContributorRegistry = new();
+    private SkillRegistry? _pendingSkillsRegistry; // set by WithSkillsRegistry, consumed in Build()
+
+    /// <summary>
+    /// Optional gate evaluated before every tool execution.
+    /// Return true to allow, false to block.  Set via <see cref="WithToolApprovalGate"/>.
+    /// </summary>
+    private Func<string, Dictionary<string, object?>, CancellationToken, Task<bool>>? _toolApprovalGate;
 
     public AgentBuilder(ToolRegistry toolRegistry)
     {
         _toolRegistry = toolRegistry;
+    }
+
+    /// <summary>
+    /// Register a prompt contributor that injects dynamic content into the system prompt
+    /// before every LLM call. Contributors can also be added at runtime via
+    /// <see cref="FoxAgent.PromptContributors"/>.
+    /// </summary>
+    public AgentBuilder WithPromptContributor(IPromptContributor contributor)
+    {
+        _promptContributorRegistry.Add(contributor);
+        return this;
     }
 
     public AgentBuilder WithName(string name)
@@ -511,12 +655,18 @@ public class AgentBuilder
     {
         _skillRegistry = skillRegistry;
         _config.SkillRegistry = skillRegistry;
+        // Auto-register contributor — will surface skills enabled after Build()
+        // The build-time skill snapshot is recorded in Build() when the contributor is created.
+        _pendingSkillsRegistry = skillRegistry;
         return this;
     }
 
-    public AgentBuilder WithMCPClient(MCPClient mcpClient)
+    public AgentBuilder WithMcpManager(McpManager mcpManager)
     {
-        _mcpClient = mcpClient;
+        _mcpManager = mcpManager;
+        // Auto-register: injects connected MCP server list into system prompt each turn
+        _promptContributorRegistry.Remove("mcp-servers"); // idempotent re-set
+        _promptContributorRegistry.Add(new MCPServerContributor(mcpManager));
         return this;
     }
 
@@ -530,6 +680,64 @@ public class AgentBuilder
     {
         _workspaceManager = workspaceManager;
         return this;
+    }
+
+    public AgentBuilder WithSessionManager(SessionManager sessionManager)
+    {
+        _sessionManager = sessionManager;
+        return this;
+    }
+
+    public AgentBuilder WithExperienceLearning(ExperienceLearningService experienceLearning)
+    {
+        _experienceLearning = experienceLearning;
+        return this;
+    }
+
+    /// <summary>
+    /// Installs a gate that is evaluated before every tool execution.
+    /// Return <c>true</c> to allow the tool to run, <c>false</c> to block it.
+    /// The gate receives the tool name, its resolved arguments, and the cancellation token.
+    /// Typically wired by AgentOrchestrator to HitlManager for human-approval flows.
+    /// </summary>
+    public AgentBuilder WithToolApprovalGate(
+        Func<string, Dictionary<string, object?>, CancellationToken, Task<bool>> gate)
+    {
+        _toolApprovalGate = gate;
+        return this;
+    }
+
+    /// <summary>
+    /// Executes a tool through the canonical gateway pipeline: registry/skill lookup, the
+    /// plan/HITL approval gate, plugin lifecycle hooks, and experience learning. This is the
+    /// only entry point external agent runtimes (e.g. the Harness adapter) may use to run
+    /// AgentFox tools — never call <c>ITool.ExecuteAsync</c> directly from a bridge.
+    /// </summary>
+    public Task<ToolResult> ExecuteThroughGatewayAsync(
+        string toolName, Dictionary<string, object?> arguments, CancellationToken ct = default)
+        => ExecuteToolAsync(toolName, arguments, ct);
+
+    /// <summary>
+    /// Wraps every currently available tool (registry + enabled skills) as an
+    /// <see cref="AITool"/> whose invocation runs through the same gateway pipeline as the
+    /// built agent's own tools. Used by the Harness adapter so bridged tools cannot bypass
+    /// AgentFox policy gates.
+    /// </summary>
+    public IReadOnlyList<AITool> CreateGatewayTools()
+    {
+        var bridged = new List<AITool>();
+        foreach (var toolDefinition in GetAvailableTools())
+        {
+            try
+            {
+                bridged.Add(CreateAgentTool(toolDefinition));
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(ex, "Failed to bridge tool {ToolName} for gateway use", toolDefinition.Name);
+            }
+        }
+        return bridged;
     }
 
     public AgentBuilder WithHistoryProvider(ChatHistoryProvider chatHistoryProvider)
@@ -613,13 +821,16 @@ public class AgentBuilder
 
     private string BuildSystemMessage()
     {
-        // Get base prompt depending on agent configuration or use default
-        var basePrompt = _config.SystemPrompt ?? SystemPromptConfig.AgentPrompts.BaseAssistant;
+        // If a complete system prompt was provided (e.g. built by SystemPromptBuilder in
+        // Program.cs with WithTools already applied), return it as-is to avoid a second
+        // "AVAILABLE TOOLS:" section being appended here.
+        if (_config.SystemPrompt != null)
+            return _config.SystemPrompt;
 
+        // No system prompt provided — build one from the default persona + registered tools.
         var builder = new SystemPromptBuilder()
-            .WithPersona(basePrompt);
+            .WithPersona(SystemPromptConfig.AgentPrompts.BaseAssistant);
 
-        // Add available tools if any
         if (_config.Tools.Count > 0)
         {
             var toolNames = _config.Tools
@@ -727,19 +938,6 @@ public class AgentBuilder
                 }
             }
 
-        // Add spawn agent tool
-        tools.Add(new ToolDefinition
-        {
-            Name = "spawn_agent",
-            Description = "Spawn a sub-agent to handle a subtask",
-            Parameters = new Dictionary<string, Models.ToolParameter>
-            {
-                ["name"] = new() { Type = "string", Description = "Name of the sub-agent", Required = true },
-                ["description"] = new() { Type = "string", Description = "Description of the sub-agent's task", Required = true },
-                ["task"] = new() { Type = "string", Description = "Task for the sub-agent", Required = true }
-            }
-        });
-
         return tools;
     }
 
@@ -779,12 +977,6 @@ public class AgentBuilder
 
     private async Task<ToolResult> ExecuteToolAsync(string toolName, Dictionary<string, object?> arguments, CancellationToken ct)
     {
-        // Handle spawn_agent specially
-        if (toolName == "spawn_agent")
-        {
-            return ToolResult.Ok("Sub-agent spawning is handled by the runtime.");
-        }
-
         // First, try to get tool from global registry
         var tool = _toolRegistry.Get(toolName);
 
@@ -806,18 +998,46 @@ public class AgentBuilder
                 _logger?.LogWarning($"Tool '{toolName}' not found. Global tools: {toolNames}. Skill tools: {skillToolsInfo}");
             }
 
-            return ToolResult.Fail($"Tool not found: {toolName}");
+            var missing = ToolResult.Fail($"Tool not found: {toolName}");
+            _experienceLearning?.RecordCurrent(toolName, arguments, missing);
+            return missing;
         }
 
+        // ── HITL approval gate (Mode 1) ──────────────────────────────────────
+        if (_toolApprovalGate != null)
+        {
+            var allowed = await _toolApprovalGate(toolName, arguments, ct);
+            if (!allowed)
+                return ToolResult.Fail(
+                    $"Tool '{toolName}' was blocked — not approved by user.");
+        }
+
+        // Tool-execution lifecycle hooks. Plugins subscribe via IPluginContext
+        // (OnToolPreExecute/OnToolPostExecute/OnToolError) which lands in this same
+        // HookRegistry; without invoking them here those handlers never fire — i.e. plugin
+        // observability/audit trails would silently record nothing. The Invoke* methods
+        // already swallow handler exceptions, so they cannot break tool execution.
+        var executionId = Guid.NewGuid().ToString("N");
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        await _toolRegistry.HookRegistry.InvokeToolPreExecuteAsync(toolName, arguments, executionId);
         try
         {
             var result = await tool.ExecuteAsync(arguments);
+            sw.Stop();
+            await _toolRegistry.HookRegistry.InvokeToolPostExecuteAsync(
+                toolName, result, sw.ElapsedMilliseconds, executionId);
+            _experienceLearning?.RecordCurrent(toolName, arguments, result);
             return result;
         }
         catch (Exception ex)
         {
+            sw.Stop();
+            await _toolRegistry.HookRegistry.InvokeToolErrorAsync(
+                toolName, ex.Message, sw.ElapsedMilliseconds, executionId);
             _logger?.LogError(ex, $"Error executing tool {toolName}");
-            return ToolResult.Fail($"Error: {ex.Message}");
+            var failed = ToolResult.Fail($"Error: {ex.Message}");
+            _experienceLearning?.RecordCurrent(toolName, arguments, failed);
+            return failed;
         }
     }
 
@@ -828,28 +1048,32 @@ public class AgentBuilder
 
         foreach (var (name, param) in tool.Parameters)
         {
-            JsonObject prop = new()
+            JsonObject prop;
+
+            // MCP tools store the full property schema in JsonSchema (set by MCPClient).
+            // Use it directly to preserve nested types, array items, enum, etc.
+            // For native AgentFox tools JsonSchema is null — build from individual fields.
+            if (!string.IsNullOrEmpty(param.JsonSchema))
             {
-                ["type"] = param.Type
-            };
+                try
+                {
+                    prop = JsonNode.Parse(param.JsonSchema)?.AsObject()
+                           ?? BuildPropFromFields(param);
+                }
+                catch
+                {
+                    prop = BuildPropFromFields(param);
+                }
+            }
+            else
+            {
+                prop = BuildPropFromFields(param);
+            }
 
-            if (!string.IsNullOrEmpty(param.Description))
-                prop["description"] = param.Description;
-
-            if (param.Pattern != null)
-                prop["pattern"] = param.Pattern;
-
-            if (param.MinLength.HasValue)
-                prop["minLength"] = param.MinLength;
-
-            if (param.MaxLength.HasValue)
-                prop["maxLength"] = param.MaxLength;
-
-            if (param.Minimum.HasValue)
-                prop["minimum"] = param.Minimum;
-
-            if (param.Maximum.HasValue)
-                prop["maximum"] = param.Maximum;
+            // OpenAI rejects array schemas that are missing "items".
+            // Ensure it's always present, even if the source schema omitted it.
+            if (prop["type"]?.GetValue<string>() == "array" && prop["items"] == null)
+                prop["items"] = new JsonObject { ["type"] = "string" };
 
             properties[name] = prop;
 
@@ -867,6 +1091,35 @@ public class AgentBuilder
             root["required"] = required;
 
         return JsonSerializer.SerializeToElement(root);
+    }
+
+    private static JsonObject BuildPropFromFields(Models.ToolParameter param)
+    {
+        var prop = new JsonObject { ["type"] = param.Type };
+
+        if (!string.IsNullOrEmpty(param.Description))
+            prop["description"] = param.Description;
+        if (param.Pattern != null)
+            prop["pattern"] = param.Pattern;
+        if (param.MinLength.HasValue)
+            prop["minLength"] = param.MinLength;
+        if (param.MaxLength.HasValue)
+            prop["maxLength"] = param.MaxLength;
+        if (param.Minimum.HasValue)
+            prop["minimum"] = param.Minimum;
+        if (param.Maximum.HasValue)
+            prop["maximum"] = param.Maximum;
+        if (param.EnumValues?.Count > 0)
+        {
+            var enumArr = new JsonArray();
+            foreach (var v in param.EnumValues) enumArr.Add(v);
+            prop["enum"] = enumArr;
+        }
+        // OpenAI requires "items" for array types
+        if (param.Type == "array")
+            prop["items"] = new JsonObject { ["type"] = "string" };
+
+        return prop;
     }
 
     private static object? ConvertJsonValue(object? value)
@@ -985,6 +1238,19 @@ public class AgentBuilder
         {
             _config.Tools.AddRange(tools);
         }
+
+        // Snapshot tool names at build time — DynamicAgentMiddleware will only surface
+        // tools registered AFTER this point (avoiding duplicates with the static set).
+        var baselineToolNames = _toolRegistry.GetAll().Select(t => t.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        // Register RuntimeSkillsContributor now that we know the build-time skill set.
+        // Deferred from WithSkillsRegistry() so we can pass the accurate baseline names.
+        if (_pendingSkillsRegistry != null)
+        {
+            var buildTimeSkillNames = _pendingSkillsRegistry.GetEnabledSkills().Select(s => s.Name);
+            _promptContributorRegistry.Remove("runtime-skills"); // idempotent re-set
+            _promptContributorRegistry.Add(new RuntimeSkillsContributor(_pendingSkillsRegistry, buildTimeSkillNames));
+        }
         //var toolCalls = tools?.Select(t => new
         //{
         //    type = "function",
@@ -1003,7 +1269,7 @@ public class AgentBuilder
         //});
 
         var agentTools = new List<AITool>();
-
+        
         foreach (var toolDefinition in tools)
         {
             try
@@ -1019,11 +1285,45 @@ public class AgentBuilder
 
         var systemPrompt = BuildSystemMessage();
 
+        //https://github.com/microsoft/agent-framework/blob/main/dotnet/src/Microsoft.Agents.AI/TextSearchProvider.cs
+        var textSearchProviderOptions = new TextSearchProviderOptions()
+        {
+            SearchTime = TextSearchProviderOptions.TextSearchBehavior.OnDemandFunctionCalling,
+            FunctionToolDescription = "Allows searching for additional information to help answer the user question. It uses Long and short term memories along with other available context to find relevant information."
+        };
+        var textSearchProvider = new TextSearchProvider(SearchLongTermMemory, textSearchProviderOptions);
+        
         //var agent = chatClient.AsAIAgent(systemPrompt, tools: agentTools);
 
         // Define a pipeline with multiple strategies (only if compaction is enabled)
 #pragma warning disable MAAI001
+        //https://github.com/microsoft/agent-framework/tree/d30103fee6b03e2322dc13d590ef43661692b7c9/dotnet/samples/02-agents/AgentSkills
+        //var options = new AgentFileSkillsSourceOptions();
+        //var skillsBuilder = new AgentSkillsProviderBuilder()
+        //    .UseFileSkills(skillPaths:
+        //    [
+        //        Path.Combine(AppContext.BaseDirectory, "company-skills"),
+        //        Path.Combine(AppContext.BaseDirectory, "team-skills"),
+        //    ])
+        //    .UseFileScriptRunner(SubprocessScriptRunner.RunAsync)
+        //    .UseOptions(o => o.DisableCaching = true)
+        //    .Build();
+
         var agentBuilder = chatClient.AsBuilder();
+
+        // Install dynamic middleware — wraps the IChatClient so every LLM call (streaming
+        // and non-streaming) automatically receives up-to-date tools and prompt addons.
+        // Capture locals so the closure does not root the entire AgentBuilder.
+        var toolRegistry = _toolRegistry;
+        var promptRegistry = _promptContributorRegistry;
+        var mcpManager = _mcpManager;
+        agentBuilder.Use(inner => new DynamicAgentMiddleware(
+            inner,
+            toolRegistry,
+            promptRegistry,
+            baselineToolNames,
+            def => CreateAgentTool(def),
+            mcpManager));
 
         if (_compactionConfig != null)
         {
@@ -1067,6 +1367,9 @@ public class AgentBuilder
         ChatHistoryProvider chatHistoryProvider =
             _chatHistoryProvider ?? new InMemoryChatHistoryProvider();
 
+        
+        //AgentWorkflowBuilder
+
         // 2. Build the agent with nested ChatOptions
         //TODO: Incorporate AgentToolkit https://github.com/microsoft/agent-governance-toolkit
         var agent = agentBuilder
@@ -1078,7 +1381,10 @@ public class AgentBuilder
                 {
                     Tools = agentTools,
                     Instructions = systemPrompt
-                }
+                },
+                AIContextProviders = [
+                    textSearchProvider
+                ],
             });
 
 #pragma warning restore MAAI001
@@ -1086,7 +1392,10 @@ public class AgentBuilder
         _logger?.LogInformation("Building FoxAgent '{AgentName}' with {ToolCount} tools", _config.Name, tools.Count);
 
         
-        var foxAgent = new FoxAgent(agent, _config, _conversationStore!, "main", _workspaceManager, _logger);
+        var foxAgent = new FoxAgent(agent, _config, _conversationStore!, "main", _workspaceManager, _promptContributorRegistry, _logger, _experienceLearning);
+
+        if (_sessionManager != null)
+            foxAgent.SessionManager = _sessionManager;
 
         // Apply memory configuration if set
         if (_memory != null)
@@ -1099,6 +1408,15 @@ public class AgentBuilder
         return foxAgent;
     }
 
-    
+    private async Task<IEnumerable<TextSearchProvider.TextSearchResult>> SearchLongTermMemory(string query, CancellationToken token)
+    {
+        var searchResult = await _memory?.SearchAsync(query)!;
+        var textSearchResults = searchResult?.Select(s=> new TextSearchProvider.TextSearchResult()
+        {
+            Text = s.Content,
+            RawRepresentation = s.Content 
+        }).ToList();
+        return textSearchResults ?? new List<TextSearchProvider.TextSearchResult>();
+    }
 }
 

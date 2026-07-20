@@ -1,0 +1,100 @@
+name: Release
+
+# Builds AgentFox + the Trading plugin for every supported OS/arch and publishes
+# the archives to a GitHub Release. Archive names match what install.ps1 / install.sh
+# download: agentfox-<rid>.zip (Windows) and agentfox-<rid>.tar.gz (Linux/macOS).
+
+on:
+  push:
+    tags:
+      - 'v*'            # e.g. git tag v1.0.0 && git push --tags
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to create/update (e.g. v1.0.0)'
+        required: true
+
+permissions:
+  contents: write        # required to create the release and upload assets
+
+jobs:
+  build:
+    name: Build ${{ matrix.rid }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { rid: win-x64,     os: windows-latest, archive: zip }
+          - { rid: win-arm64,   os: windows-latest, archive: zip }
+          - { rid: linux-x64,   os: ubuntu-latest,  archive: tar }
+          - { rid: linux-arm64, os: ubuntu-latest,  archive: tar }
+          - { rid: osx-x64,     os: macos-latest,   archive: tar }
+          - { rid: osx-arm64,   os: macos-latest,   archive: tar }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      # Optional: build the SvelteKit web UI so wwwroot is present.
+      # Uncomment if the web module should ship in the release.
+      # - uses: actions/setup-node@v4
+      #   with: { node-version: '20' }
+      # - run: npm ci && npm run build
+      #   working-directory: src/frontend
+
+      - name: Publish AgentFox
+        shell: bash
+        run: >
+          dotnet publish src/Agent/AgentFox.csproj
+          -c Release -r ${{ matrix.rid }}
+          --self-contained false
+          -p:PublishSingleFile=false -p:UseAppHost=true
+          -o staging/${{ matrix.rid }}
+
+      - name: Publish Trading plugin
+        shell: bash
+        run: >
+          dotnet publish src/Plugins/TradingAgent/TradingAgent.csproj
+          -c Release -r ${{ matrix.rid }}
+          --self-contained false
+          -o staging/${{ matrix.rid }}/plugins/TradingAgent
+
+      - name: Package (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: Compress-Archive -Path staging/${{ matrix.rid }}/* -DestinationPath agentfox-${{ matrix.rid }}.zip -Force
+
+      - name: Package (tar.gz)
+        if: matrix.archive == 'tar'
+        shell: bash
+        run: tar -czf agentfox-${{ matrix.rid }}.tar.gz -C staging/${{ matrix.rid }} .
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentfox-${{ matrix.rid }}
+          path: agentfox-${{ matrix.rid }}.*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all archives
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create / update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: AgentFox ${{ github.event.inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          files: dist/*
