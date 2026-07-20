@@ -112,6 +112,8 @@ export interface MemoryEntry {
 export interface SessionInfo {
   id: string;
   title?: string;
+  memoryEnabled: boolean;
+  memoryOverride?: boolean | null;
   agentId: string;
   origin: string;
   status: string;
@@ -385,6 +387,17 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+export type SpecialistMemoryMode = 'Shared' | 'Isolated' | 'Disabled';
+
+export interface MemorySettings {
+  globalEnabled: boolean;
+  agents: Array<{
+    id: string;
+    name: string;
+    mode: SpecialistMemoryMode;
+  }>;
+}
+
 async function patch<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method:  'PATCH',
@@ -415,6 +428,12 @@ export const api = {
   tools:    () => get<ToolInfo[]>('/tools'),
   skills:   () => get<SkillInfo[]>('/skills'),
   memory:   () => get<MemoryEntry[]>('/memory'),
+  memorySettings: () => get<MemorySettings>('/memory/settings'),
+  setGlobalMemory: (enabled: boolean) =>
+    patch<{ globalEnabled: boolean }>('/memory/settings', { enabled }),
+  setSpecialistMemory: (agentId: string, mode: SpecialistMemoryMode) =>
+    patch<{ agentId: string; mode: SpecialistMemoryMode }>(
+      `/memory/agents/${encodeURIComponent(agentId)}`, { mode }),
   sessions: () => get<SessionInfo[]>('/sessions'),
   sessionMessages: (conversationId: string) =>
     get<ConversationMessagesResponse>(`/session-messages?conversationId=${encodeURIComponent(conversationId)}`),
@@ -422,6 +441,9 @@ export const api = {
     post<{ success: boolean; conversationId: string }>('/sessions/resume', { conversationId }),
   renameSession: (conversationId: string, title: string) =>
     patch<{ success: boolean; conversationId: string; title: string }>('/sessions', { conversationId, title }),
+  setSessionMemory: (conversationId: string, enabled: boolean | null) =>
+    patch<{ success: boolean; conversationId: string; memoryEnabled: boolean; memoryOverride?: boolean | null }>(
+      '/sessions/memory', { conversationId, enabled }),
   importSession: (envelope: unknown) =>
     post<{ success: boolean; conversationId: string }>('/session-import', envelope),
   deleteSession: (conversationId: string) =>

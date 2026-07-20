@@ -63,6 +63,12 @@ public class SessionInfo
     public string? Title { get; set; }
 
     /// <summary>
+    /// Optional per-session memory override. Null inherits the global setting; false disables
+    /// memory for this session. The global switch always takes precedence.
+    /// </summary>
+    public bool? MemoryEnabled { get; set; }
+
+    /// <summary>
     /// Human-readable logical key before sanitisation (e.g. "channel:whatsapp_12345").
     /// </summary>
     public string LogicalKey { get; set; } = string.Empty;

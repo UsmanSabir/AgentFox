@@ -13,6 +13,12 @@ public class TradingAgentOptions
     // Currently the default IChatClient (from DI) is used for signal parsing.
     public string ParserModelKey { get; set; } = "CheapModel";
 
+    /// <summary>
+    /// Specialist memory mode: Shared uses AgentFox memory, Isolated uses a private persistent
+    /// trading-agent store, and Disabled turns memory off for the specialist. Default: Shared.
+    /// </summary>
+    public string MemoryMode { get; set; } = "Shared";
+
     public int DuplicateWindowMinutes { get; set; } = 60;
 
     /// <summary>

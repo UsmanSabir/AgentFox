@@ -95,6 +95,7 @@ Add the following sections to `appsettings.json`.
     "ExecutionMode":          "Disabled",
     "MinConfidence":          "HIGH",
     "ParserModelKey":         "CheapModel",
+    "MemoryMode":             "Shared",
     "DuplicateWindowMinutes": 60,
     "DatabasePath":           "trading/trading.db",
     "AllowedSymbols":         ["OGDC", "PPL"],
@@ -131,6 +132,7 @@ Add the following sections to `appsettings.json`.
 | `RequireReconciliationHealthy` | `true` | Blocks live modes when broker fills, positions, and balances cannot be reconciled. The current AHK browser adapter reports unsupported, so live entry execution remains fail-closed. |
 | `MinConfidence` | `HIGH` | Minimum signal confidence required before placing an order (`HIGH`, `MEDIUM`, `LOW`). |
 | `ParserModelKey` | `CheapModel` | Reserved for future use — will resolve to a named model from the `Models` config section once `IModelClientFactory` is available in AgentFox.Plugins. Currently uses the default `IChatClient`. |
+| `MemoryMode` | `Shared` | `Shared` uses AgentFox memory, `Isolated` uses `memory/agents/trading-agent/`, and `Disabled` prevents specialist recall and memory-tool access. Can also be changed at runtime on the Memory page. |
 | `DuplicateWindowMinutes` | `60` | Identical messages received within this window are silently discarded. |
 | `DefaultQty` | `100` | Shares to trade when the signal message does not specify a quantity. |
 | `MaxOrderValuePkr` | `50000` | Hard cap: `qty × price` above this value is rejected before the browser is touched. |

@@ -183,11 +183,13 @@ class Program
         // These need async init (Composio, MCP) so they are created before the host
         // and then registered as already-constructed singletons.
         var workspaceManager = new WorkspaceManager(configuration);
+        var memoryPolicy     = new MemoryAccessPolicy(configuration, workspaceManager);
         var toolsConfig      = configuration.GetSection("Tools").Get<ToolsConfig>() ?? new ToolsConfig();
         var toolRegistry     = CreateToolRegistry(workspaceManager, toolsConfig);
         SkillRegistry? skillRegistry = null;
         McpManager?    mcpManager    = null;
         HybridMemory?  memory        = null;
+        RoutedMemory?  agentMemory   = null;
 
         await AnsiConsole.Status()
             .Spinner(Spinner.Known.Dots12)
@@ -201,12 +203,13 @@ class Program
 
                     var longTermMemory = MemoryBackendFactory.CreateLongTermStorage(configuration, workspaceManager);
                     memory = new HybridMemory(100, longTermMemory);
+                    agentMemory = new RoutedMemory(memory, memoryPolicy, "main");
 
                     if (toolsConfig.Memory)
                     {
-                        if (toolsConfig.IsEnabled("add_memory"))      toolRegistry.Register(new AddMemoryTool(memory));
-                        if (toolsConfig.IsEnabled("search_memory"))   toolRegistry.Register(new SearchMemoryTool(memory));
-                        if (toolsConfig.IsEnabled("get_all_memories")) toolRegistry.Register(new GetAllMemoriesTool(memory));
+                        if (toolsConfig.IsEnabled("add_memory"))      toolRegistry.Register(new AddMemoryTool(agentMemory));
+                        if (toolsConfig.IsEnabled("search_memory"))   toolRegistry.Register(new SearchMemoryTool(agentMemory));
+                        if (toolsConfig.IsEnabled("get_all_memories")) toolRegistry.Register(new GetAllMemoriesTool(agentMemory));
                     }
                     ctx.Status("[green]Ready.[/]");
                 });
@@ -269,7 +272,7 @@ class Program
         // ── Single-shot command mode (runs before web host, then exits) ───────
         if (taskArgs.Length > 0)
             return await RunCommandLineMode(taskArgs, configuration, workspaceManager,
-                toolRegistry, skillRegistry!, mcpManager!, memory!);
+                toolRegistry, skillRegistry!, mcpManager!, agentMemory!, memoryPolicy);
 
         // ── Register all services in the single DI container ─────────────────
         var uiCfg = new UIConfig();
@@ -291,6 +294,8 @@ class Program
         builder.Services.AddSingleton(skillRegistry!);
         builder.Services.AddSingleton(mcpManager!);
         builder.Services.AddSingleton(memory!);
+        builder.Services.AddSingleton(agentMemory!);
+        builder.Services.AddSingleton(memoryPolicy);
         builder.Services.AddSingleton<IExperienceStore>(sp =>
             new JsonExperienceStore(Path.Combine(
                 sp.GetRequiredService<WorkspaceManager>().ResolvePath(""),
@@ -315,7 +320,8 @@ class Program
         });
         builder.Services.AddSingleton(sp => new SessionManager(
             sp.GetRequiredService<SessionConfig>(),
-            sp.GetRequiredService<WorkspaceManager>()));
+            sp.GetRequiredService<WorkspaceManager>(),
+            memoryPolicy: sp.GetRequiredService<MemoryAccessPolicy>()));
         builder.Services.AddSingleton(sp =>
             new MarkdownSessionStore(sp.GetRequiredService<SessionManager>().SessionDirectory));
 
@@ -552,11 +558,15 @@ class Program
         ToolRegistry toolRegistry,
         SkillRegistry skillRegistry,
         McpManager mcpManager,
-        HybridMemory memory)
+        IMemory memory,
+        MemoryAccessPolicy memoryPolicy)
     {
         var sessionCfg = new SessionConfig();
         configuration.GetSection("Sessions").Bind(sessionCfg);
-        var sessionManager = new SessionManager(sessionCfg, workspaceManager);
+        var sessionManager = new SessionManager(
+            sessionCfg,
+            workspaceManager,
+            memoryPolicy: memoryPolicy);
         var sessionStore   = new MarkdownSessionStore(sessionManager.SessionDirectory);
 
         var subAgentConfig = new SubAgentConfiguration

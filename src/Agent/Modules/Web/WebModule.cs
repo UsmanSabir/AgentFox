@@ -220,8 +220,54 @@ public class WebModule : IAppModule
             return Results.Ok(result);
         });
 
+        endpoints.MapGet("/memory/settings", (
+            MemoryAccessPolicy policy,
+            SpecialistAgentRegistry specialists) =>
+        {
+            var agents = specialists.GetDescriptors()
+                .OrderBy(agent => agent.Name)
+                .Select(agent =>
+                {
+                    policy.RegisterAgentMode(agent.Id, agent.MemoryMode);
+                    return new
+                    {
+                        id = agent.Id,
+                        name = agent.Name,
+                        mode = policy.GetAgentMode(agent.Id).ToString()
+                    };
+                });
+            return Results.Ok(new { globalEnabled = policy.GlobalEnabled, agents });
+        });
+
+        endpoints.MapPatch("/memory/settings", (
+            GlobalMemorySettingsRequest req,
+            MemoryAccessPolicy policy) =>
+        {
+            policy.SetGlobalEnabled(req.Enabled);
+            return Results.Ok(new { globalEnabled = policy.GlobalEnabled });
+        }).RequireAuthorization("ManagementAdministrator");
+
+        endpoints.MapPatch("/memory/agents/{agentId}", (
+            string agentId,
+            SpecialistMemorySettingsRequest req,
+            MemoryAccessPolicy policy,
+            SpecialistAgentRegistry specialists) =>
+        {
+            var descriptor = specialists.GetDescriptors()
+                .FirstOrDefault(agent => agent.Id.Equals(agentId, StringComparison.OrdinalIgnoreCase));
+            if (descriptor is null)
+                return Results.NotFound(new { error = "specialist_agent_not_found" });
+            if (!Enum.TryParse<SpecialistMemoryMode>(req.Mode, true, out var mode))
+                return Results.BadRequest(new { error = "invalid_memory_mode", allowed = new[] { "Shared", "Isolated", "Disabled" } });
+
+            policy.SetAgentMode(descriptor.Id, mode);
+            return Results.Ok(new { agentId = descriptor.Id, mode = mode.ToString() });
+        }).RequireAuthorization("ManagementAdministrator");
+
         // ── Sessions ──────────────────────────────────────────────────────────
-        endpoints.MapGet("/sessions", (SessionManager sessionManager) =>
+        endpoints.MapGet("/sessions", (
+            SessionManager sessionManager,
+            MemoryAccessPolicy memoryPolicy) =>
         {
             var sessions = sessionManager.GetAllSessions()
                 .OrderByDescending(s => s.LastActivityAt)
@@ -229,6 +275,8 @@ public class WebModule : IAppModule
             {
                 id         = s.SessionId,
                 title      = s.Title,
+                memoryEnabled = memoryPolicy.IsEnabled(s.SessionId),
+                memoryOverride = s.MemoryEnabled,
                 agentId    = s.AgentId,
                 origin     = s.Origin.ToString(),
                 status     = s.Status.ToString(),
@@ -298,6 +346,25 @@ public class WebModule : IAppModule
                 : Results.NotFound(new { error = "session_not_found" });
         });
 
+        endpoints.MapPatch("/sessions/memory", (
+            SessionMemorySettingsRequest req,
+            SessionManager sessionManager,
+            MemoryAccessPolicy memoryPolicy) =>
+        {
+            if (!SessionManager.IsSafeSessionId(req.ConversationId))
+                return Results.BadRequest(new { error = "invalid_session_id" });
+
+            return sessionManager.SetSessionMemoryEnabled(req.ConversationId, req.Enabled)
+                ? Results.Ok(new
+                {
+                    success = true,
+                    conversationId = req.ConversationId,
+                    memoryOverride = req.Enabled,
+                    memoryEnabled = memoryPolicy.IsEnabled(req.ConversationId)
+                })
+                : Results.NotFound(new { error = "session_not_found" });
+        }).RequireAuthorization("ManagementAdministrator");
+
         endpoints.MapGet("/session-export", (
             string conversationId,
             SessionManager sessionManager) =>
@@ -320,6 +387,7 @@ public class WebModule : IAppModule
                 session    = new
                 {
                     title      = session.Title,
+                    memoryEnabled = session.MemoryEnabled,
                     agentId    = session.AgentId,
                     origin     = session.Origin.ToString(),
                     createdAt  = session.CreatedAt,
@@ -354,7 +422,8 @@ public class WebModule : IAppModule
                 req.TranscriptMarkdown,
                 req.Session?.CreatedAt,
                 req.Session?.LastActive,
-                req.Session?.Title);
+                req.Session?.Title,
+                req.Session?.MemoryEnabled);
 
             return Results.Ok(new { success = true, conversationId = newId });
         });
@@ -853,6 +922,12 @@ public record ResumeSessionRequest(string ConversationId);
 
 public record RenameSessionRequest(string ConversationId, string Title);
 
+public record SessionMemorySettingsRequest(string ConversationId, bool? Enabled);
+
+public record GlobalMemorySettingsRequest(bool Enabled);
+
+public record SpecialistMemorySettingsRequest(string Mode);
+
 public record SessionImportRequest(
     string? Schema,
     SessionImportMeta? Session,
@@ -860,6 +935,7 @@ public record SessionImportRequest(
 
 public record SessionImportMeta(
     string? Title,
+    bool? MemoryEnabled,
     string? AgentId,
     string? Origin,
     DateTime? CreatedAt,

@@ -345,7 +345,8 @@ public class FoxAgent
     /// </summary>
     private static async Task<string> BuildMemoryContextAsync(IMemory? memory, string task)
     {
-        if (memory == null) return string.Empty;
+        if (memory == null || memory is ISessionMemoryAccess { IsEnabled: false })
+            return string.Empty;
 
         var memories = await memory.SearchAsync(task, limit: 5);
         if (memories.Count == 0) return string.Empty;

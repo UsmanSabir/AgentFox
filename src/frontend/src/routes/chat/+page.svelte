@@ -8,7 +8,7 @@
   } from '$lib/stores';
   import {
     Send, RotateCcw, StopCircle, Bot, User, Copy, Check, Zap, History, Plus, X,
-    Download, Upload, Trash2, Pencil
+    Download, Upload, Trash2, Pencil, Brain
   } from 'lucide-svelte';
 
   let inputEl: HTMLTextAreaElement;
@@ -23,6 +23,7 @@
   let showSessions = false;
   let loadingSession = false;
   let importInput: HTMLInputElement;
+  let globalMemoryEnabled = true;
 
   $: messages     = $chatMessages;
   $: convId       = $activeConversationId;
@@ -43,7 +44,7 @@
 
   onMount(async () => {
     inputEl?.focus();
-    await Promise.all([loadSessions(), loadSpecialists()]);
+    await Promise.all([loadSessions(), loadSpecialists(), loadMemorySettings()]);
   });
 
   onDestroy(() => {
@@ -191,6 +192,11 @@
     }
   }
 
+  async function loadMemorySettings() {
+    try { globalMemoryEnabled = (await api.memorySettings()).globalEnabled; }
+    catch { globalMemoryEnabled = true; }
+  }
+
   async function renameSession(session: SessionInfo, event: Event) {
     event.stopPropagation();
     if (isStreaming || loadingSession) return;
@@ -211,6 +217,18 @@
       await loadSessions();
     } catch (err) {
       alert('Rename failed: ' + (err instanceof Error ? err.message : String(err)));
+    }
+  }
+
+  async function toggleSessionMemory(session: SessionInfo, event: Event) {
+    event.stopPropagation();
+    if (!globalMemoryEnabled || isStreaming || loadingSession) return;
+
+    try {
+      await api.setSessionMemory(session.id, !session.memoryEnabled);
+      await loadSessions();
+    } catch (err) {
+      alert('Memory setting failed: ' + (err instanceof Error ? err.message : String(err)));
     }
   }
 
@@ -339,6 +357,20 @@
                   <span class="session-item-time">{new Date(session.lastActive).toLocaleString()}</span>
                 </button>
                 <div class="session-actions">
+                  <button
+                    class="icon-btn"
+                    class:memory-on={session.memoryEnabled}
+                    on:click={(e) => toggleSessionMemory(session, e)}
+                    disabled={!globalMemoryEnabled || isStreaming || loadingSession}
+                    aria-pressed={session.memoryEnabled}
+                    title={!globalMemoryEnabled
+                      ? 'Memory is disabled globally'
+                      : session.memoryEnabled
+                        ? 'Disable memory for this session'
+                        : 'Enable memory for this session'}
+                  >
+                    <Brain size={14} />
+                  </button>
                   <button
                     class="icon-btn"
                     on:click={(e) => renameSession(session, e)}
@@ -625,6 +657,7 @@
     padding: 0.3rem 0.35rem 0.3rem 0;
   }
   .session-actions .icon-btn { padding: 0.25rem; }
+  .session-actions .icon-btn.memory-on { color: var(--success); }
   .session-actions .icon-btn.danger:hover { color: var(--danger); }
   .session-item-title { font-size: 0.75rem; font-weight: 600; word-break: break-word; }
   .session-item-meta, .session-item-time { color: var(--text-3); font-size: 0.65rem; }

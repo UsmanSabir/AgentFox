@@ -1,5 +1,13 @@
 namespace AgentFox.Plugins.Interfaces;
 
+/// <summary>Controls which long-term memory store a specialist agent can access.</summary>
+public enum SpecialistMemoryMode
+{
+    Disabled,
+    Shared,
+    Isolated
+}
+
 /// <summary>Host-neutral declaration of a persistent specialist agent supplied by a plugin.</summary>
 public sealed class SpecialistAgentDescriptor
 {
@@ -13,6 +21,11 @@ public sealed class SpecialistAgentDescriptor
     /// <summary>High-confidence hints that may force deterministic delegation on the first model turn.</summary>
     public IReadOnlyList<string> StrongRouteHints { get; init; } = [];
     public string? ModelKey { get; init; }
+    /// <summary>
+    /// Shared uses the main agent's memory; Isolated uses a private persistent store;
+    /// Disabled prevents recall and memory-tool access. Defaults to Shared for compatibility.
+    /// </summary>
+    public SpecialistMemoryMode MemoryMode { get; init; } = SpecialistMemoryMode.Shared;
     public int MaxIterations { get; init; } = 8;
     public int MaxConcurrentTurns { get; init; } = 1;
 }

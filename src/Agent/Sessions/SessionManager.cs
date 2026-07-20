@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using AgentFox.Tools;
+using AgentFox.Memory;
 using Microsoft.Extensions.Logging;
 
 namespace AgentFox.Sessions;
@@ -39,6 +40,7 @@ public class SessionManager : IDisposable
     /// <summary>Resolved absolute path where archived session files are stored.</summary>
     public string ArchiveDirectory => _archiveDir;
     private readonly ILogger? _logger;
+    private readonly MemoryAccessPolicy? _memoryPolicy;
 
     // In-memory index: sessionId → SessionInfo
     private readonly ConcurrentDictionary<string, SessionInfo> _index = new();
@@ -57,10 +59,15 @@ public class SessionManager : IDisposable
     private static readonly HashSet<string> ResetCommands =
         new(StringComparer.OrdinalIgnoreCase) { "/new", "/reset" };
 
-    public SessionManager(SessionConfig config, WorkspaceManager workspaceManager, ILogger? logger = null)
+    public SessionManager(
+        SessionConfig config,
+        WorkspaceManager workspaceManager,
+        ILogger? logger = null,
+        MemoryAccessPolicy? memoryPolicy = null)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _logger = logger;
+        _memoryPolicy = memoryPolicy;
 
         var ws = workspaceManager ?? throw new ArgumentNullException(nameof(workspaceManager));
         _sessionDir = ws.ResolvePath(config.SessionDirectory);
@@ -428,6 +435,25 @@ public class SessionManager : IDisposable
     }
 
     /// <summary>
+    /// Sets or clears a per-session memory override. Null restores inheritance from the global setting.
+    /// Returns false when the session is not tracked.
+    /// </summary>
+    public bool SetSessionMemoryEnabled(string sessionId, bool? enabled)
+    {
+        if (!_index.TryGetValue(sessionId, out var info))
+            return false;
+
+        info.MemoryEnabled = enabled;
+        _memoryPolicy?.SetSessionOverride(sessionId, enabled);
+        SaveIndexAsync();
+        _logger?.LogInformation(
+            "Session {SessionId} memory override set to {MemoryEnabled}",
+            sessionId,
+            enabled?.ToString() ?? "inherit");
+        return true;
+    }
+
+    /// <summary>
     /// Returns sessions that were persisted as <see cref="SessionStatus.Active"/> when the
     /// previous process terminated — i.e., work that was in progress and may need recovery.
     ///
@@ -472,7 +498,10 @@ public class SessionManager : IDisposable
     /// cosmetic — parsing keys off the file name, not the frontmatter).
     /// </summary>
     public string ImportSession(string? agentId, string transcriptMarkdown,
-        DateTime? createdAt = null, DateTime? lastActive = null, string? title = null)
+        DateTime? createdAt = null,
+        DateTime? lastActive = null,
+        string? title = null,
+        bool? memoryEnabled = null)
     {
         if (string.IsNullOrWhiteSpace(transcriptMarkdown))
             throw new ArgumentException("Transcript is empty.", nameof(transcriptMarkdown));
@@ -489,6 +518,7 @@ public class SessionManager : IDisposable
         {
             SessionId = newId,
             Title = NormalizeOptionalTitle(title),
+            MemoryEnabled = memoryEnabled,
             LogicalKey = $"web:{newId}",
             Origin = SessionOrigin.Web,
             Status = SessionStatus.Idle,
@@ -496,6 +526,7 @@ public class SessionManager : IDisposable
             CreatedAt = createdAt ?? now,
             LastActivityAt = lastActive ?? now
         };
+        _memoryPolicy?.SetSessionOverride(newId, memoryEnabled);
         SaveIndexAsync();
 
         _logger?.LogInformation("Imported session as {SessionId}", newId);
@@ -513,6 +544,7 @@ public class SessionManager : IDisposable
 
         if (info.ChannelId != null)
             _channelMap.TryRemove(info.ChannelId, out _);
+        _memoryPolicy?.SetSessionOverride(sessionId, null);
 
         if (!string.IsNullOrWhiteSpace(info.ArchivePath))
         {
@@ -659,6 +691,7 @@ public class SessionManager : IDisposable
             foreach (var s in idx.Sessions)
             {
                 _index[s.SessionId] = s;
+                _memoryPolicy?.SetSessionOverride(s.SessionId, s.MemoryEnabled);
                 _preloadedSessionIds.Add(s.SessionId);
                 if (s.Origin == SessionOrigin.Channel &&
                     s.ChannelId != null &&

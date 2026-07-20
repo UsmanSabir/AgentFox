@@ -316,6 +316,12 @@ public sealed class TradingAgentModule : IAgentAwareModule
             ModelKey = string.IsNullOrWhiteSpace(agentOptions.Value.ParserModelKey)
                 ? null
                 : agentOptions.Value.ParserModelKey,
+            MemoryMode = Enum.TryParse<SpecialistMemoryMode>(
+                agentOptions.Value.MemoryMode,
+                ignoreCase: true,
+                out var memoryMode)
+                    ? memoryMode
+                    : SpecialistMemoryMode.Shared,
             MaxIterations = 8,
             MaxConcurrentTurns = 1,
             SystemPrompt = $"""

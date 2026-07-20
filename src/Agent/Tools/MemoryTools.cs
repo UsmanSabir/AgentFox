@@ -26,6 +26,9 @@ public class AddMemoryTool : BaseTool
 
     protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
     {
+        if (_memory is ISessionMemoryAccess { IsEnabled: false })
+            return ToolResult.Fail("Memory is disabled for this session.");
+
         var content = arguments["content"]?.ToString();
         if (string.IsNullOrEmpty(content))
             return ToolResult.Fail("No content provided to remember");
@@ -76,6 +79,9 @@ public class GetAllMemoriesTool : BaseTool
 
     protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
     {
+        if (_memory is ISessionMemoryAccess { IsEnabled: false })
+            return ToolResult.Fail("Memory is disabled for this session.");
+
         try
         {
             var memories = await _memory.GetAllAsync();
@@ -115,6 +121,9 @@ public class SearchMemoryTool : BaseTool
 
     protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
     {
+        if (_memory is ISessionMemoryAccess { IsEnabled: false })
+            return ToolResult.Fail("Memory is disabled for this session.");
+
         var query = arguments["query"]?.ToString();
         if (string.IsNullOrEmpty(query))
             return ToolResult.Fail("No search query provided");
