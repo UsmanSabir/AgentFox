@@ -65,11 +65,20 @@ public class WorkspaceManager
 
     private static IEnumerable<string> DefaultWorkspaceCandidates()
     {
-        yield return Environment.CurrentDirectory;
+        // Anchor workspace-relative data (sessions, memory, logs) to a STABLE per-install
+        // location so it does not depend on the directory the process was launched from.
+        // The install dir (where AgentFox.exe lives) is preferred; only if it is not
+        // writable do we fall back to a per-user location, and the launch directory is a
+        // last resort. Previously CurrentDirectory was tried first, so launching via the
+        // `agentfox` launcher from an arbitrary shell resolved a different session store
+        // than running the exe from the install directory — the web UI then listed the
+        // sessions of whichever store the process bootstrapped while transcripts lived in
+        // another, surfacing as 404 on export and empty on load.
+        yield return AppContext.BaseDirectory;
         var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         if (!string.IsNullOrEmpty(local))
             yield return Path.Combine(local, "AgentFox");
-        yield return AppContext.BaseDirectory;
+        yield return Environment.CurrentDirectory;
     }
 
     private static bool TryEnsureDirectory(string path)

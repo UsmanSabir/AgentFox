@@ -216,7 +216,9 @@ public sealed class MarkdownSessionStore : IConversationStore
         if (assistantIndex < 0) return;
 
         var line = JsonSerializer.Serialize(new ReferenceLine(assistantIndex, references.ToList()), _jsonOpts);
-        File.AppendAllText(ReferencesFilePath(conversationId), line + "\n", Encoding.UTF8);
+        var refsPath = ReferencesFilePath(conversationId);
+        EnsureParentDirectory(refsPath);
+        File.AppendAllText(refsPath, line + "\n", Encoding.UTF8);
     }
 
     /// <summary>
@@ -240,7 +242,7 @@ public sealed class MarkdownSessionStore : IConversationStore
     }
 
     public bool SessionExists(string conversationId)
-        => _cache.ContainsKey(conversationId) || File.Exists(FilePath(conversationId));
+        => _cache.ContainsKey(conversationId) || File.Exists(ResolveFilePath(conversationId));
 
     public IEnumerable<string> GetAllSessionIds()
     {
@@ -258,24 +260,44 @@ public sealed class MarkdownSessionStore : IConversationStore
         SessionManager.EnsureSafeSessionId(conversationId);
         if (!_messages.TryGetValue(conversationId, out var messages))
         {
-            var path = FilePath(conversationId);
-            if (!File.Exists(path)) return [];
-            messages = ParseFile(path);
+            var path = ResolveFilePath(conversationId);
+            messages = File.Exists(path) ? ParseFile(path) : [];
         }
 
         var snapshots = ProjectSnapshots(messages);
         var refs = LoadReferences(conversationId);
-        if (refs.Count == 0) return snapshots;
 
-        var result = new List<ConversationMessageSnapshot>(snapshots.Count);
-        int assistantIndex = 0;
-        foreach (var s in snapshots)
+        List<ConversationMessageSnapshot> result;
+        if (refs.Count == 0)
         {
-            if (s.Role == "assistant" && refs.TryGetValue(assistantIndex++, out var items))
-                result.Add(s with { References = items });
-            else
-                result.Add(s);
+            result = snapshots;
         }
+        else
+        {
+            result = new List<ConversationMessageSnapshot>(snapshots.Count);
+            int assistantIndex = 0;
+            foreach (var s in snapshots)
+            {
+                if (s.Role == "assistant" && refs.TryGetValue(assistantIndex++, out var items))
+                    result.Add(s with { References = items });
+                else
+                    result.Add(s);
+            }
+        }
+
+        // Surface an interrupted turn: a .pending sidecar means the last user message was
+        // received but never answered (the turn threw, hung, or the process was killed before
+        // persisting). Show it so a reloaded conversation is not blank — unless it is already
+        // the trailing persisted message.
+        var pending = GetLastUnrespondedUserMessage(conversationId);
+        if (!string.IsNullOrWhiteSpace(pending))
+        {
+            var trimmed = pending.Trim();
+            bool alreadyLast = result.Count > 0 && result[^1].Role == "user" && result[^1].Content == trimmed;
+            if (!alreadyLast)
+                result.Add(new ConversationMessageSnapshot("user", trimmed));
+        }
+
         return result;
     }
 
@@ -338,6 +360,7 @@ public sealed class MarkdownSessionStore : IConversationStore
     public void PersistIncomingUserMessage(string conversationId, string message)
     {
         var path = PendingFilePath(conversationId);
+        EnsureParentDirectory(path);
         File.WriteAllText(path, message, Encoding.UTF8);
     }
 
@@ -366,11 +389,21 @@ public sealed class MarkdownSessionStore : IConversationStore
         return string.IsNullOrEmpty(text) ? null : text;
     }
 
-    /// <summary>Pending-message sidecar path (<c>{session}.md.pending</c>) for a conversation.</summary>
-    private string PendingFilePath(string conversationId) => FilePath(conversationId) + ".pending";
+    /// <summary>Pending-message sidecar path (<c>{session}.md.pending</c>). Non-creating —
+    /// write callers must ensure the directory exists first.</summary>
+    private string PendingFilePath(string conversationId) => ResolveFilePath(conversationId) + ".pending";
 
-    /// <summary>References sidecar path (<c>{session}.md.refs.jsonl</c>) for a conversation.</summary>
-    private string ReferencesFilePath(string conversationId) => FilePath(conversationId) + ".refs.jsonl";
+    /// <summary>References sidecar path (<c>{session}.md.refs.jsonl</c>). Non-creating —
+    /// write callers must ensure the directory exists first.</summary>
+    private string ReferencesFilePath(string conversationId) => ResolveFilePath(conversationId) + ".refs.jsonl";
+
+    /// <summary>Creates the parent directory for a sidecar/transcript file if it is missing.</summary>
+    private static void EnsureParentDirectory(string filePath)
+    {
+        var dir = Path.GetDirectoryName(filePath);
+        if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+            Directory.CreateDirectory(dir);
+    }
 
     // ------------------------------------------------------------------
     // Session → conversationId registration
@@ -548,7 +581,10 @@ public sealed class MarkdownSessionStore : IConversationStore
     /// IDs may include a single directory separator for sub-agent scoping
     /// (e.g. "agentfox/sa_abc123" → {directory}/agentfox/sa_abc123.md).
     /// </summary>
-    private string FilePath(string id)
+    // Resolves the .md path for a conversation WITHOUT creating anything on disk. Read-only
+    // callers must use this so that merely inspecting a conversation never litters empty
+    // session sub-directories (which then look like ghost sessions).
+    private string ResolveFilePath(string id)
     {
         SessionManager.EnsureSafeSessionId(id);
         var rel = id.Replace('/', Path.DirectorySeparatorChar)
@@ -557,6 +593,12 @@ public sealed class MarkdownSessionStore : IConversationStore
         var path = Path.GetFullPath(Path.Combine(_directory, rel + ".md"));
         if (!path.StartsWith(root, StringComparison.OrdinalIgnoreCase))
             throw new ArgumentException("Conversation ID resolves outside the session directory.", nameof(id));
+        return path;
+    }
+
+    private string FilePath(string id)
+    {
+        var path = ResolveFilePath(id);
         // Ensure the sub-directory exists before callers try to write
         var dir = Path.GetDirectoryName(path)!;
         if (!Directory.Exists(dir))

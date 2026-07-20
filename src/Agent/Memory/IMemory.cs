@@ -302,7 +302,15 @@ public class HybridMemory : IMemory, IAsyncDisposable
     {
         var shortMem = await _shortTerm.GetAllAsync();
         var longMem  = await _longTerm.GetAllAsync();
-        return shortMem.Concat(longMem).ToList();
+
+        // Entries remain in short-term memory after they are persisted to the
+        // long-term store.  Merge by ID so callers (including the web UI) do
+        // not receive the same memory twice and keyed lists stay valid.
+        return shortMem
+            .Concat(longMem)
+            .GroupBy(m => m.Id)
+            .Select(group => group.First())
+            .ToList();
     }
 
     public async Task ClearAsync()

@@ -164,7 +164,10 @@
     if (isStreaming || loadingSession) return;
     loadingSession = true;
     try {
-      if (session.status.toLowerCase() === 'archived') await api.resumeSession(session.id);
+      // Always resume rather than trusting the sidebar's cached status: the background
+      // idle timer can archive a session server-side after the last loadSessions() call,
+      // and resuming an already-active session is a harmless no-op.
+      await api.resumeSession(session.id);
       const history = await api.sessionMessages(session.id);
       activeAgentId.set(specialists.some(agent => agent.id === history.agentId) ? history.agentId : 'main');
       activeConversationId.set(history.conversationId);
@@ -178,6 +181,8 @@
       showSessions = false;
       await loadSessions();
       await scrollToBottom(true);
+    } catch (err) {
+      alert('Failed to load session: ' + (err instanceof Error ? err.message : String(err)));
     } finally {
       loadingSession = false;
     }
