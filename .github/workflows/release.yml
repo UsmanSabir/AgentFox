@@ -11,15 +11,55 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag to create/update (e.g. v1.0.0)'
-        required: true
+        description: 'Explicit release tag (e.g. v1.2.3). Leave blank to auto-increment as MAJOR.MINOR.<run_number>.'
+        required: false
 
 permissions:
   contents: write        # required to create the release and upload assets
 
 jobs:
+  # ── Version ────────────────────────────────────────────────────────────────
+  # Computes the build version once and shares it with every matrix build.
+  #   • Tag push (v1.2.3) or explicit dispatch tag  → that exact version.
+  #   • Manual run with no tag                       → MAJOR.MINOR.<run_number>
+  #     (MAJOR.MINOR read from <VersionPrefix> in AgentFox.csproj), auto-tagged.
+  version:
+    name: Compute version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}   # e.g. 1.0.42
+      info:    ${{ steps.ver.outputs.info }}       # e.g. 1.0.42+ab12cd3
+      tag:     ${{ steps.ver.outputs.tag }}        # e.g. v1.0.42
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute version
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          # MAJOR.MINOR base from the project file (portable sed — runs on ubuntu)
+          BASE=$(sed -n 's/.*<VersionPrefix>\([0-9]*\.[0-9]*\).*/\1/p' src/Agent/AgentFox.csproj | head -1)
+          [ -z "$BASE" ] && BASE=1.0
+
+          REF="${{ github.event.inputs.tag || github.ref_name }}"
+          if [[ "$REF" == v* ]]; then
+            TAG="$REF"
+            VERSION="${REF#v}"
+          else
+            VERSION="${BASE}.${{ github.run_number }}"
+            TAG="v${VERSION}"
+          fi
+
+          SHA="${GITHUB_SHA::7}"
+          echo "version=$VERSION"      >> "$GITHUB_OUTPUT"
+          echo "info=$VERSION+$SHA"    >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG"              >> "$GITHUB_OUTPUT"
+          echo "AgentFox build version: $VERSION+$SHA  (tag $TAG)"
+
   build:
     name: Build ${{ matrix.rid }}
+    needs: version
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -65,6 +105,8 @@ jobs:
           -p:PublishSingleFile=true
           -p:IncludeNativeLibrariesForSelfExtract=true
           -p:UseAppHost=true
+          -p:Version=${{ needs.version.outputs.version }}
+          -p:InformationalVersion=${{ needs.version.outputs.info }}
           -o staging/${{ matrix.rid }}
 
       - name: Publish Trading plugin
@@ -94,7 +136,7 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-latest
     steps:
       - name: Download all archives
@@ -103,10 +145,12 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # Uses the version job's computed tag. On a manual run with no tag input this
+      # creates a fresh v<MAJOR.MINOR.run_number> tag at the current commit.
       - name: Create / update release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          name: AgentFox ${{ github.event.inputs.tag || github.ref_name }}
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: AgentFox ${{ needs.version.outputs.tag }}
           generate_release_notes: true
           files: dist/*
