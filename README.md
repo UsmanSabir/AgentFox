@@ -15,12 +15,14 @@ A powerful multi-agent AI framework in C# with support for sub-agents, memory, M
 ## Installation
 
 The installer checks dependencies (.NET SDK 10.0, Git), downloads a prebuilt binary from GitHub
-Releases (or builds from source), and drops an `agentfox` launcher into `~/.agentfox`. When run
-in a terminal it finishes by launching the interactive setup wizard, which configures the LLM
-provider, plugin credentials (e.g. the Trading plugin's AHK login, PIN and allowed symbols), and
-optionally installs the system service — then either starts the agent or, if the service is
-already running, points you at the web UI. Pass `-SkipOnboarding` / `--skip-onboarding` to skip
-the wizard; re-run it any time with `agentfox --onboarding`.
+Releases (or builds from source), drops an `agentfox` launcher into `~/.agentfox`, and **adds that
+directory to your PATH** so you can run `agentfox` from anywhere (open a new terminal after install
+for the PATH change to take effect). When run in a terminal it finishes by launching the
+interactive setup wizard, which configures the LLM provider, plugin credentials (e.g. the Trading
+plugin's AHK login, PIN and allowed symbols), and optionally installs the system service — then
+either starts the agent or, if the service is already running, points you at the web UI. Pass
+`-SkipOnboarding` / `--skip-onboarding` to skip the wizard; re-run it any time with
+`agentfox --onboarding`.
 
 ### Windows (PowerShell)
 
@@ -42,11 +44,12 @@ irm https://raw.githubusercontent.com/UsmanSabir/AgentFox/main/install.ps1 -OutF
 .\install.ps1 -InstallDir "C:\Tools\AgentFox"     # custom install dir
 ```
 
-Run it:
+Run it (open a new terminal first so PATH is picked up):
 
 ```powershell
-& "$HOME\.agentfox\agentfox.cmd"
-& "$HOME\.agentfox\agentfox.cmd" --install-service   # optional: run as a Windows service
+agentfox                    # start the agent (web UI on port 8080 by default)
+agentfox --onboarding       # re-run the interactive setup wizard
+agentfox --install-service  # optional: run as a Windows service
 ```
 
 ### Linux / macOS (bash)
@@ -59,10 +62,12 @@ curl -fsSL https://raw.githubusercontent.com/UsmanSabir/AgentFox/main/install.sh
 curl -fsSL https://raw.githubusercontent.com/UsmanSabir/AgentFox/main/install.sh | bash -s -- --no-trading
 ```
 
-Run it:
+Run it (open a new terminal, or `source ~/.bashrc` / `~/.zshrc`, so PATH is picked up):
 
 ```bash
-~/.agentfox/agentfox
+agentfox                    # start the agent (web UI on port 8080 by default)
+agentfox --onboarding       # re-run the interactive setup wizard
+agentfox --install-service  # optional: run as a system service
 ```
 
 ### From a local clone
@@ -92,6 +97,41 @@ bash ./install.sh --no-trading   # without trading
 | `-Branch <name>` | `AGENTFOX_BRANCH` | default branch | Branch to clone (shallow). |
 | `-SkipService` | — | off | Suppress the Windows service hint (Windows only). |
 | `-SkipOnboarding` | `--skip-onboarding` / `AGENTFOX_SKIP_ONBOARDING=1` | wizard runs | Don't launch the interactive setup wizard after install. |
+
+### Updating
+
+The installer writes an `update` script into the install dir that re-downloads the latest release
+and overwrites the install in place (no wizard). It preserves your `appsettings.json` config.
+
+```powershell
+# Windows
+powershell -File "$HOME\.agentfox\update.ps1"
+```
+
+```bash
+# Linux / macOS
+~/.agentfox/update.sh
+```
+
+Re-running the original install one-liner (`irm … | iex` / `curl … | bash`) does the same thing.
+
+### Uninstalling
+
+The installer writes an `uninstall` script into the install dir. It removes the system service (if
+installed), drops the PATH entry, and deletes the install directory.
+
+```powershell
+# Windows
+powershell -File "$HOME\.agentfox\uninstall.ps1"
+```
+
+```bash
+# Linux / macOS
+~/.agentfox/uninstall.sh
+```
+
+> Open a new terminal afterwards for the PATH change to take effect. If a custom `-InstallDir` /
+> `AGENTFOX_INSTALL_DIR` was used, the `update` and `uninstall` scripts live in that directory.
 
 ### ⚠️ Trading plugin safety
 

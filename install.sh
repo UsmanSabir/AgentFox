@@ -185,6 +185,30 @@ resolve_source_root() {
   echo "$WORK_ROOT"
 }
 
+profile_file() {
+  case "${SHELL:-}" in
+    *zsh) echo "$HOME/.zshrc" ;;
+    *) echo "$HOME/.bashrc" ;;
+  esac
+}
+
+add_to_path() {
+  dir="$1"
+  export PATH="$dir:$PATH"        # current session
+  profile="$(profile_file)"
+  # Idempotent: only append if this exact install dir isn't already wired in.
+  if ! grep -qs "# AgentFox PATH ($dir)" "$profile" 2>/dev/null; then
+    {
+      echo ""
+      echo "# AgentFox PATH ($dir)"
+      echo "export PATH=\"$dir:\$PATH\""
+    } >> "$profile"
+    info "Added $dir to your PATH via $profile"
+  else
+    info "$dir is already on your PATH ($profile)"
+  fi
+}
+
 mkdir -p "$INSTALL_DIR"
 
 # The framework-dependent binary needs the .NET runtime whether it was prebuilt or built here.
@@ -252,6 +276,57 @@ fi
 EOF
 chmod +x "$INSTALL_DIR/agentfox"
 
+# ── PATH registration ────────────────────────────────────────────────────────
+# So users can run `agentfox` from anywhere instead of cd-ing into the install dir.
+add_to_path "$INSTALL_DIR"
+
+# ── Uninstaller ──────────────────────────────────────────────────────────────
+cat > "$INSTALL_DIR/uninstall.sh" <<'EOF'
+#!/usr/bin/env bash
+# Uninstall AgentFox: remove the service, drop the PATH entry, delete this folder.
+set -u
+DIR="$(cd "$(dirname "$0")" && pwd)"
+echo "==> Uninstalling AgentFox from $DIR"
+
+if [ -x "$DIR/agentfox" ]; then
+  echo "==> Removing the AgentFox service (if installed) ..."
+  "$DIR/agentfox" --uninstall-service 2>/dev/null || \
+    sudo "$DIR/agentfox" --uninstall-service 2>/dev/null || true
+fi
+
+# Strip the PATH line we appended (matched by the marker comment) from both profiles.
+for profile in "$HOME/.bashrc" "$HOME/.zshrc"; do
+  if [ -f "$profile" ] && grep -qs "# AgentFox PATH ($DIR)" "$profile"; then
+    tmp="$(mktemp)"
+    grep -v -F -e "# AgentFox PATH ($DIR)" -e "export PATH=\"$DIR:\$PATH\"" "$profile" > "$tmp" && mv "$tmp" "$profile"
+    echo "==> Removed AgentFox from PATH in $profile"
+  fi
+done
+
+cd "$HOME"
+rm -rf "$DIR" && echo "==> AgentFox removed. Open a new terminal for the PATH change to take effect." \
+  || echo "==> Could not delete $DIR (a process may be running). Stop AgentFox and delete it manually."
+EOF
+chmod +x "$INSTALL_DIR/uninstall.sh"
+
+# ── Updater ──────────────────────────────────────────────────────────────────
+UPDATE_BRANCH="${BRANCH:-main}"
+RAW_INSTALL_URL=""
+if printf '%s' "$REPO_URL" | grep -Eq 'github\.com[:/]+[^/]+/[^/.]+'; then
+  slug="$(printf '%s' "$REPO_URL" | sed -E 's#.*github\.com[:/]+([^/]+)/([^/.]+).*#\1/\2#')"
+  RAW_INSTALL_URL="https://raw.githubusercontent.com/$slug/$UPDATE_BRANCH/install.sh"
+fi
+cat > "$INSTALL_DIR/update.sh" <<EOF
+#!/usr/bin/env bash
+# Update AgentFox in place to the latest release.
+set -euo pipefail
+export AGENTFOX_INSTALL_DIR="\$(cd "\$(dirname "\$0")" && pwd)"
+export AGENTFOX_SKIP_ONBOARDING=1
+echo "==> Updating AgentFox to the latest release ..."
+curl -fsSL "$RAW_INSTALL_URL" | bash
+EOF
+chmod +x "$INSTALL_DIR/update.sh"
+
 echo
 echo 'AgentFox installed successfully.'
 echo "Install directory: $INSTALL_DIR"
@@ -276,6 +351,13 @@ if [ "$SKIP_ONBOARDING" != "1" ] && { [ -t 0 ] || [ -t 1 ]; } && [ -e /dev/tty ]
 else
   echo
   echo 'Next steps:'
-  echo "  $INSTALL_DIR/agentfox --onboarding    # interactive setup (LLM, plugin credentials, service)"
-  echo "  $INSTALL_DIR/agentfox                 # start the agent (web UI on port 8080 by default)"
+  echo '  agentfox --onboarding    # interactive setup (LLM, plugin credentials, service)'
+  echo '  agentfox                 # start the agent (web UI on port 8080 by default)'
 fi
+
+echo
+echo "'agentfox' is now on your PATH — open a NEW terminal (or run: source $(profile_file)),"
+echo "then run it from anywhere."
+echo 'Manage this install:'
+echo "  $INSTALL_DIR/update.sh       # update to the latest release"
+echo "  $INSTALL_DIR/uninstall.sh    # remove AgentFox (service + PATH + files)"

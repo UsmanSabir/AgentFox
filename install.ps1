@@ -147,6 +147,25 @@ function Resolve-SourceRoot {
     return $workRoot
 }
 
+function Add-ToUserPath([string]$dir) {
+    # Persist to the user PATH (survives reboots / new terminals) and update the
+    # current session so `agentfox` resolves without opening a new shell.
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $entries = @()
+    if ($userPath) { $entries = $userPath -split ';' | Where-Object { $_ -ne '' } }
+    if ($entries -notcontains $dir) {
+        $newPath = (@($dir) + $entries) -join ';'
+        [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
+        Write-Info "Added $dir to your user PATH."
+    }
+    else {
+        Write-Info "$dir is already on your user PATH."
+    }
+    if (($env:PATH -split ';') -notcontains $dir) {
+        $env:PATH = "$dir;$env:PATH"
+    }
+}
+
 $resolvedInstallDir = if ($InstallDir) { $InstallDir } else { Join-Path $HOME '.agentfox' }
 $resolvedInstallDir = [System.IO.Path]::GetFullPath($resolvedInstallDir)
 New-Item -ItemType Directory -Path $resolvedInstallDir -Force | Out-Null
@@ -207,6 +226,60 @@ if exist "%AGENTFOX_HOME%\AgentFox.exe" (
 )
 "@ | Set-Content -Path $launcher -Encoding Ascii
 
+# ── PATH registration ──────────────────────────────────────────────────────────
+# Put the install dir on PATH so users run `agentfox` from anywhere, not just from
+# inside the install folder. agentfox.cmd is resolved because .CMD is in PATHEXT.
+Add-ToUserPath $resolvedInstallDir
+
+# ── Uninstaller ──────────────────────────────────────────────────────────────
+# Written into the install dir. Removes the service, the PATH entry, then the folder.
+$uninstaller = Join-Path $resolvedInstallDir 'uninstall.ps1'
+@'
+# Uninstall AgentFox: remove the service, drop the PATH entry, delete this folder.
+$ErrorActionPreference = 'SilentlyContinue'
+$dir = $PSScriptRoot
+Write-Host "Uninstalling AgentFox from $dir" -ForegroundColor Cyan
+
+$launcher = Join-Path $dir 'agentfox.cmd'
+if (Test-Path $launcher) {
+    Write-Host 'Removing the AgentFox service (if installed) ...'
+    & $launcher --uninstall-service 2>$null
+}
+
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+if ($userPath) {
+    $kept = ($userPath -split ';' | Where-Object { $_ -and $_ -ne $dir }) -join ';'
+    [Environment]::SetEnvironmentVariable('Path', $kept, 'User')
+    Write-Host 'Removed AgentFox from your user PATH.'
+}
+
+# Leave the install dir before deleting it so the folder is not the working directory.
+Set-Location $HOME
+try {
+    Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction Stop
+    Write-Host 'AgentFox removed. Open a new terminal for the PATH change to take effect.' -ForegroundColor Green
+}
+catch {
+    Write-Host "Could not delete $dir (a process may still be running). Stop AgentFox and delete it manually." -ForegroundColor Yellow
+}
+'@ | Set-Content -Path $uninstaller -Encoding UTF8
+
+# ── Updater ──────────────────────────────────────────────────────────────────
+# Re-runs the installer against this same install dir (prebuilt download, no wizard).
+$updateBranch = if ($Branch) { $Branch } else { 'main' }
+$rawInstallUrl = $null
+if ($RepoUrl -match 'github\.com[:/]+([^/]+)/([^/.]+)') {
+    $rawInstallUrl = "https://raw.githubusercontent.com/$($Matches[1])/$($Matches[2])/$updateBranch/install.ps1"
+}
+$updater = Join-Path $resolvedInstallDir 'update.ps1'
+@"
+# Update AgentFox in place to the latest release.
+`$env:AGENTFOX_INSTALL_DIR = `$PSScriptRoot
+`$env:AGENTFOX_SKIP_ONBOARDING = '1'
+Write-Host 'Updating AgentFox to the latest release ...' -ForegroundColor Cyan
+irm '$rawInstallUrl' | iex
+"@ | Set-Content -Path $updater -Encoding UTF8
+
 Write-Host ''
 Write-Host 'AgentFox installed successfully.' -ForegroundColor Green
 Write-Host "Install directory: $resolvedInstallDir" -ForegroundColor Green
@@ -225,15 +298,21 @@ else {
 # service, the gateway is already listening and no second instance is launched.
 if (-not $SkipOnboarding -and [Environment]::UserInteractive) {
     Write-Host ''
-    Write-Info 'Starting the AgentFox setup wizard (re-run any time with: agentfox.cmd --onboarding) ...'
+    Write-Info 'Starting the AgentFox setup wizard (re-run any time with: agentfox --onboarding) ...'
     & $launcher --onboarding
 }
 else {
     Write-Host ''
     Write-Host 'Next steps:' -ForegroundColor Yellow
-    Write-Host "  $resolvedInstallDir\agentfox.cmd --onboarding    # interactive setup (LLM, plugin credentials, service)" -ForegroundColor Yellow
-    Write-Host "  $resolvedInstallDir\agentfox.cmd                 # start the agent (web UI on port 8080 by default)" -ForegroundColor Yellow
+    Write-Host '  agentfox --onboarding    # interactive setup (LLM, plugin credentials, service)' -ForegroundColor Yellow
+    Write-Host '  agentfox                 # start the agent (web UI on port 8080 by default)' -ForegroundColor Yellow
     if (-not $SkipService) {
-        Write-Host "  $resolvedInstallDir\agentfox.cmd --install-service    # run AgentFox as a Windows service" -ForegroundColor DarkYellow
+        Write-Host '  agentfox --install-service    # run AgentFox as a Windows service' -ForegroundColor DarkYellow
     }
 }
+
+Write-Host ''
+Write-Host "'agentfox' is now on your PATH — open a NEW terminal, then run it from anywhere." -ForegroundColor Green
+Write-Host 'Manage this install:' -ForegroundColor Yellow
+Write-Host "  powershell -File `"$resolvedInstallDir\update.ps1`"       # update to the latest release" -ForegroundColor Yellow
+Write-Host "  powershell -File `"$resolvedInstallDir\uninstall.ps1`"    # remove AgentFox (service + PATH + files)" -ForegroundColor Yellow
