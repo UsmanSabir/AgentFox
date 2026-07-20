@@ -89,6 +89,35 @@ public sealed class WebSessionLifecycleTests
     }
 
     [TestMethod]
+    public void WebSession_CanBeRenamedAndTitlePersists()
+    {
+        const string id = "web_rename_test";
+        using (var manager = CreateManager())
+        {
+            manager.GetOrCreateWebSession("main", id);
+
+            Assert.IsTrue(manager.RenameSession(id, "  Quarterly planning  "));
+            Assert.AreEqual("Quarterly planning", manager.GetSession(id)!.Title);
+            Assert.AreEqual(id, manager.GetSession(id)!.SessionId);
+        }
+
+        using var reloadedManager = CreateManager();
+        Assert.AreEqual("Quarterly planning", reloadedManager.GetSession(id)!.Title);
+    }
+
+    [TestMethod]
+    public void RenameSession_RejectsInvalidTitlesAndUnknownSessions()
+    {
+        using var manager = CreateManager();
+        var id = manager.GetOrCreateWebSession("main");
+
+        Assert.ThrowsExactly<ArgumentException>(() => manager.RenameSession(id, "   "));
+        Assert.ThrowsExactly<ArgumentException>(() =>
+            manager.RenameSession(id, new string('x', SessionManager.MaxSessionTitleLength + 1)));
+        Assert.IsFalse(manager.RenameSession("web_missing", "Missing"));
+    }
+
+    [TestMethod]
     public void StrongRouteHint_ForcesOnlyExactSpecialistHint()
     {
         var registry = new SpecialistAgentRegistry();

@@ -20,6 +20,8 @@ namespace AgentFox.Sessions;
 /// </summary>
 public class SessionManager : IDisposable
 {
+    public const int MaxSessionTitleLength = 120;
+
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
         WriteIndented = true,
@@ -403,6 +405,29 @@ public class SessionManager : IDisposable
         _index.Values.ToList();
 
     /// <summary>
+    /// Sets the user-facing title for a session without changing its stable conversation ID.
+    /// Returns false when the session is not tracked.
+    /// </summary>
+    public bool RenameSession(string sessionId, string title)
+    {
+        if (string.IsNullOrWhiteSpace(title))
+            throw new ArgumentException("Session title cannot be empty.", nameof(title));
+
+        var normalizedTitle = title.Trim();
+        if (normalizedTitle.Length > MaxSessionTitleLength)
+            throw new ArgumentException(
+                $"Session title cannot exceed {MaxSessionTitleLength} characters.", nameof(title));
+
+        if (!_index.TryGetValue(sessionId, out var info))
+            return false;
+
+        info.Title = normalizedTitle;
+        SaveIndexAsync();
+        _logger?.LogInformation("Renamed session {SessionId} to {SessionTitle}", sessionId, normalizedTitle);
+        return true;
+    }
+
+    /// <summary>
     /// Returns sessions that were persisted as <see cref="SessionStatus.Active"/> when the
     /// previous process terminated — i.e., work that was in progress and may need recovery.
     ///
@@ -447,7 +472,7 @@ public class SessionManager : IDisposable
     /// cosmetic — parsing keys off the file name, not the frontmatter).
     /// </summary>
     public string ImportSession(string? agentId, string transcriptMarkdown,
-        DateTime? createdAt = null, DateTime? lastActive = null)
+        DateTime? createdAt = null, DateTime? lastActive = null, string? title = null)
     {
         if (string.IsNullOrWhiteSpace(transcriptMarkdown))
             throw new ArgumentException("Transcript is empty.", nameof(transcriptMarkdown));
@@ -463,6 +488,9 @@ public class SessionManager : IDisposable
         _index[newId] = new SessionInfo
         {
             SessionId = newId,
+            Title = string.IsNullOrWhiteSpace(title)
+                ? null
+                : title.Trim()[..Math.Min(title.Trim().Length, MaxSessionTitleLength)],
             LogicalKey = $"web:{newId}",
             Origin = SessionOrigin.Web,
             Status = SessionStatus.Idle,

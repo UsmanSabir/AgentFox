@@ -221,6 +221,7 @@ public class WebModule : IAppModule
                 .Select(s => new
             {
                 id         = s.SessionId,
+                title      = s.Title,
                 agentId    = s.AgentId,
                 origin     = s.Origin.ToString(),
                 status     = s.Status.ToString(),
@@ -265,6 +266,31 @@ public class WebModule : IAppModule
                 : Results.NotFound(new { error = "session_not_found_or_unavailable" });
         });
 
+        endpoints.MapPatch("/sessions", (
+            RenameSessionRequest req,
+            SessionManager sessionManager) =>
+        {
+            if (!SessionManager.IsSafeSessionId(req.ConversationId))
+                return Results.BadRequest(new { error = "invalid_session_id" });
+            if (string.IsNullOrWhiteSpace(req.Title))
+                return Results.BadRequest(new { error = "empty_session_title" });
+            if (req.Title.Trim().Length > SessionManager.MaxSessionTitleLength)
+                return Results.BadRequest(new
+                {
+                    error = "session_title_too_long",
+                    maxLength = SessionManager.MaxSessionTitleLength
+                });
+
+            return sessionManager.RenameSession(req.ConversationId, req.Title)
+                ? Results.Ok(new
+                {
+                    success = true,
+                    conversationId = req.ConversationId,
+                    title = req.Title.Trim()
+                })
+                : Results.NotFound(new { error = "session_not_found" });
+        });
+
         endpoints.MapGet("/session-export", (
             string conversationId,
             SessionManager sessionManager) =>
@@ -286,6 +312,7 @@ public class WebModule : IAppModule
                 exportedAt = DateTime.UtcNow,
                 session    = new
                 {
+                    title      = session.Title,
                     agentId    = session.AgentId,
                     origin     = session.Origin.ToString(),
                     createdAt  = session.CreatedAt,
@@ -313,7 +340,8 @@ public class WebModule : IAppModule
                 req.Session?.AgentId,
                 req.TranscriptMarkdown,
                 req.Session?.CreatedAt,
-                req.Session?.LastActive);
+                req.Session?.LastActive,
+                req.Session?.Title);
 
             return Results.Ok(new { success = true, conversationId = newId });
         });
@@ -810,12 +838,15 @@ public record HeartbeatRequest(
 
 public record ResumeSessionRequest(string ConversationId);
 
+public record RenameSessionRequest(string ConversationId, string Title);
+
 public record SessionImportRequest(
     string? Schema,
     SessionImportMeta? Session,
     string? TranscriptMarkdown);
 
 public record SessionImportMeta(
+    string? Title,
     string? AgentId,
     string? Origin,
     DateTime? CreatedAt,

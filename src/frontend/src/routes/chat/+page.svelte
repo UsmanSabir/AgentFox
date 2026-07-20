@@ -8,7 +8,7 @@
   } from '$lib/stores';
   import {
     Send, RotateCcw, StopCircle, Bot, User, Copy, Check, Zap, History, Plus, X,
-    Download, Upload, Trash2
+    Download, Upload, Trash2, Pencil
   } from 'lucide-svelte';
 
   let inputEl: HTMLTextAreaElement;
@@ -191,6 +191,25 @@
     }
   }
 
+  async function renameSession(session: SessionInfo, event: Event) {
+    event.stopPropagation();
+    if (isStreaming || loadingSession) return;
+
+    const title = prompt('Rename session', session.title ?? '');
+    if (title === null) return;
+    if (!title.trim()) {
+      alert('Session name cannot be empty.');
+      return;
+    }
+
+    try {
+      await api.renameSession(session.id, title.trim());
+      await loadSessions();
+    } catch (err) {
+      alert('Rename failed: ' + (err instanceof Error ? err.message : String(err)));
+    }
+  }
+
   async function deleteSession(session: SessionInfo, event: Event) {
     event.stopPropagation();
     if (isStreaming || loadingSession) return;
@@ -311,11 +330,19 @@
                   on:click={() => openSession(session)}
                   disabled={loadingSession || isStreaming}
                 >
-                  <span class="session-item-title">{session.id}</span>
-                  <span class="session-item-meta">{session.origin} · {session.status}</span>
+                  <span class="session-item-title">{session.title ?? session.id}</span>
+                  <span class="session-item-meta">{session.title ? `${session.id} · ` : ''}{session.origin} · {session.status}</span>
                   <span class="session-item-time">{new Date(session.lastActive).toLocaleString()}</span>
                 </button>
                 <div class="session-actions">
+                  <button
+                    class="icon-btn"
+                    on:click={(e) => renameSession(session, e)}
+                    disabled={isStreaming || loadingSession}
+                    title="Rename session"
+                  >
+                    <Pencil size={14} />
+                  </button>
                   <button
                     class="icon-btn"
                     on:click={(e) => exportSession(session, e)}
@@ -595,7 +622,7 @@
   }
   .session-actions .icon-btn { padding: 0.25rem; }
   .session-actions .icon-btn.danger:hover { color: var(--danger); }
-  .session-item-title { font-family: monospace; font-size: 0.72rem; word-break: break-all; }
+  .session-item-title { font-size: 0.75rem; font-weight: 600; word-break: break-word; }
   .session-item-meta, .session-item-time { color: var(--text-3); font-size: 0.65rem; }
   .session-empty { color: var(--text-3); font-size: 0.75rem; padding: 1rem; text-align: center; }
   .icon-btn {
