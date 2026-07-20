@@ -4,7 +4,7 @@
   import { renderMarkdown } from '$lib/markdown';
   import {
     chatMessages, addUserMessage, addAssistantMessage, addBackgroundResultMessage,
-    appendToken, finalizeMessage, activeConversationId, activeAgentId, agentReady, resetChat
+    appendToken, finalizeMessage, attachReferences, activeConversationId, activeAgentId, agentReady, resetChat
   } from '$lib/stores';
   import {
     Send, RotateCcw, StopCircle, Bot, User, Copy, Check, Zap, History, Plus, X,
@@ -107,6 +107,7 @@
             await scrollToBottom();
           } else if (event.type === 'done') {
             if (event.conversationId) activeConversationId.set(event.conversationId);
+            attachReferences(assistantId, event.references);
             finalizeMessage(assistantId);
             break;
           } else if (event.type === 'error') {
@@ -119,6 +120,7 @@
         if (response.conversationId) activeConversationId.set(response.conversationId);
         if (response.success) {
           appendToken(assistantId, response.response);
+          attachReferences(assistantId, response.references);
           finalizeMessage(assistantId);
         } else {
           finalizeMessage(assistantId, response.error ?? 'Specialist request failed');
@@ -169,6 +171,7 @@
         id: crypto.randomUUID(),
         role: item.role,
         content: item.content,
+        references: item.references,
         timestamp: new Date(session.lastActive)
       })));
       showSessions = false;
@@ -389,6 +392,22 @@
                   class="message-content markdown"
                   class:stream-cursor={msg.streaming && msg.content.length > 0}
                 >{#if msg.content.length > 0}{@html renderMarkdown(msg.content)}{:else if msg.streaming}<span class="typing-dots"><span></span><span></span><span></span></span>{/if}</div>
+              {/if}
+
+              {#if msg.role === 'assistant' && !msg.streaming && !msg.error && msg.references && msg.references.length > 0}
+                <div class="sources">
+                  <span class="sources-label">Sources</span>
+                  <ul class="sources-list">
+                    {#each msg.references as ref}
+                      <li>
+                        <a href={ref.url} target="_blank" rel="noopener noreferrer" title={ref.url}>
+                          {ref.title || ref.url}
+                        </a>
+                        {#if ref.source}<span class="sources-src">· {ref.source}</span>{/if}
+                      </li>
+                    {/each}
+                  </ul>
+                </div>
               {/if}
 
               {#if !msg.streaming && msg.role === 'assistant' && !msg.error}
@@ -880,6 +899,27 @@
     0%, 60%, 100% { transform: translateY(0); opacity: 0.6; }
     30%            { transform: translateY(-4px); opacity: 1; }
   }
+
+  /* Sources */
+  .sources {
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid var(--border);
+    font-size: 0.75rem;
+  }
+  .sources-label {
+    display: block;
+    color: var(--text-3);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 0.625rem;
+    margin-bottom: 0.25rem;
+  }
+  .sources-list { list-style: none; margin: 0; padding: 0; }
+  .sources-list li { margin: 0.15rem 0; overflow-wrap: anywhere; }
+  .sources-list a { color: var(--primary); text-decoration: none; }
+  .sources-list a:hover { text-decoration: underline; }
+  .sources-src { color: var(--text-3); }
 
   /* Copy button */
   .copy-btn {
