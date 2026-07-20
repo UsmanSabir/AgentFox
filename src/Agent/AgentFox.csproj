@@ -24,7 +24,11 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Content Include="appsettings.Development.json">
+    <!-- Dev-only overrides. Gitignored (appsettings.*.json), so absent in CI/prod.
+         Condition keeps it in local dev builds (file present) and skips it in
+         release/CI builds (file absent) instead of failing MSB3030 on copy. -->
+    <Content Include="appsettings.Development.json"
+             Condition="Exists('$(MSBuildProjectDirectory)\appsettings.Development.json')">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Content>
     <Content Include="appsettings.json" />
@@ -32,12 +36,13 @@
 
   <!-- ── Frontend static files ──────────────────────────────────────────────
        Embed wwwroot into the assembly so dotnet publish produces a single exe.
-       Uncomment after running: cd src/frontend && npm run build
-       Then publish with: dotnet publish -c Release -r win-x64 -p:PublishSingleFile=true
-  <ItemGroup>
+       Populate wwwroot first with: cd src/frontend && npm ci && npm run build
+       (SvelteKit static adapter outputs to ../Agent/wwwroot). The condition means
+       a build without a compiled frontend still succeeds — nothing is embedded and
+       the web UI is simply absent, served from disk in dev if present. -->
+  <ItemGroup Condition="Exists('$(MSBuildProjectDirectory)\wwwroot')">
     <EmbeddedResource Include="wwwroot\**\*" />
   </ItemGroup>
-  ──────────────────────────────────────────────────────────────────────────── -->
 
   <!-- ── Auto-build frontend before dotnet build (optional hook) ───────────
        Uncomment to have MSBuild run "npm run build" automatically.

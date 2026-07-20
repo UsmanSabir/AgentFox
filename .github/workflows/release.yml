@@ -39,20 +39,32 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      # Optional: build the SvelteKit web UI so wwwroot is present.
-      # Uncomment if the web module should ship in the release.
-      # - uses: actions/setup-node@v4
-      #   with: { node-version: '20' }
-      # - run: npm ci && npm run build
-      #   working-directory: src/frontend
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
+      # Build the SvelteKit web UI. The static adapter writes to src/Agent/wwwroot,
+      # which AgentFox.csproj embeds as EmbeddedResource. Must run BEFORE dotnet
+      # publish so the files exist when MSBuild compiles the assembly.
+      - name: Build web UI (wwwroot)
+        shell: bash
+        run: npm ci && npm run build
+        working-directory: src/frontend
+
+      # Single-file publish embeds wwwroot + the local-embeddings ONNX model + native
+      # libs into the exe. PublishSingleFile=true flows into the referenced
+      # LocalEmbeddings project, firing its EmbedLocalEmbeddingsModel target (the model
+      # is downloaded automatically at build time by LocalEmbeddings.targets).
       - name: Publish AgentFox
         shell: bash
         run: >
           dotnet publish src/Agent/AgentFox.csproj
           -c Release -r ${{ matrix.rid }}
           --self-contained false
-          -p:PublishSingleFile=false -p:UseAppHost=true
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:UseAppHost=true
           -o staging/${{ matrix.rid }}
 
       - name: Publish Trading plugin
