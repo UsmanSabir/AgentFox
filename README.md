@@ -90,6 +90,7 @@ bash ./install.sh --no-trading   # without trading
 | Option (PowerShell) | Flag / env var (bash) | Default | Description |
 |---|---|---|---|
 | `-NoTrading` | `--no-trading` / `AGENTFOX_NO_TRADING=1` | trading installed | Install without the Trading plugin. |
+| `-WithTrading` | `--with-trading` / `AGENTFOX_WITH_TRADING=1` | preserve on update | Explicitly add/retain the Trading plugin. |
 | `-InstallDir <path>` | `AGENTFOX_INSTALL_DIR` | `~/.agentfox` | Where AgentFox is installed. |
 | `-BinaryUrl <url>` | `AGENTFOX_BINARY_URL` | GitHub Releases latest | Direct URL to a prebuilt archive. |
 | `-BuildFromSource` | `AGENTFOX_BUILD_FROM_SOURCE=1` | off | Skip the prebuilt download and build from source. |
@@ -101,7 +102,14 @@ bash ./install.sh --no-trading   # without trading
 ### Updating
 
 The installer writes an `update` script into the install dir that re-downloads the latest release
-and overwrites the install in place (no wizard). It preserves your `appsettings.json` config.
+and stages it before updating the live install (no wizard). Release defaults live in
+`appsettings.defaults.json`; your models, accounts, credentials, channels, and other overrides live
+in `appsettings.user.json`, which is never owned or overwritten by a release. The first update from
+an older AgentFox installation copies the existing `appsettings.json` into the user file.
+
+Before deployment, the new AgentFox binary migrates and validates a temporary copy of the user
+configuration. A timestamped copy of the pre-update configuration is retained under `backups/`.
+The updater also preserves whether the Trading plugin was installed.
 
 ```powershell
 # Windows
@@ -114,6 +122,13 @@ powershell -File "$HOME\.agentfox\update.ps1"
 ```
 
 Re-running the original install one-liner (`irm … | iex` / `curl … | bash`) does the same thing.
+
+Configuration can also be checked or migrated manually:
+
+```text
+agentfox config validate
+agentfox config migrate
+```
 
 ### Uninstalling
 

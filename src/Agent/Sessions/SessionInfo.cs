@@ -58,6 +58,11 @@ public class SessionInfo
     public string SessionId { get; set; } = string.Empty;
 
     /// <summary>
+    /// Optional user-facing title. The session ID remains the stable conversation and file identifier.
+    /// </summary>
+    public string? Title { get; set; }
+
+    /// <summary>
     /// Human-readable logical key before sanitisation (e.g. "channel:whatsapp_12345").
     /// </summary>
     public string LogicalKey { get; set; } = string.Empty;

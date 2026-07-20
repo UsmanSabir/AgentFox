@@ -111,6 +111,7 @@ export interface MemoryEntry {
 
 export interface SessionInfo {
   id: string;
+  title?: string;
   agentId: string;
   origin: string;
   status: string;
@@ -384,6 +385,16 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+async function patch<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    method:  'PATCH',
+    headers: requestHeaders(true),
+    body:    JSON.stringify(body)
+  });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json() as Promise<T>;
+}
+
 async function del<T>(path: string): Promise<T> {
   const res = await fetch(`${BASE}${path}`, { method: 'DELETE', headers: requestHeaders() });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
@@ -409,6 +420,8 @@ export const api = {
     get<ConversationMessagesResponse>(`/session-messages?conversationId=${encodeURIComponent(conversationId)}`),
   resumeSession: (conversationId: string) =>
     post<{ success: boolean; conversationId: string }>('/sessions/resume', { conversationId }),
+  renameSession: (conversationId: string, title: string) =>
+    patch<{ success: boolean; conversationId: string; title: string }>('/sessions', { conversationId, title }),
   importSession: (envelope: unknown) =>
     post<{ success: boolean; conversationId: string }>('/session-import', envelope),
   deleteSession: (conversationId: string) =>

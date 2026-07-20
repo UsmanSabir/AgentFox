@@ -2,6 +2,7 @@ namespace AgentFox.Doctor.Onboarding;
 
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using AgentFox.Helpers;
 using AgentFox.Runtime.Services;
 
 /// <summary>
@@ -907,6 +908,7 @@ public class OnboardingWizard
     {
         try
         {
+            config[ConfigMigrator.SchemaVersionProperty] = ConfigMigrator.CurrentSchemaVersion;
             var dir = Path.GetDirectoryName(_configFilePath);
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
             File.WriteAllText(_configFilePath, config.ToJsonString(JsonOpts));

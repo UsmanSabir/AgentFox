@@ -160,7 +160,7 @@
                 <MessageSquare size={13} style="color: var(--text-3)" />
               </div>
               <div class="item-body">
-                <span class="item-name">{session.id}</span>
+                <span class="item-name">{session.title ?? session.id}</span>
                 <span class="item-meta">{session.origin} · {timeAgo(session.lastActive)}</span>
               </div>
               <span class="badge badge-neutral" style="font-size:0.625rem">{session.status}</span>

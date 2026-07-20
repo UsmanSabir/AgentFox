@@ -35,10 +35,18 @@
          Condition keeps it in local dev builds (file present) and skips it in
          release/CI builds (file absent) instead of failing MSB3030 on copy. -->
     <Content Include="appsettings.Development.json"
-             Condition="Exists('$(MSBuildProjectDirectory)\appsettings.Development.json')">
+              Condition="Exists('$(MSBuildProjectDirectory)\appsettings.Development.json')">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      <CopyToPublishDirectory>Never</CopyToPublishDirectory>
     </Content>
-    <Content Include="appsettings.json" />
+    <!-- The source file remains conveniently named appsettings.json for development, but
+         releases install it as defaults. User changes live in appsettings.user.json. -->
+    <Content Include="appsettings.json">
+      <Link>appsettings.defaults.json</Link>
+      <TargetPath>appsettings.defaults.json</TargetPath>
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+    </Content>
   </ItemGroup>
 
   <!-- ── Frontend static files ──────────────────────────────────────────────
@@ -100,13 +108,6 @@
   </ItemGroup>
 
   <ItemGroup>
-      <Content Update="appsettings.json">
-          <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-      </Content>
-      <Content Update="appsettings.*.json" Condition="Exists('appsettings.*.json')">
-          <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-          <DependentUpon>appsettings.json</DependentUpon>
-      </Content>
   </ItemGroup>
 
 </Project>
