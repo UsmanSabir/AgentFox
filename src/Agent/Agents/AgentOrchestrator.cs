@@ -595,6 +595,7 @@ public sealed class AgentOrchestrator : IHostedService
                 .WithChatClient(client)
                 .WithMemory(specialistMemory)
                 .WithConversationStore(_sessionStore)
+                .WithHistoryProvider(_sessionStore.HistoryProvider)
                 .WithWorkspaceManager(_workspaceManager)
                 .WithSessionManager(_sessionManager)
                 .WithExperienceLearning(_experienceLearning)

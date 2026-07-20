@@ -9,9 +9,9 @@ public class TradingAgentOptions
     // HIGH, MEDIUM, or LOW
     public string MinConfidence { get; set; } = "HIGH";
 
-    // Reserved: will resolve via IModelClientFactory once added to AgentFox.Plugins.
-    // Currently the default IChatClient (from DI) is used for signal parsing.
-    public string ParserModelKey { get; set; } = "CheapModel";
+    // Named model key (from the Models config section) the trading specialist runs on.
+    // Leave commented/missing or empty to fall back to the default LLM chat client.
+    public string ParserModelKey { get; set; } = "";
 
     /// <summary>
     /// Specialist memory mode: Shared uses AgentFox memory, Isolated uses a private persistent
