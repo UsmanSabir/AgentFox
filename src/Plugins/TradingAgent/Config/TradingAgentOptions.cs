@@ -121,6 +121,18 @@ public class TradingAgentOptions
 
     /// <summary>Maximum headlines per news query fed to the research assessment. Default 8.</summary>
     public int ResearchHeadlineCount { get; set; } = 8;
+
+    /// <summary>Expose the configured provider-backed read-only web research tool to the specialist.</summary>
+    public bool ResearchWebEnabled { get; set; } = true;
+
+    /// <summary>Maximum provider results returned by the specialist web research tool.</summary>
+    public int ResearchWebMaxResults { get; set; } = 5;
+
+    /// <summary>Provider search depth. Supported values are basic and advanced.</summary>
+    public string ResearchWebSearchDepth { get; set; } = "basic";
+
+    /// <summary>Maximum characters retained from each external result snippet.</summary>
+    public int ResearchWebMaxContentCharacters { get; set; } = 4000;
 }
 
 public sealed class MarketSessionOverride

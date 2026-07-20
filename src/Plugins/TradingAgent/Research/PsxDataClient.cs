@@ -59,6 +59,15 @@ public sealed record StockResearchData
     public IReadOnlyList<string> SourceUrls { get; init; } = [];
 }
 
+/// <summary>Read-only evidence gathered for a PSX index query.</summary>
+public sealed record IndexResearchData
+{
+    public string Index { get; init; } = "";
+    public PsxQuoteSummary Quote { get; init; } = new();
+    public DateTime RetrievedAtUtc { get; init; } = DateTime.UtcNow;
+    public IReadOnlyList<string> SourceUrls { get; init; } = [];
+}
+
 /// <summary>
 /// Fetches market data from the official PSX data portal (dps.psx.com.pk) and recent headlines
 /// from Google News RSS. No API key required for either. Every fetch is independent and
@@ -121,6 +130,31 @@ public sealed class PsxDataClient
             MarketNews     = await marketTask,
             RetrievedAtUtc = DateTime.UtcNow,
             SourceUrls     = sourceUrls
+        };
+    }
+
+    /// <summary>
+    /// Fetches one PSX index by its official portal symbol (for example KSE30 or KSE100).
+    /// This path is deliberately separate from stock research so an index question does not
+    /// trigger a company-page lookup or a stock listing assessment.
+    /// </summary>
+    public async Task<IndexResearchData> GatherIndexAsync(string index, CancellationToken ct = default)
+    {
+        index = NormalizePortalSymbol(index, "index");
+        var quote = await GetQuoteSummaryAsync(index, ct);
+        var baseUrl = _options.Value.PsxDataBaseUrl.TrimEnd('/');
+
+        return new IndexResearchData
+        {
+            Index = index,
+            Quote = quote,
+            RetrievedAtUtc = DateTime.UtcNow,
+            SourceUrls =
+            [
+                $"{baseUrl}/indices",
+                $"{baseUrl}/timeseries/eod/{index}",
+                $"{baseUrl}/timeseries/int/{index}"
+            ]
         };
     }
 
@@ -206,6 +240,14 @@ public sealed class PsxDataClient
         }
 
         return points;
+    }
+
+    private static string NormalizePortalSymbol(string value, string parameterName)
+    {
+        var normalized = value.Trim().ToUpperInvariant();
+        if (normalized.Length is < 1 or > 24 || !Regex.IsMatch(normalized, "^[A-Z0-9_-]+$"))
+            throw new ArgumentException($"Invalid PSX {parameterName} symbol.", parameterName);
+        return normalized;
     }
 
     private static bool TryDecimal(JsonElement el, out decimal value)
