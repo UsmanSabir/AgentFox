@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api } from '$lib/api';
-  import { Database, RefreshCw, Search, Filter } from 'lucide-svelte';
-  import type { MemoryEntry } from '$lib/api';
+  import { Database, RefreshCw, Search, Filter, Brain, Power } from 'lucide-svelte';
+  import type { MemoryEntry, MemorySettings, SpecialistMemoryMode } from '$lib/api';
 
   let entries: MemoryEntry[] = [];
   let filtered: MemoryEntry[] = [];
@@ -10,6 +10,9 @@
   let error: string | null = null;
   let search = '';
   let typeFilter = 'all';
+  let settings: MemorySettings | null = null;
+  let savingGlobal = false;
+  let savingAgent: string | null = null;
 
   const types = ['all', 'Fact', 'UserPreference', 'Observation', 'Conversation', 'ToolExecution', 'SubAgentResult'];
 
@@ -17,12 +20,48 @@
     loading = true;
     error = null;
     try {
-      entries = await api.memory();
+      const [memoryEntries, memorySettings] = await Promise.all([
+        api.memory(),
+        api.memorySettings()
+      ]);
+      entries = memoryEntries;
+      settings = memorySettings;
       applyFilter();
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
       loading = false;
+    }
+  }
+
+  async function toggleGlobalMemory() {
+    if (!settings || savingGlobal) return;
+    savingGlobal = true;
+    try {
+      const result = await api.setGlobalMemory(!settings.globalEnabled);
+      settings = { ...settings, globalEnabled: result.globalEnabled };
+    } catch (e: unknown) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      savingGlobal = false;
+    }
+  }
+
+  async function changeAgentMemory(agentId: string, event: Event) {
+    if (!settings) return;
+    const mode = (event.currentTarget as HTMLSelectElement).value as SpecialistMemoryMode;
+    savingAgent = agentId;
+    try {
+      const result = await api.setSpecialistMemory(agentId, mode);
+      settings = {
+        ...settings,
+        agents: settings.agents.map(agent =>
+          agent.id === agentId ? { ...agent, mode: result.mode } : agent)
+      };
+    } catch (e: unknown) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      savingAgent = null;
     }
   }
 
@@ -82,6 +121,55 @@
       Refresh
     </button>
   </div>
+
+  {#if settings}
+    <section class="memory-controls">
+      <div class="memory-master">
+        <div class="control-icon" class:enabled={settings.globalEnabled}>
+          <Power size={16} />
+        </div>
+        <div class="control-copy">
+          <strong>Agent memory</strong>
+          <span>Global privacy switch for recall and memory tools across every session and specialist.</span>
+        </div>
+        <button
+          class="toggle-switch"
+          class:on={settings.globalEnabled}
+          on:click={toggleGlobalMemory}
+          disabled={savingGlobal}
+          role="switch"
+          aria-checked={settings.globalEnabled}
+          aria-label="Toggle agent memory globally"
+        ><span></span></button>
+      </div>
+
+      {#if settings.agents.length > 0}
+        <div class="specialist-controls" class:disabled={!settings.globalEnabled}>
+          <div class="specialist-heading">
+            <Brain size={14} />
+            <div>
+              <strong>Specialist memory</strong>
+              <span>Shared uses AgentFox memory; isolated stores private specialist memories.</span>
+            </div>
+          </div>
+          {#each settings.agents as agent (agent.id)}
+            <label class="specialist-row">
+              <span>{agent.name}</span>
+              <select
+                value={agent.mode}
+                on:change={(event) => changeAgentMemory(agent.id, event)}
+                disabled={!settings.globalEnabled || savingAgent === agent.id}
+              >
+                <option value="Shared">Shared</option>
+                <option value="Isolated">Isolated</option>
+                <option value="Disabled">Disabled</option>
+              </select>
+            </label>
+          {/each}
+        </div>
+      {/if}
+    </section>
+  {/if}
 
   <!-- Filters -->
   <div class="filters">
@@ -149,6 +237,50 @@
 </div>
 
 <style>
+  .memory-controls {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(260px, 0.8fr);
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+  }
+  .memory-master, .specialist-controls {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.9rem 1rem;
+  }
+  .memory-master { display: flex; align-items: center; gap: 0.75rem; }
+  .control-icon {
+    width: 32px; height: 32px; border-radius: 8px;
+    display: grid; place-items: center;
+    background: var(--surface-3); color: var(--text-3);
+  }
+  .control-icon.enabled { background: rgba(52,211,153,0.12); color: var(--success); }
+  .control-copy { min-width: 0; display: flex; flex-direction: column; gap: 0.18rem; }
+  .control-copy strong, .specialist-heading strong { color: var(--text); font-size: 0.8rem; }
+  .control-copy span, .specialist-heading span { color: var(--text-3); font-size: 0.68rem; line-height: 1.35; }
+  .toggle-switch {
+    margin-left: auto; width: 38px; height: 22px; padding: 2px;
+    border: 0; border-radius: 99px; background: var(--surface-3); cursor: pointer;
+    transition: background 0.15s;
+  }
+  .toggle-switch span {
+    display: block; width: 18px; height: 18px; border-radius: 50%;
+    background: var(--text-3); transition: transform 0.15s, background 0.15s;
+  }
+  .toggle-switch.on { background: rgba(52,211,153,0.3); }
+  .toggle-switch.on span { transform: translateX(16px); background: var(--success); }
+  .toggle-switch:disabled { opacity: 0.55; cursor: wait; }
+  .specialist-controls { display: flex; flex-direction: column; gap: 0.65rem; }
+  .specialist-controls.disabled { opacity: 0.55; }
+  .specialist-heading { display: flex; align-items: flex-start; gap: 0.5rem; }
+  .specialist-heading > div { display: flex; flex-direction: column; gap: 0.15rem; }
+  .specialist-row { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; font-size: 0.75rem; color: var(--text-2); }
+  .specialist-row select {
+    background: var(--surface-2); color: var(--text); border: 1px solid var(--border-md);
+    border-radius: var(--radius-sm); padding: 0.3rem 1.6rem 0.3rem 0.45rem; font-size: 0.72rem;
+  }
+
   .page-header-row {
     display: flex;
     align-items: flex-start;
@@ -305,5 +437,9 @@
   @keyframes shimmer {
     0%   { background-position: 200% 0; }
     100% { background-position: -200% 0; }
+  }
+
+  @media (max-width: 760px) {
+    .memory-controls { grid-template-columns: 1fr; }
   }
 </style>

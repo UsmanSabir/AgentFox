@@ -11,6 +11,9 @@ namespace AgentFox.Memory;
 /// </summary>
 public class MemoryConfig
 {
+    /// <summary>Global memory master switch. Runtime web changes are persisted separately.</summary>
+    public bool Enabled { get; set; } = true;
+
     /// <summary>Which backend to use: "Markdown" (default) or "Sqlite"</summary>
     public string LongTermStorage { get; set; } = "Sqlite";
 
@@ -40,6 +43,29 @@ public static class MemoryBackendFactory
                 workspaceManager.ResolvePath(config.SqlitePath),
                 embeddingService),
             _ => new MarkdownLongTermMemory(workspaceManager.ResolvePath(config.MarkdownPath))
+        };
+    }
+
+    /// <summary>Creates a private persistent memory store for a specialist agent.</summary>
+    public static IMemory CreateIsolatedLongTermStorage(
+        IConfiguration configuration,
+        WorkspaceManager workspaceManager,
+        string agentId)
+    {
+        var config = configuration.GetSection("Memory").Get<MemoryConfig>() ?? new MemoryConfig();
+        var embeddingService = EmbeddingServiceFactory.Create(configuration);
+        var safeAgentId = new string(agentId
+            .Select(c => char.IsLetterOrDigit(c) || c is '-' or '_' ? c : '_')
+            .ToArray());
+        var relativeRoot = Path.Combine("memory", "agents", safeAgentId);
+
+        return config.LongTermStorage.Trim().ToLowerInvariant() switch
+        {
+            "sqlite" => new SqliteLongTermMemory(
+                workspaceManager.ResolvePath(Path.Combine(relativeRoot, "LongTermMemory.db")),
+                embeddingService),
+            _ => new MarkdownLongTermMemory(
+                workspaceManager.ResolvePath(Path.Combine(relativeRoot, "LongTermMemory.md")))
         };
     }
 }

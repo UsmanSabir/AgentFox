@@ -4,11 +4,11 @@
   import { renderMarkdown } from '$lib/markdown';
   import {
     chatMessages, addUserMessage, addAssistantMessage, addBackgroundResultMessage,
-    appendToken, finalizeMessage, activeConversationId, activeAgentId, agentReady, resetChat
+    appendToken, finalizeMessage, attachReferences, activeConversationId, activeAgentId, agentReady, resetChat
   } from '$lib/stores';
   import {
     Send, RotateCcw, StopCircle, Bot, User, Copy, Check, Zap, History, Plus, X,
-    Download, Upload, Trash2
+    Download, Upload, Trash2, Pencil, Brain
   } from 'lucide-svelte';
 
   let inputEl: HTMLTextAreaElement;
@@ -23,6 +23,7 @@
   let showSessions = false;
   let loadingSession = false;
   let importInput: HTMLInputElement;
+  let globalMemoryEnabled = true;
 
   $: messages     = $chatMessages;
   $: convId       = $activeConversationId;
@@ -43,7 +44,7 @@
 
   onMount(async () => {
     inputEl?.focus();
-    await Promise.all([loadSessions(), loadSpecialists()]);
+    await Promise.all([loadSessions(), loadSpecialists(), loadMemorySettings()]);
   });
 
   onDestroy(() => {
@@ -107,6 +108,7 @@
             await scrollToBottom();
           } else if (event.type === 'done') {
             if (event.conversationId) activeConversationId.set(event.conversationId);
+            attachReferences(assistantId, event.references);
             finalizeMessage(assistantId);
             break;
           } else if (event.type === 'error') {
@@ -119,6 +121,7 @@
         if (response.conversationId) activeConversationId.set(response.conversationId);
         if (response.success) {
           appendToken(assistantId, response.response);
+          attachReferences(assistantId, response.references);
           finalizeMessage(assistantId);
         } else {
           finalizeMessage(assistantId, response.error ?? 'Specialist request failed');
@@ -169,6 +172,7 @@
         id: crypto.randomUUID(),
         role: item.role,
         content: item.content,
+        references: item.references,
         timestamp: new Date(session.lastActive)
       })));
       showSessions = false;
@@ -185,6 +189,46 @@
       await api.exportSession(session.id);
     } catch (err) {
       alert('Export failed: ' + (err instanceof Error ? err.message : String(err)));
+    }
+  }
+
+  async function loadMemorySettings() {
+    try { globalMemoryEnabled = (await api.memorySettings()).globalEnabled; }
+    catch { globalMemoryEnabled = true; }
+  }
+
+  async function renameSession(session: SessionInfo, event: Event) {
+    event.stopPropagation();
+    if (isStreaming || loadingSession) return;
+
+    const title = prompt('Rename session', session.title ?? '');
+    if (title === null) return;
+    if (!title.trim()) {
+      alert('Session name cannot be empty.');
+      return;
+    }
+    if (title.trim().length > 120) {
+      alert('Session name cannot exceed 120 characters.');
+      return;
+    }
+
+    try {
+      await api.renameSession(session.id, title.trim());
+      await loadSessions();
+    } catch (err) {
+      alert('Rename failed: ' + (err instanceof Error ? err.message : String(err)));
+    }
+  }
+
+  async function toggleSessionMemory(session: SessionInfo, event: Event) {
+    event.stopPropagation();
+    if (!globalMemoryEnabled || isStreaming || loadingSession) return;
+
+    try {
+      await api.setSessionMemory(session.id, !session.memoryEnabled);
+      await loadSessions();
+    } catch (err) {
+      alert('Memory setting failed: ' + (err instanceof Error ? err.message : String(err)));
     }
   }
 
@@ -308,11 +352,33 @@
                   on:click={() => openSession(session)}
                   disabled={loadingSession || isStreaming}
                 >
-                  <span class="session-item-title">{session.id}</span>
-                  <span class="session-item-meta">{session.origin} · {session.status}</span>
+                  <span class="session-item-title">{session.title ?? session.id}</span>
+                  <span class="session-item-meta">{session.title ? `${session.id} · ` : ''}{session.origin} · {session.status}</span>
                   <span class="session-item-time">{new Date(session.lastActive).toLocaleString()}</span>
                 </button>
                 <div class="session-actions">
+                  <button
+                    class="icon-btn"
+                    class:memory-on={session.memoryEnabled}
+                    on:click={(e) => toggleSessionMemory(session, e)}
+                    disabled={!globalMemoryEnabled || isStreaming || loadingSession}
+                    aria-pressed={session.memoryEnabled}
+                    title={!globalMemoryEnabled
+                      ? 'Memory is disabled globally'
+                      : session.memoryEnabled
+                        ? 'Disable memory for this session'
+                        : 'Enable memory for this session'}
+                  >
+                    <Brain size={14} />
+                  </button>
+                  <button
+                    class="icon-btn"
+                    on:click={(e) => renameSession(session, e)}
+                    disabled={isStreaming || loadingSession}
+                    title="Rename session"
+                  >
+                    <Pencil size={14} />
+                  </button>
                   <button
                     class="icon-btn"
                     on:click={(e) => exportSession(session, e)}
@@ -389,6 +455,22 @@
                   class="message-content markdown"
                   class:stream-cursor={msg.streaming && msg.content.length > 0}
                 >{#if msg.content.length > 0}{@html renderMarkdown(msg.content)}{:else if msg.streaming}<span class="typing-dots"><span></span><span></span><span></span></span>{/if}</div>
+              {/if}
+
+              {#if msg.role === 'assistant' && !msg.streaming && !msg.error && msg.references && msg.references.length > 0}
+                <div class="sources">
+                  <span class="sources-label">Sources</span>
+                  <ul class="sources-list">
+                    {#each msg.references as ref}
+                      <li>
+                        <a href={ref.url} target="_blank" rel="noopener noreferrer" title={ref.url}>
+                          {ref.title || ref.url}
+                        </a>
+                        {#if ref.source}<span class="sources-src">· {ref.source}</span>{/if}
+                      </li>
+                    {/each}
+                  </ul>
+                </div>
               {/if}
 
               {#if !msg.streaming && msg.role === 'assistant' && !msg.error}
@@ -575,8 +657,9 @@
     padding: 0.3rem 0.35rem 0.3rem 0;
   }
   .session-actions .icon-btn { padding: 0.25rem; }
+  .session-actions .icon-btn.memory-on { color: var(--success); }
   .session-actions .icon-btn.danger:hover { color: var(--danger); }
-  .session-item-title { font-family: monospace; font-size: 0.72rem; word-break: break-all; }
+  .session-item-title { font-size: 0.75rem; font-weight: 600; word-break: break-word; }
   .session-item-meta, .session-item-time { color: var(--text-3); font-size: 0.65rem; }
   .session-empty { color: var(--text-3); font-size: 0.75rem; padding: 1rem; text-align: center; }
   .icon-btn {
@@ -880,6 +963,27 @@
     0%, 60%, 100% { transform: translateY(0); opacity: 0.6; }
     30%            { transform: translateY(-4px); opacity: 1; }
   }
+
+  /* Sources */
+  .sources {
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid var(--border);
+    font-size: 0.75rem;
+  }
+  .sources-label {
+    display: block;
+    color: var(--text-3);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 0.625rem;
+    margin-bottom: 0.25rem;
+  }
+  .sources-list { list-style: none; margin: 0; padding: 0; }
+  .sources-list li { margin: 0.15rem 0; overflow-wrap: anywhere; }
+  .sources-list a { color: var(--primary); text-decoration: none; }
+  .sources-list a:hover { text-decoration: underline; }
+  .sources-src { color: var(--text-3); }
 
   /* Copy button */
   .copy-btn {

@@ -25,7 +25,6 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Spectre.Console;
 using System.Text;
-using AgentFox.Helpers;
 using Microsoft.Extensions.FileProviders;
 using System.Reflection;
 using SystemPromptBuilder = AgentFox.LLM.SystemPromptBuilder;
@@ -42,6 +41,28 @@ class Program
     {
         if (!Console.IsInputRedirected)
             Console.OutputEncoding = Encoding.UTF8;
+
+        if (args.Any(a => a.Equals("--version", StringComparison.OrdinalIgnoreCase)))
+        {
+            Console.WriteLine(VersionInfo.Full);
+            return 0;
+        }
+
+        var appCfgPath = AppSettingsHelper.ResolveAppSettingsPath();
+        if (ConfigMigrationCommand.TryRun(args, appCfgPath, out var configCommandExitCode))
+            return configCommandExitCode;
+
+        // Migrate before constructing the host: a breaking migration must not depend on the
+        // new application being able to bind the old configuration shape.
+        if (File.Exists(appCfgPath))
+        {
+            var migration = ConfigMigrator.Migrate(appCfgPath);
+            if (!migration.Success)
+            {
+                Console.Error.WriteLine(migration.Message);
+                return 1;
+            }
+        }
         
         // ── Service mode detection ────────────────────────────────────────────
         // Check if running in service mode before showing banner
@@ -51,7 +72,6 @@ class Program
         if (!isServiceMode)
             ShowBanner();
 
-        var appCfgPath = AppSettingsHelper.ResolveAppSettingsPath();
         bool runDoctor    = args.Contains("--doctor");
         bool doctorFix    = args.Contains("--fix");
         bool runOnboarding = args.Contains("--onboarding") || !File.Exists(appCfgPath); // If appsettings.json doesn't exist, default to onboarding mode to guide the user through initial setup.
@@ -71,15 +91,21 @@ class Program
         }
 
         // ── Web application builder (single DI container for the whole process) ─
-        var builder       = WebApplication.CreateBuilder(args);
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+        {
+            Args = args,
+            ContentRootPath = AppContext.BaseDirectory,
+        });
 
-        // WebApplication.CreateBuilder loads appsettings.json from the *content root*
-        // (the current working directory), NOT the install directory. When the exe is
-        // launched from PATH (cwd = %USERPROFILE%) or as a service (cwd = System32),
-        // the user's real config in the install dir is never seen and every model falls
-        // back to the Ollama default (localhost:11434). Add the resolved install-dir file
-        // last so it is authoritative on every startup, not just during onboarding.
-        builder.Configuration.AddJsonFile(appCfgPath, optional: true, reloadOnChange: true);
+        // Use a deterministic configuration stack. Release defaults are replaceable; the
+        // user file is authoritative and never belongs to the release archive. Environment
+        // variables and command-line switches remain the highest-priority providers.
+        builder.Configuration.Sources.Clear();
+        builder.Configuration
+            .AddJsonFile(AppSettingsHelper.ResolveDefaultsPath(), optional: false, reloadOnChange: false)
+            .AddJsonFile(appCfgPath, optional: true, reloadOnChange: true)
+            .AddEnvironmentVariables()
+            .AddCommandLine(args);
 
         var configuration = builder.Configuration;
         builder.Services.AddManagementAuthentication(configuration);
@@ -148,10 +174,6 @@ class Program
                 return 0;
 
             // Continue into normal startup with the settings the wizard just wrote.
-            // The default providers loaded {cwd}/appsettings.json at builder creation
-            // (possibly before the file existed, or from a different directory than the
-            // wizard's target); re-adding appCfgPath last makes the wizard's file
-            // authoritative and freshly loaded.
             builder.Configuration.AddJsonFile(appCfgPath, optional: true, reloadOnChange: true);
             AnsiConsole.MarkupLine("[bold green]✓[/] Setup complete — starting AgentFox...");
             AnsiConsole.WriteLine();
@@ -161,11 +183,13 @@ class Program
         // These need async init (Composio, MCP) so they are created before the host
         // and then registered as already-constructed singletons.
         var workspaceManager = new WorkspaceManager(configuration);
+        var memoryPolicy     = new MemoryAccessPolicy(configuration, workspaceManager);
         var toolsConfig      = configuration.GetSection("Tools").Get<ToolsConfig>() ?? new ToolsConfig();
         var toolRegistry     = CreateToolRegistry(workspaceManager, toolsConfig);
         SkillRegistry? skillRegistry = null;
         McpManager?    mcpManager    = null;
         HybridMemory?  memory        = null;
+        RoutedMemory?  agentMemory   = null;
 
         await AnsiConsole.Status()
             .Spinner(Spinner.Known.Dots12)
@@ -179,12 +203,13 @@ class Program
 
                     var longTermMemory = MemoryBackendFactory.CreateLongTermStorage(configuration, workspaceManager);
                     memory = new HybridMemory(100, longTermMemory);
+                    agentMemory = new RoutedMemory(memory, memoryPolicy, "main");
 
                     if (toolsConfig.Memory)
                     {
-                        if (toolsConfig.IsEnabled("add_memory"))      toolRegistry.Register(new AddMemoryTool(memory));
-                        if (toolsConfig.IsEnabled("search_memory"))   toolRegistry.Register(new SearchMemoryTool(memory));
-                        if (toolsConfig.IsEnabled("get_all_memories")) toolRegistry.Register(new GetAllMemoriesTool(memory));
+                        if (toolsConfig.IsEnabled("add_memory"))      toolRegistry.Register(new AddMemoryTool(agentMemory));
+                        if (toolsConfig.IsEnabled("search_memory"))   toolRegistry.Register(new SearchMemoryTool(agentMemory));
+                        if (toolsConfig.IsEnabled("get_all_memories")) toolRegistry.Register(new GetAllMemoriesTool(agentMemory));
                     }
                     ctx.Status("[green]Ready.[/]");
                 });
@@ -247,7 +272,7 @@ class Program
         // ── Single-shot command mode (runs before web host, then exits) ───────
         if (taskArgs.Length > 0)
             return await RunCommandLineMode(taskArgs, configuration, workspaceManager,
-                toolRegistry, skillRegistry!, mcpManager!, memory!);
+                toolRegistry, skillRegistry!, mcpManager!, agentMemory!, memoryPolicy);
 
         // ── Register all services in the single DI container ─────────────────
         var uiCfg = new UIConfig();
@@ -269,6 +294,8 @@ class Program
         builder.Services.AddSingleton(skillRegistry!);
         builder.Services.AddSingleton(mcpManager!);
         builder.Services.AddSingleton(memory!);
+        builder.Services.AddSingleton(agentMemory!);
+        builder.Services.AddSingleton(memoryPolicy);
         builder.Services.AddSingleton<IExperienceStore>(sp =>
             new JsonExperienceStore(Path.Combine(
                 sp.GetRequiredService<WorkspaceManager>().ResolvePath(""),
@@ -293,7 +320,8 @@ class Program
         });
         builder.Services.AddSingleton(sp => new SessionManager(
             sp.GetRequiredService<SessionConfig>(),
-            sp.GetRequiredService<WorkspaceManager>()));
+            sp.GetRequiredService<WorkspaceManager>(),
+            memoryPolicy: sp.GetRequiredService<MemoryAccessPolicy>()));
         builder.Services.AddSingleton(sp =>
             new MarkdownSessionStore(sp.GetRequiredService<SessionManager>().SessionDirectory));
 
@@ -530,11 +558,15 @@ class Program
         ToolRegistry toolRegistry,
         SkillRegistry skillRegistry,
         McpManager mcpManager,
-        HybridMemory memory)
+        IMemory memory,
+        MemoryAccessPolicy memoryPolicy)
     {
         var sessionCfg = new SessionConfig();
         configuration.GetSection("Sessions").Bind(sessionCfg);
-        var sessionManager = new SessionManager(sessionCfg, workspaceManager);
+        var sessionManager = new SessionManager(
+            sessionCfg,
+            workspaceManager,
+            memoryPolicy: memoryPolicy);
         var sessionStore   = new MarkdownSessionStore(sessionManager.SessionDirectory);
 
         var subAgentConfig = new SubAgentConfiguration

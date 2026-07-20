@@ -9,11 +9,18 @@ export interface ChatRequest {
   conversationId?: string;
 }
 
+export interface ReferenceItem {
+  url: string;
+  title?: string;
+  source?: string;
+}
+
 export interface ChatResponse {
   response: string;
   conversationId?: string;
   success: boolean;
   error?: string;
+  references?: ReferenceItem[];
 }
 
 export interface AgentStatus {
@@ -104,6 +111,9 @@ export interface MemoryEntry {
 
 export interface SessionInfo {
   id: string;
+  title?: string;
+  memoryEnabled: boolean;
+  memoryOverride?: boolean | null;
   agentId: string;
   origin: string;
   status: string;
@@ -115,6 +125,7 @@ export interface SessionInfo {
 export interface ConversationMessage {
   role: 'user' | 'assistant';
   content: string;
+  references?: ReferenceItem[];
 }
 
 export interface ConversationMessagesResponse {
@@ -376,6 +387,27 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+export type SpecialistMemoryMode = 'Shared' | 'Isolated' | 'Disabled';
+
+export interface MemorySettings {
+  globalEnabled: boolean;
+  agents: Array<{
+    id: string;
+    name: string;
+    mode: SpecialistMemoryMode;
+  }>;
+}
+
+async function patch<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    method:  'PATCH',
+    headers: requestHeaders(true),
+    body:    JSON.stringify(body)
+  });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json() as Promise<T>;
+}
+
 async function del<T>(path: string): Promise<T> {
   const res = await fetch(`${BASE}${path}`, { method: 'DELETE', headers: requestHeaders() });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
@@ -396,11 +428,22 @@ export const api = {
   tools:    () => get<ToolInfo[]>('/tools'),
   skills:   () => get<SkillInfo[]>('/skills'),
   memory:   () => get<MemoryEntry[]>('/memory'),
+  memorySettings: () => get<MemorySettings>('/memory/settings'),
+  setGlobalMemory: (enabled: boolean) =>
+    patch<{ globalEnabled: boolean }>('/memory/settings', { enabled }),
+  setSpecialistMemory: (agentId: string, mode: SpecialistMemoryMode) =>
+    patch<{ agentId: string; mode: SpecialistMemoryMode }>(
+      `/memory/agents/${encodeURIComponent(agentId)}`, { mode }),
   sessions: () => get<SessionInfo[]>('/sessions'),
   sessionMessages: (conversationId: string) =>
     get<ConversationMessagesResponse>(`/session-messages?conversationId=${encodeURIComponent(conversationId)}`),
   resumeSession: (conversationId: string) =>
     post<{ success: boolean; conversationId: string }>('/sessions/resume', { conversationId }),
+  renameSession: (conversationId: string, title: string) =>
+    patch<{ success: boolean; conversationId: string; title: string }>('/sessions', { conversationId, title }),
+  setSessionMemory: (conversationId: string, enabled: boolean | null) =>
+    patch<{ success: boolean; conversationId: string; memoryEnabled: boolean; memoryOverride?: boolean | null }>(
+      '/sessions/memory', { conversationId, enabled }),
   importSession: (envelope: unknown) =>
     post<{ success: boolean; conversationId: string }>('/session-import', envelope),
   deleteSession: (conversationId: string) =>
@@ -483,7 +526,7 @@ export const api = {
 
 export type StreamEvent =
   | { type: 'token';  token: string }
-  | { type: 'done';   done: true; conversationId?: string }
+  | { type: 'done';   done: true; conversationId?: string; references?: ReferenceItem[] }
   | { type: 'error';  error: string };
 
 export async function* streamChat(
@@ -524,7 +567,7 @@ export async function* streamChat(
           try {
             const payload = JSON.parse(line.slice(6));
             if (currentEvent === 'done') {
-              yield { type: 'done', done: true, conversationId: payload.conversationId };
+              yield { type: 'done', done: true, conversationId: payload.conversationId, references: payload.references };
             } else if (currentEvent === 'error') {
               yield { type: 'error', error: payload.error ?? 'Unknown error' };
             } else {

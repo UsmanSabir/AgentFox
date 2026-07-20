@@ -1,5 +1,5 @@
 import { writable, derived } from 'svelte/store';
-import type { AgentStatus, AgentInfo, ToolInfo, SkillInfo } from './api';
+import type { AgentStatus, AgentInfo, ToolInfo, SkillInfo, ReferenceItem } from './api';
 
 // ── Agent status (polled every 5 s) ──────────────────────────────────────
 export const agentStatus = writable<AgentStatus | null>(null);
@@ -20,6 +20,7 @@ export interface ChatMessage {
   error?: string;
   timestamp: Date;
   isBackgroundResult?: boolean;
+  references?: ReferenceItem[];
 }
 
 export const chatMessages = writable<ChatMessage[]>([]);
@@ -64,6 +65,13 @@ export function appendToken(id: string, token: string) {
 export function finalizeMessage(id: string, error?: string) {
   chatMessages.update(msgs =>
     msgs.map(m => m.id === id ? { ...m, streaming: false, error } : m)
+  );
+}
+
+export function attachReferences(id: string, references?: ReferenceItem[]) {
+  if (!references || references.length === 0) return;
+  chatMessages.update(msgs =>
+    msgs.map(m => m.id === id ? { ...m, references } : m)
   );
 }
 

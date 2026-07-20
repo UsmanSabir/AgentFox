@@ -58,6 +58,17 @@ public class SessionInfo
     public string SessionId { get; set; } = string.Empty;
 
     /// <summary>
+    /// Optional user-facing title. The session ID remains the stable conversation and file identifier.
+    /// </summary>
+    public string? Title { get; set; }
+
+    /// <summary>
+    /// Optional per-session memory override. Null inherits the global setting; false disables
+    /// memory for this session. The global switch always takes precedence.
+    /// </summary>
+    public bool? MemoryEnabled { get; set; }
+
+    /// <summary>
     /// Human-readable logical key before sanitisation (e.g. "channel:whatsapp_12345").
     /// </summary>
     public string LogicalKey { get; set; } = string.Empty;

@@ -40,6 +40,8 @@ public sealed class AgentOrchestrator : IHostedService
     private readonly SkillRegistry _skillRegistry;
     private readonly McpManager _mcpManager;
     private readonly HybridMemory _memory;
+    private readonly RoutedMemory _agentMemory;
+    private readonly MemoryAccessPolicy _memoryPolicy;
     private readonly SessionManager _sessionManager;
     private readonly SubAgentManager _subAgentManager;
     private readonly CommandProcessor _commandProcessor;
@@ -69,6 +71,7 @@ public sealed class AgentOrchestrator : IHostedService
     private HeartbeatService? _heartbeatService;
     private CronScheduler? _cronScheduler;
     private CancellationTokenSource? _cleanupCts;
+    private readonly List<RoutedMemory> _specialistMemories = [];
 
     public AgentOrchestrator(
         IChatClient chatClient,
@@ -76,6 +79,8 @@ public sealed class AgentOrchestrator : IHostedService
         SkillRegistry skillRegistry,
         McpManager mcpManager,
         HybridMemory memory,
+        RoutedMemory agentMemory,
+        MemoryAccessPolicy memoryPolicy,
         SessionManager sessionManager,
         SubAgentManager subAgentManager,
         CommandProcessor commandProcessor,
@@ -104,6 +109,8 @@ public sealed class AgentOrchestrator : IHostedService
         _skillRegistry        = skillRegistry;
         _mcpManager           = mcpManager;
         _memory               = memory;
+        _agentMemory          = agentMemory;
+        _memoryPolicy         = memoryPolicy;
         _sessionManager       = sessionManager;
         _subAgentManager      = subAgentManager;
         _commandProcessor     = commandProcessor;
@@ -158,6 +165,9 @@ public sealed class AgentOrchestrator : IHostedService
 
         try { await _commandProcessor.StopAsync(TimeSpan.FromSeconds(10)); }
         catch (Exception ex) { _logger.LogWarning(ex, "Error stopping command processor during shutdown."); }
+
+        foreach (var specialistMemory in _specialistMemories)
+            await specialistMemory.DisposeAsync();
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -375,7 +385,7 @@ public sealed class AgentOrchestrator : IHostedService
         var builder = new AgentBuilder(_toolRegistry)
             .WithName("AgentFox")
             .WithSystemPrompt(systemPrompt)
-            .WithMemory(_memory)
+            .WithMemory(_agentMemory)
             .WithSkillsRegistry(_skillRegistry)
             .WithMcpManager(_mcpManager)
             .WithConversationStore(_sessionStore)
@@ -513,6 +523,7 @@ public sealed class AgentOrchestrator : IHostedService
 
     private void ActivateSpecialistAgents()
     {
+        var toolsConfig = _configuration.GetSection("Tools").Get<ToolsConfig>() ?? new ToolsConfig();
         foreach (var descriptor in _specialistAgents.GetDescriptors())
         {
             var isolatedTools = new ToolRegistry();
@@ -545,13 +556,44 @@ public sealed class AgentOrchestrator : IHostedService
                 - Reply in the same language as the user's latest message unless they request another language.
                 """;
 
+            _memoryPolicy.RegisterAgentMode(descriptor.Id, descriptor.MemoryMode);
+            var specialistMemory = new RoutedMemory(
+                _memory,
+                _memoryPolicy,
+                descriptor.Id,
+                () => new HybridMemory(
+                    100,
+                    MemoryBackendFactory.CreateIsolatedLongTermStorage(
+                        _configuration,
+                        _workspaceManager,
+                        descriptor.Id)));
+            _specialistMemories.Add(specialistMemory);
+
+            if (toolsConfig.Memory)
+            {
+                if (toolsConfig.IsEnabled("add_memory"))
+                    isolatedTools.Register(new AddMemoryTool(specialistMemory));
+                if (toolsConfig.IsEnabled("search_memory"))
+                    isolatedTools.Register(new SearchMemoryTool(specialistMemory));
+                if (toolsConfig.IsEnabled("get_all_memories"))
+                    isolatedTools.Register(new GetAllMemoriesTool(specialistMemory));
+
+                prompt += """
+
+                    Memory:
+                    - Use add_memory for durable facts and preferences that will help future turns.
+                    - Use search_memory or get_all_memories when prior context would improve the answer.
+                    - If a memory tool reports that memory is disabled, continue without memory.
+                    """;
+            }
+
             var specialist = new AgentBuilder(isolatedTools)
                 .WithName(descriptor.Name)
                 .WithDescription(descriptor.Description)
                 .WithSystemPrompt(prompt)
                 .WithMaxIterations(Math.Clamp(descriptor.MaxIterations, 1, 20))
                 .WithChatClient(client)
-                .WithMemory(_memory)
+                .WithMemory(specialistMemory)
                 .WithConversationStore(_sessionStore)
                 .WithWorkspaceManager(_workspaceManager)
                 .WithSessionManager(_sessionManager)

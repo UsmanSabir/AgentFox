@@ -6,6 +6,7 @@ using System.Text.Json.Serialization;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using AgentFox.Sessions;
+using AgentFox.Plugins.Research;
 
 namespace AgentFox.Memory;
 
@@ -135,6 +136,8 @@ public sealed class MarkdownSessionStore : IConversationStore
         WriteIndented = false
     };
 
+    private sealed record ReferenceLine(int I, List<ResearchReference> Items);
+
     public MarkdownSessionStore(string directory)
     {
         _directory = directory;
@@ -181,6 +184,42 @@ public sealed class MarkdownSessionStore : IConversationStore
     }
 
     /// <summary>
+    /// Test-only: append a fully-formed message directly to the in-memory list and flush it to
+    /// disk, bypassing the AI framework's history provider (which needs a live AgentSession).
+    /// Mirrors the same delta-tracking logic as SaveSession. Not used in production code paths.
+    /// </summary>
+    internal void AppendForTest(string conversationId, ChatMessage message)
+    {
+        var list = _messages.GetOrAdd(conversationId, _ => []);
+        list.Add(message);
+
+        int written = _writtenCounts.GetOrAdd(conversationId, 0);
+        var delta = list.Skip(written).ToList();
+        bool isNewFile = written == 0 && !File.Exists(FilePath(conversationId));
+        AppendToFile(conversationId, delta, isNewFile);
+        _writtenCounts[conversationId] = list.Count;
+    }
+
+    /// <summary>
+    /// Records the research references collected during the most recent assistant turn.
+    /// No-op when <paramref name="references"/> is empty. The references are keyed by the
+    /// assistant reply's position among user/assistant non-empty-text messages, so they can be
+    /// re-attached to the correct snapshot on reload even when other turns have no references.
+    /// </summary>
+    public void PersistAssistantReferences(string conversationId, IReadOnlyList<ResearchReference> references)
+    {
+        if (references is null || references.Count == 0) return;
+        SessionManager.EnsureSafeSessionId(conversationId);
+
+        if (!_messages.TryGetValue(conversationId, out var messages)) return;
+        int assistantIndex = ProjectSnapshots(messages).Count(s => s.Role == "assistant") - 1;
+        if (assistantIndex < 0) return;
+
+        var line = JsonSerializer.Serialize(new ReferenceLine(assistantIndex, references.ToList()), _jsonOpts);
+        File.AppendAllText(ReferencesFilePath(conversationId), line + "\n", Encoding.UTF8);
+    }
+
+    /// <summary>
     /// Reads persisted messages from the .md file into the shared message list
     /// and registers the session → conversationId mapping so the history provider
     /// can serve them on the first ProvideChatHistoryAsync call.
@@ -212,7 +251,8 @@ public sealed class MarkdownSessionStore : IConversationStore
         return _cache.Keys.Union(fromFiles).Distinct();
     }
 
-    /// <summary>Returns user-visible text messages for a persisted conversation.</summary>
+    /// <summary>Returns user-visible text messages for a persisted conversation, with any
+    /// research references attached to the corresponding assistant messages.</summary>
     public IReadOnlyList<ConversationMessageSnapshot> GetConversationMessages(string conversationId)
     {
         SessionManager.EnsureSafeSessionId(conversationId);
@@ -223,13 +263,51 @@ public sealed class MarkdownSessionStore : IConversationStore
             messages = ParseFile(path);
         }
 
-        return messages
+        var snapshots = ProjectSnapshots(messages);
+        var refs = LoadReferences(conversationId);
+        if (refs.Count == 0) return snapshots;
+
+        var result = new List<ConversationMessageSnapshot>(snapshots.Count);
+        int assistantIndex = 0;
+        foreach (var s in snapshots)
+        {
+            if (s.Role == "assistant" && refs.TryGetValue(assistantIndex++, out var items))
+                result.Add(s with { References = items });
+            else
+                result.Add(s);
+        }
+        return result;
+    }
+
+    // Projects the raw message list to user/assistant non-empty-text snapshots. Shared by the
+    // read path and PersistAssistantReferences so the assistant-index definition never drifts.
+    private static List<ConversationMessageSnapshot> ProjectSnapshots(List<ChatMessage> messages) =>
+        messages
             .Where(message => message.Role == ChatRole.User || message.Role == ChatRole.Assistant)
             .Select(message => new ConversationMessageSnapshot(
                 message.Role == ChatRole.User ? "user" : "assistant",
                 message.Text?.Trim() ?? string.Empty))
             .Where(message => !string.IsNullOrWhiteSpace(message.Content))
             .ToList();
+
+    // Reads the sidecar into a map of assistantIndex → references. Empty when absent/unreadable.
+    private Dictionary<int, List<ResearchReference>> LoadReferences(string conversationId)
+    {
+        var map = new Dictionary<int, List<ResearchReference>>();
+        var path = ReferencesFilePath(conversationId);
+        if (!File.Exists(path)) return map;
+
+        foreach (var raw in File.ReadLines(path, Encoding.UTF8))
+        {
+            if (string.IsNullOrWhiteSpace(raw)) continue;
+            try
+            {
+                var line = JsonSerializer.Deserialize<ReferenceLine>(raw, _jsonOpts);
+                if (line?.Items is { Count: > 0 }) map[line.I] = line.Items;
+            }
+            catch { /* malformed line — skip */ }
+        }
+        return map;
     }
 
     public void DeleteSession(string conversationId)
@@ -240,6 +318,10 @@ public sealed class MarkdownSessionStore : IConversationStore
         var path = FilePath(conversationId);
         if (File.Exists(path))
             File.Delete(path);
+
+        var refsPath = ReferencesFilePath(conversationId);
+        if (File.Exists(refsPath))
+            File.Delete(refsPath);
     }
 
     // ------------------------------------------------------------------
@@ -286,6 +368,9 @@ public sealed class MarkdownSessionStore : IConversationStore
 
     /// <summary>Pending-message sidecar path (<c>{session}.md.pending</c>) for a conversation.</summary>
     private string PendingFilePath(string conversationId) => FilePath(conversationId) + ".pending";
+
+    /// <summary>References sidecar path (<c>{session}.md.refs.jsonl</c>) for a conversation.</summary>
+    private string ReferencesFilePath(string conversationId) => FilePath(conversationId) + ".refs.jsonl";
 
     // ------------------------------------------------------------------
     // Session → conversationId registration
@@ -493,4 +578,7 @@ public sealed class MarkdownSessionStore : IConversationStore
         [property: JsonPropertyName("result")] string? Result);
 }
 
-public sealed record ConversationMessageSnapshot(string Role, string Content);
+public sealed record ConversationMessageSnapshot(string Role, string Content)
+{
+    public IReadOnlyList<ResearchReference> References { get; init; } = [];
+}

@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using AgentFox.Plugins.Research;
 
 namespace AgentFox.TavilySearch;
 
@@ -20,7 +21,14 @@ public sealed class TavilySearchModule : IAgentAwareModule
 
     public string Name => "tavily-search";
 
-    public void RegisterServices(IServiceCollection services, IConfiguration config) { }
+    public void RegisterServices(IServiceCollection services, IConfiguration config)
+    {
+        var apiKey = Environment.GetEnvironmentVariable("TAVILY_API_KEY")
+            ?? config["Tavily:ApiKey"]
+            ?? config["Plugins:Tavily:ApiKey"];
+        if (!string.IsNullOrWhiteSpace(apiKey))
+            services.AddSingleton<IWebSearchProvider, TavilyWebSearchProvider>();
+    }
 
     public void MapEndpoints(IEndpointRouteBuilder endpoints) { }
 
@@ -32,18 +40,17 @@ public sealed class TavilySearchModule : IAgentAwareModule
 
     public Task OnAgentReadyAsync(IPluginContext context)
     {
-        var config = _services!.GetRequiredService<IConfiguration>();
         var logger = _services!.GetRequiredService<ILoggerFactory>().CreateLogger<TavilySearchModule>();
 
-        var apiKey = Environment.GetEnvironmentVariable("TAVILY_API_KEY") ?? config["Tavily:ApiKey"];
-        if (string.IsNullOrWhiteSpace(apiKey))
+        var provider = _services!.GetService<IWebSearchProvider>();
+        if (provider is null)
         {
             logger.LogInformation(
                 "[TavilySearch] tavily_search tool not registered — set TAVILY_API_KEY or \"Tavily:ApiKey\" to enable it.");
             return Task.CompletedTask;
         }
 
-        context.RegisterTool(new TavilySearchTool(config));
+        context.RegisterTool(new TavilySearchTool(provider));
         context.ContributeToSystemPrompt(
             contributorId: "tavily-search",
             fragmentProvider: () =>

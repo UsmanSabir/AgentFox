@@ -6,16 +6,24 @@ BRANCH="${AGENTFOX_BRANCH:-}"
 INSTALL_DIR="${AGENTFOX_INSTALL_DIR:-$HOME/.agentfox}"
 BINARY_URL="${AGENTFOX_BINARY_URL:-}"
 BUILD_FROM_SOURCE="${AGENTFOX_BUILD_FROM_SOURCE:-0}"
+TRADING_CHOICE_EXPLICIT=0
 WITH_TRADING=1
+if [ "${AGENTFOX_NO_TRADING:-0}" = "1" ] && [ "${AGENTFOX_WITH_TRADING:-0}" = "1" ]; then
+  echo "Set only one of AGENTFOX_NO_TRADING or AGENTFOX_WITH_TRADING." >&2
+  exit 1
+fi
 if [ "${AGENTFOX_NO_TRADING:-0}" = "1" ]; then
   WITH_TRADING=0
+  TRADING_CHOICE_EXPLICIT=1
+elif [ "${AGENTFOX_WITH_TRADING:-0}" = "1" ]; then
+  TRADING_CHOICE_EXPLICIT=1
 fi
 SKIP_ONBOARDING="${AGENTFOX_SKIP_ONBOARDING:-0}"
 
 for arg in "$@"; do
   case "$arg" in
-    --no-trading) WITH_TRADING=0 ;;
-    --with-trading) WITH_TRADING=1 ;;
+    --no-trading) WITH_TRADING=0; TRADING_CHOICE_EXPLICIT=1 ;;
+    --with-trading) WITH_TRADING=1; TRADING_CHOICE_EXPLICIT=1 ;;
     --skip-onboarding) SKIP_ONBOARDING=1 ;;
     *)
       echo "Unknown option: $arg (supported: --no-trading, --with-trading, --skip-onboarding)" >&2
@@ -209,7 +217,27 @@ add_to_path() {
   fi
 }
 
-mkdir -p "$INSTALL_DIR"
+IS_UPDATE=0
+if [ -f "$INSTALL_DIR/AgentFox" ] || [ -f "$INSTALL_DIR/AgentFox.dll" ]; then
+  IS_UPDATE=1
+fi
+
+# Retain the existing feature set unless the caller explicitly changes it.
+if [ "$IS_UPDATE" = "1" ] && [ "$TRADING_CHOICE_EXPLICIT" = "0" ]; then
+  if { [ -f "$INSTALL_DIR/install-state.json" ] &&
+       grep -Eq '"TradingInstalled"[[:space:]]*:[[:space:]]*false' "$INSTALL_DIR/install-state.json"; } ||
+     { [ ! -f "$INSTALL_DIR/install-state.json" ] && [ ! -d "$INSTALL_DIR/plugins/TradingAgent" ]; }; then
+    WITH_TRADING=0
+  fi
+fi
+
+STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/agentfox-stage.XXXXXX")"
+cleanup_stage() {
+  if [ -n "${STAGE_DIR:-}" ] && [ -d "$STAGE_DIR" ]; then
+    rm -rf "$STAGE_DIR"
+  fi
+}
+trap cleanup_stage EXIT
 
 # The framework-dependent binary needs the .NET runtime whether it was prebuilt or built here.
 ensure_dotnet
@@ -217,7 +245,7 @@ RID="$(get_arch_suffix)"
 
 INSTALLED=0
 if [ "$BUILD_FROM_SOURCE" != "1" ]; then
-  if try_download_prebuilt "$RID" "$INSTALL_DIR"; then
+  if try_download_prebuilt "$RID" "$STAGE_DIR"; then
     INSTALLED=1
   fi
 fi
@@ -232,7 +260,7 @@ if [ "$INSTALLED" -eq 0 ]; then
     exit 1
   fi
 
-  info "Publishing AgentFox to $INSTALL_DIR"
+  info "Publishing AgentFox to staging directory"
   dotnet publish "$PROJECT_PATH" -c Release -r "$RID" --self-contained false -p:PublishSingleFile=false -p:UseAppHost=true --verbosity minimal
 
   PUBLISH_DIR="$SOURCE_ROOT/src/Agent/bin/Release/net10.0/$RID/publish"
@@ -241,14 +269,14 @@ if [ "$INSTALLED" -eq 0 ]; then
     exit 1
   fi
 
-  cp -R "$PUBLISH_DIR"/. "$INSTALL_DIR"/
+  cp -R "$PUBLISH_DIR"/. "$STAGE_DIR"/
 
   # Publish the Trading plugin into plugins/ so the runtime plugin loader discovers it.
   if [ "$WITH_TRADING" = "1" ]; then
     PLUGIN_PROJECT="$SOURCE_ROOT/src/Plugins/TradingAgent/TradingAgent.csproj"
     if [ -f "$PLUGIN_PROJECT" ]; then
       info "Publishing Trading plugin into plugins/TradingAgent"
-      dotnet publish "$PLUGIN_PROJECT" -c Release -r "$RID" --self-contained false -o "$INSTALL_DIR/plugins/TradingAgent" --verbosity minimal
+      dotnet publish "$PLUGIN_PROJECT" -c Release -r "$RID" --self-contained false -o "$STAGE_DIR/plugins/TradingAgent" --verbosity minimal
     fi
   fi
 
@@ -265,20 +293,70 @@ if [ "$INSTALLED" -eq 0 ]; then
     dir="${spec##*:}"
     if [ -f "$proj" ]; then
       info "Publishing default plugin into plugins/$dir"
-      dotnet publish "$proj" -c Release -r "$RID" --self-contained false -o "$INSTALL_DIR/plugins/$dir" --verbosity minimal
+      dotnet publish "$proj" -c Release -r "$RID" --self-contained false -o "$STAGE_DIR/plugins/$dir" --verbosity minimal
     fi
   done
 fi
 
 # The prebuilt archive bundles the Trading plugin; strip it for a core-only install.
-if [ "$WITH_TRADING" != "1" ] && [ -d "$INSTALL_DIR/plugins/TradingAgent" ]; then
+if [ "$WITH_TRADING" != "1" ] && [ -d "$STAGE_DIR/plugins/TradingAgent" ]; then
   info "Removing Trading plugin (--no-trading)"
-  rm -rf "$INSTALL_DIR/plugins/TradingAgent"
+  rm -rf "$STAGE_DIR/plugins/TradingAgent"
 fi
 
+# Defence in depth for old/pre-existing publish folders: only release defaults may ship.
+for settings_file in "$STAGE_DIR"/appsettings*.json; do
+  if [ -f "$settings_file" ] && [ "$(basename "$settings_file")" != "appsettings.defaults.json" ]; then
+    rm -f "$settings_file"
+  fi
+done
+
 # Ensure the native launcher is executable (prebuilt archives may not preserve the bit).
-if [ -f "$INSTALL_DIR/AgentFox" ]; then
-  chmod +x "$INSTALL_DIR/AgentFox" 2>/dev/null || true
+if [ -f "$STAGE_DIR/AgentFox" ]; then
+  chmod +x "$STAGE_DIR/AgentFox" 2>/dev/null || true
+fi
+
+# ── Configuration migration and staged deployment ───────────────────────────
+USER_CONFIG="${AGENTFOX_CONFIG_FILE:-$INSTALL_DIR/appsettings.user.json}"
+LEGACY_CONFIG="$INSTALL_DIR/appsettings.json"
+SOURCE_CONFIG=""
+if [ -f "$USER_CONFIG" ]; then
+  SOURCE_CONFIG="$USER_CONFIG"
+elif [ -f "$LEGACY_CONFIG" ]; then
+  SOURCE_CONFIG="$LEGACY_CONFIG"
+fi
+CANDIDATE_CONFIG="$STAGE_DIR/.appsettings.user.candidate.json"
+SERVICE_WAS_STOPPED=0
+
+if [ -n "$SOURCE_CONFIG" ]; then
+  cp "$SOURCE_CONFIG" "$CANDIDATE_CONFIG"
+  info "Validating and migrating existing configuration ..."
+  if [ -x "$STAGE_DIR/AgentFox" ]; then
+    "$STAGE_DIR/AgentFox" config migrate --config "$CANDIDATE_CONFIG"
+  else
+    dotnet "$STAGE_DIR/AgentFox.dll" config migrate --config "$CANDIDATE_CONFIG"
+  fi
+fi
+
+if [ "$IS_UPDATE" = "1" ] && [ -x "$INSTALL_DIR/agentfox" ]; then
+  if "$INSTALL_DIR/agentfox" --stop-service >/dev/null 2>&1; then
+    SERVICE_WAS_STOPPED=1
+  fi
+fi
+
+mkdir -p "$INSTALL_DIR"
+if [ -n "$SOURCE_CONFIG" ]; then
+  BACKUP_DIR="$INSTALL_DIR/backups"
+  mkdir -p "$BACKUP_DIR"
+  cp "$SOURCE_CONFIG" "$BACKUP_DIR/appsettings.user.$(date -u +%Y%m%d%H%M%S).$$.json"
+  info "Configuration backup created in $BACKUP_DIR"
+fi
+
+info "Deploying staged AgentFox release ..."
+# Shell globs intentionally exclude the dot-prefixed migration candidate and its temporary backup.
+cp -R "$STAGE_DIR"/* "$INSTALL_DIR"/
+if [ -f "$CANDIDATE_CONFIG" ]; then
+  cp "$CANDIDATE_CONFIG" "$USER_CONFIG"
 fi
 
 cat > "$INSTALL_DIR/agentfox" <<'EOF'
@@ -292,6 +370,27 @@ else
 fi
 EOF
 chmod +x "$INSTALL_DIR/agentfox"
+
+# Record update-relevant choices separately from user configuration.
+if [ -x "$INSTALL_DIR/AgentFox" ]; then
+  INSTALLED_VERSION="$("$INSTALL_DIR/AgentFox" --version 2>/dev/null || printf 'unknown')"
+else
+  INSTALLED_VERSION="$(dotnet "$INSTALL_DIR/AgentFox.dll" --version 2>/dev/null || printf 'unknown')"
+fi
+if [ "$SERVICE_WAS_STOPPED" = "1" ]; then
+  "$INSTALL_DIR/agentfox" --start-service >/dev/null 2>&1 || true
+fi
+cat > "$INSTALL_DIR/install-state.json" <<EOF
+{
+  "InstalledVersion": "$INSTALLED_VERSION",
+  "ConfigSchemaVersion": 1,
+  "TradingInstalled": $([ "$WITH_TRADING" = "1" ] && printf 'true' || printf 'false'),
+  "InstallSource": "$([ "$INSTALLED" = "1" ] && printf 'release' || printf 'source')",
+  "RepoUrl": "$REPO_URL",
+  "Branch": "${BRANCH:-main}",
+  "ConfigFile": "$USER_CONFIG"
+}
+EOF
 
 # ── PATH registration ────────────────────────────────────────────────────────
 # So users can run `agentfox` from anywhere instead of cd-ing into the install dir.
@@ -339,6 +438,13 @@ cat > "$INSTALL_DIR/update.sh" <<EOF
 set -euo pipefail
 export AGENTFOX_INSTALL_DIR="\$(cd "\$(dirname "\$0")" && pwd)"
 export AGENTFOX_SKIP_ONBOARDING=1
+export AGENTFOX_REPO_URL="$REPO_URL"
+export AGENTFOX_BRANCH="$UPDATE_BRANCH"
+unset AGENTFOX_NO_TRADING AGENTFOX_WITH_TRADING
+if [ -n "${AGENTFOX_CONFIG_FILE:-}" ]; then
+  export AGENTFOX_CONFIG_FILE="$AGENTFOX_CONFIG_FILE"
+fi
+export $([ "$WITH_TRADING" = "1" ] && printf 'AGENTFOX_WITH_TRADING=1' || printf 'AGENTFOX_NO_TRADING=1')
 echo "==> Updating AgentFox to the latest release ..."
 curl -fsSL "$RAW_INSTALL_URL" | bash
 EOF

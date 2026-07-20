@@ -6,14 +6,19 @@ param(
     [switch]$BuildFromSource,
     [switch]$SkipService,
     [switch]$NoTrading,
+    [switch]$WithTrading,
     [switch]$SkipOnboarding
 )
 
 $ErrorActionPreference = 'Stop'
 
-# Allow the one-liner (irm | iex) to opt out via env vars.
+# Allow the one-liner (irm | iex) to select an install flavour via env vars.
+$tradingChoiceExplicit = $NoTrading.IsPresent -or $WithTrading.IsPresent -or
+    $env:AGENTFOX_NO_TRADING -eq '1' -or $env:AGENTFOX_WITH_TRADING -eq '1'
 if (-not $NoTrading -and $env:AGENTFOX_NO_TRADING -eq '1') { $NoTrading = $true }
+if (-not $WithTrading -and $env:AGENTFOX_WITH_TRADING -eq '1') { $WithTrading = $true }
 if (-not $SkipOnboarding -and $env:AGENTFOX_SKIP_ONBOARDING -eq '1') { $SkipOnboarding = $true }
+if ($NoTrading -and $WithTrading) { throw 'Specify only one of -NoTrading or -WithTrading.' }
 
 if (-not $RepoUrl) { $RepoUrl = 'https://github.com/UsmanSabir/AgentFox.git' }
 
@@ -168,7 +173,27 @@ function Add-ToUserPath([string]$dir) {
 
 $resolvedInstallDir = if ($InstallDir) { $InstallDir } else { Join-Path $HOME '.agentfox' }
 $resolvedInstallDir = [System.IO.Path]::GetFullPath($resolvedInstallDir)
-New-Item -ItemType Directory -Path $resolvedInstallDir -Force | Out-Null
+$isUpdate = (Test-Path (Join-Path $resolvedInstallDir 'AgentFox.exe')) -or
+    (Test-Path (Join-Path $resolvedInstallDir 'AgentFox.dll'))
+$installStatePath = Join-Path $resolvedInstallDir 'install-state.json'
+
+# An updater must retain the existing feature set unless the caller explicitly changes it.
+if ($isUpdate -and -not $tradingChoiceExplicit) {
+    $stateSaysNoTrading = $false
+    if (Test-Path $installStatePath) {
+        try {
+            $stateSaysNoTrading = -not [bool]((Get-Content $installStatePath -Raw | ConvertFrom-Json).TradingInstalled)
+        }
+        catch { $stateSaysNoTrading = $false }
+    }
+    elseif (-not (Test-Path (Join-Path $resolvedInstallDir 'plugins/TradingAgent'))) {
+        $stateSaysNoTrading = $true
+    }
+    if ($stateSaysNoTrading) { $NoTrading = $true }
+}
+
+$stageDir = Join-Path $env:TEMP ("agentfox-stage-" + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
 
 # The framework-dependent binary needs the .NET runtime whether it was prebuilt or built here.
 Ensure-Dotnet
@@ -176,7 +201,7 @@ $rid = Get-ArchSuffix
 
 $installed = $false
 if (-not $BuildFromSource) {
-    $installed = Install-Prebuilt $rid $resolvedInstallDir
+    $installed = Install-Prebuilt $rid $stageDir
 }
 
 if (-not $installed) {
@@ -188,7 +213,7 @@ if (-not $installed) {
         throw "Could not find $projectPath"
     }
 
-    Write-Info "Publishing AgentFox to $resolvedInstallDir"
+    Write-Info "Publishing AgentFox to staging directory"
     & dotnet publish $projectPath -c Release -r $rid --self-contained false -p:PublishSingleFile=false -p:UseAppHost=true --verbosity minimal
 
     $publishDir = Join-Path $sourceRoot ("src/Agent/bin/Release/net10.0/{0}/publish" -f $rid)
@@ -196,12 +221,12 @@ if (-not $installed) {
         throw "Publish output was not created at $publishDir"
     }
 
-    Copy-Item "$publishDir/*" $resolvedInstallDir -Recurse -Force
+    Copy-Item "$publishDir/*" $stageDir -Recurse -Force
 
     # Publish the Trading plugin into plugins/ so the runtime plugin loader discovers it.
     $pluginProject = Join-Path $sourceRoot 'src/Plugins/TradingAgent/TradingAgent.csproj'
     if (-not $NoTrading -and (Test-Path $pluginProject)) {
-        $pluginDir = Join-Path $resolvedInstallDir 'plugins/TradingAgent'
+        $pluginDir = Join-Path $stageDir 'plugins/TradingAgent'
         Write-Info 'Publishing Trading plugin into plugins/TradingAgent'
         & dotnet publish $pluginProject -c Release -r $rid --self-contained false -o $pluginDir --verbosity minimal
     }
@@ -219,7 +244,7 @@ if (-not $installed) {
     foreach ($p in $defaultPlugins) {
         $proj = Join-Path $sourceRoot $p.Project
         if (Test-Path $proj) {
-            $dir = Join-Path $resolvedInstallDir ('plugins/' + $p.Dir)
+            $dir = Join-Path $stageDir ('plugins/' + $p.Dir)
             Write-Info ("Publishing default plugin into plugins/" + $p.Dir)
             & dotnet publish $proj -c Release -r $rid --self-contained false -o $dir --verbosity minimal
         }
@@ -227,10 +252,74 @@ if (-not $installed) {
 }
 
 # The prebuilt archive bundles the Trading plugin; strip it for a core-only install.
-$tradingPluginDir = Join-Path $resolvedInstallDir 'plugins/TradingAgent'
+$tradingPluginDir = Join-Path $stageDir 'plugins/TradingAgent'
 if ($NoTrading -and (Test-Path $tradingPluginDir)) {
     Write-Info 'Removing Trading plugin (-NoTrading)'
     Remove-Item $tradingPluginDir -Recurse -Force
+}
+
+# Defence in depth for old/pre-existing publish folders: no release payload may contain a
+# user-owned or environment-specific appsettings file.
+Get-ChildItem -LiteralPath $stageDir -Filter 'appsettings*.json' -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -ne 'appsettings.defaults.json' } |
+    Remove-Item -Force
+
+# ── Configuration migration and staged deployment ───────────────────────────
+# Releases own appsettings.defaults.json. The existing appsettings.json (legacy) or
+# appsettings.user.json is copied to a candidate, migrated by the new binary, and only
+# committed after migration succeeds.
+$userConfig = if ($env:AGENTFOX_CONFIG_FILE) {
+    [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($env:AGENTFOX_CONFIG_FILE))
+} else { Join-Path $resolvedInstallDir 'appsettings.user.json' }
+$legacyConfig = Join-Path $resolvedInstallDir 'appsettings.json'
+$sourceConfig = if (Test-Path $userConfig) { $userConfig } elseif (Test-Path $legacyConfig) { $legacyConfig } else { $null }
+$candidateConfig = Join-Path $stageDir '.appsettings.user.candidate.json'
+$serviceWasStopped = $false
+$oldLauncher = Join-Path $resolvedInstallDir 'agentfox.cmd'
+
+try {
+    if ($sourceConfig) {
+        Copy-Item -LiteralPath $sourceConfig -Destination $candidateConfig -Force
+        Write-Info 'Validating and migrating existing configuration ...'
+        $stagedExe = Join-Path $stageDir 'AgentFox.exe'
+        $stagedDll = Join-Path $stageDir 'AgentFox.dll'
+        if (Test-Path $stagedExe) {
+            & $stagedExe config migrate --config $candidateConfig
+        }
+        else {
+            & dotnet $stagedDll config migrate --config $candidateConfig
+        }
+        if ($LASTEXITCODE -ne 0) { throw 'Configuration migration failed; the installed version was not changed.' }
+    }
+
+    if ($isUpdate -and (Test-Path $oldLauncher)) {
+        & $oldLauncher --stop-service 2>$null
+        $serviceWasStopped = $LASTEXITCODE -eq 0
+    }
+
+    New-Item -ItemType Directory -Path $resolvedInstallDir -Force | Out-Null
+    if ($sourceConfig) {
+        $backupDir = Join-Path $resolvedInstallDir 'backups'
+        New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+        $backupName = "appsettings.user.$(Get-Date -Format 'yyyyMMddHHmmssfff').json"
+        Copy-Item -LiteralPath $sourceConfig -Destination (Join-Path $backupDir $backupName) -Force
+        Write-Info "Configuration backup created in $backupDir"
+    }
+
+    Write-Info 'Deploying staged AgentFox release ...'
+    Get-ChildItem -LiteralPath $stageDir -Force |
+        Where-Object { $_.Name -ne '.appsettings.user.candidate.json' -and $_.Name -notlike '*.backup-*' } |
+        Copy-Item -Destination $resolvedInstallDir -Recurse -Force
+
+    if (Test-Path $candidateConfig) {
+        Copy-Item -LiteralPath $candidateConfig -Destination $userConfig -Force
+    }
+}
+finally {
+    if (Test-Path $stageDir) { Remove-Item -LiteralPath $stageDir -Recurse -Force }
+    if ($serviceWasStopped -and (Test-Path (Join-Path $resolvedInstallDir 'agentfox.cmd'))) {
+        & (Join-Path $resolvedInstallDir 'agentfox.cmd') --start-service 2>$null
+    }
 }
 
 $launcher = Join-Path $resolvedInstallDir 'agentfox.cmd'
@@ -244,6 +333,21 @@ if exist "%AGENTFOX_HOME%\AgentFox.exe" (
   dotnet "%AGENTFOX_HOME%\AgentFox.dll" %*
 )
 "@ | Set-Content -Path $launcher -Encoding Ascii
+
+# Record update-relevant choices separately from user configuration.
+$liveExe = Join-Path $resolvedInstallDir 'AgentFox.exe'
+$installedVersion = if (Test-Path $liveExe) {
+    [Diagnostics.FileVersionInfo]::GetVersionInfo($liveExe).ProductVersion
+} else { $null }
+[ordered]@{
+    InstalledVersion    = $installedVersion
+    ConfigSchemaVersion = 1
+    TradingInstalled    = -not [bool]$NoTrading
+    InstallSource       = if ($installed) { 'release' } else { 'source' }
+    RepoUrl             = $RepoUrl
+    Branch              = if ($Branch) { $Branch } else { 'main' }
+    ConfigFile          = $userConfig
+} | ConvertTo-Json | Set-Content -Path $installStatePath -Encoding UTF8
 
 # ── PATH registration ──────────────────────────────────────────────────────────
 # Put the install dir on PATH so users run `agentfox` from anywhere, not just from
@@ -291,10 +395,22 @@ if ($RepoUrl -match 'github\.com[:/]+([^/]+)/([^/.]+)') {
     $rawInstallUrl = "https://raw.githubusercontent.com/$($Matches[1])/$($Matches[2])/$updateBranch/install.ps1"
 }
 $updater = Join-Path $resolvedInstallDir 'update.ps1'
+$updateTradingEnv = if ($NoTrading) {
+    "Remove-Item Env:AGENTFOX_WITH_TRADING -ErrorAction SilentlyContinue`n`$env:AGENTFOX_NO_TRADING = '1'"
+} else {
+    "Remove-Item Env:AGENTFOX_NO_TRADING -ErrorAction SilentlyContinue`n`$env:AGENTFOX_WITH_TRADING = '1'"
+}
+$configEnvLine = if ($env:AGENTFOX_CONFIG_FILE) {
+    "`$env:AGENTFOX_CONFIG_FILE = '$($env:AGENTFOX_CONFIG_FILE)'"
+} else { '' }
 @"
 # Update AgentFox in place to the latest release.
 `$env:AGENTFOX_INSTALL_DIR = `$PSScriptRoot
 `$env:AGENTFOX_SKIP_ONBOARDING = '1'
+`$env:AGENTFOX_REPO_URL = '$RepoUrl'
+`$env:AGENTFOX_BRANCH = '$updateBranch'
+$configEnvLine
+$updateTradingEnv
 Write-Host 'Updating AgentFox to the latest release ...' -ForegroundColor Cyan
 irm '$rawInstallUrl' | iex
 "@ | Set-Content -Path $updater -Encoding UTF8
