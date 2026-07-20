@@ -29,7 +29,7 @@ public sealed record PsxQuoteSummary
     public string? Error { get; init; }
 }
 
-public sealed record NewsHeadline(string Title, string? Source, DateTime? PublishedUtc);
+public sealed record NewsHeadline(string Title, string? Source, DateTime? PublishedUtc, string? Url = null);
 
 /// <summary>
 /// Listing status of a security on the PSX. Derived from the portal's company page, which renders a
@@ -54,6 +54,9 @@ public sealed record StockResearchData
     public IReadOnlyList<NewsHeadline> CompanyNews { get; init; } = [];
     public IReadOnlyList<NewsHeadline> MarketNews { get; init; } = [];
     public DateTime RetrievedAtUtc { get; init; } = DateTime.UtcNow;
+
+    /// <summary>The web endpoints consulted for this gather (PSX portal series + company page), for citation.</summary>
+    public IReadOnlyList<string> SourceUrls { get; init; } = [];
 }
 
 /// <summary>
@@ -95,6 +98,20 @@ public sealed class PsxDataClient
 
         await Task.WhenAll(quoteTask, indexTask, listingTask, newsTask, marketTask);
 
+        var baseUrl = _options.Value.PsxDataBaseUrl.TrimEnd('/');
+        var sourceUrls = new List<string>
+        {
+            $"{baseUrl}/timeseries/eod/{symbol}",
+            $"{baseUrl}/timeseries/int/{symbol}",
+            $"{baseUrl}/company/{symbol}",
+            $"{baseUrl}/timeseries/eod/{Kse100Symbol}"
+        };
+        if (_options.Value.ResearchNewsEnabled)
+        {
+            sourceUrls.Add(NewsFeedUrl($"\"{symbol}\" PSX Pakistan stock"));
+            sourceUrls.Add(NewsFeedUrl("Pakistan Stock Exchange KSE-100"));
+        }
+
         return new StockResearchData
         {
             Quote          = await quoteTask,
@@ -102,7 +119,8 @@ public sealed class PsxDataClient
             ListingStatus  = await listingTask,
             CompanyNews    = await newsTask,
             MarketNews     = await marketTask,
-            RetrievedAtUtc = DateTime.UtcNow
+            RetrievedAtUtc = DateTime.UtcNow,
+            SourceUrls     = sourceUrls
         };
     }
 
@@ -294,25 +312,45 @@ public sealed class PsxDataClient
     {
         try
         {
-            var url = "https://news.google.com/rss/search?q=" + Uri.EscapeDataString(query) +
-                      "&hl=en-PK&gl=PK&ceid=PK:en";
+            var url = NewsFeedUrl(query);
             var xml = await _http.GetStringAsync(url, ct);
-            var feed = XDocument.Parse(xml);
+            return ParseNewsFeed(xml, Math.Max(1, _options.Value.ResearchHeadlineCount));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[PsxData] News fetch failed for query '{Query}'.", query);
+            return [];
+        }
+    }
 
+    /// <summary>Builds the keyless Google News RSS search URL for a query.</summary>
+    public static string NewsFeedUrl(string query) =>
+        "https://news.google.com/rss/search?q=" + Uri.EscapeDataString(query) + "&hl=en-PK&gl=PK&ceid=PK:en";
+
+    /// <summary>
+    /// Parses a Google News RSS document into headlines. Pure/deterministic so it can be unit-tested
+    /// without network access. Each item's &lt;link&gt; is captured as <see cref="NewsHeadline.Url"/>.
+    /// Returns an empty list for unparseable XML.
+    /// </summary>
+    public static IReadOnlyList<NewsHeadline> ParseNewsFeed(string xml, int max)
+    {
+        try
+        {
+            var feed = XDocument.Parse(xml);
             return feed.Descendants("item")
-                .Take(Math.Max(1, _options.Value.ResearchHeadlineCount))
+                .Take(Math.Max(1, max))
                 .Select(item => new NewsHeadline(
                     item.Element("title")?.Value.Trim() ?? "",
                     item.Elements().FirstOrDefault(e => e.Name.LocalName == "source")?.Value.Trim(),
                     DateTime.TryParse(item.Element("pubDate")?.Value, CultureInfo.InvariantCulture,
                         DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var dt)
-                        ? dt : null))
+                        ? dt : null,
+                    item.Element("link")?.Value.Trim()))
                 .Where(h => h.Title.Length > 0)
                 .ToList();
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-            _logger.LogWarning(ex, "[PsxData] News fetch failed for query '{Query}'.", query);
             return [];
         }
     }

@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using AgentFox.Plugins.Interfaces;
+using AgentFox.Plugins.Research;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 using TradingAgent.Research;
@@ -106,6 +107,17 @@ public sealed class ResearchStockTool : BaseTool
 
         _logger.LogInformation("[ResearchStock] Researching {Symbol}…", symbol);
         var data = await _dataClient.GatherAsync(symbol);
+
+        // Register the web sources consulted so the chat UI can cite them. Fail-soft: no-op when no
+        // scope is open (e.g. the tool is invoked outside an agent turn).
+        var scope = ResearchReferenceScope.Current;
+        if (scope is not null)
+        {
+            foreach (var headline in data.CompanyNews.Concat(data.MarketNews))
+                scope.Add(headline.Url, headline.Title, headline.Source ?? "News");
+            foreach (var portalUrl in data.SourceUrls)
+                scope.Add(portalUrl, $"PSX data: {symbol}", "PSX Data Portal");
+        }
 
         var evidence = new
         {
