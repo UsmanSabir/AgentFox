@@ -304,6 +304,10 @@ public class FoxAgent
             // Persist updated session metadata (e.g. lastActiveAt) after each turn.
             ConversationStore.SaveSession(conversationId, session);
 
+            var references = ResearchReferenceScope.Current?.Snapshot().ToList() ?? new List<ResearchReference>();
+            if (references.Count > 0)
+                (ConversationStore as MarkdownSessionStore)?.PersistAssistantReferences(conversationId, references);
+
             // Turn completed successfully — remove the pending marker.
             (ConversationStore as MarkdownSessionStore)?.ClearPendingUserMessage(conversationId);
 
@@ -311,7 +315,6 @@ public class FoxAgent
             SessionManager?.TouchSession(conversationId);
             _logger?.LogInformation("Agent '{AgentName}' completed task in conversation {ConversationId}", Name, conversationId);
 
-            var references = ResearchReferenceScope.Current?.Snapshot().ToList() ?? new List<ResearchReference>();
             var result = new AgentResult { Success = true, Output = responseText, References = references };
             if (_experienceLearning != null)
                 await _experienceLearning.CompleteAsync(experienceTurn, true, timeoutToken);
