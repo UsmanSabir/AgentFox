@@ -1,5 +1,6 @@
 using AgentFox.Memory;
 using AgentFox.Plugins.Interfaces;
+using AgentFox.Plugins.Models;
 using AgentFox.Tools;
 
 namespace AgentFox.Agents;
@@ -47,17 +48,17 @@ internal sealed class FoxAgentService : IAgentService
 
     public FoxAgentService(FoxAgentHolder holder) => _holder = holder;
 
-    public async Task<string> RunAsync(
+    public async Task<AgentReply> RunAsync(
         string input,
         string? conversationId = null,
         CancellationToken ct = default)
     {
         var agent = await _holder.WaitAsync(ct);
         var result = await agent.ProcessAsync(input, conversationId, cancellationToken: ct);
-        return result.Output ?? string.Empty;
+        return new AgentReply { Output = result.Output ?? string.Empty, References = result.References };
     }
 
-    public async Task<string> StreamAsync(
+    public async Task<AgentReply> StreamAsync(
         string input,
         string? conversationId,
         Func<string, Task> onToken,
@@ -66,7 +67,7 @@ internal sealed class FoxAgentService : IAgentService
         var agent = await _holder.WaitAsync(ct);
         var streaming = new StreamingCallbacks { OnToken = onToken };
         var result = await agent.ProcessAsync(input, conversationId, streaming, ct);
-        return result.Output ?? string.Empty;
+        return new AgentReply { Output = result.Output ?? string.Empty, References = result.References };
     }
 }
 

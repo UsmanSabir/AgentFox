@@ -1,4 +1,6 @@
-﻿namespace AgentFox.Plugins.Models;
+﻿using AgentFox.Plugins.Research;
+
+namespace AgentFox.Plugins.Models;
 
 /// <summary>Incoming chat request from the HTTP /chat endpoint.</summary>
 public class ChatRequest
@@ -27,4 +29,7 @@ public class ChatResponse
 
     /// <summary>Error message if <see cref="Success"/> is false.</summary>
     public string? Error { get; set; }
+
+    /// <summary>Web sources consulted during the turn, for display as citations.</summary>
+    public List<ResearchReference> References { get; set; } = new();
 }

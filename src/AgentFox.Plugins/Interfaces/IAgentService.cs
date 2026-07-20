@@ -1,4 +1,6 @@
-﻿namespace AgentFox.Plugins.Interfaces;
+﻿using AgentFox.Plugins.Models;
+
+namespace AgentFox.Plugins.Interfaces;
 
 /// <summary>
 /// Minimal contract for running a task through the agent.
@@ -14,7 +16,7 @@ public interface IAgentService
     /// Optional session/conversation key. Pass null to use the agent's default session.
     /// </param>
     /// <param name="ct">Cancellation token.</param>
-    Task<string> RunAsync(string input, string? conversationId = null, CancellationToken ct = default);
+    Task<AgentReply> RunAsync(string input, string? conversationId = null, CancellationToken ct = default);
 
     /// <summary>
     /// Run <paramref name="input"/> through the agent, invoking <paramref name="onToken"/>
@@ -25,7 +27,7 @@ public interface IAgentService
     /// <param name="conversationId">Optional session/conversation key.</param>
     /// <param name="onToken">Callback invoked per token; must be non-blocking.</param>
     /// <param name="ct">Cancellation token.</param>
-    Task<string> StreamAsync(
+    Task<AgentReply> StreamAsync(
         string input,
         string? conversationId,
         Func<string, Task> onToken,

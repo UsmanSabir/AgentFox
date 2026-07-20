@@ -86,9 +86,10 @@ public class WebModule : IAppModule
                 var reply = await agentService.RunAsync(req.Message, conversationId, ct);
                 return Results.Ok(new ChatResponse
                 {
-                    Response = reply,
+                    Response = reply.Output,
                     ConversationId = conversationId,
-                    Success = true
+                    Success = true,
+                    References = reply.References
                 });
             }
             catch (Exception ex)
@@ -131,7 +132,7 @@ public class WebModule : IAppModule
                 // Pre-generate a conversation ID so the same session is reused across turns.
                 var conversationId = sessionManager.GetOrCreateWebSession("main", req.ConversationId);
 
-                await agentService.StreamAsync(
+                var reply = await agentService.StreamAsync(
                     req.Message,
                     conversationId,
                     async token =>
@@ -148,7 +149,8 @@ public class WebModule : IAppModule
                 var donePayload = JsonSerializer.Serialize(new
                 {
                     done = true,
-                    conversationId
+                    conversationId,
+                    references = reply.References
                 });
                 await httpContext.Response.WriteAsync($"event: done\ndata: {donePayload}\n\n", ct);
                 await httpContext.Response.Body.FlushAsync(ct);
