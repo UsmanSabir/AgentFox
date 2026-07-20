@@ -9,11 +9,18 @@ export interface ChatRequest {
   conversationId?: string;
 }
 
+export interface ReferenceItem {
+  url: string;
+  title?: string;
+  source?: string;
+}
+
 export interface ChatResponse {
   response: string;
   conversationId?: string;
   success: boolean;
   error?: string;
+  references?: ReferenceItem[];
 }
 
 export interface AgentStatus {
@@ -115,6 +122,7 @@ export interface SessionInfo {
 export interface ConversationMessage {
   role: 'user' | 'assistant';
   content: string;
+  references?: ReferenceItem[];
 }
 
 export interface ConversationMessagesResponse {
@@ -483,7 +491,7 @@ export const api = {
 
 export type StreamEvent =
   | { type: 'token';  token: string }
-  | { type: 'done';   done: true; conversationId?: string }
+  | { type: 'done';   done: true; conversationId?: string; references?: ReferenceItem[] }
   | { type: 'error';  error: string };
 
 export async function* streamChat(
@@ -524,7 +532,7 @@ export async function* streamChat(
           try {
             const payload = JSON.parse(line.slice(6));
             if (currentEvent === 'done') {
-              yield { type: 'done', done: true, conversationId: payload.conversationId };
+              yield { type: 'done', done: true, conversationId: payload.conversationId, references: payload.references };
             } else if (currentEvent === 'error') {
               yield { type: 'error', error: payload.error ?? 'Unknown error' };
             } else {
