@@ -126,7 +126,24 @@ public sealed class PageActorClient : IAsyncDisposable
     {
         var url = _options.SearchEngineUrl + Uri.EscapeDataString(query);
         _logger.LogInformation("Search: \"{Query}\"", query);
-        return await NavigateAsync(url, ct);
+        try
+        {
+            return await NavigateAsync(url, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (
+            !string.IsNullOrWhiteSpace(_options.FallbackSearchEngineUrl) &&
+            !string.Equals(_options.SearchEngineUrl, _options.FallbackSearchEngineUrl,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            var fallbackUrl = _options.FallbackSearchEngineUrl + Uri.EscapeDataString(query);
+            _logger.LogWarning(
+                "Primary search engine failed ({Error}); trying configured fallback.", ex.Message);
+            return await NavigateAsync(fallbackUrl, ct);
+        }
     }
 
     /// <summary>

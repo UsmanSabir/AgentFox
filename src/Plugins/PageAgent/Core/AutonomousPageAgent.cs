@@ -5,6 +5,7 @@ using PageAgent.Models;
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using AgentFox.Plugins.Research;
 
 namespace PageAgent.Core;
 
@@ -162,7 +163,13 @@ public sealed class AutonomousPageAgent
             {
                 currentPage = await browser.AnalyzePageAsync(runCt);
                 if (!currentPage.IsEmpty)
+                {
                     memory.MarkVisited(currentPage.Url);
+                    ResearchReferenceScope.Current?.Add(
+                        currentPage.Url,
+                        currentPage.Title,
+                        "PageAgent browser");
+                }
             }
             else if (success && action.Action == "analyze")
             {

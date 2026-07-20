@@ -9,8 +9,8 @@ namespace AgentFox.DuckDuckGoSearch;
 /// <summary>
 /// AgentFox plugin module that exposes the <see cref="DuckDuckGoTool"/> (duckduckgo_search).
 ///
-/// DuckDuckGo's Instant Answer API needs no key, so this module always registers the tool once
-/// the agent is ready — making it a zero-configuration default search provider.
+/// DuckDuckGo's Instant Answer API needs no key. It is useful for sourced abstracts and related
+/// topics, but it is not advertised as a full current-web search provider.
 /// </summary>
 public sealed class DuckDuckGoSearchModule : IAgentAwareModule
 {
@@ -36,7 +36,8 @@ public sealed class DuckDuckGoSearchModule : IAgentAwareModule
         context.ContributeToSystemPrompt(
             contributorId: "duckduckgo-search",
             fragmentProvider: () =>
-                "You have a 'duckduckgo_search' tool that queries DuckDuckGo for current web results.");
+                "You have a 'duckduckgo_search' tool for DuckDuckGo Instant Answers. " +
+                "It is not a full current-web search; prefer Tavily, Brave, or browse_web for current information.");
 
         logger.LogInformation("[DuckDuckGoSearch] duckduckgo_search tool registered.");
         return Task.CompletedTask;

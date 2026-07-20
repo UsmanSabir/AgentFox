@@ -41,7 +41,7 @@ public sealed class TavilySearchTool(IWebSearchProvider provider) : BaseTool
         }
         catch (Exception ex)
         {
-            return ToolResult.Fail($"Failed to fetch URL: {ex.GetType().Name} - {ex.Message}");
+            return ToolResult.Fail($"Tavily search failed: {ex.GetType().Name} - {ex.Message}");
         }
     }
 }

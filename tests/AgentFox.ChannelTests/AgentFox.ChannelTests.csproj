@@ -22,6 +22,9 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\Agent\AgentFox.csproj" />
     <ProjectReference Include="..\..\src\Plugins\TradingAgent\TradingAgent.csproj" />
+    <ProjectReference Include="..\..\src\Plugins\AgentFox.TavilySearch\AgentFox.TavilySearch.csproj" />
+    <ProjectReference Include="..\..\src\Plugins\AgentFox.BraveSearch\AgentFox.BraveSearch.csproj" />
+    <ProjectReference Include="..\..\src\Plugins\AgentFox.DuckDuckGoSearch\AgentFox.DuckDuckGoSearch.csproj" />
   </ItemGroup>
 
   <ItemGroup>

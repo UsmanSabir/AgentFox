@@ -142,6 +142,12 @@ public sealed class BrowseWebTool : BaseTool
             FallbackSearchEngineUrl = _options.Value.FallbackSearchEngineUrl,
             ViewportWidth = _options.Value.ViewportWidth,
             ViewportHeight = _options.Value.ViewportHeight,
+            UserDataDir = _options.Value.UserDataDir,
+            UseProfileCopy = _options.Value.UseProfileCopy,
+            UseSystemProfile = _options.Value.UseSystemProfile,
+            AutoRestartOnCrash = _options.Value.AutoRestartOnCrash,
+            MaxRestarts = _options.Value.MaxRestarts,
+            KillConflictingBrowser = _options.Value.KillConflictingBrowser,
         };
 
         if (arguments.TryGetValue("max_steps", out var maxStepsRaw))

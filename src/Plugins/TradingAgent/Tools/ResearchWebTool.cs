@@ -69,6 +69,10 @@ public sealed class ResearchWebTool : BaseTool
                     options.ResearchWebSearchDepth,
                     IncludeAnswer: true));
 
+            if (response.Results.Count == 0)
+                return ToolResult.Fail(
+                    $"Web research provider '{response.Provider}' returned zero sourced results for '{query}'.");
+
             var maxContent = Math.Clamp(options.ResearchWebMaxContentCharacters, 256, 20_000);
             var results = response.Results
                 .Where(result => Uri.TryCreate(result.Url, UriKind.Absolute, out var uri) &&

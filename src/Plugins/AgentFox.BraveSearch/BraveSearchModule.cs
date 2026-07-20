@@ -11,7 +11,7 @@ namespace AgentFox.BraveSearch;
 ///
 /// Brave Search is a key-only API (no free tier), and <see cref="BraveSearchTool"/> throws
 /// from its constructor when no key is present. So this module registers the tool only when a
-/// "BraveSearch:ApiKey" is configured; otherwise it logs a hint and stays inert, which lets the
+/// "BRAVE_SEARCH_API_KEY" or "Plugins:BraveSearch:ApiKey" is configured; otherwise it stays inert, which lets the
 /// plugin ship enabled-by-default without crashing installs that have not set a key.
 /// </summary>
 public sealed class BraveSearchModule : IAgentAwareModule
@@ -35,10 +35,11 @@ public sealed class BraveSearchModule : IAgentAwareModule
         var config = _services!.GetRequiredService<IConfiguration>();
         var logger = _services!.GetRequiredService<ILoggerFactory>().CreateLogger<BraveSearchModule>();
 
-        if (string.IsNullOrWhiteSpace(config["BraveSearch:ApiKey"]))
+        if (string.IsNullOrWhiteSpace(BraveSearchTool.ResolveApiKey(config)))
         {
             logger.LogInformation(
-                "[BraveSearch] brave_search tool not registered — set \"BraveSearch:ApiKey\" to enable it.");
+                "[BraveSearch] brave_search tool not registered — set BRAVE_SEARCH_API_KEY or " +
+                "\"Plugins:BraveSearch:ApiKey\" to enable it.");
             return Task.CompletedTask;
         }
 
