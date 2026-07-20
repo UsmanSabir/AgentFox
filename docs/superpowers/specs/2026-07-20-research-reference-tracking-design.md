@@ -126,13 +126,29 @@ public sealed record ResearchReference(string Url, string? Title = null, string?
 
 ### 5. Persistence — `src/Agent/Memory/MarkdownSessionStore.cs`
 
-- Write a new line type under the assistant message in `WriteMessage`/`FlushMessage`
-  (lines 324-358, 412-451): `[references]{"items":[{"url":...,"title":...,"source":...}]}`.
-  Chosen to mirror the existing `[tool_call]{…}` / `[tool_result]{…}` inline-JSON
-  convention.
-- Parse that line on load and attach to the corresponding assistant message.
-- `ConversationMessageSnapshot` (line 496): add `List<ResearchReference> References`.
-- `GetConversationMessages` (lines 216-233): project references onto assistant messages.
+References are persisted in a **per-conversation sidecar file** `{session}.md.refs.jsonl`
+(one JSON object per line: `{"i":<assistantIndex>,"items":[{"url","title","source"}]}`),
+NOT inline in the `.md`. Rationale: the `.md` is re-parsed into the `ChatMessage`
+list that feeds the LLM as history; interleaving a `[references]` line there would
+either pollute the reconstructed assistant text or force changes to the shared
+parse path (`ParseFile`/`FlushMessage`). A sidecar keeps references completely out
+of the LLM-history path and mirrors the existing `.md.pending` sidecar precedent.
+
+- `assistantIndex` = the 0-based position of the assistant reply among the
+  user/assistant **non-empty-text** messages the conversation projects (the same set
+  `GetConversationMessages` returns). Storing the index (rather than relying on line
+  order) keeps alignment correct even for turns that produced no references (no line
+  written → a gap, tolerated on read).
+- New method `PersistAssistantReferences(conversationId, IReadOnlyList<ResearchReference>)`:
+  no-op when the list is empty; otherwise computes `assistantIndex` from the in-memory
+  message list and appends one line to the sidecar. Called from `ProcessAsync` right
+  after `SaveSession` (`Agent.cs:303`).
+- `ConversationMessageSnapshot` (line 496): add init-only `IReadOnlyList<ResearchReference>
+  References` (default empty) — keeps the existing positional constructor unchanged.
+- `GetConversationMessages` (lines 216-233): after building the role/content snapshots,
+  load the sidecar into `Dictionary<int,List<ResearchReference>>` and attach by
+  assistant index.
+- `DeleteSession` (lines 235-243): also delete the sidecar file.
 
 ### 6. Frontend
 
@@ -173,8 +189,9 @@ public sealed record ResearchReference(string Url, string? Title = null, string?
   restores the previous scope on dispose.
 - **Unit** — `PsxDataClient`: RSS `<link>` is extracted into `NewsHeadline.Url` for a
   representative feed sample.
-- **Backend** — `MarkdownSessionStore`: references round-trip (write assistant message
-  with references → reload → parse → snapshot contains them).
+- **Backend** — `MarkdownSessionStore`: references sidecar round-trip (persist references
+  for an assistant turn → `GetConversationMessages` returns them attached to the correct
+  assistant snapshot; turns without references remain empty).
 - **Manual/integration** — run a `research_stock` request through the web chat; confirm
   the Sources list renders under the reply, links open correctly, and the list reappears
   after reopening the conversation.
