@@ -7,7 +7,8 @@
     appendToken, finalizeMessage, activeConversationId, activeAgentId, agentReady, resetChat
   } from '$lib/stores';
   import {
-    Send, RotateCcw, StopCircle, Bot, User, Copy, Check, Zap, History, Plus, X
+    Send, RotateCcw, StopCircle, Bot, User, Copy, Check, Zap, History, Plus, X,
+    Download, Upload, Trash2
   } from 'lucide-svelte';
 
   let inputEl: HTMLTextAreaElement;
@@ -21,6 +22,7 @@
   let specialists: SpecialistAgentInfo[] = [];
   let showSessions = false;
   let loadingSession = false;
+  let importInput: HTMLInputElement;
 
   $: messages     = $chatMessages;
   $: convId       = $activeConversationId;
@@ -177,6 +179,54 @@
     }
   }
 
+  async function exportSession(session: SessionInfo, event: Event) {
+    event.stopPropagation();
+    try {
+      await api.exportSession(session.id);
+    } catch (err) {
+      alert('Export failed: ' + (err instanceof Error ? err.message : String(err)));
+    }
+  }
+
+  async function deleteSession(session: SessionInfo, event: Event) {
+    event.stopPropagation();
+    if (isStreaming || loadingSession) return;
+    if (!confirm(`Delete session "${session.id}"? This permanently removes its transcript and cannot be undone.`))
+      return;
+    try {
+      await api.deleteSession(session.id);
+      if (session.id === convId) resetChat(selectedAgentId);
+      await loadSessions();
+    } catch (err) {
+      alert('Delete failed: ' + (err instanceof Error ? err.message : String(err)));
+    }
+  }
+
+  function triggerImport() {
+    importInput?.click();
+  }
+
+  async function handleImportFile(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = ''; // allow re-importing the same file later
+    if (!file || isStreaming) return;
+
+    let newId: string | null = null;
+    try {
+      const envelope = JSON.parse(await file.text());
+      const result = await api.importSession(envelope);
+      newId = result.conversationId;
+      await loadSessions();
+    } catch (err) {
+      alert('Import failed: ' + (err instanceof Error ? err.message : String(err)));
+      return;
+    }
+
+    const imported = sessions.find(s => s.id === newId);
+    if (imported) await openSession(imported);
+  }
+
   function changeAgent(event: Event) {
     const id = (event.currentTarget as HTMLSelectElement).value;
     resetChat(id);
@@ -233,23 +283,53 @@
       <aside class="session-panel fade-in">
         <div class="session-panel-head">
           <div><strong>Sessions</strong><span>{sessions.length}</span></div>
-          <button class="icon-btn" on:click={() => showSessions = false} title="Close"><X size={15} /></button>
+          <div class="session-head-actions">
+            <button class="toolbar-btn" on:click={triggerImport} title="Import a session from a file">
+              <Upload size={13} /> Import
+            </button>
+            <button class="icon-btn" on:click={() => showSessions = false} title="Close"><X size={15} /></button>
+          </div>
         </div>
+        <input
+          type="file"
+          accept="application/json,.json"
+          bind:this={importInput}
+          on:change={handleImportFile}
+          hidden
+        />
         <div class="session-list">
           {#if sessions.length === 0}
             <p class="session-empty">No saved sessions yet.</p>
           {:else}
             {#each sessions as session (session.id)}
-              <button
-                class="session-item"
-                class:active={session.id === convId}
-                on:click={() => openSession(session)}
-                disabled={loadingSession || isStreaming}
-              >
-                <span class="session-item-title">{session.id}</span>
-                <span class="session-item-meta">{session.origin} · {session.status}</span>
-                <span class="session-item-time">{new Date(session.lastActive).toLocaleString()}</span>
-              </button>
+              <div class="session-row" class:active={session.id === convId}>
+                <button
+                  class="session-item"
+                  on:click={() => openSession(session)}
+                  disabled={loadingSession || isStreaming}
+                >
+                  <span class="session-item-title">{session.id}</span>
+                  <span class="session-item-meta">{session.origin} · {session.status}</span>
+                  <span class="session-item-time">{new Date(session.lastActive).toLocaleString()}</span>
+                </button>
+                <div class="session-actions">
+                  <button
+                    class="icon-btn"
+                    on:click={(e) => exportSession(session, e)}
+                    title="Export session to file"
+                  >
+                    <Download size={14} />
+                  </button>
+                  <button
+                    class="icon-btn danger"
+                    on:click={(e) => deleteSession(session, e)}
+                    disabled={isStreaming || loadingSession}
+                    title="Delete session"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              </div>
             {/each}
           {/if}
         </div>
@@ -457,23 +537,45 @@
     border-radius: 99px;
     padding: 0.1rem 0.4rem;
   }
-  .session-list { overflow-y: auto; padding: 0.45rem; }
+  .session-list { overflow-y: auto; padding: 0.45rem; display: flex; flex-direction: column; gap: 0.15rem; }
+  .session-head-actions { display: flex; align-items: center; gap: 0.35rem; }
+
+  .session-row {
+    display: flex;
+    align-items: stretch;
+    gap: 0.2rem;
+    border: 1px solid transparent;
+    border-radius: 7px;
+  }
+  .session-row:hover { background: var(--surface-2); border-color: var(--border); }
+  .session-row.active { background: var(--primary-dim); border-color: rgba(129,140,248,0.35); }
+
   .session-item {
-    width: 100%;
+    flex: 1;
+    min-width: 0;
     text-align: left;
     display: flex;
     flex-direction: column;
     gap: 0.2rem;
-    border: 1px solid transparent;
+    border: none;
     border-radius: 7px;
     background: transparent;
     color: var(--text);
     padding: 0.65rem;
     cursor: pointer;
   }
-  .session-item:hover { background: var(--surface-2); border-color: var(--border); }
-  .session-item.active { background: var(--primary-dim); border-color: rgba(129,140,248,0.35); }
   .session-item:disabled { opacity: 0.55; cursor: wait; }
+
+  .session-actions {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.1rem;
+    padding: 0.3rem 0.35rem 0.3rem 0;
+  }
+  .session-actions .icon-btn { padding: 0.25rem; }
+  .session-actions .icon-btn.danger:hover { color: var(--danger); }
   .session-item-title { font-family: monospace; font-size: 0.72rem; word-break: break-all; }
   .session-item-meta, .session-item-time { color: var(--text-3); font-size: 0.65rem; }
   .session-empty { color: var(--text-3); font-size: 0.75rem; padding: 1rem; text-align: center; }
