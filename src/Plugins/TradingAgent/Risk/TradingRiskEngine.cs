@@ -19,13 +19,13 @@ public sealed partial class TradingRiskEngine : ITradingRiskEngine
         _agentOptions = agentOptions;
     }
 
-    public RiskValidationResult Validate(IReadOnlyList<IReadOnlyList<TradingSignal>> groups)
+    public RiskValidationResult Validate(IReadOnlyList<IReadOnlyList<TradingSignal>> groups, bool? killSwitchOverride = null)
     {
         var cfg = _options.Value;
         var agent = _agentOptions.Value;
         var violations = new List<string>();
         var orderCount = groups.Sum(group => group.Count);
-        if (agent.KillSwitch)
+        if (killSwitchOverride ?? agent.KillSwitch)
             violations.Add("The global trading kill switch is active.");
         if (orderCount > Math.Max(1, agent.MaxOrdersPerBatch))
             violations.Add($"Batch has {orderCount} orders; maximum is {agent.MaxOrdersPerBatch}.");

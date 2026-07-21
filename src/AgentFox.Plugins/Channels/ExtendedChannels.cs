@@ -50,6 +50,83 @@ public class DiscordChannel : Channel
         }
     }
 
+    // Renders `actions` as clickable buttons (customId = the action's Command verbatim, e.g.
+    // "/approve A1B2C3D4") so a click is handled by HandleButtonExecutedAsync exactly like the
+    // user had typed that command — no separate resolution logic needed.
+    public override async Task SendActionableAsync(string content, IReadOnlyList<ChannelAction> actions)
+    {
+        if (!IsConnected || _textChannel == null)
+            await WaitForConnectionAsync(SendConnectionWait);
+
+        if (!IsConnected || _textChannel == null)
+        {
+            BufferOutbound(content, replyToMessageId: null);
+            return;
+        }
+
+        var builder = new ComponentBuilder();
+        for (var i = 0; i < actions.Count && i < 5; i++)
+        {
+            var action = actions[i];
+            var style = i == 0 ? ButtonStyle.Success : ButtonStyle.Secondary;
+            builder.WithButton(action.Label, customId: action.Command, style: style);
+        }
+
+        try
+        {
+            await _textChannel.SendMessageAsync(text: content, components: builder.Build());
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[Discord] Actionable send failed, buffering as plain text: {ex.Message}");
+            BufferOutbound(content, replyToMessageId: null);
+        }
+    }
+
+    private async Task HandleButtonExecutedAsync(SocketMessageComponent component)
+    {
+        try
+        {
+            if (component.Channel.Id != _channelId)
+                return;
+
+            // Acknowledge quietly (ephemeral) — we respond via the normal message pipeline,
+            // not the interaction's own response channel.
+            await component.DeferAsync(ephemeral: true);
+
+            // Strip the buttons so the same click can't be replayed once resolved.
+            try
+            {
+                await component.Message.ModifyAsync(m => m.Components = new ComponentBuilder().Build());
+            }
+            catch
+            {
+                // Message may already be edited/deleted — not critical to the approval itself.
+            }
+
+            var channelMessage = new ChannelMessage
+            {
+                Id = component.Message.Id.ToString(),
+                ChannelId = ChannelId,
+                SenderId = component.User.Id.ToString(),
+                SenderName = component.User.Username,
+                Content = component.Data.CustomId,
+                Timestamp = DateTime.UtcNow,
+                Type = MessageType.Command,
+                Metadata = new Dictionary<string, string>
+                {
+                    ["messageId"] = component.Message.Id.ToString(),
+                    ["authorId"] = component.User.Id.ToString()
+                }
+            };
+
+            RaiseMessageReceived(channelMessage);
+        }
+        catch
+        {
+        }
+    }
+
     public async Task SendEmbedAsync(EmbedBuilder embed)
     {
         try
@@ -95,6 +172,7 @@ public class DiscordChannel : Channel
             if (_client != null)
             {
                 _client.MessageReceived -= HandleMessageReceivedAsync;
+                _client.ButtonExecuted -= HandleButtonExecutedAsync;
                 _client.Disconnected -= OnDisconnectedAsync;
                 _client.Ready -= OnClientReady;
                 try { await _client.StopAsync(); } catch { }
@@ -161,6 +239,8 @@ public class DiscordChannel : Channel
         {
             _client.MessageReceived -= HandleMessageReceivedAsync;
             _client.MessageReceived += HandleMessageReceivedAsync;
+            _client.ButtonExecuted -= HandleButtonExecutedAsync;
+            _client.ButtonExecuted += HandleButtonExecutedAsync;
         }
 
         IsConnected = true;
@@ -219,6 +299,7 @@ public class DiscordChannel : Channel
             if (_client != null)
             {
                 _client.MessageReceived -= HandleMessageReceivedAsync;
+                _client.ButtonExecuted -= HandleButtonExecutedAsync;
                 _client.Disconnected -= OnDisconnectedAsync;
                 _client.Ready -= OnClientReady;
 

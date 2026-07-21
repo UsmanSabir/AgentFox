@@ -1,19 +1,20 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { CalendarClock, Plus, Trash2, RefreshCw, X, Check } from 'lucide-svelte';
+  import { CalendarClock, Plus, Trash2, RefreshCw, Pencil } from 'lucide-svelte';
   import { api, type CronJobInfo } from '$lib/api';
 
   let jobs: CronJobInfo[] = [];
   let loading = true;
   let error = '';
 
-  // Add form
-  let showAddForm = false;
-  let addName = '';
-  let addCron = '';
-  let addTask = '';
-  let addError = '';
-  let adding = false;
+  // Add / edit modal — shared for both create and update.
+  let showForm = false;
+  let formMode: 'add' | 'edit' = 'add';
+  let formName = '';
+  let formCron = '';
+  let formTask = '';
+  let formError = '';
+  let saving = false;
 
   const PRESETS = [
     { label: 'Every minute',   value: '* * * * *' },
@@ -33,19 +34,50 @@
 
   onMount(load);
 
-  async function addJob() {
-    if (!addName.trim() || !addCron.trim() || !addTask.trim()) {
-      addError = 'Name, cron expression, and task are required.'; return;
+  function openAdd() {
+    formMode = 'add';
+    formName = ''; formCron = ''; formTask = '';
+    formError = '';
+    showForm = true;
+  }
+
+  function openEdit(job: CronJobInfo) {
+    formMode = 'edit';
+    formName = job.name;
+    formCron = job.cronExpression;
+    formTask = job.task;
+    formError = '';
+    showForm = true;
+  }
+
+  function closeForm() {
+    showForm = false;
+    formError = '';
+  }
+
+  async function save() {
+    if (!formName.trim() || !formCron.trim() || !formTask.trim()) {
+      formError = 'Name, cron expression, and task are required.'; return;
     }
-    adding = true; addError = '';
+    saving = true; formError = '';
     try {
-      await api.cron.add({ name: addName.trim(), cronExpression: addCron.trim(), task: addTask.trim() });
-      addName = ''; addCron = ''; addTask = '';
-      showAddForm = false;
+      if (formMode === 'edit') {
+        await api.cron.update(formName, {
+          cronExpression: formCron.trim(),
+          task: formTask.trim(),
+        });
+      } else {
+        await api.cron.add({
+          name: formName.trim(),
+          cronExpression: formCron.trim(),
+          task: formTask.trim(),
+        });
+      }
+      showForm = false;
       await load();
     } catch (e: unknown) {
-      addError = e instanceof Error ? e.message : String(e);
-    } finally { adding = false; }
+      formError = e instanceof Error ? e.message : String(e);
+    } finally { saving = false; }
   }
 
   async function remove(name: string) {
@@ -86,7 +118,7 @@
         <RefreshCw size={14} />
         Refresh
       </button>
-      <button class="btn btn-primary" on:click={() => { showAddForm = !showAddForm; addError = ''; }}>
+      <button class="btn btn-primary" on:click={openAdd}>
         <Plus size={14} />
         Add Job
       </button>
@@ -97,39 +129,58 @@
     <div class="error-banner">{error}</div>
   {/if}
 
-  <!-- Add form -->
-  {#if showAddForm}
-    <div class="card add-form">
-      <h3 class="form-title">New Cron Job</h3>
-      <div class="form-grid">
-        <label>
-          Name
-          <input class="input" bind:value={addName} placeholder="daily-summary" />
+  <!-- Add / edit modal -->
+  {#if showForm}
+    <div
+      class="modal-overlay"
+      role="button"
+      tabindex="0"
+      on:click={closeForm}
+      on:keydown={(e) => { if (e.key === 'Escape') closeForm(); }}
+    >
+      <div class="modal card" role="dialog" aria-modal="true" tabindex="-1" on:click|stopPropagation on:keydown|stopPropagation>
+        <h3 class="form-title">{formMode === 'edit' ? `Edit “${formName}”` : 'New Cron Job'}</h3>
+        <div class="form-grid">
+          <label>
+            Name
+            <input
+              class="input"
+              bind:value={formName}
+              placeholder="daily-summary"
+              disabled={formMode === 'edit'}
+            />
+            {#if formMode === 'edit'}<span class="field-hint">Name is the job's identity and can't be changed.</span>{/if}
+          </label>
+          <label>
+            Cron expression
+            <input class="input mono" bind:value={formCron} placeholder="0 9 * * *" />
+          </label>
+        </div>
+
+        <div class="presets">
+          <span class="presets-label">Presets:</span>
+          {#each PRESETS as p}
+            <button class="preset-chip" on:click={() => (formCron = p.value)}>{p.label}</button>
+          {/each}
+        </div>
+
+        <label class="full-label">
+          Task (full prompt sent to agent)
+          <textarea
+            class="input textarea"
+            rows="10"
+            bind:value={formTask}
+            placeholder="Generate and send a daily activity summary"
+          ></textarea>
         </label>
-        <label>
-          Cron expression
-          <input class="input mono" bind:value={addCron} placeholder="0 9 * * *" />
-        </label>
-      </div>
 
-      <div class="presets">
-        <span class="presets-label">Presets:</span>
-        {#each PRESETS as p}
-          <button class="preset-chip" on:click={() => (addCron = p.value)}>{p.label}</button>
-        {/each}
-      </div>
-
-      <label class="full-label">
-        Task (prompt sent to agent)
-        <textarea class="input textarea" rows="2" bind:value={addTask} placeholder="Generate and send a daily activity summary"></textarea>
-      </label>
-
-      {#if addError}<p class="field-error">{addError}</p>{/if}
-      <div class="form-actions">
-        <button class="btn" on:click={() => { showAddForm = false; addError = ''; }}>Cancel</button>
-        <button class="btn btn-primary" on:click={addJob} disabled={adding}>
-          {adding ? 'Adding…' : 'Add Job'}
-        </button>
+        {#if formError}<p class="field-error">{formError}</p>{/if}
+        <div class="form-actions">
+          <button class="btn" on:click={closeForm}>Cancel</button>
+          <button class="btn btn-primary" on:click={save} disabled={saving}>
+            {saving ? 'Saving…' : (formMode === 'edit' ? 'Save Changes' : 'Add Job')}
+          </button>
+        </div>
       </div>
     </div>
   {/if}
@@ -173,11 +224,16 @@
             <div class="job-badges">
               <span class="badge badge-blue">{job.cronExpression}</span>
             </div>
+            <button class="icon-btn" title="View / edit job" on:click={() => openEdit(job)}>
+              <Pencil size={14} />
+            </button>
             <button class="icon-btn danger" title="Remove job" on:click={() => remove(job.name)}>
               <Trash2 size={14} />
             </button>
           </div>
-          <p class="job-task">{job.task}</p>
+          <button class="job-task" title="Click to view / edit full instructions" on:click={() => openEdit(job)}>
+            {job.task}
+          </button>
           <div class="job-meta">
             <div class="meta-item">
               <span class="meta-label">Last run</span>
@@ -208,14 +264,18 @@
 
   .error-banner { background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.3); color: #fca5a5; padding: 0.625rem 0.875rem; border-radius: var(--radius-sm); font-size: 0.8125rem; }
 
-  .add-form { padding: 1.125rem; }
+  /* Modal */
+  .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.55); display: flex; align-items: center; justify-content: center; padding: 1.5rem; z-index: 50; }
+  .modal { padding: 1.25rem 1.375rem; width: 100%; max-width: 640px; max-height: 88vh; overflow-y: auto; }
   .form-title { font-size: 0.9375rem; font-weight: 600; color: var(--text); margin: 0 0 0.875rem; }
   .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem 1rem; margin-bottom: 0.75rem; }
   .form-grid label, .full-label { display: flex; flex-direction: column; gap: 0.375rem; font-size: 0.8125rem; color: var(--text-2); }
   .full-label { margin-bottom: 0.75rem; }
-  .textarea { resize: vertical; min-height: 56px; }
+  .textarea { resize: vertical; min-height: 160px; font-family: var(--font-mono, monospace); line-height: 1.55; }
   .mono { font-family: var(--font-mono, monospace); letter-spacing: 0.03em; }
   .field-error { color: #fca5a5; font-size: 0.75rem; margin: 0.25rem 0 0; }
+  .field-hint { font-size: 0.6875rem; color: var(--text-3); }
+  .input:disabled { opacity: 0.6; cursor: not-allowed; }
   .form-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.875rem; }
 
   .presets { display: flex; flex-wrap: wrap; gap: 0.375rem; align-items: center; margin-bottom: 0.75rem; }
@@ -246,7 +306,8 @@
   .job-header { display: flex; align-items: center; gap: 0.625rem; flex-wrap: wrap; }
   .job-name { font-weight: 700; color: var(--text); font-size: 0.9375rem; flex: 1; }
   .job-badges { display: flex; gap: 0.375rem; flex-wrap: wrap; }
-  .job-task { margin: 0; font-size: 0.8125rem; color: var(--text-2); line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  .job-task { margin: 0; padding: 0; text-align: left; width: 100%; background: none; border: none; cursor: pointer; font: inherit; font-size: 0.8125rem; color: var(--text-2); line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; transition: color 0.12s; }
+  .job-task:hover { color: var(--text); }
 
   .job-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; border-top: 1px solid var(--border); padding-top: 0.625rem; }
   .meta-item { display: flex; flex-direction: column; gap: 0.125rem; }

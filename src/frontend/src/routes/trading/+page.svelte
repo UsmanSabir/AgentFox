@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api, type TradingStatus, type TradeProposal, type TradingExecution, type TradingEvent, type ReconciliationRun } from '$lib/api';
-  import { RefreshCw, ShieldAlert, Activity, FileText, ListChecks, Scale, History } from 'lucide-svelte';
+  import { RefreshCw, ShieldAlert, Activity, FileText, ListChecks, Scale, History, Power } from 'lucide-svelte';
 
   let loading = true;
+  let killSwitchBusy = false;
   let error: string | null = null;
   let status: TradingStatus | null = null;
   let proposals: TradeProposal[] = [];
@@ -29,13 +30,39 @@
 
   const date = (value?: string) => value ? new Date(value).toLocaleString() : '—';
   const json = (value: unknown) => JSON.stringify(value, null, 2);
+
+  async function toggleKillSwitch() {
+    if (!status || killSwitchBusy) return;
+    const next = !status.killSwitch;
+    if (next && !confirm('Activate the kill switch? This blocks ALL trading orders immediately.')) return;
+    killSwitchBusy = true;
+    try {
+      await api.trading.setKillSwitch(next);
+      await load();
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      killSwitchBusy = false;
+    }
+  }
+
   onMount(load);
 </script>
 
 <div class="page-wrap fade-in">
   <div class="page-header-row">
     <div><h1 class="page-title">Trading Manager</h1><p class="page-sub">Read-only operational view of the isolated PSX specialist and deterministic ledger</p></div>
-    <button class="btn btn-ghost" on:click={load} disabled={loading}><RefreshCw size={14} /> Refresh</button>
+    <div class="header-actions">
+      {#if status}
+        <button
+          class="btn kill-switch-btn"
+          class:active={status.killSwitch}
+          on:click={toggleKillSwitch}
+          disabled={killSwitchBusy}
+        ><Power size={14} /> {status.killSwitch ? 'Kill switch: ACTIVE — click to clear' : 'Kill switch: clear — click to stop trading'}</button>
+      {/if}
+      <button class="btn btn-ghost" on:click={load} disabled={loading}><RefreshCw size={14} /> Refresh</button>
+    </div>
   </div>
 
   {#if error}<div class="error-banner">{error}</div>{/if}
@@ -86,6 +113,10 @@
 
 <style>
   .page-header-row { display:flex; justify-content:space-between; align-items:flex-start; gap:1rem; margin-bottom:1.25rem; }
+  .header-actions { display:flex; gap:.6rem; align-items:center; }
+  .kill-switch-btn { display:flex; align-items:center; gap:.4rem; border:1px solid rgba(52,211,153,.35); background:rgba(52,211,153,.08); color:var(--success); border-radius:var(--radius); padding:.55rem .9rem; font-size:.78rem; font-weight:600; cursor:pointer; }
+  .kill-switch-btn.active { border-color:rgba(248,113,113,.45); background:rgba(248,113,113,.15); color:var(--danger); }
+  .kill-switch-btn:disabled { opacity:.6; cursor:wait; }
   .error-banner,.safety-banner { border:1px solid rgba(52,211,153,.25); background:rgba(52,211,153,.08); padding:.9rem 1rem; border-radius:var(--radius); margin-bottom:1rem; display:flex; gap:.75rem; align-items:center; color:var(--success); }
   .error-banner,.safety-banner.blocked { border-color:rgba(248,113,113,.3); background:rgba(248,113,113,.08); color:var(--danger); }
   .safety-banner div { display:flex; flex-direction:column; gap:.2rem; }.safety-banner span { font-size:.75rem; color:var(--text-2); }

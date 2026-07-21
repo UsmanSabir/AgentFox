@@ -148,17 +148,35 @@ public sealed class TradingAgentModule : IAgentAwareModule
                 ledger,
                 market,
                 reconciliation = brokerState,
-                killSwitch = configured.KillSwitch,
+                killSwitch = policy.KillSwitch,
                 reconciliationFresh,
                 liveExecutionReady = liveMode
                     && policy.AutoExecute
-                    && !configured.KillSwitch
+                    && !policy.KillSwitch
                     && brokerState.Supported
                     && brokerState.Healthy
                     && reconciliationFresh,
                 checkedUtc = DateTime.UtcNow
             });
         });
+
+        // Dedicated, no-restart kill switch: flips the runtime policy overlay (same store the
+        // generic /plugin-config/trading-agent editor writes to) so TradingRiskEngine picks it up
+        // on the very next order via TradingPolicyProvider — nothing to restart.
+        trading.MapPost("/kill-switch", async (
+            KillSwitchRequest body,
+            PluginConfigManager configManager,
+            ILogger<TradingAgentModule> logger,
+            CancellationToken ct) =>
+        {
+            await configManager.MergeConfigAsync("trading-agent", new Dictionary<string, object?>
+            {
+                ["killSwitch"] = body.Active
+            });
+            logger.LogWarning("[TradingAgent] Kill switch {State} via web API. Reason: {Reason}",
+                body.Active ? "ACTIVATED" : "cleared", body.Reason ?? "(none given)");
+            return Results.Ok(new { killSwitch = body.Active });
+        }).RequireAuthorization("ManagementAdministrator");
 
         trading.MapGet("/proposals", async (
             int? limit,
@@ -406,3 +424,5 @@ public sealed class TradingAgentModule : IAgentAwareModule
         return names;
     }
 }
+
+public sealed record KillSwitchRequest(bool Active, string? Reason = null);

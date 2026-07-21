@@ -63,6 +63,7 @@ public sealed class AgentOrchestrator : IHostedService
 
     private readonly HitlManager _hitlManager;
     private readonly PlanStateStore _planStore;
+    private readonly AgentFox.Plugins.PluginConfigManager _pluginConfigManager;
 
     // Built during InitializeAsync, used by StopAsync
     private ChannelManager? _channelManager;
@@ -100,10 +101,12 @@ public sealed class AgentOrchestrator : IHostedService
         ILogger<AgentOrchestrator> logger,
         PendingNotificationStore pendingNotifications,
         HitlManager hitlManager,
-        PlanStateStore planStore)
+        PlanStateStore planStore,
+        AgentFox.Plugins.PluginConfigManager pluginConfigManager)
     {
         _hitlManager          = hitlManager;
         _planStore            = planStore;
+        _pluginConfigManager  = pluginConfigManager;
         _chatClient           = chatClient;
         _toolRegistry         = toolRegistry;
         _skillRegistry        = skillRegistry;
@@ -240,6 +243,7 @@ public sealed class AgentOrchestrator : IHostedService
 
             // ── HITL tools ────────────────────────────────────────────────────
             _channelManager.SetHitlManager(_hitlManager);
+            _channelManager.SetPluginConfigManager(_pluginConfigManager);
             _toolRegistry.Register(new RequestHumanInputTool(
                 _hitlManager,
                 _channelManager,
@@ -454,23 +458,37 @@ public sealed class AgentOrchestrator : IHostedService
                     approvalId, sessionKey ?? string.Empty, channelId,
                     HitlTrigger.Tool, toolName, argsPreview);
 
-                if (channelId != null && _channelManager != null)
+                // Broadcast to every connected channel — not just the one this session
+                // originated from — plus the console, so any reachable surface (including
+                // the web UI polling HitlManager.GetPendingForSession) can resolve it.
+                // HitlManager.Respond is already id-based and channel-agnostic, so whichever
+                // surface answers first wins; the rest are harmless no-ops. Channels that
+                // support interactive UI (Discord buttons, Telegram inline keyboards) render
+                // these as one-click controls instead of requiring a typed command.
+                var actions = new List<ChannelAction>
                 {
-                    var channel = _channelManager.Channels.Values
-                        .FirstOrDefault(c => c.ChannelId == channelId && c.IsConnected);
-                    if (channel != null)
-                        await channel.SendToTargetAsync(string.Empty, msg);
-                }
-                else
-                {
-                    // Console fallback — print approval prompt
-                    AnsiConsole.WriteLine();
-                    AnsiConsole.MarkupLine($"[bold yellow]🔐 Approval Required[/] [[{approvalId}]]");
-                    AnsiConsole.MarkupLine($"Tool: [bold]{Markup.Escape(toolName)}[/]");
-                    if (argsPreview.Length > 0)
-                        AnsiConsole.MarkupLine($"Args: [dim]{Markup.Escape(argsPreview)}[/]");
-                    AnsiConsole.MarkupLine($"[dim]Type [bold]hitl approve {approvalId}[/] or [bold]hitl reject {approvalId}[/][/]");
-                }
+                    new("✅ Approve", $"/approve {approvalId}"),
+                    new("❌ Reject", $"/reject {approvalId}")
+                };
+                var deliveredTo = _channelManager != null
+                    ? await _channelManager.BroadcastActionableAsync(msg, actions)
+                    : 0;
+
+                // Console fallback — always prints; it's one more parallel notification
+                // surface now, not gated on "no channel configured" (matters for a headless
+                // service deployment with channels but no interactive console, and vice versa).
+                AnsiConsole.WriteLine();
+                AnsiConsole.MarkupLine($"[bold yellow]🔐 Approval Required[/] [[{Markup.Escape(approvalId)}]]");
+                AnsiConsole.MarkupLine($"Tool: [bold]{Markup.Escape(toolName)}[/]");
+                if (argsPreview.Length > 0)
+                    AnsiConsole.MarkupLine($"Args: [dim]{Markup.Escape(argsPreview)}[/]");
+                AnsiConsole.MarkupLine($"[dim]Type [bold]hitl approve {Markup.Escape(approvalId)}[/] or [bold]hitl reject {Markup.Escape(approvalId)}[/][/]");
+
+                if (deliveredTo == 0 && Console.IsInputRedirected)
+                    _logger?.LogWarning(
+                        "HITL approval [{ApprovalId}] has no reachable notification surface — " +
+                        "no connected channels and no interactive console. It will remain pending until it times out or the process restarts.",
+                        approvalId);
 
                 var decision = await _hitlManager.RequestApprovalAsync(request, ct);
                 return decision.Approved;

@@ -462,6 +462,22 @@ public class CronScheduler : IDisposable
     }
     
     /// <summary>
+    /// Update an existing cron job's schedule and/or task in place, preserving
+    /// its run history (LastExecuted). Returns false if the job doesn't exist.
+    /// </summary>
+    public bool UpdateJob(string name, string cronExpression, string task)
+    {
+        if (!_jobs.TryGetValue(name, out var job))
+            return false;
+
+        job.CronExpression = cronExpression;
+        job.Task = task;
+        job.NextExecution = CalculateNextExecution(cronExpression);
+        SaveJobsToFile();
+        return true;
+    }
+
+    /// <summary>
     /// Remove a cron job by name. Returns false if not found.
     /// </summary>
     public bool RemoveJob(string name)

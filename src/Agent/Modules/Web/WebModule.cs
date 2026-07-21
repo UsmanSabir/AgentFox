@@ -1,4 +1,5 @@
 using AgentFox.Helpers;
+using AgentFox.Hitl;
 using AgentFox.MCP;
 using AgentFox.Memory;
 using AgentFox.Plugins.Models;
@@ -589,11 +590,15 @@ public class WebModule : IAppModule
         // ── Pending notifications (background sub-agent results) ─────────────
         // Clients poll this after spawning a background sub-agent to receive the
         // result once it arrives. Each call drains the queue (deliver-once).
+        // Also reports a HITL approval blocking this session, if any, so the web UI
+        // can render Approve/Reject inline instead of just spinning on a blocked turn.
         endpoints.MapGet("/chat/pending/{conversationId}", (
             string conversationId,
-            PendingNotificationStore pendingStore) =>
+            PendingNotificationStore pendingStore,
+            HitlManager hitlManager) =>
         {
             var notifications = pendingStore.Drain(conversationId);
+            var pendingApproval = hitlManager.GetPendingForSession(conversationId);
             return Results.Ok(new
             {
                 conversationId,
@@ -603,9 +608,33 @@ public class WebModule : IAppModule
                     message      = n.Message,
                     timestamp    = n.Timestamp,
                     subAgentRunId = n.SubAgentRunId
-                })
+                }),
+                pendingApproval = pendingApproval == null ? null : new
+                {
+                    approvalId  = pendingApproval.ApprovalId,
+                    trigger     = pendingApproval.Trigger.ToString(),
+                    description = pendingApproval.Description,
+                    details     = pendingApproval.Details
+                }
             });
         });
+
+        // ── HITL approve / reject ─────────────────────────────────────────────
+        // Lets any connected surface — not just the channel/console a request
+        // originated from — resolve a pending approval. HitlManager.Respond is already
+        // channel-agnostic (first response to a given id wins); this just gives the web
+        // UI the same one-click action Discord/Telegram buttons and CLI commands have.
+        endpoints.MapPost("/hitl/{approvalId}/approve", (
+            string approvalId,
+            HitlDecisionRequest? body,
+            HitlManager hitlManager) =>
+            Results.Ok(new { ok = hitlManager.Respond(approvalId, approved: true, body?.Message) }));
+
+        endpoints.MapPost("/hitl/{approvalId}/reject", (
+            string approvalId,
+            HitlDecisionRequest? body,
+            HitlManager hitlManager) =>
+            Results.Ok(new { ok = hitlManager.Respond(approvalId, approved: false, body?.Message) }));
 
         // ── Channels ─────────────────────────────────────────────────────────
 
@@ -727,6 +756,17 @@ public class WebModule : IAppModule
 
             scheduling.CronScheduler!.AddJob(req.Name, req.CronExpression, req.Task);
             return Results.Ok(new { success = true });
+        });
+
+        endpoints.MapPut("/cron/{name}", (SchedulingHolder scheduling, string name, CronJobUpdateRequest req) =>
+        {
+            if (!scheduling.IsAvailable) return Results.StatusCode(503);
+            if (string.IsNullOrWhiteSpace(req.CronExpression)
+                || string.IsNullOrWhiteSpace(req.Task))
+                return Results.BadRequest(new { error = "CronExpression and Task are required." });
+
+            var updated = scheduling.CronScheduler!.UpdateJob(name, req.CronExpression, req.Task);
+            return updated ? Results.Ok(new { success = true }) : Results.NotFound();
         });
 
         endpoints.MapDelete("/cron/{name}", (SchedulingHolder scheduling, string name) =>
@@ -920,6 +960,9 @@ public class WebModule : IAppModule
 
 // ── Request / response models ─────────────────────────────────────────────────
 
+/// <summary>Optional feedback/reason accompanying a HITL /hitl/{id}/approve|reject call.</summary>
+public record HitlDecisionRequest(string? Message);
+
 public record HeartbeatRequest(
     string Name,
     string Task,
@@ -956,5 +999,9 @@ public record HeartbeatUpdateRequest(
 
 public record CronJobRequest(
     string Name,
+    string CronExpression,
+    string Task);
+
+public record CronJobUpdateRequest(
     string CronExpression,
     string Task);

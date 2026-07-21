@@ -118,7 +118,7 @@ public sealed class CliWorker : BackgroundService
         catch (Exception ex)
         {
             _logger.LogError(ex, "CLI session terminated unexpectedly.");
-            AnsiConsole.MarkupLine($"[bold red][ERR][/] CLI session terminated: {Markup.Escape(ex.Message)}");
+            AnsiConsole.MarkupLine($"[bold red][[ERR]][/] CLI session terminated: {Markup.Escape(ex.Message)}");
         }
         finally
         {
@@ -164,21 +164,38 @@ public sealed class CliWorker : BackgroundService
             if (string.IsNullOrWhiteSpace(input))
                 continue;
 
-            var handled = await HandleReplCommandAsync(
-                input, agent, consoleSessionId, channelManager, doctorAgent, ct);
-
-            if (handled == ReplAction.Exit)
+            // A bug in a single command handler must not escape this loop: this REPL runs
+            // in the same host as the Web module and every messaging channel, and an
+            // unhandled exception here previously took ALL of them down via
+            // BackgroundServiceExceptionBehavior.StopHost (see CliWorker crash on a Spectre
+            // markup parse error from an unescaped approval id).
+            try
             {
-                AnsiConsole.MarkupLine("[bold green]Goodbye![/]");
-                // StopApplication triggers AgentOrchestrator.StopAsync which
-                // disconnects channels and stops the command processor.
+                var handled = await HandleReplCommandAsync(
+                    input, agent, consoleSessionId, channelManager, doctorAgent, ct);
+
+                if (handled == ReplAction.Exit)
+                {
+                    AnsiConsole.MarkupLine("[bold green]Goodbye![/]");
+                    // StopApplication triggers AgentOrchestrator.StopAsync which
+                    // disconnects channels and stops the command processor.
+                    break;
+                }
+
+                if (handled != ReplAction.Unhandled)
+                    continue;
+
+                await RunAgentTurnAsync(input, agent, consoleSessionId, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
                 break;
             }
-
-            if (handled != ReplAction.Unhandled)
-                continue;
-
-            await RunAgentTurnAsync(input, agent, consoleSessionId, ct);
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "REPL command failed: {Input}", input);
+                AnsiConsole.MarkupLine($"[bold red]Command failed:[/] {Markup.Escape(ex.Message)}");
+            }
         }
     }
 
@@ -280,9 +297,9 @@ public sealed class CliWorker : BackgroundService
             var feedback   = spaceIdx < 0 ? null : rest[(spaceIdx + 1)..].Trim();
 
             if (_hitlManager.Respond(approvalId, approved: true, feedback))
-                AnsiConsole.MarkupLine($"[green]✅ Approved[/] [{approvalId}]");
+                AnsiConsole.MarkupLine($"[green]✅ Approved[/] [[{Markup.Escape(approvalId)}]]");
             else
-                AnsiConsole.MarkupLine($"[yellow]No pending approval with id '{approvalId}'.[/]");
+                AnsiConsole.MarkupLine($"[yellow]No pending approval with id '{Markup.Escape(approvalId)}'.[/]");
             return ReplAction.Handled;
         }
 
@@ -294,9 +311,9 @@ public sealed class CliWorker : BackgroundService
             var reason     = spaceIdx < 0 ? null : rest[(spaceIdx + 1)..].Trim();
 
             if (_hitlManager.Respond(approvalId, approved: false, reason))
-                AnsiConsole.MarkupLine($"[red]❌ Rejected[/] [{approvalId}]");
+                AnsiConsole.MarkupLine($"[red]❌ Rejected[/] [[{Markup.Escape(approvalId)}]]");
             else
-                AnsiConsole.MarkupLine($"[yellow]No pending approval with id '{approvalId}'.[/]");
+                AnsiConsole.MarkupLine($"[yellow]No pending approval with id '{Markup.Escape(approvalId)}'.[/]");
             return ReplAction.Handled;
         }
 

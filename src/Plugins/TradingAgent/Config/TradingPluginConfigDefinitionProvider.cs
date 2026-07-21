@@ -61,6 +61,15 @@ public sealed class TradingPluginConfigDefinitionProvider : IPluginConfigDefinit
                     Type = "select",
                     DefaultValue = options.MinConfidence,
                     Options = ["LOW", "MEDIUM", "HIGH"]
+                },
+                new PluginConfigFieldDefinition
+                {
+                    Key = "killSwitch",
+                    Label = "Kill switch",
+                    Description = "Emergency stop — blocks every order immediately, independent of AutoExecute, " +
+                                  "execution mode, and the LLM. Takes effect on the next order without a restart.",
+                    Type = "boolean",
+                    DefaultValue = options.KillSwitch
                 }
             ]
         };
