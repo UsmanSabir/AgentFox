@@ -1,6 +1,7 @@
 using AgentFox.Agents;
 using AgentFox.Hitl;
 using AgentFox.Models;
+using AgentFox.Plugins;
 using AgentFox.Plugins.Channels;
 using AgentFox.Plugins.Interfaces;
 using AgentFox.Sessions;
@@ -21,6 +22,7 @@ public class ChannelManager
     private readonly ICommandQueue? _commandQueue;
     private readonly ILogger? _logger;
     private HitlManager? _hitlManager;
+    private PluginConfigManager? _pluginConfigManager;
     private readonly IAgentRegistry? _agentRegistry;
 
     public IReadOnlyDictionary<string, Channel> Channels => _channels;
@@ -67,6 +69,13 @@ public class ChannelManager
     /// </summary>
     public void SetHitlManager(HitlManager hitlManager) =>
         _hitlManager = hitlManager;
+
+    /// <summary>
+    /// Wires in plugin config access so incoming channel messages can drive the trading
+    /// kill switch (/killswitch on|off) without going through the LLM.
+    /// </summary>
+    public void SetPluginConfigManager(PluginConfigManager pluginConfigManager) =>
+        _pluginConfigManager = pluginConfigManager;
 
     public void AddChannel(Channel channel)
     {
@@ -166,6 +175,45 @@ public class ChannelManager
             return;
         }
         var messageContent = message.Content ?? string.Empty;
+
+        // ── Trading kill switch — deterministic control command, never reaches the LLM ──
+        // Intentionally coupled to the trading plugin's "trading-agent"/"killSwitch" config key
+        // rather than a generic command registry: this is the one cross-plugin control-plane
+        // command that needs to work even if the agent loop is busy, stuck, or misbehaving.
+        if (_pluginConfigManager != null)
+        {
+            var ksContent = messageContent.Trim();
+            var isKillSwitchCommand =
+                ksContent.StartsWith("/killswitch ", StringComparison.OrdinalIgnoreCase) ||
+                ksContent.StartsWith("killswitch ", StringComparison.OrdinalIgnoreCase);
+
+            if (isKillSwitchCommand)
+            {
+                var rest = ksContent[(ksContent.IndexOf(' ') + 1)..].Trim();
+                var spaceIdx = rest.IndexOf(' ');
+                var stateWord = (spaceIdx < 0 ? rest : rest[..spaceIdx]).ToLowerInvariant();
+                var reason = spaceIdx < 0 ? null : rest[(spaceIdx + 1)..].Trim();
+
+                if (stateWord is "on" or "off")
+                {
+                    var active = stateWord == "on";
+                    await _pluginConfigManager.MergeConfigAsync("trading-agent", new Dictionary<string, object?>
+                    {
+                        ["killSwitch"] = active
+                    });
+                    _logger?.LogWarning(
+                        "[ChannelManager] Trading kill switch {State} via channel command. Reason: {Reason}",
+                        active ? "ACTIVATED" : "cleared", reason ?? "(none given)");
+                    await channel.SendReplyAsync(message, active
+                        ? "🛑 Kill switch ACTIVATED — all trading orders blocked."
+                        : "✅ Kill switch cleared — trading resumes per normal policy.");
+                    return;
+                }
+
+                await channel.SendReplyAsync(message, "Usage: `/killswitch on [reason]` or `/killswitch off [reason]`");
+                return;
+            }
+        }
 
         // ── HITL interception — runs before gateway/queue routing ─────────────
         if (_hitlManager != null)

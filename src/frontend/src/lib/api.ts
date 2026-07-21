@@ -547,6 +547,8 @@ export const api = {
     executions:     (limit = 100)         => get<TradingExecution[]>(`/trading/executions?limit=${limit}`),
     events:         (limit = 200)         => get<TradingEvent[]>(`/trading/events?limit=${limit}`),
     reconciliation: (limit = 100)         => get<ReconciliationRun[]>(`/trading/reconciliation?limit=${limit}`),
+    setKillSwitch:  (active: boolean, reason?: string) =>
+      post<{ killSwitch: boolean }>('/trading/kill-switch', { active, reason }),
   }
 };
 

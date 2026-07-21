@@ -13,6 +13,7 @@ public sealed record TradingPolicySnapshot(
     bool AutoBuyWithoutEntryPrice,
     bool RetryFailedTakeProfit,
     int TakeProfitRetryIntervalMinutes,
+    bool KillSwitch,
     string Version);
 
 /// <summary>
@@ -40,8 +41,9 @@ public sealed class TradingPolicyProvider
         var auto = GetBool(runtime, "autoExecute") ?? opts.AutoExecute;
         var mode = GetString(runtime, "executionMode") ?? opts.ExecutionMode;
         var confidence = GetString(runtime, "minConfidence") ?? opts.MinConfidence;
+        var killSwitch = GetBool(runtime, "killSwitch") ?? opts.KillSwitch;
 
-        var canonical = string.Join('|', auto, mode, confidence,
+        var canonical = string.Join('|', auto, mode, confidence, killSwitch,
             opts.AutoPlaceTargetSell, opts.AutoBuyWithoutEntryPrice,
             opts.RetryFailedTakeProfit, opts.TakeProfitRetryIntervalMinutes);
         var version = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)))[..16];
@@ -54,6 +56,7 @@ public sealed class TradingPolicyProvider
             opts.AutoBuyWithoutEntryPrice,
             opts.RetryFailedTakeProfit,
             Math.Max(1, opts.TakeProfitRetryIntervalMinutes),
+            killSwitch,
             version);
     }
 

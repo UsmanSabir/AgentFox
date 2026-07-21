@@ -72,7 +72,7 @@ public sealed class TradingManager
         if (groups.Count == 0 || groups.All(g => g.Count == 0))
             return TradingExecutionResult.Rejected(policy.Version, "No orders were supplied.");
 
-        var risk = _riskEngine.Validate(groups);
+        var risk = _riskEngine.Validate(groups, policy.KillSwitch);
         if (!risk.Allowed)
             return TradingExecutionResult.Rejected(policy.Version,
                 "Pre-trade risk validation failed: " + string.Join(" ", risk.Violations));

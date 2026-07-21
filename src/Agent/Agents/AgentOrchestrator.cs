@@ -63,6 +63,7 @@ public sealed class AgentOrchestrator : IHostedService
 
     private readonly HitlManager _hitlManager;
     private readonly PlanStateStore _planStore;
+    private readonly AgentFox.Plugins.PluginConfigManager _pluginConfigManager;
 
     // Built during InitializeAsync, used by StopAsync
     private ChannelManager? _channelManager;
@@ -100,10 +101,12 @@ public sealed class AgentOrchestrator : IHostedService
         ILogger<AgentOrchestrator> logger,
         PendingNotificationStore pendingNotifications,
         HitlManager hitlManager,
-        PlanStateStore planStore)
+        PlanStateStore planStore,
+        AgentFox.Plugins.PluginConfigManager pluginConfigManager)
     {
         _hitlManager          = hitlManager;
         _planStore            = planStore;
+        _pluginConfigManager  = pluginConfigManager;
         _chatClient           = chatClient;
         _toolRegistry         = toolRegistry;
         _skillRegistry        = skillRegistry;
@@ -240,6 +243,7 @@ public sealed class AgentOrchestrator : IHostedService
 
             // ── HITL tools ────────────────────────────────────────────────────
             _channelManager.SetHitlManager(_hitlManager);
+            _channelManager.SetPluginConfigManager(_pluginConfigManager);
             _toolRegistry.Register(new RequestHumanInputTool(
                 _hitlManager,
                 _channelManager,

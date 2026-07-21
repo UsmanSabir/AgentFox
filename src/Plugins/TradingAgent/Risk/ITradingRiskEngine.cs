@@ -10,5 +10,9 @@ public sealed record RiskValidationResult(bool Allowed, IReadOnlyList<string> Vi
 
 public interface ITradingRiskEngine
 {
-    RiskValidationResult Validate(IReadOnlyList<IReadOnlyList<TradingSignal>> groups);
+    /// <param name="killSwitchOverride">
+    /// The current runtime kill-switch value (from <see cref="TradingAgent.Config.TradingPolicyProvider"/>).
+    /// Omit to fall back to the static appsettings value.
+    /// </param>
+    RiskValidationResult Validate(IReadOnlyList<IReadOnlyList<TradingSignal>> groups, bool? killSwitchOverride = null);
 }
