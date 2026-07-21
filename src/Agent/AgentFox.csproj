@@ -95,6 +95,7 @@
 	  <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" />
 	  <PackageReference Include="Newtonsoft.Json" />
 	  <PackageReference Include="YamlDotNet" />
+	  <PackageReference Include="Cronos" />
 	  <PackageReference Include="ModelContextProtocol.Core" />
 	  <PackageReference Include="Discord.Net" />
 	  <!-- Serves wwwroot embedded in the assembly for single-file publish -->

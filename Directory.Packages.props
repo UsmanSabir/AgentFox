@@ -48,6 +48,7 @@
     <PackageVersion Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.3" />
 
     <!-- Channels, tooling, misc -->
+    <PackageVersion Include="Cronos" Version="0.13.0" />
     <PackageVersion Include="Discord.Net" Version="3.20.1" />
     <PackageVersion Include="FastBertTokenizer" Version="1.0.28" />
     <PackageVersion Include="Microsoft.ML.OnnxRuntime" Version="1.27.1" />
