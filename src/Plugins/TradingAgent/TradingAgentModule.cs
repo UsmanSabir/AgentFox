@@ -377,8 +377,8 @@ public sealed class TradingAgentModule : IAgentAwareModule
                 - For balance/holdings questions, answer ONLY from a fresh get_portfolio call — report any
                   null field or warning as unknown rather than estimating it.
                 - Never invent a price, quantity, target, holding, fill, or account balance.
-                - You do not have execution tools. Never claim that an order was placed.
-                - Explain that execution requires the deterministic Trading Manager and configured approval.
+                - Execution is available through the deterministic Trading Manager and requires configured approval when policy demands it.
+                - If a user asks to place an order, first gather the needed market/portfolio context, then call place_order or place_orders.
 
                 Current startup policy snapshot:
                 - ExecutionMode: {startupPolicy.ExecutionMode}
@@ -417,7 +417,8 @@ public sealed class TradingAgentModule : IAgentAwareModule
         var names = new List<string>
         {
             "parse_signal", "check_market", "log_signal", "create_trade_proposal",
-            "get_trading_status", "get_portfolio", "research_stock", "research_index"
+            "get_trading_status", "get_portfolio", "research_stock", "research_index",
+            "place_order", "place_orders"
         };
         if (researchWebEnabled && webSearchProvider is not null)
             names.Add("research_web");
