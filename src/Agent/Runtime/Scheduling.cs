@@ -1,5 +1,6 @@
 using System.Timers;
 using System.Text;
+using Cronos;
 using AgentFox.Agents;
 using AgentFox.Models;
 using AgentFox.Sessions;
@@ -567,29 +568,24 @@ public class CronScheduler : IDisposable
     
     private DateTime CalculateNextExecution(string cronExpression)
     {
-        // Simple cron parser - for production, use a proper cron library
-        var parts = cronExpression.Split(' ');
-        if (parts.Length != 5) return DateTime.UtcNow.AddMinutes(1);
-        
+        // Standard 5-field cron (minute hour day-of-month month day-of-week),
+        // evaluated in UTC. Cron jobs are scheduled against DateTime.UtcNow, so
+        // e.g. "0 6 * * 1-5" fires at 06:00 UTC (11:00 PKT) on weekdays.
         var now = DateTime.UtcNow;
-        
         try
         {
-            // Very basic cron interpretation
-            if (parts[0] == "*" && parts[1] == "*" && parts[2] == "*" && parts[3] == "*" && parts[4] == "*")
-                return now.AddMinutes(1); // Every minute
-            
-            if (parts[0] != "*" && parts[1] == "*" && parts[2] == "*" && parts[3] == "*" && parts[4] == "*")
-            {
-                var minute = int.Parse(parts[0]);
-                var next = now.Date.AddHours(now.Hour).AddMinutes(minute);
-                if (next <= now) next = next.AddHours(1);
-                return next;
-            }
+            var expr = CronExpression.Parse(cronExpression.Trim());
+            var next = expr.GetNextOccurrence(now, TimeZoneInfo.Utc);
+            // No future occurrence (unreachable schedule) — back off a day rather
+            // than hammering the check every tick.
+            return next ?? now.AddDays(1);
         }
-        catch { }
-        
-        return now.AddMinutes(1);
+        catch
+        {
+            // Malformed expression — back off an hour instead of re-firing every
+            // minute (the previous fallback caused runaway execution).
+            return now.AddHours(1);
+        }
     }
     
     // ── Persistence ──────────────────────────────────────────────────────────
