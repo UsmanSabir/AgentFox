@@ -729,6 +729,17 @@ public class WebModule : IAppModule
             return Results.Ok(new { success = true });
         });
 
+        endpoints.MapPut("/cron/{name}", (SchedulingHolder scheduling, string name, CronJobUpdateRequest req) =>
+        {
+            if (!scheduling.IsAvailable) return Results.StatusCode(503);
+            if (string.IsNullOrWhiteSpace(req.CronExpression)
+                || string.IsNullOrWhiteSpace(req.Task))
+                return Results.BadRequest(new { error = "CronExpression and Task are required." });
+
+            var updated = scheduling.CronScheduler!.UpdateJob(name, req.CronExpression, req.Task);
+            return updated ? Results.Ok(new { success = true }) : Results.NotFound();
+        });
+
         endpoints.MapDelete("/cron/{name}", (SchedulingHolder scheduling, string name) =>
         {
             if (!scheduling.IsAvailable) return Results.StatusCode(503);
@@ -956,5 +967,9 @@ public record HeartbeatUpdateRequest(
 
 public record CronJobRequest(
     string Name,
+    string CronExpression,
+    string Task);
+
+public record CronJobUpdateRequest(
     string CronExpression,
     string Task);

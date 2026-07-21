@@ -187,6 +187,11 @@ export interface CronJobRequest {
   task: string;
 }
 
+export interface CronJobUpdateRequest {
+  cronExpression: string;
+  task: string;
+}
+
 // ── Plugin Sessions & Config ──────────────────────────────────────────────
 
 export interface ToolExecution {
@@ -408,6 +413,16 @@ async function patch<T>(path: string, body: unknown): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+async function put<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    method:  'PUT',
+    headers: requestHeaders(true),
+    body:    JSON.stringify(body)
+  });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json() as Promise<T>;
+}
+
 async function del<T>(path: string): Promise<T> {
   const res = await fetch(`${BASE}${path}`, { method: 'DELETE', headers: requestHeaders() });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
@@ -493,6 +508,8 @@ export const api = {
   cron: {
     list:   ()                         => get<CronJobInfo[]>('/cron'),
     add:    (req: CronJobRequest)      => post<{ success: boolean }>('/cron', req),
+    update: (name: string, req: CronJobUpdateRequest) =>
+              put<{ success: boolean }>(`/cron/${encodeURIComponent(name)}`, req),
     remove: (name: string)             => del<{ success: boolean }>(`/cron/${encodeURIComponent(name)}`),
   },
 
