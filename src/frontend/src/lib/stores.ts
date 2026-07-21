@@ -1,5 +1,5 @@
 import { writable, derived } from 'svelte/store';
-import type { AgentStatus, AgentInfo, ToolInfo, SkillInfo, ReferenceItem } from './api';
+import type { AgentStatus, AgentInfo, ToolInfo, SkillInfo, ReferenceItem, PendingApprovalInfo } from './api';
 
 // ── Agent status (polled every 5 s) ──────────────────────────────────────
 export const agentStatus = writable<AgentStatus | null>(null);
@@ -21,6 +21,7 @@ export interface ChatMessage {
   timestamp: Date;
   isBackgroundResult?: boolean;
   references?: ReferenceItem[];
+  pendingApproval?: PendingApprovalInfo;
 }
 
 export const chatMessages = writable<ChatMessage[]>([]);
@@ -72,6 +73,30 @@ export function attachReferences(id: string, references?: ReferenceItem[]) {
   if (!references || references.length === 0) return;
   chatMessages.update(msgs =>
     msgs.map(m => m.id === id ? { ...m, references } : m)
+  );
+}
+
+// Shows/updates a bubble for a HITL approval blocking the current turn (upsert by
+// approvalId so repeated polls don't spawn duplicate bubbles).
+export function upsertPendingApproval(approval: PendingApprovalInfo) {
+  chatMessages.update(msgs => {
+    const existing = msgs.find(m => m.pendingApproval?.approvalId === approval.approvalId);
+    if (existing) {
+      return msgs.map(m => m.id === existing.id ? { ...m, pendingApproval: approval } : m);
+    }
+    return [...msgs, {
+      id: crypto.randomUUID(), role: 'assistant' as const, content: '',
+      pendingApproval: approval, timestamp: new Date()
+    }];
+  });
+}
+
+// Clears a resolved approval's bubble (by id, or all of them if none is currently pending).
+export function clearPendingApproval(approvalId?: string) {
+  chatMessages.update(msgs =>
+    msgs.map(m => (!approvalId || m.pendingApproval?.approvalId === approvalId)
+      ? { ...m, pendingApproval: undefined }
+      : m)
   );
 }
 

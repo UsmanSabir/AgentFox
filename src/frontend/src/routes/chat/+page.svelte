@@ -4,7 +4,8 @@
   import { renderMarkdown } from '$lib/markdown';
   import {
     chatMessages, addUserMessage, addAssistantMessage, addBackgroundResultMessage,
-    appendToken, finalizeMessage, attachReferences, activeConversationId, activeAgentId, agentReady, resetChat
+    appendToken, finalizeMessage, attachReferences, activeConversationId, activeAgentId, agentReady, resetChat,
+    upsertPendingApproval, clearPendingApproval
   } from '$lib/stores';
   import {
     Send, RotateCcw, StopCircle, Bot, User, Copy, Check, Zap, History, Plus, X,
@@ -60,8 +61,28 @@
         }
         await scrollToBottom();
       }
+      if (data.pendingApproval) {
+        upsertPendingApproval(data.pendingApproval);
+      } else {
+        clearPendingApproval();
+      }
     } catch {
       // silently ignore poll errors (server may be restarting)
+    }
+  }
+
+  let respondingApprovalId: string | null = null;
+
+  async function respondToApproval(approvalId: string, approved: boolean) {
+    respondingApprovalId = approvalId;
+    try {
+      if (approved) await api.hitlApprove(approvalId);
+      else await api.hitlReject(approvalId);
+      clearPendingApproval(approvalId);
+    } catch {
+      // leave the bubble in place — the next poll (or a retry click) can still resolve it
+    } finally {
+      respondingApprovalId = null;
     }
   }
 
@@ -453,6 +474,25 @@
 
               {#if msg.error}
                 <div class="message-error">{msg.error}</div>
+              {:else if msg.pendingApproval}
+                <div class="approval-card">
+                  <div class="approval-desc">🔐 {msg.pendingApproval.description}</div>
+                  {#if msg.pendingApproval.details}
+                    <div class="approval-details">{msg.pendingApproval.details}</div>
+                  {/if}
+                  <div class="approval-actions">
+                    <button
+                      class="approval-btn approve"
+                      disabled={respondingApprovalId === msg.pendingApproval.approvalId}
+                      on:click={() => msg.pendingApproval && respondToApproval(msg.pendingApproval.approvalId, true)}
+                    >✅ Approve</button>
+                    <button
+                      class="approval-btn reject"
+                      disabled={respondingApprovalId === msg.pendingApproval.approvalId}
+                      on:click={() => msg.pendingApproval && respondToApproval(msg.pendingApproval.approvalId, false)}
+                    >❌ Reject</button>
+                  </div>
+                </div>
               {:else if msg.role === 'user'}
                 <div class="message-content user-text">{msg.content}</div>
               {:else}
@@ -943,6 +983,54 @@
     border-radius: 8px;
     padding: 0.625rem 0.875rem;
     font-size: 0.8125rem;
+    color: var(--danger);
+  }
+
+  .approval-card {
+    background: rgba(250,204,21,0.08);
+    border: 1px solid rgba(250,204,21,0.3);
+    border-radius: 8px;
+    padding: 0.75rem 0.875rem;
+    font-size: 0.8125rem;
+  }
+  .approval-desc {
+    font-weight: 600;
+    color: var(--text-1);
+    margin-bottom: 0.25rem;
+  }
+  .approval-details {
+    color: var(--text-3);
+    font-size: 0.75rem;
+    margin-bottom: 0.625rem;
+    word-break: break-word;
+  }
+  .approval-actions {
+    display: flex;
+    gap: 0.5rem;
+  }
+  .approval-btn {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    padding: 0.375rem 0.75rem;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text-1);
+    cursor: pointer;
+  }
+  .approval-btn:hover:not(:disabled) {
+    filter: brightness(1.1);
+  }
+  .approval-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .approval-btn.approve {
+    border-color: rgba(74,222,128,0.4);
+    color: #4ade80;
+  }
+  .approval-btn.reject {
+    border-color: rgba(248,113,113,0.4);
     color: var(--danger);
   }
 

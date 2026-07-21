@@ -276,10 +276,18 @@ export interface PendingNotification {
   subAgentRunId?: string;
 }
 
+export interface PendingApprovalInfo {
+  approvalId: string;
+  trigger: string;
+  description: string;
+  details: string;
+}
+
 export interface PendingNotificationsResponse {
   conversationId: string;
   count: number;
   notifications: PendingNotification[];
+  pendingApproval: PendingApprovalInfo | null;
 }
 
 export interface TradingStatus {
@@ -483,6 +491,10 @@ export const api = {
   channels: () => get<ChannelsStatus>('/channels'),
   pendingNotifications: (conversationId: string) =>
     get<PendingNotificationsResponse>(`/chat/pending/${encodeURIComponent(conversationId)}`),
+  hitlApprove: (approvalId: string, message?: string) =>
+    post<{ ok: boolean }>(`/hitl/${encodeURIComponent(approvalId)}/approve`, { message }),
+  hitlReject: (approvalId: string, message?: string) =>
+    post<{ ok: boolean }>(`/hitl/${encodeURIComponent(approvalId)}/reject`, { message }),
 
   chat: async (req: ChatRequest): Promise<ChatResponse> => {
     const res = await fetch(`${BASE}/chat`, {

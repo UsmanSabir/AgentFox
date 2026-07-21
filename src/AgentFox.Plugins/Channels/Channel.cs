@@ -40,7 +40,28 @@ public abstract class Channel
     {
         await SendMessageAsync(content);
     }
+
+    /// <summary>
+    /// Sends a message paired with one or more follow-up actions (e.g. HITL approve/reject).
+    /// Channels that support interactive UI (Discord buttons, Telegram inline keyboards)
+    /// should override this to render <paramref name="actions"/> as clickable controls that,
+    /// when triggered, raise <see cref="OnMessageReceived"/> with the action's
+    /// <see cref="ChannelAction.Command"/> as the message content — reusing the same
+    /// text-command handling every channel already supports. The default implementation
+    /// just sends the text as-is; callers should ensure that text also spells out the
+    /// commands themselves as a fallback for channels with no interactive UI.
+    /// </summary>
+    public virtual Task SendActionableAsync(string content, IReadOnlyList<ChannelAction> actions) =>
+        SendToTargetAsync(string.Empty, content);
 }
+
+/// <summary>
+/// A single follow-up action offered alongside a channel message (e.g. an Approve button).
+/// <see cref="Command"/> is the exact text that should be treated as if the user typed it
+/// themselves — e.g. "/approve A1B2C3D4" — so channels can implement interactive UI without
+/// any new server-side resolution logic.
+/// </summary>
+public sealed record ChannelAction(string Label, string Command);
 
 public sealed record WebhookResult(bool Supported, bool Accepted, string? Error = null)
 {

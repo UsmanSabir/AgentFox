@@ -109,6 +109,54 @@ public class ChannelManager
             await channel.DisconnectAsync();
     }
 
+    /// <summary>
+    /// Sends the same message to every connected channel — used for HITL approval
+    /// notifications so any configured surface (not just the originating one) can act on
+    /// them. Mirrors <c>NotifyUserTool</c>'s broadcast pattern. Per-channel failures are
+    /// logged and swallowed so one broken channel cannot suppress the notification on the
+    /// others. Returns the number of channels the message was actually sent to.
+    /// </summary>
+    public async Task<int> BroadcastAsync(string message)
+    {
+        var sent = 0;
+        foreach (var channel in _channels.Values.Where(c => c.IsConnected))
+        {
+            try
+            {
+                await channel.SendToTargetAsync(string.Empty, message);
+                sent++;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(ex, "BroadcastAsync: failed to deliver to channel {Channel}", channel.Type);
+            }
+        }
+        return sent;
+    }
+
+    /// <summary>
+    /// Like <see cref="BroadcastAsync"/>, but gives channels that support interactive UI
+    /// (Discord buttons, Telegram inline keyboards) a chance to render <paramref name="actions"/>
+    /// as one-click controls instead of requiring the user to type a command back.
+    /// </summary>
+    public async Task<int> BroadcastActionableAsync(string message, IReadOnlyList<ChannelAction> actions)
+    {
+        var sent = 0;
+        foreach (var channel in _channels.Values.Where(c => c.IsConnected))
+        {
+            try
+            {
+                await channel.SendActionableAsync(message, actions);
+                sent++;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(ex, "BroadcastActionableAsync: failed to deliver to channel {Channel}", channel.Type);
+            }
+        }
+        return sent;
+    }
+
     private async Task HandleMessage(Channel channel, ChannelMessage message)
     {
         var agent = _agentFactory();

@@ -149,4 +149,12 @@ public class HitlManager
         _pending.Values.Select(e => (e.Request, e.CreatedAt)).ToList();
 
     public bool HasAnyPending() => !_pending.IsEmpty;
+
+    /// <summary>
+    /// Returns the pending Mode 1 approval request for the given session, if any.
+    /// Lets a client (e.g. the web chat UI) poll "is my turn currently blocked on approval?"
+    /// without holding the originating request open for the whole wait.
+    /// </summary>
+    public HitlRequest? GetPendingForSession(string sessionKey) =>
+        _pending.Values.FirstOrDefault(e => e.Request.SessionKey == sessionKey)?.Request;
 }

@@ -45,8 +45,20 @@ public sealed class FoxAgentHolder
 internal sealed class FoxAgentService : IAgentService
 {
     private readonly FoxAgentHolder _holder;
+    private readonly PendingNotificationStore? _pendingStore;
 
-    public FoxAgentService(FoxAgentHolder holder) => _holder = holder;
+    public FoxAgentService(FoxAgentHolder holder, PendingNotificationStore? pendingStore = null)
+    {
+        _holder = holder;
+        _pendingStore = pendingStore;
+    }
+
+    // A turn (e.g. one blocked on a HITL approval) must survive the caller's HTTP
+    // connection dropping mid-wait — it is not the caller's turn to cancel just because
+    // a browser tab closed or a proxy timed out. `ct` is honored only for the initial
+    // "agent not ready yet" wait and to decide, once the turn finishes, whether the
+    // result still has a live connection to be written to or needs to fall back to
+    // PendingNotificationStore for the client to pick up on its next poll.
 
     public async Task<AgentReply> RunAsync(
         string input,
@@ -54,8 +66,13 @@ internal sealed class FoxAgentService : IAgentService
         CancellationToken ct = default)
     {
         var agent = await _holder.WaitAsync(ct);
-        var result = await agent.ProcessAsync(input, conversationId, cancellationToken: ct);
-        return new AgentReply { Output = result.Output ?? string.Empty, References = result.References };
+        var result = await agent.ProcessAsync(input, conversationId, cancellationToken: CancellationToken.None);
+        var reply = new AgentReply { Output = result.Output ?? string.Empty, References = result.References };
+
+        if (ct.IsCancellationRequested && conversationId != null)
+            _pendingStore?.Add(conversationId, reply.Output);
+
+        return reply;
     }
 
     public async Task<AgentReply> StreamAsync(
@@ -65,9 +82,24 @@ internal sealed class FoxAgentService : IAgentService
         CancellationToken ct = default)
     {
         var agent = await _holder.WaitAsync(ct);
-        var streaming = new StreamingCallbacks { OnToken = onToken };
-        var result = await agent.ProcessAsync(input, conversationId, streaming, ct);
-        return new AgentReply { Output = result.Output ?? string.Empty, References = result.References };
+
+        // Once the caller's connection is gone, stop trying to write tokens to it but
+        // keep the underlying turn running to completion.
+        async Task SafeOnToken(string token)
+        {
+            if (ct.IsCancellationRequested) return;
+            try { await onToken(token); }
+            catch { /* connection gone; the turn keeps running */ }
+        }
+
+        var streaming = new StreamingCallbacks { OnToken = SafeOnToken };
+        var result = await agent.ProcessAsync(input, conversationId, streaming, CancellationToken.None);
+        var reply = new AgentReply { Output = result.Output ?? string.Empty, References = result.References };
+
+        if (ct.IsCancellationRequested && conversationId != null)
+            _pendingStore?.Add(conversationId, reply.Output);
+
+        return reply;
     }
 }
 

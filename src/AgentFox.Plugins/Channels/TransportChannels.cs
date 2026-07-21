@@ -182,7 +182,7 @@ public class TelegramChannel : Channel
         {
             try
             {
-                var url = $"{ApiBase}/getUpdates?offset={_updateOffset}&timeout={_pollingTimeoutSeconds}&allowed_updates=[\"message\"]";
+                var url = $"{ApiBase}/getUpdates?offset={_updateOffset}&timeout={_pollingTimeoutSeconds}&allowed_updates=[\"message\",\"callback_query\"]";
                 var json = await _http.GetStringAsync(url, ct);
                 var resp = JsonConvert.DeserializeObject<TgApiResponse<List<TgUpdate>>>(json);
 
@@ -209,6 +209,12 @@ public class TelegramChannel : Channel
 
     private void HandleUpdate(TgUpdate update)
     {
+        if (update.CallbackQuery != null)
+        {
+            HandleCallbackQuery(update.CallbackQuery);
+            return;
+        }
+
         var msg = update.Message;
         if (msg == null || string.IsNullOrWhiteSpace(msg.Text))
             return;
@@ -236,6 +242,105 @@ public class TelegramChannel : Channel
         };
 
         RaiseMessageReceived(incoming);
+    }
+
+    // Handles a tap on an inline-keyboard button (e.g. HITL Approve/Reject). Synthesizes the
+    // same "/approve <id>" text a typed command would produce and raises it through the
+    // normal message pipeline — no separate resolution logic needed.
+    private void HandleCallbackQuery(TgCallbackQuery callback)
+    {
+        if (string.IsNullOrWhiteSpace(callback.Data) || callback.Message == null)
+            return;
+
+        var chatId = callback.Message.Chat.Id;
+        if (chatId != 0 && !_defaultChatId.HasValue)
+        {
+            _defaultChatId = chatId;
+            PersistDefaultChatId(chatId);
+        }
+
+        // Ack so Telegram stops showing a loading spinner on the button, and strip the
+        // keyboard so the same click can't be replayed once resolved. Best-effort/fire-and-forget:
+        // neither failure should block delivering the actual command below.
+        _ = AnswerCallbackQueryAsync(callback.Id);
+        _ = RemoveInlineKeyboardAsync(chatId, callback.Message.MessageId);
+
+        var incoming = new ChannelMessage
+        {
+            ChannelId = $"telegram_{chatId}",
+            SenderId = callback.From?.Id.ToString() ?? chatId.ToString(),
+            SenderName = callback.From == null ? "Unknown" : $"{callback.From.FirstName} {callback.From.LastName}".Trim(),
+            Content = callback.Data,
+            Type = MessageType.Command,
+            Metadata = new Dictionary<string, string>
+            {
+                ["chat_id"] = chatId.ToString(),
+                ["message_id"] = callback.Message.MessageId.ToString()
+            }
+        };
+
+        RaiseMessageReceived(incoming);
+    }
+
+    private async Task AnswerCallbackQueryAsync(string callbackQueryId)
+    {
+        try
+        {
+            var payload = new { callback_query_id = callbackQueryId };
+            var body = new StringContent(JsonConvert.SerializeObject(payload), System.Text.Encoding.UTF8, "application/json");
+            await _http.PostAsync($"{ApiBase}/answerCallbackQuery", body);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Telegram answerCallbackQuery failed");
+        }
+    }
+
+    private async Task RemoveInlineKeyboardAsync(long chatId, long messageId)
+    {
+        try
+        {
+            var payload = new { chat_id = chatId, message_id = messageId, reply_markup = new { inline_keyboard = Array.Empty<object[]>() } };
+            var body = new StringContent(JsonConvert.SerializeObject(payload), System.Text.Encoding.UTF8, "application/json");
+            await _http.PostAsync($"{ApiBase}/editMessageReplyMarkup", body);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Telegram editMessageReplyMarkup failed");
+        }
+    }
+
+    // Renders `actions` as an inline keyboard (callback_data = the action's Command verbatim,
+    // e.g. "/approve A1B2C3D4") so a tap is handled by HandleCallbackQuery exactly like the
+    // user had typed that command.
+    public override async Task SendActionableAsync(string content, IReadOnlyList<ChannelAction> actions)
+    {
+        if (!await EnsureDefaultChatIdAsync())
+        {
+            _logger?.LogWarning("TelegramChannel.SendActionableAsync: no chat ID configured or discoverable from getUpdates.");
+            return;
+        }
+
+        var keyboard = new[]
+        {
+            actions.Take(5).Select(a => new { text = a.Label, callback_data = a.Command }).ToArray()
+        };
+
+        var payload = new
+        {
+            chat_id = _defaultChatId!.Value,
+            text = content,
+            parse_mode = "Markdown",
+            reply_markup = new { inline_keyboard = keyboard }
+        };
+
+        var body = new StringContent(JsonConvert.SerializeObject(payload), System.Text.Encoding.UTF8, "application/json");
+        var resp = await _http.PostAsync($"{ApiBase}/sendMessage", body);
+        if (!resp.IsSuccessStatusCode)
+        {
+            var raw = await resp.Content.ReadAsStringAsync();
+            _logger?.LogError("Telegram sendMessage (actionable) failed ({Status}): {Body}", resp.StatusCode, raw);
+        }
     }
 
     public override async Task SendReplyAsync(ChannelMessage originalMessage, string content)
@@ -427,6 +532,15 @@ internal class TgUpdate
 {
     [JsonProperty("update_id")] public long UpdateId { get; set; }
     [JsonProperty("message")] public TgMessage? Message { get; set; }
+    [JsonProperty("callback_query")] public TgCallbackQuery? CallbackQuery { get; set; }
+}
+
+internal class TgCallbackQuery
+{
+    [JsonProperty("id")] public string Id { get; set; } = string.Empty;
+    [JsonProperty("from")] public TgUser? From { get; set; }
+    [JsonProperty("message")] public TgMessage? Message { get; set; }
+    [JsonProperty("data")] public string? Data { get; set; }
 }
 
 internal class TgMessage

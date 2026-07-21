@@ -2,6 +2,7 @@ using AgentFox.Agents;
 using AgentFox.Channels;
 using AgentFox.Hitl;
 using AgentFox.Planning;
+using AgentFox.Plugins.Channels;
 using AgentFox.Plugins.Interfaces;
 using AgentFox.Sessions;
 using Microsoft.Extensions.Logging;
@@ -109,22 +110,30 @@ public class SubmitPlanTool : BaseTool
             $"\n\n`/approve {approvalId}` — execute the plan\n" +
             $"`/reject {approvalId} [reason]` — send back for revision";
 
-        if (channelId != null && _channelManager != null)
+        // Broadcast to every connected channel (not just the originating one) plus the
+        // console — same rationale as the tool-approval gate in AgentOrchestrator: any
+        // reachable surface can resolve it, and HitlManager.Respond is id-based so the
+        // first responder wins regardless of which surface it came from.
+        var actions = new List<ChannelAction>
         {
-            var channel = _channelManager.Channels.Values
-                .FirstOrDefault(c => c.ChannelId == channelId && c.IsConnected);
-            if (channel != null)
-                await channel.SendToTargetAsync(string.Empty, msg);
-        }
-        else
-        {
-            AnsiConsole.WriteLine();
-            AnsiConsole.MarkupLine($"[bold yellow]📋 Plan Approval Required[/] [[{approvalId}]]");
-            if (summary is { Length: > 0 })
-                AnsiConsole.MarkupLine($"[dim]{Markup.Escape(summary)}[/]");
-            AnsiConsole.WriteLine(plan);
-            AnsiConsole.MarkupLine($"[dim]Type [bold]hitl approve {approvalId}[/] or [bold]hitl reject {approvalId} [reason][/][/]");
-        }
+            new("✅ Approve", $"/approve {approvalId}"),
+            new("❌ Reject", $"/reject {approvalId}")
+        };
+        var deliveredTo = _channelManager != null
+            ? await _channelManager.BroadcastActionableAsync(msg, actions)
+            : 0;
+
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine($"[bold yellow]📋 Plan Approval Required[/] [[{Markup.Escape(approvalId)}]]");
+        if (summary is { Length: > 0 })
+            AnsiConsole.MarkupLine($"[dim]{Markup.Escape(summary)}[/]");
+        AnsiConsole.WriteLine(plan);
+        AnsiConsole.MarkupLine($"[dim]Type [bold]hitl approve {Markup.Escape(approvalId)}[/] or [bold]hitl reject {Markup.Escape(approvalId)} [reason][/][/]");
+
+        if (deliveredTo == 0 && Console.IsInputRedirected)
+            _logger?.LogWarning(
+                "HITL plan approval [{ApprovalId}] has no reachable notification surface — " +
+                "no connected channels and no interactive console.", approvalId);
 
         var request = new HitlRequest(
             approvalId, sessionKey, channelId,
