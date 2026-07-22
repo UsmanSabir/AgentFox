@@ -36,31 +36,66 @@ public class ComposioClient
     }
 
     /// <summary>
+    /// Read the response body, throwing with the full Composio error payload on failure.
+    /// Composio returns a JSON body (message + log_id) on 4xx/5xx that EnsureSuccessStatusCode
+    /// would otherwise discard, hiding the real reason behind a bare status code.
+    /// </summary>
+    private async Task<string> ReadOrThrowAsync(HttpResponseMessage response, string operation)
+    {
+        var content = await response.Content.ReadAsStringAsync();
+        if (!response.IsSuccessStatusCode)
+        {
+            var message = $"Composio {operation} failed: HTTP {(int)response.StatusCode} {response.StatusCode}. Response: {content}";
+            _logger?.LogError("{Message}", message);
+            throw new HttpRequestException(message, null, response.StatusCode);
+        }
+        return content;
+    }
+
+    /// <summary>
+    /// Fetch every page of an 'items'-based list endpoint, following <c>next_cursor</c>.
+    /// The Composio v3 list endpoints paginate (default 20 per page); reading only the first
+    /// page silently drops tools/toolkits/accounts (e.g. gmail exposes 23 tools across 2 pages,
+    /// so GMAIL_SEND_EMAIL fell off page 1). A large page size keeps this to a single round-trip
+    /// in the common case while still following the cursor when it isn't.
+    /// </summary>
+    private async Task<List<T>> GetAllItemsAsync<T>(string requestUrl, string operation)
+    {
+        var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+        var all = new List<T>();
+        var separator = requestUrl.Contains('?') ? "&" : "?";
+        string? cursor = null;
+
+        do
+        {
+            var url = $"{requestUrl}{separator}limit=100";
+            if (!string.IsNullOrEmpty(cursor))
+                url += $"&cursor={Uri.EscapeDataString(cursor)}";
+
+            var response = await _httpClient.GetAsync(url);
+            var content = await ReadOrThrowAsync(response, operation);
+            var page = JsonSerializer.Deserialize<ComposioApiResponseWithItems<T>>(content, options);
+
+            if (page?.Items != null)
+                all.AddRange(page.Items);
+            cursor = page?.NextCursor;
+        }
+        while (!string.IsNullOrEmpty(cursor));
+
+        return all;
+    }
+
+    /// <summary>
     /// Get all available toolkits from Composio.dev
     /// </summary>
     public async Task<List<ComposioToolkit>> GetToolkitsAsync()
     {
         try
         {
-            var response = await _httpClient.GetAsync($"{_baseUrl}toolkits");
-            response.EnsureSuccessStatusCode();
-            var content = await response.Content.ReadAsStringAsync();
-            var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
-            
-            // Try items-based response first, fall back to data-based
-            ComposioApiResponseWithItems<ComposioToolkit>? result;
-            try
-            {
-                result = JsonSerializer.Deserialize<ComposioApiResponseWithItems<ComposioToolkit>>(content, options);
-            }
-            catch
-            {
-                var dataResult = JsonSerializer.Deserialize<ComposioApiResponse<ComposioToolkit>>(content, options);
-                result = new ComposioApiResponseWithItems<ComposioToolkit> { Items = dataResult?.Data ?? new() };
-            }
-            
-            _logger?.LogInformation("Retrieved {Count} toolkits from Composio.dev", result?.Items?.Count ?? 0);
-            return result?.Items ?? new();
+            var items = await GetAllItemsAsync<ComposioToolkit>($"{_baseUrl}toolkits", "list toolkits");
+
+            _logger?.LogInformation("Retrieved {Count} toolkits from Composio.dev", items.Count);
+            return items;
         }
         catch (Exception ex)
         {
@@ -76,15 +111,12 @@ public class ComposioClient
     {
         try
         {
-            var response = await _httpClient.GetAsync($"{_baseUrl}tools?toolkit_slug={toolkitSlug}");
-            response.EnsureSuccessStatusCode();
-            var content = await response.Content.ReadAsStringAsync();
-            var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
-            var result = JsonSerializer.Deserialize<ComposioApiResponseWithItems<ComposioTool>>(content, options);
-            
-            _logger?.LogInformation("Retrieved {Count} tools for toolkit {ToolkitSlug}", 
-                result?.Items?.Count ?? 0, toolkitSlug);
-            return result?.Items ?? new();
+            var url = $"{_baseUrl}tools?toolkit_slug={Uri.EscapeDataString(toolkitSlug)}";
+            var items = await GetAllItemsAsync<ComposioTool>(url, $"list tools for '{toolkitSlug}'");
+
+            _logger?.LogInformation("Retrieved {Count} tools for toolkit {ToolkitSlug}",
+                items.Count, toolkitSlug);
+            return items;
         }
         catch (Exception ex)
         {
@@ -100,14 +132,10 @@ public class ComposioClient
     {
         try
         {
-            var response = await _httpClient.GetAsync($"{_baseUrl}auth_configs");
-            response.EnsureSuccessStatusCode();
-            var content = await response.Content.ReadAsStringAsync();
-            var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
-            var result = JsonSerializer.Deserialize<ComposioAuthConfigResponse>(content, options);
-            
-            _logger?.LogInformation("Retrieved {Count} auth configs", result?.Items?.Count ?? 0);
-            return result?.Items ?? new();
+            var items = await GetAllItemsAsync<ComposioAuthConfig>($"{_baseUrl}auth_configs", "list auth configs");
+
+            _logger?.LogInformation("Retrieved {Count} auth configs", items.Count);
+            return items;
         }
         catch (Exception ex)
         {
@@ -123,14 +151,10 @@ public class ComposioClient
     {
         try
         {
-            var response = await _httpClient.GetAsync($"{_baseUrl}connected_accounts");
-            response.EnsureSuccessStatusCode();
-            var content = await response.Content.ReadAsStringAsync();
-            var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
-            var result = JsonSerializer.Deserialize<ComposioConnectedAccountsResponse>(content, options);
-            
-            _logger?.LogInformation("Retrieved {Count} connected accounts", result?.Items?.Count ?? 0);
-            return result?.Items ?? new();
+            var items = await GetAllItemsAsync<ComposioConnectedAccount>($"{_baseUrl}connected_accounts", "list connected accounts");
+
+            _logger?.LogInformation("Retrieved {Count} connected accounts", items.Count);
+            return items;
         }
         catch (Exception ex)
         {
@@ -243,9 +267,8 @@ public class ComposioClient
             var json = JsonSerializer.Serialize(payload);
             var content = new StringContent(json, Encoding.UTF8, "application/json");
             var response = await _httpClient.PostAsync($"{_baseUrl}tools/execute/{toolSlug}", content);
-            
-            response.EnsureSuccessStatusCode();
-            var responseContent = await response.Content.ReadAsStringAsync();
+
+            var responseContent = await ReadOrThrowAsync(response, $"execute tool '{toolSlug}'");
             var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
             var result = JsonSerializer.Deserialize<ComposioExecutionResponse>(responseContent, options);
             
@@ -269,8 +292,7 @@ public class ComposioClient
         try
         {
             var response = await _httpClient.GetAsync($"{_baseUrl}tools/{toolSlug}");
-            response.EnsureSuccessStatusCode();
-            var content = await response.Content.ReadAsStringAsync();
+            var content = await ReadOrThrowAsync(response, $"get tool '{toolSlug}'");
             var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
             var result = JsonSerializer.Deserialize<ComposioApiResponse<ComposioTool>>(content, options);
             
@@ -291,8 +313,7 @@ public class ComposioClient
         try
         {
             var response = await _httpClient.GetAsync($"{_baseUrl}toolkits/{toolkitSlug}");
-            response.EnsureSuccessStatusCode();
-            var content = await response.Content.ReadAsStringAsync();
+            var content = await ReadOrThrowAsync(response, $"get toolkit '{toolkitSlug}'");
             var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
             var result = JsonSerializer.Deserialize<ComposioApiResponse<ComposioToolkit>>(content, options);
             

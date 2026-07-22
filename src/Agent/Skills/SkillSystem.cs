@@ -141,7 +141,7 @@ public class SkillRegistry
         try
         {
             _logger?.LogInformation("Registering Composio.dev skills");
-            
+
             var composioProvider = new ComposioSkillProvider(
                 apiKey: composioApiKey,
                 skillRegistry: this,

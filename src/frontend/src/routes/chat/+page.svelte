@@ -315,13 +315,20 @@
     setTimeout(() => { copiedId = null; }, 1500);
   }
 
-  function autoResize(node: HTMLTextAreaElement) {
+  function autoResize(node: HTMLTextAreaElement, _value?: string) {
     function resize() {
       node.style.height = 'auto';
       node.style.height = Math.min(node.scrollHeight, 160) + 'px';
     }
+    resize();
     node.addEventListener('input', resize);
-    return { destroy() { node.removeEventListener('input', resize); } };
+    return {
+      // Re-run when the bound value changes programmatically (e.g. cleared on send),
+      // since that does not fire an 'input' event. tick() ensures the DOM value is
+      // updated before we measure scrollHeight.
+      update() { tick().then(resize); },
+      destroy() { node.removeEventListener('input', resize); },
+    };
   }
 </script>
 
@@ -547,7 +554,7 @@
       <textarea
         bind:this={inputEl}
         bind:value={message}
-        use:autoResize
+        use:autoResize={message}
         on:keydown={handleKeyDown}
         placeholder={agentIsReady ? 'Message AgentFox… (Enter to send, Shift+Enter for newline)' : 'Waiting for agent…'}
         disabled={!agentIsReady}
