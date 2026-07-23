@@ -137,8 +137,11 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
     // Wait for Svelte to flush the DOM, then for the browser to lay it out,
     // so scrollHeight reflects the newly rendered content before we jump.
     await tick();
-    requestAnimationFrame(() => {
-      if (autoStick && scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => {
+        if (autoStick && scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
+        resolve();
+      });
     });
   }
 
@@ -148,11 +151,10 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
 
     message = '';
     addUserMessage(text);
-    await scrollToBottom(true);
-
     const assistantId = addAssistantMessage('', true);
     isStreaming = true;
     abortCtrl   = new AbortController();
+    await scrollToBottom(true);
 
     try {
       if (selectedAgentId === 'main') {
@@ -206,12 +208,12 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
     } finally {
       isStreaming = false;
       abortCtrl   = null;
-      await scrollToBottom();
-      await tick();
-      inputEl?.focus();
       await loadSessions();
       await loadTodos();
       await loadActivity();
+      await scrollToBottom();
+      await tick();
+      inputEl?.focus();
     }
   }
 
