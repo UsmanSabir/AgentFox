@@ -389,6 +389,21 @@ public class WebModule : IAppModule
             if (transcript is null)
                 return Results.NotFound(new { error = "transcript_not_found" });
 
+            // Unfinished todos travel with the bundle so a session can be moved mid-task. Emitted
+            // verbatim (savedAt included) — the import side keeps that original timestamp so the
+            // agent recognises the work as stale and asks before resuming it.
+            System.Text.Json.JsonElement? providerState = null;
+            var rawState = sessionManager.ReadProviderState(conversationId);
+            if (!string.IsNullOrWhiteSpace(rawState))
+            {
+                try
+                {
+                    using var stateDoc = System.Text.Json.JsonDocument.Parse(rawState);
+                    providerState = stateDoc.RootElement.Clone();
+                }
+                catch { /* unreadable sidecar — export the transcript without it */ }
+            }
+
             var envelope = new
             {
                 schema     = SessionExportSchema,
@@ -402,7 +417,11 @@ public class WebModule : IAppModule
                     createdAt  = session.CreatedAt,
                     lastActive = session.LastActivityAt
                 },
-                transcriptMarkdown = transcript
+                transcriptMarkdown = transcript,
+                providerState,
+                // Newline-delimited JSON, carried verbatim like the transcript so references stay
+                // pinned to the assistant messages they were collected for.
+                references = sessionManager.ReadReferences(conversationId)
             };
 
             var bytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(
@@ -426,13 +445,34 @@ public class WebModule : IAppModule
                     maxLength = SessionManager.MaxSessionTitleLength
                 });
 
+            // Unwrap the optional provider-state envelope. Its contents are NOT trusted here —
+            // what may actually be restored is allowlisted when the sidecar is read, so a crafted
+            // bundle cannot inject chat history. We only pull out the bag and its original
+            // savedAt, which is what makes imported work register as stale.
+            System.Text.Json.JsonElement? stateBag = null;
+            DateTimeOffset? savedAt = null;
+            if (req.ProviderState is { ValueKind: System.Text.Json.JsonValueKind.Object } ps)
+            {
+                if (ps.TryGetProperty("stateBag", out var bag) &&
+                    bag.ValueKind == System.Text.Json.JsonValueKind.Object)
+                    stateBag = bag.Clone();
+
+                if (ps.TryGetProperty("savedAt", out var sa) &&
+                    sa.ValueKind == System.Text.Json.JsonValueKind.String &&
+                    sa.TryGetDateTimeOffset(out var parsed))
+                    savedAt = parsed;
+            }
+
             var newId = sessionManager.ImportSession(
                 req.Session?.AgentId,
                 req.TranscriptMarkdown,
                 req.Session?.CreatedAt,
                 req.Session?.LastActive,
                 req.Session?.Title,
-                req.Session?.MemoryEnabled);
+                req.Session?.MemoryEnabled,
+                stateBag,
+                savedAt,
+                req.References);
 
             return Results.Ok(new { success = true, conversationId = newId });
         });
@@ -982,7 +1022,19 @@ public record SpecialistMemorySettingsRequest(string Mode);
 public record SessionImportRequest(
     string? Schema,
     SessionImportMeta? Session,
-    string? TranscriptMarkdown);
+    string? TranscriptMarkdown,
+    /// <summary>
+    /// Optional persisted provider state (the unfinished todo list), shaped like the
+    /// <c>.state.json</c> sidecar: <c>{"savedAt":"...","stateBag":{"TodoProvider":{...}}}</c>.
+    /// Absent in bundles exported before this field existed, which import unchanged.
+    /// </summary>
+    System.Text.Json.JsonElement? ProviderState = null,
+    /// <summary>
+    /// Optional research references as newline-delimited JSON, one
+    /// <c>{"i":assistantIndex,"items":[...]}</c> per line. Malformed lines are dropped on import.
+    /// Absent in bundles exported before this field existed, which import unchanged.
+    /// </summary>
+    string? References = null);
 
 public record SessionImportMeta(
     string? Title,

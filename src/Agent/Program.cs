@@ -612,7 +612,7 @@ class Program
             .Build();
 
         var chatClient = LLMFactory.CreateFromConfiguration(configuration);
-        var agent = new AgentBuilder(toolRegistry)
+        var agentBuilder = new AgentBuilder(toolRegistry)
             .WithName("AgentFox")
             .WithSystemPrompt(systemPrompt)
             .WithMemory(memory)
@@ -624,7 +624,21 @@ class Program
             .WithWorkspaceManager(workspaceManager)
             .WithSessionManager(sessionManager)
             .WithCompactionFromConfig(configuration)
-            .Build();
+            .WithTodoPlannerFromConfig(configuration);
+
+        // No plan gate on this path, so the todo guidance is phase-independent.
+        if (agentBuilder.IsTodoPlannerEnabled)
+        {
+            var todoRestores = new AgentFox.Planning.TodoRestoreTracker();
+            agentBuilder = agentBuilder
+                .WithTodoRestoreTracker(todoRestores)
+                .WithPromptContributor(new AgentFox.Planning.TodoPlannerContributor(
+                    store: null,
+                    restores: todoRestores,
+                    staleAfter: TimeSpan.FromHours(agentBuilder.TodoPlannerOptions!.StaleAfterHours)));
+        }
+
+        var agent = agentBuilder.Build();
         agentRef = agent;
 
         var cliSessionId = sessionManager.GetOrCreateConsoleSession(agent.Id);

@@ -13,22 +13,19 @@
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
   </PropertyGroup>
-
   <ItemGroup>
     <!-- Agent Framework family — keep versions aligned when bumping -->
-    <PackageVersion Include="Microsoft.Agents.AI" Version="1.13.0" />
+    <PackageVersion Include="Microsoft.Agents.AI" Version="1.15.0" />
     <PackageVersion Include="Microsoft.Agents.AI.Anthropic" Version="1.0.0-rc5" />
-    <PackageVersion Include="Microsoft.Agents.AI.Harness" Version="1.13.0-preview.260703.1" />
-    <PackageVersion Include="Microsoft.Agents.AI.OpenAI" Version="1.13.0" />
-    <PackageVersion Include="Microsoft.Agents.AI.Workflows" Version="1.13.0" />
-
+    <PackageVersion Include="Microsoft.Agents.AI.Harness" Version="1.15.0" />
+    <PackageVersion Include="Microsoft.Agents.AI.OpenAI" Version="1.15.0" />
+    <PackageVersion Include="Microsoft.Agents.AI.Workflows" Version="1.15.0" />
     <!-- LLM providers and AI abstractions -->
     <PackageVersion Include="Azure.AI.OpenAI" Version="2.1.0" />
-    <PackageVersion Include="Google.GenAI" Version="1.14.0" />
-    <PackageVersion Include="Microsoft.Extensions.AI.Abstractions" Version="10.8.0" />
+    <PackageVersion Include="Google.GenAI" Version="1.15.0" />
+    <PackageVersion Include="Microsoft.Extensions.AI.Abstractions" Version="10.8.1" />
     <PackageVersion Include="OllamaSharp" Version="5.4.27" />
     <PackageVersion Include="OpenAI" Version="2.12.0" />
-
     <!-- Microsoft.Extensions.* — pinned to the host's version; plugins must never build
          against a higher version than the host ships (PluginLoadContext delegates these
          to the host's load context and roll-forward only binds UP) -->
@@ -42,11 +39,9 @@
     <PackageVersion Include="Microsoft.Extensions.Http.Resilience" Version="10.8.0" />
     <PackageVersion Include="Microsoft.Extensions.Logging" Version="10.0.10" />
     <PackageVersion Include="Microsoft.Extensions.Logging.Console" Version="10.0.10" />
-
     <!-- Storage -->
     <PackageVersion Include="Microsoft.Data.Sqlite" Version="10.0.10" />
-    <PackageVersion Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.3" />
-
+    <PackageVersion Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.4" />
     <!-- Channels, tooling, misc -->
     <PackageVersion Include="Cronos" Version="0.13.0" />
     <PackageVersion Include="Discord.Net" Version="3.20.1" />
@@ -58,7 +53,6 @@
     <PackageVersion Include="PuppeteerSharp" Version="25.3.4" />
     <PackageVersion Include="Spectre.Console" Version="0.57.2" />
     <PackageVersion Include="YamlDotNet" Version="18.1.0" />
-
     <!-- Tests -->
     <PackageVersion Include="Microsoft.AspNetCore.TestHost" Version="10.0.10" />
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />

@@ -344,6 +344,8 @@ public sealed class MarkdownSessionStore : IConversationStore
         var refsPath = ReferencesFilePath(conversationId);
         if (File.Exists(refsPath))
             File.Delete(refsPath);
+
+        ClearSessionState(conversationId);
     }
 
     // ------------------------------------------------------------------
@@ -389,13 +391,88 @@ public sealed class MarkdownSessionStore : IConversationStore
         return string.IsNullOrEmpty(text) ? null : text;
     }
 
+    // ------------------------------------------------------------------
+    // Provider state sidecar ({session}.md.state.json)
+    // ------------------------------------------------------------------
+
+    private sealed record PersistedSessionState(
+        [property: JsonPropertyName("savedAt")]  DateTimeOffset SavedAt,
+        [property: JsonPropertyName("stateBag")] JsonElement StateBag);
+
+    /// <summary>
+    /// Persists a slice of the session's AIContextProvider state (currently the todo list) beside
+    /// the transcript, so outstanding work survives a process restart.
+    ///
+    /// IMPORTANT: callers must pass a filtered slice, never a whole serialized session. A full
+    /// session blob also carries the ChatHistoryProvider's messages, and this store already owns
+    /// message persistence through the .md file — writing both would restore every message twice.
+    /// </summary>
+    public void PersistSessionState(string conversationId, JsonElement stateBag)
+    {
+        SessionManager.EnsureSafeSessionId(conversationId);
+        var path = StateFilePath(conversationId);
+        EnsureParentDirectory(path);
+        File.WriteAllText(path, SerializeStateSidecar(stateBag, DateTimeOffset.UtcNow), Encoding.UTF8);
+    }
+
+    /// <summary>
+    /// Renders the sidecar payload. Shared with session import so the on-disk schema has a single
+    /// definition. <paramref name="savedAt"/> is passed in rather than taken as "now" because an
+    /// imported bundle must keep its ORIGINAL save time — that is what lets the agent recognise
+    /// the restored work as stale and ask before resuming it.
+    /// </summary>
+    public static string SerializeStateSidecar(JsonElement stateBag, DateTimeOffset savedAt)
+        => JsonSerializer.Serialize(new PersistedSessionState(savedAt, stateBag), _jsonOpts);
+
+    /// <summary>File name suffix of the provider-state sidecar.</summary>
+    public const string StateSidecarSuffix = ".state.json";
+
+    /// <summary>File name suffix of the research-references sidecar (newline-delimited JSON).</summary>
+    public const string ReferencesSidecarSuffix = ".refs.jsonl";
+
+    /// <summary>
+    /// Reads the persisted provider state for a conversation, or null when absent or unreadable.
+    /// A corrupt sidecar is treated as absent: stale planner state must never block a session.
+    /// </summary>
+    public SessionStateSnapshot? ReadSessionState(string conversationId)
+    {
+        SessionManager.EnsureSafeSessionId(conversationId);
+        var path = StateFilePath(conversationId);
+        if (!File.Exists(path)) return null;
+
+        try
+        {
+            var payload = JsonSerializer.Deserialize<PersistedSessionState>(
+                File.ReadAllText(path, Encoding.UTF8), _jsonOpts);
+            if (payload is null || payload.StateBag.ValueKind != JsonValueKind.Object)
+                return null;
+
+            return new SessionStateSnapshot(payload.StateBag.Clone(), payload.SavedAt);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Removes the persisted provider state (e.g. once its todo list is finished).</summary>
+    public void ClearSessionState(string conversationId)
+    {
+        var path = StateFilePath(conversationId);
+        if (File.Exists(path))
+            File.Delete(path);
+    }
+
+    /// <summary>Provider-state sidecar path (<c>{session}.md.state.json</c>). Non-creating.</summary>
+    private string StateFilePath(string conversationId) => ResolveFilePath(conversationId) + StateSidecarSuffix;
+
     /// <summary>Pending-message sidecar path (<c>{session}.md.pending</c>). Non-creating —
     /// write callers must ensure the directory exists first.</summary>
     private string PendingFilePath(string conversationId) => ResolveFilePath(conversationId) + ".pending";
 
     /// <summary>References sidecar path (<c>{session}.md.refs.jsonl</c>). Non-creating —
     /// write callers must ensure the directory exists first.</summary>
-    private string ReferencesFilePath(string conversationId) => ResolveFilePath(conversationId) + ".refs.jsonl";
+    private string ReferencesFilePath(string conversationId) => ResolveFilePath(conversationId) + ReferencesSidecarSuffix;
 
     /// <summary>Creates the parent directory for a sidecar/transcript file if it is missing.</summary>
     private static void EnsureParentDirectory(string filePath)
@@ -624,3 +701,9 @@ public sealed record ConversationMessageSnapshot(string Role, string Content)
 {
     public IReadOnlyList<ResearchReference> References { get; init; } = [];
 }
+
+/// <summary>
+/// Persisted AIContextProvider state for a conversation, with the wall-clock time it was written.
+/// <paramref name="SavedAt"/> is what lets a restored todo list be judged stale.
+/// </summary>
+public sealed record SessionStateSnapshot(JsonElement StateBag, DateTimeOffset SavedAt);

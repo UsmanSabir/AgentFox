@@ -39,9 +39,10 @@ public sealed class HarnessOptions
 /// <summary>
 /// Per-profile capability switches. Every switch defaults to the least-privilege setting; the
 /// factory maps them onto explicit HarnessAgentOptions values so no Harness default is accepted
-/// implicitly. Capabilities not yet bridged through AgentFox policy (file access, file memory,
-/// web search, shell, skills discovery, background agents) have no switch here on purpose —
-/// the factory hard-disables them until a later roadmap phase wires them deliberately.
+/// implicitly. Capabilities not yet bridged through AgentFox policy (file memory, file access,
+/// web search, skills discovery, background agents) have no switch here on purpose — the factory
+/// keeps them off until a later roadmap phase wires them deliberately. Shell is absent from that
+/// list because Harness 1.15.0 removed the shell surface entirely; there is nothing to switch.
 /// </summary>
 public sealed class HarnessProfileOptions
 {

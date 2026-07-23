@@ -354,6 +354,12 @@ public class SessionManager : IDisposable
             try
             {
                 File.Move(srcPath, destPath);
+
+                // Sidecars follow the transcript, so a resumed session recovers its unfinished
+                // todo list and references instead of leaving them orphaned in the active folder.
+                foreach (var suffix in SidecarSuffixes)
+                    TryMoveSidecar(srcPath + suffix, destPath + suffix);
+
                 info.ArchivePath = Path.GetRelativePath(_archiveDir, destPath);
                 _logger?.LogInformation("Archived session file {Src} → {Dest}", srcPath, destPath);
             }
@@ -408,6 +414,10 @@ public class SessionManager : IDisposable
         }
 
         File.Move(source, destination);
+
+        foreach (var suffix in SidecarSuffixes)
+            TryMoveSidecar(source + suffix, destination + suffix);
+
         info.Status = SessionStatus.Active;
         info.LastActivityAt = DateTime.UtcNow;
         info.ArchivePath = null;
@@ -514,6 +524,90 @@ public class SessionManager : IDisposable
     }
 
     /// <summary>
+    /// Reads a session's persisted provider state (the unfinished todo list) so it can travel
+    /// with an export, following the transcript into the archive when the session is archived.
+    /// Returns null when there is no outstanding state or it cannot be read.
+    /// </summary>
+    public string? ReadProviderState(string sessionId)
+        => ReadSidecar(sessionId, Memory.MarkdownSessionStore.StateSidecarSuffix);
+
+    /// <summary>
+    /// Reads a session's research references (newline-delimited JSON) so they can travel with an
+    /// export and stay attached to the right assistant messages after import.
+    /// Returns null when the session has none or they cannot be read.
+    /// </summary>
+    public string? ReadReferences(string sessionId)
+        => ReadSidecar(sessionId, Memory.MarkdownSessionStore.ReferencesSidecarSuffix);
+
+    /// <summary>
+    /// Keeps only well-formed reference lines from an imported bundle: each must be a JSON object
+    /// carrying the assistant-message index <c>i</c> and an <c>items</c> array. Anything else is
+    /// dropped, so a malformed upload cannot leave a corrupt sidecar behind.
+    /// </summary>
+    private static string SanitizeReferenceLines(string raw)
+    {
+        var kept = new List<string>();
+
+        foreach (var line in raw.Split('\n'))
+        {
+            var trimmed = line.Trim();
+            if (trimmed.Length == 0) continue;
+
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(trimmed);
+                var root = doc.RootElement;
+                if (root.ValueKind != System.Text.Json.JsonValueKind.Object) continue;
+                if (!root.TryGetProperty("i", out var index) ||
+                    index.ValueKind != System.Text.Json.JsonValueKind.Number) continue;
+                if (!root.TryGetProperty("items", out var items) ||
+                    items.ValueKind != System.Text.Json.JsonValueKind.Array) continue;
+
+                kept.Add(trimmed);
+            }
+            catch
+            {
+                // Malformed line — skip it rather than failing the whole import.
+            }
+        }
+
+        return kept.Count == 0 ? string.Empty : string.Join("\n", kept) + "\n";
+    }
+
+    /// <summary>
+    /// Reads one of a session's sidecars, following the transcript into the archive when the
+    /// session is archived. Never throws — a missing or unreadable sidecar is simply absent.
+    /// </summary>
+    private string? ReadSidecar(string sessionId, string suffix)
+    {
+        if (!_index.TryGetValue(sessionId, out var info)) return null;
+
+        string? path;
+        if (info.Status == SessionStatus.Archived)
+        {
+            if (string.IsNullOrWhiteSpace(info.ArchivePath)) return null;
+            var archiveRoot = Path.GetFullPath(_archiveDir) + Path.DirectorySeparatorChar;
+            var src = Path.GetFullPath(Path.Combine(_archiveDir, info.ArchivePath));
+            if (!src.StartsWith(archiveRoot, StringComparison.OrdinalIgnoreCase)) return null;
+            path = src + suffix;
+        }
+        else
+        {
+            path = ConversationFilePath(sessionId) + suffix;
+        }
+
+        try
+        {
+            return File.Exists(path) ? File.ReadAllText(path, System.Text.Encoding.UTF8) : null;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Could not read {Suffix} sidecar for {SessionId}", suffix, sessionId);
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Registers an imported conversation as a brand-new web session and writes its
     /// transcript verbatim. Always mints a fresh ID so an import can never overwrite an
     /// existing session. The transcript is stored as-is (its embedded frontmatter ID is
@@ -523,7 +617,10 @@ public class SessionManager : IDisposable
         DateTime? createdAt = null,
         DateTime? lastActive = null,
         string? title = null,
-        bool? memoryEnabled = null)
+        bool? memoryEnabled = null,
+        System.Text.Json.JsonElement? providerState = null,
+        DateTimeOffset? providerStateSavedAt = null,
+        string? references = null)
     {
         if (string.IsNullOrWhiteSpace(transcriptMarkdown))
             throw new ArgumentException("Transcript is empty.", nameof(transcriptMarkdown));
@@ -534,6 +631,46 @@ public class SessionManager : IDisposable
         var path = ConversationFilePath(newId);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllText(path, transcriptMarkdown, System.Text.Encoding.UTF8);
+
+        // Carry the bundle's unfinished todo list into the new session. The ORIGINAL save time is
+        // preserved, not "now": an imported bundle is by definition not fresh, so the agent must
+        // treat the work as stale and ask before resuming it. What the sidecar may actually
+        // restore is allowlisted at read time, so an untrusted bundle cannot inject chat history.
+        if (providerState is { ValueKind: System.Text.Json.JsonValueKind.Object } state)
+        {
+            try
+            {
+                File.WriteAllText(
+                    path + Memory.MarkdownSessionStore.StateSidecarSuffix,
+                    Memory.MarkdownSessionStore.SerializeStateSidecar(
+                        state, providerStateSavedAt ?? DateTimeOffset.UtcNow),
+                    System.Text.Encoding.UTF8);
+            }
+            catch (Exception ex)
+            {
+                // A bad sidecar must not fail the import; the transcript is the essential part.
+                _logger?.LogWarning(ex, "Could not write imported provider state for {SessionId}", newId);
+            }
+        }
+
+        // Research references, so imported assistant messages keep their sources. Each line is
+        // validated before being written: the reader tolerates junk lines by skipping them, but
+        // there is no reason to persist junk from an uploaded bundle in the first place.
+        if (!string.IsNullOrWhiteSpace(references))
+        {
+            try
+            {
+                var clean = SanitizeReferenceLines(references);
+                if (clean.Length > 0)
+                    File.WriteAllText(
+                        path + Memory.MarkdownSessionStore.ReferencesSidecarSuffix,
+                        clean, System.Text.Encoding.UTF8);
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(ex, "Could not write imported references for {SessionId}", newId);
+            }
+        }
 
         var now = DateTime.UtcNow;
         _index[newId] = new SessionInfo
@@ -575,7 +712,11 @@ public class SessionManager : IDisposable
                 var archiveRoot = Path.GetFullPath(_archiveDir) + Path.DirectorySeparatorChar;
                 var arc = Path.GetFullPath(Path.Combine(_archiveDir, info.ArchivePath));
                 if (arc.StartsWith(archiveRoot, StringComparison.OrdinalIgnoreCase) && File.Exists(arc))
+                {
                     File.Delete(arc);
+                    foreach (var suffix in SidecarSuffixes)
+                        TryDeleteSidecar(arc + suffix);
+                }
             }
             catch (Exception ex) { _logger?.LogError(ex, "Failed to delete archive for {SessionId}", sessionId); }
         }
@@ -584,8 +725,11 @@ public class SessionManager : IDisposable
         {
             var path = ConversationFilePath(sessionId);
             if (File.Exists(path)) File.Delete(path);
-            var pending = path + ".pending";
-            if (File.Exists(pending)) File.Delete(pending);
+
+            // All sidecars, not just .pending — a surviving .state.json would hand its stale
+            // todo list to the next session that resolves to this path.
+            foreach (var suffix in SidecarSuffixes)
+                TryDeleteSidecar(path + suffix);
         }
         catch (Exception ex) { _logger?.LogError(ex, "Failed to delete transcript for {SessionId}", sessionId); }
 
@@ -597,6 +741,45 @@ public class SessionManager : IDisposable
     // -------------------------------------------------------------------------
     // Path helpers (public so MarkdownSessionStore can share the convention)
     // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Suffixes of the sidecar files written next to a session's <c>.md</c> transcript:
+    /// the crash-recovery pending message, the research references, and the persisted
+    /// AIContextProvider state (the todo list).
+    ///
+    /// These must travel with the transcript on archive/resume and be removed with it on delete.
+    /// Otherwise they orphan in the active directory, and a later session that resolves to the
+    /// same path picks up unrelated state — e.g. a "new" conversation inheriting a stale todo list.
+    /// </summary>
+    private static readonly string[] SidecarSuffixes = [".pending", ".refs.jsonl", ".state.json"];
+
+    /// <summary>Moves a sidecar if present. Never throws: a sidecar must not fail the operation.</summary>
+    private void TryMoveSidecar(string source, string destination)
+    {
+        try
+        {
+            if (!File.Exists(source)) return;
+            if (File.Exists(destination)) File.Delete(destination);
+            File.Move(source, destination);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Failed to move session sidecar {Source}", source);
+        }
+    }
+
+    /// <summary>Deletes a sidecar if present. Never throws.</summary>
+    private void TryDeleteSidecar(string path)
+    {
+        try
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Failed to delete session sidecar {Path}", path);
+        }
+    }
 
     /// <summary>
     /// Full path to the .md conversation file for the given conversationId.

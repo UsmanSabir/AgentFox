@@ -80,6 +80,60 @@ public class CompactionConfig
 }
 
 /// <summary>
+/// Configuration for the todo planner (Microsoft.Agents.AI <c>TodoProvider</c>).
+///
+/// Why the Microsoft provider rather than an AgentFox one: todo state lives in the session's
+/// state bag, not in the message list, so the plan survives compaction. A home-grown planner
+/// that tracked steps as chat messages would lose them the first time
+/// <c>SummarizationCompactionStrategy</c> ran. This is complementary to
+/// <see cref="AgentFox.Planning.PlanState"/> — PlanState governs *permission* (research →
+/// approved → execute), the todo list tracks *progress* within an approved plan.
+/// </summary>
+public class TodoPlannerConfig
+{
+    /// <summary>Enable the todo planner (default: true).</summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>
+    /// Extra instructions appended to the provider's own todo guidance. Left null the provider
+    /// uses its built-in text; <see cref="AgentFox.Planning.TodoPlannerContributor"/> supplies
+    /// the AgentFox-specific steering separately, per plan phase.
+    /// </summary>
+    public string? Instructions { get; set; }
+
+    /// <summary>
+    /// Suppress the per-turn injected todo-list message. Leave false: that injection is exactly
+    /// what makes the list survive compaction, since it is rebuilt from state every turn.
+    /// </summary>
+    public bool SuppressTodoListMessage { get; set; } = false;
+
+    /// <summary>
+    /// How many extra agent turns may be issued automatically when a turn ends with incomplete
+    /// todos. This is the deterministic, non-experimental stand-in for the Agent Framework's
+    /// <c>TodoCompletionLoopEvaluator</c> (which is still <c>[Experimental]</c>/MAAI001).
+    ///
+    /// Default 0 — warn only, never spend extra tokens or emit an unrequested second reply.
+    /// Raise it (1–2 is sensible) for autonomous/headless runs where nobody is watching to
+    /// tell the agent to keep going. Always bounded, so it cannot spin.
+    /// </summary>
+    public int MaxContinuations { get; set; } = 0;
+
+    /// <summary>
+    /// Persist the todo list to a <c>{session}.md.state.json</c> sidecar so unfinished work
+    /// survives a process restart (default: true). Without this the list survives compaction and
+    /// in-process failures, but is lost on crash/restart — leaving a transcript that claims work
+    /// was planned with no list behind it.
+    /// </summary>
+    public bool PersistAcrossRestarts { get; set; } = true;
+
+    /// <summary>
+    /// How old a restored todo list may be before the agent must ask the user whether to resume
+    /// it rather than silently continuing (default: 1 hour).
+    /// </summary>
+    public double StaleAfterHours { get; set; } = 1;
+}
+
+/// <summary>
 /// Main agent class that orchestrates all functionality
 /// </summary>
 public class FoxAgent
@@ -89,6 +143,14 @@ public class FoxAgent
     private readonly ILogger<FoxAgent>? _logger;
     private WorkspaceManager _workspaceManager;
     private readonly ExperienceLearningService? _experienceLearning;
+    private TodoProvider? _todoProvider;
+    private TodoPlannerConfig? _todoPlannerConfig;
+
+    /// <summary>
+    /// Last persisted todo signature per conversation, so an unchanged list does not trigger a
+    /// full session serialization every turn. In-memory only — a cold start simply re-persists.
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _persistedTodoSignatures = new();
 
     /// <summary>
     /// Ambient session key for the currently executing agent turn.
@@ -141,6 +203,257 @@ public class FoxAgent
         PromptContributors = promptContributors;
         _logger = logger;
         _experienceLearning = experienceLearning;
+    }
+
+    /// <summary>
+    /// Attach the todo planner built by <see cref="AgentBuilder"/> so this agent can check
+    /// outstanding work at the end of a turn. Called by the builder; not part of the fluent API.
+    /// </summary>
+    internal void ConfigureTodoPlanner(TodoProvider provider, TodoPlannerConfig config)
+    {
+        _todoProvider = provider;
+        _todoPlannerConfig = config;
+    }
+
+    /// <summary>
+    /// Records restored todo lists so <see cref="Planning.TodoPlannerContributor"/> can ask the
+    /// user whether to resume stale work. Optional; without it restores happen silently.
+    /// </summary>
+    public Planning.TodoRestoreTracker? TodoRestoreTracker { get; set; }
+
+    /// <summary>
+    /// The single state key the todo planner owns inside the session state bag.
+    /// </summary>
+    private const string TodoStateKey = "TodoProvider";
+
+    /// <summary>
+    /// Extracts the todo entry from a fully serialized session, returning bare state-bag contents
+    /// (<c>{"TodoProvider":{...}}</c>) — not the <c>{"stateBag":...}</c> envelope, so the persisted
+    /// sidecar has exactly one level of nesting and stays hand-readable and portable.
+    ///
+    /// The filtering is the whole point. A full session blob also contains the
+    /// ChatHistoryProvider's messages, and <see cref="MarkdownSessionStore"/> already persists
+    /// messages to the .md transcript — restoring both would duplicate every message.
+    /// </summary>
+    private static JsonElement? ExtractTodoBag(JsonElement serializedSession)
+    {
+        if (serializedSession.ValueKind != JsonValueKind.Object ||
+            !serializedSession.TryGetProperty("stateBag", out var bag) ||
+            bag.ValueKind != JsonValueKind.Object ||
+            !bag.TryGetProperty(TodoStateKey, out var todo))
+            return null;
+
+        return Clone(new JsonObject { [TodoStateKey] = JsonNode.Parse(todo.GetRawText()) });
+    }
+
+    /// <summary>
+    /// Turns persisted state-bag contents into a blob <c>DeserializeSessionAsync</c> accepts,
+    /// keeping ONLY the todo key.
+    ///
+    /// This allowlist is a security control, not tidiness. A sidecar can arrive from an imported
+    /// session bundle — i.e. an uploaded file — and the session blob format can carry a chat
+    /// history provider's messages. Without this filter, a crafted bundle could inject arbitrary
+    /// messages into a conversation's history. Nothing but the todo list is ever honoured.
+    /// </summary>
+    private static JsonElement? FilterToTodoState(JsonElement stateBag)
+    {
+        if (stateBag.ValueKind != JsonValueKind.Object ||
+            !stateBag.TryGetProperty(TodoStateKey, out var todo))
+            return null;
+
+        return Clone(new JsonObject
+        {
+            ["stateBag"] = new JsonObject { [TodoStateKey] = JsonNode.Parse(todo.GetRawText()) }
+        });
+    }
+
+    /// <summary>Materialises a detached <see cref="JsonElement"/> from a node tree.</summary>
+    private static JsonElement Clone(JsonNode node)
+    {
+        using var doc = JsonDocument.Parse(node.ToJsonString());
+        return doc.RootElement.Clone();
+    }
+
+    /// <summary>
+    /// Rehydrates a session from the persisted todo sidecar when one exists, so unfinished work
+    /// survives a restart. Falls back to a fresh session on any failure — a planner problem must
+    /// never stop a conversation from starting.
+    /// </summary>
+    private async Task<AgentSession> CreateOrRestoreSessionAsync(
+        ChatClientAgent agent, string conversationId, CancellationToken cancellationToken)
+    {
+        if (_todoProvider == null || _todoPlannerConfig is not { PersistAcrossRestarts: true } ||
+            ConversationStore is not MarkdownSessionStore store)
+            return await agent.CreateSessionAsync(cancellationToken);
+
+        var persisted = store.ReadSessionState(conversationId);
+        if (persisted == null)
+            return await agent.CreateSessionAsync(cancellationToken);
+
+        // Allowlist before deserializing: the sidecar may have arrived via session import, and
+        // the blob format can carry chat messages. Only the todo entry is ever honoured.
+        var restorable = FilterToTodoState(persisted.StateBag);
+        if (restorable == null)
+            return await agent.CreateSessionAsync(cancellationToken);
+
+        try
+        {
+            var session = await agent.DeserializeSessionAsync(
+                restorable.Value, cancellationToken: cancellationToken);
+
+            var outstanding = await _todoProvider.GetRemainingTodosAsync(session, cancellationToken);
+            if (outstanding.Count > 0)
+            {
+                TodoRestoreTracker?.Record(conversationId, persisted.SavedAt, outstanding.Count);
+                _logger?.LogInformation(
+                    "Restored {Count} unfinished todo item(s) for conversation {ConversationId}, saved {SavedAt:O}.",
+                    outstanding.Count, conversationId, persisted.SavedAt);
+            }
+            else
+            {
+                store.ClearSessionState(conversationId);
+            }
+
+            return session;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex,
+                "Could not restore persisted todo state for {ConversationId}; starting a fresh session.",
+                conversationId);
+            return await agent.CreateSessionAsync(cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// Writes the session's todo slice to disk after a turn, or clears the sidecar once nothing
+    /// is outstanding so a finished list is never resurrected on the next start.
+    /// </summary>
+    private async Task PersistTodoStateAsync(
+        ChatClientAgent agent, AgentSession session, string conversationId, CancellationToken cancellationToken)
+    {
+        if (_todoProvider == null || _todoPlannerConfig is not { PersistAcrossRestarts: true } ||
+            ConversationStore is not MarkdownSessionStore store)
+            return;
+
+        try
+        {
+            var outstanding = await _todoProvider.GetRemainingTodosAsync(session, cancellationToken);
+            if (outstanding.Count == 0)
+            {
+                store.ClearSessionState(conversationId);
+                _persistedTodoSignatures.TryRemove(conversationId, out _);
+                return;
+            }
+
+            // SerializeSessionAsync walks the whole session, transcript included, and we keep only
+            // the todo slice. On a long conversation that is a lot of JSON to throw away, so skip
+            // it entirely when the outstanding list is byte-for-byte what we last wrote.
+            var signature = string.Join("", outstanding.Select(t => $"{t.Id}:{t.IsComplete}:{t.Title}"));
+            if (_persistedTodoSignatures.TryGetValue(conversationId, out var previous) && previous == signature)
+                return;
+
+            var serialized = await agent.SerializeSessionAsync(session, cancellationToken: cancellationToken);
+            var bag = ExtractTodoBag(serialized);
+            if (bag.HasValue)
+            {
+                store.PersistSessionState(conversationId, bag.Value);
+                _persistedTodoSignatures[conversationId] = signature;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Never fail a completed turn because the planner sidecar could not be written.
+            _logger?.LogWarning(ex, "Could not persist todo state for {ConversationId}.", conversationId);
+        }
+    }
+
+    /// <summary>
+    /// Todo items still outstanding for a session, or an empty list when the planner is off.
+    /// </summary>
+    public async Task<IReadOnlyList<TodoItem>> GetRemainingTodosAsync(
+        AgentSession session, CancellationToken cancellationToken = default)
+    {
+        if (_todoProvider == null)
+            return Array.Empty<TodoItem>();
+
+        return await _todoProvider.GetRemainingTodosAsync(session, cancellationToken);
+    }
+
+    /// <summary>
+    /// Deterministic stand-in for the Agent Framework's <c>TodoCompletionLoopEvaluator</c>,
+    /// which is still <c>[Experimental]</c> (MAAI001) and would take control of the agent loop.
+    ///
+    /// Without something here, nothing forces completion: the todo list is advisory context, and
+    /// a turn ends whenever the model stops emitting tool calls — even with items outstanding.
+    /// This closes that gap under AgentFox's own control, and is always bounded by
+    /// <see cref="TodoPlannerConfig.MaxContinuations"/> so it cannot spin. At the default of 0
+    /// it only warns, which keeps the "no unrequested extra turns" property intact.
+    /// </summary>
+    private async Task<string> EnsureTodosCompletedAsync(
+        AgentSession session,
+        string responseText,
+        Func<string, Task<string>> runTurn,
+        CancellationToken cancellationToken)
+    {
+        if (_todoProvider == null || _todoPlannerConfig == null)
+            return responseText;
+
+        for (var attempt = 0; ; attempt++)
+        {
+            List<TodoItem> remaining;
+            try
+            {
+                remaining = await _todoProvider.GetRemainingTodosAsync(session, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // A planner read failure must never fail an otherwise successful turn.
+                _logger?.LogWarning(ex, "Could not read remaining todos; skipping completion check.");
+                return responseText;
+            }
+
+            if (remaining.Count == 0)
+                return responseText;
+
+            var titles = string.Join("; ", remaining.Select(t => t.Title));
+
+            if (attempt >= _todoPlannerConfig.MaxContinuations)
+            {
+                _logger?.LogWarning(
+                    "Agent '{AgentName}' ended its turn with {Count} incomplete todo item(s) after "
+                    + "{Attempts} auto-continuation(s): {Titles}. Raise TodoPlanner:MaxContinuations "
+                    + "to let the agent keep working unattended.",
+                    Name, remaining.Count, attempt, titles);
+                return responseText;
+            }
+
+            _logger?.LogInformation(
+                "Agent '{AgentName}' left {Count} todo item(s) incomplete; issuing auto-continuation "
+                + "{Attempt}/{Max}.",
+                Name, remaining.Count, attempt + 1, _todoPlannerConfig.MaxContinuations);
+
+            var continuation = await runTurn(
+                $"You ended your turn with {remaining.Count} incomplete todo item(s): {titles}.\n"
+                + "Continue working through them now. Complete each one and mark it done with "
+                + "`todos_complete`. If an item can no longer be done, remove it with `todos_remove` "
+                + "and say why. Do not restate work you have already finished.");
+
+            if (!string.IsNullOrWhiteSpace(continuation))
+                responseText = responseText + "\n\n" + continuation;
+        }
     }
 
     /// <summary>
@@ -220,7 +533,8 @@ public class FoxAgent
             if (session == null)
             {
                 _logger?.LogDebug("Creating new conversation session for {ConversationId}", conversationId);
-                session = await agent.CreateSessionAsync(cancellationToken);
+                // Rehydrates any unfinished todo list left by a previous process; otherwise fresh.
+                session = await CreateOrRestoreSessionAsync(agent, conversationId, cancellationToken);
                 session.StateBag.SetValue("ConversationId", conversationId);
                 session.StateBag.SetValue("CreatedAt", DateTime.UtcNow.ToString("O"));
                 await ConversationStore.RestoreAsync(conversationId, session);
@@ -246,6 +560,10 @@ public class FoxAgent
                 : await _experienceLearning.BuildBaselineAsync(task, timeoutToken);
             var augmentedTask = memoryContext + learnedBaseline + task;
 
+            // One agent turn. Extracted so the todo-completion check below can issue bounded
+            // follow-up turns through exactly the same streaming/non-streaming path.
+            async Task<string> RunTurnAsync(string prompt)
+            {
             string responseText;
 
             if (streaming != null)
@@ -259,7 +577,7 @@ public class FoxAgent
                 var sb = new StringBuilder();
                 try
                 {
-                    await foreach (var update in agent.RunStreamingAsync(augmentedTask, session, options: runOptions, cancellationToken: timeoutToken))
+                    await foreach (var update in agent.RunStreamingAsync(prompt, session, options: runOptions, cancellationToken: timeoutToken))
                     {
                         //foreach (var content in update.Contents)
                         //{
@@ -300,12 +618,23 @@ public class FoxAgent
             else
             {
                 // Non-streaming path: channels, CLI, sub-agents — wait for the full response.
-                var response = await agent.RunAsync(augmentedTask, session, options: runOptions, cancellationToken: timeoutToken);
+                var response = await agent.RunAsync(prompt, session, options: runOptions, cancellationToken: timeoutToken);
                 responseText = response.Text ?? "I apologize, but I wasn't able to generate a response.";
             }
 
+            return responseText;
+            }
+
+            var responseText = await RunTurnAsync(augmentedTask);
+            responseText = await EnsureTodosCompletedAsync(
+                session, responseText, RunTurnAsync, timeoutToken);
+
             // Persist updated session metadata (e.g. lastActiveAt) after each turn.
             ConversationStore.SaveSession(conversationId, session);
+
+            // Persist (or clear) the todo list so unfinished work survives a restart. After
+            // SaveSession so a failure here can never cost us the transcript.
+            await PersistTodoStateAsync(agent, session, conversationId, timeoutToken);
 
             var references = ResearchReferenceScope.Current?.Snapshot().ToList() ?? new List<ResearchReference>();
             if (references.Count > 0)
@@ -591,6 +920,8 @@ public class AgentBuilder
     private ILogger<FoxAgent>? _logger;
     private IChatClient? _chatClient;
     private CompactionConfig? _compactionConfig;
+    private TodoPlannerConfig? _todoPlannerConfig;
+    private Planning.TodoRestoreTracker? _todoRestoreTracker;
     private ChatHistoryProvider? _chatHistoryProvider;
     private WorkspaceManager _workspaceManager;
     private SessionManager? _sessionManager;
@@ -767,6 +1098,57 @@ public class AgentBuilder
     {
         _chatHistoryProvider = chatHistoryProvider;
         return this;
+    }
+
+    /// <summary>
+    /// Whether the todo planner is currently configured on. Callers use this to avoid
+    /// registering todo prompt guidance for tools that will not exist.
+    /// </summary>
+    public bool IsTodoPlannerEnabled => _todoPlannerConfig != null;
+
+    /// <summary>
+    /// The configured todo planner options, or null when the planner is off. Callers use this to
+    /// build a matching <see cref="Planning.TodoPlannerContributor"/> without re-reading config.
+    /// </summary>
+    public TodoPlannerConfig? TodoPlannerOptions => _todoPlannerConfig;
+
+    /// <summary>
+    /// Supply the tracker that records todo lists rehydrated from disk after a restart, so the
+    /// prompt can ask the user whether to resume stale work.
+    /// </summary>
+    public AgentBuilder WithTodoRestoreTracker(Planning.TodoRestoreTracker tracker)
+    {
+        _todoRestoreTracker = tracker;
+        return this;
+    }
+
+    /// <summary>
+    /// Enable the todo planner with default settings.
+    /// </summary>
+    public AgentBuilder WithTodoPlanner() => WithTodoPlanner(new TodoPlannerConfig());
+
+    /// <summary>
+    /// Configure the todo planner. Pass null to disable it.
+    /// </summary>
+    public AgentBuilder WithTodoPlanner(TodoPlannerConfig? config)
+    {
+        _todoPlannerConfig = config is { Enabled: true } ? config : null;
+        return this;
+    }
+
+    /// <summary>
+    /// Load todo planner configuration from appsettings.json section "TodoPlanner".
+    /// Absent section means enabled with defaults — the planner is cheap (session-state only)
+    /// and its tools have no side effects outside the session.
+    /// </summary>
+    public AgentBuilder WithTodoPlannerFromConfig(IConfiguration configuration)
+    {
+        var section = configuration.GetSection("TodoPlanner");
+        var config = new TodoPlannerConfig();
+        if (section.Exists())
+            section.Bind(config);
+
+        return WithTodoPlanner(config);
     }
 
     /// <summary>
@@ -1387,6 +1769,25 @@ public class AgentBuilder
             _logger?.LogInformation("Compaction disabled for agent '{AgentName}'", _config.Name);
         }
 
+        // Todo planner. Not experimental (TodoProvider is stable in Microsoft.Agents.AI 1.15.0)
+        // and deliberately ordered after the CompactionProvider: todo state lives in the session
+        // state bag rather than the message list, so compaction can summarize the entire
+        // conversation away and the outstanding plan is still rebuilt into context next turn.
+        TodoProvider? todoProvider = null;
+        var contextProviders = new List<AIContextProvider> { textSearchProvider };
+        if (_todoPlannerConfig != null)
+        {
+            todoProvider = new TodoProvider(new TodoProviderOptions
+            {
+                Instructions = _todoPlannerConfig.Instructions,
+                SuppressTodoListMessage = _todoPlannerConfig.SuppressTodoListMessage,
+            });
+            contextProviders.Add(todoProvider);
+            _logger?.LogInformation(
+                "Todo planner enabled for agent '{AgentName}' (max auto-continuations: {MaxContinuations})",
+                _config.Name, _todoPlannerConfig.MaxContinuations);
+        }
+
         ChatHistoryProvider chatHistoryProvider =
             _chatHistoryProvider ?? new InMemoryChatHistoryProvider();
 
@@ -1405,9 +1806,7 @@ public class AgentBuilder
                     Tools = agentTools,
                     Instructions = systemPrompt
                 },
-                AIContextProviders = [
-                    textSearchProvider
-                ],
+                AIContextProviders = contextProviders,
             });
 
 #pragma warning restore MAAI001
@@ -1416,6 +1815,12 @@ public class AgentBuilder
 
         
         var foxAgent = new FoxAgent(agent, _config, _conversationStore!, "main", _workspaceManager, _promptContributorRegistry, _logger, _experienceLearning);
+
+        if (todoProvider != null)
+        {
+            foxAgent.ConfigureTodoPlanner(todoProvider, _todoPlannerConfig!);
+            foxAgent.TodoRestoreTracker = _todoRestoreTracker;
+        }
 
         if (_sessionManager != null)
             foxAgent.SessionManager = _sessionManager;
