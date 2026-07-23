@@ -398,6 +398,11 @@ public sealed class CliWorker : BackgroundService
         string consoleSessionId,
         CancellationToken ct)
     {
+        // Visually separates the user's (possibly multi-line) input from the streamed response
+        // that follows immediately after — without this, the response starts rendering right where
+        // the cursor was left after Enter, and the two run together with nothing to tell them apart.
+        AnsiConsole.Write(new Rule().RuleStyle("grey dim"));
+
         var tcs = new TaskCompletionSource<AgentResult>(TaskCreationOptions.RunContinuationsAsynchronously);
         var cmd = AgentCommand.CreateMainCommand(
             sessionKey: consoleSessionId,
