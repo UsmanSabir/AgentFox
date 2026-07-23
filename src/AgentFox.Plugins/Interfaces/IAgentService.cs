@@ -35,4 +35,34 @@ public interface IAgentService
         Func<string, Task>? onStatus = null,
         Func<AgentToolActivity, Task>? onToolActivity = null,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// As <see cref="RunAsync(string, string?, CancellationToken)"/>, with files attached to
+    /// the turn. Attachments must already have passed the capability checks for the configured
+    /// model — this contract carries them, it does not police them.
+    /// </summary>
+    /// <remarks>
+    /// Defaults to dropping the attachments so existing implementations keep compiling and
+    /// keep answering text-only requests correctly.
+    /// </remarks>
+    Task<AgentReply> RunAsync(
+        string input,
+        IReadOnlyList<ChatAttachment>? attachments,
+        string? conversationId = null,
+        CancellationToken ct = default)
+        => RunAsync(input, conversationId, ct);
+
+    /// <summary>
+    /// As <see cref="StreamAsync"/>, with files attached to the turn.
+    /// </summary>
+    Task<AgentReply> StreamAsync(
+        string input,
+        IReadOnlyList<ChatAttachment>? attachments,
+        string? conversationId,
+        Func<string, Task> onToken,
+        Func<string, Task>? onReasoning = null,
+        Func<string, Task>? onStatus = null,
+        Func<AgentToolActivity, Task>? onToolActivity = null,
+        CancellationToken ct = default)
+        => StreamAsync(input, conversationId, onToken, onReasoning, onStatus, onToolActivity, ct);
 }

@@ -535,13 +535,14 @@ public sealed class AgentOrchestrator : IHostedService
 
         foreach (var m in awareModules)
         {
-            var before = _toolRegistry.GetAll().Count;
+            context.TakeRegistrationCounts(); // discard anything left over from the previous module
             try
             {
                 await m.OnAgentReadyAsync(context);
-                var added = _toolRegistry.GetAll().Count - before;
+                var (main, specialist) = context.TakeRegistrationCounts();
+                var detail = specialist > 0 ? $" ({specialist} specialist-only)" : "";
                 AnsiConsole.MarkupLineInterpolated(
-                    $"[green]✓[/] Plugin '{m.Name}' registered {added} tool(s).");
+                    $"[green]✓[/] Plugin '{m.Name}' registered {main + specialist} tool(s).{detail}");
             }
             catch (Exception ex)
             {
@@ -574,6 +575,10 @@ public sealed class AgentOrchestrator : IHostedService
                 _logger.LogError(
                     "Specialist {AgentId} was not activated because tools are missing: {Tools}",
                     descriptor.Id, string.Join(", ", missing));
+                // Console too: an inactive specialist silently answers nothing, and the log file is
+                // not where anyone looks when the plugin "loaded fine" at startup.
+                AnsiConsole.MarkupLineInterpolated(
+                    $"[yellow]⚠ Specialist '{descriptor.Id}' NOT activated — missing tool(s):[/] [red]{string.Join(", ", missing)}[/]");
                 continue;
             }
 

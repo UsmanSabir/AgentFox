@@ -1,17 +1,18 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from 'svelte';
 import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoSnapshot,
-  type ToolActivity, type ToolActivityDetails } from '$lib/api';
+  type ToolActivity, type ToolActivityDetails, type ChatAttachment,
+  type AttachmentCapabilities } from '$lib/api';
   import { renderMarkdown } from '$lib/markdown';
   import {
     chatMessages, addUserMessage, addAssistantMessage, addBackgroundResultMessage,
     appendToken, appendReasoning, setMessageStatus, upsertToolActivity, finalizeMessage,
-    attachReferences, setAssistantIndex, activeConversationId, activeAgentId, agentReady, resetChat,
-    upsertPendingApproval, clearPendingApproval, type ChatMessage
+    prepareMessageForRetry, attachReferences, setAssistantIndex, activeConversationId, activeAgentId, agentReady, resetChat,
+    upsertPendingApproval, clearPendingApproval, type ChatMessage, type ChatAttachmentView
   } from '$lib/stores';
   import {
     Send, RotateCcw, StopCircle, Bot, User, Copy, Check, Zap, History, Plus, X,
-    Download, Upload, Trash2, Pencil, Brain, GitFork, ChevronDown
+    Download, Upload, Trash2, Pencil, Brain, GitFork, ChevronDown, Paperclip, FileText
   } from 'lucide-svelte';
 
   let inputEl: HTMLTextAreaElement;
@@ -34,6 +35,163 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
   let showActivity = false;
   let loadingActivity = false;
 
+  // ── Attachments ─────────────────────────────────────────────────────────
+  // A pending attachment holds both the base64 payload we will POST and the view
+  // metadata the transcript bubble renders, so send() never has to re-read the File.
+  interface PendingAttachment {
+    id: string;
+    payload: ChatAttachment;
+    view: ChatAttachmentView;
+  }
+
+  /** Images at or below this size get an inline thumbnail; larger ones show a chip. */
+  const PREVIEW_MAX_BYTES = 2 * 1024 * 1024;
+
+  let attachCaps: AttachmentCapabilities | null = null;
+  let pendingAttachments: PendingAttachment[] = [];
+  let attachInput: HTMLInputElement;
+  let attachError = '';
+  let dragDepth = 0;   // nested dragenter/dragleave pairs; only 0 means truly outside
+
+  // Only the main agent's endpoints carry attachments; the specialist chat route is
+  // text-only, so the paperclip disappears rather than silently dropping files.
+  $: attachEnabled  = attachCaps?.enabled === true && selectedAgentId === 'main';
+  $: if (!attachEnabled && pendingAttachments.length > 0) clearAttachments();
+  $: isDraggingFile = dragDepth > 0;
+  $: attachAccept   = attachCaps?.acceptedMediaTypes.join(',') ?? '';
+  $: attachTitle    = attachCaps
+    ? `Attach files — ${describeAccepted(attachCaps)} (max ${formatBytes(attachCaps.maxFileSizeBytes)} each, ` +
+      `${attachCaps.maxFilesPerMessage} per message)`
+    : 'Attach files';
+
+  function describeAccepted(caps: AttachmentCapabilities): string {
+    const kinds: string[] = [];
+    if (caps.textFiles) kinds.push('text & code');
+    if (caps.images)    kinds.push('images');
+    if (caps.documents) kinds.push('PDFs');
+    return kinds.join(', ') || 'nothing';
+  }
+
+  function formatBytes(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  async function loadCapabilities() {
+    // On failure leave attachments off: offering a button that always 400s is worse
+    // than not offering one.
+    try { attachCaps = (await api.capabilities()).attachments; }
+    catch { attachCaps = null; }
+  }
+
+  function toBase64(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error(`Could not read ${file.name}`));
+      // readAsDataURL gives "data:<type>;base64,<payload>" — everything after the comma
+      // is the raw base64 the API expects.
+      reader.onload = () => resolve(String(reader.result).split(',')[1] ?? '');
+      reader.readAsDataURL(file);
+    });
+  }
+
+  /**
+   * Client-side mirror of the server's limits. The server re-checks everything; this exists
+   * so a mistake shows up next to the paperclip instead of costing a round-trip.
+   */
+  function rejectReason(file: File, alreadyPending: number): string | null {
+    if (!attachCaps) return 'Attachments are unavailable.';
+    if (alreadyPending >= attachCaps.maxFilesPerMessage)
+      return `Up to ${attachCaps.maxFilesPerMessage} files per message.`;
+    if (file.size > attachCaps.maxFileSizeBytes)
+      return `${file.name} is ${formatBytes(file.size)} — the limit is ${formatBytes(attachCaps.maxFileSizeBytes)}.`;
+    if (file.size === 0) return `${file.name} is empty.`;
+
+    const isImage = file.type.startsWith('image/');
+    const isPdf   = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+    if (isImage && !attachCaps.images)
+      return `${attachCaps.model || 'This model'} cannot read images.`;
+    if (isPdf && !attachCaps.documents)
+      return `${attachCaps.model || 'This model'} cannot read PDFs.`;
+    if (!isImage && !isPdf && !attachCaps.textFiles)
+      return `${file.name} is not an accepted file type.`;
+    return null;
+  }
+
+  async function addFiles(files: FileList | File[] | null) {
+    if (!files || !attachEnabled) return;
+    attachError = '';
+
+    const accepted: PendingAttachment[] = [];
+    for (const file of Array.from(files)) {
+      const reason = rejectReason(file, pendingAttachments.length + accepted.length);
+      if (reason) { attachError = reason; continue; }
+
+      let data: string;
+      try { data = await toBase64(file); }
+      catch (err) { attachError = err instanceof Error ? err.message : String(err); continue; }
+
+      const mediaType = file.type || 'application/octet-stream';
+      const showPreview = mediaType.startsWith('image/') && file.size <= PREVIEW_MAX_BYTES;
+
+      accepted.push({
+        id: crypto.randomUUID(),
+        payload: { name: file.name, mediaType, data },
+        view: {
+          name: file.name,
+          mediaType,
+          size: file.size,
+          previewUrl: showPreview ? `data:${mediaType};base64,${data}` : undefined
+        }
+      });
+    }
+
+    if (accepted.length > 0) pendingAttachments = [...pendingAttachments, ...accepted];
+  }
+
+  function removeAttachment(id: string) {
+    pendingAttachments = pendingAttachments.filter(a => a.id !== id);
+    attachError = '';
+  }
+
+  function clearAttachments() {
+    pendingAttachments = [];
+    attachError = '';
+  }
+
+  async function handleAttachInput(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    await addFiles(input.files);
+    input.value = ''; // let the same file be picked again after removing it
+  }
+
+  // Pasting a screenshot is the fastest path to "look at this", so treat clipboard
+  // files exactly like picked ones — but only when the model can actually use them.
+  async function handlePaste(event: ClipboardEvent) {
+    if (!attachEnabled) return;
+    const files = Array.from(event.clipboardData?.files ?? []);
+    if (files.length === 0) return;
+    event.preventDefault();
+    await addFiles(files);
+  }
+
+  function handleDragEnter(event: DragEvent) {
+    if (!attachEnabled || !event.dataTransfer?.types.includes('Files')) return;
+    dragDepth += 1;
+  }
+
+  function handleDragLeave() {
+    if (dragDepth > 0) dragDepth -= 1;
+  }
+
+  async function handleDrop(event: DragEvent) {
+    dragDepth = 0;
+    if (!attachEnabled || !event.dataTransfer?.files.length) return;
+    event.preventDefault();
+    await addFiles(event.dataTransfer.files);
+  }
+
   $: messages     = $chatMessages;
   $: convId       = $activeConversationId;
   $: agentIsReady = $agentReady;
@@ -53,7 +211,7 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
 
   onMount(async () => {
     inputEl?.focus();
-    await Promise.all([loadSessions(), loadSpecialists(), loadMemorySettings()]);
+    await Promise.all([loadSessions(), loadSpecialists(), loadMemorySettings(), loadCapabilities()]);
   });
 
   onDestroy(() => {
@@ -147,18 +305,38 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
 
   async function send() {
     const text = message.trim();
-    if (!text || isStreaming) return;
+    if ((!text && pendingAttachments.length === 0) || isStreaming) return;
+
+    // Attachments are consumed by this turn: detach them from the composer before the
+    // await so a second Enter press cannot send the same files twice.
+    const attached = pendingAttachments;
+    pendingAttachments = [];
+    attachError = '';
 
     message = '';
-    addUserMessage(text);
-    const assistantId = addAssistantMessage('', true);
+    addUserMessage(text, attached.map(a => a.view));
+    const assistantId = addAssistantMessage('', true, text);
+    await runMessage(text, assistantId, attached.map(a => a.payload));
+  }
+
+  async function retryMessage(msg: ChatMessage) {
+    if (!msg.error || !msg.retryContent || isStreaming || !agentIsReady) return;
+
+    prepareMessageForRetry(msg.id);
+    // Retry re-sends text only. The file bytes were dropped once the turn was handed off,
+    // and silently retrying without them would be worse than making the user re-attach.
+    await runMessage(msg.retryContent, msg.id);
+  }
+
+  async function runMessage(text: string, assistantId: string, attachments?: ChatAttachment[]) {
     isStreaming = true;
     abortCtrl   = new AbortController();
     await scrollToBottom(true);
 
     try {
       if (selectedAgentId === 'main') {
-        const gen = streamChat(text, convId, abortCtrl.signal);
+        const gen = streamChat(text, convId, abortCtrl.signal, attachments);
+        let completed = false;
         for await (const event of gen) {
           if (event.type === 'token') {
             appendToken(assistantId, event.token);
@@ -178,13 +356,18 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
             attachReferences(assistantId, event.references);
             setAssistantIndex(assistantId, event.assistantIndex);
             finalizeMessage(assistantId);
+            completed = true;
             await loadTodos(event.conversationId ?? convId);
             await loadActivity(event.conversationId ?? convId);
             break;
           } else if (event.type === 'error') {
             finalizeMessage(assistantId, event.error);
+            completed = true;
             break;
           }
+        }
+        if (!completed && !abortCtrl.signal.aborted) {
+          finalizeMessage(assistantId, 'The response ended before completion.');
         }
       } else {
         const response = await api.specialistChat(selectedAgentId, text, convId);
@@ -223,6 +406,7 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
 
   function clearChat() {
     resetChat(selectedAgentId);
+    clearAttachments();
     todoSnapshot = null;
     sessionActivities = [];
     activityDetails = {};
@@ -609,7 +793,24 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
                   </div>
                 </div>
               {:else if msg.role === 'user'}
-                <div class="message-content user-text">{msg.content}</div>
+                {#if msg.attachments && msg.attachments.length > 0}
+                  <div class="message-attachments">
+                    {#each msg.attachments as file}
+                      {#if file.previewUrl}
+                        <img class="message-attachment-image" src={file.previewUrl} alt={file.name} title={file.name} />
+                      {:else}
+                        <span class="attach-chip static">
+                          <FileText size={14} class="attach-icon" />
+                          <span class="attach-name" title={file.name}>{file.name}</span>
+                          <span class="attach-size">{formatBytes(file.size)}</span>
+                        </span>
+                      {/if}
+                    {/each}
+                  </div>
+                {/if}
+                {#if msg.content}
+                  <div class="message-content user-text">{msg.content}</div>
+                {/if}
 	              {:else}
 	                <div
 	                  class="message-content markdown"
@@ -634,11 +835,15 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
 	                    <span class="tool-chip">{activity.toolName || 'tool'} · {activity.status}</span>
 	                  {/each}
 	                </div>
-	              {/if}
+              {/if}
 
               {#if msg.role === 'assistant' && !msg.streaming && !msg.error && msg.references && msg.references.length > 0}
-                <div class="sources">
-                  <span class="sources-label">Sources</span>
+                <details class="sources">
+                  <summary class="sources-summary">
+                    <span class="sources-label">Sources</span>
+                    <span class="sources-count">{msg.references.length}</span>
+                    <span class="sources-chevron"><ChevronDown size={14} /></span>
+                  </summary>
 	                  <ul class="sources-list">
 	                    {#each msg.references as ref}
 	                      <li>
@@ -653,14 +858,14 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
                       </li>
                     {/each}
                   </ul>
-                </div>
+                </details>
               {/if}
 
-              {#if !msg.streaming && msg.role === 'assistant' && !msg.error}
+              {#if !msg.streaming && (msg.role === 'user' || (msg.role === 'assistant' && (!msg.error || msg.retryContent)))}
                 <div class="message-actions">
-                  {#if msg.assistantIndex !== undefined && convId}
+                  {#if msg.role === 'assistant' && !msg.error && msg.assistantIndex !== undefined && convId}
                     <button
-                      class="copy-btn"
+                      class="message-action-btn"
                       on:click={() => forkFromMessage(msg)}
                       disabled={isStreaming || loadingSession || forkingMessageId !== null}
                       title="Start a new session from this response"
@@ -669,19 +874,31 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
                       <span>{forkingMessageId === msg.id ? 'Forking…' : 'Fork from here'}</span>
                     </button>
                   {/if}
-                  <button
-                    class="copy-btn"
-                    on:click={() => copyContent(msg.id, msg.content)}
-                    title="Copy response"
-                  >
-                    {#if copiedId === msg.id}
-                      <Check size={12} />
-                      <span>Copied</span>
-                    {:else}
-                      <Copy size={12} />
-                      <span>Copy</span>
-                    {/if}
-                  </button>
+                  {#if msg.role === 'assistant' && msg.error && msg.retryContent}
+                    <button
+                      class="message-action-btn retry"
+                      on:click={() => retryMessage(msg)}
+                      disabled={isStreaming || !agentIsReady}
+                      title="Retry this message"
+                    >
+                      <RotateCcw size={12} />
+                      <span>Retry</span>
+                    </button>
+                  {:else}
+                    <button
+                      class="message-action-btn"
+                      on:click={() => copyContent(msg.id, msg.content)}
+                      title={msg.role === 'user' ? 'Copy message' : 'Copy response'}
+                    >
+                      {#if copiedId === msg.id}
+                        <Check size={12} />
+                        <span>Copied</span>
+                      {:else}
+                        <Copy size={12} />
+                        <span>Copy</span>
+                      {/if}
+                    </button>
+                  {/if}
                 </div>
               {/if}
             </div>
@@ -748,12 +965,58 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
 	      </details>
 	    {/if}
 
-	    <div class="input-wrap">
+	    {#if attachError}
+	      <div class="attach-error" role="alert">
+	        <span>{attachError}</span>
+	        <button class="attach-error-dismiss" on:click={() => attachError = ''} title="Dismiss">
+	          <X size={12} />
+	        </button>
+	      </div>
+	    {/if}
+
+	    {#if pendingAttachments.length > 0}
+	      <div class="attach-tray">
+	        {#each pendingAttachments as item (item.id)}
+	          <div class="attach-chip">
+	            {#if item.view.previewUrl}
+	              <img class="attach-thumb" src={item.view.previewUrl} alt="" />
+	            {:else}
+	              <FileText size={14} class="attach-icon" />
+	            {/if}
+	            <span class="attach-name" title={item.view.name}>{item.view.name}</span>
+	            <span class="attach-size">{formatBytes(item.view.size)}</span>
+	            <button
+	              class="attach-remove"
+	              on:click={() => removeAttachment(item.id)}
+	              disabled={isStreaming}
+	              title="Remove {item.view.name}"
+	            >
+	              <X size={12} />
+	            </button>
+	          </div>
+	        {/each}
+	      </div>
+	    {/if}
+
+	    <div
+	      class="input-wrap"
+	      class:drop-active={isDraggingFile}
+	      role="presentation"
+	      on:dragenter={handleDragEnter}
+	      on:dragleave={handleDragLeave}
+	      on:dragover|preventDefault
+	      on:drop|preventDefault={handleDrop}
+	    >
+      {#if isDraggingFile}
+        <div class="drop-overlay">Drop files to attach</div>
+      {/if}
+
       <textarea
         bind:this={inputEl}
         bind:value={message}
         use:autoResize={message}
         on:keydown={handleKeyDown}
+        on:paste={handlePaste}
         placeholder={agentIsReady ? 'Message AgentFox… (Enter to send, Shift+Enter for newline)' : 'Waiting for agent…'}
         disabled={!agentIsReady}
         rows="1"
@@ -761,6 +1024,25 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
       ></textarea>
 
       <div class="input-actions">
+        {#if attachEnabled}
+          <input
+            type="file"
+            multiple
+            accept={attachAccept}
+            bind:this={attachInput}
+            on:change={handleAttachInput}
+            class="hidden-input"
+          />
+          <button
+            class="icon-btn"
+            on:click={() => attachInput?.click()}
+            title={attachTitle}
+            disabled={isStreaming || !agentIsReady}
+          >
+            <Paperclip size={15} />
+          </button>
+        {/if}
+
         {#if messages.length > 0}
           <button class="icon-btn" on:click={clearChat} title="Clear chat" disabled={isStreaming}>
             <RotateCcw size={15} />
@@ -776,7 +1058,7 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
           <button
             class="send-btn"
             on:click={send}
-            disabled={!message.trim() || !agentIsReady}
+            disabled={(!message.trim() && pendingAttachments.length === 0) || !agentIsReady}
             title="Send message"
           >
             <Send size={15} />
@@ -784,7 +1066,12 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
         {/if}
       </div>
     </div>
-    <p class="input-hint">AgentFox can use tools, access memory, and spawn sub-agents.</p>
+    <p class="input-hint">
+      AgentFox can use tools, access memory, and spawn sub-agents.
+      {#if attachEnabled && attachCaps}
+        · Attach {describeAccepted(attachCaps)} — drag, paste, or use the paperclip.
+      {/if}
+    </p>
   </div>
 </div>
 
@@ -1280,15 +1567,34 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
     border-top: 1px solid var(--border);
     font-size: 0.75rem;
   }
-  .sources-label {
-    display: block;
+  .sources-summary {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
     color: var(--text-3);
+    cursor: pointer;
+    list-style: none;
+    user-select: none;
+  }
+  .sources-summary::-webkit-details-marker { display: none; }
+  .sources-summary:hover { color: var(--text-2); }
+  .sources-label {
     text-transform: uppercase;
     letter-spacing: 0.04em;
     font-size: 0.625rem;
-    margin-bottom: 0.25rem;
   }
-  .sources-list { list-style: none; margin: 0; padding: 0; }
+  .sources-count {
+    min-width: 1.25rem;
+    padding: 0.05rem 0.35rem;
+    border: 1px solid var(--border);
+    border-radius: 99px;
+    text-align: center;
+    font-size: 0.625rem;
+    line-height: 1.2;
+  }
+  .sources-chevron { transition: transform 0.15s ease; }
+  .sources[open] .sources-chevron { transform: rotate(180deg); }
+  .sources-list { list-style: none; margin: 0.4rem 0 0; padding: 0; }
   .sources-list li { margin: 0.15rem 0; overflow-wrap: anywhere; }
   .sources-list a { color: var(--primary); text-decoration: none; }
   .sources-list a:hover { text-decoration: underline; }
@@ -1340,7 +1646,7 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
     margin-top: 0.125rem;
   }
 
-  .copy-btn {
+  .message-action-btn {
     display: inline-flex;
     align-items: center;
     gap: 0.25rem;
@@ -1352,8 +1658,10 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
     padding: 0.125rem 0;
     transition: color 0.15s;
   }
-  .copy-btn:hover { color: var(--text-2); }
-  .copy-btn:disabled { cursor: wait; opacity: 0.55; }
+  .message-action-btn:hover { color: var(--text-2); }
+  .message-action-btn.retry { color: var(--danger); }
+  .message-action-btn.retry:hover { filter: brightness(1.15); }
+  .message-action-btn:disabled { cursor: wait; opacity: 0.55; }
 
   /* Input bar */
   .input-bar {
@@ -1434,6 +1742,7 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
   }
 
   .input-wrap {
+    position: relative;
     display: flex;
     align-items: flex-end;
     gap: 0.5rem;
@@ -1444,6 +1753,112 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
     transition: border-color 0.15s;
   }
   .input-wrap:focus-within { border-color: var(--primary); }
+  .input-wrap.drop-active { border-color: var(--primary); border-style: dashed; }
+
+  /* Attachments */
+  .hidden-input { display: none; }
+
+  .drop-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius);
+    background: var(--surface-2);
+    color: var(--primary);
+    font-size: 0.8125rem;
+    font-weight: 600;
+    pointer-events: none;   /* the drop must land on .input-wrap underneath */
+    z-index: 2;
+  }
+
+  .attach-tray {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.375rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .attach-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    max-width: 260px;
+    padding: 0.25rem 0.375rem 0.25rem 0.5rem;
+    background: var(--surface-2);
+    border: 1px solid var(--border-md);
+    border-radius: 6px;
+    font-size: 0.75rem;
+    color: var(--text-2);
+  }
+  .attach-chip.static { padding-right: 0.5rem; }
+
+  .attach-thumb {
+    width: 22px;
+    height: 22px;
+    object-fit: cover;
+    border-radius: 3px;
+    flex-shrink: 0;
+  }
+
+  .attach-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .attach-size { color: var(--text-3); flex-shrink: 0; }
+
+  .attach-remove {
+    display: flex;
+    align-items: center;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    color: var(--text-3);
+    padding: 0.125rem;
+    border-radius: 3px;
+    flex-shrink: 0;
+  }
+  .attach-remove:hover { color: var(--danger); }
+  .attach-remove:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .attach-error {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+    padding: 0.375rem 0.5rem;
+    background: rgba(248,113,113,0.1);
+    border: 1px solid rgba(248,113,113,0.25);
+    border-radius: 6px;
+    font-size: 0.75rem;
+    color: var(--danger);
+  }
+  .attach-error-dismiss {
+    display: flex;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    color: inherit;
+    padding: 0.125rem;
+  }
+
+  .message-attachments {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 0.375rem;
+    margin-bottom: 0.375rem;
+  }
+
+  .message-attachment-image {
+    max-width: 240px;
+    max-height: 240px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+  }
 
   .chat-input {
     flex: 1;

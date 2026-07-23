@@ -1,4 +1,5 @@
 using AgentFox.Memory;
+using AgentFox.Modules.Web;
 using AgentFox.Plugins.Research;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
@@ -82,5 +83,27 @@ public sealed class ReferencesSidecarTests
 
         Assert.AreEqual(1, assistants[1].References.Count);
         Assert.AreEqual("https://safe.example/a", assistants[1].References[0].Url);
+    }
+
+    [TestMethod]
+    public void BuildSpecialistChatResponse_IncludesLatestPersistedReferences()
+    {
+        var dir = NewTempDir();
+        var store = new MarkdownSessionStore(dir);
+        const string conv = "specialist/trading-agent/web_test";
+        SeedTwoTurns(store, conv);
+        store.PersistAssistantReferences(conv,
+        [
+            new("https://news.example.com/mari", "MARI research", "Business Times")
+        ]);
+
+        var response = WebModule.BuildSpecialistChatResponse(
+            "LUCK looks fine too.", conv, store);
+
+        Assert.IsTrue(response.Success);
+        Assert.AreEqual(conv, response.ConversationId);
+        Assert.AreEqual(1, response.AssistantIndex);
+        Assert.AreEqual(1, response.References.Count);
+        Assert.AreEqual("https://news.example.com/mari", response.References[0].Url);
     }
 }

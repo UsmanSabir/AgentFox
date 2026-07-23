@@ -110,6 +110,11 @@ class Program
         var configuration = builder.Configuration;
         builder.Services.AddManagementAuthentication(configuration);
 
+        // Chat attachments ride inline as base64 in the /chat body, so a request can exceed
+        // Kestrel's 30 MB default. Give it enough headroom that AttachmentSupport's own limits
+        // are what a user hits — a precise 400 explaining the cap, not an opaque 413.
+        builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = 64L * 1024 * 1024);
+
         // ── Logging setup ─────────────────────────────────────────────────────
         // WebApplicationBuilder registers Console/Debug providers by default.
         // We replace the whole pipeline so neither framework internals nor our
