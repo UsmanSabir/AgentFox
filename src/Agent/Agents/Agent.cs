@@ -17,6 +17,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using AgentFox.Plugins.Interfaces;
 using AgentFox.Plugins.Research;
+using AgentFox.Planning;
 using SystemPromptBuilder = AgentFox.LLM.SystemPromptBuilder;
 
 namespace AgentFox.Agents;
@@ -102,8 +103,9 @@ public class TodoPlannerConfig
     public string? Instructions { get; set; }
 
     /// <summary>
-    /// Suppress the per-turn injected todo-list message. Leave false: that injection is exactly
-    /// what makes the list survive compaction, since it is rebuilt from state every turn.
+    /// Suppress the per-turn injected todo-list message. Leave false so the provider can rebuild
+    /// outstanding items after compaction; the configured formatter omits empty and completed-only
+    /// lists so those synthetic messages do not appear in the transcript.
     /// </summary>
     public bool SuppressTodoListMessage { get; set; } = false;
 
@@ -509,6 +511,17 @@ public class FoxAgent
         if (SessionManager != null && SessionManager.IsResetCommand(task))
         {
             var newId = SessionManager.ResetSession(conversationId);
+
+            // ResetSession only re-archives SessionManager's own bookkeeping. For console/channel
+            // origins the new ID is the SAME string as the old one (e.g. "console" stays "console"),
+            // so without this, ConversationStore.GetSession would keep returning the stale cached
+            // AgentSession with the full prior history still attached on the very next turn — "/new"
+            // would print "starting fresh" while the agent kept the old context. Web sessions dodge
+            // this by accident (they always mint a new random GUID), but clearing here is correct and
+            // harmless for them too — the old transcript file is already moved to the archive by
+            // ResetSession, so this only evicts the in-memory cache entry.
+            ConversationStore.DeleteSession(conversationId);
+
             _logger?.LogInformation("Session reset by user command: {Old} → {New}", conversationId, newId);
             return new AgentResult { Success = true, Output = $"Session reset. Starting fresh (session: {newId})." };
         }
@@ -1812,6 +1825,7 @@ public class AgentBuilder
             {
                 Instructions = _todoPlannerConfig.Instructions,
                 SuppressTodoListMessage = _todoPlannerConfig.SuppressTodoListMessage,
+                TodoListMessageBuilder = TodoListMessageFormatter.Build,
             });
             contextProviders.Add(todoProvider);
             _logger?.LogInformation(

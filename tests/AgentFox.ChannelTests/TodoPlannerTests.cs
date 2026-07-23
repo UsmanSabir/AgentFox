@@ -85,6 +85,40 @@ public sealed class TodoPlannerTests
     }
 
     [TestMethod]
+    public void TodoMessageFormatter_OmitsEmptyAndCompletedItems()
+    {
+        Assert.AreEqual(
+            string.Empty,
+            TodoListMessageFormatter.Build(
+            [
+                new Microsoft.Agents.AI.TodoItem { Id = 1, Title = "done", IsComplete = true }
+            ]));
+        Assert.AreEqual(
+            string.Empty,
+            TodoListMessageFormatter.Build([]));
+    }
+
+    [TestMethod]
+    public void TodoMessageFormatter_EmitsOnlyOutstandingItems()
+    {
+        var message = TodoListMessageFormatter.Build(
+        [
+            new Microsoft.Agents.AI.TodoItem { Id = 1, Title = "done", IsComplete = true },
+            new Microsoft.Agents.AI.TodoItem
+            {
+                Id = 2,
+                Title = "execute next",
+                Description = "keep going",
+                IsComplete = false
+            }
+        ]);
+
+        StringAssert.Contains(message, "### Current todo list");
+        StringAssert.Contains(message, "- 2 execute next: keep going");
+        Assert.IsFalse(message.Contains("done"));
+    }
+
+    [TestMethod]
     public void Contributor_InResearchPhase_DefersToSubmitPlanInsteadOfTodos()
     {
         var store = new PlanStateStore();

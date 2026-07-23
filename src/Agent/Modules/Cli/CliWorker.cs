@@ -159,7 +159,7 @@ public sealed class CliWorker : BackgroundService
         var appConfigPath = AppSettingsHelper.ResolveAppSettingsPath();
         var doctorAgent   = new DoctorAgent(_chatClient, appConfigPath);
 
-        AnsiConsole.MarkupLine("[dim]Type [bold white]help[/] for commands, [bold white]exit[/] to quit. [bold white]Shift+Enter[/] for multi-line input, [bold white]↑/↓[/] for history.[/]");
+        AnsiConsole.MarkupLine("[dim]Type [bold white]/help[/] for commands, [bold white]/exit[/] to quit. [bold white]Shift+Enter[/] for multi-line input, [bold white]↑/↓[/] for history, [bold white]Esc[/] to clear.[/]");
         AnsiConsole.WriteLine();
 
         // PrettyPrompt owns the whole line-editing experience (cursor movement, history navigation,
@@ -234,7 +234,11 @@ public sealed class CliWorker : BackgroundService
         DoctorAgent doctorAgent,
         CancellationToken ct)
     {
-        var trimmed = input.Trim();
+        var raw = input.Trim();
+        if (!raw.StartsWith('/'))
+            return ReplAction.Unhandled; // no leading slash — treat as a chat message for the agent
+
+        var trimmed = raw[1..].Trim();
         var lower   = trimmed.ToLowerInvariant();
 
         switch (lower)
@@ -298,8 +302,8 @@ public sealed class CliWorker : BackgroundService
                 : trimmed["doctor configure ".Length..].Trim();
             if (string.IsNullOrWhiteSpace(request))
             {
-                AnsiConsole.MarkupLine("[yellow]Usage: doctor config <your request>[/]");
-                AnsiConsole.MarkupLine("[dim]Example: doctor config set LLM provider to Anthropic with claude-3-5-sonnet[/]");
+                AnsiConsole.MarkupLine("[yellow]Usage: /doctor config <your request>[/]");
+                AnsiConsole.MarkupLine("[dim]Example: /doctor config set LLM provider to Anthropic with claude-3-5-sonnet[/]");
             }
             else
             {
@@ -605,7 +609,7 @@ public sealed class CliWorker : BackgroundService
                 .AddColumn(new TableColumn("").Width(30))
                 .AddColumn(new TableColumn(""));
             foreach (var row in rows)
-                table.AddRow($"[bold white]{Markup.Escape(row[0])}[/]", $"[dim]{Markup.Escape(row[1])}[/]");
+                table.AddRow($"[bold white]/{Markup.Escape(row[0])}[/]", $"[dim]{Markup.Escape(row[1])}[/]");
             AnsiConsole.MarkupLine($"\n[bold dodgerblue1]{header}[/]");
             AnsiConsole.Write(table);
         }
@@ -613,6 +617,8 @@ public sealed class CliWorker : BackgroundService
         AddSection("General Commands", new[]
         {
             new[] { "help",                "Show this help message" },
+            new[] { "new",                 "Archive the current session and start fresh" },
+            new[] { "reset",               "Alias for /new" },
             new[] { "status",              "Show agent status" },
             new[] { "tools",               "List available tools" },
             new[] { "skills",              "List all registered skills" },
@@ -727,7 +733,7 @@ public sealed class CliWorker : BackgroundService
 
         AnsiConsole.Write(table);
         AnsiConsole.WriteLine();
-        AnsiConsole.MarkupLine("[dim]Use [bold white]skill <name>[/] for details.[/]");
+        AnsiConsole.MarkupLine("[dim]Use [bold white]/skill <name>[/] for details.[/]");
         AnsiConsole.WriteLine();
     }
 
@@ -805,7 +811,7 @@ public sealed class CliWorker : BackgroundService
         }
 
         AnsiConsole.Write(table);
-        AnsiConsole.MarkupLine("[dim]  hitl approve <id>   hitl reject <id> [reason][/]");
+        AnsiConsole.MarkupLine("[dim]  /hitl approve <id>   /hitl reject <id> [reason][/]");
         AnsiConsole.WriteLine();
     }
 
@@ -874,7 +880,7 @@ public sealed class CliWorker : BackgroundService
 
     private void HandleAgentPause(string runId)
     {
-        if (string.IsNullOrWhiteSpace(runId)) { AnsiConsole.MarkupLine("[dim]Usage:[/] [bold white]agents pause <runId>[/]"); return; }
+        if (string.IsNullOrWhiteSpace(runId)) { AnsiConsole.MarkupLine("[dim]Usage:[/] [bold white]/agents pause <runId>[/]"); return; }
         if (_subAgentManager.PauseSubAgent(runId))
             AnsiConsole.MarkupLine($"[bold yellow]⏸[/]  Sub-agent [dim]{Markup.Escape(runId)}[/] paused.");
         else
@@ -884,7 +890,7 @@ public sealed class CliWorker : BackgroundService
 
     private void HandleAgentResume(string runId)
     {
-        if (string.IsNullOrWhiteSpace(runId)) { AnsiConsole.MarkupLine("[dim]Usage:[/] [bold white]agents resume <runId>[/]"); return; }
+        if (string.IsNullOrWhiteSpace(runId)) { AnsiConsole.MarkupLine("[dim]Usage:[/] [bold white]/agents resume <runId>[/]"); return; }
         if (_subAgentManager.ResumeSubAgent(runId))
             AnsiConsole.MarkupLine($"[bold green]▶[/]  Sub-agent [dim]{Markup.Escape(runId)}[/] resumed.");
         else
@@ -894,7 +900,7 @@ public sealed class CliWorker : BackgroundService
 
     private async Task HandleAgentStopAsync(string runId)
     {
-        if (string.IsNullOrWhiteSpace(runId)) { AnsiConsole.MarkupLine("[dim]Usage:[/] [bold white]agents stop <runId>[/]"); return; }
+        if (string.IsNullOrWhiteSpace(runId)) { AnsiConsole.MarkupLine("[dim]Usage:[/] [bold white]/agents stop <runId>[/]"); return; }
         AnsiConsole.MarkupLine($"[dim]Stopping sub-agent [bold white]{Markup.Escape(runId)}[/]...[/]");
         var ok = await _subAgentManager.StopSubAgentAsync(runId);
         AnsiConsole.MarkupLine(ok
@@ -963,28 +969,38 @@ public sealed class CliWorker : BackgroundService
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// PrettyPrompt completion — top-level REPL commands only
+// PrettyPrompt callbacks — slash-command completion + Esc-to-clear
 // ─────────────────────────────────────────────────────────────────────────
 
 /// <summary>
-/// Offers completions for the known top-level REPL commands (help, status, agents, ...), scoped to
-/// the first word of the input. Most REPL input is a free-form chat message to the agent, not a
-/// command, so completions must not pop up once the caret has moved past the command name — doing
-/// so on every word would make ordinary typing feel like fighting an IDE's intellisense.
+/// Completion is scoped to slash commands (<c>/help</c>, <c>/agents</c>, ...) only. Plain-word
+/// completion was tried and dropped: PrettyPrompt's completion window, once open, never truly hides
+/// itself — <c>SlidingArrayWindow.IsEmpty</c> (which gates whether the renderer draws the box) only
+/// reflects whether the original candidate list was empty, not whether any candidate still matches
+/// what's typed, so it kept showing the full list for ordinary chat text like "hello".
+/// <para>
+/// Requiring a leading '/' sidesteps that for the common case (free-form chat basically never starts
+/// with '/'), and <see cref="GetSpanToReplaceByCompletionAsync"/> below adds a second-layer fix for
+/// slash-typos: it collapses the replacement span to an empty span at the caret whenever nothing
+/// matches, which — per PrettyPrompt's own close condition (span start AND end both differing from
+/// the prior keystroke) — forces the pane to actually close instead of lingering with a stale list.
+/// </para>
 /// </summary>
 internal sealed class ReplPromptCallbacks : PromptCallbacks
 {
     private static readonly (string Command, string Description)[] Commands =
-    {
+    [
         ("help",              "Show this help message"),
+        ("new",               "Archive the current session and start fresh"),
+        ("reset",             "Alias for /new"),
         ("status",            "Show agent status"),
         ("tools",             "List available tools"),
         ("skills",            "List all registered skills"),
-        ("skill",             "Show detailed info for a skill: skill <name>"),
-        ("doctor",            "Run health checks (doctor fix, doctor config <request>)"),
+        ("skill",             "Show detailed info for a skill: /skill <name>"),
+        ("doctor",            "Run health checks (/doctor fix, /doctor config <request>)"),
         ("exit",              "Quit AgentFox"),
-        ("agents",            "List/manage sub-agents (agents stats|pause|resume|stop|kill)"),
-        ("hitl",              "List/respond to pending approvals (hitl approve|reject <id>)"),
+        ("agents",            "List/manage sub-agents (/agents stats|pause|resume|stop|kill)"),
+        ("hitl",              "List/respond to pending approvals (/hitl approve|reject <id>)"),
         ("install-service",   "Install as a system service"),
         ("uninstall-service", "Remove the system service"),
         ("start-service",     "Start the system service"),
@@ -992,29 +1008,73 @@ internal sealed class ReplPromptCallbacks : PromptCallbacks
         ("restart-service",   "Restart the system service"),
         ("service-status",    "Show service status"),
         ("service-config",    "Show service configuration"),
-    };
+    ];
+
+    // Built once (not per keystroke): avoids reallocating a CompletionItem + closure per
+    // command on every call, and keeps GetCompletionItemsAsync a plain field read.
+    private static readonly IReadOnlyList<CompletionItem> AllCompletionItems = BuildCompletionItems();
+
+    private static CompletionItem[] BuildCompletionItems()
+    {
+        var items = new CompletionItem[Commands.Length];
+        for (int i = 0; i < Commands.Length; i++)
+        {
+            var description = Commands[i].Description;
+            items[i] = new CompletionItem(
+                replacementText: Commands[i].Command,
+                getExtendedDescription: _ => Task.FromResult<FormattedString>(description));
+        }
+        return items;
+    }
+
+    private static bool IsSlashCommand(string text) => text.Length > 0 && text[0] == '/';
+
+    // Index just past the command word: the first space/newline after the slash, or end of text.
+    private static int GetFirstTokenEnd(string text)
+    {
+        var idx = text.IndexOfAny(TokenBreakChars, 1);
+        return idx < 0 ? text.Length : idx;
+    }
+
+    private static readonly char[] TokenBreakChars = [' ', '\n'];
+
+    private static bool IsOnFirstToken(string text, int caret)
+        => IsSlashCommand(text) && caret >= 1 && caret <= GetFirstTokenEnd(text);
 
     protected override Task<bool> ShouldOpenCompletionWindowAsync(
         string text, int caret, KeyPress keyPress, CancellationToken cancellationToken)
-        => Task.FromResult(caret > 0 && IsOnFirstWord(text, caret));
+        => Task.FromResult(IsOnFirstToken(text, caret));
 
     protected override Task<IReadOnlyList<CompletionItem>> GetCompletionItemsAsync(
         string text, int caret, TextSpan spanToBeReplaced, CancellationToken cancellationToken)
+        => Task.FromResult(IsOnFirstToken(text, caret) ? AllCompletionItems : []);
+
+    // Determines what gets replaced if a completion is committed — but also doubles as the mechanism
+    // that closes the completion pane once nothing matches (see class remarks above). While the typed
+    // prefix still matches at least one command, this returns the real command-word span, [1, tokenEnd).
+    // Once nothing matches, it collapses to an empty span at the caret, which differs in BOTH start and
+    // end from the previous keystroke's span — the one condition PrettyPrompt itself uses to force-close
+    // an open completion pane mid-session.
+    protected override Task<TextSpan> GetSpanToReplaceByCompletionAsync(
+        string text, int caret, CancellationToken cancellationToken)
     {
-        if (!IsOnFirstWord(text, caret))
-            return Task.FromResult<IReadOnlyList<CompletionItem>>(Array.Empty<CompletionItem>());
+        if (!IsSlashCommand(text) || caret < 1)
+            return Task.FromResult(new TextSpan(caret, 0));
 
-        IReadOnlyList<CompletionItem> items = Commands
-            .Select(c => new CompletionItem(
-                replacementText: c.Command,
-                getExtendedDescription: _ => Task.FromResult<FormattedString>(c.Description)))
-            .ToArray();
+        var tokenEnd = GetFirstTokenEnd(text);
+        if (caret > tokenEnd)
+            return Task.FromResult(new TextSpan(caret, 0));
 
-        return Task.FromResult(items);
+        var prefix = text[1..caret];
+        var anyMatch = Commands.Any(c => c.Command.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+
+        return Task.FromResult(anyMatch ? TextSpan.FromBounds(1, tokenEnd) : new TextSpan(caret, 0));
     }
 
-    // True while the caret sits inside the first word — i.e. the user is still typing/editing the
-    // REPL command name rather than its arguments or a free-form chat message.
-    private static bool IsOnFirstWord(string text, int caret)
-        => text.AsSpan(0, caret).IndexOfAny(' ', '\n') == -1;
+    protected override Task<(string Text, int Caret)> FormatInput(
+        string text, int caret, KeyPress keyPress, CancellationToken cancellationToken)
+        => Task.FromResult(
+            keyPress.ConsoleKeyInfo.Key == ConsoleKey.Escape
+                ? (string.Empty, 0)
+                : (text, caret));
 }
