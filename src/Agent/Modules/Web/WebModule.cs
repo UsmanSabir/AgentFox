@@ -79,6 +79,7 @@ public class WebModule : IAppModule
         endpoints.MapPost("/chat", async (
             IAgentService agentService,
             SessionManager sessionManager,
+            MarkdownSessionStore sessionStore,
             ChatRequest req,
             CancellationToken ct) =>
         {
@@ -101,7 +102,8 @@ public class WebModule : IAppModule
                     Response = reply.Output,
                     ConversationId = conversationId,
                     Success = true,
-                    References = reply.References
+                    References = reply.References,
+                    AssistantIndex = sessionStore.GetLatestAssistantIndex(conversationId)
                 });
             }
             catch (Exception ex)
@@ -124,6 +126,7 @@ public class WebModule : IAppModule
     ChatRequest req,
     IAgentService agentService,
     SessionManager sessionManager,
+    MarkdownSessionStore sessionStore,
     HttpContext httpContext,
     CancellationToken ct) =>
         {
@@ -184,7 +187,8 @@ public class WebModule : IAppModule
                 {
                     done = true,
                     conversationId,
-                    references = reply.References
+                    references = reply.References,
+                    assistantIndex = sessionStore.GetLatestAssistantIndex(conversationId)
                 }, SseJsonOptions);
                 await httpContext.Response.WriteAsync($"event: done\ndata: {donePayload}\n\n", ct);
                 await httpContext.Response.Body.FlushAsync(ct);
@@ -309,7 +313,9 @@ public class WebModule : IAppModule
                 status     = s.Status.ToString(),
                 createdAt  = s.CreatedAt,
                 lastActive = s.LastActivityAt,
-                channelType = s.ChannelType
+                channelType = s.ChannelType,
+                forkedFromSessionId = s.ForkedFromSessionId,
+                forkedAtAssistantIndex = s.ForkedAtAssistantIndex
             });
             return Results.Ok(sessions);
         });
@@ -443,6 +449,49 @@ public class WebModule : IAppModule
             return sessionManager.ResumeSession(req.ConversationId)
                 ? Results.Ok(new { success = true, conversationId = req.ConversationId })
                 : Results.NotFound(new { error = "session_not_found_or_unavailable" });
+        });
+
+        endpoints.MapPost("/sessions/fork", (
+            ForkSessionRequest req,
+            SessionManager sessionManager) =>
+        {
+            if (!SessionManager.IsSafeSessionId(req.ConversationId))
+                return Results.BadRequest(new { error = "invalid_session_id" });
+            if (req.AssistantIndex < 0)
+                return Results.BadRequest(new { error = "invalid_assistant_index" });
+
+            try
+            {
+                var newId = sessionManager.ForkWebSession(
+                    req.ConversationId, req.AssistantIndex);
+                return Results.Ok(new
+                {
+                    success = true,
+                    conversationId = newId,
+                    sourceConversationId = req.ConversationId,
+                    assistantIndex = req.AssistantIndex
+                });
+            }
+            catch (KeyNotFoundException)
+            {
+                return Results.NotFound(new { error = "session_not_found" });
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                return Results.BadRequest(new { error = "invalid_assistant_index" });
+            }
+            catch (InvalidOperationException ex) when (ex.Message == "session_busy")
+            {
+                return Results.Conflict(new { error = "session_busy" });
+            }
+            catch (InvalidOperationException ex) when (ex.Message == "session_not_web")
+            {
+                return Results.BadRequest(new { error = "session_not_web" });
+            }
+            catch (IOException)
+            {
+                return Results.Conflict(new { error = "session_busy" });
+            }
         });
 
         endpoints.MapPatch("/sessions", (
@@ -687,6 +736,7 @@ public class WebModule : IAppModule
             ChatRequest req,
             SpecialistAgentRegistry registry,
             SessionManager sessionManager,
+            MarkdownSessionStore sessionStore,
             ICommandQueue commandQueue,
             CancellationToken ct) =>
         {
@@ -723,7 +773,8 @@ public class WebModule : IAppModule
                 {
                     Response = reply,
                     ConversationId = conversationId,
-                    Success = true
+                    Success = true,
+                    AssistantIndex = sessionStore.GetLatestAssistantIndex(conversationId)
                 });
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1244,6 +1295,8 @@ public record HeartbeatRequest(
     int MaxMissed = 3);
 
 public record ResumeSessionRequest(string ConversationId);
+
+public record ForkSessionRequest(string ConversationId, int AssistantIndex);
 
 public record RenameSessionRequest(string ConversationId, string Title);
 

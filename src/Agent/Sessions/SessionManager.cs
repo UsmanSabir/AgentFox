@@ -545,7 +545,7 @@ public class SessionManager : IDisposable
     /// carrying the assistant-message index <c>i</c> and an <c>items</c> array. Anything else is
     /// dropped, so a malformed upload cannot leave a corrupt sidecar behind.
     /// </summary>
-    private static string SanitizeReferenceLines(string raw)
+    private static string SanitizeReferenceLines(string raw, int? maxAssistantIndex = null)
     {
         var kept = new List<string>();
         var options = new JsonSerializerOptions
@@ -568,6 +568,8 @@ public class SessionManager : IDisposable
                     index.ValueKind != System.Text.Json.JsonValueKind.Number ||
                     !index.TryGetInt32(out var assistantIndex) ||
                     assistantIndex < 0) continue;
+                if (maxAssistantIndex.HasValue && assistantIndex > maxAssistantIndex.Value)
+                    continue;
                 if (!(root.TryGetProperty("items", out var items) || root.TryGetProperty("Items", out items)) ||
                     items.ValueKind != System.Text.Json.JsonValueKind.Array) continue;
 
@@ -631,6 +633,88 @@ public class SessionManager : IDisposable
             _logger?.LogWarning(ex, "Could not read {Suffix} sidecar for {SessionId}", suffix, sessionId);
             return null;
         }
+    }
+
+    /// <summary>
+    /// Creates an independent web conversation containing the source transcript through the
+    /// selected user-visible assistant reply. The source is never modified. Conversation context
+    /// and research references are copied; live/pending work and provider state are deliberately
+    /// not copied.
+    /// </summary>
+    public string ForkWebSession(string sourceSessionId, int assistantIndex)
+    {
+        EnsureSafeSessionId(sourceSessionId);
+        if (assistantIndex < 0)
+            throw new ArgumentOutOfRangeException(
+                nameof(assistantIndex), "Assistant index must be non-negative.");
+        if (!_index.TryGetValue(sourceSessionId, out var source))
+            throw new KeyNotFoundException($"Session '{sourceSessionId}' was not found.");
+        if (source.Origin != SessionOrigin.Web)
+            throw new InvalidOperationException("session_not_web");
+
+        var pending = ReadSidecar(sourceSessionId, ".pending");
+        if (!string.IsNullOrWhiteSpace(pending))
+            throw new InvalidOperationException("session_busy");
+
+        var transcript = ReadTranscript(sourceSessionId);
+        if (transcript is null)
+            throw new KeyNotFoundException($"Transcript for session '{sourceSessionId}' was not found.");
+
+        string newId;
+        var specialistPrefix = sourceSessionId.StartsWith("specialist/", StringComparison.OrdinalIgnoreCase)
+            ? $"specialist/{Sanitize(source.AgentId)}/"
+            : string.Empty;
+        do
+        {
+            newId = $"{specialistPrefix}web_{Guid.NewGuid():N}";
+        }
+        while (_index.ContainsKey(newId));
+
+        var forkedTranscript = Memory.MarkdownSessionStore.BuildForkTranscript(
+            transcript, assistantIndex, newId);
+        var path = ConversationFilePath(newId);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, forkedTranscript, System.Text.Encoding.UTF8);
+
+        var references = ReadReferences(sourceSessionId);
+        if (!string.IsNullOrWhiteSpace(references))
+        {
+            var cleanReferences = SanitizeReferenceLines(references, assistantIndex);
+            if (cleanReferences.Length > 0)
+                File.WriteAllText(
+                    path + Memory.MarkdownSessionStore.ReferencesSidecarSuffix,
+                    cleanReferences,
+                    System.Text.Encoding.UTF8);
+        }
+
+        var sourceName = source.Title ?? source.SessionId;
+        var titlePrefix = "Fork of ";
+        var availableLength = MaxSessionTitleLength - titlePrefix.Length;
+        var title = titlePrefix + sourceName[..Math.Min(sourceName.Length, availableLength)];
+        var now = DateTime.UtcNow;
+        _index[newId] = new SessionInfo
+        {
+            SessionId = newId,
+            Title = title,
+            MemoryEnabled = source.MemoryEnabled,
+            LogicalKey = $"web:{newId}",
+            Origin = SessionOrigin.Web,
+            Status = SessionStatus.Idle,
+            AgentId = source.AgentId,
+            ForkedFromSessionId = sourceSessionId,
+            ForkedAtAssistantIndex = assistantIndex,
+            CreatedAt = now,
+            LastActivityAt = now
+        };
+        _memoryPolicy?.SetSessionOverride(newId, source.MemoryEnabled);
+        SaveIndexAsync();
+
+        _logger?.LogInformation(
+            "Forked web session {SourceSessionId} at assistant reply {AssistantIndex} as {SessionId}",
+            sourceSessionId,
+            assistantIndex,
+            newId);
+        return newId;
     }
 
     /// <summary>

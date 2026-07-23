@@ -60,6 +60,7 @@ public sealed class CliWorker : BackgroundService
     private readonly ILogger<CliWorker> _logger;
     private readonly ServiceConfig _serviceConfig;
     private readonly HitlManager _hitlManager;
+    private readonly IEnumerable<IAppModule> _modules;
 
     public CliWorker(
         IHostApplicationLifetime lifetime,
@@ -80,7 +81,8 @@ public sealed class CliWorker : BackgroundService
         ChannelManagerHolder channelManagerHolder,
         ILogger<CliWorker> logger,
         ServiceConfig serviceConfig,
-        HitlManager hitlManager)
+        HitlManager hitlManager,
+        IEnumerable<IAppModule> modules)
     {
         _hitlManager          = hitlManager;
         _lifetime             = lifetime;
@@ -101,6 +103,7 @@ public sealed class CliWorker : BackgroundService
         _channelManagerHolder = channelManagerHolder;
         _logger               = logger;
         _serviceConfig        = serviceConfig;
+        _modules              = modules;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -149,6 +152,15 @@ public sealed class CliWorker : BackgroundService
             AnsiConsole.MarkupLine($"[bold green]✓[/]  {channelManager.Channels.Count} channel(s) connected.");
         else
             AnsiConsole.MarkupLine("[dim]No channels configured. Use manage_channel to add one at runtime.[/]");
+
+        // The web/API module binds its own Kestrel listener (see Program.cs UseUrls); only print
+        // the link when that module is actually active, so this doesn't claim a UI exists for a
+        // CLI-only / --disabled-web run.
+        if (_modules.Any(m => m.Name is "web" or "api"))
+        {
+            var url = $"http://localhost:{_serviceConfig.Port}";
+            AnsiConsole.MarkupLine($"[bold green]✓[/]  Web UI: [link={url}]{url}[/]");
+        }
 
         // Session recovery (interactive — must stay in CliWorker)
         var interrupted      = _sessionManager.GetInterruptedActiveSessions();

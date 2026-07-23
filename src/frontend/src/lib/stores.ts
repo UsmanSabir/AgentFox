@@ -24,6 +24,7 @@ export interface ChatMessage {
   timestamp: Date;
   isBackgroundResult?: boolean;
   references?: ReferenceItem[];
+  assistantIndex?: number;
   pendingApproval?: PendingApprovalInfo;
   reasoning?: string;
   status?: string;
@@ -104,6 +105,13 @@ export function attachReferences(id: string, references?: ReferenceItem[]) {
   if (!references || references.length === 0) return;
   chatMessages.update(msgs =>
     msgs.map(m => m.id === id ? { ...m, references } : m)
+  );
+}
+
+export function setAssistantIndex(id: string, assistantIndex?: number) {
+  if (assistantIndex === undefined) return;
+  chatMessages.update(msgs =>
+    msgs.map(m => m.id === id ? { ...m, assistantIndex } : m)
   );
 }
 

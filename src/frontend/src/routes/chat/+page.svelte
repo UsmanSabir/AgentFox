@@ -6,12 +6,12 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
   import {
     chatMessages, addUserMessage, addAssistantMessage, addBackgroundResultMessage,
     appendToken, appendReasoning, setMessageStatus, upsertToolActivity, finalizeMessage,
-    attachReferences, activeConversationId, activeAgentId, agentReady, resetChat,
-    upsertPendingApproval, clearPendingApproval
+    attachReferences, setAssistantIndex, activeConversationId, activeAgentId, agentReady, resetChat,
+    upsertPendingApproval, clearPendingApproval, type ChatMessage
   } from '$lib/stores';
   import {
     Send, RotateCcw, StopCircle, Bot, User, Copy, Check, Zap, History, Plus, X,
-    Download, Upload, Trash2, Pencil, Brain
+    Download, Upload, Trash2, Pencil, Brain, GitFork, ChevronDown
   } from 'lucide-svelte';
 
   let inputEl: HTMLTextAreaElement;
@@ -20,6 +20,7 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
   let isStreaming = false;
   let abortCtrl: AbortController | null = null;
   let copiedId: string | null = null;
+  let forkingMessageId: string | null = null;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let sessions: SessionInfo[] = [];
   let specialists: SpecialistAgentInfo[] = [];
@@ -173,6 +174,7 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
           } else if (event.type === 'done') {
             if (event.conversationId) activeConversationId.set(event.conversationId);
             attachReferences(assistantId, event.references);
+            setAssistantIndex(assistantId, event.assistantIndex);
             finalizeMessage(assistantId);
             await loadTodos(event.conversationId ?? convId);
             await loadActivity(event.conversationId ?? convId);
@@ -188,6 +190,7 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
         if (response.success) {
           appendToken(assistantId, response.response);
           attachReferences(assistantId, response.references);
+          setAssistantIndex(assistantId, response.assistantIndex);
           finalizeMessage(assistantId);
         } else {
           finalizeMessage(assistantId, response.error ?? 'Specialist request failed');
@@ -249,6 +252,7 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
         role: item.role,
         content: item.content,
         references: item.references,
+        assistantIndex: item.assistantIndex,
         timestamp: new Date(session.lastActive)
       })));
       showSessions = false;
@@ -383,6 +387,26 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
       update() { tick().then(resize); },
       destroy() { node.removeEventListener('input', resize); },
     };
+  }
+
+  async function forkFromMessage(msg: ChatMessage) {
+    if (!convId || msg.assistantIndex === undefined || isStreaming || loadingSession ||
+        forkingMessageId !== null)
+      return;
+
+    forkingMessageId = msg.id;
+    try {
+      const result = await api.forkSession(convId, msg.assistantIndex);
+      await loadSessions();
+      const forked = sessions.find(session => session.id === result.conversationId);
+      if (!forked)
+        throw new Error('The fork was created but could not be found in the session list.');
+      await openSession(forked);
+    } catch (err) {
+      alert('Fork failed: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      forkingMessageId = null;
+    }
   }
 
   function isSafeReferenceUrl(url: string): boolean {
@@ -631,19 +655,32 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
               {/if}
 
               {#if !msg.streaming && msg.role === 'assistant' && !msg.error}
-                <button
-                  class="copy-btn"
-                  on:click={() => copyContent(msg.id, msg.content)}
-                  title="Copy response"
-                >
-                  {#if copiedId === msg.id}
-                    <Check size={12} />
-                    <span>Copied</span>
-                  {:else}
-                    <Copy size={12} />
-                    <span>Copy</span>
+                <div class="message-actions">
+                  {#if msg.assistantIndex !== undefined && convId}
+                    <button
+                      class="copy-btn"
+                      on:click={() => forkFromMessage(msg)}
+                      disabled={isStreaming || loadingSession || forkingMessageId !== null}
+                      title="Start a new session from this response"
+                    >
+                      <GitFork size={12} />
+                      <span>{forkingMessageId === msg.id ? 'Forking…' : 'Fork from here'}</span>
+                    </button>
                   {/if}
-                </button>
+                  <button
+                    class="copy-btn"
+                    on:click={() => copyContent(msg.id, msg.content)}
+                    title="Copy response"
+                  >
+                    {#if copiedId === msg.id}
+                      <Check size={12} />
+                      <span>Copied</span>
+                    {:else}
+                      <Copy size={12} />
+                      <span>Copy</span>
+                    {/if}
+                  </button>
+                </div>
               {/if}
             </div>
           </div>
@@ -680,9 +717,16 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
 	          loadingActivity = true;
 	          Promise.all(sessionActivities.map(loadActivityDetails)).finally(() => loadingActivity = false);
 	        }
-	      }}>
+	        }}>
 	        <summary>
-	          <span>Tool activity</span>
+	          <span class="progress-label">
+	            <ChevronDown
+	              size={13}
+	              class={showActivity ? 'activity-chevron open' : 'activity-chevron'}
+	              aria-hidden="true"
+	            />
+	            <span>Tool activity</span>
+	          </span>
 	          <span>{sessionActivities.length} call{sessionActivities.length === 1 ? '' : 's'}</span>
 	        </summary>
 	        <ul class="activity-list">
@@ -1286,7 +1330,14 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
     font-size: 0.6875rem;
   }
 
-  /* Copy button */
+  /* Message actions */
+  .message-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-top: 0.125rem;
+  }
+
   .copy-btn {
     display: inline-flex;
     align-items: center;
@@ -1298,9 +1349,9 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
     font-size: 0.6875rem;
     padding: 0.125rem 0;
     transition: color 0.15s;
-    margin-top: 0.125rem;
   }
   .copy-btn:hover { color: var(--text-2); }
+  .copy-btn:disabled { cursor: wait; opacity: 0.55; }
 
   /* Input bar */
   .input-bar {
@@ -1321,6 +1372,16 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
   .progress-panel summary span:last-child {
     color: var(--text-3);
   }
+  .progress-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+  }
+  .activity-chevron {
+    color: var(--text-3);
+    transition: transform 0.15s ease;
+  }
+  .activity-chevron.open { transform: rotate(180deg); }
   .plan-preview {
     max-height: 120px;
     overflow-y: auto;

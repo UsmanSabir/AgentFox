@@ -276,10 +276,10 @@ public sealed class MarkdownSessionStore : IConversationStore
         else
         {
             result = new List<ConversationMessageSnapshot>(snapshots.Count);
-            int assistantIndex = 0;
             foreach (var s in snapshots)
             {
-                if (s.Role == "assistant" && refs.TryGetValue(assistantIndex++, out var items))
+                if (s.AssistantIndex is int assistantIndex &&
+                    refs.TryGetValue(assistantIndex, out var items))
                     result.Add(s with { References = items });
                 else
                     result.Add(s);
@@ -300,6 +300,25 @@ public sealed class MarkdownSessionStore : IConversationStore
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Returns the zero-based index of the latest persisted, user-visible assistant reply.
+    /// Null means the conversation has no completed assistant response yet.
+    /// </summary>
+    public int? GetLatestAssistantIndex(string conversationId)
+    {
+        SessionManager.EnsureSafeSessionId(conversationId);
+        if (!_messages.TryGetValue(conversationId, out var messages))
+        {
+            var path = ResolveFilePath(conversationId);
+            messages = File.Exists(path) ? ParseFile(path) : [];
+        }
+
+        return ProjectSnapshots(messages)
+            .Where(message => message.AssistantIndex.HasValue)
+            .Select(message => message.AssistantIndex)
+            .LastOrDefault();
     }
 
     /// <summary>
@@ -361,14 +380,34 @@ public sealed class MarkdownSessionStore : IConversationStore
 
     // Projects the raw message list to user/assistant non-empty-text snapshots. Shared by the
     // read path and PersistAssistantReferences so the assistant-index definition never drifts.
-    private static List<ConversationMessageSnapshot> ProjectSnapshots(List<ChatMessage> messages) =>
-        messages
-            .Where(message => message.Role == ChatRole.User || message.Role == ChatRole.Assistant)
-            .Select(message => new ConversationMessageSnapshot(
-                message.Role == ChatRole.User ? "user" : "assistant",
-                message.Text?.Trim() ?? string.Empty))
-            .Where(message => !string.IsNullOrWhiteSpace(message.Content))
-            .ToList();
+    private static List<ConversationMessageSnapshot> ProjectSnapshots(List<ChatMessage> messages)
+    {
+        var snapshots = new List<ConversationMessageSnapshot>();
+        var assistantIndex = 0;
+
+        foreach (var message in messages)
+        {
+            if (message.Role != ChatRole.User && message.Role != ChatRole.Assistant)
+                continue;
+
+            var content = message.Text?.Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(content))
+                continue;
+
+            if (message.Role == ChatRole.Assistant)
+            {
+                snapshots.Add(new ConversationMessageSnapshot(
+                    "assistant", content, assistantIndex));
+                assistantIndex++;
+            }
+            else
+            {
+                snapshots.Add(new ConversationMessageSnapshot("user", content));
+            }
+        }
+
+        return snapshots;
+    }
 
     // Reads the sidecar into a map of assistantIndex → references. Empty when absent/unreadable.
     private Dictionary<int, List<ResearchReference>> LoadReferences(string conversationId)
@@ -564,15 +603,7 @@ public sealed class MarkdownSessionStore : IConversationStore
         using var writer = new StreamWriter(stream, Encoding.UTF8);
 
         if (isNewFile)
-        {
-            writer.WriteLine("---");
-            writer.WriteLine($"sessionId: {conversationId}");
-            writer.WriteLine($"createdAt: {DateTime.UtcNow:O}");
-            writer.WriteLine("---");
-            writer.WriteLine();
-            writer.WriteLine("# Chat Log");
-            writer.WriteLine();
-        }
+            WriteTranscriptHeader(writer, conversationId);
 
         foreach (var msg in messages)
             WriteMessage(writer, msg);
@@ -580,7 +611,18 @@ public sealed class MarkdownSessionStore : IConversationStore
         writer.Flush();
     }
 
-    private static void WriteMessage(StreamWriter writer, ChatMessage msg)
+    private static void WriteTranscriptHeader(TextWriter writer, string conversationId)
+    {
+        writer.WriteLine("---");
+        writer.WriteLine($"sessionId: {conversationId}");
+        writer.WriteLine($"createdAt: {DateTime.UtcNow:O}");
+        writer.WriteLine("---");
+        writer.WriteLine();
+        writer.WriteLine("# Chat Log");
+        writer.WriteLine();
+    }
+
+    private static void WriteMessage(TextWriter writer, ChatMessage msg)
     {
         writer.WriteLine($"### {msg.Role.Value}");
         writer.WriteLine();
@@ -627,8 +669,13 @@ public sealed class MarkdownSessionStore : IConversationStore
 
     private static List<ChatMessage> ParseFile(string path)
     {
-        var messages = new List<ChatMessage>();
         var allText = File.ReadAllText(path, Encoding.UTF8);
+        return ParseMarkdown(allText);
+    }
+
+    private static List<ChatMessage> ParseMarkdown(string allText)
+    {
+        var messages = new List<ChatMessage>();
 
         // Skip YAML frontmatter
         var bodyStart = 0;
@@ -671,6 +718,52 @@ public sealed class MarkdownSessionStore : IConversationStore
             FlushMessage(messages, currentRole.Value, contentLines);
 
         return messages;
+    }
+
+    /// <summary>
+    /// Builds a fresh Markdown transcript containing the raw conversation through the selected
+    /// user-visible assistant reply. Tool calls and results before that reply remain intact.
+    /// </summary>
+    internal static string BuildForkTranscript(
+        string transcriptMarkdown,
+        int assistantIndex,
+        string destinationConversationId)
+    {
+        if (assistantIndex < 0)
+            throw new ArgumentOutOfRangeException(
+                nameof(assistantIndex), "Assistant index must be non-negative.");
+
+        SessionManager.EnsureSafeSessionId(destinationConversationId);
+        var messages = ParseMarkdown(transcriptMarkdown);
+        var currentAssistantIndex = -1;
+        var rawCutoff = -1;
+
+        for (var i = 0; i < messages.Count; i++)
+        {
+            var message = messages[i];
+            if (message.Role != ChatRole.Assistant ||
+                string.IsNullOrWhiteSpace(message.Text))
+                continue;
+
+            currentAssistantIndex++;
+            if (currentAssistantIndex == assistantIndex)
+            {
+                rawCutoff = i;
+                break;
+            }
+        }
+
+        if (rawCutoff < 0)
+            throw new ArgumentOutOfRangeException(
+                nameof(assistantIndex), "The selected assistant reply does not exist.");
+
+        var builder = new StringBuilder();
+        using var writer = new StringWriter(builder) { NewLine = "\n" };
+        WriteTranscriptHeader(writer, destinationConversationId);
+        foreach (var message in messages.Take(rawCutoff + 1))
+            WriteMessage(writer, message);
+
+        return builder.ToString();
     }
 
     private static void FlushMessage(List<ChatMessage> messages, ChatRole role, List<string> lines)
@@ -766,7 +859,10 @@ public sealed class MarkdownSessionStore : IConversationStore
         [property: JsonPropertyName("result")] string? Result);
 }
 
-public sealed record ConversationMessageSnapshot(string Role, string Content)
+public sealed record ConversationMessageSnapshot(
+    string Role,
+    string Content,
+    int? AssistantIndex = null)
 {
     public IReadOnlyList<ResearchReference> References { get; init; } = [];
 }

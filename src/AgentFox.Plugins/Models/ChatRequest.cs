@@ -32,4 +32,9 @@ public class ChatResponse
 
     /// <summary>Web sources consulted during the turn, for display as citations.</summary>
     public List<ResearchReference> References { get; set; } = new();
+
+    /// <summary>
+    /// Zero-based persisted assistant reply index. Web clients use this as a stable fork point.
+    /// </summary>
+    public int? AssistantIndex { get; set; }
 }

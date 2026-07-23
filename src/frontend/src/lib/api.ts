@@ -47,6 +47,7 @@ export interface ChatResponse {
   success: boolean;
   error?: string;
   references?: ReferenceItem[];
+  assistantIndex?: number;
 }
 
 export interface AgentStatus {
@@ -146,12 +147,15 @@ export interface SessionInfo {
   createdAt: string;
   lastActive: string;
   channelType?: string;
+  forkedFromSessionId?: string;
+  forkedAtAssistantIndex?: number;
 }
 
 export interface ConversationMessage {
   role: 'user' | 'assistant';
   content: string;
   references?: ReferenceItem[];
+  assistantIndex?: number;
 }
 
 export interface ConversationMessagesResponse {
@@ -488,6 +492,13 @@ export const api = {
     get<ConversationMessagesResponse>(`/session-messages?conversationId=${encodeURIComponent(conversationId)}`),
   resumeSession: (conversationId: string) =>
     post<{ success: boolean; conversationId: string }>('/sessions/resume', { conversationId }),
+  forkSession: (conversationId: string, assistantIndex: number) =>
+    post<{
+      success: boolean;
+      conversationId: string;
+      sourceConversationId: string;
+      assistantIndex: number;
+    }>('/sessions/fork', { conversationId, assistantIndex }),
   renameSession: (conversationId: string, title: string) =>
     patch<{ success: boolean; conversationId: string; title: string }>('/sessions', { conversationId, title }),
   setSessionMemory: (conversationId: string, enabled: boolean | null) =>
@@ -594,7 +605,13 @@ export type StreamEvent =
   | { type: 'reasoning'; text: string }
   | { type: 'status'; status: string }
   | { type: 'tool_activity'; activity: ToolActivity }
-  | { type: 'done';   done: true; conversationId?: string; references?: ReferenceItem[] }
+  | {
+      type: 'done';
+      done: true;
+      conversationId?: string;
+      references?: ReferenceItem[];
+      assistantIndex?: number;
+    }
   | { type: 'error';  error: string };
 
 export async function* streamChat(
@@ -635,7 +652,13 @@ export async function* streamChat(
           try {
             const payload = JSON.parse(line.slice(6));
             if (currentEvent === 'done') {
-              yield { type: 'done', done: true, conversationId: payload.conversationId, references: payload.references };
+              yield {
+                type: 'done',
+                done: true,
+                conversationId: payload.conversationId,
+                references: payload.references,
+                assistantIndex: payload.assistantIndex
+              };
             } else if (currentEvent === 'session') {
               yield { type: 'session', conversationId: payload.conversationId };
             } else if (currentEvent === 'reasoning') {
