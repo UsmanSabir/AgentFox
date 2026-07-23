@@ -1,10 +1,12 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from 'svelte';
-  import { streamChat, api, type SessionInfo, type SpecialistAgentInfo } from '$lib/api';
+import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoSnapshot,
+  type ToolActivity, type ToolActivityDetails } from '$lib/api';
   import { renderMarkdown } from '$lib/markdown';
   import {
     chatMessages, addUserMessage, addAssistantMessage, addBackgroundResultMessage,
-    appendToken, finalizeMessage, attachReferences, activeConversationId, activeAgentId, agentReady, resetChat,
+    appendToken, appendReasoning, setMessageStatus, upsertToolActivity, finalizeMessage,
+    attachReferences, activeConversationId, activeAgentId, agentReady, resetChat,
     upsertPendingApproval, clearPendingApproval
   } from '$lib/stores';
   import {
@@ -25,6 +27,11 @@
   let loadingSession = false;
   let importInput: HTMLInputElement;
   let globalMemoryEnabled = true;
+  let todoSnapshot: TodoSnapshot | null = null;
+  let sessionActivities: ToolActivity[] = [];
+  let activityDetails: Record<string, ToolActivityDetails> = {};
+  let showActivity = false;
+  let loadingActivity = false;
 
   $: messages     = $chatMessages;
   $: convId       = $activeConversationId;
@@ -66,19 +73,45 @@
       } else {
         clearPendingApproval();
       }
+      await loadTodos(cid);
     } catch {
       // silently ignore poll errors (server may be restarting)
     }
   }
 
+  async function loadTodos(cid = convId) {
+    if (!cid) { todoSnapshot = null; return; }
+    try { todoSnapshot = await api.todos(cid); } catch { todoSnapshot = null; }
+  }
+
+  async function loadActivity(cid = convId) {
+    if (!cid) { sessionActivities = []; return; }
+    try { sessionActivities = await api.activity(cid); }
+    catch { sessionActivities = []; }
+  }
+
+  async function loadActivityDetails(activity: ToolActivity) {
+    if (!convId || activityDetails[activity.callId]) return;
+    try {
+      const detail = await api.activityDetails(convId, activity.callId);
+      activityDetails = { ...activityDetails, [activity.callId]: detail };
+    } catch {
+      // Leave the summary visible when details cannot be loaded.
+    }
+  }
+
   let respondingApprovalId: string | null = null;
+  let approvalFeedback: Record<string, string> = {};
 
   async function respondToApproval(approvalId: string, approved: boolean) {
     respondingApprovalId = approvalId;
     try {
       if (approved) await api.hitlApprove(approvalId);
-      else await api.hitlReject(approvalId);
+      else await api.hitlReject(approvalId, approvalFeedback[approvalId]?.trim() || undefined);
       clearPendingApproval(approvalId);
+      const remaining = { ...approvalFeedback };
+      delete remaining[approvalId];
+      approvalFeedback = remaining;
     } catch {
       // leave the bubble in place — the next poll (or a retry click) can still resolve it
     } finally {
@@ -127,10 +160,22 @@
           if (event.type === 'token') {
             appendToken(assistantId, event.token);
             await scrollToBottom();
+          } else if (event.type === 'session') {
+            activeConversationId.set(event.conversationId);
+            await loadTodos(event.conversationId);
+            void pollPending(event.conversationId);
+          } else if (event.type === 'reasoning') {
+            appendReasoning(assistantId, event.text);
+          } else if (event.type === 'status') {
+            setMessageStatus(assistantId, event.status);
+          } else if (event.type === 'tool_activity') {
+            upsertToolActivity(assistantId, event.activity);
           } else if (event.type === 'done') {
             if (event.conversationId) activeConversationId.set(event.conversationId);
             attachReferences(assistantId, event.references);
             finalizeMessage(assistantId);
+            await loadTodos(event.conversationId ?? convId);
+            await loadActivity(event.conversationId ?? convId);
             break;
           } else if (event.type === 'error') {
             finalizeMessage(assistantId, event.error);
@@ -162,6 +207,8 @@
       await tick();
       inputEl?.focus();
       await loadSessions();
+      await loadTodos();
+      await loadActivity();
     }
   }
 
@@ -171,6 +218,9 @@
 
   function clearChat() {
     resetChat(selectedAgentId);
+    todoSnapshot = null;
+    sessionActivities = [];
+    activityDetails = {};
   }
 
   async function loadSessions() {
@@ -192,6 +242,8 @@
       const history = await api.sessionMessages(session.id);
       activeAgentId.set(specialists.some(agent => agent.id === history.agentId) ? history.agentId : 'main');
       activeConversationId.set(history.conversationId);
+      todoSnapshot = null;
+      activityDetails = {};
       chatMessages.set(history.messages.map(item => ({
         id: crypto.randomUUID(),
         role: item.role,
@@ -201,6 +253,8 @@
       })));
       showSessions = false;
       await loadSessions();
+      await loadTodos(history.conversationId);
+      await loadActivity(history.conversationId);
       await scrollToBottom(true);
     } catch (err) {
       alert('Failed to load session: ' + (err instanceof Error ? err.message : String(err)));
@@ -329,6 +383,23 @@
       update() { tick().then(resize); },
       destroy() { node.removeEventListener('input', resize); },
     };
+  }
+
+  function isSafeReferenceUrl(url: string): boolean {
+    try {
+      const parsed = new URL(url);
+      return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+    } catch {
+      return false;
+    }
+  }
+
+  function statusLabel(status?: string): string {
+    return ({
+      thinking: 'Thinking…',
+      running_tools: 'Running tools…',
+      preparing_response: 'Preparing response…'
+    } as Record<string, string>)[status ?? ''] ?? '';
   }
 </script>
 
@@ -484,10 +555,21 @@
               {:else if msg.pendingApproval}
                 <div class="approval-card">
                   <div class="approval-desc">🔐 {msg.pendingApproval.description}</div>
-                  {#if msg.pendingApproval.details}
-                    <div class="approval-details">{msg.pendingApproval.details}</div>
-                  {/if}
-                  <div class="approval-actions">
+	                  {#if msg.pendingApproval.details}
+	                    <div class="approval-details">{msg.pendingApproval.details}</div>
+	                  {/if}
+	                  <input
+	                    class="approval-feedback"
+	                    value={approvalFeedback[msg.pendingApproval.approvalId] ?? ''}
+	                    on:input={(event) => {
+	                      approvalFeedback = {
+	                        ...approvalFeedback,
+	                        [msg.pendingApproval!.approvalId]: (event.currentTarget as HTMLInputElement).value
+	                      };
+	                    }}
+	                    placeholder="Optional rejection feedback"
+	                  />
+	                  <div class="approval-actions">
                     <button
                       class="approval-btn approve"
                       disabled={respondingApprovalId === msg.pendingApproval.approvalId}
@@ -502,22 +584,45 @@
                 </div>
               {:else if msg.role === 'user'}
                 <div class="message-content user-text">{msg.content}</div>
-              {:else}
-                <div
-                  class="message-content markdown"
-                  class:stream-cursor={msg.streaming && msg.content.length > 0}
-                >{#if msg.content.length > 0}{@html renderMarkdown(msg.content)}{:else if msg.streaming}<span class="typing-dots"><span></span><span></span><span></span></span>{/if}</div>
-              {/if}
+	              {:else}
+	                <div
+	                  class="message-content markdown"
+	                  class:stream-cursor={msg.streaming && msg.content.length > 0}
+	                >{#if msg.content.length > 0}{@html renderMarkdown(msg.content)}{:else if msg.streaming}<span class="typing-dots"><span></span><span></span><span></span></span>{/if}</div>
+	              {/if}
+
+	              {#if msg.role === 'assistant' && (msg.reasoning || (msg.streaming && msg.status))}
+	                <details class="aux-panel" open={false}>
+	                  <summary>{msg.reasoning ? 'Reasoning' : statusLabel(msg.status)}</summary>
+	                  {#if msg.reasoning}
+	                    <div class="reasoning-text">{@html renderMarkdown(msg.reasoning)}</div>
+	                  {:else}
+	                    <div class="status-text">{statusLabel(msg.status)}</div>
+	                  {/if}
+	                </details>
+	              {/if}
+
+	              {#if msg.role === 'assistant' && msg.toolActivities && msg.toolActivities.length > 0}
+	                <div class="tool-summary">
+	                  {#each msg.toolActivities as activity}
+	                    <span class="tool-chip">{activity.toolName || 'tool'} · {activity.status}</span>
+	                  {/each}
+	                </div>
+	              {/if}
 
               {#if msg.role === 'assistant' && !msg.streaming && !msg.error && msg.references && msg.references.length > 0}
                 <div class="sources">
                   <span class="sources-label">Sources</span>
-                  <ul class="sources-list">
-                    {#each msg.references as ref}
-                      <li>
-                        <a href={ref.url} target="_blank" rel="noopener noreferrer" title={ref.url}>
-                          {ref.title || ref.url}
-                        </a>
+	                  <ul class="sources-list">
+	                    {#each msg.references as ref}
+	                      <li>
+	                        {#if isSafeReferenceUrl(ref.url)}
+	                          <a href={ref.url} target="_blank" rel="noopener noreferrer" title={ref.url}>
+	                            {ref.title || ref.url}
+	                          </a>
+	                        {:else}
+	                          <span>{ref.title || ref.url}</span>
+	                        {/if}
                         {#if ref.source}<span class="sources-src">· {ref.source}</span>{/if}
                       </li>
                     {/each}
@@ -548,9 +653,56 @@
     </div>
   </div>
 
-  <!-- Input bar -->
-  <div class="input-bar">
-    <div class="input-wrap">
+	  <!-- Input bar -->
+	  <div class="input-bar">
+	    {#if todoSnapshot?.enabled && todoSnapshot.items.length > 0}
+	      <details class="progress-panel">
+	        <summary>
+	          <span>Progress</span>
+	          <span>{todoSnapshot.items.length - todoSnapshot.remainingCount}/{todoSnapshot.items.length} complete</span>
+	        </summary>
+	        {#if todoSnapshot.plan}
+	          <div class="plan-preview">{todoSnapshot.plan}</div>
+	        {/if}
+	        <ul class="todo-list">
+	          {#each todoSnapshot.items as item}
+	            <li class:todo-complete={item.completed}>
+	              <span>{item.completed ? '✓' : '○'}</span>{item.title}
+	            </li>
+	          {/each}
+	        </ul>
+	      </details>
+	    {/if}
+
+	    {#if sessionActivities.length > 0}
+	      <details class="progress-panel activity-panel" bind:open={showActivity} on:toggle={() => {
+	        if (showActivity && !loadingActivity) {
+	          loadingActivity = true;
+	          Promise.all(sessionActivities.map(loadActivityDetails)).finally(() => loadingActivity = false);
+	        }
+	      }}>
+	        <summary>
+	          <span>Tool activity</span>
+	          <span>{sessionActivities.length} call{sessionActivities.length === 1 ? '' : 's'}</span>
+	        </summary>
+	        <ul class="activity-list">
+	          {#each sessionActivities as activity}
+	            {@const detail = activityDetails[activity.callId]}
+	            <li>
+	              <div class="activity-row">
+	                <span>{activity.toolName || 'tool'}</span>
+	                <span>{activity.status}</span>
+	              </div>
+	              {#if detail}
+	                <pre>{JSON.stringify({ arguments: detail.arguments, result: detail.result }, null, 2)}</pre>
+	              {/if}
+	            </li>
+	          {/each}
+	        </ul>
+	      </details>
+	    {/if}
+
+	    <div class="input-wrap">
       <textarea
         bind:this={inputEl}
         bind:value={message}
@@ -1015,6 +1167,17 @@
     display: flex;
     gap: 0.5rem;
   }
+  .approval-feedback {
+    width: 100%;
+    margin: 0.25rem 0 0.625rem;
+    padding: 0.4rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface-2);
+    color: var(--text);
+    font: inherit;
+    font-size: 0.75rem;
+  }
   .approval-btn {
     font-size: 0.8125rem;
     font-weight: 600;
@@ -1085,6 +1248,44 @@
   .sources-list a:hover { text-decoration: underline; }
   .sources-src { color: var(--text-3); }
 
+  .aux-panel {
+    margin-top: 0.45rem;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--surface-2);
+    font-size: 0.75rem;
+  }
+  .aux-panel summary,
+  .progress-panel summary {
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.45rem 0.625rem;
+    color: var(--text-2);
+    user-select: none;
+  }
+  .reasoning-text,
+  .status-text {
+    padding: 0.5rem 0.625rem;
+    border-top: 1px solid var(--border);
+    color: var(--text-3);
+    line-height: 1.5;
+  }
+  .tool-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    margin-top: 0.35rem;
+  }
+  .tool-chip {
+    border: 1px solid var(--border);
+    border-radius: 99px;
+    padding: 0.15rem 0.45rem;
+    color: var(--text-3);
+    font-size: 0.6875rem;
+  }
+
   /* Copy button */
   .copy-btn {
     display: inline-flex;
@@ -1107,6 +1308,66 @@
     border-top: 1px solid var(--border);
     background: var(--surface);
     flex-shrink: 0;
+  }
+
+  .progress-panel {
+    max-width: 780px;
+    margin: 0 auto 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface-2);
+    font-size: 0.75rem;
+  }
+  .progress-panel summary span:last-child {
+    color: var(--text-3);
+  }
+  .plan-preview {
+    max-height: 120px;
+    overflow-y: auto;
+    padding: 0.5rem 0.625rem;
+    border-top: 1px solid var(--border);
+    color: var(--text-3);
+    white-space: pre-wrap;
+  }
+  .todo-list,
+  .activity-list {
+    list-style: none;
+    margin: 0;
+    padding: 0.35rem 0.625rem 0.55rem;
+    border-top: 1px solid var(--border);
+  }
+  .todo-list li {
+    display: flex;
+    gap: 0.45rem;
+    padding: 0.2rem 0;
+    color: var(--text-2);
+  }
+  .todo-list li.todo-complete {
+    color: var(--text-3);
+    text-decoration: line-through;
+  }
+  .activity-list li {
+    padding: 0.35rem 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .activity-list li:last-child { border-bottom: none; }
+  .activity-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.5rem;
+    color: var(--text-2);
+  }
+  .activity-list pre {
+    max-height: 180px;
+    overflow: auto;
+    margin: 0.35rem 0 0;
+    padding: 0.45rem;
+    border-radius: 5px;
+    background: var(--surface);
+    color: var(--text-3);
+    font-size: 0.6875rem;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 
   .input-wrap {

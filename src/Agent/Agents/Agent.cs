@@ -165,6 +165,7 @@ public class FoxAgent
     public IConversationStore ConversationStore => _agent.ConversationStore;
     public AgentStatus Status => _agent.Status;
     public List<Agent> SubAgents => _agent.SubAgents;
+    public bool TodoPlannerEnabled => _todoProvider != null;
 
     /// <summary>
     /// Skills enabled for this agent (used for capability-based routing)
@@ -573,12 +574,40 @@ public class FoxAgent
                 // RunAsync, but yields ChatResponseUpdate chunks as the model produces them.
                 if (streaming.OnStart != null)
                     await streaming.OnStart();
+                if (streaming.OnStatus != null)
+                    await streaming.OnStatus("thinking");
 
                 var sb = new StringBuilder();
                 try
                 {
                     await foreach (var update in agent.RunStreamingAsync(prompt, session, options: runOptions, cancellationToken: timeoutToken))
                     {
+                        if (streaming.OnStatus != null && update.Contents.Any(c =>
+                                c is FunctionCallContent || c is FunctionResultContent))
+                            await streaming.OnStatus("running_tools");
+
+                        if (streaming.OnToolActivity != null)
+                        {
+                            foreach (var call in update.Contents.OfType<FunctionCallContent>())
+                            {
+                                await streaming.OnToolActivity(new AgentFox.Plugins.Models.AgentToolActivity
+                                {
+                                    CallId = call.CallId,
+                                    ToolName = call.Name,
+                                    Status = "running"
+                                });
+                            }
+
+                            foreach (var result in update.Contents.OfType<FunctionResultContent>())
+                            {
+                                await streaming.OnToolActivity(new AgentFox.Plugins.Models.AgentToolActivity
+                                {
+                                    CallId = result.CallId,
+                                    ToolName = string.Empty,
+                                    Status = "completed"
+                                });
+                            }
+                        }
                         //foreach (var content in update.Contents)
                         //{
                         //    if (content.GetType() != typeof(TextContent) && content.GetType() != typeof(TextReasoningContent) && content.GetType() != typeof(UsageContent))
@@ -614,6 +643,8 @@ public class FoxAgent
                         await streaming.OnComplete();
                 }
                 responseText = sb.Length > 0 ? sb.ToString() : "I apologize, but I wasn't able to generate a response.";
+                if (streaming.OnStatus != null)
+                    await streaming.OnStatus("preparing_response");
             }
             else
             {

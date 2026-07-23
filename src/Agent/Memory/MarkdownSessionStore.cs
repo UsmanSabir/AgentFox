@@ -133,6 +133,7 @@ public sealed class MarkdownSessionStore : IConversationStore
     private static readonly JsonSerializerOptions _jsonOpts = new()
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        PropertyNameCaseInsensitive = true,
         WriteIndented = false
     };
 
@@ -301,6 +302,63 @@ public sealed class MarkdownSessionStore : IConversationStore
         return result;
     }
 
+    /// <summary>
+    /// Returns persisted tool activity without exposing it through the normal chat projection.
+    /// Callers choose whether to request details; the web layer applies redaction before returning
+    /// those details to a browser.
+    /// </summary>
+    public IReadOnlyList<ConversationToolActivitySnapshot> GetConversationToolActivities(
+        string conversationId)
+    {
+        SessionManager.EnsureSafeSessionId(conversationId);
+        if (!_messages.TryGetValue(conversationId, out var messages))
+        {
+            var path = ResolveFilePath(conversationId);
+            messages = File.Exists(path) ? ParseFile(path) : [];
+        }
+
+        var calls = new List<ConversationToolActivitySnapshot>();
+        foreach (var message in messages)
+        {
+            foreach (var call in message.Contents.OfType<FunctionCallContent>())
+            {
+                calls.Add(new ConversationToolActivitySnapshot(
+                    call.CallId,
+                    call.Name,
+                    "running",
+                    null,
+                    call.Arguments,
+                    null));
+            }
+
+            foreach (var result in message.Contents.OfType<FunctionResultContent>())
+            {
+                var index = calls.FindIndex(item => item.CallId == result.CallId);
+                if (index >= 0)
+                {
+                    var prior = calls[index];
+                    calls[index] = prior with
+                    {
+                        Status = "completed",
+                        Result = result.Result?.ToString()
+                    };
+                }
+                else
+                {
+                    calls.Add(new ConversationToolActivitySnapshot(
+                        result.CallId,
+                        string.Empty,
+                        "completed",
+                        null,
+                        null,
+                        result.Result?.ToString()));
+                }
+            }
+        }
+
+        return calls;
+    }
+
     // Projects the raw message list to user/assistant non-empty-text snapshots. Shared by the
     // read path and PersistAssistantReferences so the assistant-index definition never drifts.
     private static List<ConversationMessageSnapshot> ProjectSnapshots(List<ChatMessage> messages) =>
@@ -325,7 +383,13 @@ public sealed class MarkdownSessionStore : IConversationStore
             try
             {
                 var line = JsonSerializer.Deserialize<ReferenceLine>(raw, _jsonOpts);
-                if (line?.Items is { Count: > 0 }) map[line.I] = line.Items;
+                if (line?.Items is { Count: > 0 })
+                {
+                    var valid = line.Items
+                        .Where(item => ResearchReferenceScope.IsSafeHttpUrl(item.Url, out _))
+                        .ToList();
+                    if (valid.Count > 0) map[line.I] = valid;
+                }
             }
             catch { /* malformed line — skip */ }
         }
@@ -529,6 +593,11 @@ public sealed class MarkdownSessionStore : IConversationStore
                     writer.WriteLine(tc.Text);
                     break;
 
+                // Reasoning is intentionally ephemeral: it may be streamed to the active web/CLI
+                // surface, but must never enter transcripts, exports, or imported sessions.
+                case TextReasoningContent:
+                    break;
+
                 case FunctionCallContent fc:
                     var call = new FunctionCallRecord(
                         fc.CallId, fc.Name,
@@ -701,6 +770,14 @@ public sealed record ConversationMessageSnapshot(string Role, string Content)
 {
     public IReadOnlyList<ResearchReference> References { get; init; } = [];
 }
+
+public sealed record ConversationToolActivitySnapshot(
+    string CallId,
+    string ToolName,
+    string Status,
+    long? DurationMs,
+    object? Arguments,
+    string? Result);
 
 /// <summary>
 /// Persisted AIContextProvider state for a conversation, with the wall-clock time it was written.

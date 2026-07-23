@@ -15,6 +15,32 @@ export interface ReferenceItem {
   source?: string;
 }
 
+export interface ToolActivity {
+  callId: string;
+  toolName: string;
+  status: 'running' | 'completed' | 'failed' | string;
+  durationMs?: number;
+}
+
+export interface ToolActivityDetails extends ToolActivity {
+  arguments?: unknown;
+  result?: unknown;
+}
+
+export interface TodoItem {
+  id: string;
+  title: string;
+  completed: boolean;
+}
+
+export interface TodoSnapshot {
+  enabled: boolean;
+  phase?: string;
+  plan?: string;
+  items: TodoItem[];
+  remainingCount: number;
+}
+
 export interface ChatResponse {
   response: string;
   conversationId?: string;
@@ -491,6 +517,13 @@ export const api = {
   channels: () => get<ChannelsStatus>('/channels'),
   pendingNotifications: (conversationId: string) =>
     get<PendingNotificationsResponse>(`/chat/pending/${encodeURIComponent(conversationId)}`),
+  todos: (conversationId: string) =>
+    get<TodoSnapshot>(`/sessions/${encodeURIComponent(conversationId)}/todos`),
+  activity: (conversationId: string) =>
+    get<ToolActivity[]>(`/sessions/${encodeURIComponent(conversationId)}/activity`),
+  activityDetails: (conversationId: string, callId: string) =>
+    get<ToolActivityDetails>(
+      `/sessions/${encodeURIComponent(conversationId)}/activity/${encodeURIComponent(callId)}`),
   hitlApprove: (approvalId: string, message?: string) =>
     post<{ ok: boolean }>(`/hitl/${encodeURIComponent(approvalId)}/approve`, { message }),
   hitlReject: (approvalId: string, message?: string) =>
@@ -557,6 +590,10 @@ export const api = {
 
 export type StreamEvent =
   | { type: 'token';  token: string }
+  | { type: 'session'; conversationId: string }
+  | { type: 'reasoning'; text: string }
+  | { type: 'status'; status: string }
+  | { type: 'tool_activity'; activity: ToolActivity }
   | { type: 'done';   done: true; conversationId?: string; references?: ReferenceItem[] }
   | { type: 'error';  error: string };
 
@@ -599,6 +636,14 @@ export async function* streamChat(
             const payload = JSON.parse(line.slice(6));
             if (currentEvent === 'done') {
               yield { type: 'done', done: true, conversationId: payload.conversationId, references: payload.references };
+            } else if (currentEvent === 'session') {
+              yield { type: 'session', conversationId: payload.conversationId };
+            } else if (currentEvent === 'reasoning') {
+              yield { type: 'reasoning', text: payload.text ?? '' };
+            } else if (currentEvent === 'status') {
+              yield { type: 'status', status: payload.status ?? '' };
+            } else if (currentEvent === 'tool_activity') {
+              yield { type: 'tool_activity', activity: payload as ToolActivity };
             } else if (currentEvent === 'error') {
               yield { type: 'error', error: payload.error ?? 'Unknown error' };
             } else {

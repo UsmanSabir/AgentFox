@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using AgentFox.Tools;
 using AgentFox.Memory;
+using AgentFox.Plugins.Research;
 using Microsoft.Extensions.Logging;
 
 namespace AgentFox.Sessions;
@@ -547,6 +548,11 @@ public class SessionManager : IDisposable
     private static string SanitizeReferenceLines(string raw)
     {
         var kept = new List<string>();
+        var options = new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true,
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+        };
 
         foreach (var line in raw.Split('\n'))
         {
@@ -558,12 +564,32 @@ public class SessionManager : IDisposable
                 using var doc = System.Text.Json.JsonDocument.Parse(trimmed);
                 var root = doc.RootElement;
                 if (root.ValueKind != System.Text.Json.JsonValueKind.Object) continue;
-                if (!root.TryGetProperty("i", out var index) ||
-                    index.ValueKind != System.Text.Json.JsonValueKind.Number) continue;
-                if (!root.TryGetProperty("items", out var items) ||
+                if (!(root.TryGetProperty("i", out var index) || root.TryGetProperty("I", out index)) ||
+                    index.ValueKind != System.Text.Json.JsonValueKind.Number ||
+                    !index.TryGetInt32(out var assistantIndex) ||
+                    assistantIndex < 0) continue;
+                if (!(root.TryGetProperty("items", out var items) || root.TryGetProperty("Items", out items)) ||
                     items.ValueKind != System.Text.Json.JsonValueKind.Array) continue;
 
-                kept.Add(trimmed);
+                var validItems = new List<ResearchReference>();
+                foreach (var item in items.EnumerateArray())
+                {
+                    try
+                    {
+                        var reference = item.Deserialize<ResearchReference>(options);
+                        if (reference != null && ResearchReferenceScope.IsSafeHttpUrl(reference.Url, out _))
+                            validItems.Add(reference);
+                    }
+                    catch { /* invalid item: keep processing its siblings */ }
+                }
+
+                if (validItems.Count == 0) continue;
+                var clean = new
+                {
+                    i = assistantIndex,
+                    items = validItems
+                };
+                kept.Add(JsonSerializer.Serialize(clean, options));
             }
             catch
             {

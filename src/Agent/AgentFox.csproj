@@ -81,6 +81,7 @@
 	  <PackageReference Include="Microsoft.VisualStudio.Azure.Containers.Tools.Targets" />
 	  <PackageReference Include="OllamaSharp" />
 	  <PackageReference Include="OpenAI" />
+	  <PackageReference Include="PrettyPrompt" />
 
 	  <PackageReference Include="Microsoft.Extensions.Configuration" />
 	  <PackageReference Include="Microsoft.Extensions.Configuration.Binder" />

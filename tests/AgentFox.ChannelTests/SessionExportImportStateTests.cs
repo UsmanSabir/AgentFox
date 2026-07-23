@@ -78,8 +78,8 @@ public sealed class SessionExportImportStateTests
         Directory.CreateDirectory(Path.GetDirectoryName(mdPath)!);
         File.WriteAllText(mdPath, "# Chat Log\n");
         File.WriteAllText(mdPath + MarkdownSessionStore.ReferencesSidecarSuffix,
-            """{"i":0,"items":[{"Title":"PSX circular","Url":"https://example.test/a"}]}""" + "\n" +
-            """{"i":2,"items":[{"Title":"Annual report","Url":"https://example.test/b"}]}""" + "\n");
+            """{"I":0,"Items":[{"Title":"PSX circular","Url":"https://example.test/a"}]}""" + "\n" +
+            """{"I":2,"Items":[{"Title":"Annual report","Url":"https://example.test/b"}]}""" + "\n");
 
         var exported = manager.ReadReferences(source);
         Assert.IsNotNull(exported);
@@ -110,11 +110,36 @@ public sealed class SessionExportImportStateTests
 
         Assert.IsNotNull(stored);
         StringAssert.Contains(stored, "good");
-        StringAssert.Contains(stored, "\"i\":1");
         Assert.IsFalse(stored!.Contains("not json at all"));
         Assert.IsFalse(stored.Contains("missing"));
-        Assert.AreEqual(2, stored.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length,
-            "Only the two well-formed lines should have been persisted.");
+        Assert.AreEqual(1, stored.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length,
+            "Lines with no safe HTTP(S) references should be dropped.");
+    }
+
+    [TestMethod]
+    public void ImportedReferences_FilterUnsafeUrlsWithoutChangingValidUrls()
+    {
+        using var manager = CreateManager();
+        const string signedUrl = "https://Example.test/report?sig=Aa%2F9&expires=123#page=2";
+
+        var id = manager.ImportSession("main", "# Chat Log\n", references:
+            $$"""{"i":0,"items":[{"Title":"signed","Url":"{{signedUrl}}"},{"Title":"script","Url":"javascript:alert(1)"},{"Title":"relative","Url":"/local"}]}""" + "\n" +
+            """{"i":1,"items":[{"Title":"data","Url":"data:text/html,bad"}]}""" + "\n");
+
+        var stored = manager.ReadReferences(id);
+
+        Assert.IsNotNull(stored);
+        using var storedLine = JsonDocument.Parse(
+            stored!.Split('\n', StringSplitOptions.RemoveEmptyEntries)[0]);
+        Assert.AreEqual(
+            signedUrl,
+            storedLine.RootElement.GetProperty("items")[0].GetProperty("Url").GetString(),
+            "Validation must not change the parsed value of a valid signed URL.");
+        Assert.IsFalse(stored!.Contains("javascript:"));
+        Assert.IsFalse(stored.Contains("data:text"));
+        Assert.IsFalse(stored.Contains("\"/local\""));
+        Assert.AreEqual(1, stored.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length,
+            "The all-invalid reference line should be removed without rejecting the import.");
     }
 
     [TestMethod]

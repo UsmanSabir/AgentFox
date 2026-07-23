@@ -1,4 +1,5 @@
 using AgentFox.Models;
+using AgentFox.Plugins.Models;
 
 namespace AgentFox.Agents;
 
@@ -32,6 +33,10 @@ public sealed class StreamingCallbacks
     public Func<Task>? OnComplete { get; set; }
 
     public Func<string, Task>? OnReasoning { get; set; }
+
+    public Func<string, Task>? OnStatus { get; set; }
+
+    public Func<AgentToolActivity, Task>? OnToolActivity { get; set; }
 }
 
 /// <summary>

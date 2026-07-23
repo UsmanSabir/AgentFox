@@ -17,6 +17,11 @@ using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using PrettyPrompt;
+using PrettyPrompt.Completion;
+using PrettyPrompt.Consoles;
+using PrettyPrompt.Documents;
+using PrettyPrompt.Highlighting;
 using Spectre.Console;
 using Spectre.Console.Rendering;
 using System.Text;
@@ -154,13 +159,29 @@ public sealed class CliWorker : BackgroundService
         var appConfigPath = AppSettingsHelper.ResolveAppSettingsPath();
         var doctorAgent   = new DoctorAgent(_chatClient, appConfigPath);
 
-        AnsiConsole.MarkupLine("[dim]Type [bold white]help[/] for commands, [bold white]exit[/] to quit. [bold white]Shift+Enter[/] for multi-line input.[/]");
+        AnsiConsole.MarkupLine("[dim]Type [bold white]help[/] for commands, [bold white]exit[/] to quit. [bold white]Shift+Enter[/] for multi-line input, [bold white]↑/↓[/] for history.[/]");
         AnsiConsole.WriteLine();
+
+        // PrettyPrompt owns the whole line-editing experience (cursor movement, history navigation,
+        // real clipboard paste, Ctrl-C to clear the current line) so the REPL no longer hand-rolls
+        // key handling via raw Console.ReadKey. One instance is reused for the life of the session so
+        // in-memory + persisted history accumulates across turns.
+        await using var prompt = new Prompt(
+            persistentHistoryFilepath: Path.Combine(_workspaceManager.ResolvePath(""), ".cli_history"),
+            callbacks: new ReplPromptCallbacks(),
+            configuration: new PromptConfiguration(
+                prompt: new FormattedString(
+                    "> ",
+                    new FormatSpan(0, 1, new ConsoleFormat(Foreground: AnsiColor.Rgb(0, 135, 255), Bold: true)))));
 
         // ── REPL loop ─────────────────────────────────────────────────────────
         while (!ct.IsCancellationRequested)
         {
-            var input = ReadMultilineInput();
+            var response = await prompt.ReadLineAsync();
+            if (!response.IsSuccess)
+                continue; // Ctrl-C cancelled the current line — start fresh instead of quitting.
+
+            var input = response.Text;
             if (string.IsNullOrWhiteSpace(input))
                 continue;
 
@@ -936,69 +957,64 @@ public sealed class CliWorker : BackgroundService
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Multiline console input
-    // ─────────────────────────────────────────────────────────────────────────
-
-    /// <summary>
-    /// Reads a (potentially multi-line) input from the console.
-    /// <list type="bullet">
-    ///   <item><b>Enter</b> — submits when no paste is in progress.</item>
-    ///   <item><b>Shift+Enter</b> — inserts a newline without submitting.</item>
-    ///   <item><b>Paste</b> — newlines inside pasted text are treated as line breaks.</item>
-    /// </list>
-    /// </summary>
-    internal static string ReadMultilineInput()
-    {
-        const string prompt       = "\x1b[1;38;5;33m>\x1b[0m "; // bold dodgerblue1
-        const string continuation = "  ";
-
-        Console.Write(prompt);
-
-        var lines   = new List<string>();
-        var current = new StringBuilder();
-
-        while (true)
-        {
-            var key = Console.ReadKey(intercept: true);
-
-            if (key.Key == ConsoleKey.Enter
-                && !key.Modifiers.HasFlag(ConsoleModifiers.Shift)
-                && !Console.KeyAvailable)
-            {
-                Console.WriteLine();
-                lines.Add(current.ToString());
-                return string.Join("\n", lines);
-            }
-
-            if (key.Key == ConsoleKey.Enter)
-            {
-                Console.WriteLine();
-                Console.Write(continuation);
-                lines.Add(current.ToString());
-                current.Clear();
-                continue;
-            }
-
-            if (key.Key == ConsoleKey.Backspace)
-            {
-                if (current.Length > 0)
-                {
-                    current.Remove(current.Length - 1, 1);
-                    Console.Write("\b \b");
-                }
-                continue;
-            }
-
-            if (key.KeyChar != '\0')
-            {
-                current.Append(key.KeyChar);
-                Console.Write(key.KeyChar);
-            }
-        }
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
     // Helpers
     // ─────────────────────────────────────────────────────────────────────────
 
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// PrettyPrompt completion — top-level REPL commands only
+// ─────────────────────────────────────────────────────────────────────────
+
+/// <summary>
+/// Offers completions for the known top-level REPL commands (help, status, agents, ...), scoped to
+/// the first word of the input. Most REPL input is a free-form chat message to the agent, not a
+/// command, so completions must not pop up once the caret has moved past the command name — doing
+/// so on every word would make ordinary typing feel like fighting an IDE's intellisense.
+/// </summary>
+internal sealed class ReplPromptCallbacks : PromptCallbacks
+{
+    private static readonly (string Command, string Description)[] Commands =
+    {
+        ("help",              "Show this help message"),
+        ("status",            "Show agent status"),
+        ("tools",             "List available tools"),
+        ("skills",            "List all registered skills"),
+        ("skill",             "Show detailed info for a skill: skill <name>"),
+        ("doctor",            "Run health checks (doctor fix, doctor config <request>)"),
+        ("exit",              "Quit AgentFox"),
+        ("agents",            "List/manage sub-agents (agents stats|pause|resume|stop|kill)"),
+        ("hitl",              "List/respond to pending approvals (hitl approve|reject <id>)"),
+        ("install-service",   "Install as a system service"),
+        ("uninstall-service", "Remove the system service"),
+        ("start-service",     "Start the system service"),
+        ("stop-service",      "Stop the system service"),
+        ("restart-service",   "Restart the system service"),
+        ("service-status",    "Show service status"),
+        ("service-config",    "Show service configuration"),
+    };
+
+    protected override Task<bool> ShouldOpenCompletionWindowAsync(
+        string text, int caret, KeyPress keyPress, CancellationToken cancellationToken)
+        => Task.FromResult(caret > 0 && IsOnFirstWord(text, caret));
+
+    protected override Task<IReadOnlyList<CompletionItem>> GetCompletionItemsAsync(
+        string text, int caret, TextSpan spanToBeReplaced, CancellationToken cancellationToken)
+    {
+        if (!IsOnFirstWord(text, caret))
+            return Task.FromResult<IReadOnlyList<CompletionItem>>(Array.Empty<CompletionItem>());
+
+        IReadOnlyList<CompletionItem> items = Commands
+            .Select(c => new CompletionItem(
+                replacementText: c.Command,
+                getExtendedDescription: _ => Task.FromResult<FormattedString>(c.Description)))
+            .ToArray();
+
+        return Task.FromResult(items);
+    }
+
+    // True while the caret sits inside the first word — i.e. the user is still typing/editing the
+    // REPL command name rather than its arguments or a free-form chat message.
+    private static bool IsOnFirstWord(string text, int caret)
+        => text.AsSpan(0, caret).IndexOfAny(' ', '\n') == -1;
 }

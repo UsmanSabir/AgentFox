@@ -31,5 +31,8 @@ public interface IAgentService
         string input,
         string? conversationId,
         Func<string, Task> onToken,
+        Func<string, Task>? onReasoning = null,
+        Func<string, Task>? onStatus = null,
+        Func<AgentToolActivity, Task>? onToolActivity = null,
         CancellationToken ct = default);
 }
