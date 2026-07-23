@@ -79,6 +79,9 @@ internal sealed class FoxAgentService : IAgentService
         string input,
         string? conversationId,
         Func<string, Task> onToken,
+        Func<string, Task>? onReasoning = null,
+        Func<string, Task>? onStatus = null,
+        Func<AgentToolActivity, Task>? onToolActivity = null,
         CancellationToken ct = default)
     {
         var agent = await _holder.WaitAsync(ct);
@@ -92,7 +95,34 @@ internal sealed class FoxAgentService : IAgentService
             catch { /* connection gone; the turn keeps running */ }
         }
 
-        var streaming = new StreamingCallbacks { OnToken = SafeOnToken };
+        async Task SafeOnReasoning(string text)
+        {
+            if (ct.IsCancellationRequested || onReasoning == null) return;
+            try { await onReasoning(text); }
+            catch { /* connection gone; the turn keeps running */ }
+        }
+
+        async Task SafeOnStatus(string status)
+        {
+            if (ct.IsCancellationRequested || onStatus == null) return;
+            try { await onStatus(status); }
+            catch { /* connection gone; the turn keeps running */ }
+        }
+
+        async Task SafeOnToolActivity(AgentToolActivity activity)
+        {
+            if (ct.IsCancellationRequested || onToolActivity == null) return;
+            try { await onToolActivity(activity); }
+            catch { /* connection gone; the turn keeps running */ }
+        }
+
+        var streaming = new StreamingCallbacks
+        {
+            OnToken = SafeOnToken,
+            OnReasoning = SafeOnReasoning,
+            OnStatus = SafeOnStatus,
+            OnToolActivity = SafeOnToolActivity
+        };
         var result = await agent.ProcessAsync(input, conversationId, streaming, CancellationToken.None);
         var reply = new AgentReply { Output = result.Output ?? string.Empty, References = result.References };
 

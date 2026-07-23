@@ -1,5 +1,8 @@
 import { writable, derived } from 'svelte/store';
-import type { AgentStatus, AgentInfo, ToolInfo, SkillInfo, ReferenceItem, PendingApprovalInfo } from './api';
+import type {
+  AgentStatus, AgentInfo, ToolInfo, SkillInfo, ReferenceItem, PendingApprovalInfo,
+  ToolActivity
+} from './api';
 
 // ── Agent status (polled every 5 s) ──────────────────────────────────────
 export const agentStatus = writable<AgentStatus | null>(null);
@@ -21,7 +24,11 @@ export interface ChatMessage {
   timestamp: Date;
   isBackgroundResult?: boolean;
   references?: ReferenceItem[];
+  assistantIndex?: number;
   pendingApproval?: PendingApprovalInfo;
+  reasoning?: string;
+  status?: string;
+  toolActivities?: ToolActivity[];
 }
 
 export const chatMessages = writable<ChatMessage[]>([]);
@@ -63,6 +70,31 @@ export function appendToken(id: string, token: string) {
   );
 }
 
+export function appendReasoning(id: string, text: string) {
+  if (!text) return;
+  chatMessages.update(msgs =>
+    msgs.map(m => m.id === id ? { ...m, reasoning: (m.reasoning ?? '') + text } : m)
+  );
+}
+
+export function setMessageStatus(id: string, status: string) {
+  chatMessages.update(msgs =>
+    msgs.map(m => m.id === id ? { ...m, status } : m)
+  );
+}
+
+export function upsertToolActivity(id: string, activity: ToolActivity) {
+  chatMessages.update(msgs => msgs.map(m => {
+    if (m.id !== id) return m;
+    const current = m.toolActivities ?? [];
+    const index = current.findIndex(item => item.callId === activity.callId);
+    const toolActivities = index < 0
+      ? [...current, activity]
+      : current.map((item, i) => i === index ? { ...item, ...activity } : item);
+    return { ...m, toolActivities };
+  }));
+}
+
 export function finalizeMessage(id: string, error?: string) {
   chatMessages.update(msgs =>
     msgs.map(m => m.id === id ? { ...m, streaming: false, error } : m)
@@ -73,6 +105,13 @@ export function attachReferences(id: string, references?: ReferenceItem[]) {
   if (!references || references.length === 0) return;
   chatMessages.update(msgs =>
     msgs.map(m => m.id === id ? { ...m, references } : m)
+  );
+}
+
+export function setAssistantIndex(id: string, assistantIndex?: number) {
+  if (assistantIndex === undefined) return;
+  chatMessages.update(msgs =>
+    msgs.map(m => m.id === id ? { ...m, assistantIndex } : m)
   );
 }
 

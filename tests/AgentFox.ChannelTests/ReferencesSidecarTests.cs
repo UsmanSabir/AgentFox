@@ -63,4 +63,24 @@ public sealed class ReferencesSidecarTests
         var msgs = store.GetConversationMessages(conv);
         Assert.IsTrue(msgs.Where(m => m.Role == "assistant").All(a => a.References.Count == 0));
     }
+
+    [TestMethod]
+    public void ReadExistingSidecar_FiltersUnsafeReferenceUrls()
+    {
+        var dir = NewTempDir();
+        var store = new MarkdownSessionStore(dir);
+        const string conv = "main";
+        SeedTwoTurns(store, conv);
+
+        var path = Path.Combine(dir, "main.md" + MarkdownSessionStore.ReferencesSidecarSuffix);
+        File.WriteAllText(path,
+            """{"I":1,"Items":[{"Url":"https://safe.example/a"},{"Url":"javascript:alert(1)"}]}""" + "\n");
+
+        var assistants = store.GetConversationMessages(conv)
+            .Where(message => message.Role == "assistant")
+            .ToList();
+
+        Assert.AreEqual(1, assistants[1].References.Count);
+        Assert.AreEqual("https://safe.example/a", assistants[1].References[0].Url);
+    }
 }

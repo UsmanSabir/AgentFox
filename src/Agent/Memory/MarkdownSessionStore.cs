@@ -133,6 +133,7 @@ public sealed class MarkdownSessionStore : IConversationStore
     private static readonly JsonSerializerOptions _jsonOpts = new()
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        PropertyNameCaseInsensitive = true,
         WriteIndented = false
     };
 
@@ -275,10 +276,10 @@ public sealed class MarkdownSessionStore : IConversationStore
         else
         {
             result = new List<ConversationMessageSnapshot>(snapshots.Count);
-            int assistantIndex = 0;
             foreach (var s in snapshots)
             {
-                if (s.Role == "assistant" && refs.TryGetValue(assistantIndex++, out var items))
+                if (s.AssistantIndex is int assistantIndex &&
+                    refs.TryGetValue(assistantIndex, out var items))
                     result.Add(s with { References = items });
                 else
                     result.Add(s);
@@ -301,16 +302,112 @@ public sealed class MarkdownSessionStore : IConversationStore
         return result;
     }
 
+    /// <summary>
+    /// Returns the zero-based index of the latest persisted, user-visible assistant reply.
+    /// Null means the conversation has no completed assistant response yet.
+    /// </summary>
+    public int? GetLatestAssistantIndex(string conversationId)
+    {
+        SessionManager.EnsureSafeSessionId(conversationId);
+        if (!_messages.TryGetValue(conversationId, out var messages))
+        {
+            var path = ResolveFilePath(conversationId);
+            messages = File.Exists(path) ? ParseFile(path) : [];
+        }
+
+        return ProjectSnapshots(messages)
+            .Where(message => message.AssistantIndex.HasValue)
+            .Select(message => message.AssistantIndex)
+            .LastOrDefault();
+    }
+
+    /// <summary>
+    /// Returns persisted tool activity without exposing it through the normal chat projection.
+    /// Callers choose whether to request details; the web layer applies redaction before returning
+    /// those details to a browser.
+    /// </summary>
+    public IReadOnlyList<ConversationToolActivitySnapshot> GetConversationToolActivities(
+        string conversationId)
+    {
+        SessionManager.EnsureSafeSessionId(conversationId);
+        if (!_messages.TryGetValue(conversationId, out var messages))
+        {
+            var path = ResolveFilePath(conversationId);
+            messages = File.Exists(path) ? ParseFile(path) : [];
+        }
+
+        var calls = new List<ConversationToolActivitySnapshot>();
+        foreach (var message in messages)
+        {
+            foreach (var call in message.Contents.OfType<FunctionCallContent>())
+            {
+                calls.Add(new ConversationToolActivitySnapshot(
+                    call.CallId,
+                    call.Name,
+                    "running",
+                    null,
+                    call.Arguments,
+                    null));
+            }
+
+            foreach (var result in message.Contents.OfType<FunctionResultContent>())
+            {
+                var index = calls.FindIndex(item => item.CallId == result.CallId);
+                if (index >= 0)
+                {
+                    var prior = calls[index];
+                    calls[index] = prior with
+                    {
+                        Status = "completed",
+                        Result = result.Result?.ToString()
+                    };
+                }
+                else
+                {
+                    calls.Add(new ConversationToolActivitySnapshot(
+                        result.CallId,
+                        string.Empty,
+                        "completed",
+                        null,
+                        null,
+                        result.Result?.ToString()));
+                }
+            }
+        }
+
+        return calls;
+    }
+
     // Projects the raw message list to user/assistant non-empty-text snapshots. Shared by the
     // read path and PersistAssistantReferences so the assistant-index definition never drifts.
-    private static List<ConversationMessageSnapshot> ProjectSnapshots(List<ChatMessage> messages) =>
-        messages
-            .Where(message => message.Role == ChatRole.User || message.Role == ChatRole.Assistant)
-            .Select(message => new ConversationMessageSnapshot(
-                message.Role == ChatRole.User ? "user" : "assistant",
-                message.Text?.Trim() ?? string.Empty))
-            .Where(message => !string.IsNullOrWhiteSpace(message.Content))
-            .ToList();
+    private static List<ConversationMessageSnapshot> ProjectSnapshots(List<ChatMessage> messages)
+    {
+        var snapshots = new List<ConversationMessageSnapshot>();
+        var assistantIndex = 0;
+
+        foreach (var message in messages)
+        {
+            if (message.Role != ChatRole.User && message.Role != ChatRole.Assistant)
+                continue;
+
+            var content = message.Text?.Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(content))
+                continue;
+
+            if (message.Role == ChatRole.Assistant)
+            {
+                snapshots.Add(new ConversationMessageSnapshot(
+                    "assistant", content, assistantIndex));
+                assistantIndex++;
+            }
+            else
+            {
+                snapshots.Add(new ConversationMessageSnapshot("user", content));
+            }
+        }
+
+        return snapshots;
+    }
 
     // Reads the sidecar into a map of assistantIndex → references. Empty when absent/unreadable.
     private Dictionary<int, List<ResearchReference>> LoadReferences(string conversationId)
@@ -325,7 +422,13 @@ public sealed class MarkdownSessionStore : IConversationStore
             try
             {
                 var line = JsonSerializer.Deserialize<ReferenceLine>(raw, _jsonOpts);
-                if (line?.Items is { Count: > 0 }) map[line.I] = line.Items;
+                if (line?.Items is { Count: > 0 })
+                {
+                    var valid = line.Items
+                        .Where(item => ResearchReferenceScope.IsSafeHttpUrl(item.Url, out _))
+                        .ToList();
+                    if (valid.Count > 0) map[line.I] = valid;
+                }
             }
             catch { /* malformed line — skip */ }
         }
@@ -344,6 +447,8 @@ public sealed class MarkdownSessionStore : IConversationStore
         var refsPath = ReferencesFilePath(conversationId);
         if (File.Exists(refsPath))
             File.Delete(refsPath);
+
+        ClearSessionState(conversationId);
     }
 
     // ------------------------------------------------------------------
@@ -389,13 +494,88 @@ public sealed class MarkdownSessionStore : IConversationStore
         return string.IsNullOrEmpty(text) ? null : text;
     }
 
+    // ------------------------------------------------------------------
+    // Provider state sidecar ({session}.md.state.json)
+    // ------------------------------------------------------------------
+
+    private sealed record PersistedSessionState(
+        [property: JsonPropertyName("savedAt")]  DateTimeOffset SavedAt,
+        [property: JsonPropertyName("stateBag")] JsonElement StateBag);
+
+    /// <summary>
+    /// Persists a slice of the session's AIContextProvider state (currently the todo list) beside
+    /// the transcript, so outstanding work survives a process restart.
+    ///
+    /// IMPORTANT: callers must pass a filtered slice, never a whole serialized session. A full
+    /// session blob also carries the ChatHistoryProvider's messages, and this store already owns
+    /// message persistence through the .md file — writing both would restore every message twice.
+    /// </summary>
+    public void PersistSessionState(string conversationId, JsonElement stateBag)
+    {
+        SessionManager.EnsureSafeSessionId(conversationId);
+        var path = StateFilePath(conversationId);
+        EnsureParentDirectory(path);
+        File.WriteAllText(path, SerializeStateSidecar(stateBag, DateTimeOffset.UtcNow), Encoding.UTF8);
+    }
+
+    /// <summary>
+    /// Renders the sidecar payload. Shared with session import so the on-disk schema has a single
+    /// definition. <paramref name="savedAt"/> is passed in rather than taken as "now" because an
+    /// imported bundle must keep its ORIGINAL save time — that is what lets the agent recognise
+    /// the restored work as stale and ask before resuming it.
+    /// </summary>
+    public static string SerializeStateSidecar(JsonElement stateBag, DateTimeOffset savedAt)
+        => JsonSerializer.Serialize(new PersistedSessionState(savedAt, stateBag), _jsonOpts);
+
+    /// <summary>File name suffix of the provider-state sidecar.</summary>
+    public const string StateSidecarSuffix = ".state.json";
+
+    /// <summary>File name suffix of the research-references sidecar (newline-delimited JSON).</summary>
+    public const string ReferencesSidecarSuffix = ".refs.jsonl";
+
+    /// <summary>
+    /// Reads the persisted provider state for a conversation, or null when absent or unreadable.
+    /// A corrupt sidecar is treated as absent: stale planner state must never block a session.
+    /// </summary>
+    public SessionStateSnapshot? ReadSessionState(string conversationId)
+    {
+        SessionManager.EnsureSafeSessionId(conversationId);
+        var path = StateFilePath(conversationId);
+        if (!File.Exists(path)) return null;
+
+        try
+        {
+            var payload = JsonSerializer.Deserialize<PersistedSessionState>(
+                File.ReadAllText(path, Encoding.UTF8), _jsonOpts);
+            if (payload is null || payload.StateBag.ValueKind != JsonValueKind.Object)
+                return null;
+
+            return new SessionStateSnapshot(payload.StateBag.Clone(), payload.SavedAt);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Removes the persisted provider state (e.g. once its todo list is finished).</summary>
+    public void ClearSessionState(string conversationId)
+    {
+        var path = StateFilePath(conversationId);
+        if (File.Exists(path))
+            File.Delete(path);
+    }
+
+    /// <summary>Provider-state sidecar path (<c>{session}.md.state.json</c>). Non-creating.</summary>
+    private string StateFilePath(string conversationId) => ResolveFilePath(conversationId) + StateSidecarSuffix;
+
     /// <summary>Pending-message sidecar path (<c>{session}.md.pending</c>). Non-creating —
     /// write callers must ensure the directory exists first.</summary>
     private string PendingFilePath(string conversationId) => ResolveFilePath(conversationId) + ".pending";
 
     /// <summary>References sidecar path (<c>{session}.md.refs.jsonl</c>). Non-creating —
     /// write callers must ensure the directory exists first.</summary>
-    private string ReferencesFilePath(string conversationId) => ResolveFilePath(conversationId) + ".refs.jsonl";
+    private string ReferencesFilePath(string conversationId) => ResolveFilePath(conversationId) + ReferencesSidecarSuffix;
 
     /// <summary>Creates the parent directory for a sidecar/transcript file if it is missing.</summary>
     private static void EnsureParentDirectory(string filePath)
@@ -423,15 +603,7 @@ public sealed class MarkdownSessionStore : IConversationStore
         using var writer = new StreamWriter(stream, Encoding.UTF8);
 
         if (isNewFile)
-        {
-            writer.WriteLine("---");
-            writer.WriteLine($"sessionId: {conversationId}");
-            writer.WriteLine($"createdAt: {DateTime.UtcNow:O}");
-            writer.WriteLine("---");
-            writer.WriteLine();
-            writer.WriteLine("# Chat Log");
-            writer.WriteLine();
-        }
+            WriteTranscriptHeader(writer, conversationId);
 
         foreach (var msg in messages)
             WriteMessage(writer, msg);
@@ -439,7 +611,18 @@ public sealed class MarkdownSessionStore : IConversationStore
         writer.Flush();
     }
 
-    private static void WriteMessage(StreamWriter writer, ChatMessage msg)
+    private static void WriteTranscriptHeader(TextWriter writer, string conversationId)
+    {
+        writer.WriteLine("---");
+        writer.WriteLine($"sessionId: {conversationId}");
+        writer.WriteLine($"createdAt: {DateTime.UtcNow:O}");
+        writer.WriteLine("---");
+        writer.WriteLine();
+        writer.WriteLine("# Chat Log");
+        writer.WriteLine();
+    }
+
+    private static void WriteMessage(TextWriter writer, ChatMessage msg)
     {
         writer.WriteLine($"### {msg.Role.Value}");
         writer.WriteLine();
@@ -450,6 +633,11 @@ public sealed class MarkdownSessionStore : IConversationStore
             {
                 case TextContent tc when !string.IsNullOrEmpty(tc.Text):
                     writer.WriteLine(tc.Text);
+                    break;
+
+                // Reasoning is intentionally ephemeral: it may be streamed to the active web/CLI
+                // surface, but must never enter transcripts, exports, or imported sessions.
+                case TextReasoningContent:
                     break;
 
                 case FunctionCallContent fc:
@@ -481,8 +669,13 @@ public sealed class MarkdownSessionStore : IConversationStore
 
     private static List<ChatMessage> ParseFile(string path)
     {
-        var messages = new List<ChatMessage>();
         var allText = File.ReadAllText(path, Encoding.UTF8);
+        return ParseMarkdown(allText);
+    }
+
+    private static List<ChatMessage> ParseMarkdown(string allText)
+    {
+        var messages = new List<ChatMessage>();
 
         // Skip YAML frontmatter
         var bodyStart = 0;
@@ -525,6 +718,52 @@ public sealed class MarkdownSessionStore : IConversationStore
             FlushMessage(messages, currentRole.Value, contentLines);
 
         return messages;
+    }
+
+    /// <summary>
+    /// Builds a fresh Markdown transcript containing the raw conversation through the selected
+    /// user-visible assistant reply. Tool calls and results before that reply remain intact.
+    /// </summary>
+    internal static string BuildForkTranscript(
+        string transcriptMarkdown,
+        int assistantIndex,
+        string destinationConversationId)
+    {
+        if (assistantIndex < 0)
+            throw new ArgumentOutOfRangeException(
+                nameof(assistantIndex), "Assistant index must be non-negative.");
+
+        SessionManager.EnsureSafeSessionId(destinationConversationId);
+        var messages = ParseMarkdown(transcriptMarkdown);
+        var currentAssistantIndex = -1;
+        var rawCutoff = -1;
+
+        for (var i = 0; i < messages.Count; i++)
+        {
+            var message = messages[i];
+            if (message.Role != ChatRole.Assistant ||
+                string.IsNullOrWhiteSpace(message.Text))
+                continue;
+
+            currentAssistantIndex++;
+            if (currentAssistantIndex == assistantIndex)
+            {
+                rawCutoff = i;
+                break;
+            }
+        }
+
+        if (rawCutoff < 0)
+            throw new ArgumentOutOfRangeException(
+                nameof(assistantIndex), "The selected assistant reply does not exist.");
+
+        var builder = new StringBuilder();
+        using var writer = new StringWriter(builder) { NewLine = "\n" };
+        WriteTranscriptHeader(writer, destinationConversationId);
+        foreach (var message in messages.Take(rawCutoff + 1))
+            WriteMessage(writer, message);
+
+        return builder.ToString();
     }
 
     private static void FlushMessage(List<ChatMessage> messages, ChatRole role, List<string> lines)
@@ -620,7 +859,24 @@ public sealed class MarkdownSessionStore : IConversationStore
         [property: JsonPropertyName("result")] string? Result);
 }
 
-public sealed record ConversationMessageSnapshot(string Role, string Content)
+public sealed record ConversationMessageSnapshot(
+    string Role,
+    string Content,
+    int? AssistantIndex = null)
 {
     public IReadOnlyList<ResearchReference> References { get; init; } = [];
 }
+
+public sealed record ConversationToolActivitySnapshot(
+    string CallId,
+    string ToolName,
+    string Status,
+    long? DurationMs,
+    object? Arguments,
+    string? Result);
+
+/// <summary>
+/// Persisted AIContextProvider state for a conversation, with the wall-clock time it was written.
+/// <paramref name="SavedAt"/> is what lets a restored todo list be judged stale.
+/// </summary>
+public sealed record SessionStateSnapshot(JsonElement StateBag, DateTimeOffset SavedAt);

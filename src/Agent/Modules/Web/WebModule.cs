@@ -3,6 +3,7 @@ using AgentFox.Hitl;
 using AgentFox.MCP;
 using AgentFox.Memory;
 using AgentFox.Plugins.Models;
+using AgentFox.Planning;
 using AgentFox.Sessions;
 using AgentFox.Skills;
 using AgentFox.Tools;
@@ -16,6 +17,8 @@ using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using AgentFox.Plugins.Interfaces;
 using AgentFox.Runtime;
 
@@ -76,6 +79,7 @@ public class WebModule : IAppModule
         endpoints.MapPost("/chat", async (
             IAgentService agentService,
             SessionManager sessionManager,
+            MarkdownSessionStore sessionStore,
             ChatRequest req,
             CancellationToken ct) =>
         {
@@ -98,7 +102,8 @@ public class WebModule : IAppModule
                     Response = reply.Output,
                     ConversationId = conversationId,
                     Success = true,
-                    References = reply.References
+                    References = reply.References,
+                    AssistantIndex = sessionStore.GetLatestAssistantIndex(conversationId)
                 });
             }
             catch (Exception ex)
@@ -121,6 +126,7 @@ public class WebModule : IAppModule
     ChatRequest req,
     IAgentService agentService,
     SessionManager sessionManager,
+    MarkdownSessionStore sessionStore,
     HttpContext httpContext,
     CancellationToken ct) =>
         {
@@ -148,6 +154,18 @@ public class WebModule : IAppModule
                 // Pre-generate a conversation ID so the same session is reused across turns.
                 var conversationId = sessionManager.GetOrCreateWebSession("main", req.ConversationId);
 
+                async Task WriteEventAsync(string eventName, object payload)
+                {
+                    if (ct.IsCancellationRequested) return;
+                    var data = JsonSerializer.Serialize(payload, SseJsonOptions);
+                    await httpContext.Response.WriteAsync($"event: {eventName}\ndata: {data}\n\n", ct);
+                    await httpContext.Response.Body.FlushAsync(ct);
+                }
+
+                // The client must know the session before the agent can block on a
+                // first-turn approval. The terminal event remains for compatibility.
+                await WriteEventAsync("session", new { conversationId });
+
                 var reply = await agentService.StreamAsync(
                     req.Message,
                     conversationId,
@@ -158,6 +176,9 @@ public class WebModule : IAppModule
                         await httpContext.Response.WriteAsync($"data: {data}\n\n", ct);
                         await httpContext.Response.Body.FlushAsync(ct);
                     },
+                    reasoning => WriteEventAsync("reasoning", new { text = reasoning }),
+                    status => WriteEventAsync("status", new { status }),
+                    activity => WriteEventAsync("tool_activity", activity),
                     ct);
 
                 // Terminal event — always includes the conversation ID so the client
@@ -166,7 +187,8 @@ public class WebModule : IAppModule
                 {
                     done = true,
                     conversationId,
-                    references = reply.References
+                    references = reply.References,
+                    assistantIndex = sessionStore.GetLatestAssistantIndex(conversationId)
                 }, SseJsonOptions);
                 await httpContext.Response.WriteAsync($"event: done\ndata: {donePayload}\n\n", ct);
                 await httpContext.Response.Body.FlushAsync(ct);
@@ -291,7 +313,9 @@ public class WebModule : IAppModule
                 status     = s.Status.ToString(),
                 createdAt  = s.CreatedAt,
                 lastActive = s.LastActivityAt,
-                channelType = s.ChannelType
+                channelType = s.ChannelType,
+                forkedFromSessionId = s.ForkedFromSessionId,
+                forkedAtAssistantIndex = s.ForkedAtAssistantIndex
             });
             return Results.Ok(sessions);
         });
@@ -318,6 +342,103 @@ public class WebModule : IAppModule
             });
         });
 
+        endpoints.MapGet("/sessions/{conversationId}/todos", async (
+            string conversationId,
+            SessionManager sessionManager,
+            PlanStateStore planStateStore,
+            FoxAgentHolder holder,
+            CancellationToken ct) =>
+        {
+            if (!SessionManager.IsSafeSessionId(conversationId))
+                return Results.BadRequest(new { error = "invalid_session_id" });
+            if (sessionManager.GetSession(conversationId) is null)
+                return Results.NotFound(new { error = "session_not_found" });
+
+            var rawState = sessionManager.ReadProviderState(conversationId);
+            var items = ReadTodoItems(rawState).ToList();
+            var agent = holder.Agent;
+            var liveSession = agent?.ConversationStore.GetSession(conversationId);
+            if (agent?.TodoPlannerEnabled == true && liveSession != null)
+            {
+                try
+                {
+                    var remaining = await agent.GetRemainingTodosAsync(liveSession, ct);
+                    var remainingIds = remaining.Select(item => item.Id.ToString())
+                        .ToHashSet(StringComparer.Ordinal);
+
+                    for (var i = 0; i < items.Count; i++)
+                        items[i] = items[i] with { Completed = !remainingIds.Contains(items[i].Id) };
+
+                    foreach (var item in remaining)
+                    {
+                        var id = item.Id.ToString();
+                        if (items.All(existing => existing.Id != id))
+                            items.Add(new TodoItemSnapshot(id, item.Title, false));
+                    }
+                }
+                catch (OperationCanceledException) { throw; }
+                catch { /* persisted snapshot remains a safe fallback */ }
+            }
+
+            var plan = planStateStore.Peek(conversationId);
+            return Results.Ok(new
+            {
+                enabled = agent?.TodoPlannerEnabled == true || rawState != null,
+                phase = plan?.Phase.ToString() ?? "Research",
+                plan = plan?.PlanText,
+                items,
+                remainingCount = items.Count(item => !item.Completed)
+            });
+        });
+
+        endpoints.MapGet("/sessions/{conversationId}/activity", (
+            string conversationId,
+            SessionManager sessionManager,
+            MarkdownSessionStore sessionStore) =>
+        {
+            if (!SessionManager.IsSafeSessionId(conversationId))
+                return Results.BadRequest(new { error = "invalid_session_id" });
+            if (sessionManager.GetSession(conversationId) is null)
+                return Results.NotFound(new { error = "session_not_found" });
+
+            var activities = sessionStore.GetConversationToolActivities(conversationId)
+                .Select(activity => new
+                {
+                    callId = activity.CallId,
+                    toolName = activity.ToolName,
+                    status = activity.Status,
+                    durationMs = activity.DurationMs
+                });
+            return Results.Ok(activities);
+        });
+
+        endpoints.MapGet("/sessions/{conversationId}/activity/{callId}", (
+            string conversationId,
+            string callId,
+            SessionManager sessionManager,
+            MarkdownSessionStore sessionStore) =>
+        {
+            if (!SessionManager.IsSafeSessionId(conversationId))
+                return Results.BadRequest(new { error = "invalid_session_id" });
+            if (sessionManager.GetSession(conversationId) is null)
+                return Results.NotFound(new { error = "session_not_found" });
+
+            var activity = sessionStore.GetConversationToolActivities(conversationId)
+                .FirstOrDefault(item => string.Equals(item.CallId, callId, StringComparison.Ordinal));
+            if (activity is null)
+                return Results.NotFound(new { error = "activity_not_found" });
+
+            return Results.Ok(new
+            {
+                callId = activity.CallId,
+                toolName = activity.ToolName,
+                status = activity.Status,
+                durationMs = activity.DurationMs,
+                arguments = RedactToolPayload(activity.Arguments),
+                result = RedactToolPayload(activity.Result)
+            });
+        });
+
         endpoints.MapPost("/sessions/resume", (
             ResumeSessionRequest req,
             SessionManager sessionManager) =>
@@ -328,6 +449,49 @@ public class WebModule : IAppModule
             return sessionManager.ResumeSession(req.ConversationId)
                 ? Results.Ok(new { success = true, conversationId = req.ConversationId })
                 : Results.NotFound(new { error = "session_not_found_or_unavailable" });
+        });
+
+        endpoints.MapPost("/sessions/fork", (
+            ForkSessionRequest req,
+            SessionManager sessionManager) =>
+        {
+            if (!SessionManager.IsSafeSessionId(req.ConversationId))
+                return Results.BadRequest(new { error = "invalid_session_id" });
+            if (req.AssistantIndex < 0)
+                return Results.BadRequest(new { error = "invalid_assistant_index" });
+
+            try
+            {
+                var newId = sessionManager.ForkWebSession(
+                    req.ConversationId, req.AssistantIndex);
+                return Results.Ok(new
+                {
+                    success = true,
+                    conversationId = newId,
+                    sourceConversationId = req.ConversationId,
+                    assistantIndex = req.AssistantIndex
+                });
+            }
+            catch (KeyNotFoundException)
+            {
+                return Results.NotFound(new { error = "session_not_found" });
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                return Results.BadRequest(new { error = "invalid_assistant_index" });
+            }
+            catch (InvalidOperationException ex) when (ex.Message == "session_busy")
+            {
+                return Results.Conflict(new { error = "session_busy" });
+            }
+            catch (InvalidOperationException ex) when (ex.Message == "session_not_web")
+            {
+                return Results.BadRequest(new { error = "session_not_web" });
+            }
+            catch (IOException)
+            {
+                return Results.Conflict(new { error = "session_busy" });
+            }
         });
 
         endpoints.MapPatch("/sessions", (
@@ -389,6 +553,21 @@ public class WebModule : IAppModule
             if (transcript is null)
                 return Results.NotFound(new { error = "transcript_not_found" });
 
+            // Unfinished todos travel with the bundle so a session can be moved mid-task. Emitted
+            // verbatim (savedAt included) — the import side keeps that original timestamp so the
+            // agent recognises the work as stale and asks before resuming it.
+            System.Text.Json.JsonElement? providerState = null;
+            var rawState = sessionManager.ReadProviderState(conversationId);
+            if (!string.IsNullOrWhiteSpace(rawState))
+            {
+                try
+                {
+                    using var stateDoc = System.Text.Json.JsonDocument.Parse(rawState);
+                    providerState = stateDoc.RootElement.Clone();
+                }
+                catch { /* unreadable sidecar — export the transcript without it */ }
+            }
+
             var envelope = new
             {
                 schema     = SessionExportSchema,
@@ -402,7 +581,11 @@ public class WebModule : IAppModule
                     createdAt  = session.CreatedAt,
                     lastActive = session.LastActivityAt
                 },
-                transcriptMarkdown = transcript
+                transcriptMarkdown = transcript,
+                providerState,
+                // Newline-delimited JSON, carried verbatim like the transcript so references stay
+                // pinned to the assistant messages they were collected for.
+                references = sessionManager.ReadReferences(conversationId)
             };
 
             var bytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(
@@ -426,13 +609,34 @@ public class WebModule : IAppModule
                     maxLength = SessionManager.MaxSessionTitleLength
                 });
 
+            // Unwrap the optional provider-state envelope. Its contents are NOT trusted here —
+            // what may actually be restored is allowlisted when the sidecar is read, so a crafted
+            // bundle cannot inject chat history. We only pull out the bag and its original
+            // savedAt, which is what makes imported work register as stale.
+            System.Text.Json.JsonElement? stateBag = null;
+            DateTimeOffset? savedAt = null;
+            if (req.ProviderState is { ValueKind: System.Text.Json.JsonValueKind.Object } ps)
+            {
+                if (ps.TryGetProperty("stateBag", out var bag) &&
+                    bag.ValueKind == System.Text.Json.JsonValueKind.Object)
+                    stateBag = bag.Clone();
+
+                if (ps.TryGetProperty("savedAt", out var sa) &&
+                    sa.ValueKind == System.Text.Json.JsonValueKind.String &&
+                    sa.TryGetDateTimeOffset(out var parsed))
+                    savedAt = parsed;
+            }
+
             var newId = sessionManager.ImportSession(
                 req.Session?.AgentId,
                 req.TranscriptMarkdown,
                 req.Session?.CreatedAt,
                 req.Session?.LastActive,
                 req.Session?.Title,
-                req.Session?.MemoryEnabled);
+                req.Session?.MemoryEnabled,
+                stateBag,
+                savedAt,
+                req.References);
 
             return Results.Ok(new { success = true, conversationId = newId });
         });
@@ -532,6 +736,7 @@ public class WebModule : IAppModule
             ChatRequest req,
             SpecialistAgentRegistry registry,
             SessionManager sessionManager,
+            MarkdownSessionStore sessionStore,
             ICommandQueue commandQueue,
             CancellationToken ct) =>
         {
@@ -568,7 +773,8 @@ public class WebModule : IAppModule
                 {
                     Response = reply,
                     ConversationId = conversationId,
-                    Success = true
+                    Success = true,
+                    AssistantIndex = sessionStore.GetLatestAssistantIndex(conversationId)
                 });
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -956,6 +1162,125 @@ public class WebModule : IAppModule
     };
 
     public Task StartAsync(IServiceProvider services) => Task.CompletedTask;
+
+    internal static IReadOnlyList<TodoItemSnapshot> ReadTodoItems(string? rawState)
+    {
+        if (string.IsNullOrWhiteSpace(rawState)) return Array.Empty<TodoItemSnapshot>();
+        try
+        {
+            using var doc = JsonDocument.Parse(rawState);
+            var root = doc.RootElement;
+            if (root.TryGetProperty("stateBag", out var bag))
+                root = bag;
+            if (!root.TryGetProperty("TodoProvider", out var provider) ||
+                provider.ValueKind != JsonValueKind.Object ||
+                !provider.TryGetProperty("items", out var items) ||
+                items.ValueKind != JsonValueKind.Array)
+                return Array.Empty<TodoItemSnapshot>();
+
+            return items.EnumerateArray()
+                .Where(item => item.ValueKind == JsonValueKind.Object)
+                .Select(item => new TodoItemSnapshot(
+                    item.TryGetProperty("id", out var id) ? id.ToString() : string.Empty,
+                    item.TryGetProperty("title", out var title) ? title.GetString() ?? string.Empty : string.Empty,
+                    item.TryGetProperty("isComplete", out var complete) && complete.ValueKind == JsonValueKind.True))
+                .Where(item => !string.IsNullOrWhiteSpace(item.Title))
+                .ToList();
+        }
+        catch
+        {
+            return Array.Empty<TodoItemSnapshot>();
+        }
+    }
+
+    internal static JsonNode? RedactToolPayload(object? value)
+    {
+        if (value is null) return null;
+        try
+        {
+            if (value is string text)
+            {
+                try
+                {
+                    var parsed = JsonNode.Parse(text);
+                    if (parsed != null) return RedactToolNode(parsed);
+                }
+                catch { /* ordinary text result */ }
+                return JsonValue.Create(RedactToolText(text));
+            }
+
+            var node = JsonNode.Parse(JsonSerializer.Serialize(value));
+            return RedactToolNode(node);
+        }
+        catch
+        {
+            return JsonValue.Create(RedactToolText(value.ToString()));
+        }
+    }
+
+    private static JsonNode? RedactToolNode(JsonNode? node, int depth = 0)
+    {
+        if (node is null) return null;
+        if (depth > 6) return JsonValue.Create("[truncated]");
+
+        if (node is JsonObject obj)
+        {
+            foreach (var property in obj.ToList())
+            {
+                if (IsSensitiveToolKey(property.Key))
+                    obj[property.Key] = "[redacted]";
+                else
+                    obj[property.Key] = RedactToolNode(property.Value, depth + 1);
+            }
+            return obj;
+        }
+
+        if (node is JsonArray array)
+        {
+            while (array.Count > 50)
+                array.RemoveAt(array.Count - 1);
+            for (var i = 0; i < array.Count; i++)
+                array[i] = RedactToolNode(array[i], depth + 1);
+            return array;
+        }
+
+        if (node is JsonValue value && value.TryGetValue<string>(out var text))
+            return JsonValue.Create(TruncateToolText(text));
+
+        return node;
+    }
+
+    private static bool IsSensitiveToolKey(string key)
+    {
+        var normalized = key.Replace("-", string.Empty).Replace("_", string.Empty)
+            .Replace(" ", string.Empty).ToLowerInvariant();
+        return normalized.Contains("token")
+            || normalized.Contains("secret")
+            || normalized.Contains("password")
+            || normalized.Contains("authorization")
+            || normalized.Contains("cookie")
+            || normalized.Contains("apikey")
+            || normalized.Contains("privatekey")
+            || normalized.Contains("environment")
+            || normalized == "env";
+    }
+
+    private static string TruncateToolText(string? text)
+    {
+        if (string.IsNullOrEmpty(text)) return string.Empty;
+        return text.Length <= 4096 ? text : text[..4096] + "… [truncated]";
+    }
+
+    private static string RedactToolText(string? text)
+    {
+        var truncated = TruncateToolText(text);
+        return Regex.Replace(
+            truncated,
+            @"(?i)\b(authorization|bearer|token|secret|password|api[_-]?key|cookie|private[_-]?key|env)\b\s*[:=]\s*(?:""[^""]*""|'[^']*'|[^\s,;]+)",
+            "$1=[redacted]",
+            RegexOptions.CultureInvariant,
+            TimeSpan.FromMilliseconds(100));
+    }
 }
 
 // ── Request / response models ─────────────────────────────────────────────────
@@ -971,6 +1296,8 @@ public record HeartbeatRequest(
 
 public record ResumeSessionRequest(string ConversationId);
 
+public record ForkSessionRequest(string ConversationId, int AssistantIndex);
+
 public record RenameSessionRequest(string ConversationId, string Title);
 
 public record SessionMemorySettingsRequest(string ConversationId, bool? Enabled);
@@ -982,7 +1309,19 @@ public record SpecialistMemorySettingsRequest(string Mode);
 public record SessionImportRequest(
     string? Schema,
     SessionImportMeta? Session,
-    string? TranscriptMarkdown);
+    string? TranscriptMarkdown,
+    /// <summary>
+    /// Optional persisted provider state (the unfinished todo list), shaped like the
+    /// <c>.state.json</c> sidecar: <c>{"savedAt":"...","stateBag":{"TodoProvider":{...}}}</c>.
+    /// Absent in bundles exported before this field existed, which import unchanged.
+    /// </summary>
+    System.Text.Json.JsonElement? ProviderState = null,
+    /// <summary>
+    /// Optional research references as newline-delimited JSON, one
+    /// <c>{"i":assistantIndex,"items":[...]}</c> per line. Malformed lines are dropped on import.
+    /// Absent in bundles exported before this field existed, which import unchanged.
+    /// </summary>
+    string? References = null);
 
 public record SessionImportMeta(
     string? Title,
@@ -991,6 +1330,8 @@ public record SessionImportMeta(
     string? Origin,
     DateTime? CreatedAt,
     DateTime? LastActive);
+
+public record TodoItemSnapshot(string Id, string Title, bool Completed);
 
 public record HeartbeatUpdateRequest(
     string? Task = null,

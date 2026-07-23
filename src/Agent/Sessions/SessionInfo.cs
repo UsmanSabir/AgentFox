@@ -91,6 +91,17 @@ public class SessionInfo
     /// </summary>
     public string? ParentSessionId { get; set; }
 
+    /// <summary>
+    /// Source web session when this conversation was created by forking an earlier reply.
+    /// Kept separate from <see cref="ParentSessionId"/>, which describes sub-agent ownership.
+    /// </summary>
+    public string? ForkedFromSessionId { get; set; }
+
+    /// <summary>
+    /// Zero-based position of the source assistant reply included at the end of the fork.
+    /// </summary>
+    public int? ForkedAtAssistantIndex { get; set; }
+
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime LastActivityAt { get; set; } = DateTime.UtcNow;
 

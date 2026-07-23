@@ -41,16 +41,27 @@ public sealed class ResearchReferenceScope : IDisposable
     /// <summary>Registers a source. No-op for null/whitespace or non-http(s) URLs. Dedupes by normalized URL.</summary>
     public void Add(string? url, string? title = null, string? source = null)
     {
-        if (string.IsNullOrWhiteSpace(url)) return;
-        if (!Uri.TryCreate(url.Trim(), UriKind.Absolute, out var uri)) return;
-        if (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps) return;
+        if (!IsSafeHttpUrl(url, out var uri)) return;
 
         var key = Normalize(uri);
         lock (_gate)
         {
             if (!_seen.Add(key)) return; // first occurrence wins
-            _items.Add(new ResearchReference(url.Trim(), Trim(title), Trim(source)));
+            _items.Add(new ResearchReference(url!.Trim(), Trim(title), Trim(source)));
         }
+    }
+
+    /// <summary>Returns true only for absolute HTTP(S) URLs safe to expose as links.</summary>
+    public static bool IsSafeHttpUrl(string? url, out Uri uri)
+    {
+        uri = null!;
+        if (string.IsNullOrWhiteSpace(url)) return false;
+        var trimmed = url.Trim();
+        if (trimmed.Length > 16_384) return false;
+        if (!Uri.TryCreate(trimmed, UriKind.Absolute, out var parsed)) return false;
+        if (parsed.Scheme != Uri.UriSchemeHttp && parsed.Scheme != Uri.UriSchemeHttps) return false;
+        uri = parsed;
+        return true;
     }
 
     public void AddRange(IEnumerable<ResearchReference> references)

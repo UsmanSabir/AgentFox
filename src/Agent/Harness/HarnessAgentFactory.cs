@@ -7,18 +7,32 @@ using Microsoft.Extensions.Options;
 namespace AgentFox.Harness;
 
 /// <summary>
-/// The single place AgentFox touches the preview HarnessAgent API (<c>AsHarnessAgent</c> and
+/// The single place AgentFox touches the HarnessAgent API (<c>AsHarnessAgent</c> and
 /// <c>HarnessAgentOptions</c>). Everything else in the codebase works against the returned
-/// <see cref="AIAgent"/> abstraction, so preview churn stays inside this file.
+/// <see cref="AIAgent"/> abstraction, so churn in this API stays inside this file.
+///
+/// As of Microsoft.Agents.AI.Harness 1.15.0 the package is no longer prerelease and the
+/// HarnessAgent type itself is no longer <c>[Experimental]</c> — but a subset of
+/// <c>HarnessAgentOptions</c> members still is (compaction, context/output budgets, loop
+/// evaluators, the file stores, and background agents), which is why MAAI001 is still
+/// suppressed below rather than removed.
 ///
 /// Safety contract (roadmap Phase 0):
 ///  - Disabled by default; <see cref="Create"/> throws unless Harness:Enabled is true.
 ///  - Every tool is bridged through <see cref="AgentBuilder.CreateGatewayTools"/>, so the plan
 ///    gate, HITL approval, plugin lifecycle hooks, and experience learning all still apply.
-///  - File access, file memory, web search, skill discovery, shell, and background agents are
-///    hard-disabled regardless of profile until a later phase bridges them deliberately.
+///  - File memory, file access, web search, skill discovery, and background agents stay off
+///    regardless of profile until a later phase bridges them deliberately. Note the shapes
+///    differ: file memory / web search / skills are opt-OUT (explicit Disable* below), while
+///    file access and background agents are opt-IN and stay off simply by not being set.
 ///  - Harness tool approval stays in auto mode: AgentFox's own gate inside the tool gateway is
-///    the only approval authority, so no alternate approval path exists.
+///    the only approval authority, so no alternate approval path exists. The 1.15.0 approval
+///    hardening (approval-response binding, approval-not-required bypassing) is left at its
+///    secure default so a surfaced approval binds to exactly the call it was raised for.
+///
+/// Shell execution is not mentioned here because it no longer exists on this surface: 1.15.0
+/// removed the ShellExecutor/ShellTool*/DisableShellToolApproval members, and the separate
+/// Microsoft.Agents.AI.Tools.Shell package has no 1.15.0 release. There is nothing to disable.
 /// </summary>
 public sealed class HarnessAgentFactory
 {
@@ -51,8 +65,10 @@ public sealed class HarnessAgentFactory
 
         var tools = toolGateway.CreateGatewayTools().ToList();
 
-        // MAAI001: HarnessAgent is an evaluation-only preview API. Containing its use is this
-        // file's whole purpose (see class doc); the roadmap's version policy governs upgrades.
+        // MAAI001 is still required at 1.15.0 — not for HarnessAgent/AsHarnessAgent (both went
+        // stable) but for the individual experimental options set below: DisableCompaction and
+        // MaxContextWindowTokens. Containing that exposure is this file's whole purpose (see
+        // class doc); the roadmap's version policy governs upgrades.
 #pragma warning disable MAAI001
         var harnessOptions = new HarnessAgentOptions
         {
@@ -73,8 +89,12 @@ public sealed class HarnessAgentFactory
 
             // Least privilege: no Harness-native data or capability provider is active until a
             // later roadmap phase bridges it through AgentFox policy explicitly.
+            //
+            // File access has no Disable* switch as of Harness 1.15.0 — it inverted to opt-in:
+            // leaving FileAccessStore null means no FileAccessProvider is added and the agent gets
+            // no file tools. Do NOT set FileAccessStore/FileAccessProviderOptions here; that would
+            // hand the model file tools that bypass the AgentFox gateway.
             DisableFileMemory = true,
-            DisableFileAccess = true,
             DisableWebSearch = true,
             DisableAgentSkillsProvider = true,
 
@@ -85,8 +105,10 @@ public sealed class HarnessAgentFactory
             DisableOpenTelemetry = !profile.EnableOpenTelemetry,
             OpenTelemetrySourceName = profile.OpenTelemetrySourceName,
         };
-
-        return chatClient.AsHarnessAgent(harnessOptions, _loggerFactory);
 #pragma warning restore MAAI001
+
+        // Outside the suppression on purpose: AsHarnessAgent is stable at 1.15.0, so if a future
+        // bump re-flags it the warning surfaces here instead of being silently swallowed.
+        return chatClient.AsHarnessAgent(harnessOptions, _loggerFactory);
     }
 }

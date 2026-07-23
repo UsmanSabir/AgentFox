@@ -15,12 +15,39 @@ export interface ReferenceItem {
   source?: string;
 }
 
+export interface ToolActivity {
+  callId: string;
+  toolName: string;
+  status: 'running' | 'completed' | 'failed' | string;
+  durationMs?: number;
+}
+
+export interface ToolActivityDetails extends ToolActivity {
+  arguments?: unknown;
+  result?: unknown;
+}
+
+export interface TodoItem {
+  id: string;
+  title: string;
+  completed: boolean;
+}
+
+export interface TodoSnapshot {
+  enabled: boolean;
+  phase?: string;
+  plan?: string;
+  items: TodoItem[];
+  remainingCount: number;
+}
+
 export interface ChatResponse {
   response: string;
   conversationId?: string;
   success: boolean;
   error?: string;
   references?: ReferenceItem[];
+  assistantIndex?: number;
 }
 
 export interface AgentStatus {
@@ -120,12 +147,15 @@ export interface SessionInfo {
   createdAt: string;
   lastActive: string;
   channelType?: string;
+  forkedFromSessionId?: string;
+  forkedAtAssistantIndex?: number;
 }
 
 export interface ConversationMessage {
   role: 'user' | 'assistant';
   content: string;
   references?: ReferenceItem[];
+  assistantIndex?: number;
 }
 
 export interface ConversationMessagesResponse {
@@ -462,6 +492,13 @@ export const api = {
     get<ConversationMessagesResponse>(`/session-messages?conversationId=${encodeURIComponent(conversationId)}`),
   resumeSession: (conversationId: string) =>
     post<{ success: boolean; conversationId: string }>('/sessions/resume', { conversationId }),
+  forkSession: (conversationId: string, assistantIndex: number) =>
+    post<{
+      success: boolean;
+      conversationId: string;
+      sourceConversationId: string;
+      assistantIndex: number;
+    }>('/sessions/fork', { conversationId, assistantIndex }),
   renameSession: (conversationId: string, title: string) =>
     patch<{ success: boolean; conversationId: string; title: string }>('/sessions', { conversationId, title }),
   setSessionMemory: (conversationId: string, enabled: boolean | null) =>
@@ -491,6 +528,13 @@ export const api = {
   channels: () => get<ChannelsStatus>('/channels'),
   pendingNotifications: (conversationId: string) =>
     get<PendingNotificationsResponse>(`/chat/pending/${encodeURIComponent(conversationId)}`),
+  todos: (conversationId: string) =>
+    get<TodoSnapshot>(`/sessions/${encodeURIComponent(conversationId)}/todos`),
+  activity: (conversationId: string) =>
+    get<ToolActivity[]>(`/sessions/${encodeURIComponent(conversationId)}/activity`),
+  activityDetails: (conversationId: string, callId: string) =>
+    get<ToolActivityDetails>(
+      `/sessions/${encodeURIComponent(conversationId)}/activity/${encodeURIComponent(callId)}`),
   hitlApprove: (approvalId: string, message?: string) =>
     post<{ ok: boolean }>(`/hitl/${encodeURIComponent(approvalId)}/approve`, { message }),
   hitlReject: (approvalId: string, message?: string) =>
@@ -557,7 +601,17 @@ export const api = {
 
 export type StreamEvent =
   | { type: 'token';  token: string }
-  | { type: 'done';   done: true; conversationId?: string; references?: ReferenceItem[] }
+  | { type: 'session'; conversationId: string }
+  | { type: 'reasoning'; text: string }
+  | { type: 'status'; status: string }
+  | { type: 'tool_activity'; activity: ToolActivity }
+  | {
+      type: 'done';
+      done: true;
+      conversationId?: string;
+      references?: ReferenceItem[];
+      assistantIndex?: number;
+    }
   | { type: 'error';  error: string };
 
 export async function* streamChat(
@@ -598,7 +652,21 @@ export async function* streamChat(
           try {
             const payload = JSON.parse(line.slice(6));
             if (currentEvent === 'done') {
-              yield { type: 'done', done: true, conversationId: payload.conversationId, references: payload.references };
+              yield {
+                type: 'done',
+                done: true,
+                conversationId: payload.conversationId,
+                references: payload.references,
+                assistantIndex: payload.assistantIndex
+              };
+            } else if (currentEvent === 'session') {
+              yield { type: 'session', conversationId: payload.conversationId };
+            } else if (currentEvent === 'reasoning') {
+              yield { type: 'reasoning', text: payload.text ?? '' };
+            } else if (currentEvent === 'status') {
+              yield { type: 'status', status: payload.status ?? '' };
+            } else if (currentEvent === 'tool_activity') {
+              yield { type: 'tool_activity', activity: payload as ToolActivity };
             } else if (currentEvent === 'error') {
               yield { type: 'error', error: payload.error ?? 'Unknown error' };
             } else {

@@ -63,6 +63,10 @@ public sealed class AgentOrchestrator : IHostedService
 
     private readonly HitlManager _hitlManager;
     private readonly PlanStateStore _planStore;
+
+    // Shared by the main agent and every specialist: records todo lists rehydrated from disk
+    // after a restart so the prompt can ask the user whether to resume them.
+    private readonly TodoRestoreTracker _todoRestores = new();
     private readonly AgentFox.Plugins.PluginConfigManager _pluginConfigManager;
 
     // Built during InitializeAsync, used by StopAsync
@@ -398,7 +402,8 @@ public sealed class AgentOrchestrator : IHostedService
             .WithWorkspaceManager(_workspaceManager)
             .WithSessionManager(_sessionManager)
             .WithExperienceLearning(_experienceLearning)
-            .WithCompactionFromConfig(_configuration);
+            .WithCompactionFromConfig(_configuration)
+            .WithTodoPlannerFromConfig(_configuration);
 
         if (withLogger)
             builder = builder.WithLogger(_loggerFactory.CreateLogger<FoxAgent>());
@@ -498,6 +503,17 @@ public sealed class AgentOrchestrator : IHostedService
         // Steer the model per plan phase (research / awaiting / execute).
         if (planCfg.Enabled)
             builder = builder.WithPromptContributor(new PlanPhaseContributor(_planStore));
+
+        // Todo-list guidance, phased by plan state when the plan gate is on. Only when the
+        // planner is actually enabled — otherwise the todos_* tools do not exist and this
+        // would be describing tools the model cannot call.
+        if (builder.IsTodoPlannerEnabled)
+            builder = builder
+                .WithTodoRestoreTracker(_todoRestores)
+                .WithPromptContributor(new TodoPlannerContributor(
+                    planCfg.Enabled ? _planStore : null,
+                    _todoRestores,
+                    TimeSpan.FromHours(builder.TodoPlannerOptions!.StaleAfterHours)));
 
         return builder.Build();
     }
@@ -605,7 +621,7 @@ public sealed class AgentOrchestrator : IHostedService
                     """;
             }
 
-            var specialist = new AgentBuilder(isolatedTools)
+            var specialistBuilder = new AgentBuilder(isolatedTools)
                 .WithName(descriptor.Name)
                 .WithDescription(descriptor.Description)
                 .WithSystemPrompt(prompt)
@@ -617,7 +633,22 @@ public sealed class AgentOrchestrator : IHostedService
                 .WithWorkspaceManager(_workspaceManager)
                 .WithSessionManager(_sessionManager)
                 .WithExperienceLearning(_experienceLearning)
-                .Build();
+                .WithCompactionFromConfig(_configuration)
+                .WithTodoPlannerFromConfig(_configuration);
+
+            // Specialists are delegated multi-step work (research a stock, reconcile a batch) and
+            // are the agents most likely to drop a step, so they get the same todo planner as the
+            // main agent. No plan-phase steering: the plan gate is a main-agent concept and no
+            // PlanState is tracked for specialist sessions, so the guidance is phase-independent.
+            if (specialistBuilder.IsTodoPlannerEnabled)
+                specialistBuilder = specialistBuilder
+                    .WithTodoRestoreTracker(_todoRestores)
+                    .WithPromptContributor(new TodoPlannerContributor(
+                        store: null,
+                        restores: _todoRestores,
+                        staleAfter: TimeSpan.FromHours(specialistBuilder.TodoPlannerOptions!.StaleAfterHours)));
+
+            var specialist = specialistBuilder.Build();
 
             _specialistAgents.Activate(descriptor.Id, async (input, conversationId, cancellationToken) =>
             {
