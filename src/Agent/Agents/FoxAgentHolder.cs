@@ -60,13 +60,21 @@ internal sealed class FoxAgentService : IAgentService
     // result still has a live connection to be written to or needs to fall back to
     // PendingNotificationStore for the client to pick up on its next poll.
 
+    public Task<AgentReply> RunAsync(
+        string input,
+        string? conversationId = null,
+        CancellationToken ct = default)
+        => RunAsync(input, null, conversationId, ct);
+
     public async Task<AgentReply> RunAsync(
         string input,
+        IReadOnlyList<ChatAttachment>? attachments,
         string? conversationId = null,
         CancellationToken ct = default)
     {
         var agent = await _holder.WaitAsync(ct);
-        var result = await agent.ProcessAsync(input, conversationId, cancellationToken: CancellationToken.None);
+        var result = await agent.ProcessAsync(
+            input, conversationId, cancellationToken: CancellationToken.None, attachments: attachments);
         var reply = new AgentReply { Output = result.Output ?? string.Empty, References = result.References };
 
         if (ct.IsCancellationRequested && conversationId != null)
@@ -75,8 +83,19 @@ internal sealed class FoxAgentService : IAgentService
         return reply;
     }
 
+    public Task<AgentReply> StreamAsync(
+        string input,
+        string? conversationId,
+        Func<string, Task> onToken,
+        Func<string, Task>? onReasoning = null,
+        Func<string, Task>? onStatus = null,
+        Func<AgentToolActivity, Task>? onToolActivity = null,
+        CancellationToken ct = default)
+        => StreamAsync(input, null, conversationId, onToken, onReasoning, onStatus, onToolActivity, ct);
+
     public async Task<AgentReply> StreamAsync(
         string input,
+        IReadOnlyList<ChatAttachment>? attachments,
         string? conversationId,
         Func<string, Task> onToken,
         Func<string, Task>? onReasoning = null,
@@ -123,7 +142,7 @@ internal sealed class FoxAgentService : IAgentService
             OnStatus = SafeOnStatus,
             OnToolActivity = SafeOnToolActivity
         };
-        var result = await agent.ProcessAsync(input, conversationId, streaming, CancellationToken.None);
+        var result = await agent.ProcessAsync(input, conversationId, streaming, CancellationToken.None, attachments);
         var reply = new AgentReply { Output = result.Output ?? string.Empty, References = result.References };
 
         if (ct.IsCancellationRequested && conversationId != null)
@@ -162,10 +181,30 @@ internal sealed class PluginContextAdapter : IPluginContext
     }
 
     // ── Tool registration ────────────────────────────────────────────────────
-    public void RegisterTool(ITool tool) => _toolRegistry.Register(tool);
+    private int _mainToolRegistrations;
+    private int _specialistToolRegistrations;
 
-    public void RegisterAgentTool(string agentId, ITool tool) =>
+    public void RegisterTool(ITool tool)
+    {
+        _toolRegistry.Register(tool);
+        Interlocked.Increment(ref _mainToolRegistrations);
+    }
+
+    public void RegisterAgentTool(string agentId, ITool tool)
+    {
         _agentRegistry.RegisterTool(agentId, tool);
+        Interlocked.Increment(ref _specialistToolRegistrations);
+    }
+
+    /// <summary>
+    /// Returns what the last plugin registered and resets the counters, so the caller can report each
+    /// module separately. Specialist-scoped tools are counted apart from main-agent tools: they never
+    /// enter the main <see cref="ToolRegistry"/>, so a plugin that registers only those (the trading
+    /// agent does) otherwise reports "0 tool(s)" and looks broken when it is working exactly as designed.
+    /// </summary>
+    internal (int Main, int Specialist) TakeRegistrationCounts() =>
+        (Interlocked.Exchange(ref _mainToolRegistrations, 0),
+         Interlocked.Exchange(ref _specialistToolRegistrations, 0));
 
     public void RegisterAgent(SpecialistAgentDescriptor descriptor) =>
         _agentRegistry.Register(descriptor);

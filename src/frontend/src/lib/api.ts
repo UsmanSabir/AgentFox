@@ -4,9 +4,37 @@ const BASE = '/api';
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
+/** One file attached to a turn, carried inline as base64 (no separate upload round-trip). */
+export interface ChatAttachment {
+  name: string;
+  mediaType: string;
+  /** Base64 file bytes, without a `data:` URI prefix. */
+  data: string;
+}
+
 export interface ChatRequest {
   message: string;
   conversationId?: string;
+  attachments?: ChatAttachment[];
+}
+
+/** What the configured model accepts as input — drives whether the UI offers attachments. */
+export interface AttachmentCapabilities {
+  enabled: boolean;
+  images: boolean;
+  documents: boolean;
+  textFiles: boolean;
+  maxFileSizeBytes: number;
+  maxFilesPerMessage: number;
+  maxTotalBytes: number;
+  acceptedMediaTypes: string[];
+  provider: string;
+  model: string;
+  source: 'config' | 'detected' | string;
+}
+
+export interface Capabilities {
+  attachments: AttachmentCapabilities;
 }
 
 export interface ReferenceItem {
@@ -473,6 +501,7 @@ export const api = {
   health:   () => get<{ status: string; version: string; timestamp: string }>('/health'),
   version:  () => get<VersionInfo>('/version'),
   status:   () => get<AgentStatus>('/status'),
+  capabilities: () => get<Capabilities>('/capabilities'),
   agents:   () => get<AgentInfo[]>('/agents'),
   specialistAgents: () => get<SpecialistAgentInfo[]>('/specialist-agents'),
   specialistChat: (agentId: string, message: string, conversationId?: string) =>
@@ -617,17 +646,21 @@ export type StreamEvent =
 export async function* streamChat(
   message: string,
   conversationId?: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  attachments?: ChatAttachment[]
 ): AsyncGenerator<StreamEvent> {
   const res = await fetch(`${BASE}/chat/stream`, {
     method:  'POST',
     headers: requestHeaders(true),
-    body:    JSON.stringify({ message, conversationId }),
+    body:    JSON.stringify({ message, conversationId, attachments }),
     signal
   });
 
   if (!res.ok || !res.body) {
-    yield { type: 'error', error: `HTTP ${res.status}` };
+    // The server rejects unusable attachments with a 400 and an explanation; surface it
+    // instead of the bare status code, which would leave the user guessing.
+    const detail = await res.json().catch(() => null);
+    yield { type: 'error', error: detail?.error ?? `HTTP ${res.status}` };
     return;
   }
 

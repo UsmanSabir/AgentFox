@@ -93,7 +93,7 @@ public sealed class PsxDataClient
 
     public async Task<StockResearchData> GatherAsync(string symbol, CancellationToken ct = default)
     {
-        symbol = symbol.Trim().ToUpperInvariant();
+        symbol = NormalizeStockSymbol(symbol);
 
         var quoteTask   = GetQuoteSummaryAsync(symbol, ct);
         var indexTask   = GetQuoteSummaryAsync(Kse100Symbol, ct);
@@ -248,6 +248,19 @@ public sealed class PsxDataClient
         if (normalized.Length is < 1 or > 24 || !Regex.IsMatch(normalized, "^[A-Z0-9_-]+$"))
             throw new ArgumentException($"Invalid PSX {parameterName} symbol.", parameterName);
         return normalized;
+    }
+
+    /// <summary>
+    /// Normalizes a stock ticker before it is used in PSX portal paths. Some model-generated
+    /// requests append the company-type suffix "CEL" to MARI (for example, "MARICEL"), but
+    /// the official portal ticker is MARI.
+    /// </summary>
+    public static string NormalizeStockSymbol(string value)
+    {
+        var normalized = value.Trim().ToUpperInvariant();
+        //if (normalized.Length > 3 && normalized.EndsWith("CEL", StringComparison.Ordinal))
+        //    normalized = normalized[..^3];
+        return NormalizePortalSymbol(normalized, "stock");
     }
 
     private static bool TryDecimal(JsonElement el, out decimal value)

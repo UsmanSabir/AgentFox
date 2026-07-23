@@ -58,8 +58,53 @@ public class AhkConfig
     /// </summary>
     public bool AllowMarketOrders { get; set; } = false;
 
-    /// <summary>How long to wait for the portal to show an order confirmation/error after submit.</summary>
-    public int OrderConfirmTimeoutMs { get; set; } = 8_000;
+    /// <summary>
+    /// How long to wait for the portal to show an order confirmation/error after submit. Also covers a
+    /// LATE "Are you sure?" prompt (see <see cref="ConfirmPromptTimeoutMs"/>), so on a slow machine this
+    /// must be comfortably larger than the prompt timeout or a confirmed order reads back as unconfirmed.
+    /// </summary>
+    public int OrderConfirmTimeoutMs { get; set; } = 15_000;
+
+    // ── Slow-machine readiness timeouts ────────────────────────────────────────
+    // The portal renders its toolbar, modal and confirmation prompt asynchronously. On a slow or loaded
+    // machine each of those can arrive seconds after the step that triggered it, so every one of these
+    // waits is a bounded poll — never a fixed sleep. Raise them if orders fail with "could not open the
+    // … dialog" or "submit button not found"; the cost of a larger value is only spent when the portal
+    // really is that slow.
+
+    /// <summary>
+    /// How long to wait for the order dialog to actually open (toolbar button to render + the modal's
+    /// symbol field to become visible). The open click is retried within this window, because a click
+    /// that lands before the portal binds its handler opens nothing at all.
+    /// </summary>
+    public int DialogOpenTimeoutMs { get; set; } = 15_000;
+
+    /// <summary>
+    /// How long to wait for the order submit button to become visible and enabled. The button is only
+    /// ever clicked ONCE — this timeout governs waiting for it to appear, never a retry of the submit.
+    /// </summary>
+    public int SubmitButtonTimeoutMs { get; set; } = 10_000;
+
+    /// <summary>
+    /// How long to wait for the portal's "Are you sure? You want to execute Buy/Sell order!" prompt
+    /// after the submit click. The order does NOT execute until it is confirmed, so a too-small value
+    /// on a slow machine means the submit silently never becomes an order.
+    /// </summary>
+    public int ConfirmPromptTimeoutMs { get; set; } = 10_000;
+
+    /// <summary>
+    /// How long to wait for the portal to resolve a typed symbol and auto-fill the price field. Waiting
+    /// for the auto-fill (rather than sleeping a fixed interval) also guarantees the portal's populate
+    /// cannot land AFTER our own limit price and overwrite it.
+    /// </summary>
+    public int SymbolResolveTimeoutMs { get; set; } = 6_000;
+
+    /// <summary>
+    /// How long to wait after loading the portal for it to settle into either the trading screen (a
+    /// persisted session) or the login form, before deciding which one it is. Without this, a slow
+    /// render looks like "username field not found" on an already-authenticated session.
+    /// </summary>
+    public int PageReadyTimeoutMs { get; set; } = 15_000;
 
     /// <summary>
     /// Launch the browser only when an order is placed and close it once the order finishes (default

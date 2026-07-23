@@ -1,5 +1,6 @@
 using AgentFox.Helpers;
 using AgentFox.Hitl;
+using AgentFox.LLM;
 using AgentFox.MCP;
 using AgentFox.Memory;
 using AgentFox.Plugins.Models;
@@ -74,12 +75,38 @@ public class WebModule : IAppModule
             });
         });
 
+        // ── Capabilities ──────────────────────────────────────────────────────
+        // What the configured model accepts as chat input. The web UI reads this to decide
+        // whether to offer the attachment button at all, and which file types to accept.
+        endpoints.MapGet("/capabilities", (IConfiguration config) =>
+        {
+            var caps = AttachmentSupport.Resolve(config);
+            return Results.Ok(new
+            {
+                attachments = new
+                {
+                    enabled            = caps.Enabled && caps.AnySupported,
+                    images             = caps.Images,
+                    documents          = caps.Documents,
+                    textFiles          = caps.TextFiles,
+                    maxFileSizeBytes   = caps.MaxFileSizeBytes,
+                    maxFilesPerMessage = caps.MaxFilesPerMessage,
+                    maxTotalBytes      = caps.MaxTotalBytes,
+                    acceptedMediaTypes = caps.AcceptedMediaTypes,
+                    provider           = caps.Provider,
+                    model              = caps.Model,
+                    source             = caps.Source
+                }
+            });
+        });
+
         // ── Chat (request/response) ───────────────────────────────────────────
 
         endpoints.MapPost("/chat", async (
             IAgentService agentService,
             SessionManager sessionManager,
             MarkdownSessionStore sessionStore,
+            IConfiguration config,
             ChatRequest req,
             CancellationToken ct) =>
         {
@@ -90,13 +117,19 @@ public class WebModule : IAppModule
                     Error = "Message must not be empty."
                 });
 
+            // Reject the whole turn on an unusable attachment rather than dropping it: a user
+            // who attached a screenshot to a text-only model must be told, not left believing
+            // the model looked at it.
+            if (!AttachmentSupport.TryResolve(req.Attachments, AttachmentSupport.Resolve(config), out _, out var attachmentError))
+                return Results.BadRequest(new ChatResponse { Success = false, Error = attachmentError });
+
             try
             {
                 // Pre-generate a conversation ID so the same session is reused across turns.
                 // If the client already has one (follow-up message) we keep it; otherwise we
                 // mint a new one here and return it so the client can send it on the next turn.
                 var conversationId = sessionManager.GetOrCreateWebSession("main", req.ConversationId);
-                var reply = await agentService.RunAsync(req.Message, conversationId, ct);
+                var reply = await agentService.RunAsync(req.Message, req.Attachments, conversationId, ct);
                 return Results.Ok(new ChatResponse
                 {
                     Response = reply.Output,
@@ -127,6 +160,7 @@ public class WebModule : IAppModule
     IAgentService agentService,
     SessionManager sessionManager,
     MarkdownSessionStore sessionStore,
+    IConfiguration config,
     HttpContext httpContext,
     CancellationToken ct) =>
         {
@@ -134,6 +168,14 @@ public class WebModule : IAppModule
             {
                 httpContext.Response.StatusCode = 400;
                 await httpContext.Response.WriteAsJsonAsync(new { error = "Message must not be empty." }, ct);
+                return;
+            }
+
+            // Same all-or-nothing rule as /chat — see the comment there.
+            if (!AttachmentSupport.TryResolve(req.Attachments, AttachmentSupport.Resolve(config), out _, out var attachmentError))
+            {
+                httpContext.Response.StatusCode = 400;
+                await httpContext.Response.WriteAsJsonAsync(new { error = attachmentError }, ct);
                 return;
             }
 
@@ -168,6 +210,7 @@ public class WebModule : IAppModule
 
                 var reply = await agentService.StreamAsync(
                     req.Message,
+                    req.Attachments,
                     conversationId,
                     async token =>
                     {
@@ -769,13 +812,7 @@ public class WebModule : IAppModule
             try
             {
                 var reply = await command.ResultSource.Task.WaitAsync(ct);
-                return Results.Ok(new ChatResponse
-                {
-                    Response = reply,
-                    ConversationId = conversationId,
-                    Success = true,
-                    AssistantIndex = sessionStore.GetLatestAssistantIndex(conversationId)
-                });
+                return Results.Ok(BuildSpecialistChatResponse(reply, conversationId, sessionStore));
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -1162,6 +1199,27 @@ public class WebModule : IAppModule
     };
 
     public Task StartAsync(IServiceProvider services) => Task.CompletedTask;
+
+    internal static ChatResponse BuildSpecialistChatResponse(
+        string reply,
+        string conversationId,
+        MarkdownSessionStore sessionStore)
+    {
+        // Specialist commands currently return only their response text. Their research
+        // references are persisted by the agent before the command completes, so recover the
+        // completed turn from the same projection used when a browser reloads the session.
+        var latestAssistant = sessionStore.GetConversationMessages(conversationId)
+            .LastOrDefault(message => message.Role == "assistant");
+
+        return new ChatResponse
+        {
+            Response = reply,
+            ConversationId = conversationId,
+            Success = true,
+            References = latestAssistant?.References.ToList() ?? [],
+            AssistantIndex = latestAssistant?.AssistantIndex
+        };
+    }
 
     internal static IReadOnlyList<TodoItemSnapshot> ReadTodoItems(string? rawState)
     {

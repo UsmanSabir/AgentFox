@@ -15,6 +15,20 @@ export const activeConversationId = writable<string | undefined>(undefined);
 export const activeAgentId = writable('main');
 
 // ── Chat history (in-memory for current session) ──────────────────────────
+
+/**
+ * An attachment as shown in the transcript. `previewUrl` is a `data:` URI, set only for
+ * smaller images — a data URI needs no revocation, so a thumbnail cannot outlive its
+ * message or leak. Reloaded sessions show name and size only: the transcript records the
+ * file's identity, not its bytes.
+ */
+export interface ChatAttachmentView {
+  name: string;
+  mediaType: string;
+  size: number;
+  previewUrl?: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -29,6 +43,8 @@ export interface ChatMessage {
   reasoning?: string;
   status?: string;
   toolActivities?: ToolActivity[];
+  retryContent?: string;
+  attachments?: ChatAttachmentView[];
 }
 
 export const chatMessages = writable<ChatMessage[]>([]);
@@ -39,18 +55,19 @@ export function resetChat(agentId = 'main') {
   activeAgentId.set(agentId);
 }
 
-export function addUserMessage(content: string): string {
+export function addUserMessage(content: string, attachments?: ChatAttachmentView[]): string {
   const id = crypto.randomUUID();
   chatMessages.update(msgs => [...msgs, {
-    id, role: 'user', content, timestamp: new Date()
+    id, role: 'user', content, timestamp: new Date(),
+    attachments: attachments?.length ? attachments : undefined
   }]);
   return id;
 }
 
-export function addAssistantMessage(content = '', streaming = false): string {
+export function addAssistantMessage(content = '', streaming = false, retryContent?: string): string {
   const id = crypto.randomUUID();
   chatMessages.update(msgs => [...msgs, {
-    id, role: 'assistant', content, streaming, timestamp: new Date()
+    id, role: 'assistant', content, streaming, retryContent, timestamp: new Date()
   }]);
   return id;
 }
@@ -98,6 +115,22 @@ export function upsertToolActivity(id: string, activity: ToolActivity) {
 export function finalizeMessage(id: string, error?: string) {
   chatMessages.update(msgs =>
     msgs.map(m => m.id === id ? { ...m, streaming: false, error } : m)
+  );
+}
+
+export function prepareMessageForRetry(id: string) {
+  chatMessages.update(msgs =>
+    msgs.map(m => m.id === id ? {
+      ...m,
+      content: '',
+      streaming: true,
+      error: undefined,
+      references: undefined,
+      assistantIndex: undefined,
+      reasoning: undefined,
+      status: undefined,
+      toolActivities: undefined
+    } : m)
   );
 }
 

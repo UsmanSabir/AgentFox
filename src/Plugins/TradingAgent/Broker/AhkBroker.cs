@@ -447,22 +447,17 @@ public sealed class AhkBroker : IAsyncDisposable
     private async Task<decimal?> ReadLastTradePriceAsync(string symbol)
     {
         await FillFieldAsync("#buysymbol", symbol);
-        await Task.Delay(800);                 // autocomplete dropdown
-        await _page!.Keyboard.PressAsync("Tab");
-        await Task.Delay(500);                 // portal populates #buyprice with the last trade price
 
-        var raw = await _page.EvaluateFunctionAsync<string>(
-            "() => { const e = document.querySelector('#buyprice'); return e ? (e.value || '') : ''; }") ?? "";
-
-        // Strip thousands separators / stray characters, keep digits and a single decimal point.
-        var cleaned = Regex.Replace(raw, @"[^0-9.]", "");
-        if (decimal.TryParse(cleaned, NumberStyles.Any, CultureInfo.InvariantCulture, out var price) && price > 0m)
+        // Bounded wait for the portal to resolve the symbol and populate #buyprice — a fixed sleep
+        // reads an empty field on a slow machine and reports the symbol as unpriceable.
+        var price = await ResolveSymbolAsync("buy");
+        if (price is > 0m)
         {
-            _logger.LogInformation("[AhkBroker] Live price for {Symbol}: {Price} (raw '{Raw}').", symbol, price, raw);
+            _logger.LogInformation("[AhkBroker] Live price for {Symbol}: {Price}.", symbol, price);
             return price;
         }
 
-        _logger.LogWarning("[AhkBroker] Could not read a live price for {Symbol} (raw '{Raw}').", symbol, raw);
+        _logger.LogWarning("[AhkBroker] Could not read a live price for {Symbol}.", symbol);
         return null;
     }
 
@@ -545,20 +540,23 @@ public sealed class AhkBroker : IAsyncDisposable
             if (!string.IsNullOrWhiteSpace(cfg.PortfolioMenuToggleSelector))
             {
                 if (await ClickViaDomAsync(cfg.PortfolioMenuToggleSelector))
-                    await Task.Delay(600); // sidebar slide-out animation
+                {
+                    // Wait for the menu the toggle reveals rather than guessing the animation length:
+                    // the nav item appearing IS the thing the fixed 600ms was hoping for.
+                    if (!await WaitForExistsAsync(cfg.PortfolioNavSelector, timeout))
+                        await WaitForDomSettledAsync(300, Math.Min(timeout, 2_000));
+                }
                 else
+                {
                     _logger.LogWarning(
                         "[AhkBroker] Menu toggle '{Selector}' not found — trying the nav item directly.",
                         cfg.PortfolioMenuToggleSelector);
+                }
             }
 
-            // Wait for the nav item to exist (it may be lazily rendered when the menu opens).
-            try
-            {
-                await _page!.WaitForSelectorAsync(cfg.PortfolioNavSelector,
-                    new WaitForSelectorOptions { Timeout = Math.Min(timeout, 5_000) });
-            }
-            catch (Exception) { /* fall through — the open attempt below reports if it's truly absent */ }
+            // The nav item may be lazily rendered; give it the configured budget rather than a fixed 5s.
+            // A miss is not fatal here — the open attempt below reports if it is truly absent.
+            await WaitForExistsAsync(cfg.PortfolioNavSelector, timeout);
 
             if (!await OpenPortfolioDialogAsync(cfg, timeout))
             {
@@ -567,8 +565,8 @@ public sealed class AhkBroker : IAsyncDisposable
         }
         else
         {
-            // No explicit target: give the current screen a moment to finish rendering.
-            await Task.Delay(1_000);
+            // No explicit target: let the current screen finish rendering.
+            await WaitForDomSettledAsync(quietMs: 500, timeoutMs: Math.Min(timeout, 5_000));
         }
 
         await SelectPortfolioAccountAsync(cfg);
@@ -584,7 +582,9 @@ public sealed class AhkBroker : IAsyncDisposable
     /// MouseEvent fires that handler — a bare element.click() does not, and Puppeteer's ClickAsync
     /// can't reach the element because the sidebar is parked off-screen (left:-200). The success
     /// signal is the holdings table EXISTING (not visible: DataTables keeps the scroll header
-    /// zero-height). Retries a few times to absorb the handler binding slightly after page load.
+    /// zero-height). Retries until PortfolioLoadTimeoutMs is exhausted to absorb the handler binding
+    /// slightly after page load — a fixed attempt count silently became a much shorter wall-clock
+    /// budget on a slow machine, which is exactly when the handler binds latest.
     /// </summary>
     private async Task<bool> OpenPortfolioDialogAsync(AhkConfig cfg, int timeout)
     {
@@ -592,7 +592,8 @@ public sealed class AhkBroker : IAsyncDisposable
             ? cfg.HoldingsTableSelector
             : cfg.PortfolioAccountSelectSelector;
 
-        for (var attempt = 1; attempt <= 4; attempt++)
+        var deadline = DateTime.UtcNow.AddMilliseconds(timeout);
+        for (var attempt = 1; ; attempt++)
         {
             var fired = await ClickViaDomAsync(cfg.PortfolioNavSelector);
             if (!fired)
@@ -601,18 +602,74 @@ public sealed class AhkBroker : IAsyncDisposable
                     "[AhkBroker] PortfolioNavSelector '{Selector}' not found on the page (attempt {Attempt}).",
                     cfg.PortfolioNavSelector, attempt);
             }
-            else if (await WaitForExistsAsync(scaffoldSelector, Math.Min(timeout, 3_000)))
+            else
             {
-                return true;
+                var remaining = (int)(deadline - DateTime.UtcNow).TotalMilliseconds;
+                if (await WaitForExistsAsync(scaffoldSelector, Math.Clamp(remaining, 500, 3_000)))
+                {
+                    if (attempt > 1)
+                        _logger.LogInformation(
+                            "[AhkBroker] Exposure dialog opened on attempt {Attempt} — the portal bound its handler late.",
+                            attempt);
+                    return true;
+                }
             }
 
-            await Task.Delay(800);
+            if (DateTime.UtcNow >= deadline) break;
+            await Task.Delay(400);
         }
 
         _logger.LogWarning(
-            "[AhkBroker] Exposure dialog scaffold '{Selector}' never appeared after triggering '{Nav}'.",
-            scaffoldSelector, cfg.PortfolioNavSelector);
+            "[AhkBroker] Exposure dialog scaffold '{Selector}' never appeared within {Timeout}ms after triggering '{Nav}'. " +
+            "Raise Ahk.PortfolioLoadTimeoutMs if this machine is slow.",
+            scaffoldSelector, timeout, cfg.PortfolioNavSelector);
         return false;
+    }
+
+    /// <summary>
+    /// Waits until the page has stopped mutating for <paramref name="quietMs"/>, bounded by
+    /// <paramref name="timeoutMs"/>. Returns true if it settled, false on timeout (the caller
+    /// continues either way — this replaces a guess, it is not a gate).
+    ///
+    /// The portfolio flow is a chain of AJAX loads and tab renders with no single selector that means
+    /// "done", which is why it used fixed sleeps. A MutationObserver gives the real signal: the sleep
+    /// was always either too long (wasting seconds every read) or too short (scraping a half-rendered
+    /// grid and reporting an empty portfolio). The observer is installed once per document and
+    /// re-installed automatically after a navigation clears it.
+    /// </summary>
+    private async Task<bool> WaitForDomSettledAsync(int quietMs, int timeoutMs)
+    {
+        var deadline = DateTime.UtcNow.AddMilliseconds(Math.Max(quietMs, timeoutMs));
+        while (true)
+        {
+            long idleMs;
+            try
+            {
+                idleMs = await _page!.EvaluateFunctionAsync<long>(
+                    """
+                    () => {
+                        if (!window.__afSettle) {
+                            window.__afSettle = { last: Date.now() };
+                            try {
+                                new MutationObserver(() => { window.__afSettle.last = Date.now(); })
+                                    .observe(document.documentElement, {
+                                        subtree: true, childList: true, characterData: true, attributes: true
+                                    });
+                            } catch (e) { /* no document yet — treated as still busy below */ }
+                        }
+                        return Date.now() - window.__afSettle.last;
+                    }
+                    """);
+            }
+            catch
+            {
+                return false; // page mid-navigation; the caller's own waits take over
+            }
+
+            if (idleMs >= quietMs) return true;
+            if (DateTime.UtcNow >= deadline) return false;
+            await Task.Delay(100);
+        }
     }
 
     /// <summary>Waits until the selector matches an element in the DOM (visible or not). Empty/timeout → false.</summary>
@@ -664,21 +721,36 @@ public sealed class AhkBroker : IAsyncDisposable
     {
         if (string.IsNullOrWhiteSpace(cfg.PortfolioAccountSelectSelector)) return;
 
-        var values = await _page!.EvaluateFunctionAsync<string[]>(
-            """
-            (sel) => {
-                const e = document.querySelector(sel);
-                return e && e.options ? Array.from(e.options).map(o => o.value) : [];
-            }
-            """, cfg.PortfolioAccountSelectSelector) ?? [];
+        var timeout = Math.Max(1_000, cfg.PortfolioLoadTimeoutMs);
 
-        var account = values.FirstOrDefault(v => !string.IsNullOrWhiteSpace(v) && v != "0");
+        // The account list itself arrives by AJAX: right after the dialog opens the dropdown exists but
+        // holds only the "Select Account" placeholder (value "0"). Reading it once at that moment used
+        // to abort the whole portfolio read — no account selected means no data loads, and the caller
+        // reports a perfectly healthy account as an empty portfolio. Poll until a real option appears.
+        var deadline = DateTime.UtcNow.AddMilliseconds(timeout);
+        string[] values;
+        string? account;
+        while (true)
+        {
+            values = await _page!.EvaluateFunctionAsync<string[]>(
+                """
+                (sel) => {
+                    const e = document.querySelector(sel);
+                    return e && e.options ? Array.from(e.options).map(o => o.value) : [];
+                }
+                """, cfg.PortfolioAccountSelectSelector) ?? [];
+
+            account = values.FirstOrDefault(v => !string.IsNullOrWhiteSpace(v) && v != "0");
+            if (account is not null || DateTime.UtcNow >= deadline) break;
+            await Task.Delay(250);
+        }
+
         if (account is null)
         {
-            if (values.Length > 0)
-                _logger.LogWarning(
-                    "[AhkBroker] Account dropdown '{Selector}' has no selectable account (options: {Options}).",
-                    cfg.PortfolioAccountSelectSelector, string.Join(",", values));
+            _logger.LogWarning(
+                "[AhkBroker] Account dropdown '{Selector}' still had no selectable account after {Timeout}ms (options: {Options}).",
+                cfg.PortfolioAccountSelectSelector, timeout,
+                values.Length == 0 ? "<none>" : string.Join(",", values));
             return;
         }
 
@@ -696,7 +768,10 @@ public sealed class AhkBroker : IAsyncDisposable
             }
             """, cfg.PortfolioAccountSelectSelector);
 
-        await Task.Delay(1_500); // exposure panels + collaterals load via AJAX after the change event
+        // Exposure panels + collaterals load via AJAX after the change event. Wait for the page to stop
+        // mutating instead of sleeping 1.5s: on a fast machine that sleep was wasted, and on a slow one
+        // the tab sequence below ran against a grid the portal was still building.
+        await WaitForDomSettledAsync(quietMs: 600, timeoutMs: timeout);
     }
 
     /// <summary>
@@ -706,6 +781,8 @@ public sealed class AhkBroker : IAsyncDisposable
     /// </summary>
     private async Task RunPortfolioTabSequenceAsync(AhkConfig cfg)
     {
+        var timeout = Math.Max(1_000, cfg.PortfolioLoadTimeoutMs);
+
         foreach (var selector in cfg.PortfolioTabSequence.Where(s => !string.IsNullOrWhiteSpace(s)))
         {
             if (!await ClickViaDomAsync(selector))
@@ -713,13 +790,19 @@ public sealed class AhkBroker : IAsyncDisposable
                 _logger.LogWarning("[AhkBroker] Portfolio tab '{Selector}' not found — skipping.", selector);
                 continue;
             }
-            await Task.Delay(700);
+
+            // Each flip re-renders a pane (and can refetch its data). Wait for that to finish rather
+            // than a fixed 700ms — flipping away before the previous pane rendered is what makes the
+            // final Collaterals grid come back empty.
+            await WaitForDomSettledAsync(quietMs: 400, timeoutMs: Math.Min(timeout, 5_000));
         }
     }
 
     /// <summary>
-    /// Bounded poll for data rows in the holdings table body. A genuinely empty portfolio exhausts
-    /// the timeout (accepted cost — it is indistinguishable from slow AJAX from out here).
+    /// Bounded poll for data rows in the holdings table body. A grid that has explicitly rendered its
+    /// "no data available" placeholder returns immediately — that is the portal SAYING the portfolio is
+    /// empty, which is different from not having answered yet, and waiting out the timeout for it made
+    /// every read on an empty account cost the full PortfolioLoadTimeoutMs.
     /// </summary>
     private async Task WaitForHoldingsRowsAsync(AhkConfig cfg, int timeoutMs)
     {
@@ -728,14 +811,30 @@ public sealed class AhkBroker : IAsyncDisposable
         var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
         while (DateTime.UtcNow < deadline)
         {
+            // -1 = the grid rendered an explicit empty-state row; 0 = nothing yet; >0 = data rows.
             var rows = await _page!.EvaluateFunctionAsync<int>(
                 """
                 (sel) => {
                     const t = document.querySelector(sel);
-                    return t && t.tBodies && t.tBodies.length ? t.tBodies[0].rows.length : 0;
+                    if (!t || !t.tBodies || !t.tBodies.length) return 0;
+                    const body = t.tBodies[0];
+                    const count = body.rows.length;
+                    if (count === 0) return 0;
+                    const text = (body.innerText || body.textContent || '').trim().toLowerCase();
+                    // DataTables' empty state is a single full-width row ("No data available in table",
+                    // "No matching records found", "no record found" on some skins).
+                    if (count === 1 && /no (data|matching|record)/.test(text)) return -1;
+                    return count;
                 }
                 """, cfg.HoldingsTableSelector);
+
             if (rows > 0) return;
+            if (rows < 0)
+            {
+                _logger.LogInformation(
+                    "[AhkBroker] Holdings grid '{Selector}' reported an empty portfolio.", cfg.HoldingsTableSelector);
+                return;
+            }
             await Task.Delay(400);
         }
 
@@ -1210,6 +1309,11 @@ public sealed class AhkBroker : IAsyncDisposable
         // A persisted profile may still be authenticated (cookies survive a browser close). In that
         // case the portal lands directly on the trading screen with no login form, so trying to fill
         // credentials would fail with "username field not found". Detect that and skip login.
+        // The decision is deliberately delayed until the page has actually rendered one of the two:
+        // on a slow machine networkidle0 fires while the screen is still blank, and reading it that
+        // early misclassifies an authenticated session as "login page with no username field".
+        await WaitForPageReadyAsync(cfg);
+
         if (await IsLoggedInAsync())
         {
             _logger.LogInformation("[AhkBroker] Already authenticated via persisted session — skipping credential entry.");
@@ -1237,6 +1341,29 @@ public sealed class AhkBroker : IAsyncDisposable
         await VerifyLoggedInAsync(cfg);
 
         _logger.LogInformation("[AhkBroker] Login successful.");
+    }
+
+    /// <summary>
+    /// Waits — bounded by PageReadyTimeoutMs — until the loaded portal shows EITHER the trading screen
+    /// (LoggedInSelector, i.e. a still-valid persisted session) OR a login form. Returns when one of
+    /// them appears; on timeout it simply returns and the caller reports the concrete failure with a
+    /// page dump, so this can never turn a real problem into an indefinite hang.
+    /// </summary>
+    private async Task WaitForPageReadyAsync(AhkConfig cfg)
+    {
+        var timeout  = Math.Max(1_000, cfg.PageReadyTimeoutMs);
+        var deadline = DateTime.UtcNow.AddMilliseconds(timeout);
+
+        while (DateTime.UtcNow < deadline)
+        {
+            if (await IsLoggedInAsync()) return;
+            if (await FindUsernameFieldAsync(cfg) is not null) return;
+            await Task.Delay(250);
+        }
+
+        _logger.LogWarning(
+            "[AhkBroker] Neither the trading screen ('{LoggedIn}') nor a login form appeared within {Timeout}ms on '{Url}'.",
+            cfg.LoggedInSelector, timeout, _page!.Url);
     }
 
     /// <summary>
@@ -1457,8 +1584,7 @@ public sealed class AhkBroker : IAsyncDisposable
         await SelectByVisibleTextAsync("#buyordertype", isLimit ? "Limit" : "Market");
 
         await FillFieldAsync("#buysymbol", signal.Symbol);
-        await Task.Delay(800); // wait for autocomplete dropdown
-        await _page!.Keyboard.PressAsync("Tab");
+        await ResolveSymbolAsync("buy");
 
         await FillFieldAsync("#buyvolume", qty.ToString());
 
@@ -1480,9 +1606,9 @@ public sealed class AhkBroker : IAsyncDisposable
         var before = await ScreenshotAsync("pre_buy");
 
         await ClickSubmitAsync("buy");
-        await ConfirmOrderAsync("Buy");
+        var confirmed = await ConfirmOrderAsync("Buy");
 
-        var outcome = await ReadOrderOutcomeAsync(cfg.OrderConfirmTimeoutMs);
+        var outcome = await ReadOrderOutcomeAsync(cfg.OrderConfirmTimeoutMs, confirmed);
         var after   = await ScreenshotAsync("post_buy");
 
         return new OrderResult
@@ -1519,8 +1645,7 @@ public sealed class AhkBroker : IAsyncDisposable
         await SelectByVisibleTextAsync("#sellordertype", isLimit ? "Limit" : "Market");
 
         await FillFieldAsync("#sellsymbol", signal.Symbol);
-        await Task.Delay(800);
-        await _page!.Keyboard.PressAsync("Tab");
+        await ResolveSymbolAsync("sell");
 
         await FillFieldAsync("#sellvolume", qty.ToString());
 
@@ -1542,9 +1667,9 @@ public sealed class AhkBroker : IAsyncDisposable
         var before = await ScreenshotAsync("pre_sell");
 
         await ClickSubmitAsync("sell");
-        await ConfirmOrderAsync("Sell");
+        var confirmed = await ConfirmOrderAsync("Sell");
 
-        var outcome = await ReadOrderOutcomeAsync(cfg.OrderConfirmTimeoutMs);
+        var outcome = await ReadOrderOutcomeAsync(cfg.OrderConfirmTimeoutMs, confirmed);
         var after   = await ScreenshotAsync("post_sell");
 
         return new OrderResult
@@ -1576,8 +1701,14 @@ public sealed class AhkBroker : IAsyncDisposable
     /// </summary>
     private async Task FillFieldAsync(string selector, string value)
     {
+        // The modal's fields are rendered asynchronously — on a slow machine we arrive before they
+        // exist, so wait for the field rather than failing the order on the first lookup.
+        var timeout = Math.Max(1_000, _config.Current.DialogOpenTimeoutMs);
+        await WaitForVisibleAsync(selector, timeout);
+
         var el = await _page!.QuerySelectorAsync(selector)
-                 ?? throw new InvalidOperationException($"Order field '{selector}' not found on the form.");
+                 ?? throw new InvalidOperationException(
+                     $"Order field '{selector}' not found on the form (waited {timeout}ms).");
 
         await ClearAndTypeAsync(el, selector, value);
 
@@ -1592,6 +1723,46 @@ public sealed class AhkBroker : IAsyncDisposable
     }
 
     /// <summary>
+    /// Completes symbol entry in the open order dialog: lets the autocomplete dropdown render, accepts
+    /// it with Tab, then waits — bounded by SymbolResolveTimeoutMs — for the portal to auto-fill the
+    /// price field from the last trade. Returns that price, or null if it never appeared.
+    ///
+    /// Waiting for the auto-fill rather than sleeping a fixed interval matters twice over on a slow
+    /// machine: the price band we clamp against is only rendered once the symbol resolves, and a
+    /// populate that lands after we have typed our own limit price silently overwrites it.
+    /// </summary>
+    private async Task<decimal?> ResolveSymbolAsync(string side)
+    {
+        var priceField = side == "sell" ? "#sellprice" : "#buyprice";
+        var timeout    = Math.Max(1_000, _config.Current.SymbolResolveTimeoutMs);
+
+        await Task.Delay(800); // autocomplete dropdown must be rendered before Tab can accept it
+        await _page!.Keyboard.PressAsync("Tab");
+
+        var deadline = DateTime.UtcNow.AddMilliseconds(timeout);
+        while (true)
+        {
+            var raw = await _page.EvaluateFunctionAsync<string>(
+                "(sel) => { const e = document.querySelector(sel); return e ? (e.value || '') : ''; }",
+                priceField) ?? "";
+
+            var cleaned = Regex.Replace(raw, @"[^0-9.]", "");
+            if (decimal.TryParse(cleaned, NumberStyles.Any, CultureInfo.InvariantCulture, out var price) && price > 0m)
+                return price;
+
+            if (DateTime.UtcNow >= deadline) break;
+            await Task.Delay(150);
+        }
+
+        // Not fatal: a market order has no price to populate, and an explicit limit price is typed
+        // below regardless. Logged because it is also the signature of an unresolved symbol.
+        _logger.LogWarning(
+            "[AhkBroker] {Field} did not populate within {Timeout}ms after symbol entry — the portal may not have resolved the symbol.",
+            priceField, timeout);
+        return null;
+    }
+
+    /// <summary>
     /// Clears a single-line field with real key events, then types the value. End→Shift+Home selects
     /// the whole current value and Backspace deletes it; doing this via key events (rather than
     /// keyboard Ctrl+A, which the portal's autocomplete/number fields often ignore) reliably empties
@@ -1599,7 +1770,13 @@ public sealed class AhkBroker : IAsyncDisposable
     /// </summary>
     private async Task ClearAndTypeAsync(IElementHandle el, string selector, string value)
     {
-        await el.ClickAsync();                        // focus the field
+        // Focus via the DOM first: a coordinate click can land on the wrong element while the modal is
+        // still fading in, which silently sends the keystrokes somewhere else. Click only as a fallback
+        // for a field that ignores programmatic focus.
+        try { await el.FocusAsync(); } catch { /* fall back to the click below */ }
+        if (!await el.EvaluateFunctionAsync<bool>("e => document.activeElement === e"))
+            await el.ClickAsync();
+
         await _page!.Keyboard.PressAsync("End");      // caret to end
         await _page.Keyboard.DownAsync("Shift");
         await _page.Keyboard.PressAsync("Home");      // select the entire value
@@ -1613,28 +1790,64 @@ public sealed class AhkBroker : IAsyncDisposable
     /// waits for the symbol field to become visible. No-ops if the dialog is already open. Required
     /// when the session is restored already-logged-in: nothing else opens the modal, so its fields
     /// stay hidden and uninteractable.
+    ///
+    /// Slow machines break this step in two distinct ways, so both are handled:
+    ///   • the toolbar button itself is not rendered yet — clicking blindly throws "No node found";
+    ///   • the click lands before the portal binds its click handler — the click is simply swallowed
+    ///     and nothing ever opens, which used to fail the order after a flat 5s wait.
+    /// The open click is therefore RETRIED until the dialog is visible or DialogOpenTimeoutMs expires.
+    /// Retrying is safe here: opening a dialog places nothing (unlike submit, which runs exactly once).
     /// </summary>
     private async Task OpenOrderDialogAsync(string side)
     {
+        var cfg     = _config.Current;
         var openBtn = side == "buy" ? "#buyorder"  : "#sellorder";
         var field   = side == "buy" ? "#buysymbol" : "#sellsymbol";
+        var timeout = Math.Max(2_000, cfg.DialogOpenTimeoutMs);
 
         if (await IsVisibleAsync(field)) return; // already open
 
-        await _page!.ClickAsync(openBtn);
-
-        try
+        if (!await WaitForVisibleAsync(openBtn, timeout))
         {
-            await _page.WaitForSelectorAsync(field,
-                new WaitForSelectorOptions { Visible = true, Timeout = 5_000 });
-        }
-        catch
-        {
-            await DumpOrderFormAsync($"no_{side}_dialog");
+            await DumpOrderFormAsync($"no_{side}_toolbar");
             throw new InvalidOperationException(
-                $"Could not open the {side.ToUpperInvariant()} order dialog ({openBtn} → {field} not visible). " +
-                $"See dumped order_no_{side}_dialog.html.");
+                $"The {side.ToUpperInvariant()} toolbar button '{openBtn}' never became visible within " +
+                $"{timeout}ms — the trading screen did not finish loading. See dumped order_no_{side}_toolbar.html, " +
+                "or raise Ahk.DialogOpenTimeoutMs.");
         }
+
+        var deadline = DateTime.UtcNow.AddMilliseconds(timeout);
+        for (var attempt = 1; ; attempt++)
+        {
+            try { await _page!.ClickAsync(openBtn); }
+            catch (Exception ex)
+            {
+                // The button can be re-rendered between the visibility check and the click.
+                _logger.LogDebug(ex, "[AhkBroker] Click on '{Selector}' failed (attempt {Attempt}) — retrying.",
+                    openBtn, attempt);
+            }
+
+            var remaining = (int)(deadline - DateTime.UtcNow).TotalMilliseconds;
+            if (await WaitForVisibleAsync(field, Math.Clamp(remaining, 500, 3_000)))
+            {
+                if (attempt > 1)
+                    _logger.LogWarning(
+                        "[AhkBroker] {Side} dialog opened only on attempt {Attempt} — the portal was slow to bind its handler.",
+                        side.ToUpperInvariant(), attempt);
+
+                // The modal fades in; give it a beat to reach its final position so the field clicks
+                // below land on the field rather than on whatever was under the moving element.
+                await Task.Delay(250);
+                return;
+            }
+
+            if (DateTime.UtcNow >= deadline) break;
+        }
+
+        await DumpOrderFormAsync($"no_{side}_dialog");
+        throw new InvalidOperationException(
+            $"Could not open the {side.ToUpperInvariant()} order dialog ({openBtn} → {field} not visible " +
+            $"within {timeout}ms). See dumped order_no_{side}_dialog.html, or raise Ahk.DialogOpenTimeoutMs.");
     }
 
     /// <summary>True if the element exists and is rendered (offsetParent set, i.e. not display:none / hidden modal).</summary>
@@ -1650,87 +1863,139 @@ public sealed class AhkBroker : IAsyncDisposable
     }
 
     /// <summary>
+    /// Bounded wait until the selector matches a RENDERED element. Unlike
+    /// <see cref="WaitForExistsAsync"/> this requires visibility, which is what makes an element
+    /// clickable/typeable — the distinction that matters while a modal is still opening.
+    /// </summary>
+    private async Task<bool> WaitForVisibleAsync(string selector, int timeoutMs)
+    {
+        if (string.IsNullOrWhiteSpace(selector)) return false;
+        try
+        {
+            await _page!.WaitForSelectorAsync(selector,
+                new WaitForSelectorOptions { Visible = true, Timeout = Math.Max(250, timeoutMs) });
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Click the order submit button. The AHK portal's submit button has NO id — its only reliable
     /// marker is its exact visible text ("BUY"/"SELL"). A substring match is unsafe: the toolbar
     /// buttons "Buy Order" / "LB Buy Order" also contain "Buy" and merely re-open the dialog, so a
     /// loose match clicks the wrong button and the order never submits. We therefore match the text
     /// EXACTLY. A configured selector (Ahk.BuySubmitSelector / SellSubmitSelector) overrides this.
+    ///
+    /// The button is polled for up to SubmitButtonTimeoutMs: while the modal is still rendering it is
+    /// either absent or disabled, and a single-shot lookup on a slow machine failed the order with
+    /// "submit button not found". This polls the LOOKUP only — the moment a click lands we return, so
+    /// the exactly-once submit guarantee is unchanged.
     /// </summary>
     private async Task ClickSubmitAsync(string side)
     {
         var cfg        = _config.Current;
         var configured = side == "buy" ? cfg.BuySubmitSelector : cfg.SellSubmitSelector;
+        var timeout    = Math.Max(1_000, cfg.SubmitButtonTimeoutMs);
+        var word       = side == "buy" ? "BUY" : "SELL";
+
         if (!string.IsNullOrWhiteSpace(configured))
         {
+            if (!await WaitForVisibleAsync(configured, timeout))
+            {
+                await DumpOrderFormAsync($"no_{side}_submit");
+                throw new InvalidOperationException(
+                    $"Configured {word} submit selector '{configured}' never became visible within {timeout}ms. " +
+                    $"See dumped order_no_{side}_submit.html, or raise Ahk.SubmitButtonTimeoutMs.");
+            }
             await _page!.ClickAsync(configured);
             return;
         }
 
-        var word = side == "buy" ? "BUY" : "SELL";
-        var clicked = await _page!.EvaluateFunctionAsync<bool>(@"(word) => {
-            const btns = Array.from(document.querySelectorAll(
-                ""button, input[type='submit'], input[type='button']""));
-            const visible = e => e.offsetParent !== null && !e.disabled;
-            const btn = btns.find(b => visible(b) &&
-                (b.textContent || b.value || '').trim().toUpperCase() === word);
-            if (btn) { btn.click(); return true; }
-            return false;
-        }", word);
-
-        if (!clicked)
+        var deadline = DateTime.UtcNow.AddMilliseconds(timeout);
+        while (true)
         {
-            await DumpOrderFormAsync($"no_{side}_submit");
-            throw new InvalidOperationException(
-                $"{word} submit button not found (no button with exact text '{word}'). " +
-                $"See dumped order_no_{side}_submit.html, or set Ahk.{(side == "buy" ? "Buy" : "Sell")}SubmitSelector.");
+            var clicked = await _page!.EvaluateFunctionAsync<bool>(@"(word) => {
+                const btns = Array.from(document.querySelectorAll(
+                    ""button, input[type='submit'], input[type='button']""));
+                const visible = e => e.offsetParent !== null && !e.disabled;
+                const btn = btns.find(b => visible(b) &&
+                    (b.textContent || b.value || '').trim().toUpperCase() === word);
+                if (btn) { btn.click(); return true; }
+                return false;
+            }", word);
+
+            if (clicked) return;
+            if (DateTime.UtcNow >= deadline) break;
+            await Task.Delay(150);
         }
+
+        await DumpOrderFormAsync($"no_{side}_submit");
+        throw new InvalidOperationException(
+            $"{word} submit button not found within {timeout}ms (no visible, enabled button with exact text '{word}'). " +
+            $"See dumped order_no_{side}_submit.html, set Ahk.{(side == "buy" ? "Buy" : "Sell")}SubmitSelector, " +
+            "or raise Ahk.SubmitButtonTimeoutMs.");
     }
 
     /// <summary>
     /// After the submit click the portal shows a SweetAlert2 confirmation prompt
     /// ("Are you sure? You want to execute Buy/Sell order!") with Cancel / OK buttons. The order does
     /// NOT execute until OK is pressed, so we wait for that prompt and click OK exactly once. A
-    /// confirmation is told apart from a result popup by having a VISIBLE Cancel button. No-op if no
-    /// prompt appears (so the EXACTLY-ONCE submit guarantee is preserved — we never re-click submit).
+    /// confirmation is told apart from a result popup by having a VISIBLE Cancel button. Returns whether
+    /// the prompt was confirmed; false if none appeared (so the EXACTLY-ONCE submit guarantee is
+    /// preserved — we never re-click submit). A prompt that is merely LATE is picked up afterwards by
+    /// <see cref="ReadOrderOutcomeAsync"/>, which keeps watching for it while polling for the verdict.
     /// </summary>
-    private async Task ConfirmOrderAsync(string side)
+    private async Task<bool> ConfirmOrderAsync(string side)
     {
-        var deadline = DateTime.UtcNow.AddSeconds(5);
-        while (DateTime.UtcNow < deadline)
+        var timeout  = Math.Max(1_000, _config.Current.ConfirmPromptTimeoutMs);
+        var deadline = DateTime.UtcNow.AddMilliseconds(timeout);
+        while (true)
         {
-            bool clicked;
-            try
-            {
-                // The portal uses the legacy "sweetalert" library (swal-* classes). A confirmation
-                // prompt has a visible cancel button alongside the confirm button — click confirm.
-                // A text-based match (OK/Yes next to Cancel) is kept as a fallback for any other dialog.
-                clicked = await _page!.EvaluateFunctionAsync<bool>(@"() => {
-                    const visible = e => e && e.offsetParent !== null;
-                    const swalConfirm = document.querySelector('.swal-button--confirm');
-                    const swalCancel  = document.querySelector('.swal-button--cancel');
-                    if (visible(swalConfirm) && visible(swalCancel)) { swalConfirm.click(); return true; }
-
-                    const label = e => (e.textContent || e.value || '').trim().toLowerCase();
-                    const btns = Array.from(document.querySelectorAll(
-                        ""button, input[type='button'], input[type='submit'], a[role='button']"")).filter(visible);
-                    const hasCancel = btns.some(b => label(b) === 'cancel');
-                    const ok = btns.find(b => label(b) === 'ok' || label(b) === 'yes');
-                    if (hasCancel && ok) { ok.click(); return true; }
-                    return false;
-                }");
-            }
-            catch { clicked = false; }
-
-            if (clicked)
+            if (await TryClickConfirmPromptAsync())
             {
                 _logger.LogInformation("[AhkBroker] Confirmed {Side} execution (clicked OK on the 'Are you sure?' prompt).", side);
-                return;
+                return true;
             }
 
+            if (DateTime.UtcNow >= deadline) break;
             await Task.Delay(200);
         }
 
-        _logger.LogInformation("[AhkBroker] No {Side} confirmation prompt appeared within 5s (already handled or none required).", side);
+        _logger.LogInformation(
+            "[AhkBroker] No {Side} confirmation prompt appeared within {Timeout}ms — still watching for a late one while reading the outcome.",
+            side, timeout);
+        return false;
+    }
+
+    /// <summary>
+    /// Clicks the confirm button of a visible "Are you sure?" prompt, returning whether one was found.
+    /// The portal uses the legacy "sweetalert" library (swal-* classes); a confirmation prompt has a
+    /// visible cancel button alongside the confirm button, which is what distinguishes it from a result
+    /// popup. A text-based match (OK/Yes next to Cancel) is kept as a fallback for any other dialog.
+    /// </summary>
+    private async Task<bool> TryClickConfirmPromptAsync()
+    {
+        try
+        {
+            return await _page!.EvaluateFunctionAsync<bool>(@"() => {
+                const visible = e => e && e.offsetParent !== null;
+                const swalConfirm = document.querySelector('.swal-button--confirm');
+                const swalCancel  = document.querySelector('.swal-button--cancel');
+                if (visible(swalConfirm) && visible(swalCancel)) { swalConfirm.click(); return true; }
+
+                const label = e => (e.textContent || e.value || '').trim().toLowerCase();
+                const btns = Array.from(document.querySelectorAll(
+                    ""button, input[type='button'], input[type='submit'], a[role='button']"")).filter(visible);
+                const hasCancel = btns.some(b => label(b) === 'cancel');
+                const ok = btns.find(b => label(b) === 'ok' || label(b) === 'yes');
+                if (hasCancel && ok) { ok.click(); return true; }
+                return false;
+            }");
+        }
+        catch { return false; }
     }
 
     /// <summary>
@@ -1806,14 +2071,31 @@ public sealed class AhkBroker : IAsyncDisposable
     /// Polls the page text after submit for an explicit confirmation or error. Does NOT assume
     /// success — if neither appears within the timeout the order is reported unconfirmed so a
     /// human verifies via the screenshots instead of trusting a fake success.
+    ///
+    /// <paramref name="confirmed"/> says whether the "Are you sure?" prompt was already answered. When
+    /// it was not, this loop keeps watching for it: on a slow machine the prompt can render after
+    /// ConfirmPromptTimeoutMs, and an unanswered prompt means the order NEVER executes and its modal
+    /// blocks the next one. It is clicked at most once here — submit itself is never re-clicked.
     /// </summary>
-    private async Task<OrderOutcome> ReadOrderOutcomeAsync(int timeoutMs)
+    private async Task<OrderOutcome> ReadOrderOutcomeAsync(int timeoutMs, bool confirmed)
     {
         var deadline = DateTime.UtcNow.AddMilliseconds(Math.Max(1_000, timeoutMs));
         var lastText = "";
 
         while (DateTime.UtcNow < deadline)
         {
+            // 0. A confirmation prompt that arrived after ConfirmOrderAsync gave up. Answer it (once)
+            //    and keep polling for the verdict it produces.
+            if (!confirmed && await TryClickConfirmPromptAsync())
+            {
+                confirmed = true;
+                _logger.LogWarning(
+                    "[AhkBroker] The confirmation prompt appeared late — confirmed while reading the outcome. " +
+                    "Consider raising Ahk.ConfirmPromptTimeoutMs on this machine.");
+                await Task.Delay(200);
+                continue;
+            }
+
             // 1. A result popup (SweetAlert2-style: red ✗ / green ✓ with a message and an OK button)
             //    is the portal's explicit verdict. Read and classify it, then dismiss it so a leftover
             //    modal can't block the next order.
@@ -1854,8 +2136,12 @@ public sealed class AhkBroker : IAsyncDisposable
         }
 
         return new OrderOutcome(false,
-            "Order submitted but no confirmation or error was detected within the timeout. " +
-            "Verify manually (see screenshots).", null);
+            confirmed
+                ? "Order submitted but no confirmation or error was detected within the timeout. " +
+                  "Verify manually (see screenshots)."
+                : "Order submitted but the portal's 'Are you sure?' prompt never appeared, so the order was " +
+                  "most likely NOT executed. Verify manually (see screenshots) and raise Ahk.ConfirmPromptTimeoutMs " +
+                  "/ Ahk.OrderConfirmTimeoutMs if this machine is slow.", null);
     }
 
     /// <summary>

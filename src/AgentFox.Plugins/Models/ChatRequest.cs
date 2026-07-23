@@ -13,6 +13,32 @@ public class ChatRequest
     /// If omitted the agent starts or continues the default session.
     /// </summary>
     public string? ConversationId { get; set; }
+
+    /// <summary>
+    /// Files attached to this turn. Only accepted when the configured model advertises
+    /// support for them (see the <c>/capabilities</c> endpoint); otherwise the request
+    /// is rejected rather than silently dropping the file.
+    /// </summary>
+    public List<ChatAttachment> Attachments { get; set; } = new();
+}
+
+/// <summary>
+/// One file attached to a chat turn, carried inline as base64 so a single JSON POST
+/// stays the whole transport (no separate upload round-trip, no server-side blob store).
+/// </summary>
+public class ChatAttachment
+{
+    /// <summary>Original file name, used for display and for media-type inference.</summary>
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>
+    /// MIME type as reported by the browser. Often empty or <c>application/octet-stream</c>
+    /// for source files, so the server re-infers it from <see cref="Name"/> when unhelpful.
+    /// </summary>
+    public string? MediaType { get; set; }
+
+    /// <summary>Base64-encoded file bytes, without a <c>data:</c> URI prefix.</summary>
+    public string Data { get; set; } = string.Empty;
 }
 
 /// <summary>Response from the HTTP /chat endpoint.</summary>

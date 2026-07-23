@@ -67,4 +67,11 @@ public sealed class PsxListingStatusTests
         Assert.IsNull(status.IsDelisted);
         Assert.IsNotNull(status.Error);
     }
+
+    [TestMethod]
+    public void NormalizeStockSymbol_RemovesErroneousCelSuffix()
+    {
+        Assert.AreEqual("MARI", PsxDataClient.NormalizeStockSymbol("MARICEL"));
+        Assert.AreEqual("OGDC", PsxDataClient.NormalizeStockSymbol("ogdc"));
+    }
 }

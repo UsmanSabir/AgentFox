@@ -502,7 +502,7 @@ public class FoxAgent
     /// Internal: external callers should route through ICommandQueue; only
     /// FoxAgentExecutor and SpawnSubAgentTool use this directly (both same assembly).
     /// </summary>
-    internal async Task<AgentResult> ProcessAsync(string task, string? conversationId = null, StreamingCallbacks? streaming = null, CancellationToken cancellationToken = default)
+    internal async Task<AgentResult> ProcessAsync(string task, string? conversationId = null, StreamingCallbacks? streaming = null, CancellationToken cancellationToken = default, IReadOnlyList<AgentFox.Plugins.Models.ChatAttachment>? attachments = null)
     {
         conversationId ??= Guid.NewGuid().ToString("N");
         CurrentSessionKey.Value = conversationId;
@@ -555,13 +555,19 @@ public class FoxAgent
                 ConversationStore.SaveSession(conversationId, session);
             }
 
+            // Attached files become extra content parts on the user message. The transcript
+            // only gets a short note naming them: the bytes already live in the session's
+            // message history, and writing base64 into a markdown transcript would bloat it
+            // beyond usefulness while telling a human reader nothing.
+            var (attachmentContents, attachmentNote) = AttachmentSupport.ConvertForPrompt(attachments);
+
             // Persist the raw user message to a sidecar .pending file *before* any
             // failure-prone work (memory recall, baseline building, the LLM call). If the
             // turn then throws, hangs, or the process is killed, the message survives and can
             // be surfaced when the conversation is reloaded and recovered on the next start —
             // instead of the whole turn vanishing from the transcript. We persist `task`
             // (not `augmentedTask`) so the memory preamble is rebuilt fresh on retry.
-            (ConversationStore as Memory.MarkdownSessionStore)?.PersistIncomingUserMessage(conversationId, task);
+            (ConversationStore as Memory.MarkdownSessionStore)?.PersistIncomingUserMessage(conversationId, task + attachmentNote);
 
             var runOptions = new AgentRunOptions();
             //TODO: Look into prompt caching
@@ -576,7 +582,9 @@ public class FoxAgent
 
             // One agent turn. Extracted so the todo-completion check below can issue bounded
             // follow-up turns through exactly the same streaming/non-streaming path.
-            async Task<string> RunTurnAsync(string prompt)
+            // Takes the full message so a turn can carry attachment parts alongside its text;
+            // RunTurnAsync below is the text-only entry point the follow-up turns use.
+            async Task<string> RunMessagesAsync(IEnumerable<Microsoft.Extensions.AI.ChatMessage> messages)
             {
             string responseText;
 
@@ -593,7 +601,7 @@ public class FoxAgent
                 var sb = new StringBuilder();
                 try
                 {
-                    await foreach (var update in agent.RunStreamingAsync(prompt, session, options: runOptions, cancellationToken: timeoutToken))
+                    await foreach (var update in agent.RunStreamingAsync(messages, session, options: runOptions, cancellationToken: timeoutToken))
                     {
                         if (streaming.OnStatus != null && update.Contents.Any(c =>
                                 c is FunctionCallContent || c is FunctionResultContent))
@@ -662,14 +670,25 @@ public class FoxAgent
             else
             {
                 // Non-streaming path: channels, CLI, sub-agents — wait for the full response.
-                var response = await agent.RunAsync(prompt, session, options: runOptions, cancellationToken: timeoutToken);
+                var response = await agent.RunAsync(messages, session, options: runOptions, cancellationToken: timeoutToken);
                 responseText = response.Text ?? "I apologize, but I wasn't able to generate a response.";
             }
 
             return responseText;
             }
 
-            var responseText = await RunTurnAsync(augmentedTask);
+            Task<string> RunTurnAsync(string prompt) =>
+                RunMessagesAsync([new Microsoft.Extensions.AI.ChatMessage(ChatRole.User, prompt)]);
+
+            // First turn carries the attachments; the text always leads so a model that
+            // ignores the file parts still sees the user's actual question first.
+            var firstTurn = attachmentContents.Count == 0
+                ? new Microsoft.Extensions.AI.ChatMessage(ChatRole.User, augmentedTask)
+                : new Microsoft.Extensions.AI.ChatMessage(
+                    ChatRole.User,
+                    [new TextContent(augmentedTask), .. attachmentContents]);
+
+            var responseText = await RunMessagesAsync([firstTurn]);
             responseText = await EnsureTodosCompletedAsync(
                 session, responseText, RunTurnAsync, timeoutToken);
 

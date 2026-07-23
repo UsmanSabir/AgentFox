@@ -640,6 +640,13 @@ public sealed class MarkdownSessionStore : IConversationStore
                 case TextReasoningContent:
                     break;
 
+                // Attached file bytes stay out of the transcript — base64 would bloat it by
+                // megabytes per image while telling a human reader nothing. The preceding
+                // <attachment .../> label written by AttachmentSupport.ConvertForPrompt is
+                // what records that a file was sent, and what it was.
+                case DataContent:
+                    break;
+
                 case FunctionCallContent fc:
                     var call = new FunctionCallRecord(
                         fc.CallId, fc.Name,
