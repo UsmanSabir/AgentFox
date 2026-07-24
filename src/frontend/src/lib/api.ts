@@ -508,6 +508,10 @@ export const api = {
   specialistChat: (agentId: string, message: string, conversationId?: string) =>
     post<ChatResponse>(`/specialist-agents/${encodeURIComponent(agentId)}/chat`, { message, conversationId }),
   commandQueues: () => get<CommandQueueStatus>('/command-queues'),
+  steerChat: (conversationId: string, runId: string) =>
+    post<{ ok: boolean; runId: string }>('/chat/steer', { conversationId, runId }),
+  cancelChat: (conversationId: string) =>
+    post<{ ok: boolean }>('/chat/cancel', { conversationId }),
   tools:    () => get<ToolInfo[]>('/tools'),
   skills:   () => get<SkillInfo[]>('/skills'),
   memory:   () => get<MemoryEntry[]>('/memory'),
@@ -632,12 +636,16 @@ export const api = {
 export type StreamEvent =
   | { type: 'token';  token: string }
   | { type: 'session'; conversationId: string }
+  | { type: 'queued'; runId: string; position: number }
+  | { type: 'started'; runId: string }
+  | { type: 'interrupted'; runId: string }
   | { type: 'reasoning'; text: string }
   | { type: 'status'; status: string }
   | { type: 'tool_activity'; activity: ToolActivity }
   | {
       type: 'done';
       done: true;
+      runId?: string;
       conversationId?: string;
       references?: ReferenceItem[];
       assistantIndex?: number;
@@ -689,12 +697,23 @@ export async function* streamChat(
               yield {
                 type: 'done',
                 done: true,
+                runId: payload.runId,
                 conversationId: payload.conversationId,
                 references: payload.references,
                 assistantIndex: payload.assistantIndex
               };
             } else if (currentEvent === 'session') {
               yield { type: 'session', conversationId: payload.conversationId };
+            } else if (currentEvent === 'queued') {
+              yield {
+                type: 'queued',
+                runId: payload.runId,
+                position: payload.position ?? 0
+              };
+            } else if (currentEvent === 'started') {
+              yield { type: 'started', runId: payload.runId };
+            } else if (currentEvent === 'interrupted') {
+              yield { type: 'interrupted', runId: payload.runId };
             } else if (currentEvent === 'reasoning') {
               yield { type: 'reasoning', text: payload.text ?? '' };
             } else if (currentEvent === 'status') {

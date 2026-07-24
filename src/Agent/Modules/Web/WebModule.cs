@@ -161,6 +161,8 @@ public class WebModule : IAppModule
     SessionManager sessionManager,
     MarkdownSessionStore sessionStore,
     IConfiguration config,
+    WebChatTurnCoordinator turnCoordinator,
+    PendingNotificationStore pendingNotifications,
     HttpContext httpContext,
     CancellationToken ct) =>
         {
@@ -208,27 +210,71 @@ public class WebModule : IAppModule
                 // first-turn approval. The terminal event remains for compatibility.
                 await WriteEventAsync("session", new { conversationId });
 
-                var reply = await agentService.StreamAsync(
-                    req.Message,
-                    req.Attachments,
+                var turn = turnCoordinator.Enqueue(
                     conversationId,
-                    async token =>
+                    async (runId, turnCt) =>
                     {
-                        if (ct.IsCancellationRequested) return;
-                        var data = JsonSerializer.Serialize(new { token }, SseJsonOptions);
-                        await httpContext.Response.WriteAsync($"data: {data}\n\n", ct);
-                        await httpContext.Response.Body.FlushAsync(ct);
-                    },
-                    reasoning => WriteEventAsync("reasoning", new { text = reasoning }),
-                    status => WriteEventAsync("status", new { status }),
-                    activity => WriteEventAsync("tool_activity", activity),
-                    ct);
+                        await WriteEventAsync("started", new { runId });
+                        var reply = await agentService.StreamAsync(
+                            req.Message,
+                            req.Attachments,
+                            conversationId,
+                            async token =>
+                            {
+                                if (ct.IsCancellationRequested) return;
+                                var data = JsonSerializer.Serialize(new { token }, SseJsonOptions);
+                                await httpContext.Response.WriteAsync($"data: {data}\n\n", ct);
+                                await httpContext.Response.Body.FlushAsync(ct);
+                            },
+                            reasoning => WriteEventAsync("reasoning", new { text = reasoning }),
+                            status => WriteEventAsync("status", new { status }),
+                            activity => WriteEventAsync("tool_activity", activity),
+                            turnCt);
+                        return WebChatTurnResult.Completed(reply);
+                    });
+
+                try
+                {
+                    await WriteEventAsync("queued", new
+                    {
+                        runId = turn.RunId,
+                        position = turn.Position
+                    });
+                }
+                finally
+                {
+                    // A disconnected browser must not leave a queued turn permanently
+                    // parked behind its release gate.
+                    turn.Release();
+                }
+
+                var result = await turn.Completion.ConfigureAwait(false);
+                if (result.State == WebChatTurnState.Interrupted)
+                {
+                    await WriteEventAsync("interrupted", new { runId = turn.RunId });
+                    return;
+                }
+
+                if (result.State == WebChatTurnState.Failed)
+                {
+                    await WriteEventAsync("error", new
+                    {
+                        runId = turn.RunId,
+                        error = result.Error ?? "The turn failed."
+                    });
+                    return;
+                }
+
+                var reply = result.Reply ?? new AgentReply();
+                if (ct.IsCancellationRequested)
+                    pendingNotifications.Add(conversationId, reply.Output);
 
                 // Terminal event — always includes the conversation ID so the client
                 // can store it and send it with the next message.
                 var donePayload = JsonSerializer.Serialize(new
                 {
                     done = true,
+                    runId = turn.RunId,
                     conversationId,
                     references = reply.References,
                     assistantIndex = sessionStore.GetLatestAssistantIndex(conversationId)
@@ -251,6 +297,36 @@ public class WebModule : IAppModule
                 catch { /* response may already be gone */ }
             }
         });
+
+        endpoints.MapPost("/chat/steer", (
+            WebChatSteerRequest req,
+            WebChatTurnCoordinator turnCoordinator) =>
+        {
+            if (string.IsNullOrWhiteSpace(req.ConversationId) ||
+                string.IsNullOrWhiteSpace(req.RunId))
+                return Results.BadRequest(new { error = "conversationId and runId are required." });
+
+            return turnCoordinator.Steer(req.ConversationId, req.RunId)
+                ? Results.Ok(new { ok = true, runId = req.RunId })
+                : Results.NotFound(new { error = "queued_turn_not_found" });
+        });
+
+        endpoints.MapPost("/chat/cancel", (
+            WebChatCancelRequest req,
+            WebChatTurnCoordinator turnCoordinator) =>
+        {
+            if (string.IsNullOrWhiteSpace(req.ConversationId))
+                return Results.BadRequest(new { error = "conversationId is required." });
+
+            return turnCoordinator.CancelActive(req.ConversationId)
+                ? Results.Ok(new { ok = true })
+                : Results.NotFound(new { error = "active_turn_not_found" });
+        });
+
+        endpoints.MapGet("/chat/queue/{conversationId}", (
+            string conversationId,
+            WebChatTurnCoordinator turnCoordinator) =>
+            Results.Ok(turnCoordinator.GetSnapshot(conversationId)));
 
         // ── Tools ─────────────────────────────────────────────────────────────
         endpoints.MapGet("/tools", (ToolRegistry toolRegistry) =>
@@ -1357,6 +1433,10 @@ public record ResumeSessionRequest(string ConversationId);
 public record ForkSessionRequest(string ConversationId, int AssistantIndex);
 
 public record RenameSessionRequest(string ConversationId, string Title);
+
+public record WebChatSteerRequest(string ConversationId, string RunId);
+
+public record WebChatCancelRequest(string ConversationId);
 
 public record SessionMemorySettingsRequest(string ConversationId, bool? Enabled);
 
