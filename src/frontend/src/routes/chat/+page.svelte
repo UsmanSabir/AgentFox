@@ -437,6 +437,7 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
         id: crypto.randomUUID(),
         role: item.role,
         content: item.content,
+        agentAddition: item.agentAddition,
         references: item.references,
         assistantIndex: item.assistantIndex,
         timestamp: new Date(session.lastActive)
@@ -810,6 +811,15 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
                 {/if}
                 {#if msg.content}
                   <div class="message-content user-text">{msg.content}</div>
+                {/if}
+                {#if msg.agentAddition}
+                  <details class="agent-addition">
+                    <summary>
+                      <span>Agent-added context</span>
+                      <span class="agent-addition-hint">not typed by you</span>
+                    </summary>
+                    <div class="agent-addition-content">{msg.agentAddition}</div>
+                  </details>
                 {/if}
 	              {:else}
 	                <div
@@ -1381,6 +1391,42 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
   /* User messages are plain text — preserve their line breaks. */
   .message-content.user-text { white-space: pre-wrap; }
 
+  .agent-addition {
+    margin-top: 0.4rem;
+    max-width: 100%;
+    border: 1px solid var(--border-md);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--surface-2) 72%, transparent);
+    color: var(--text-2);
+    font-size: 0.75rem;
+  }
+
+  .agent-addition summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.45rem 0.65rem;
+    cursor: pointer;
+    user-select: none;
+    font-weight: 600;
+  }
+
+  .agent-addition-hint {
+    color: var(--text-3);
+    font-size: 0.6875rem;
+    font-weight: 400;
+  }
+
+  .agent-addition-content {
+    padding: 0.6rem 0.7rem;
+    border-top: 1px solid var(--border);
+    white-space: pre-wrap;
+    font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+  }
+
   /* Rendered markdown (assistant / background results) */
   .markdown :global(> *:first-child) { margin-top: 0; }
   .markdown :global(> *:last-child) { margin-bottom: 0; }
@@ -1706,6 +1752,13 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
     margin: 0;
     padding: 0.35rem 0.625rem 0.55rem;
     border-top: 1px solid var(--border);
+  }
+  .activity-list {
+    /* Keep an expanded panel inside the viewport and make every call reachable. */
+    max-height: min(45vh, 28rem);
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+    scrollbar-gutter: stable;
   }
   .todo-list li {
     display: flex;

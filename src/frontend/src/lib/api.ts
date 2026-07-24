@@ -182,6 +182,7 @@ export interface SessionInfo {
 export interface ConversationMessage {
   role: 'user' | 'assistant';
   content: string;
+  agentAddition?: string;
   references?: ReferenceItem[];
   assistantIndex?: number;
 }

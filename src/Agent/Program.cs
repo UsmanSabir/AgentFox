@@ -190,7 +190,7 @@ class Program
         var workspaceManager = new WorkspaceManager(configuration);
         var memoryPolicy     = new MemoryAccessPolicy(configuration, workspaceManager);
         var toolsConfig      = configuration.GetSection("Tools").Get<ToolsConfig>() ?? new ToolsConfig();
-        var toolRegistry     = CreateToolRegistry(workspaceManager, toolsConfig);
+        var toolRegistry     = CreateToolRegistry(workspaceManager, toolsConfig, configuration);
         SkillRegistry? skillRegistry = null;
         McpManager?    mcpManager    = null;
         HybridMemory?  memory        = null;
@@ -684,7 +684,7 @@ class Program
     // Factory helpers
     // ─────────────────────────────────────────────────────────────────────────
 
-    static ToolRegistry CreateToolRegistry(WorkspaceManager workspaceManager, ToolsConfig toolsConfig)
+    static ToolRegistry CreateToolRegistry(WorkspaceManager workspaceManager, ToolsConfig toolsConfig, IConfiguration configuration)
     {
         var registry = new ToolRegistry();
 
@@ -706,7 +706,7 @@ class Program
 
         if (toolsConfig.Web)
         {
-            if (toolsConfig.IsEnabled("web_search")) registry.Register(new WebSearchTool());
+            if (toolsConfig.IsEnabled("web_search")) registry.Register(new WebSearchTool(configuration));
             if (toolsConfig.IsEnabled("fetch_url"))  registry.Register(new FetchUrlTool());
         }
 
