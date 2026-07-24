@@ -526,6 +526,20 @@ public class FoxAgent
             return new AgentResult { Success = true, Output = $"Session reset. Starting fresh (session: {newId})." };
         }
 
+        // Empty-task guard. The web edge rejects blank messages, but the other entry points
+        // (channels, heartbeat, cron, sub-agents) do not — and a blank task would be turned into
+        // a content-less user ChatMessage that (a) poisons the session history and (b) makes the
+        // provider reject the whole request with HTTP 400 "user message must have content". Skip
+        // the turn at the source. Attachment-only turns are legitimate, so allow those through.
+        if (string.IsNullOrWhiteSpace(task) && (attachments is null || attachments.Count == 0))
+        {
+            _logger?.LogWarning(
+                "Agent '{AgentName}' received an empty task for conversation {ConversationId} with no "
+                + "attachments; skipping turn (nothing to send to the model).",
+                Name, conversationId);
+            return new AgentResult { Success = true, Output = string.Empty };
+        }
+
         _logger?.LogInformation("Agent '{AgentName}' processing task in conversation {ConversationId}", Name, conversationId);
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -1785,13 +1799,15 @@ public class AgentBuilder
         var toolRegistry = _toolRegistry;
         var promptRegistry = _promptContributorRegistry;
         var mcpManager = _mcpManager;
+        var middlewareLogger = _logger;
         agentBuilder.Use(inner => new DynamicAgentMiddleware(
             inner,
             toolRegistry,
             promptRegistry,
             baselineToolNames,
             def => CreateAgentTool(def),
-            mcpManager));
+            mcpManager,
+            middlewareLogger));
 
         if (_compactionConfig != null)
         {

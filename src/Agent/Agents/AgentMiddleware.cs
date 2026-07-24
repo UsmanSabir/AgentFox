@@ -5,6 +5,7 @@ using AgentFox.Models;
 using AgentFox.Skills;
 using AgentFox.Tools;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Logging;
 
 namespace AgentFox.Agents;
 
@@ -100,6 +101,7 @@ internal sealed class DynamicAgentMiddleware : DelegatingChatClient
     private readonly HashSet<string> _baselineToolNames;
     private readonly Func<ToolDefinition, AITool> _toolFactory;
     private readonly McpManager? _mcpManager;
+    private readonly ILogger? _logger;
 
     // Tool injection cache — rebuilt only when ToolRegistry.Version changes
     private int _cachedToolVersion;
@@ -119,13 +121,15 @@ internal sealed class DynamicAgentMiddleware : DelegatingChatClient
         PromptContributorRegistry promptRegistry,
         IEnumerable<string> baselineToolNames,
         Func<ToolDefinition, AITool> toolFactory,
-        McpManager? mcpManager = null) : base(inner)
+        McpManager? mcpManager = null,
+        ILogger? logger = null) : base(inner)
     {
         _toolRegistry = toolRegistry;
         _promptRegistry = promptRegistry;
         _baselineToolNames = new HashSet<string>(baselineToolNames, StringComparer.OrdinalIgnoreCase);
         _toolFactory = toolFactory;
         _mcpManager = mcpManager;
+        _logger = logger;
         // Snapshot the version at construction so first-call change detection is accurate
         _cachedToolVersion = toolRegistry.Version;
     }
@@ -135,7 +139,7 @@ internal sealed class DynamicAgentMiddleware : DelegatingChatClient
         ChatOptions? options = null,
         CancellationToken cancellationToken = default)
     {
-        var messageList = messages as IReadOnlyList<ChatMessage> ?? messages.ToList();
+        var messageList = StripEmptyMessages(messages as IReadOnlyList<ChatMessage> ?? messages.ToList());
         return base.GetResponseAsync(
             messageList,
             PrepareOptions(options, ShouldForceDelegation(messageList)),
@@ -147,13 +151,109 @@ internal sealed class DynamicAgentMiddleware : DelegatingChatClient
         ChatOptions? options = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        var messageList = messages as IReadOnlyList<ChatMessage> ?? messages.ToList();
+        var messageList = StripEmptyMessages(messages as IReadOnlyList<ChatMessage> ?? messages.ToList());
         var prepared = PrepareOptions(options, ShouldForceDelegation(messageList));
         await foreach (var update in base.GetStreamingResponseAsync(messageList, prepared, cancellationToken))
             yield return update;
     }
 
     // ── Private helpers ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Drops messages that carry no content the provider will accept. A content-less message —
+    /// most often a <see cref="ChatRole.User"/> message whose only part is empty/whitespace text —
+    /// makes OpenAI reject the <em>entire</em> request with
+    /// <c>HTTP 400 … "user message must have content"</c>, which kills every turn of the affected
+    /// conversation. One malformed message must never take down the whole exchange, so we filter it
+    /// here (the last hop before the LLM) rather than trust every upstream producer to be perfect.
+    /// <para>
+    /// A message is kept when it has any function call/result, any binary/data or URI part, or any
+    /// non-whitespace text. Messages that are only empty text or reasoning are dropped.
+    /// </para>
+    /// </summary>
+    private IReadOnlyList<ChatMessage> StripEmptyMessages(IReadOnlyList<ChatMessage> messages)
+    {
+        // Outbound batch shape (index, role, content-part types, text lengths) for the last hop
+        // before the LLM. Logs even messages the filter KEEPS, so it can trace a
+        // "user message must have content" 400 to the exact message and its producer. Kept at
+        // Debug (dormant under the default Warning MinLevel) — raise Logging:MinLevel to
+        // "Debug" to turn it back on. Never logs message text.
+        if (_logger?.IsEnabled(LogLevel.Debug) == true)
+        {
+            var shape = messages.Count == 0
+                ? "(empty batch)"
+                : string.Join(" | ", messages.Select((m, i) => $"#{i}:{m.Role.Value}[{DescribeParts(m)}]"));
+            _logger.LogDebug("[MSGDIAG] outbound batch of {Count}: {Shape}", messages.Count, shape);
+        }
+
+        List<ChatMessage>? kept = null;
+        for (var i = 0; i < messages.Count; i++)
+        {
+            var msg = messages[i];
+            if (HasSendableContent(msg))
+            {
+                kept?.Add(msg);
+            }
+            else
+            {
+                // First drop: materialise the survivors seen so far, then skip this one.
+                kept ??= [.. messages.Take(i)];
+
+                // Log enough to identify the producer without dumping message content: the
+                // dropped message's role and index, its neighbours' roles, the content-part
+                // types it carried, and the roles of the whole batch for shape context.
+                var prev = i > 0 ? messages[i - 1].Role.Value : "(none)";
+                var next = i < messages.Count - 1 ? messages[i + 1].Role.Value : "(none)";
+                var partTypes = msg.Contents.Count == 0
+                    ? "(no content parts)"
+                    : string.Join(", ", msg.Contents.Select(c => c.GetType().Name));
+                var batchRoles = string.Join(" > ", messages.Select(m => m.Role.Value));
+
+                _logger?.LogWarning(
+                    "Dropped empty {Role} message at index {Index} of {Count} before LLM call "
+                    + "(prev={Prev}, next={Next}); content parts: [{PartTypes}]; batch roles: {BatchRoles}. "
+                    + "This message had no sendable content and would have caused a provider 400 "
+                    + "(\"message must have content\").",
+                    msg.Role.Value, i, messages.Count, prev, next, partTypes, batchRoles);
+            }
+        }
+
+        return kept ?? messages;
+    }
+
+    /// <summary>Compact, content-free description of a message's parts for diagnostics:
+    /// content-part type names, with text length for <see cref="TextContent"/> so an empty
+    /// text part shows as <c>Text(len=0)</c>. Never logs the text itself.</summary>
+    private static string DescribeParts(ChatMessage msg)
+    {
+        if (msg.Contents.Count == 0) return "no-parts";
+        return string.Join(",", msg.Contents.Select(c => c switch
+        {
+            TextContent t          => $"Text(len={t.Text?.Length ?? 0})",
+            TextReasoningContent r => $"Reasoning(len={r.Text?.Length ?? 0})",
+            _                      => c.GetType().Name
+        }));
+    }
+
+    private static bool HasSendableContent(ChatMessage msg)
+    {
+        foreach (var content in msg.Contents)
+        {
+            switch (content)
+            {
+                case TextContent tc:
+                    if (!string.IsNullOrWhiteSpace(tc.Text)) return true;
+                    break;
+                case TextReasoningContent:
+                    break; // reasoning is never sent as content — ignore
+                default:
+                    // Function calls/results, DataContent, UriContent, approval parts, and any
+                    // other non-text content are all sendable — keep the message.
+                    return true;
+            }
+        }
+        return false;
+    }
 
     private ChatOptions PrepareOptions(ChatOptions? options, bool forceDelegation)
     {
