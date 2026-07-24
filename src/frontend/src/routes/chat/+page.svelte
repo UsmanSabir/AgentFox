@@ -1753,6 +1753,13 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
     padding: 0.35rem 0.625rem 0.55rem;
     border-top: 1px solid var(--border);
   }
+  .activity-list {
+    /* Keep an expanded panel inside the viewport and make every call reachable. */
+    max-height: min(45vh, 28rem);
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+    scrollbar-gutter: stable;
+  }
   .todo-list li {
     display: flex;
     gap: 0.45rem;
