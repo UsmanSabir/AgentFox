@@ -402,12 +402,67 @@ public sealed class MarkdownSessionStore : IConversationStore
             }
             else
             {
-                snapshots.Add(new ConversationMessageSnapshot("user", content));
+                var (userContent, agentAddition) = SplitAgentAddition(content);
+                snapshots.Add(new ConversationMessageSnapshot("user", userContent)
+                {
+                    AgentAddition = agentAddition
+                });
             }
         }
 
         return snapshots;
     }
+
+    // Older transcripts contain recall/learning preambles inline in the user message because
+    // that is how the augmented prompt is sent to the model. Keep the persisted prompt intact,
+    // but project those known AgentFox additions separately for user-facing clients.
+    private static (string UserContent, string? AgentAddition) SplitAgentAddition(string content)
+    {
+        const string memoryHeader = "[Relevant context from long-term memory:]";
+        const string baselineHeader = "[Shared learned baseline from previously verified attempts:]";
+        const string baselineFooter =
+            "Use this only when current preconditions match, and verify the result again.";
+
+        var remainder = content;
+        var additions = new List<string>();
+
+        if (remainder.StartsWith(memoryHeader, StringComparison.Ordinal))
+        {
+            var boundary = FindBlankLine(remainder);
+            if (boundary >= 0)
+            {
+                additions.Add(remainder[..boundary].Trim());
+                remainder = remainder[SkipBlankLine(remainder, boundary)..];
+            }
+        }
+
+        if (remainder.StartsWith(baselineHeader, StringComparison.Ordinal))
+        {
+            var footer = remainder.IndexOf(baselineFooter, StringComparison.Ordinal);
+            if (footer >= 0)
+            {
+                var end = footer + baselineFooter.Length;
+                additions.Add(remainder[..end].Trim());
+                remainder = remainder[end..].TrimStart('\r', '\n');
+            }
+        }
+
+        return additions.Count == 0
+            ? (content, null)
+            : (remainder.Trim(), string.Join(Environment.NewLine + Environment.NewLine, additions));
+    }
+
+    private static int FindBlankLine(string value)
+    {
+        var unix = value.IndexOf("\n\n", StringComparison.Ordinal);
+        var windows = value.IndexOf("\r\n\r\n", StringComparison.Ordinal);
+        if (unix < 0) return windows;
+        if (windows < 0) return unix;
+        return Math.Min(unix, windows);
+    }
+
+    private static int SkipBlankLine(string value, int index) =>
+        value.AsSpan(index).StartsWith("\r\n\r\n", StringComparison.Ordinal) ? index + 4 : index + 2;
 
     // Reads the sidecar into a map of assistantIndex → references. Empty when absent/unreadable.
     private Dictionary<int, List<ResearchReference>> LoadReferences(string conversationId)
@@ -872,6 +927,7 @@ public sealed record ConversationMessageSnapshot(
     int? AssistantIndex = null)
 {
     public IReadOnlyList<ResearchReference> References { get; init; } = [];
+    public string? AgentAddition { get; init; }
 }
 
 public sealed record ConversationToolActivitySnapshot(
