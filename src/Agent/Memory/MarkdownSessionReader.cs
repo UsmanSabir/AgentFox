@@ -81,10 +81,15 @@ public static class MarkdownSessionReader
         {
             if (line.StartsWith("### "))
             {
-                // 1. If we have a previous role/content, finalize that message now
+                // 1. If we have a previous role/content, finalize that message now.
+                //    Skip empty sections: a content-less message (e.g. a "### user" header with no
+                //    body) makes the provider reject the whole request ("user message must have
+                //    content"). MarkdownSessionStore.FlushMessage applies the same guard.
                 if (currentRole != null)
                 {
-                    messages.Add(new ChatMessage(currentRole.Value, contentBuffer.ToString().Trim()));
+                    var text = contentBuffer.ToString().Trim();
+                    if (text.Length > 0)
+                        messages.Add(new ChatMessage(currentRole.Value, text));
                     contentBuffer.Clear();
                 }
 
@@ -104,10 +109,12 @@ public static class MarkdownSessionReader
             }
         }
 
-        // 3. Add the very last message from the buffer
+        // 3. Add the very last message from the buffer (same empty-section guard as above)
         if (currentRole != null)
         {
-            messages.Add(new ChatMessage(currentRole.Value, contentBuffer.ToString().Trim()));
+            var text = contentBuffer.ToString().Trim();
+            if (text.Length > 0)
+                messages.Add(new ChatMessage(currentRole.Value, text));
         }
 
         var session = await agent.CreateSessionAsync();

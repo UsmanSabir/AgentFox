@@ -97,23 +97,39 @@ function Ensure-Git {
     }
 }
 
-function Ensure-Dotnet {
-    $dotnet = Get-Command dotnet -ErrorAction SilentlyContinue
-    if ($dotnet) {
-        $version = (& dotnet --version).Trim()
-        if ($version -match '^10\.') {
-            Write-Info "Found dotnet $version"
-            return
-        }
-    }
+# The published AgentFox binary is framework-dependent (--self-contained false), so at
+# runtime it needs the ASP.NET Core 10 shared runtime. `dotnet --list-runtimes` reports the
+# installed shared frameworks; an installed SDK also carries the runtime, so either satisfies
+# a prebuilt install. Building from source additionally needs the SDK (see Test-DotnetSdk).
+function Test-DotnetRuntime {
+    if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) { return $false }
+    $runtimes = & dotnet --list-runtimes 2>$null
+    return [bool]($runtimes | Where-Object { $_ -match '^Microsoft\.AspNetCore\.App 10\.' })
+}
+
+function Test-DotnetSdk {
+    if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) { return $false }
+    $version = (& dotnet --version 2>$null)
+    return ($version -and $version.Trim() -match '^10\.')
+}
+
+# Downloads dotnet-install.ps1 and installs either the ASP.NET Core runtime or the full SDK.
+function Install-Dotnet {
+    param([ValidateSet('Runtime', 'Sdk')][string]$Kind)
 
     $targetDir = if ($InstallDir) { $InstallDir } else { Join-Path $HOME '.dotnet' }
     New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
 
-    Write-Info 'Installing .NET SDK 10.0 ...'
     $tempScript = Join-Path $env:TEMP 'dotnet-install.ps1'
     Invoke-WebRequest -Uri 'https://dot.net/v1/dotnet-install.ps1' -OutFile $tempScript
-    & $tempScript -Channel '10.0' -InstallDir $targetDir -Quality 'GA'
+    if ($Kind -eq 'Runtime') {
+        Write-Info 'Installing .NET ASP.NET Core Runtime 10.0 ...'
+        & $tempScript -Channel '10.0' -Runtime 'aspnetcore' -InstallDir $targetDir -Quality 'GA'
+    }
+    else {
+        Write-Info 'Installing .NET SDK 10.0 ...'
+        & $tempScript -Channel '10.0' -InstallDir $targetDir -Quality 'GA'
+    }
 
     $env:PATH = "$targetDir;$env:PATH"
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -123,6 +139,20 @@ function Ensure-Dotnet {
 
     $env:DOTNET_ROOT = $targetDir
     [Environment]::SetEnvironmentVariable('DOTNET_ROOT', $targetDir, 'User')
+}
+
+# Prebuilt (framework-dependent) install: the runtime is enough. An existing SDK also works.
+function Ensure-DotnetRuntime {
+    if (Test-DotnetRuntime) { Write-Info 'Found .NET 10 ASP.NET Core runtime'; return }
+    if (Test-DotnetSdk)     { Write-Info 'Found .NET 10 SDK (provides the runtime)'; return }
+    Install-Dotnet -Kind Runtime
+    Write-Info '.NET runtime installed.'
+}
+
+# Building from source: the full SDK is required.
+function Ensure-DotnetSdk {
+    if (Test-DotnetSdk) { Write-Info "Found dotnet SDK $((& dotnet --version).Trim())"; return }
+    Install-Dotnet -Kind Sdk
     Write-Info 'dotnet SDK installed.'
 }
 
@@ -195,8 +225,9 @@ if ($isUpdate -and -not $tradingChoiceExplicit) {
 $stageDir = Join-Path $env:TEMP ("agentfox-stage-" + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
 
-# The framework-dependent binary needs the .NET runtime whether it was prebuilt or built here.
-Ensure-Dotnet
+# Try the prebuilt download first (no dotnet needed to fetch/extract), then provision the
+# smallest .NET that satisfies the chosen path: the runtime for a prebuilt binary, the full
+# SDK only when we actually have to compile from source.
 $rid = Get-ArchSuffix
 
 $installed = $false
@@ -204,7 +235,13 @@ if (-not $BuildFromSource) {
     $installed = Install-Prebuilt $rid $stageDir
 }
 
-if (-not $installed) {
+if ($installed) {
+    # Prebuilt binaries are framework-dependent (--self-contained false) — runtime is enough.
+    Ensure-DotnetRuntime
+}
+else {
+    # Building from source requires the SDK.
+    Ensure-DotnetSdk
     Ensure-Git
     $sourceRoot = Resolve-SourceRoot
     $projectPath = Join-Path $sourceRoot 'src/Agent/AgentFox.csproj'

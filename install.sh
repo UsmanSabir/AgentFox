@@ -139,20 +139,34 @@ ensure_git() {
   fi
 }
 
-ensure_dotnet() {
-  if command -v dotnet >/dev/null 2>&1; then
-    version="$(dotnet --version | cut -d. -f1)"
-    if [ "$version" -ge 10 ]; then
-      info "Found dotnet $(dotnet --version)"
-      return
-    fi
-  fi
+# The published AgentFox binary is framework-dependent (--self-contained false), so at runtime
+# it needs the ASP.NET Core 10 shared runtime. `dotnet --list-runtimes` reports the installed
+# shared frameworks; an installed SDK also carries the runtime. Building from source additionally
+# needs the SDK (see dotnet_has_sdk).
+dotnet_has_runtime() {
+  command -v dotnet >/dev/null 2>&1 || return 1
+  dotnet --list-runtimes 2>/dev/null | grep -Eq '^Microsoft\.AspNetCore\.App 10\.'
+}
 
-  info "Installing .NET SDK 10.0 ..."
+dotnet_has_sdk() {
+  command -v dotnet >/dev/null 2>&1 || return 1
+  major="$(dotnet --version 2>/dev/null | cut -d. -f1)"
+  [ -n "$major" ] && [ "$major" -ge 10 ] 2>/dev/null
+}
+
+# Downloads dotnet-install.sh and installs either the ASP.NET Core runtime or the full SDK.
+# $1 = runtime|sdk
+install_dotnet() {
   DOTNET_DIR="${HOME}/.dotnet"
   mkdir -p "$DOTNET_DIR"
   curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh
-  bash /tmp/dotnet-install.sh --channel 10.0 --install-dir "$DOTNET_DIR" --quality GA
+  if [ "$1" = "runtime" ]; then
+    info "Installing .NET ASP.NET Core Runtime 10.0 ..."
+    bash /tmp/dotnet-install.sh --channel 10.0 --runtime aspnetcore --install-dir "$DOTNET_DIR" --quality GA
+  else
+    info "Installing .NET SDK 10.0 ..."
+    bash /tmp/dotnet-install.sh --channel 10.0 --install-dir "$DOTNET_DIR" --quality GA
+  fi
 
   export DOTNET_ROOT="$DOTNET_DIR"
   export PATH="$DOTNET_DIR:$PATH"
@@ -164,6 +178,21 @@ ensure_dotnet() {
     echo 'export DOTNET_ROOT="$HOME/.dotnet"' >> "$PROFILE"
     echo 'export PATH="$HOME/.dotnet:$PATH"' >> "$PROFILE"
   fi
+}
+
+# Prebuilt (framework-dependent) install: the runtime is enough; an existing SDK also works.
+ensure_dotnet_runtime() {
+  if dotnet_has_runtime; then info "Found .NET 10 ASP.NET Core runtime"; return; fi
+  if dotnet_has_sdk; then info "Found .NET 10 SDK (provides the runtime)"; return; fi
+  install_dotnet runtime
+  info ".NET runtime installed."
+}
+
+# Building from source: the full SDK is required.
+ensure_dotnet_sdk() {
+  if dotnet_has_sdk; then info "Found dotnet $(dotnet --version)"; return; fi
+  install_dotnet sdk
+  info "dotnet SDK installed."
 }
 
 resolve_source_root() {
@@ -239,8 +268,9 @@ cleanup_stage() {
 }
 trap cleanup_stage EXIT
 
-# The framework-dependent binary needs the .NET runtime whether it was prebuilt or built here.
-ensure_dotnet
+# Try the prebuilt download first (no dotnet needed to fetch/extract), then provision the
+# smallest .NET that satisfies the chosen path: the runtime for a prebuilt binary, the full
+# SDK only when we actually have to compile from source.
 RID="$(get_arch_suffix)"
 
 INSTALLED=0
@@ -250,7 +280,11 @@ if [ "$BUILD_FROM_SOURCE" != "1" ]; then
   fi
 fi
 
-if [ "$INSTALLED" -eq 0 ]; then
+if [ "$INSTALLED" -eq 1 ]; then
+  # Prebuilt binaries are framework-dependent (--self-contained false) — runtime is enough.
+  ensure_dotnet_runtime
+else
+  ensure_dotnet_sdk
   ensure_git
   SOURCE_ROOT="$(resolve_source_root)"
   PROJECT_PATH="$SOURCE_ROOT/src/Agent/AgentFox.csproj"
