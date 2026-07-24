@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api } from '$lib/api';
-  import { Database, RefreshCw, Search, Filter, Brain, Power } from 'lucide-svelte';
+  import { Database, RefreshCw, Search, Filter, Brain, Power, Trash2 } from 'lucide-svelte';
   import type { MemoryEntry, MemorySettings, SpecialistMemoryMode } from '$lib/api';
 
   let entries: MemoryEntry[] = [];
@@ -13,6 +13,8 @@
   let settings: MemorySettings | null = null;
   let savingGlobal = false;
   let savingAgent: string | null = null;
+  let deletingId: string | null = null;
+  let clearing = false;
 
   const types = ['all', 'Fact', 'UserPreference', 'Observation', 'Conversation', 'ToolExecution', 'SubAgentResult'];
 
@@ -62,6 +64,35 @@
       error = e instanceof Error ? e.message : String(e);
     } finally {
       savingAgent = null;
+    }
+  }
+
+  async function deleteEntry(id: string) {
+    if (deletingId || !confirm('Delete this memory? This cannot be undone.')) return;
+    deletingId = id;
+    try {
+      await api.deleteMemory(id);
+      entries = entries.filter(e => e.id !== id);
+      applyFilter();
+    } catch (e: unknown) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      deletingId = null;
+    }
+  }
+
+  async function clearAll() {
+    if (clearing || entries.length === 0) return;
+    if (!confirm(`Delete all ${entries.length} memories? This cannot be undone.`)) return;
+    clearing = true;
+    try {
+      await api.clearMemory();
+      entries = [];
+      applyFilter();
+    } catch (e: unknown) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      clearing = false;
     }
   }
 
@@ -116,10 +147,21 @@
         {#if !loading}<span class="count-badge">{filtered.length} / {entries.length}</span>{/if}
       </p>
     </div>
-    <button class="btn btn-ghost" on:click={load} disabled={loading}>
-      <RefreshCw size={14} />
-      Refresh
-    </button>
+    <div class="header-actions">
+      <button class="btn btn-ghost" on:click={load} disabled={loading}>
+        <RefreshCw size={14} />
+        Refresh
+      </button>
+      <button
+        class="btn btn-ghost btn-danger"
+        on:click={clearAll}
+        disabled={loading || clearing || entries.length === 0}
+        title="Delete all memories"
+      >
+        <Trash2 size={14} />
+        Clear all
+      </button>
+    </div>
   </div>
 
   {#if settings}
@@ -227,6 +269,15 @@
               </div>
               <span class="importance-val">{importanceBar(entry.importance).pct}%</span>
             </div>
+            <button
+              class="entry-delete"
+              on:click={() => deleteEntry(entry.id)}
+              disabled={deletingId === entry.id}
+              title="Delete this memory"
+              aria-label="Delete this memory"
+            >
+              <Trash2 size={13} />
+            </button>
           </div>
           <p class="entry-content">{entry.content}</p>
           <div class="entry-id">{entry.id}</div>
@@ -287,6 +338,19 @@
     justify-content: space-between;
     margin-bottom: 1.25rem;
     gap: 1rem;
+  }
+
+  .header-actions {
+    display: flex;
+    gap: 0.5rem;
+  }
+
+  .btn-danger {
+    color: var(--danger);
+  }
+  .btn-danger:hover:not(:disabled) {
+    background: rgba(248,113,113,0.1);
+    border-color: rgba(248,113,113,0.3);
   }
 
   .count-badge {
@@ -382,6 +446,26 @@
     font-size: 0.6875rem;
     color: var(--text-3);
     margin-left: auto;
+  }
+
+  .entry-delete {
+    border: 0;
+    background: transparent;
+    color: var(--text-3);
+    cursor: pointer;
+    padding: 0.2rem;
+    border-radius: var(--radius-sm);
+    display: grid;
+    place-items: center;
+    transition: color 0.15s, background 0.15s;
+  }
+  .entry-delete:hover:not(:disabled) {
+    color: var(--danger);
+    background: rgba(248,113,113,0.1);
+  }
+  .entry-delete:disabled {
+    opacity: 0.5;
+    cursor: wait;
   }
 
   .importance-wrap {

@@ -370,6 +370,20 @@ public class WebModule : IAppModule
             return Results.Ok(result);
         });
 
+        endpoints.MapDelete("/memory/{id}", async (
+            string id,
+            HybridMemory memory) =>
+        {
+            await memory.DeleteAsync(id);
+            return Results.Ok(new { deleted = id });
+        }).RequireAuthorization("ManagementAdministrator");
+
+        endpoints.MapDelete("/memory", async (HybridMemory memory) =>
+        {
+            await memory.ClearAsync();
+            return Results.Ok(new { cleared = true });
+        }).RequireAuthorization("ManagementAdministrator");
+
         endpoints.MapGet("/memory/settings", (
             MemoryAccessPolicy policy,
             SpecialistAgentRegistry specialists) =>

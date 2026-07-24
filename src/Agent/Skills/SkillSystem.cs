@@ -129,6 +129,7 @@ public class SkillRegistry
         Register(new DatabaseSkill());
         Register(new TestingSkill());
         Register(new DeploymentSkill());
+        Register(new SelfSkill());
     }
 
     /// <summary>
@@ -977,6 +978,40 @@ public class DeploymentSkill : Skill, ISkillPlugin
 // 7. Document deployment steps and create runbooks
 // 8. Use blue-green or canary deployment strategies when possible
 //         ");
+    }
+}
+
+/// <summary>
+/// Self-referential skill: tells the agent where its OWN persistent state lives
+/// (sessions, long-term memory, learning store, config, plugins, logs) so it edits
+/// the right file when asked to inspect/back up/migrate/repair itself.
+/// </summary>
+public class SelfSkill : Skill
+{
+    public SelfSkill()
+    {
+        Name = "self";
+        Description = "Map of AgentFox's own storage — which file/folder backs sessions, memory, learning, config, plugins, and logs";
+        Version = "1.0.0";
+
+        Metadata = new SkillMetadata
+        {
+            SkillName = "self",
+            Version = "1.0.0",
+            Capabilities = new[] { "introspection", "self-maintenance", "storage-map" }.ToList(),
+            Tags = new[] { "internals", "maintenance", "reference" }.ToList(),
+            ComplexityScore = 3
+        };
+    }
+
+    public override List<ITool> GetTools() => new();
+
+    public override List<string> GetSystemPrompts()
+    {
+        return new List<string>
+        {
+            SystemPromptConfig.SkillPrompts.SelfExpert
+        };
     }
 }
 

@@ -515,6 +515,8 @@ export const api = {
   tools:    () => get<ToolInfo[]>('/tools'),
   skills:   () => get<SkillInfo[]>('/skills'),
   memory:   () => get<MemoryEntry[]>('/memory'),
+  deleteMemory: (id: string) => del<{ deleted: string }>(`/memory/${encodeURIComponent(id)}`),
+  clearMemory: () => del<{ cleared: boolean }>('/memory'),
   memorySettings: () => get<MemorySettings>('/memory/settings'),
   setGlobalMemory: (enabled: boolean) =>
     patch<{ globalEnabled: boolean }>('/memory/settings', { enabled }),

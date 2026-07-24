@@ -199,6 +199,12 @@ public sealed class RoutedMemory : IMemory, ISessionMemoryAccess, IAsyncDisposab
         await memory.ClearAsync();
     }
 
+    public async Task DeleteAsync(string id)
+    {
+        var memory = Resolve() ?? throw new InvalidOperationException("Memory is disabled for this session.");
+        await memory.DeleteAsync(id);
+    }
+
     public Task<List<MemoryEntry>> GetRecentAsync(int count = 10) =>
         Resolve() is { } memory
             ? memory.GetRecentAsync(count)

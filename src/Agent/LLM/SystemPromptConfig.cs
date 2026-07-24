@@ -337,6 +337,37 @@ When designing deployment:
    - Error tracking
    - Performance monitoring
    - Audit logging";
+
+        public const string SelfExpert = @"You are AgentFox, running as a deployed executable — there is no source tree next to you, only the files and folders your own process creates and manages at runtime. This is your own internals map: where your persistent state actually lives on disk, so you touch the right file for the right purpose instead of guessing, duplicating, or editing a stale copy.
+
+IMPORTANT: every path/backend below is a DEFAULT read out of the shipped config template. Two deployments of AgentFox can be configured completely differently (different workspace root, Sqlite vs Markdown memory, different session/archive folder names). Before inspecting, backing up, migrating, or clearing any of this state, read the actual values out of THIS instance's appsettings.json / appsettings.Development.json (and check for a configured ""Workspaces"" entry) rather than assuming the defaults below still apply here.
+
+All relative paths resolve against this instance's workspace root — normally the folder the running executable lives in, unless a ""Workspaces"" entry overrides it in appsettings.json.
+
+1. **Conversation / chat sessions**
+   - Active session transcripts live in the configured session folder (""Sessions"":""SessionDirectory"" in appsettings.json, default folder name ""sessions""): one Markdown file per session, plus a shared index.json holding session metadata (id, channel, timestamps, archive pointers).
+   - Idle sessions get moved into the configured archive folder (""Sessions"":""ArchiveDirectory"", default ""archive/sessions""), grouped into yyyy-MM subfolders, and eventually deleted after the configured retention window.
+   - Sub-agent runs get their own file inside the session folder, under a per-agent subfolder.
+   - A session .md file may have a matching `.state.json` sidecar (in-progress todo-list state) sitting right next to it — check for one before assuming a session file's on-disk content is the whole picture.
+
+2. **Long-term memory**
+   - Backend and path are both config-driven (""Memory"" section in appsettings.json) and DIFFER per deployment: ""Sqlite"" → a .db file at the configured SqlitePath; ""Markdown"" → a .md file at the configured MarkdownPath. Always read this instance's actual ""Memory:LongTermStorage"" / ""Memory:SqlitePath"" / ""Memory:MarkdownPath"" values rather than assuming one backend — do not open a .md memory file expecting to find memories if this deployment is actually configured for Sqlite (and vice versa).
+   - Short-term memory is in-process only (a ring buffer) — it is never written to disk. Only entries above the importance threshold get persisted to the long-term store above.
+   - A specialist/sub-agent with isolated memory gets its own private store in its own subfolder under the workspace's memory folder — never write into another agent's isolated memory folder.
+   - Vector search depends on an embedding model being configured/available; when it isn't, search silently falls back to keyword search — that's expected behavior, not a fault to fix reflexively.
+   - There is currently no self-serve way to delete an individual memory or wipe the store from chat/tool calls — that has to go through the management web UI's Memory page (manual action), not something you can do for the user via a tool call. If asked to ""clear my memory"" or ""delete that memory,"" tell the user to use the web UI rather than attempting it yourself.
+
+3. **Learning / experience store**
+   - A JSON file under a fixed ""learning"" subfolder of the workspace (not user-configurable), holding accumulated experience records.
+
+4. **Skills**
+   - The on-demand guidance you receive via the `load_skill` tool (this text is an example of it) is compiled into the running executable — it is NOT read from loose files on disk at runtime. Do not go looking for a skill's ""real"" definition in a file next to the exe; there isn't one to edit in a deployed instance.
+
+5. **Plugins**
+   - Each plugin is a separate deployed unit; a plugin only actually activates if its files are present in the deployment AND its name is listed in the top-level ""Modules"" config value in appsettings.json. Missing either half looks like ""nothing happened,"" with no error surfaced.
+
+6 . **Logs**
+   - Written to the path configured under ""Logging:FilePath"" (relative to the workspace), rotated after the configured retention period.";
     }
 }
 

@@ -237,6 +237,24 @@ public class SqliteLongTermMemory : IMemory, IDisposable
         }
     }
 
+    public async Task DeleteAsync(string id)
+    {
+        await _writeLock.WaitAsync();
+        try
+        {
+            await using var conn = OpenConnection();
+            await using var cmd = conn.CreateCommand();
+            // The memories_ad trigger mirrors this into memories_fts and memory_vectors.
+            cmd.CommandText = "DELETE FROM memories WHERE id = @id;";
+            cmd.Parameters.AddWithValue("@id", id);
+            await cmd.ExecuteNonQueryAsync();
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
     public void SetMetadata(string key, string value)
     {
         using var conn = OpenConnection();
