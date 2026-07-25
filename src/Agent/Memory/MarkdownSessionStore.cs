@@ -536,6 +536,30 @@ public sealed class MarkdownSessionStore : IConversationStore
     }
 
     /// <summary>
+    /// Makes an interrupted user turn visible in the transcript before a queued
+    /// follow-up can replace the crash-recovery marker. The history provider may
+    /// already have stored the request, so this is deliberately idempotent for a
+    /// trailing user message with the same text.
+    /// </summary>
+    public void PersistInterruptedUserMessage(string conversationId, string message)
+    {
+        SessionManager.EnsureSafeSessionId(conversationId);
+        var text = message.Trim();
+        if (text.Length == 0) return;
+
+        var list = _messages.GetOrAdd(conversationId, _ => []);
+        lock (list)
+        {
+            var snapshots = ProjectSnapshots(list);
+            var last = snapshots.LastOrDefault();
+            if (last?.Role == "user" && string.Equals(last.Content, text, StringComparison.Ordinal))
+                return;
+
+            list.Add(new ChatMessage(ChatRole.User, text));
+        }
+    }
+
+    /// <summary>
     /// Returns the original user message that was being processed when the
     /// previous process terminated (detected via the <c>.pending</c> sidecar file),
     /// or <c>null</c> if no interrupted turn is detected.

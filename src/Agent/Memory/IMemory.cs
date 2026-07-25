@@ -27,7 +27,12 @@ public interface IMemory
     /// Clear all memories
     /// </summary>
     Task ClearAsync();
-    
+
+    /// <summary>
+    /// Delete a single memory entry by id. No-op if the id is not found.
+    /// </summary>
+    Task DeleteAsync(string id);
+
     /// <summary>
     /// Get recent memories
     /// </summary>
@@ -118,6 +123,15 @@ public class ShortTermMemory : IMemory
         return Task.CompletedTask;
     }
 
+    public Task DeleteAsync(string id)
+    {
+        lock (_lock)
+        {
+            _memories.RemoveAll(m => m.Id == id);
+        }
+        return Task.CompletedTask;
+    }
+
     public Task<List<MemoryEntry>> GetRecentAsync(int count = 10)
     {
         lock (_lock)
@@ -185,6 +199,17 @@ public class LongTermMemory : IMemory
         {
             _memories.Clear();
             await SaveToDiskAsync();
+        }
+        finally { _lock.Release(); }
+    }
+
+    public async Task DeleteAsync(string id)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            if (_memories.RemoveAll(m => m.Id == id) > 0)
+                await SaveToDiskAsync();
         }
         finally { _lock.Release(); }
     }
@@ -316,6 +341,13 @@ public class HybridMemory : IMemory, IAsyncDisposable
     public async Task ClearAsync()
     {
         await _shortTerm.ClearAsync();
+        await _longTerm.ClearAsync();
+    }
+
+    public async Task DeleteAsync(string id)
+    {
+        await _shortTerm.DeleteAsync(id);
+        await _longTerm.DeleteAsync(id);
     }
 
     public Task<List<MemoryEntry>> GetRecentAsync(int count = 10) =>
@@ -454,6 +486,22 @@ public class MarkdownLongTermMemory : IMemory
         }
     }
 
+    public async Task DeleteAsync(string id)
+    {
+        await _fileLock.WaitAsync();
+        try
+        {
+            EnsureCache();
+            if (_cache!.RemoveAll(m => m.Id == id) == 0)
+                return;
+            await RewriteFileAsync();
+        }
+        finally
+        {
+            _fileLock.Release();
+        }
+    }
+
     public async Task<List<MemoryEntry>> GetRecentAsync(int count = 10)
     {
         await _fileLock.WaitAsync();
@@ -468,6 +516,25 @@ public class MarkdownLongTermMemory : IMemory
         finally
         {
             _fileLock.Release();
+        }
+    }
+
+    /// <summary>Rewrites the whole file from the in-memory cache. Caller must hold _fileLock.</summary>
+    private async Task RewriteFileAsync()
+    {
+        using var stream = new FileStream(_storagePath, FileMode.Create, FileAccess.Write, FileShare.None);
+        using var writer = new StreamWriter(stream, System.Text.Encoding.UTF8);
+
+        await writer.WriteLineAsync("# AgentFox Long-Term Memory");
+        await writer.WriteLineAsync();
+
+        foreach (var entry in _cache!)
+        {
+            await writer.WriteLineAsync($"## [{entry.Type}] {entry.Timestamp:O} | id:{entry.Id} | imp:{entry.Importance:F2}");
+            await writer.WriteLineAsync(entry.Content);
+            await writer.WriteLineAsync();
+            await writer.WriteLineAsync("---");
+            await writer.WriteLineAsync();
         }
     }
 

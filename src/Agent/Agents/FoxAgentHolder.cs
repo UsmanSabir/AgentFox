@@ -105,8 +105,9 @@ internal sealed class FoxAgentService : IAgentService
     {
         var agent = await _holder.WaitAsync(ct);
 
-        // Once the caller's connection is gone, stop trying to write tokens to it but
-        // keep the underlying turn running to completion.
+        // Once the caller's connection is gone, stop trying to write tokens to it. The
+        // execution token is owned by the web-turn coordinator, so a disconnected browser
+        // does not cancel a queued/running turn; an explicit Stop/Steer request does.
         async Task SafeOnToken(string token)
         {
             if (ct.IsCancellationRequested) return;
@@ -142,7 +143,7 @@ internal sealed class FoxAgentService : IAgentService
             OnStatus = SafeOnStatus,
             OnToolActivity = SafeOnToolActivity
         };
-        var result = await agent.ProcessAsync(input, conversationId, streaming, CancellationToken.None, attachments);
+        var result = await agent.ProcessAsync(input, conversationId, streaming, ct, attachments);
         var reply = new AgentReply { Output = result.Output ?? string.Empty, References = result.References };
 
         if (ct.IsCancellationRequested && conversationId != null)

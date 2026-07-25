@@ -44,6 +44,8 @@ export interface ChatMessage {
   pendingApproval?: PendingApprovalInfo;
   reasoning?: string;
   status?: string;
+  runId?: string;
+  queuePosition?: number;
   toolActivities?: ToolActivity[];
   retryContent?: string;
   attachments?: ChatAttachmentView[];
@@ -99,6 +101,12 @@ export function appendReasoning(id: string, text: string) {
 export function setMessageStatus(id: string, status: string) {
   chatMessages.update(msgs =>
     msgs.map(m => m.id === id ? { ...m, status } : m)
+  );
+}
+
+export function setTurnState(id: string, runId: string, status: string, queuePosition?: number) {
+  chatMessages.update(msgs =>
+    msgs.map(m => m.id === id ? { ...m, runId, status, queuePosition } : m)
   );
 }
 

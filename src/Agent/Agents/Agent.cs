@@ -729,6 +729,35 @@ public class FoxAgent
                 await _experienceLearning.CompleteAsync(experienceTurn, true, timeoutToken);
             return result;
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // User steering/stop and host shutdown are intentional interruptions, not
+            // timeouts. Preserve the user turn before the single pending sidecar is reused
+            // by the next queued message, and keep the session resumable.
+            if (ConversationStore is Memory.MarkdownSessionStore interruptedStore)
+            {
+                try
+                {
+                    interruptedStore.PersistInterruptedUserMessage(conversationId, task);
+                    ConversationStore.SaveSession(conversationId, session!);
+                    interruptedStore.ClearPendingUserMessage(conversationId);
+                }
+                catch (Exception persistEx)
+                {
+                    _logger?.LogWarning(
+                        persistEx,
+                        "Failed to persist interrupted user turn for conversation {ConversationId}",
+                        conversationId);
+                }
+            }
+
+            SessionManager?.TouchSession(conversationId);
+            _logger?.LogInformation(
+                "Agent '{AgentName}' turn interrupted in conversation {ConversationId}",
+                Name,
+                conversationId);
+            throw;
+        }
         catch (OperationCanceledException)
         {
             _logger?.LogWarning("Agent '{AgentName}' task timed out after {Timeout} seconds", Name, TimeoutSeconds);

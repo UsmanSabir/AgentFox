@@ -7,7 +7,8 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
   import {
     chatMessages, addUserMessage, addAssistantMessage, addBackgroundResultMessage,
     appendToken, appendReasoning, setMessageStatus, upsertToolActivity, finalizeMessage,
-    prepareMessageForRetry, attachReferences, setAssistantIndex, activeConversationId, activeAgentId, agentReady, resetChat,
+    prepareMessageForRetry, attachReferences, setAssistantIndex, setTurnState,
+    activeConversationId, activeAgentId, agentReady, resetChat,
     upsertPendingApproval, clearPendingApproval, type ChatMessage, type ChatAttachmentView
   } from '$lib/stores';
   import {
@@ -19,7 +20,8 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
   let scrollEl: HTMLDivElement;
   let message = '';
   let isStreaming = false;
-  let abortCtrl: AbortController | null = null;
+  let pendingRuns = 0;
+  let steeringRunId: string | null = null;
   let copiedId: string | null = null;
   let forkingMessageId: string | null = null;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -200,6 +202,8 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
     ? 'AgentFox'
     : specialists.find(agent => agent.id === selectedAgentId)?.name ?? selectedAgentId;
 
+  $: isStreaming = pendingRuns > 0;
+
   // Start / restart polling whenever the conversation ID changes.
   // Polling is intentionally keyed to the conversation, not to isStreaming,
   // so background results arrive even while the user is mid-conversation.
@@ -305,7 +309,8 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
 
   async function send() {
     const text = message.trim();
-    if ((!text && pendingAttachments.length === 0) || isStreaming) return;
+    if ((!text && pendingAttachments.length === 0) ||
+        (selectedAgentId !== 'main' && isStreaming)) return;
 
     // Attachments are consumed by this turn: detach them from the composer before the
     // await so a second Enter press cannot send the same files twice.
@@ -316,7 +321,16 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
     message = '';
     addUserMessage(text, attached.map(a => a.view));
     const assistantId = addAssistantMessage('', true, text);
-    await runMessage(text, assistantId, attached.map(a => a.payload));
+
+    // Reserve the first web conversation id synchronously so two rapid submissions
+    // before the first SSE session event still land in the same server queue.
+    const turnConversationId = selectedAgentId === 'main'
+      ? (convId ?? `web_${crypto.randomUUID().replaceAll('-', '')}`)
+      : convId;
+    if (selectedAgentId === 'main' && !convId)
+      activeConversationId.set(turnConversationId);
+
+    void runMessage(text, assistantId, attached.map(a => a.payload), turnConversationId);
   }
 
   async function retryMessage(msg: ChatMessage) {
@@ -325,17 +339,21 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
     prepareMessageForRetry(msg.id);
     // Retry re-sends text only. The file bytes were dropped once the turn was handed off,
     // and silently retrying without them would be worse than making the user re-attach.
-    await runMessage(msg.retryContent, msg.id);
+    await runMessage(msg.retryContent, msg.id, undefined, convId);
   }
 
-  async function runMessage(text: string, assistantId: string, attachments?: ChatAttachment[]) {
-    isStreaming = true;
-    abortCtrl   = new AbortController();
+  async function runMessage(
+    text: string,
+    assistantId: string,
+    attachments?: ChatAttachment[],
+    conversationId?: string
+  ) {
+    pendingRuns += 1;
     await scrollToBottom(true);
 
     try {
       if (selectedAgentId === 'main') {
-        const gen = streamChat(text, convId, abortCtrl.signal, attachments);
+        const gen = streamChat(text, conversationId, undefined, attachments);
         let completed = false;
         for await (const event of gen) {
           if (event.type === 'token') {
@@ -345,6 +363,14 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
             activeConversationId.set(event.conversationId);
             await loadTodos(event.conversationId);
             void pollPending(event.conversationId);
+          } else if (event.type === 'queued') {
+            setTurnState(assistantId, event.runId, 'queued', event.position);
+          } else if (event.type === 'started') {
+            setTurnState(assistantId, event.runId, 'thinking');
+          } else if (event.type === 'interrupted') {
+            finalizeMessage(assistantId);
+            completed = true;
+            break;
           } else if (event.type === 'reasoning') {
             appendReasoning(assistantId, event.text);
           } else if (event.type === 'status') {
@@ -366,7 +392,7 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
             break;
           }
         }
-        if (!completed && !abortCtrl.signal.aborted) {
+        if (!completed) {
           finalizeMessage(assistantId, 'The response ended before completion.');
         }
       } else {
@@ -383,14 +409,13 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (msg !== 'AbortError' && !msg.includes('abort')) {
+      if (!msg.includes('abort')) {
         finalizeMessage(assistantId, msg);
       } else {
         finalizeMessage(assistantId);
       }
     } finally {
-      isStreaming = false;
-      abortCtrl   = null;
+      pendingRuns = Math.max(0, pendingRuns - 1);
       await loadSessions();
       await loadTodos();
       await loadActivity();
@@ -400,8 +425,23 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
     }
   }
 
-  function stop() {
-    abortCtrl?.abort();
+  async function stop() {
+    if (!convId) return;
+    try { await api.cancelChat(convId); } catch { /* the active turn may have just completed */ }
+  }
+
+  async function steer(msg: ChatMessage) {
+    if (!convId || !msg.runId || msg.status !== 'queued' || steeringRunId) return;
+    steeringRunId = msg.runId;
+    setMessageStatus(msg.id, 'steering');
+    try {
+      await api.steerChat(convId, msg.runId);
+    } catch (err) {
+      setMessageStatus(msg.id, 'queued');
+      alert('Could not steer this turn: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      steeringRunId = null;
+    }
   }
 
   function clearChat() {
@@ -607,6 +647,8 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
 
   function statusLabel(status?: string): string {
     return ({
+      queued: 'Queued…',
+      steering: 'Steering…',
       thinking: 'Thinking…',
       running_tools: 'Running tools…',
       preparing_response: 'Preparing response…'
@@ -834,9 +876,28 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
 	                  {#if msg.reasoning}
 	                    <div class="reasoning-text">{@html renderMarkdown(msg.reasoning)}</div>
 	                  {:else}
-	                    <div class="status-text">{statusLabel(msg.status)}</div>
+	                    <div class="status-text">
+	                      {statusLabel(msg.status)}
+	                      {#if msg.status === 'queued' && msg.queuePosition}
+	                        <span class="queue-position">Position {msg.queuePosition}</span>
+	                      {/if}
+	                    </div>
 	                  {/if}
 	                </details>
+	              {/if}
+
+	              {#if msg.role === 'assistant' && msg.status === 'queued' && msg.runId}
+	                <div class="turn-actions">
+	                  <button
+	                    class="message-action-btn steer"
+	                    on:click={() => steer(msg)}
+	                    disabled={steeringRunId !== null}
+	                    title="Stop the active turn and run this message next"
+	                  >
+	                    <Zap size={12} />
+	                    <span>{steeringRunId === msg.runId ? 'Steering…' : 'Steer now'}</span>
+	                  </button>
+	                </div>
 	              {/if}
 
 	              {#if msg.role === 'assistant' && msg.toolActivities && msg.toolActivities.length > 0}
