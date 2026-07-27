@@ -27,6 +27,22 @@ public class SubAgentSpawnResult
 }
 
 /// <summary>
+/// A finished sub-agent run, retained after the live task record has been cleaned up so the
+/// parent agent can still ask what happened to a background task it spawned.
+/// <see cref="SubAgentManager"/> keeps a bounded number of these, evicting the oldest first.
+/// </summary>
+public sealed record SubAgentCompletionRecord(
+    string RunId,
+    string SessionKey,
+    string ParentSessionKey,
+    string TaskPayload,
+    SubAgentState Status,
+    string? Output,
+    string? Error,
+    DateTime CompletedAt,
+    TimeSpan? Duration);
+
+/// <summary>
 /// Policy check result indicating whether an action is allowed
 /// </summary>
 public class PolicyCheckResult
@@ -53,6 +69,11 @@ public class SubAgentManager : IDisposable
     
     // Track spawn count per parent agent to enforce MaxChildrenPerAgent
     private readonly ConcurrentDictionary<string, int> _childCountPerAgent;
+
+    // Finished runs, retained after _activeSubAgents cleanup so the parent agent can still ask
+    // what happened to a background task whose announcement never arrived. Bounded FIFO.
+    private readonly ConcurrentQueue<SubAgentCompletionRecord> _recentCompletions = new();
+    private const int MaxRetainedCompletions = 50;
     
     // Event for result announcements (OpenClaw-inspired callback system)
     private event SubAgentResultCallback? OnSubAgentFinalized;
@@ -244,48 +265,73 @@ public class SubAgentManager : IDisposable
     /// </summary>
     public void OnSubAgentCompleted(string runId, SubAgentCompletionResult result)
     {
-        if (_activeSubAgents.TryGetValue(runId, out var task))
+        if (!_activeSubAgents.TryGetValue(runId, out var task))
         {
-            task.State = result.Status;
-            task.CompletedAt = DateTime.UtcNow;
-            task.Completion.SetResult(result);
+            // The task record is gone — already completed, or purged by cleanup/shutdown.
+            // Announcing is the only route by which a result reaches the user, so a lost
+            // record means a lost result: say so rather than returning silently.
+            _logger?.LogWarning(
+                "Sub-agent {RunId} reported status {Status} but its task record no longer exists; " +
+                "the result cannot be announced.", runId, result.Status);
+            return;
+        }
 
-            // Mark aborted sessions so SessionManager archives them
-            if (result.Status is SubAgentState.Cancelled or SubAgentState.TimedOut or SubAgentState.Failed)
-                _sessionManager?.MarkAborted(task.SessionKey, $"sub-agent {result.Status}");
+        task.State = result.Status;
+        task.CompletedAt = DateTime.UtcNow;
 
-            _logger?.LogInformation($"Sub-agent completed: {runId}, Status={result.Status}");
-            
-            // ✅ NEW: Invoke result callbacks for result announcement routing
-            if (OnSubAgentFinalized != null)
-            {
-                try
-                {
-                    // Invoke all registered callbacks (fire and forget pattern)
-                    _ = InvokeResultCallbacksAsync(task, result);
-                }
-                catch (Exception ex)
-                {
-                    _logger?.LogError($"Error invoking result callbacks: {ex.Message}");
-                }
-            }
-            
-            // Decrement child count
-            if (_childCountPerAgent.TryGetValue(task.ParentAgentId, out var count) && count > 0)
-            {
-                _childCountPerAgent.AddOrUpdate(task.ParentAgentId, 0, (_, _) => count - 1);
-            }
-            
-            // Schedule cleanup if configured
-            if (_config.AutoCleanupCompleted)
-            {
-                _ = ScheduleCleanupAsync(runId);
-            }
-            else
-            {
-                // Remove immediately if not scheduling cleanup
-                _activeSubAgents.TryRemove(runId, out _);
-            }
+        // The announcement templates interpolate {duration}; without this a timed-out sub-agent
+        // reports "timed out after 0.0 seconds". Only fill what the caller left unset.
+        result.Duration ??= task.ExecutionDuration;
+
+        // TrySetResult rather than SetResult: a second completion for the same run (a cancel
+        // or timeout racing the natural finish) would otherwise throw here and abort the
+        // method before the result callbacks run — losing the announcement entirely.
+        if (!task.Completion.TrySetResult(result))
+        {
+            _logger?.LogDebug(
+                "Sub-agent {RunId} already has a completion result; ignoring duplicate {Status}.",
+                runId, result.Status);
+            return;
+        }
+
+        RecordCompletion(task, result);
+
+        // Mark aborted sessions so SessionManager archives them
+        if (result.Status is SubAgentState.Cancelled or SubAgentState.TimedOut or SubAgentState.Failed)
+            _sessionManager?.MarkAborted(task.SessionKey, $"sub-agent {result.Status}");
+
+        _logger?.LogInformation($"Sub-agent completed: {runId}, Status={result.Status}");
+
+        // Invoke result callbacks for result announcement routing
+        if (OnSubAgentFinalized != null)
+        {
+            // Fire and forget — InvokeResultCallbacksAsync guards each callback internally,
+            // so it does not fault. Nothing can be caught here: an exception thrown inside
+            // the discarded task never surfaces at this call site.
+            _ = InvokeResultCallbacksAsync(task, result);
+        }
+        else
+        {
+            _logger?.LogWarning(
+                "Sub-agent {RunId} finished with status {Status} but no result callback is " +
+                "registered, so the result will not be announced anywhere.", runId, result.Status);
+        }
+
+        // Decrement child count. The update delegate reads the *current* value so that
+        // concurrent completions cannot both write the same decremented count and leak a
+        // slot, which would eventually block the parent from spawning at all.
+        _childCountPerAgent.AddOrUpdate(
+            task.ParentAgentId, 0, (_, current) => current > 0 ? current - 1 : 0);
+
+        // Schedule cleanup if configured
+        if (_config.AutoCleanupCompleted)
+        {
+            _ = ScheduleCleanupAsync(runId);
+        }
+        else
+        {
+            // Remove immediately if not scheduling cleanup
+            _activeSubAgents.TryRemove(runId, out _);
         }
     }
     
@@ -423,6 +469,35 @@ public class SubAgentManager : IDisposable
     public IEnumerable<SubAgentTask> GetActiveSubAgents()
     {
         return _activeSubAgents.Values.ToList();
+    }
+
+    /// <summary>
+    /// Finished sub-agent runs still held in the completion history, oldest first. These outlive
+    /// the <see cref="GetActiveSubAgents"/> entries, which <see cref="ScheduleCleanupAsync"/>
+    /// purges shortly after completion, so a result stays inspectable even if its announcement
+    /// never reached the conversation.
+    /// </summary>
+    public IReadOnlyList<SubAgentCompletionRecord> GetRecentCompletions() =>
+        _recentCompletions.ToList();
+
+    /// <summary>
+    /// Adds a finished run to the bounded completion history.
+    /// </summary>
+    private void RecordCompletion(SubAgentTask task, SubAgentCompletionResult result)
+    {
+        _recentCompletions.Enqueue(new SubAgentCompletionRecord(
+            task.RunId,
+            task.SessionKey,
+            task.ParentSessionKey,
+            task.TaskPayload,
+            result.Status,
+            result.Output,
+            result.Error,
+            task.CompletedAt ?? DateTime.UtcNow,
+            task.ExecutionDuration));
+
+        while (_recentCompletions.Count > MaxRetainedCompletions)
+            _recentCompletions.TryDequeue(out _);
     }
     
     /// <summary>

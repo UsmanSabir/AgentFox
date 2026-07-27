@@ -606,6 +606,7 @@ class Program
             toolRegistry.Register(spawnTool);
             spawnBgTool = new SpawnBackgroundSubAgentTool(subAgentManager);
             toolRegistry.Register(spawnBgTool);
+            toolRegistry.Register(new CheckSubAgentStatusTool(subAgentManager));
         }
 
         var systemPrompt = new SystemPromptBuilder()
