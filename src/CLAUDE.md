@@ -52,6 +52,8 @@ var agent = new AgentBuilder(toolRegistry)
 
 Spawned via `SpawnSubAgentTool` or `SpawnBackgroundSubAgentTool`. The manager enforces `MaxSpawnDepth` and `MaxConcurrentSubAgents` policies, routes results back via `ResultAnnouncementCommand` callbacks.
 
+A background sub-agent's result reaches the user along one path: completion → result callback → `ResultAnnouncementCommand` on the Main lane → a parent-session agent turn → `PendingNotificationStore`, which web clients drain by polling `GET /chat/pending/{conversationId}`. The parent turn is an enrichment only; if it fails or returns nothing, the raw result is queued anyway, so a finished sub-agent is never silently lost. `CheckSubAgentStatusTool` (`check_subagent_status`) exposes running and recently-finished runs, since live task records are purged a few seconds after completion.
+
 ### Memory System (`Memory/`)
 
 Three-tier design:

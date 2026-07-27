@@ -203,6 +203,10 @@ public sealed class AgentOrchestrator : IHostedService
                     _subAgentManager,
                     logger: _loggerFactory.CreateLogger<SpawnBackgroundSubAgentTool>());
                 _toolRegistry.Register(spawnBgTool);
+
+                _toolRegistry.Register(new CheckSubAgentStatusTool(
+                    _subAgentManager,
+                    logger: _loggerFactory.CreateLogger<CheckSubAgentStatusTool>()));
             }
 
             if (toolsConfig.Mcp)
@@ -724,9 +728,19 @@ public sealed class AgentOrchestrator : IHostedService
 
             _subAgentManager.OnSubAgentStarted(runId);
 
-            using var linked = subTask != null
-                ? CancellationTokenSource.CreateLinkedTokenSource(ct, subTask.CancellationTokenSource.Token)
-                : CancellationTokenSource.CreateLinkedTokenSource(ct);
+            // TimeoutSeconds was recorded on the task but never enforced against the running
+            // command, so a wedged sub-agent stayed "Running" forever and never announced
+            // anything back. Keep timeout cancellation in its own source, separate from the
+            // task's CTS, so the completion status can tell a timeout from an explicit cancel.
+            using var timeoutCts = new CancellationTokenSource();
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+                ct,
+                subTask?.CancellationTokenSource.Token ?? CancellationToken.None,
+                timeoutCts.Token);
+
+            var timeoutSeconds = subTask?.TimeoutSeconds ?? 0;
+            if (timeoutSeconds > 0)
+                timeoutCts.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
 
             try
             {
@@ -735,6 +749,11 @@ public sealed class AgentOrchestrator : IHostedService
                     ? SubAgentCompletionResult.Success(subResult.Output)
                     : SubAgentCompletionResult.Failure(subResult.Error ?? "Sub-agent returned no output");
                 _subAgentManager.OnSubAgentCompleted(runId, completion);
+            }
+            catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
+            {
+                _subAgentManager.OnSubAgentCompleted(runId, SubAgentCompletionResult.Timeout(
+                    $"Sub-agent exceeded its {timeoutSeconds}s timeout."));
             }
             catch (OperationCanceledException)
             {
@@ -777,7 +796,8 @@ public sealed class AgentOrchestrator : IHostedService
             // Report back to a parent agent session
             if (!string.IsNullOrEmpty(announcement.ParentSessionKey))
             {
-                var notification = $"[Background sub-agent result]\n{announcement.FormatMessage()}";
+                var rawResult    = announcement.FormatMessage();
+                var notification = $"[Background sub-agent result]\n{rawResult}";
 
                 if (isInteractive)
                 {
@@ -787,34 +807,65 @@ public sealed class AgentOrchestrator : IHostedService
 
                 var notifyCmd = AgentCommand.CreateMainCommand(
                     announcement.ParentSessionKey, agentId: agent.Id, message: notification);
+
+                // Running the parent turn lets the LLM react to the result in context, but it is
+                // only an enrichment: it can throw, be cancelled, return Success=false, or return
+                // no text at all. The sub-agent's own output has to reach the client either way.
+                // Before the fallback below existed, an unsuccessful or empty parent turn dropped
+                // the result entirely — no pending notification, no user-visible error, only a
+                // log line — so a background agent that had genuinely finished looked to the user
+                // like one that never reported back at all.
+                string? enriched = null;
+                string? failure  = null;
+
                 try
                 {
                     var parentResult = await _agentRuntime.ExecuteAsync(notifyCmd, ct);
-                    if (isInteractive)
+
+                    if (parentResult.Success && !string.IsNullOrWhiteSpace(parentResult.Output))
+                        enriched = parentResult.Output;
+                    else
+                        failure = parentResult.Success
+                            ? "the parent agent turn produced no output"
+                            : parentResult.Error ?? "the parent agent turn failed without reporting an error";
+
+                    if (isInteractive && enriched != null)
                     {
                         AnsiConsole.WriteLine();
                         AnsiConsole.MarkupLine("[bold cyan][[AGENT]][/]");
-                        AnsiConsole.WriteLine(parentResult.Output);
+                        AnsiConsole.WriteLine(enriched);
                         AnsiConsole.Markup("\n[bold dodgerblue1]>[/] ");
-                    }
-
-                    // Always queue for web/channel clients regardless of console interactivity.
-                    // isInteractive reflects the *process* console, not whether the parent
-                    // session is a web session — a CLI process can serve web sessions too.
-                    if (!string.IsNullOrEmpty(parentResult.Output))
-                    {
-                        _pendingNotifications.Add(
-                            announcement.ParentSessionKey,
-                            parentResult.Output,
-                            subAgentRunId: announcement.SessionKey);
                     }
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Failed to deliver sub-agent result to parent session.");
-                    if (isInteractive)
-                        AnsiConsole.MarkupLine($"[bold red][[ERR]][/] Failed to deliver sub-agent result: {Markup.Escape(ex.Message)}");
+                    failure = ex.Message;
+                    _logger.LogError(ex, "Sub-agent result delivery to parent session {Session} threw.",
+                        announcement.ParentSessionKey);
                 }
+
+                if (failure != null)
+                {
+                    _logger.LogWarning(
+                        "Sub-agent {SubAgent} result could not be relayed through its parent turn " +
+                        "({Reason}); delivering the raw result to session {Session} instead.",
+                        announcement.SubAgentSessionKey ?? announcement.SessionKey,
+                        failure,
+                        announcement.ParentSessionKey);
+
+                    if (isInteractive)
+                        AnsiConsole.MarkupLine(
+                            $"[bold red][[ERR]][/] Could not relay sub-agent result: {Markup.Escape(failure)}");
+                }
+
+                // Always queue for web/channel clients regardless of console interactivity.
+                // isInteractive reflects the *process* console, not whether the parent
+                // session is a web session — a CLI process can serve web sessions too.
+                _pendingNotifications.Add(
+                    announcement.ParentSessionKey,
+                    enriched ?? BuildUndeliveredNotice(rawResult, failure),
+                    subAgentRunId: announcement.SessionKey);
+
                 return;
             }
 
@@ -890,6 +941,19 @@ public sealed class AgentOrchestrator : IHostedService
             }
         });
     }
+
+    /// <summary>
+    /// Wraps a sub-agent's raw result for the case where the parent agent turn could not relay it.
+    /// The result itself is still shown: a background task that finished must never be
+    /// indistinguishable from one that silently disappeared.
+    /// </summary>
+    private static string BuildUndeliveredNotice(string rawResult, string? failure) =>
+        $"""
+        ⚠️ A background sub-agent finished, but its result could not be relayed through the agent
+        ({failure ?? "unknown reason"}). The raw result follows.
+
+        {rawResult}
+        """;
 
     // ─────────────────────────────────────────────────────────────────────────
     // Channel loading

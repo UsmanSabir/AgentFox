@@ -43,8 +43,15 @@ public sealed class MarkdownSessionHistoryProvider : ChatHistoryProvider
         if (!TryGetId(context.Session, out var id))
             return ValueTask.FromResult(Enumerable.Empty<ChatMessage>());
 
-        _messages.TryGetValue(id, out var list);
-        return ValueTask.FromResult((list ?? []) as IEnumerable<ChatMessage>);
+        if (!_messages.TryGetValue(id, out var list))
+            return ValueTask.FromResult(Enumerable.Empty<ChatMessage>());
+
+        // Hand back a snapshot, not the live list. Two turns can run against the same
+        // conversationId concurrently (a web turn and a sub-agent result-announcement
+        // turn), and List<T> throws "Collection was modified" if one appends while the
+        // framework is still enumerating for the other's request.
+        lock (list)
+            return ValueTask.FromResult(list.ToList() as IEnumerable<ChatMessage>);
     }
 
     protected override ValueTask StoreChatHistoryAsync(
@@ -55,12 +62,15 @@ public sealed class MarkdownSessionHistoryProvider : ChatHistoryProvider
 
         var list = _messages.GetOrAdd(id, _ => []);
 
-        foreach (var msg in context.RequestMessages)
-            if (msg.Role != ChatRole.System)
-                list.Add(msg);
+        lock (list)
+        {
+            foreach (var msg in context.RequestMessages)
+                if (msg.Role != ChatRole.System)
+                    list.Add(msg);
 
-        foreach (var msg in context.ResponseMessages)
-            list.Add(msg);
+            foreach (var msg in context.ResponseMessages)
+                list.Add(msg);
+        }
 
         return ValueTask.CompletedTask;
     }
@@ -174,14 +184,22 @@ public sealed class MarkdownSessionStore : IConversationStore
         if (!_messages.TryGetValue(conversationId, out var messages))
             return;
 
-        int written = _writtenCounts.GetOrAdd(conversationId, 0);
-        if (messages.Count <= written)
-            return;
+        // Read the watermark, compute the delta, append, and advance the watermark as one
+        // atomic step. Unlocked, two concurrent saves for the same conversation can both
+        // read the same `written`, and the loser's advance then hides the winner's messages
+        // behind a watermark that was never actually flushed — silently dropping them from
+        // the .md transcript with no exception and no log line.
+        lock (messages)
+        {
+            int written = _writtenCounts.GetOrAdd(conversationId, 0);
+            if (messages.Count <= written)
+                return;
 
-        var delta = messages.Skip(written).ToList();
-        bool isNewFile = written == 0 && !File.Exists(FilePath(conversationId));
-        AppendToFile(conversationId, delta, isNewFile);
-        _writtenCounts[conversationId] = messages.Count;
+            var delta = messages.Skip(written).ToList();
+            bool isNewFile = written == 0 && !File.Exists(FilePath(conversationId));
+            AppendToFile(conversationId, delta, isNewFile);
+            _writtenCounts[conversationId] = messages.Count;
+        }
     }
 
     /// <summary>
@@ -192,13 +210,17 @@ public sealed class MarkdownSessionStore : IConversationStore
     internal void AppendForTest(string conversationId, ChatMessage message)
     {
         var list = _messages.GetOrAdd(conversationId, _ => []);
-        list.Add(message);
 
-        int written = _writtenCounts.GetOrAdd(conversationId, 0);
-        var delta = list.Skip(written).ToList();
-        bool isNewFile = written == 0 && !File.Exists(FilePath(conversationId));
-        AppendToFile(conversationId, delta, isNewFile);
-        _writtenCounts[conversationId] = list.Count;
+        lock (list)
+        {
+            list.Add(message);
+
+            int written = _writtenCounts.GetOrAdd(conversationId, 0);
+            var delta = list.Skip(written).ToList();
+            bool isNewFile = written == 0 && !File.Exists(FilePath(conversationId));
+            AppendToFile(conversationId, delta, isNewFile);
+            _writtenCounts[conversationId] = list.Count;
+        }
     }
 
     /// <summary>
@@ -212,7 +234,12 @@ public sealed class MarkdownSessionStore : IConversationStore
         if (references is null || references.Count == 0) return;
         SessionManager.EnsureSafeSessionId(conversationId);
 
-        if (!_messages.TryGetValue(conversationId, out var messages)) return;
+        if (!_messages.TryGetValue(conversationId, out var live)) return;
+
+        List<ChatMessage> messages;
+        lock (live)
+            messages = live.ToList();
+
         int assistantIndex = ProjectSnapshots(messages).Count(s => s.Role == "assistant") - 1;
         if (assistantIndex < 0) return;
 
@@ -254,16 +281,29 @@ public sealed class MarkdownSessionStore : IConversationStore
         return _cache.Keys.Union(fromFiles).Distinct();
     }
 
+    /// <summary>
+    /// Returns a stable copy of a conversation's messages — from memory when the session is
+    /// live, otherwise parsed from the .md file. Copying under the per-conversation lock stops
+    /// web-facing readers from enumerating the list while a turn is appending to it.
+    /// </summary>
+    private List<ChatMessage> SnapshotMessages(string conversationId)
+    {
+        if (!_messages.TryGetValue(conversationId, out var messages))
+        {
+            var path = ResolveFilePath(conversationId);
+            return File.Exists(path) ? ParseFile(path) : [];
+        }
+
+        lock (messages)
+            return messages.ToList();
+    }
+
     /// <summary>Returns user-visible text messages for a persisted conversation, with any
     /// research references attached to the corresponding assistant messages.</summary>
     public IReadOnlyList<ConversationMessageSnapshot> GetConversationMessages(string conversationId)
     {
         SessionManager.EnsureSafeSessionId(conversationId);
-        if (!_messages.TryGetValue(conversationId, out var messages))
-        {
-            var path = ResolveFilePath(conversationId);
-            messages = File.Exists(path) ? ParseFile(path) : [];
-        }
+        var messages = SnapshotMessages(conversationId);
 
         var snapshots = ProjectSnapshots(messages);
         var refs = LoadReferences(conversationId);
@@ -309,11 +349,7 @@ public sealed class MarkdownSessionStore : IConversationStore
     public int? GetLatestAssistantIndex(string conversationId)
     {
         SessionManager.EnsureSafeSessionId(conversationId);
-        if (!_messages.TryGetValue(conversationId, out var messages))
-        {
-            var path = ResolveFilePath(conversationId);
-            messages = File.Exists(path) ? ParseFile(path) : [];
-        }
+        var messages = SnapshotMessages(conversationId);
 
         return ProjectSnapshots(messages)
             .Where(message => message.AssistantIndex.HasValue)
@@ -330,11 +366,7 @@ public sealed class MarkdownSessionStore : IConversationStore
         string conversationId)
     {
         SessionManager.EnsureSafeSessionId(conversationId);
-        if (!_messages.TryGetValue(conversationId, out var messages))
-        {
-            var path = ResolveFilePath(conversationId);
-            messages = File.Exists(path) ? ParseFile(path) : [];
-        }
+        var messages = SnapshotMessages(conversationId);
 
         var calls = new List<ConversationToolActivitySnapshot>();
         foreach (var message in messages)
