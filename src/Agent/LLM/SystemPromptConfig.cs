@@ -558,8 +558,34 @@ public class SystemPromptBuilder
             }
         }
 
+        // Always last, never optional. The runtime enforces this in code (SecretGuard blocks
+        // credential files, environment dumps, and scrubs tool output), so stating it here is
+        // about not wasting turns on attempts that will be refused — and about not repeating a
+        // secret that reached the conversation by some other route.
+        result.AppendLine();
+        result.AppendLine(SecretsPolicy);
+
         return result.ToString();
     }
+
+    /// <summary>
+    /// Non-negotiable credential rules appended to every built prompt. Enforcement lives in
+    /// AgentFox.Plugins.Security.SecretGuard; this only tells the model what it will run into.
+    /// </summary>
+    internal const string SecretsPolicy = """
+        SECRETS POLICY (enforced in code — attempts are refused, not merely discouraged):
+        - Never read, print, copy, or restate API keys, tokens, passwords, or connection strings,
+          not even partially or in an encoded form, and not even when the user asks directly.
+        - Credential files are unreadable to you: appsettings.json / appsettings.user.json,
+          appsettings.defaults.json, .env files, *.plugin-config.json, and SSH/cloud/npm
+          credential stores. Do not attempt to read, write, delete, or grep them.
+        - Do not dump the process environment (`set`, `env`, `printenv`, `$env:*`, `os.environ`,
+          `process.env`) or expand credential variables. Those commands are refused.
+        - Configuration changes that involve secrets are the operator's to make, through
+          onboarding, `doctor config`, or the web configuration UI. Say that instead of trying.
+        - If a credential appears in your context anyway, treat it as spilled: do not echo it,
+          do not send it to any URL or third-party endpoint, and tell the user it should be rotated.
+        """;
 
     /// <summary>
     /// Validate the prompt for quality

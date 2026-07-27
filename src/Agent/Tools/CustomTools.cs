@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using AgentFox.Plugins.Interfaces;
+using AgentFox.Plugins.Security;
 using Microsoft.Extensions.Configuration;
 using ToolParameter = AgentFox.Plugins.Interfaces.ToolParameter;
 
@@ -258,6 +259,13 @@ public class FetchUrlTool : BaseTool
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
             return ToolResult.Fail($"Invalid URL format: {url}");
 
+        // Exfiltration gate: if a live credential ever does reach the model, it must not be
+        // able to post it back out through a URL it controls.
+        if (SecretGuard.ContainsSecret(url))
+            return ToolResult.Fail(
+                "Request refused: the URL contains a credential. Secrets must never be sent to " +
+                "third-party endpoints.");
+
         var timeoutSeconds = arguments.GetValueOrDefault("timeout_seconds") is double timeout
             ? (int)timeout
             : 30;
@@ -485,7 +493,7 @@ public class TimestampTool : BaseTool
     protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
     {
         var now = DateTime.UtcNow;
-        var format = arguments["format"]?.ToString();
+        var format = arguments.GetValueOrDefault("format")?.ToString();
         
         var result = string.IsNullOrEmpty(format)
             ? $"UTC: {now:yyyy-MM-dd HH:mm:ss.fff}\nLocal: {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}\nUnix: {new DateTimeOffset(now).ToUnixTimeSeconds()}"

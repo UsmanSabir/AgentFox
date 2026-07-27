@@ -108,6 +108,12 @@ class Program
             .AddCommandLine(args);
 
         var configuration = builder.Configuration;
+
+        // Bind the credential guard before anything can run a tool. It reads the composed
+        // configuration to learn which values are live secrets, so it must come after the
+        // configuration stack is complete and before the tool registry is built.
+        AgentFox.Plugins.Security.SecretGuard.Initialize(configuration);
+
         builder.Services.AddManagementAuthentication(configuration);
 
         // Chat attachments ride inline as base64 in the /chat body, so a request can exceed

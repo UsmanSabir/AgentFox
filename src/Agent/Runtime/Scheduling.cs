@@ -419,6 +419,7 @@ public class CronScheduler : IDisposable
 {
     private readonly System.Timers.Timer _timer;
     private readonly Dictionary<string, CronJob> _jobs = new();
+    private readonly object _jobsLock = new();
     private readonly FoxAgent _agent;
     private readonly SessionManager? _sessionManager;
     private readonly ICommandQueue? _commandQueue;
@@ -450,29 +451,35 @@ public class CronScheduler : IDisposable
     /// </summary>
     public void AddJob(string name, string cronExpression, string task)
     {
-        _jobs[name] = new CronJob
+        lock (_jobsLock)
         {
-            Name = name,
-            CronExpression = cronExpression,
-            Task = task,
-            LastExecuted = DateTime.MinValue,
-            NextExecution = CalculateNextExecution(cronExpression)
-        };
+            _jobs[name] = new CronJob
+            {
+                Name = name,
+                CronExpression = cronExpression,
+                Task = task,
+                LastExecuted = DateTime.MinValue,
+                NextExecution = CalculateNextExecution(cronExpression)
+            };
+        }
         SaveJobsToFile();
     }
-    
+
     /// <summary>
     /// Update an existing cron job's schedule and/or task in place, preserving
     /// its run history (LastExecuted). Returns false if the job doesn't exist.
     /// </summary>
     public bool UpdateJob(string name, string cronExpression, string task)
     {
-        if (!_jobs.TryGetValue(name, out var job))
-            return false;
+        lock (_jobsLock)
+        {
+            if (!_jobs.TryGetValue(name, out var job))
+                return false;
 
-        job.CronExpression = cronExpression;
-        job.Task = task;
-        job.NextExecution = CalculateNextExecution(cronExpression);
+            job.CronExpression = cronExpression;
+            job.Task = task;
+            job.NextExecution = CalculateNextExecution(cronExpression);
+        }
         SaveJobsToFile();
         return true;
     }
@@ -482,7 +489,11 @@ public class CronScheduler : IDisposable
     /// </summary>
     public bool RemoveJob(string name)
     {
-        var removed = _jobs.Remove(name);
+        bool removed;
+        lock (_jobsLock)
+        {
+            removed = _jobs.Remove(name);
+        }
         if (removed) SaveJobsToFile();
         return removed;
     }
@@ -492,14 +503,23 @@ public class CronScheduler : IDisposable
     /// </summary>
     public CronJob? GetJob(string name)
     {
-        _jobs.TryGetValue(name, out var job);
-        return job;
+        lock (_jobsLock)
+        {
+            _jobs.TryGetValue(name, out var job);
+            return job;
+        }
     }
 
     /// <summary>
     /// Get all registered cron jobs.
     /// </summary>
-    public IReadOnlyDictionary<string, CronJob> GetJobs() => _jobs;
+    public IReadOnlyDictionary<string, CronJob> GetJobs()
+    {
+        lock (_jobsLock)
+        {
+            return new Dictionary<string, CronJob>(_jobs);
+        }
+    }
 
     /// <summary>
     /// Add common cron jobs
@@ -530,8 +550,14 @@ public class CronScheduler : IDisposable
     private async void OnTimerElapsed(object? sender, ElapsedEventArgs e)
     {
         var now = DateTime.UtcNow;
-        
-        foreach (var job in _jobs.Values.Where(j => j.NextExecution <= now))
+
+        List<CronJob> dueJobs;
+        lock (_jobsLock)
+        {
+            dueJobs = _jobs.Values.Where(j => j.NextExecution <= now).ToList();
+        }
+
+        foreach (var job in dueJobs)
         {
             try
             {
@@ -560,9 +586,12 @@ public class CronScheduler : IDisposable
                     result = await _agent.ProcessAsync(job.Task, sessionId);
                 }
 
-                job.LastExecuted = now;
-                job.NextExecution = CalculateNextExecution(job.CronExpression);
-                
+                lock (_jobsLock)
+                {
+                    job.LastExecuted = now;
+                    job.NextExecution = CalculateNextExecution(job.CronExpression);
+                }
+
                 JobExecuted?.Invoke(this, new CronJobExecutedEventArgs
                 {
                     Name = job.Name,
@@ -624,7 +653,13 @@ public class CronScheduler : IDisposable
             sb.AppendLine("## Jobs");
             sb.AppendLine();
 
-            if (_jobs.Count == 0)
+            List<CronJob> jobsSnapshot;
+            lock (_jobsLock)
+            {
+                jobsSnapshot = _jobs.Values.ToList();
+            }
+
+            if (jobsSnapshot.Count == 0)
             {
                 sb.AppendLine("| Name | Cron | Task |");
                 sb.AppendLine("|------|------|------|");
@@ -634,7 +669,7 @@ public class CronScheduler : IDisposable
             {
                 sb.AppendLine("| Name | Cron | Task |");
                 sb.AppendLine("|------|------|------|");
-                foreach (var job in _jobs.Values)
+                foreach (var job in jobsSnapshot)
                     sb.AppendLine($"| {job.Name} | {job.CronExpression} | {job.Task} |");
             }
 
