@@ -6,6 +6,7 @@ using AgentFox.Doctor;
 using AgentFox.Http;
 using AgentFox.LLM;
 using AgentFox.Plugins.Interfaces;
+using AgentFox.Plugins.Security;
 using AgentFox.Tools;
 using Microsoft.Extensions.Logging;
 
@@ -1057,6 +1058,16 @@ internal static class SkillHttpHelper
 
     public static async Task<ToolResult> SendAsync(string method, string url, string? body, Dictionary<string, string>? headers = null)
     {
+        // Single exfiltration gate for rest_call and graphql_query: a credential must not leave
+        // the process in a URL, a body, or a header the model composed.
+        if (SecretGuard.ContainsSecret(url) || SecretGuard.ContainsSecret(body) ||
+            (headers != null && headers.Any(h => SecretGuard.ContainsSecret(h.Value))))
+        {
+            return ToolResult.Fail(
+                "Request refused: it carries a credential. Secrets must never be sent to " +
+                "third-party endpoints.");
+        }
+
         try
         {
             var request = new HttpRequestMessage(new HttpMethod(method.ToUpperInvariant()), url);

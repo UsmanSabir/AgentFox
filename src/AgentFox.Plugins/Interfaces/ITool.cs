@@ -136,7 +136,12 @@ public abstract class BaseTool : ITool
             
             var result = await ExecuteInternalAsync(arguments);
             startTime.Stop();
-            
+
+            // Credential backstop: no tool result reaches a model or a chat transcript with a
+            // live API key in it, whatever the tool did to obtain one. Applied here so every
+            // BaseTool — core, skill, and plugin — is covered without opting in.
+            AgentFox.Plugins.Security.SecretGuard.ScrubInPlace(result);
+
             // Enhance result with metadata
             result.ToolCallId = executionId;
             result.ExecutionTimeMs = startTime.ElapsedMilliseconds;

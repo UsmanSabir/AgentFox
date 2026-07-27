@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using AgentFox.Plugins.Interfaces;
+using AgentFox.Plugins.Security;
 using AgentFox.Tools;
 
 namespace AgentFox.Runtime;
@@ -110,20 +111,22 @@ public class CodeSandbox
         
         try
         {
-            using var process = new Process
+            var startInfo = new ProcessStartInfo
             {
-                StartInfo = new ProcessStartInfo
-                {
-                    FileName = fileName,
-                    Arguments = arguments,
-                    WorkingDirectory = workingDir,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                }
+                FileName = fileName,
+                Arguments = arguments,
+                WorkingDirectory = workingDir,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
             };
-            
+            // Sandboxed code inherits our environment, so without this every `os.environ` in
+            // Python or `process.env` in Node would read the operator's provider keys.
+            SecretGuard.SanitizeChildEnvironment(startInfo);
+
+            using var process = new Process { StartInfo = startInfo };
+
             process.Start();
             
             var timeoutTask = Task.Delay(TimeSpan.FromSeconds(_timeoutSeconds));
@@ -221,7 +224,13 @@ public class CodeExecutionTool : BaseTool
         
         if (string.IsNullOrEmpty(language) || string.IsNullOrEmpty(code))
             return ToolResult.Fail("Language and code are required");
-        
+
+        // The sandbox restricts nothing about what code may read, so credential harvesting is
+        // rejected before compilation. The child process also runs without secret env vars,
+        // and the result is scrubbed on the way out — three chances to stop the same leak.
+        if (SecretGuard.TryDenyPayload(code, out var denial))
+            return ToolResult.Fail(denial);
+
         CodeExecutionResult result;
         
         switch (language)

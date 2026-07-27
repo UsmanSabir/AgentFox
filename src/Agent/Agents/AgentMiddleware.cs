@@ -199,22 +199,24 @@ internal sealed class DynamicAgentMiddleware : DelegatingChatClient
                 // First drop: materialise the survivors seen so far, then skip this one.
                 kept ??= [.. messages.Take(i)];
 
-                // Log enough to identify the producer without dumping message content: the
-                // dropped message's role and index, its neighbours' roles, the content-part
-                // types it carried, and the roles of the whole batch for shape context.
-                var prev = i > 0 ? messages[i - 1].Role.Value : "(none)";
-                var next = i < messages.Count - 1 ? messages[i + 1].Role.Value : "(none)";
-                var partTypes = msg.Contents.Count == 0
-                    ? "(no content parts)"
-                    : string.Join(", ", msg.Contents.Select(c => c.GetType().Name));
-                var batchRoles = string.Join(" > ", messages.Select(m => m.Role.Value));
+                // Routine defense-in-depth, not a warning-worthy event — the upstream empty-task
+                // guard already prevents this in the common case. Kept at Debug (dormant under the
+                // default Warning MinLevel) so it doesn't spam logs; raise Logging:MinLevel to
+                // "Debug" to see which messages are being dropped and why.
+                if (_logger?.IsEnabled(LogLevel.Debug) == true)
+                {
+                    var prev = i > 0 ? messages[i - 1].Role.Value : "(none)";
+                    var next = i < messages.Count - 1 ? messages[i + 1].Role.Value : "(none)";
+                    var partTypes = msg.Contents.Count == 0
+                        ? "(no content parts)"
+                        : string.Join(", ", msg.Contents.Select(c => c.GetType().Name));
 
-                _logger?.LogWarning(
-                    "Dropped empty {Role} message at index {Index} of {Count} before LLM call "
-                    + "(prev={Prev}, next={Next}); content parts: [{PartTypes}]; batch roles: {BatchRoles}. "
-                    + "This message had no sendable content and would have caused a provider 400 "
-                    + "(\"message must have content\").",
-                    msg.Role.Value, i, messages.Count, prev, next, partTypes, batchRoles);
+                    _logger.LogDebug(
+                        "Dropped empty {Role} message at index {Index} of {Count} before LLM call "
+                        + "(prev={Prev}, next={Next}); content parts: [{PartTypes}]. This message had "
+                        + "no sendable content and would have caused a provider 400 (\"message must have content\").",
+                        msg.Role.Value, i, messages.Count, prev, next, partTypes);
+                }
             }
         }
 

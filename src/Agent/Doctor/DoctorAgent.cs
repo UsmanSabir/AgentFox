@@ -37,15 +37,20 @@ public class DoctorAgent
         if (currentJson == null)
             return "Cannot read appsettings.json";
 
+        var maskedJson = MaskSecrets(currentJson, out var secrets);
+        if (maskedJson == null)
+            return "Cannot parse appsettings.json — refusing to send it unmasked to the model";
+
         var prompt =
             $"You are a configuration assistant for AgentFox. " +
             $"You will be given the current appsettings.json and a user request. " +
             $"Return ONLY the complete updated JSON — no explanation, no markdown, no code fences. " +
-            $"Preserve all existing settings unless the request requires changing them.\n\n" +
-            $"Current config:\n{currentJson}\n\n" +
+            $"Preserve all existing settings unless the request requires changing them.\n" +
+            SecretMaskInstruction +
+            $"\nCurrent config:\n{maskedJson}\n\n" +
             $"User request: {userRequest}";
 
-        return await RunUpdateFlowAsync(currentJson, prompt, ct);
+        return await RunUpdateFlowAsync(currentJson, prompt, secrets, ct);
     }
 
     /// <summary>Fix a specific configuration issue found by a health check.</summary>
@@ -57,22 +62,31 @@ public class DoctorAgent
         if (currentJson == null)
             return new FixResult(false, "Cannot read appsettings.json");
 
+        var maskedJson = MaskSecrets(currentJson, out var secrets);
+        if (maskedJson == null)
+            return new FixResult(false, "Cannot parse appsettings.json — refusing to send it unmasked to the model");
+
         var prompt =
             $"You are a configuration assistant for AgentFox. " +
             $"A health check has detected a configuration issue. " +
             $"Fix the issue and return ONLY the complete updated JSON — no explanation, no markdown, no code fences. " +
-            $"Preserve all existing settings that are not related to the issue.\n\n" +
-            $"Current config:\n{currentJson}\n\n" +
+            $"Preserve all existing settings that are not related to the issue.\n" +
+            SecretMaskInstruction +
+            $"\nCurrent config:\n{maskedJson}\n\n" +
             $"Issue to fix: {issueDescription}";
 
-        var result = await RunUpdateFlowAsync(currentJson, prompt, ct);
+        var result = await RunUpdateFlowAsync(currentJson, prompt, secrets, ct);
         bool success = result.StartsWith("✓") || result.Contains("written");
         return new FixResult(success, result, RequiresRestart: true);
     }
 
     // ── Internal flow ─────────────────────────────────────────────────────────
 
-    private async Task<string> RunUpdateFlowAsync(string currentJson, string prompt, CancellationToken ct)
+    private async Task<string> RunUpdateFlowAsync(
+        string currentJson,
+        string prompt,
+        Dictionary<string, JsonNode?> secrets,
+        CancellationToken ct)
     {
         // 1. Ask the LLM to generate updated config
         DoctorUI.ReportHealthy("Asking LLM to generate updated configuration...");
@@ -115,6 +129,11 @@ public class DoctorAgent
             DoctorUI.ReportCritical($"LLM returned invalid JSON: {ex.Message}");
             return $"LLM returned invalid JSON — no changes written";
         }
+
+        // 2b. Put the real credentials back. The model only ever saw the mask, so every masked
+        // value it echoed — and every one it dropped on the floor while rewriting — is restored
+        // from the file it never read.
+        RestoreSecrets(updatedNode, secrets);
 
         // 3. Show diff (which top-level keys changed or were added)
         ShowDiff(currentJson, updatedNode);
@@ -176,6 +195,134 @@ public class DoctorAgent
         {
             DoctorUI.ReportWarning("Could not compute diff");
         }
+    }
+
+    // ── Credential masking ────────────────────────────────────────────────────
+    //
+    // The Doctor's whole job is to hand appsettings.json to a model and write back what it
+    // returns — which means the operator's API keys, bot tokens, and connection strings would
+    // otherwise be uploaded to a provider on every `doctor config` call. Secrets go out masked
+    // and come back restored from disk, so the model edits the shape of the file without ever
+    // seeing its credentials.
+
+    internal const string SecretMask = "********";
+
+    private const string SecretMaskInstruction =
+        "Credential values (API keys, tokens, passwords) have been replaced with \"" + SecretMask +
+        "\". Leave them exactly as \"" + SecretMask + "\" — they are restored from disk after you " +
+        "reply, and inventing a value would overwrite a working credential. Only write a real " +
+        "credential when the request explicitly supplies one.\n";
+
+    /// <summary>
+    /// Returns the configuration JSON with every credential value replaced by
+    /// <see cref="SecretMask"/>, and the originals collected by <c>a:b:c</c> path for
+    /// <see cref="RestoreSecrets"/>. Null when the file cannot be parsed — the caller must then
+    /// refuse rather than fall back to sending the raw text.
+    /// </summary>
+    internal static string? MaskSecrets(string json, out Dictionary<string, JsonNode?> secrets)
+    {
+        secrets = new Dictionary<string, JsonNode?>(StringComparer.Ordinal);
+
+        JsonNode? root;
+        try
+        {
+            // appsettings.json carries // comments and trailing commas by convention.
+            root = JsonNode.Parse(json, documentOptions: new JsonDocumentOptions
+            {
+                CommentHandling = JsonCommentHandling.Skip,
+                AllowTrailingCommas = true
+            });
+        }
+        catch
+        {
+            return null;
+        }
+        if (root is null) return null;
+
+        MaskNode(root, string.Empty, secrets);
+        return root.ToJsonString(_jsonOpts);
+    }
+
+    private static void MaskNode(JsonNode? node, string path, Dictionary<string, JsonNode?> secrets)
+    {
+        switch (node)
+        {
+            case JsonObject obj:
+                foreach (var (key, value) in obj.ToList())
+                {
+                    var childPath = path.Length == 0 ? key : $"{path}:{key}";
+                    if (AgentFox.Plugins.Security.SecretGuard.IsSecretName(key) &&
+                        value is JsonValue && value.GetValueKind() == JsonValueKind.String &&
+                        !string.IsNullOrEmpty(value.GetValue<string>()))
+                    {
+                        secrets[childPath] = value.DeepClone();
+                        obj[key] = SecretMask;
+                    }
+                    else
+                    {
+                        MaskNode(value, childPath, secrets);
+                    }
+                }
+                break;
+
+            case JsonArray array:
+                for (var i = 0; i < array.Count; i++)
+                    MaskNode(array[i], $"{path}:{i}", secrets);
+                break;
+        }
+    }
+
+    internal static void RestoreSecrets(JsonNode updated, Dictionary<string, JsonNode?> secrets)
+    {
+        foreach (var (path, original) in secrets)
+        {
+            var segments = path.Split(':');
+            var parent = ResolveParent(updated, segments, out var leaf);
+            if (parent is null) continue;
+
+            switch (parent)
+            {
+                // The model echoed the mask, dropped the key entirely, or replaced it with
+                // something that is not a real credential — restore in all three cases. A value
+                // the request explicitly supplied is left alone.
+                case JsonObject obj when !obj.ContainsKey(leaf) || IsMaskOrEmpty(obj[leaf]):
+                    obj[leaf] = original?.DeepClone();
+                    break;
+                case JsonArray array when int.TryParse(leaf, out var index)
+                                          && index >= 0 && index < array.Count
+                                          && IsMaskOrEmpty(array[index]):
+                    array[index] = original?.DeepClone();
+                    break;
+            }
+        }
+    }
+
+    /// <summary>Walks to the container holding the last path segment, creating nothing.</summary>
+    private static JsonNode? ResolveParent(JsonNode root, string[] segments, out string leaf)
+    {
+        leaf = segments[^1];
+        var current = root;
+
+        for (var i = 0; i < segments.Length - 1; i++)
+        {
+            current = current switch
+            {
+                JsonObject obj => obj.TryGetPropertyValue(segments[i], out var next) ? next : null,
+                JsonArray array when int.TryParse(segments[i], out var index)
+                                     && index >= 0 && index < array.Count => array[index],
+                _ => null
+            };
+            if (current is null) return null;
+        }
+        return current;
+    }
+
+    private static bool IsMaskOrEmpty(JsonNode? node)
+    {
+        if (node is null) return true;
+        if (node.GetValueKind() != JsonValueKind.String) return false;
+        var value = node.GetValue<string>();
+        return string.IsNullOrEmpty(value) || value == SecretMask;
     }
 
     private string? ReadConfigFile()

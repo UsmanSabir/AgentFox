@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using AgentFox.Plugins.Interfaces;
+using AgentFox.Plugins.Security;
 using ToolParameter = AgentFox.Plugins.Interfaces.ToolParameter;
 
 namespace AgentFox.Tools;
@@ -40,21 +41,28 @@ public class ShellCommandTool : BaseTool
             return ToolResult.Fail($"Access to working directory '{resolvedDir}' is denied by workspace configuration.");
         }
 
+        // A shell is the widest credential-exfiltration path in the process: `set` dumps the
+        // environment and `type appsettings.user.json` prints the key file. Refuse the command
+        // outright, then start the child with secrets stripped from its environment so a
+        // spelling we did not anticipate has nothing left to read.
+        if (SecretGuard.TryDenyPayload(command, out var denial))
+            return ToolResult.Fail(denial);
+
         try
         {
-            var process = new Process
+            var startInfo = new ProcessStartInfo
             {
-                StartInfo = new ProcessStartInfo
-                {
-                    FileName = "cmd.exe",
-                    Arguments = $"/c {command}",
-                    WorkingDirectory = resolvedDir,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                }
+                FileName = "cmd.exe",
+                Arguments = $"/c {command}",
+                WorkingDirectory = resolvedDir,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
             };
+            SecretGuard.SanitizeChildEnvironment(startInfo);
+
+            var process = new Process { StartInfo = startInfo };
 
             process.Start();
             var output = await process.StandardOutput.ReadToEndAsync();
@@ -105,6 +113,11 @@ public class ReadFileTool : BaseTool
         if (!_workspaceManager.IsPathAllowed(path))
             return ToolResult.Fail($"Access to path '{path}' is denied by workspace configuration.");
 
+        // The workspace check is about location; this one is about content. appsettings.user.json
+        // sits inside the primary workspace by design, so without this the key file is readable.
+        if (SecretGuard.IsProtectedPath(path))
+            return ToolResult.Fail(SecretGuard.ProtectedPathMessage(rawPath));
+
         try
         {
             if (!File.Exists(path))
@@ -112,7 +125,10 @@ public class ReadFileTool : BaseTool
 
             var lines = await File.ReadAllLinesAsync(path);
             var startLine = Convert.ToInt32(arguments.GetValueOrDefault("start_line") ?? 1);
-            var endLine = arguments["end_line"] != null ? Convert.ToInt32(arguments["end_line"]) : lines.Length;
+            // Optional parameters must be looked up, not indexed — the model routinely omits
+            // them, and an indexer throws KeyNotFoundException instead of using the default.
+            var endLineArg = arguments.GetValueOrDefault("end_line");
+            var endLine = endLineArg != null ? Convert.ToInt32(endLineArg) : lines.Length;
 
             startLine = Math.Max(1, startLine);
             endLine = Math.Min(lines.Length, endLine);
@@ -159,6 +175,11 @@ public class WriteFileTool : BaseTool
         var path = _workspaceManager.ResolvePath(rawPath);
         if (!_workspaceManager.IsPathAllowed(path))
             return Task.FromResult(ToolResult.Fail($"Access to path '{path}' is denied by workspace configuration."));
+        // Writing is gated for the same reason reading is: an agent that can rewrite
+        // appsettings.user.json can point a provider at an attacker endpoint, or clobber the
+        // operator's keys. Config changes go through onboarding / Doctor / the web config UI.
+        if (SecretGuard.IsProtectedPath(path))
+            return Task.FromResult(ToolResult.Fail(SecretGuard.ProtectedPathMessage(rawPath)));
         if (content == null)
             return Task.FromResult(ToolResult.Fail("No content provided"));
 
@@ -212,7 +233,7 @@ public class ListFilesTool : BaseTool
 
     protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
     {
-        var rawPath = arguments["path"]?.ToString() ?? ".";
+        var rawPath = arguments.GetValueOrDefault("path")?.ToString() ?? ".";
         var recursive = Convert.ToBoolean(arguments.GetValueOrDefault("recursive") ?? false);
 
         var path = _workspaceManager.ResolvePath(rawPath);
@@ -259,9 +280,9 @@ public class SearchFilesTool : BaseTool
 
     protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
     {
-        var rawPath = arguments["path"]?.ToString() ?? ".";
+        var rawPath = arguments.GetValueOrDefault("path")?.ToString() ?? ".";
         var pattern = arguments["pattern"]?.ToString();
-        var filePattern = arguments["file_pattern"]?.ToString() ?? "*";
+        var filePattern = arguments.GetValueOrDefault("file_pattern")?.ToString() ?? "*";
 
         if (string.IsNullOrEmpty(pattern))
             return Task.FromResult(ToolResult.Fail("No search pattern provided"));
@@ -280,6 +301,11 @@ public class SearchFilesTool : BaseTool
 
             foreach (var file in files)
             {
+                // Credential files are skipped, not searched: a hit/miss on a guessed key
+                // prefix would turn this tool into an oracle for reading them one probe at a time.
+                if (SecretGuard.IsProtectedPath(file))
+                    continue;
+
                 try
                 {
                     var content = File.ReadAllText(file);
@@ -375,6 +401,10 @@ public class DeleteTool : BaseTool
         var path = _workspaceManager.ResolvePath(rawPath);
         if (!_workspaceManager.IsPathAllowed(path))
              return Task.FromResult(ToolResult.Fail($"Access to path '{path}' is denied by workspace configuration."));
+        // Deleting the key file is not a leak but it is a denial of service on the operator's
+        // configuration, and a recursive delete of an install directory would take it with it.
+        if (SecretGuard.IsProtectedPath(path))
+            return Task.FromResult(ToolResult.Fail(SecretGuard.ProtectedPathMessage(rawPath)));
 
         try
         {
@@ -419,6 +449,9 @@ public class GetEnvironmentInfoTool : BaseTool
 
     protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
     {
+        // Deliberately host facts only. Never add Environment.GetEnvironmentVariables() here —
+        // the process environment carries provider API keys, and this tool's output goes
+        // straight into model context.
         var info = $"""
             Operating System: {Environment.OSVersion}
             Machine Name: {Environment.MachineName}

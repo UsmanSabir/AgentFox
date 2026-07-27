@@ -724,7 +724,15 @@ public class FoxAgent
             SessionManager?.TouchSession(conversationId);
             _logger?.LogInformation("Agent '{AgentName}' completed task in conversation {ConversationId}", Name, conversationId);
 
-            var result = new AgentResult { Success = true, Output = responseText, References = references };
+            // Last line of defence on the way to the user: a live key must not be echoed back,
+            // even if it entered this conversation before the guard existed. Exact values only —
+            // shape patterns would mangle legitimate config documentation the agent writes.
+            var result = new AgentResult
+            {
+                Success = true,
+                Output = AgentFox.Plugins.Security.SecretGuard.ScrubKnownValues(responseText),
+                References = references
+            };
             if (_experienceLearning != null)
                 await _experienceLearning.CompleteAsync(experienceTurn, true, timeoutToken);
             return result;
@@ -1534,6 +1542,12 @@ public class AgentBuilder
         try
         {
             var result = await tool.ExecuteAsync(arguments);
+            // Credential backstop at the gateway, in addition to BaseTool's own scrub: tools
+            // that implement ITool directly (MCP bridges, ComposioToolWrapper) never pass
+            // through BaseTool, and this is the one path every model-invoked tool takes.
+            // Scrubbing before the hooks means audit trails and experience learning store the
+            // redacted text too. Scrub is idempotent, so the double pass costs nothing.
+            AgentFox.Plugins.Security.SecretGuard.ScrubInPlace(result);
             sw.Stop();
             await _toolRegistry.HookRegistry.InvokeToolPostExecuteAsync(
                 toolName, result, sw.ElapsedMilliseconds, executionId);
