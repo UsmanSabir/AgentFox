@@ -273,3 +273,57 @@ public sealed class BackgroundSubAgentDeliveryTests
         public void SetExecutor(IAgentExecutor executor) { }
     }
 }
+
+/// <summary>
+/// The console shows two distinct things when a background sub-agent reports back: the
+/// sub-agent's own output, and the agent turn reacting to it. The web client sees only what
+/// <see cref="PendingNotificationStore"/> holds, so both have to be queued and both have to be
+/// distinguishable — queueing one collapsed string is what previously made the agent's final
+/// response invisible in the web UI while it printed fine in the terminal.
+/// </summary>
+[TestClass]
+public sealed class PendingNotificationKindTests
+{
+    private const string Session = "web_abc123";
+
+    [TestMethod]
+    public void Drain_PreservesBothKindsInOrder()
+    {
+        var store = new PendingNotificationStore();
+
+        store.Add(Session, "raw sub-agent output", "run-1", PendingNotificationKind.SubAgentResult);
+        store.Add(Session, "here is what that means", "run-1", PendingNotificationKind.AgentResponse);
+
+        var drained = store.Drain(Session);
+
+        Assert.AreEqual(2, drained.Count, "Both the result and the agent's synthesis must survive.");
+        Assert.AreEqual(PendingNotificationKind.SubAgentResult, drained[0].Kind);
+        Assert.AreEqual("raw sub-agent output", drained[0].Message);
+        Assert.AreEqual(PendingNotificationKind.AgentResponse, drained[1].Kind);
+        Assert.AreEqual("here is what that means", drained[1].Message);
+    }
+
+    [TestMethod]
+    public void Add_DefaultsToSubAgentResultKind()
+    {
+        var store = new PendingNotificationStore();
+
+        // Callers that predate the kind tag (e.g. the disconnect fallbacks in the web edge)
+        // must keep producing badged background-result bubbles, not silently become replies.
+        store.Add(Session, "legacy message");
+
+        Assert.AreEqual(PendingNotificationKind.SubAgentResult, store.Drain(Session).Single().Kind);
+    }
+
+    [TestMethod]
+    public void Drain_IsDeliverOncePerConversation()
+    {
+        var store = new PendingNotificationStore();
+        store.Add(Session, "result", "run-1", PendingNotificationKind.SubAgentResult);
+        store.Add(Session, "synthesis", "run-1", PendingNotificationKind.AgentResponse);
+
+        Assert.AreEqual(2, store.Drain(Session).Count);
+        Assert.AreEqual(0, store.Drain(Session).Count, "A second poll must not replay the pair.");
+        Assert.IsFalse(store.HasPending(Session));
+    }
+}

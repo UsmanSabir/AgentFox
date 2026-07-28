@@ -25,10 +25,14 @@ public class PendingNotificationStore
     /// <summary>
     /// Add a notification for the given conversation/session.
     /// </summary>
-    public void Add(string conversationId, string message, string? subAgentRunId = null)
+    public void Add(
+        string conversationId,
+        string message,
+        string? subAgentRunId = null,
+        string kind = PendingNotificationKind.SubAgentResult)
     {
         var queue = _store.GetOrAdd(conversationId, _ => new ConcurrentQueue<PendingNotification>());
-        queue.Enqueue(new PendingNotification(message, DateTime.UtcNow, subAgentRunId));
+        queue.Enqueue(new PendingNotification(message, DateTime.UtcNow, subAgentRunId, kind));
     }
 
     /// <summary>
@@ -91,8 +95,26 @@ public class PendingNotificationStore
     }
 }
 
+/// <summary>
+/// What a queued notification represents, so the web client can render it the way the
+/// console does: the sub-agent's own report and the agent's reaction to it are two
+/// different things and must not be collapsed into one bubble.
+/// </summary>
+public static class PendingNotificationKind
+{
+    /// <summary>Raw output produced by the background sub-agent itself.</summary>
+    public const string SubAgentResult = "subagent_result";
+
+    /// <summary>The parent agent's turn reacting to that result — a normal assistant reply.</summary>
+    public const string AgentResponse = "agent_response";
+
+    /// <summary>Delivery problem the user needs to see (relay failed, agent turn errored).</summary>
+    public const string Notice = "notice";
+}
+
 /// <summary>A single queued notification from a completed background sub-agent.</summary>
 public record PendingNotification(
     string Message,
     DateTime Timestamp,
-    string? SubAgentRunId);
+    string? SubAgentRunId,
+    string Kind = PendingNotificationKind.SubAgentResult);

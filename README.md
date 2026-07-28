@@ -1,6 +1,11 @@
 # AgentFox 🦊
 
-A powerful multi-agent AI framework in C# with support for sub-agents, memory, MCP, skills, and channel integrations.
+**Your own AI agent, running on your computer.** Chat with it on WhatsApp, Telegram, Discord,
+Slack, or Microsoft Teams and it handles things for you — answering questions, browsing the web,
+managing files, running scheduled tasks, and more. No coding required to use it.
+
+*(Built in C#, if you're into that — see [Features](#features) and the
+[Developer Guide](docs/DEVELOPMENT.md) below.)*
 
 ## Features
 
@@ -14,75 +19,110 @@ A powerful multi-agent AI framework in C# with support for sub-agents, memory, M
 
 ## Installation
 
-The installer checks dependencies (.NET SDK 10.0, Git), downloads a prebuilt binary from GitHub
-Releases (or builds from source), drops an `agentfox` launcher into `~/.agentfox`, and **adds that
-directory to your PATH** so you can run `agentfox` from anywhere (open a new terminal after install
-for the PATH change to take effect). When run in a terminal it finishes by launching the
-interactive setup wizard, which configures the LLM provider, plugin credentials (e.g. the Trading
-plugin's AHK login, PIN and allowed symbols), and optionally installs the system service — then
-either starts the agent or, if the service is already running, points you at the web UI. Pass
-`-SkipOnboarding` / `--skip-onboarding` to skip the wizard; re-run it any time with
-`agentfox --onboarding`.
+Installing sets everything up automatically: it checks for required software and installs
+anything missing (like .NET), downloads AgentFox, and finishes with a friendly setup wizard that
+asks a few questions (which AI provider to use, any account logins for plugins, etc.) and then
+starts the agent for you. You don't need to know what any of that means — just follow the steps
+below for your operating system.
 
-### Windows (PowerShell)
+Two flavors are available:
 
-Run in an **elevated** PowerShell:
+- **Recommended** — includes the optional Trading plugin (for automated stock trading signals).
+  See the **⚠️ Trading plugin safety** section further down this page before you turn it on.
+- **Without Trading** — a leaner install that skips that plugin entirely.
+
+Pick the one command for your system below, copy it, paste it into the terminal, and press Enter.
+
+### 🪟 Windows
+
+1. Click the **Start** button, type `PowerShell`, right-click **Windows PowerShell**, and choose
+   **Run as administrator**.
+2. Paste in **one** of the commands below and press Enter.
+
+**Recommended (with the Trading plugin):**
 
 ```powershell
-# With the Trading plugin (default)
 irm https://raw.githubusercontent.com/UsmanSabir/AgentFox/main/install.ps1 | iex
+```
 
-# Without the Trading plugin
+**Without the Trading plugin:**
+
+```powershell
 $env:AGENTFOX_NO_TRADING = '1'; irm https://raw.githubusercontent.com/UsmanSabir/AgentFox/main/install.ps1 | iex
 ```
 
-Or download first and use parameters:
+That's it — the setup wizard will walk you through the rest. Once it's done, close and reopen your
+terminal, then run:
 
 ```powershell
-irm https://raw.githubusercontent.com/UsmanSabir/AgentFox/main/install.ps1 -OutFile install.ps1
-.\install.ps1 -NoTrading                          # core only, no Trading plugin
-.\install.ps1 -InstallDir "C:\Tools\AgentFox"     # custom install dir
+agentfox
 ```
 
-Run it (open a new terminal first so PATH is picked up):
+to start (or restart) AgentFox any time. `agentfox --onboarding` re-runs the setup wizard, and
+`agentfox --install-service` makes it start automatically in the background (optional).
 
-```powershell
-agentfox                    # start the agent (web UI on port 8080 by default)
-agentfox --onboarding       # re-run the interactive setup wizard
-agentfox --install-service  # optional: run as a Windows service
-```
+### 🍎🐧 macOS / Linux
 
-### Linux / macOS (bash)
+1. Open the **Terminal** app.
+2. Paste in **one** of the commands below and press Enter.
+
+**Recommended (with the Trading plugin):**
 
 ```bash
-# With the Trading plugin (default)
 curl -fsSL https://raw.githubusercontent.com/UsmanSabir/AgentFox/main/install.sh | bash
+```
 
-# Without the Trading plugin
+**Without the Trading plugin:**
+
+```bash
 curl -fsSL https://raw.githubusercontent.com/UsmanSabir/AgentFox/main/install.sh | bash -s -- --no-trading
 ```
 
-Run it (open a new terminal, or `source ~/.bashrc` / `~/.zshrc`, so PATH is picked up):
+That's it — the setup wizard will walk you through the rest. Once it's done, close and reopen your
+terminal (or run `source ~/.bashrc` / `source ~/.zshrc`), then run:
 
 ```bash
-agentfox                    # start the agent (web UI on port 8080 by default)
-agentfox --onboarding       # re-run the interactive setup wizard
-agentfox --install-service  # optional: run as a system service
+agentfox
 ```
 
-### From a local clone
+to start (or restart) AgentFox any time. `agentfox --onboarding` re-runs the setup wizard, and
+`agentfox --install-service` makes it start automatically in the background (optional).
+
+### For developers: installing from a local clone
 
 ```bash
 git clone https://github.com/UsmanSabir/AgentFox.git
 cd AgentFox
+```
 
-# Windows
+**Windows:**
+
+```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1            # with trading
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -NoTrading # without trading
+```
 
-# Linux / macOS
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -NoTrading # without trading
+```
+
+**Linux / macOS:**
+
+```bash
 bash ./install.sh                # with trading
+```
+
+```bash
 bash ./install.sh --no-trading   # without trading
+```
+
+Or download the script first and pass options directly:
+
+```powershell
+irm https://raw.githubusercontent.com/UsmanSabir/AgentFox/main/install.ps1 -OutFile install.ps1
+```
+
+```powershell
+.\install.ps1 -NoTrading -InstallDir "C:\Tools\AgentFox"
 ```
 
 ### Installer options

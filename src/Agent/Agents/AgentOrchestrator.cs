@@ -54,6 +54,7 @@ public sealed class AgentOrchestrator : IHostedService
     private readonly ChannelManagerHolder _channelManagerHolder;
     private readonly SchedulingHolder _schedulingHolder;
     private readonly PendingNotificationStore _pendingNotifications;
+    private readonly ConversationEventBus _conversationEvents;
     private readonly ChannelProviderCatalog _channelProviderCatalog;
     private readonly IEnumerable<IAppModule> _modules;
     private readonly ILoggerFactory _loggerFactory;
@@ -104,6 +105,7 @@ public sealed class AgentOrchestrator : IHostedService
         ILoggerFactory loggerFactory,
         ILogger<AgentOrchestrator> logger,
         PendingNotificationStore pendingNotifications,
+        ConversationEventBus conversationEvents,
         HitlManager hitlManager,
         PlanStateStore planStore,
         AgentFox.Plugins.PluginConfigManager pluginConfigManager)
@@ -134,6 +136,7 @@ public sealed class AgentOrchestrator : IHostedService
         _loggerFactory        = loggerFactory;
         _logger               = logger;
         _pendingNotifications = pendingNotifications;
+        _conversationEvents   = conversationEvents;
         _specialistAgents = specialistAgents;
         _experienceLearning = experienceLearning;
     }
@@ -798,15 +801,66 @@ public sealed class AgentOrchestrator : IHostedService
             {
                 var rawResult    = announcement.FormatMessage();
                 var notification = $"[Background sub-agent result]\n{rawResult}";
+                var parentKey    = announcement.ParentSessionKey;
+
+                // Correlates the live stream with the durable notifications queued below, so a
+                // client that watched the turn arrive can drop the polled copy of the same thing.
+                var runKey = string.IsNullOrEmpty(announcement.SessionKey)
+                    ? Guid.NewGuid().ToString("N")
+                    : announcement.SessionKey;
 
                 if (isInteractive)
                 {
                     AnsiConsole.WriteLine();
-                    AnsiConsole.MarkupLine($"[bold blue][[SUB-AGENT]][/] Reporting to parent agent [dim](session: {Markup.Escape(announcement.ParentSessionKey)})[/]...");
+                    AnsiConsole.MarkupLine($"[bold blue][[SUB-AGENT]][/] Reporting to parent agent [dim](session: {Markup.Escape(parentKey)})[/]...");
                 }
 
+                // Push the sub-agent's own output first so a watching client renders it above the
+                // agent's reaction, matching the console's ordering instead of having it appear
+                // seconds later out of order when the next poll lands.
+                _conversationEvents.Publish(parentKey, "background_result", new
+                {
+                    runKey,
+                    kind    = PendingNotificationKind.SubAgentResult,
+                    message = rawResult
+                });
+
                 var notifyCmd = AgentCommand.CreateMainCommand(
-                    announcement.ParentSessionKey, agentId: agent.Id, message: notification);
+                    parentKey, agentId: agent.Id, message: notification);
+
+                // The turn streams to whoever is subscribed to the parent conversation. This is
+                // the piece that gives a web client the same live view the console gets: without
+                // it the browser sits silent through a multi-minute turn and then receives one
+                // finished blob on its next poll. Publishing never blocks or throws, so a slow or
+                // absent subscriber cannot affect the turn.
+                notifyCmd.Streaming = new StreamingCallbacks
+                {
+                    OnStart = () =>
+                    {
+                        _conversationEvents.Publish(parentKey, "background_turn_started", new { runKey });
+                        return Task.CompletedTask;
+                    },
+                    OnToken = token =>
+                    {
+                        _conversationEvents.Publish(parentKey, "background_token", new { runKey, token });
+                        return Task.CompletedTask;
+                    },
+                    OnReasoning = text =>
+                    {
+                        _conversationEvents.Publish(parentKey, "background_reasoning", new { runKey, text });
+                        return Task.CompletedTask;
+                    },
+                    OnStatus = status =>
+                    {
+                        _conversationEvents.Publish(parentKey, "background_status", new { runKey, status });
+                        return Task.CompletedTask;
+                    },
+                    OnToolActivity = activity =>
+                    {
+                        _conversationEvents.Publish(parentKey, "background_tool_activity", new { runKey, activity });
+                        return Task.CompletedTask;
+                    }
+                };
 
                 // Running the parent turn lets the LLM react to the result in context, but it is
                 // only an enrichment: it can throw, be cancelled, return Success=false, or return
@@ -841,7 +895,7 @@ public sealed class AgentOrchestrator : IHostedService
                 {
                     failure = ex.Message;
                     _logger.LogError(ex, "Sub-agent result delivery to parent session {Session} threw.",
-                        announcement.ParentSessionKey);
+                        parentKey);
                 }
 
                 if (failure != null)
@@ -851,20 +905,63 @@ public sealed class AgentOrchestrator : IHostedService
                         "({Reason}); delivering the raw result to session {Session} instead.",
                         announcement.SubAgentSessionKey ?? announcement.SessionKey,
                         failure,
-                        announcement.ParentSessionKey);
+                        parentKey);
 
                     if (isInteractive)
                         AnsiConsole.MarkupLine(
                             $"[bold red][[ERR]][/] Could not relay sub-agent result: {Markup.Escape(failure)}");
                 }
 
+                // Closes the live bubble on any watching client. Sent whether the turn produced
+                // text or not — a stream left open would spin forever on a turn that failed.
+                _conversationEvents.Publish(parentKey, "background_turn_done", new
+                {
+                    runKey,
+                    kind    = enriched != null ? PendingNotificationKind.AgentResponse : PendingNotificationKind.Notice,
+                    message = enriched ?? BuildUndeliveredNotice(failure),
+                    failure
+                });
+
                 // Always queue for web/channel clients regardless of console interactivity.
                 // isInteractive reflects the *process* console, not whether the parent
                 // session is a web session — a CLI process can serve web sessions too.
+                //
+                // The console sees two distinct things here: the sub-agent's own report and
+                // the agent's reaction to it. Queueing only one string gave the web client
+                // strictly less than the terminal — whichever of the two arrived, the other
+                // was lost with no trace. Queue both, tagged, so the UI can render the result
+                // as a background-result bubble and the synthesis as a normal assistant reply.
                 _pendingNotifications.Add(
-                    announcement.ParentSessionKey,
-                    enriched ?? BuildUndeliveredNotice(rawResult, failure),
-                    subAgentRunId: announcement.SessionKey);
+                    parentKey,
+                    rawResult,
+                    subAgentRunId: runKey,
+                    kind: PendingNotificationKind.SubAgentResult);
+
+                if (enriched != null)
+                {
+                    _pendingNotifications.Add(
+                        parentKey,
+                        enriched,
+                        subAgentRunId: runKey,
+                        kind: PendingNotificationKind.AgentResponse);
+                }
+                else
+                {
+                    _pendingNotifications.Add(
+                        parentKey,
+                        BuildUndeliveredNotice(failure),
+                        subAgentRunId: runKey,
+                        kind: PendingNotificationKind.Notice);
+                }
+
+                _logger.LogInformation(
+                    "Sub-agent {SubAgent} result queued for session {Session} "
+                    + "(raw {RawLength} chars, synthesis {SynthesisState}, {Watchers} live watcher(s)).",
+                    announcement.SubAgentSessionKey ?? announcement.SessionKey,
+                    parentKey,
+                    rawResult.Length,
+                    enriched != null ? $"{enriched.Length} chars" : "unavailable",
+                    _conversationEvents.SubscriberCount(parentKey));
 
                 return;
             }
@@ -943,17 +1040,14 @@ public sealed class AgentOrchestrator : IHostedService
     }
 
     /// <summary>
-    /// Wraps a sub-agent's raw result for the case where the parent agent turn could not relay it.
-    /// The result itself is still shown: a background task that finished must never be
-    /// indistinguishable from one that silently disappeared.
+    /// Explains why no agent synthesis accompanies a sub-agent result. The result itself is
+    /// queued separately and always shown, so a background task that finished is never
+    /// indistinguishable from one that silently disappeared — this only covers the missing
+    /// commentary on top of it.
     /// </summary>
-    private static string BuildUndeliveredNotice(string rawResult, string? failure) =>
-        $"""
-        ⚠️ A background sub-agent finished, but its result could not be relayed through the agent
-        ({failure ?? "unknown reason"}). The raw result follows.
-
-        {rawResult}
-        """;
+    private static string BuildUndeliveredNotice(string? failure) =>
+        $"⚠️ The sub-agent result above could not be relayed through the agent "
+        + $"({failure ?? "unknown reason"}), so it is shown unprocessed.";
 
     // ─────────────────────────────────────────────────────────────────────────
     // Channel loading

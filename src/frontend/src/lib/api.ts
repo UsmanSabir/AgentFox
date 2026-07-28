@@ -329,10 +329,18 @@ export interface ChannelsStatus {
   connected: number;
 }
 
+/**
+ * `subagent_result` — the background sub-agent's own report.
+ * `agent_response`  — the agent's turn reacting to that report (a normal assistant reply).
+ * `notice`          — a delivery problem worth showing the user.
+ */
+export type PendingNotificationKind = 'subagent_result' | 'agent_response' | 'notice';
+
 export interface PendingNotification {
   message: string;
   timestamp: string;
   subAgentRunId?: string;
+  kind?: PendingNotificationKind;
 }
 
 export interface PendingApprovalInfo {
@@ -731,6 +739,61 @@ export async function* streamChat(
             // malformed JSON line — skip
           }
           currentEvent = 'message';
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+/** One frame off the conversation event stream: the SSE event name and its parsed payload. */
+export interface ConversationStreamEvent {
+  event: string;
+  data: any;
+}
+
+/**
+ * Long-lived stream of live conversation events — currently the parent-session turn a finishing
+ * background sub-agent triggers, which has no chat request of its own to stream into.
+ *
+ * Uses `fetch` rather than `EventSource` because the whole `/api` group is authorized together
+ * and `EventSource` cannot send the management API key header; the alternative would be putting
+ * the key in a URL, where it ends up in logs. Reconnection is the caller's job — this returns
+ * when the connection closes, cleanly or otherwise.
+ */
+export async function* streamConversationEvents(
+  conversationId: string,
+  signal?: AbortSignal
+): AsyncGenerator<ConversationStreamEvent> {
+  const res = await fetch(`${BASE}/chat/events/${encodeURIComponent(conversationId)}`, {
+    headers: requestHeaders(),
+    signal
+  });
+
+  if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+
+  const reader  = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer       = '';
+  let currentEvent = 'message';
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+
+      for (const line of lines) {
+        // `: ping` keep-alive comments and blank separators fall through untouched.
+        if (line.startsWith('event: ')) {
+          currentEvent = line.slice(7).trim();
+        } else if (line.startsWith('data: ')) {
+          try { yield { event: currentEvent, data: JSON.parse(line.slice(6)) }; }
+          catch { /* malformed frame — skip it rather than kill the stream */ }
         }
       }
     }
