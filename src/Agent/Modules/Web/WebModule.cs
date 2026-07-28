@@ -920,6 +920,80 @@ public class WebModule : IAppModule
             checkedUtc = DateTime.UtcNow
         }));
 
+        // ── Live conversation events (background sub-agent turns) ────────────
+        // A long-lived SSE stream, opened per conversation and independent of any chat turn.
+        // Turns triggered by a finishing background sub-agent have no HTTP request of their
+        // own to stream into, so without this the browser sees nothing until the next poll
+        // delivers one finished blob — while the console watches the same turn token by token.
+        // Best-effort only: /chat/pending remains the durable path for a client that is closed
+        // or reconnecting, and events carry runKey so a client can drop the polled duplicate.
+        endpoints.MapGet("/chat/events/{conversationId}", async (
+            string conversationId,
+            ConversationEventBus bus,
+            HttpContext httpContext,
+            CancellationToken ct) =>
+        {
+            httpContext.Response.ContentType = "text/event-stream; charset=utf-8";
+            httpContext.Response.Headers.CacheControl = "no-cache";
+            httpContext.Response.Headers.Connection = "keep-alive";
+            httpContext.Response.Headers["X-Accel-Buffering"] = "no";
+            httpContext.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
+
+            using var subscription = bus.Subscribe(conversationId);
+
+            // The keep-alive ping and the event loop both write to one response body, which is
+            // not safe for concurrent writers.
+            using var writeLock = new SemaphoreSlim(1, 1);
+
+            async Task WriteRawAsync(string payload)
+            {
+                await writeLock.WaitAsync(ct);
+                try
+                {
+                    await httpContext.Response.WriteAsync(payload, ct);
+                    await httpContext.Response.Body.FlushAsync(ct);
+                }
+                finally { writeLock.Release(); }
+            }
+
+            // Idle streams are exactly the normal case here — a conversation may wait minutes
+            // for its sub-agent — so comment pings keep proxies from reaping the connection.
+            var keepAlive = Task.Run(async () =>
+            {
+                try
+                {
+                    using var timer = new PeriodicTimer(TimeSpan.FromSeconds(20));
+                    while (await timer.WaitForNextTickAsync(ct))
+                        await WriteRawAsync(": ping\n\n");
+                }
+                catch (OperationCanceledException) { /* client gone */ }
+                catch (Exception) { /* response closed mid-write */ }
+            }, ct);
+
+            try
+            {
+                await WriteRawAsync(": connected\n\n");
+
+                await foreach (var evt in subscription.Reader.ReadAllAsync(ct))
+                {
+                    var data = JsonSerializer.Serialize(evt.Payload, SseJsonOptions);
+                    await WriteRawAsync($"event: {evt.Type}\ndata: {data}\n\n");
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Client disconnected — the subscription is disposed on the way out.
+            }
+            catch (Exception)
+            {
+                // Response already torn down; nothing useful to write back.
+            }
+            finally
+            {
+                await keepAlive.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+            }
+        });
+
         // ── Pending notifications (background sub-agent results) ─────────────
         // Clients poll this after spawning a background sub-agent to receive the
         // result once it arrives. Each call drains the queue (deliver-once).
@@ -940,7 +1014,8 @@ public class WebModule : IAppModule
                 {
                     message      = n.Message,
                     timestamp    = n.Timestamp,
-                    subAgentRunId = n.SubAgentRunId
+                    subAgentRunId = n.SubAgentRunId,
+                    kind         = n.Kind
                 }),
                 pendingApproval = pendingApproval == null ? null : new
                 {

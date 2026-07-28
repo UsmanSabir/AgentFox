@@ -114,21 +114,35 @@ function Test-DotnetSdk {
 }
 
 # Downloads dotnet-install.ps1 and installs either the ASP.NET Core runtime or the full SDK.
+# NOTE: $targetDir is deliberately independent of the -InstallDir *script* parameter (that one
+# names the AgentFox install directory, not dotnet's) — always use a dedicated ~/.dotnet, same
+# as install.sh's $DOTNET_DIR.
 function Install-Dotnet {
     param([ValidateSet('Runtime', 'Sdk')][string]$Kind)
 
-    $targetDir = if ($InstallDir) { $InstallDir } else { Join-Path $HOME '.dotnet' }
+    $targetDir = Join-Path $HOME '.dotnet'
     New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
 
     $tempScript = Join-Path $env:TEMP 'dotnet-install.ps1'
     Invoke-WebRequest -Uri 'https://dot.net/v1/dotnet-install.ps1' -OutFile $tempScript
+    # Invoke-WebRequest tags the file with the Internet zone, and dotnet-install.ps1 isn't
+    # authenticode-signed, so under the default RemoteSigned execution policy the script
+    # refuses to load ("... is not digitally signed"). Unblock it and force-bypass the policy
+    # for this one child process so a locked-down default policy can't silently kill the install.
+    Unblock-File -Path $tempScript -ErrorAction SilentlyContinue
     if ($Kind -eq 'Runtime') {
         Write-Info 'Installing .NET ASP.NET Core Runtime 10.0 ...'
-        & $tempScript -Channel '10.0' -Runtime 'aspnetcore' -InstallDir $targetDir -Quality 'GA'
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $tempScript -Channel '10.0' -Runtime 'aspnetcore' -InstallDir $targetDir -Quality 'GA'
     }
     else {
         Write-Info 'Installing .NET SDK 10.0 ...'
-        & $tempScript -Channel '10.0' -InstallDir $targetDir -Quality 'GA'
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $tempScript -Channel '10.0' -InstallDir $targetDir -Quality 'GA'
+    }
+    # dotnet-install.ps1 runs as a child process: a nonzero exit code does not raise a
+    # terminating error, so without this check a failed install (bad network, bad channel,
+    # disk-full, etc.) would go unnoticed and the script would carry on as if it succeeded.
+    if ($LASTEXITCODE -ne 0) {
+        throw "dotnet-install.ps1 exited with code $LASTEXITCODE; .NET $Kind was not installed."
     }
 
     $env:PATH = "$targetDir;$env:PATH"
@@ -146,6 +160,9 @@ function Ensure-DotnetRuntime {
     if (Test-DotnetRuntime) { Write-Info 'Found .NET 10 ASP.NET Core runtime'; return }
     if (Test-DotnetSdk)     { Write-Info 'Found .NET 10 SDK (provides the runtime)'; return }
     Install-Dotnet -Kind Runtime
+    if (-not (Test-DotnetRuntime)) {
+        throw '.NET 10 ASP.NET Core runtime install reported success but the runtime is still not detectable. Try installing it manually from https://dotnet.microsoft.com/download/dotnet/10.0 and re-run this script.'
+    }
     Write-Info '.NET runtime installed.'
 }
 
@@ -153,6 +170,9 @@ function Ensure-DotnetRuntime {
 function Ensure-DotnetSdk {
     if (Test-DotnetSdk) { Write-Info "Found dotnet SDK $((& dotnet --version).Trim())"; return }
     Install-Dotnet -Kind Sdk
+    if (-not (Test-DotnetSdk)) {
+        throw '.NET 10 SDK install reported success but the SDK is still not detectable. Try installing it manually from https://dotnet.microsoft.com/download/dotnet/10.0 and re-run this script.'
+    }
     Write-Info 'dotnet SDK installed.'
 }
 

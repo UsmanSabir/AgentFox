@@ -371,6 +371,7 @@ class Program
 
         // Agent holder + channel manager holder + scheduling holder + IAgentService (used by WebModule /chat)
         builder.Services.AddSingleton<PendingNotificationStore>();
+        builder.Services.AddSingleton<ConversationEventBus>();
         builder.Services.AddSingleton<WebChatTurnCoordinator>();
         builder.Services.AddSingleton<SpecialistAgentRegistry>();
         builder.Services.AddSingleton<AgentFox.Plugins.Interfaces.IAgentRegistry>(sp =>

@@ -185,6 +185,10 @@ ensure_dotnet_runtime() {
   if dotnet_has_runtime; then info "Found .NET 10 ASP.NET Core runtime"; return; fi
   if dotnet_has_sdk; then info "Found .NET 10 SDK (provides the runtime)"; return; fi
   install_dotnet runtime
+  if ! dotnet_has_runtime; then
+    echo "dotnet-install.sh exited successfully but the ASP.NET Core 10 runtime is still not detectable. Install it manually from https://dotnet.microsoft.com/download/dotnet/10.0 and re-run this script." >&2
+    exit 1
+  fi
   info ".NET runtime installed."
 }
 
@@ -192,6 +196,10 @@ ensure_dotnet_runtime() {
 ensure_dotnet_sdk() {
   if dotnet_has_sdk; then info "Found dotnet $(dotnet --version)"; return; fi
   install_dotnet sdk
+  if ! dotnet_has_sdk; then
+    echo "dotnet-install.sh exited successfully but the .NET 10 SDK is still not detectable. Install it manually from https://dotnet.microsoft.com/download/dotnet/10.0 and re-run this script." >&2
+    exit 1
+  fi
   info "dotnet SDK installed."
 }
 

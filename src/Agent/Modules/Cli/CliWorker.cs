@@ -410,11 +410,20 @@ public sealed class CliWorker : BackgroundService
             message:    input);
         cmd.ResultSource = tcs;
 
-        var streamChannel = SysChannel.CreateUnbounded<(bool IsReasoning, string Text)>(
-            new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
+        // Created per streamed turn, not per REPL input: EnsureTodosCompletedAsync can issue bounded
+        // follow-up turns through the same callbacks, and each one starts with a fresh OnStart after
+        // the previous OnComplete closed the writer. Reusing one channel made the follow-up's first
+        // OnToken throw ChannelClosedException and fail an otherwise-fine turn.
+        Channel<(bool IsReasoning, string Text)>? streamChannel = null;
         var sb           = new StringBuilder();
         var sbReasoning  = new StringBuilder();
         Task<string>? liveDisplayTask = null;
+
+        // Signalled by OnStart. Everything between Enqueue and the first streamed token —
+        // queue wait behind other lanes' work, session restore, memory recall, the experience
+        // baseline call — happens before OnStart fires, and used to render as a dead terminal
+        // with no way to tell "thinking" from "hung".
+        var streamStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         IRenderable BuildDisplay()
         {
@@ -438,10 +447,24 @@ public sealed class CliWorker : BackgroundService
             return sb.Length == 0 ? thinkingPanel : new Rows(thinkingPanel, new Text(sb.ToString()));
         }
 
+        // Assigned below, immediately before Enqueue — so by the time the lane task can reach
+        // OnStart it is guaranteed non-null. OnStart must await it: Spectre allows only one
+        // interactive display at a time, and starting Live while the spinner still holds the
+        // exclusivity lock throws "Trying to run one or more interactive functions concurrently".
+        Task? busyTask = null;
+
         cmd.Streaming = new StreamingCallbacks
         {
-            OnStart = () =>
+            OnStart = async () =>
             {
+                streamStarted.TrySetResult();
+                if (busyTask != null)
+                    await busyTask;
+
+                var channel = SysChannel.CreateUnbounded<(bool IsReasoning, string Text)>(
+                    new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
+                streamChannel = channel;
+
                 if (!_uiConfig.RenderReasoning)
                 {
                     var table = new Table().NoBorder();
@@ -453,7 +476,7 @@ public sealed class CliWorker : BackgroundService
                         .Cropping(VerticalOverflowCropping.Top)
                         .StartAsync(async ctx =>
                         {
-                            await foreach (var (isReasoning, text) in streamChannel.Reader.ReadAllAsync())
+                            await foreach (var (isReasoning, text) in channel.Reader.ReadAllAsync())
                             {
                                 if (!isReasoning)
                                 {
@@ -472,13 +495,16 @@ public sealed class CliWorker : BackgroundService
                 }
                 else
                 {
-                    liveDisplayTask = AnsiConsole.Live(new Text(string.Empty))
+                    // Seeded with the same placeholder as the branch above: the reasoning view
+                    // stays blank until the first reasoning/text chunk lands, which on a slow
+                    // first token is indistinguishable from a stalled turn.
+                    liveDisplayTask = AnsiConsole.Live(new Text("Working..."))
                         .AutoClear(false)
                         .Overflow(VerticalOverflow.Ellipsis)
                         .Cropping(VerticalOverflowCropping.Top)
                         .StartAsync(async ctx =>
                         {
-                            await foreach (var (isReasoning, text) in streamChannel.Reader.ReadAllAsync())
+                            await foreach (var (isReasoning, text) in channel.Reader.ReadAllAsync())
                             {
                                 if (isReasoning) sbReasoning.Append(text);
                                 else             sb.Append(text);
@@ -488,26 +514,134 @@ public sealed class CliWorker : BackgroundService
                             return string.Empty;
                         });
                 }
-                return Task.CompletedTask;
             },
             OnReasoning = !_uiConfig.RenderReasoning ? null
-                : async chunk => await streamChannel.Writer.WriteAsync((true, chunk)),
-            OnToken  = async chunk => await streamChannel.Writer.WriteAsync((false, chunk)),
+                : async chunk =>
+                {
+                    var channel = streamChannel;
+                    if (channel != null) await channel.Writer.WriteAsync((true, chunk));
+                },
+            OnToken = async chunk =>
+            {
+                var channel = streamChannel;
+                if (channel != null) await channel.Writer.WriteAsync((false, chunk));
+            },
             OnComplete = async () =>
             {
-                streamChannel.Writer.TryComplete();
+                streamChannel?.Writer.TryComplete();
                 if (liveDisplayTask != null)
                     await liveDisplayTask;
             },
         };
 
+        busyTask = RunBusyIndicatorAsync(streamStarted.Task, tcs.Task);
         _commandQueue.Enqueue(cmd);
-        var result = await tcs.Task;
+
+        AgentResult result;
+        try
+        {
+            // WaitAsync so host shutdown / Ctrl-C unblocks the REPL. Without it a command that
+            // never completes its ResultSource (e.g. dropped because its lane has no handler)
+            // wedges the prompt permanently with no output.
+            result = await tcs.Task.WaitAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            // A lane that faults or cancels its ResultSource surfaces here. The Main lane
+            // converts exceptions into a failed AgentResult instead, handled further down.
+            streamStarted.TrySetResult();
+            streamChannel?.Writer.TryComplete();
+            await SafeAwaitAsync(busyTask);
+            await SafeAwaitAsync(liveDisplayTask);
+            if (ex is OperationCanceledException && ct.IsCancellationRequested) throw;
+            WriteTurnError(ex.Message);
+            return;
+        }
+
+        // Both are already finished on the normal path (OnStart drains the spinner, OnComplete
+        // awaits the live display), but a turn that fails *before* OnStart never fires either —
+        // leaving the spinner holding Spectre's exclusivity lock for every later write.
+        streamStarted.TrySetResult();
+        streamChannel?.Writer.TryComplete();
+        await SafeAwaitAsync(busyTask);
+        await SafeAwaitAsync(liveDisplayTask);
 
         AnsiConsole.WriteLine();
 
+        if (!result.Success)
+        {
+            WriteTurnError(result.Error);
+            return;
+        }
+
+        // Nothing was streamed: either the turn produced its output outside the streaming path
+        // (/new, /reset, the empty-task guard) or it produced nothing at all. Both used to print
+        // absolutely nothing, so "Session reset" and "no response" looked identical to a no-op.
+        if (sb.Length == 0)
+        {
+            if (!string.IsNullOrWhiteSpace(result.Output))
+                AnsiConsole.WriteLine(result.Output);
+            else
+                AnsiConsole.MarkupLine("[dim](no response returned)[/]");
+            AnsiConsole.WriteLine();
+        }
+
         if (result.SpawnedSubAgents.Count > 0)
             AnsiConsole.MarkupLine($"[bold blue]↳[/] Spawned [bold]{result.SpawnedSubAgents.Count}[/] sub-agent(s)");
+    }
+
+    /// <summary>
+    /// Spinner shown from the moment a turn is queued until streaming starts (or the turn ends
+    /// without ever streaming). Returns once either happens, releasing Spectre's interactive
+    /// exclusivity lock so the streaming <c>Live</c> display can take over.
+    /// </summary>
+    private async Task RunBusyIndicatorAsync(Task streamStarted, Task<AgentResult> completed)
+    {
+        var startedAt = DateTime.UtcNow;
+
+        await AnsiConsole.Status()
+            .Spinner(Spinner.Known.Dots)
+            .SpinnerStyle(Style.Parse("dodgerblue1"))
+            .StartAsync("[dim]Sending...[/]", async ctx =>
+            {
+                var settled = Task.WhenAny(streamStarted, completed);
+                while (await Task.WhenAny(settled, Task.Delay(400)) != settled)
+                {
+                    var elapsed = (int)(DateTime.UtcNow - startedAt).TotalSeconds;
+                    // Queue depth still counts this command while it waits, hence the -1: what the
+                    // user wants to know is how much other work (channel, web, cron) is in front of
+                    // them, not that their own message exists.
+                    var ahead   = Math.Max(0, _commandQueue.GetTotalQueueCount() - 1);
+                    ctx.Status(ahead > 0
+                        ? $"[dim]Queued behind {ahead} command(s)... {elapsed}s[/]"
+                        : $"[dim]Thinking... {elapsed}s[/]");
+                    ctx.Refresh();
+                }
+            });
+    }
+
+    private static void WriteTurnError(string? error)
+    {
+        var message = string.IsNullOrWhiteSpace(error) ? "The turn failed without reporting a reason." : error;
+        AnsiConsole.Write(new Panel(new Markup($"[red]{Markup.Escape(message)}[/]"))
+        {
+            Header      = new PanelHeader("[bold red] ✗ Turn failed [/]", Justify.Left),
+            Border      = BoxBorder.Rounded,
+            BorderStyle = Style.Parse("red"),
+            Padding     = new Padding(1, 0),
+        });
+        AnsiConsole.WriteLine();
+    }
+
+    /// <summary>
+    /// Awaits a display task purely for its teardown side effects. A failure inside the spinner
+    /// or live view must not replace the turn's own result (or error) with a rendering error.
+    /// </summary>
+    private async Task SafeAwaitAsync(Task? task)
+    {
+        if (task == null) return;
+        try { await task; }
+        catch (Exception ex) { _logger.LogDebug(ex, "CLI display task failed during teardown."); }
     }
 
     // ─────────────────────────────────────────────────────────────────────────

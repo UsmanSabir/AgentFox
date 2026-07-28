@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from 'svelte';
-import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoSnapshot,
+import { streamChat, streamConversationEvents, api, type SessionInfo,
+  type SpecialistAgentInfo, type TodoSnapshot, type ConversationStreamEvent,
   type ToolActivity, type ToolActivityDetails, type ChatAttachment,
   type AttachmentCapabilities } from '$lib/api';
   import { renderMarkdown } from '$lib/markdown';
@@ -26,6 +27,20 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
   let forkingMessageId: string | null = null;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let sessions: SessionInfo[] = [];
+
+  // ── Live background sub-agent turns ─────────────────────────────────────
+  // A turn kicked off by a finishing background sub-agent has no chat request of its own,
+  // so it streams over a conversation-scoped EventSource instead. Polling stays as the
+  // durable fallback; these two structures keep the two paths from double-rendering.
+  let eventAbort: AbortController | null = null;
+  /** Bumped whenever the stream is torn down, so a late frame from an old one is ignored. */
+  let streamEpoch = 0;
+  /** Open live bubbles, keyed by the server's runKey, with the text streamed so far. */
+  let backgroundTurns: Record<string, { id: string; text: string }> = {};
+  /** `kind:runKey` already rendered live → when-rendered, so the poll can skip it. */
+  const liveRendered = new Map<string, number>();
+  const LIVE_RENDER_TTL_MS = 5 * 60 * 1000;
+
   let specialists: SpecialistAgentInfo[] = [];
   let showSessions = false;
   let loadingSession = false;
@@ -210,7 +225,11 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
   $: {
     const cid = $activeConversationId;
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-    if (cid) pollTimer = setInterval(() => pollPending(cid), 3000);
+    closeEventStream();
+    if (cid) {
+      pollTimer = setInterval(() => pollPending(cid), 3000);
+      openEventStream(cid);
+    }
   }
 
   onMount(async () => {
@@ -220,14 +239,157 @@ import { streamChat, api, type SessionInfo, type SpecialistAgentInfo, type TodoS
 
   onDestroy(() => {
     if (pollTimer) clearInterval(pollTimer);
+    closeEventStream();
   });
+
+  // ── Conversation event stream ───────────────────────────────────────────
+
+  function closeEventStream() {
+    streamEpoch += 1;
+    eventAbort?.abort();
+    eventAbort = null;
+    // Bubbles from the conversation we are leaving must not stay stuck mid-stream.
+    for (const turn of Object.values(backgroundTurns)) finalizeMessage(turn.id);
+    backgroundTurns = {};
+  }
+
+  function markRenderedLive(kind: string, runKey: string) {
+    const now = Date.now();
+    for (const [key, at] of liveRendered)
+      if (now - at > LIVE_RENDER_TTL_MS) liveRendered.delete(key);
+    liveRendered.set(`${kind}:${runKey}`, now);
+  }
+
+  /** True when the poll is about to replay something the stream already showed. */
+  function alreadyRenderedLive(kind: string | undefined, runKey: string | undefined): boolean {
+    if (!kind || !runKey) return false;
+    const key = `${kind}:${runKey}`;
+    if (!liveRendered.has(key)) return false;
+    liveRendered.delete(key);
+    return true;
+  }
+
+  function openEventStream(cid: string) {
+    const epoch = ++streamEpoch;
+
+    void (async () => {
+      let backoffMs = 1000;
+
+      while (epoch === streamEpoch) {
+        const abort = new AbortController();
+        eventAbort = abort;
+
+        try {
+          for await (const frame of streamConversationEvents(cid, abort.signal)) {
+            if (epoch !== streamEpoch) return;
+            backoffMs = 1000; // a frame arrived, so the connection is healthy again
+            await handleStreamFrame(frame);
+          }
+        } catch {
+          // Backend down, restarting, or the connection dropped — retry below.
+        }
+
+        if (epoch !== streamEpoch) return;
+
+        // Backoff caps the retry rate so a backend that stays down does not become a
+        // request flood. Polling continues meanwhile, so nothing is actually lost here.
+        await new Promise(resolve => setTimeout(resolve, backoffMs));
+        backoffMs = Math.min(backoffMs * 2, 30000);
+      }
+    })();
+  }
+
+  async function handleStreamFrame({ event, data }: ConversationStreamEvent) {
+    const turn = data?.runKey ? backgroundTurns[data.runKey] : undefined;
+
+    switch (event) {
+      case 'background_result':
+        addBackgroundResultMessage(data.message);
+        markRenderedLive(data.kind ?? 'subagent_result', data.runKey);
+        await scrollToBottom();
+        break;
+
+      case 'background_turn_started': {
+        const id = addAssistantMessage('', true);
+        backgroundTurns = { ...backgroundTurns, [data.runKey]: { id, text: '' } };
+        await scrollToBottom();
+        break;
+      }
+
+      case 'background_token':
+        if (!turn) break;
+        turn.text += data.token;
+        appendToken(turn.id, data.token);
+        await scrollToBottom();
+        break;
+
+      case 'background_reasoning':
+        if (turn) appendReasoning(turn.id, data.text);
+        break;
+
+      case 'background_status':
+        if (turn) setMessageStatus(turn.id, data.status);
+        break;
+
+      case 'background_tool_activity':
+        if (turn) upsertToolActivity(turn.id, data.activity);
+        break;
+
+      case 'background_turn_done':
+        closeBackgroundTurn(data.runKey, data.kind, data.message);
+        await scrollToBottom();
+        await loadTodos();
+        await loadActivity();
+        break;
+    }
+  }
+
+  /**
+   * Settles a live bubble. `message` is the server's authoritative final text: it replaces
+   * nothing when tokens already streamed, fills the bubble when we joined too late to see
+   * them, and is appended for a notice explaining why no synthesis exists.
+   */
+  function closeBackgroundTurn(runKey: string, kind: string, message: string) {
+    markRenderedLive(kind, runKey);
+    const turn = backgroundTurns[runKey];
+
+    if (!turn) {
+      if (!message) return;
+      if (kind === 'agent_response') addAssistantMessage(message);
+      else addBackgroundResultMessage(message);
+      return;
+    }
+
+    const streamed = turn.text.trim();
+    if (message && (!streamed || kind !== 'agent_response'))
+      appendToken(turn.id, streamed ? `\n\n${message}` : message);
+
+    finalizeMessage(turn.id);
+    const { [runKey]: _closed, ...rest } = backgroundTurns;
+    backgroundTurns = rest;
+  }
 
   async function pollPending(cid: string) {
     try {
       const data = await api.pendingNotifications(cid);
       if (data.count > 0) {
         for (const n of data.notifications) {
-          addBackgroundResultMessage(n.message);
+          // Already on screen from the live stream — drain it and move on.
+          if (alreadyRenderedLive(n.kind, n.subAgentRunId)) continue;
+
+          // A bubble left open by a stream that dropped before its done event: settle it
+          // here rather than leaving it spinning forever.
+          if (n.subAgentRunId && backgroundTurns[n.subAgentRunId]) {
+            closeBackgroundTurn(n.subAgentRunId, n.kind ?? 'agent_response', n.message);
+            continue;
+          }
+
+          // The agent's reaction to a background result is an ordinary assistant reply and
+          // reads as one; only the sub-agent's own report (and delivery notices) carry the
+          // "background result" badge. Untagged notifications come from older servers and
+          // keep the previous badged rendering.
+          if (n.kind === 'agent_response') addAssistantMessage(n.message);
+          else addBackgroundResultMessage(n.message);
         }
         await scrollToBottom();
       }
