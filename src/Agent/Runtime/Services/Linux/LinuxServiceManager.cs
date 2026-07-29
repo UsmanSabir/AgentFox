@@ -16,8 +16,13 @@ public class LinuxServiceManager : IServiceManager
     public string PlatformName => "Linux";
 
     private string SystemdUnitPath => $"/etc/systemd/system/{_config.ServiceName}.service";
+
+    // {workspace} resolves to the install directory, NOT the current directory: the CWD belongs
+    // to whoever happened to run the installer and is meaningless to a boot-time service.
     private string LogPath => _config.LogPath
-        .Replace("{workspace}", Directory.GetCurrentDirectory());
+        .Replace("{workspace}", ServiceLauncher.InstallDirectory);
+
+    private static bool IsRoot => ServiceLauncher.IsRootUser;
 
     public LinuxServiceManager(ServiceConfig config, ILogger? logger = null)
     {
@@ -41,24 +46,30 @@ public class LinuxServiceManager : IServiceManager
             // Generate systemd unit file
             string unitFile = GenerateSystemdUnitFile();
 
+            // The log directory has to exist before systemd opens the append: targets, or the
+            // unit fails to start with a permission/ENOENT error on StandardOutput.
+            string? logDir = Path.GetDirectoryName(LogPath);
+            if (!string.IsNullOrEmpty(logDir))
+                await RunPrivilegedAsync("mkdir", "-p", logDir);
+
             // Write to /etc/systemd/system (requires root)
             var writeResult = await WriteFileAsync(SystemdUnitPath, unitFile);
             if (!writeResult.success)
             {
-                return new ServiceResult(false, 
+                return new ServiceResult(false,
                     $"Failed to create systemd unit file at '{SystemdUnitPath}'",
                     $"Error: {writeResult.error}\n\nNote: Service installation requires root/sudo privileges.\n" +
-                    "Run: sudo dotnet run -- --install-service");
+                    "Run: sudo agentfox --install-service");
             }
 
             // Set file permissions
-            await RunCommandAsync("chmod", $"644 {SystemdUnitPath}");
+            await RunPrivilegedAsync("chmod", "644", SystemdUnitPath);
 
             // Reload systemd daemon
-            var reloadResult = await RunCommandAsync("systemctl", "daemon-reload");
+            var reloadResult = await RunPrivilegedAsync("systemctl", "daemon-reload");
             if (!reloadResult.success)
             {
-                return new ServiceResult(false, 
+                return new ServiceResult(false,
                     $"Failed to reload systemd daemon",
                     reloadResult.output);
             }
@@ -66,10 +77,10 @@ public class LinuxServiceManager : IServiceManager
             // Enable service (auto-start on boot)
             if (_config.AutoStart)
             {
-                var enableResult = await RunCommandAsync("systemctl", $"enable {_config.ServiceName}");
+                var enableResult = await RunPrivilegedAsync("systemctl", "enable", _config.ServiceName);
                 if (!enableResult.success)
                 {
-                    return new ServiceResult(false, 
+                    return new ServiceResult(false,
                         $"Failed to enable service for auto-start",
                         enableResult.output);
                 }
@@ -105,22 +116,22 @@ public class LinuxServiceManager : IServiceManager
             }
 
             // Stop the service first
-            await RunCommandAsync("systemctl", $"stop {_config.ServiceName}");
+            await RunPrivilegedAsync("systemctl", "stop", _config.ServiceName);
 
             // Disable auto-start
-            await RunCommandAsync("systemctl", $"disable {_config.ServiceName}");
+            await RunPrivilegedAsync("systemctl", "disable", _config.ServiceName);
 
             // Remove unit file
-            var removeResult = await RunCommandAsync("rm", $"-f {SystemdUnitPath}");
-            if (!removeResult.success)
+            var removeResult = await RunPrivilegedAsync("rm", "-f", SystemdUnitPath);
+            if (!removeResult.success && File.Exists(SystemdUnitPath))
             {
-                return new ServiceResult(false, 
+                return new ServiceResult(false,
                     $"Failed to remove systemd unit file",
                     removeResult.output);
             }
 
             // Reload systemd daemon
-            await RunCommandAsync("systemctl", "daemon-reload");
+            await RunPrivilegedAsync("systemctl", "daemon-reload");
 
             _logger?.LogInformation($"Service '{_config.ServiceName}' uninstalled successfully.");
 
@@ -148,7 +159,7 @@ public class LinuxServiceManager : IServiceManager
                     $"Service '{_config.ServiceName}' is not installed.");
             }
 
-            var result = await RunCommandAsync("systemctl", $"start {_config.ServiceName}");
+            var result = await RunPrivilegedAsync("systemctl", "start", _config.ServiceName);
             if (!result.success)
             {
                 return new ServiceResult(false, 
@@ -158,7 +169,7 @@ public class LinuxServiceManager : IServiceManager
 
             // Verify it's running
             await Task.Delay(1000);
-            var statusResult = await RunCommandAsync("systemctl", $"is-active {_config.ServiceName}");
+            var statusResult = await RunCommandAsync("systemctl", "is-active", _config.ServiceName);
             
             _logger?.LogInformation($"Service '{_config.ServiceName}' started successfully.");
 
@@ -186,7 +197,7 @@ public class LinuxServiceManager : IServiceManager
                     $"Service '{_config.ServiceName}' is not installed.");
             }
 
-            var result = await RunCommandAsync("systemctl", $"stop {_config.ServiceName}");
+            var result = await RunPrivilegedAsync("systemctl", "stop", _config.ServiceName);
             if (!result.success)
             {
                 return new ServiceResult(false, 
@@ -220,7 +231,7 @@ public class LinuxServiceManager : IServiceManager
                     $"Service '{_config.ServiceName}' is not installed.");
             }
 
-            var result = await RunCommandAsync("systemctl", $"restart {_config.ServiceName}");
+            var result = await RunPrivilegedAsync("systemctl", "restart", _config.ServiceName);
             if (!result.success)
             {
                 return new ServiceResult(false, 
@@ -252,7 +263,7 @@ public class LinuxServiceManager : IServiceManager
                     $"Service '{_config.ServiceName}' is not installed.");
             }
 
-            var result = await RunCommandAsync("systemctl", $"status {_config.ServiceName}");
+            var result = await RunCommandAsync("systemctl", "status", _config.ServiceName);
             
             return new ServiceResult(true, 
                 $"Status of '{_config.ServiceName}'",
@@ -276,8 +287,10 @@ public class LinuxServiceManager : IServiceManager
             if (File.Exists(SystemdUnitPath))
                 return true;
 
-            // Also check via systemctl
-            var result = await RunCommandAsync("systemctl", $"list-units --all | grep {_config.ServiceName}");
+            // Also check via systemctl. NOTE: no shell is involved (UseShellExecute = false), so
+            // this must not contain a pipe — the old "list-units --all | grep X" was handed to
+            // systemctl as literal arguments and always failed.
+            var result = await RunCommandAsync("systemctl", "list-unit-files", $"{_config.ServiceName}.service");
             return result.success && result.output.Contains(_config.ServiceName);
         }
         catch
@@ -288,61 +301,83 @@ public class LinuxServiceManager : IServiceManager
 
     private string GenerateSystemdUnitFile()
     {
-        // Ensure log directory exists
-        string logDir = Path.GetDirectoryName(LogPath) ?? "/var/log";
-        
+        // ExecStart is built from the resolved launcher, not a hardcoded /usr/bin/dotnet: the
+        // installer provisions .NET into ~/.dotnet, so that path usually does not exist, and a
+        // framework-dependent publish ships an apphost that should be preferred anyway.
+        string execStart = string.Join(' ',
+            ServiceLauncher.BuildProgramArguments().Select(ServiceLauncher.QuoteForSystemd));
+
+        // RunAsAdmin=false previously emitted User=agentfox — an account nothing ever creates,
+        // which made the unit fail to start. Fall back to the invoking user instead.
+        string user = _config.RunAsAdmin
+            ? "root"
+            : (Environment.GetEnvironmentVariable("SUDO_USER")
+               ?? Environment.GetEnvironmentVariable("USER")
+               ?? Environment.UserName);
+
+        // Every assignment goes through QuoteForSystemd: a user-supplied value containing a quote
+        // or backslash would otherwise terminate the Environment= directive early and leave an
+        // unparseable unit behind.
+        var environment = new List<string>
+        {
+            "Environment=" + ServiceLauncher.QuoteForSystemd("DOTNET_ENVIRONMENT=Production"),
+            "Environment=" + ServiceLauncher.QuoteForSystemd($"ASPNETCORE_URLS=http://localhost:{_config.Port}"),
+        };
+        environment.AddRange(_config.EnvironmentVariables.Select(kvp =>
+            "Environment=" + ServiceLauncher.QuoteForSystemd($"{kvp.Key}={kvp.Value}")));
+
+        // A systemd directive is a single line; a newline in the display name would corrupt the unit.
+        string description = _config.GetEffectiveDisplayName().ReplaceLineEndings(" ");
+
         return $@"[Unit]
-Description={_config.GetEffectiveDisplayName()}
+Description={description}
 After=network.target
 
 [Service]
 Type=simple
-User={(_config.RunAsAdmin ? "root" : "agentfox")}
-WorkingDirectory={Directory.GetCurrentDirectory()}
-ExecStart=/usr/bin/dotnet ""{Path.Combine(AppContext.BaseDirectory, "AgentFox.dll")}"" --service-mode --modules web
+User={user}
+WorkingDirectory={ServiceLauncher.InstallDirectory}
+ExecStart={execStart}
 Restart=always
 RestartSec=10
 StandardOutput=append:{LogPath}
 StandardError=append:{LogPath}
 SyslogIdentifier={_config.ServiceName}
-Environment=""DOTNET_ENVIRONMENT=Production""
-Environment=""ASPNETCORE_URLS=http://localhost:{_config.Port}""
-{string.Join("\n", _config.EnvironmentVariables.Select(kvp => $"Environment=\"{kvp.Key}={kvp.Value}\""))}
+{string.Join("\n", environment)}
 
 [Install]
 WantedBy=multi-user.target
 ";
     }
 
-    private async Task<(bool success, string output)> RunCommandAsync(string command, string arguments)
+    /// <summary>
+    /// Runs a command with an explicit argument vector. Using ArgumentList rather than a single
+    /// Arguments string matters: .NET parses that string with Windows CRT quoting rules even on
+    /// Unix, so any embedded quote is silently eaten before the target process sees it.
+    /// </summary>
+    private static async Task<(bool success, string output)> RunCommandAsync(string command, params string[] arguments)
     {
         try
         {
             var psi = new ProcessStartInfo
             {
                 FileName = command,
-                Arguments = arguments,
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 CreateNoWindow = true
             };
+            foreach (var argument in arguments) psi.ArgumentList.Add(argument);
 
-            using (var process = Process.Start(psi))
-            {
-                if (process == null)
-                    return (false, $"Failed to start process '{command}'");
+            using var process = Process.Start(psi);
+            if (process == null)
+                return (false, $"Failed to start process '{command}'");
 
-                string output = await process.StandardOutput.ReadToEndAsync();
-                string error = await process.StandardError.ReadToEndAsync();
+            string output = await process.StandardOutput.ReadToEndAsync();
+            string error  = await process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync();
 
-                process.WaitForExit();
-
-                if (process.ExitCode == 0)
-                    return (true, output);
-
-                return (false, error.Length > 0 ? error : output);
-            }
+            return process.ExitCode == 0 ? (true, output) : (false, error.Length > 0 ? error : output);
         }
         catch (Exception ex)
         {
@@ -350,43 +385,75 @@ WantedBy=multi-user.target
         }
     }
 
-    private async Task<(bool success, string error)> WriteFileAsync(string path, string content)
+    /// <summary>
+    /// Runs a command that needs root, re-invoking it under <c>sudo -n</c> when this process is
+    /// not root. Installing previously did no elevation at all, so writing the unit file into
+    /// /etc/systemd/system simply failed for every non-root caller.
+    /// </summary>
+    private static async Task<(bool success, string output)> RunPrivilegedAsync(string command, params string[] arguments)
+    {
+        if (IsRoot)
+            return await RunCommandAsync(command, arguments);
+
+        // -n: never prompt. There is no TTY here (stdio is redirected), so an interactive sudo
+        // password prompt would hang rather than ask. Fail fast with a message the caller can act on.
+        var sudoArgs = new List<string> { "-n", command };
+        sudoArgs.AddRange(arguments);
+        var result = await RunCommandAsync("sudo", sudoArgs.ToArray());
+        if (!result.success && result.output.Contains("password", StringComparison.OrdinalIgnoreCase))
+            return (false, $"{result.output.Trim()}\nRe-run as root: sudo agentfox --install-service");
+        return result;
+    }
+
+    /// <summary>
+    /// Writes a root-owned file by streaming the content into <c>tee</c> over stdin.
+    /// </summary>
+    /// <remarks>
+    /// The previous implementation interpolated the file content into
+    /// <c>sh -c "echo '…' | tee path"</c>. Because .NET parses ProcessStartInfo.Arguments itself,
+    /// every double quote in the unit file was consumed as a grouping character before the shell
+    /// ran — the generated unit reached disk with its ExecStart quoting stripped. Passing content
+    /// on stdin removes the quoting round-trip completely.
+    /// </remarks>
+    private static async Task<(bool success, string error)> WriteFileAsync(string path, string content)
     {
         try
         {
+            if (IsRoot)
+            {
+                await File.WriteAllTextAsync(path, content);
+                return (true, "");
+            }
+
             var psi = new ProcessStartInfo
             {
-                FileName = "sh",
-                Arguments = $"-c \"echo '{EscapeForShell(content)}' | tee {path} > /dev/null\"",
+                FileName = "sudo",
                 UseShellExecute = false,
+                RedirectStandardInput = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 CreateNoWindow = true
             };
+            psi.ArgumentList.Add("-n");
+            psi.ArgumentList.Add("tee");
+            psi.ArgumentList.Add(path);
 
-            using (var process = Process.Start(psi))
-            {
-                if (process == null)
-                    return (false, "Failed to start shell process");
+            using var process = Process.Start(psi);
+            if (process == null)
+                return (false, "Failed to start 'sudo tee'");
 
-                string error = await process.StandardError.ReadToEndAsync();
-                process.WaitForExit();
+            await process.StandardInput.WriteAsync(content);
+            process.StandardInput.Close();
 
-                if (process.ExitCode == 0)
-                    return (true, "");
+            string error = await process.StandardError.ReadToEndAsync();
+            _ = await process.StandardOutput.ReadToEndAsync();   // tee echoes the content; discard it
+            await process.WaitForExitAsync();
 
-                return (false, error);
-            }
+            return process.ExitCode == 0 ? (true, "") : (false, error);
         }
         catch (Exception ex)
         {
             return (false, ex.Message);
         }
-    }
-
-    private string EscapeForShell(string text)
-    {
-        // Basic shell escaping - replace single quotes and escape for single-quoted string
-        return text.Replace("'", "'\\''");
     }
 }

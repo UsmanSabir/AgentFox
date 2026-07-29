@@ -608,6 +608,18 @@ public class OnboardingWizard
             OnboardingUI.PrintInfo("Accept it to let AgentFox register the service.");
         }
 
+        // Unix has no consent-prompt equivalent: writing the systemd unit or the LaunchDaemons
+        // plist needs root, and sudo is invoked with -n (there is no TTY here to type a password
+        // into). Say so before the attempt rather than after it fails.
+        bool needsRoot = (platform == "Linux" || (platform == "macOS" && runAsAdmin))
+                         && Environment.GetEnvironmentVariable("USER") != "root";
+        if (needsRoot)
+        {
+            OnboardingUI.PrintLine();
+            OnboardingUI.PrintWarning("Not running as root — this needs sudo without a password prompt.");
+            OnboardingUI.PrintInfo($"If it fails, re-run with:  {fallbackCmd}");
+        }
+
         // Attempt installation ─────────────────────────────────────────────────
         OnboardingUI.PrintLine();
         var serviceConfig = new ServiceConfig

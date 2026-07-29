@@ -22,10 +22,14 @@ public class MacServiceManager : IServiceManager
         ? $"/Library/LaunchDaemons/com.agentfox.{_config.ServiceName}.plist"
         : $"{Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)}/Library/LaunchAgents/com.agentfox.{_config.ServiceName}.plist";
 
+    // {workspace} resolves to the install directory, NOT the current directory: the CWD belongs
+    // to whoever happened to run the installer and is meaningless to a boot-time daemon.
     private string LogPath => _config.LogPath
-        .Replace("{workspace}", Directory.GetCurrentDirectory());
+        .Replace("{workspace}", ServiceLauncher.InstallDirectory);
 
     private string PlistIdentifier => $"com.agentfox.{_config.ServiceName}";
+
+    private static bool IsRoot => ServiceLauncher.IsRootUser;
 
     public MacServiceManager(ServiceConfig config, ILogger? logger = null)
     {
@@ -64,23 +68,26 @@ public class MacServiceManager : IServiceManager
                     $"Failed to create launchd plist at '{LaunchPlistPath}'",
                     $"Error: {writeResult.error}\n\n" +
                     (IsSystemWide ? "Note: System-wide service installation requires admin/sudo privileges.\n" +
-                    "Run: sudo dotnet run -- --install-service" 
+                    "Run: sudo agentfox --install-service"
                     : "Note: Per-user service installation requires write access to ~/Library/LaunchAgents"));
             }
 
             // Set proper file permissions
             if (IsSystemWide)
             {
-                await RunCommandAsync("sudo", $"chmod 644 {LaunchPlistPath}");
-                await RunCommandAsync("sudo", $"chown root:wheel {LaunchPlistPath}");
+                await RunPrivilegedAsync("chmod", "644", LaunchPlistPath);
+                await RunPrivilegedAsync("chown", "root:wheel", LaunchPlistPath);
             }
             else
             {
-                await RunCommandAsync("chmod", $"644 {LaunchPlistPath}");
+                await RunCommandAsync("chmod", "644", LaunchPlistPath);
             }
 
-            // Load the service
-            var loadResult = await RunCommandAsync("launchctl", $"load {LaunchPlistPath}");
+            // Load the service. A system-wide daemon must be loaded as root, or launchctl
+            // reports success while silently doing nothing for the LaunchDaemons domain.
+            var loadResult = IsSystemWide
+                ? await RunPrivilegedAsync("launchctl", "load", "-w", LaunchPlistPath)
+                : await RunCommandAsync("launchctl", "load", "-w", LaunchPlistPath);
             if (!loadResult.success && !loadResult.output.Contains("already loaded"))
             {
                 return new ServiceResult(false, 
@@ -119,15 +126,19 @@ public class MacServiceManager : IServiceManager
             }
 
             // Unload the service
-            var unloadResult = await RunCommandAsync("launchctl", $"unload {LaunchPlistPath}");
+            var unloadResult = IsSystemWide
+                ? await RunPrivilegedAsync("launchctl", "unload", "-w", LaunchPlistPath)
+                : await RunCommandAsync("launchctl", "unload", "-w", LaunchPlistPath);
             if (!unloadResult.success)
             {
                 _logger?.LogWarning($"Warning: Failed to unload service, continuing with removal: {unloadResult.output}");
             }
 
             // Remove plist file
-            var removeResult = await RunCommandAsync("rm", $"-f {LaunchPlistPath}");
-            if (!removeResult.success)
+            var removeResult = IsSystemWide
+                ? await RunPrivilegedAsync("rm", "-f", LaunchPlistPath)
+                : await RunCommandAsync("rm", "-f", LaunchPlistPath);
+            if (!removeResult.success && File.Exists(LaunchPlistPath))
             {
                 return new ServiceResult(false, 
                     $"Failed to remove launchd plist file",
@@ -160,7 +171,9 @@ public class MacServiceManager : IServiceManager
                     $"Service '{_config.ServiceName}' is not installed.");
             }
 
-            var result = await RunCommandAsync("launchctl", $"start {PlistIdentifier}");
+            var result = IsSystemWide
+                ? await RunPrivilegedAsync("launchctl", "start", PlistIdentifier)
+                : await RunCommandAsync("launchctl", "start", PlistIdentifier);
             if (!result.success && !result.output.Contains("already running"))
             {
                 return new ServiceResult(false, 
@@ -194,7 +207,9 @@ public class MacServiceManager : IServiceManager
                     $"Service '{_config.ServiceName}' is not installed.");
             }
 
-            var result = await RunCommandAsync("launchctl", $"stop {PlistIdentifier}");
+            var result = IsSystemWide
+                ? await RunPrivilegedAsync("launchctl", "stop", PlistIdentifier)
+                : await RunCommandAsync("launchctl", "stop", PlistIdentifier);
             if (!result.success)
             {
                 return new ServiceResult(false, 
@@ -253,13 +268,13 @@ public class MacServiceManager : IServiceManager
                     $"Service '{_config.ServiceName}' is not installed.");
             }
 
-            var listResult = await RunCommandAsync("launchctl", $"list | grep {PlistIdentifier}");
-            
-            var infoResult = await RunCommandAsync("launchctl", $"info {PlistIdentifier}");
+            // No shell here (UseShellExecute = false), so a pipe cannot be used: the old
+            // "list | grep X" was passed to launchctl as literal arguments and always failed.
+            var listResult = await RunCommandAsync("launchctl", "list", PlistIdentifier);
 
             return new ServiceResult(true, 
                 $"Status of '{_config.ServiceName}'",
-                listResult.output.Length > 0 ? listResult.output : infoResult.output);
+                listResult.output.Length > 0 ? listResult.output : "Not currently loaded.");
         }
         catch (Exception ex)
         {
@@ -280,8 +295,9 @@ public class MacServiceManager : IServiceManager
                 return true;
 
             // Also check via launchctl
-            var result = await RunCommandAsync("launchctl", $"list | grep {PlistIdentifier}");
-            return result.success && result.output.Contains(PlistIdentifier);
+            // `launchctl list <label>` exits non-zero when the job is unknown - no pipe needed.
+            var result = await RunCommandAsync("launchctl", "list", PlistIdentifier);
+            return result.success;
         }
         catch
         {
@@ -291,90 +307,95 @@ public class MacServiceManager : IServiceManager
 
     private string GenerateLaunchPlist()
     {
-        string dllPath = Path.Combine(AppContext.BaseDirectory, "AgentFox.dll");
-        
+        // Built from the resolved launcher rather than a hardcoded /usr/bin/dotnet: SIP means
+        // nothing can live in /usr/bin on macOS (the real host is /usr/local/share/dotnet/dotnet),
+        // and install.sh provisions .NET into ~/.dotnet anyway. A published apphost wins outright.
+        string programArguments = string.Join("\n        ",
+            ServiceLauncher.BuildProgramArguments()
+                .Select(a => $"<string>{ServiceLauncher.EscapeXml(a)}</string>"));
+
+        var environment = new List<string>
+        {
+            "<key>DOTNET_ENVIRONMENT</key>",
+            "<string>Production</string>",
+            "<key>ASPNETCORE_URLS</key>",
+            $"<string>http://localhost:{_config.Port}</string>",
+        };
+        foreach (var kvp in _config.EnvironmentVariables)
+        {
+            environment.Add($"<key>{ServiceLauncher.EscapeXml(kvp.Key)}</key>");
+            environment.Add($"<string>{ServiceLauncher.EscapeXml(kvp.Value)}</string>");
+        }
+
+        // NOTE: no StartInterval. Combined with KeepAlive it told launchd to relaunch the job on
+        // a 60-second timer on top of keeping it alive, which is not what an always-on agent wants.
         return $@"<?xml version=""1.0"" encoding=""UTF-8""?>
 <!DOCTYPE plist PUBLIC ""-//Apple//DTD PLIST 1.0//EN"" ""http://www.apple.com/DTDs/PropertyList-1.0.dtd"">
 <plist version=""1.0"">
 <dict>
     <key>Label</key>
-    <string>{PlistIdentifier}</string>
-    
+    <string>{ServiceLauncher.EscapeXml(PlistIdentifier)}</string>
+
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/dotnet</string>
-        <string>{dllPath}</string>
-        <string>--service-mode</string>
-        <string>--modules</string>
-        <string>web</string>
+        {programArguments}
     </array>
-    
+
     <key>WorkingDirectory</key>
-    <string>{Directory.GetCurrentDirectory()}</string>
-    
+    <string>{ServiceLauncher.EscapeXml(ServiceLauncher.InstallDirectory)}</string>
+
     <key>StandardOutPath</key>
-    <string>{LogPath}</string>
-    
+    <string>{ServiceLauncher.EscapeXml(LogPath)}</string>
+
     <key>StandardErrorPath</key>
-    <string>{LogPath}</string>
-    
+    <string>{ServiceLauncher.EscapeXml(LogPath)}</string>
+
     <key>KeepAlive</key>
     <true/>
-    
+
     <key>RunAtLoad</key>
     <{(_config.AutoStart ? "true" : "false")}/>
-    
-    <key>StartInterval</key>
-    <integer>60</integer>
-    
-    <key>TimeOut</key>
-    <integer>30</integer>
-    
+
     <key>ProcessType</key>
     <string>Standard</string>
-    
+
     <key>EnvironmentVariables</key>
     <dict>
-        <key>DOTNET_ENVIRONMENT</key>
-        <string>Production</string>
-        <key>ASPNETCORE_URLS</key>
-        <string>http://localhost:{_config.Port}</string>
-        {string.Join("\n        ", _config.EnvironmentVariables.Select(kvp => $"<key>{kvp.Key}</key>\n        <string>{kvp.Value}</string>"))}
+        {string.Join("\n        ", environment)}
     </dict>
 </dict>
 </plist>
 ";
     }
 
-    private async Task<(bool success, string output)> RunCommandAsync(string command, string arguments)
+    /// <summary>
+    /// Runs a command with an explicit argument vector. Using ArgumentList rather than a single
+    /// Arguments string matters: .NET parses that string with Windows CRT quoting rules even on
+    /// macOS, so any embedded quote is silently eaten before the target process sees it.
+    /// </summary>
+    private static async Task<(bool success, string output)> RunCommandAsync(string command, params string[] arguments)
     {
         try
         {
             var psi = new ProcessStartInfo
             {
                 FileName = command,
-                Arguments = arguments,
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 CreateNoWindow = true
             };
+            foreach (var argument in arguments) psi.ArgumentList.Add(argument);
 
-            using (var process = Process.Start(psi))
-            {
-                if (process == null)
-                    return (false, $"Failed to start process '{command}'");
+            using var process = Process.Start(psi);
+            if (process == null)
+                return (false, $"Failed to start process '{command}'");
 
-                string output = await process.StandardOutput.ReadToEndAsync();
-                string error = await process.StandardError.ReadToEndAsync();
+            string output = await process.StandardOutput.ReadToEndAsync();
+            string error  = await process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync();
 
-                process.WaitForExit();
-
-                if (process.ExitCode == 0)
-                    return (true, output);
-
-                return (false, error.Length > 0 ? error : output);
-            }
+            return process.ExitCode == 0 ? (true, output) : (false, error.Length > 0 ? error : output);
         }
         catch (Exception ex)
         {
@@ -382,61 +403,83 @@ public class MacServiceManager : IServiceManager
         }
     }
 
+    /// <summary>
+    /// Runs a command that needs root, via <c>sudo -n</c> when this process is not already root.
+    /// </summary>
+    /// <remarks>
+    /// <c>-n</c> is essential: stdio is redirected and there is no TTY, so an interactive sudo
+    /// password prompt would block forever instead of asking. Failing fast lets the caller tell
+    /// the user to re-run under sudo.
+    /// </remarks>
+    private static async Task<(bool success, string output)> RunPrivilegedAsync(string command, params string[] arguments)
+    {
+        if (IsRoot)
+            return await RunCommandAsync(command, arguments);
+
+        var sudoArgs = new List<string> { "-n", command };
+        sudoArgs.AddRange(arguments);
+        var result = await RunCommandAsync("sudo", sudoArgs.ToArray());
+        if (!result.success && result.output.Contains("password", StringComparison.OrdinalIgnoreCase))
+            return (false, $"{result.output.Trim()}\nRe-run as root: sudo agentfox --install-service");
+        return result;
+    }
+
+    /// <summary>
+    /// Writes the plist, streaming content into <c>tee</c> over stdin for the root-owned case.
+    /// </summary>
+    /// <remarks>
+    /// The previous implementation interpolated the plist into
+    /// <c>sh -c "echo '…' | sudo tee path"</c>. Because .NET parses ProcessStartInfo.Arguments
+    /// itself, the quote-dense XML was split apart before any shell ran — the command was
+    /// truncated at the DOCTYPE line and the resulting file was not valid XML, so launchd
+    /// rejected it. Content on stdin removes the quoting round-trip entirely.
+    /// </remarks>
     private async Task<(bool success, string error)> WriteFileAsync(string path, string content)
     {
         try
         {
             // Ensure directory exists
             string? dir = Path.GetDirectoryName(path);
-            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir) && !IsSystemWide)
             {
                 Directory.CreateDirectory(dir);
             }
 
-            // Write file directly or with sudo if needed
-            if (IsSystemWide)
+            if (!IsSystemWide || IsRoot)
             {
-                // Use sudo tee to write as root
-                var psi = new ProcessStartInfo
-                {
-                    FileName = "sh",
-                    Arguments = $"-c \"echo '{EscapeForShell(content)}' | sudo tee {path} > /dev/null\"",
-                    UseShellExecute = false,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    CreateNoWindow = true
-                };
-
-                using (var process = Process.Start(psi))
-                {
-                    if (process == null)
-                        return (false, "Failed to start shell process");
-
-                    string error = await process.StandardError.ReadToEndAsync();
-                    process.WaitForExit();
-
-                    if (process.ExitCode == 0)
-                        return (true, "");
-
-                    return (false, error);
-                }
-            }
-            else
-            {
-                // Write directly as user
                 await File.WriteAllTextAsync(path, content);
                 return (true, "");
             }
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = "sudo",
+                UseShellExecute = false,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+            psi.ArgumentList.Add("-n");
+            psi.ArgumentList.Add("tee");
+            psi.ArgumentList.Add(path);
+
+            using var process = Process.Start(psi);
+            if (process == null)
+                return (false, "Failed to start 'sudo tee'");
+
+            await process.StandardInput.WriteAsync(content);
+            process.StandardInput.Close();
+
+            string error = await process.StandardError.ReadToEndAsync();
+            _ = await process.StandardOutput.ReadToEndAsync();   // tee echoes the content; discard it
+            await process.WaitForExitAsync();
+
+            return process.ExitCode == 0 ? (true, "") : (false, error);
         }
         catch (Exception ex)
         {
             return (false, ex.Message);
         }
-    }
-
-    private string EscapeForShell(string text)
-    {
-        // Basic shell escaping
-        return text.Replace("'", "'\\''");
     }
 }
