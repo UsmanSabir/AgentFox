@@ -19,18 +19,27 @@ elif [ "${AGENTFOX_WITH_TRADING:-0}" = "1" ]; then
   TRADING_CHOICE_EXPLICIT=1
 fi
 SKIP_ONBOARDING="${AGENTFOX_SKIP_ONBOARDING:-0}"
+INSTALL_SERVICE="${AGENTFOX_INSTALL_SERVICE:-0}"
+SKIP_SERVICE="${AGENTFOX_SKIP_SERVICE:-0}"
 
 for arg in "$@"; do
   case "$arg" in
     --no-trading) WITH_TRADING=0; TRADING_CHOICE_EXPLICIT=1 ;;
     --with-trading) WITH_TRADING=1; TRADING_CHOICE_EXPLICIT=1 ;;
     --skip-onboarding) SKIP_ONBOARDING=1 ;;
+    --install-service) INSTALL_SERVICE=1 ;;
+    --skip-service) SKIP_SERVICE=1 ;;
     *)
-      echo "Unknown option: $arg (supported: --no-trading, --with-trading, --skip-onboarding)" >&2
+      echo "Unknown option: $arg (supported: --no-trading, --with-trading, --skip-onboarding, --install-service, --skip-service)" >&2
       exit 1
       ;;
   esac
 done
+
+if [ "$INSTALL_SERVICE" = "1" ] && [ "$SKIP_SERVICE" = "1" ]; then
+  echo "Specify only one of --install-service or --skip-service." >&2
+  exit 1
+fi
 
 info() {
   echo "==> $*"
@@ -518,6 +527,35 @@ else
   echo 'Next steps:'
   echo '  agentfox --onboarding    # interactive setup (LLM, plugin credentials, service)'
   echo '  agentfox                 # start the agent (web UI on port 8080 by default)'
+  if [ "$SKIP_SERVICE" != "1" ] && [ "$INSTALL_SERVICE" != "1" ]; then
+    echo '  sudo agentfox --install-service    # run AgentFox in the background at boot'
+  fi
+fi
+
+# ── System service registration ──────────────────────────────────────────────
+# Runs AFTER onboarding so the service starts against a configuration that already exists.
+# Writing a systemd unit (/etc/systemd/system) or a LaunchDaemons plist needs root, and the
+# agent invokes sudo with -n, so elevate here rather than letting that fail.
+if [ "$INSTALL_SERVICE" = "1" ]; then
+  echo
+  info "Registering AgentFox as a system service ..."
+  if [ "$(id -u)" = "0" ]; then
+    SERVICE_CMD=""
+  elif command -v sudo >/dev/null 2>&1; then
+    SERVICE_CMD="sudo"
+  else
+    SERVICE_CMD=""
+    echo "Warning: not root and sudo is unavailable; the service install will likely fail." >&2
+  fi
+
+  if $SERVICE_CMD "$INSTALL_DIR/agentfox" --install-service; then
+    $SERVICE_CMD "$INSTALL_DIR/agentfox" --start-service || true
+    echo 'AgentFox is registered as a system service and set to start on boot.'
+  else
+    echo
+    echo 'Service registration failed. Re-run it directly with:'
+    echo "  sudo $INSTALL_DIR/agentfox --install-service"
+  fi
 fi
 
 echo

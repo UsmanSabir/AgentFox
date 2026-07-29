@@ -4,6 +4,7 @@ param(
     [string]$InstallDir = $env:AGENTFOX_INSTALL_DIR,
     [string]$BinaryUrl = $env:AGENTFOX_BINARY_URL,
     [switch]$BuildFromSource,
+    [switch]$InstallService,
     [switch]$SkipService,
     [switch]$NoTrading,
     [switch]$WithTrading,
@@ -18,7 +19,10 @@ $tradingChoiceExplicit = $NoTrading.IsPresent -or $WithTrading.IsPresent -or
 if (-not $NoTrading -and $env:AGENTFOX_NO_TRADING -eq '1') { $NoTrading = $true }
 if (-not $WithTrading -and $env:AGENTFOX_WITH_TRADING -eq '1') { $WithTrading = $true }
 if (-not $SkipOnboarding -and $env:AGENTFOX_SKIP_ONBOARDING -eq '1') { $SkipOnboarding = $true }
+if (-not $InstallService -and $env:AGENTFOX_INSTALL_SERVICE -eq '1') { $InstallService = $true }
+if (-not $SkipService -and $env:AGENTFOX_SKIP_SERVICE -eq '1') { $SkipService = $true }
 if ($NoTrading -and $WithTrading) { throw 'Specify only one of -NoTrading or -WithTrading.' }
+if ($InstallService -and $SkipService) { throw 'Specify only one of -InstallService or -SkipService.' }
 
 if (-not $RepoUrl) { $RepoUrl = 'https://github.com/UsmanSabir/AgentFox.git' }
 
@@ -498,8 +502,27 @@ else {
     Write-Host 'Next steps:' -ForegroundColor Yellow
     Write-Host '  agentfox --onboarding    # interactive setup (LLM, plugin credentials, service)' -ForegroundColor Yellow
     Write-Host '  agentfox                 # start the agent (web UI on port 8080 by default)' -ForegroundColor Yellow
-    if (-not $SkipService) {
+    if (-not $SkipService -and -not $InstallService) {
         Write-Host '  agentfox --install-service    # run AgentFox as a Windows service' -ForegroundColor DarkYellow
+    }
+}
+
+# ── Windows service registration ─────────────────────────────────────────────
+# Runs AFTER onboarding so the service starts against a configuration that already exists.
+# Registering a service needs an elevated token; when this shell is not elevated the agent
+# re-launches itself behind a UAC consent prompt, so a prompt appearing here is expected.
+if ($InstallService) {
+    Write-Host ''
+    Write-Info 'Registering AgentFox as a Windows service ...'
+    & $launcher --install-service
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host ''
+        Write-Host 'Service registration failed. Re-run from an Administrator terminal:' -ForegroundColor Yellow
+        Write-Host "  `"$launcher`" --install-service" -ForegroundColor Yellow
+    }
+    else {
+        & $launcher --start-service
+        Write-Host 'AgentFox is registered as a Windows service and set to start on boot.' -ForegroundColor Green
     }
 }
 

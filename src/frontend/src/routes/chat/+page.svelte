@@ -10,7 +10,8 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
     appendToken, appendReasoning, setMessageStatus, upsertToolActivity, finalizeMessage,
     prepareMessageForRetry, attachReferences, setAssistantIndex, setTurnState,
     activeConversationId, activeAgentId, agentReady, resetChat,
-    upsertPendingApproval, clearPendingApproval, type ChatMessage, type ChatAttachmentView
+    upsertPendingApproval, clearPendingApproval, setBackgroundResult, uiMode,
+    type ChatMessage, type ChatAttachmentView
   } from '$lib/stores';
   import {
     Send, RotateCcw, StopCircle, Bot, User, Copy, Check, Zap, History, Plus, X,
@@ -210,6 +211,13 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
   }
 
   $: messages     = $chatMessages;
+  $: simpleMode   = $uiMode === 'simple';
+  $: visibleMessages = simpleMode
+    ? messages.filter(msg =>
+        !msg.isBackgroundResult &&
+        !msg.pendingApproval &&
+        (msg.role === 'user' || msg.streaming || !!msg.content || !!msg.error))
+    : messages;
   $: convId       = $activeConversationId;
   $: agentIsReady = $agentReady;
   $: selectedAgentId = $activeAgentId;
@@ -310,7 +318,9 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
         break;
 
       case 'background_turn_started': {
-        const id = addAssistantMessage('', true);
+        // Keep background work out of Simple mode until the server identifies
+        // it as a user-facing agent response.
+        const id = addBackgroundResultMessage('', true);
         backgroundTurns = { ...backgroundTurns, [data.runKey]: { id, text: '' } };
         await scrollToBottom();
         break;
@@ -361,6 +371,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
     }
 
     const streamed = turn.text.trim();
+    if (kind === 'agent_response') setBackgroundResult(turn.id, false);
     if (message && (!streamed || kind !== 'agent_response'))
       appendToken(turn.id, streamed ? `\n\n${message}` : message);
 
@@ -818,7 +829,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
   }
 </script>
 
-<div class="chat-shell">
+<div class="chat-shell" class:simple={simpleMode}>
   <div class="chat-toolbar">
     <button class="toolbar-btn" on:click={() => showSessions = !showSessions} title="Browse sessions">
       <History size={14} /> Sessions
@@ -923,19 +934,21 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
 
     <!-- Messages -->
     <div class="messages-wrap" bind:this={scrollEl} on:scroll={onScroll}>
-    {#if messages.length === 0}
+    {#if visibleMessages.length === 0}
       <div class="intro fade-in">
         <div class="intro-icon">
           <Zap size={28} />
         </div>
         <h2 class="intro-title">AgentFox Chat</h2>
-        <p class="intro-sub">Real-time streaming · Tool use · Memory · Sub-agents</p>
+        <p class="intro-sub">
+          {simpleMode ? 'Ask anything and get a clear response.' : 'Real-time streaming · Tool use · Memory · Sub-agents'}
+        </p>
         <div class="suggestions">
           {#each [
-            'What tools do you have available?',
-            'Search the web for latest AI news',
+            simpleMode ? 'Help me plan my day' : 'What tools do you have available?',
+            simpleMode ? 'Explain a difficult topic simply' : 'Search the web for latest AI news',
             'Help me write a Python script',
-            'What do you remember from our past conversations?'
+            simpleMode ? 'Draft a professional email' : 'What do you remember from our past conversations?'
           ] as s}
             <button
               class="suggestion"
@@ -947,7 +960,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
       </div>
     {:else}
       <div class="messages">
-        {#each messages as msg (msg.id)}
+        {#each visibleMessages as msg (msg.id)}
           <div class="message {msg.role} fade-in">
             <div class="message-avatar">
               {#if msg.role === 'user'}
@@ -959,7 +972,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
             <div class="message-body">
               <div class="message-meta">
                 <span class="message-role">{msg.role === 'user' ? 'You' : selectedAgentName}</span>
-                {#if msg.isBackgroundResult}
+                {#if !simpleMode && msg.isBackgroundResult}
                   <span class="bg-badge">background result</span>
                 {/if}
                 <span class="message-time">{msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
@@ -1016,7 +1029,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
                 {#if msg.content}
                   <div class="message-content user-text">{msg.content}</div>
                 {/if}
-                {#if msg.agentAddition}
+                {#if !simpleMode && msg.agentAddition}
                   <details class="agent-addition">
                     <summary>
                       <span>Agent-added context</span>
@@ -1032,7 +1045,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
 	                >{#if msg.content.length > 0}{@html renderMarkdown(msg.content)}{:else if msg.streaming}<span class="typing-dots"><span></span><span></span><span></span></span>{/if}</div>
 	              {/if}
 
-	              {#if msg.role === 'assistant' && (msg.reasoning || (msg.streaming && msg.status))}
+	              {#if !simpleMode && msg.role === 'assistant' && (msg.reasoning || (msg.streaming && msg.status))}
 	                <details class="aux-panel" open={false}>
 	                  <summary>{msg.reasoning ? 'Reasoning' : statusLabel(msg.status)}</summary>
 	                  {#if msg.reasoning}
@@ -1048,7 +1061,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
 	                </details>
 	              {/if}
 
-	              {#if msg.role === 'assistant' && msg.status === 'queued' && msg.runId}
+	              {#if !simpleMode && msg.role === 'assistant' && msg.status === 'queued' && msg.runId}
 	                <div class="turn-actions">
 	                  <button
 	                    class="message-action-btn steer"
@@ -1062,7 +1075,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
 	                </div>
 	              {/if}
 
-	              {#if msg.role === 'assistant' && msg.toolActivities && msg.toolActivities.length > 0}
+	              {#if !simpleMode && msg.role === 'assistant' && msg.toolActivities && msg.toolActivities.length > 0}
 	                <div class="tool-summary">
 	                  {#each msg.toolActivities as activity}
 	                    <span class="tool-chip">{activity.toolName || 'tool'} · {activity.status}</span>
@@ -1070,7 +1083,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
 	                </div>
               {/if}
 
-              {#if msg.role === 'assistant' && !msg.streaming && !msg.error && msg.references && msg.references.length > 0}
+              {#if !simpleMode && msg.role === 'assistant' && !msg.streaming && !msg.error && msg.references && msg.references.length > 0}
                 <details class="sources">
                   <summary class="sources-summary">
                     <span class="sources-label">Sources</span>
@@ -1094,7 +1107,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
                 </details>
               {/if}
 
-              {#if !msg.streaming && (msg.role === 'user' || (msg.role === 'assistant' && (!msg.error || msg.retryContent)))}
+              {#if !simpleMode && !msg.streaming && (msg.role === 'user' || (msg.role === 'assistant' && (!msg.error || msg.retryContent)))}
                 <div class="message-actions">
                   {#if msg.role === 'assistant' && !msg.error && msg.assistantIndex !== undefined && convId}
                     <button
@@ -1144,7 +1157,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
 
 	  <!-- Input bar -->
 	  <div class="input-bar">
-	    {#if todoSnapshot?.enabled && todoSnapshot.items.length > 0}
+	    {#if !simpleMode && todoSnapshot?.enabled && todoSnapshot.items.length > 0}
 	      <details class="progress-panel">
 	        <summary>
 	          <span>Progress</span>
@@ -1163,7 +1176,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
 	      </details>
 	    {/if}
 
-	    {#if sessionActivities.length > 0}
+	    {#if !simpleMode && sessionActivities.length > 0}
 	      <details class="progress-panel activity-panel" bind:open={showActivity} on:toggle={() => {
 	        if (showActivity && !loadingActivity) {
 	          loadingActivity = true;
@@ -1299,12 +1312,14 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
         {/if}
       </div>
     </div>
+    {#if !simpleMode}
     <p class="input-hint">
       AgentFox can use tools, access memory, and spawn sub-agents.
       {#if attachEnabled && attachCaps}
         · Attach {describeAccepted(attachCaps)} — drag, paste, or use the paperclip.
       {/if}
     </p>
+    {/if}
   </div>
 </div>
 

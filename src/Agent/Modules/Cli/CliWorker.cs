@@ -415,116 +415,159 @@ public sealed class CliWorker : BackgroundService
         // the previous OnComplete closed the writer. Reusing one channel made the follow-up's first
         // OnToken throw ChannelClosedException and fail an otherwise-fine turn.
         Channel<(bool IsReasoning, string Text)>? streamChannel = null;
-        var sb           = new StringBuilder();
-        var sbReasoning  = new StringBuilder();
-        Task<string>? liveDisplayTask = null;
+        var sb          = new StringBuilder();
+        var sbReasoning = new StringBuilder();
+        Task? liveDisplayTask = null;
 
-        // Signalled by OnStart. Everything between Enqueue and the first streamed token —
-        // queue wait behind other lanes' work, session restore, memory recall, the experience
-        // baseline call — happens before OnStart fires, and used to render as a dead terminal
-        // with no way to tell "thinking" from "hung".
-        var streamStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var turnStartedAt = DateTime.UtcNow;
+        var spinnerFrame  = 0;
 
-        IRenderable BuildDisplay()
+        // What the busy line says. Written from the streaming callbacks (serially — Agent.cs awaits
+        // them one at a time inside its update loop) and read by whichever display is currently up.
+        var busyLabel = "Sending";
+
+        // Handed off from the spinner to the Live display at the *first streamed chunk*, not at
+        // OnStart. OnStart fires before RunStreamingAsync — i.e. before the first LLM call and
+        // before every tool round-trip — so handing over there froze the terminal on a static
+        // "Working..." for the longest part of the turn, which read as "the indicator vanished".
+        var handoff = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        // Assigned below, immediately before Enqueue — so by the time the lane task can reach a
+        // streaming callback it is guaranteed non-null.
+        Task? busyTask = null;
+
+        string BusyFooter()
         {
-            var responseText = sb.ToString();
-            if (sbReasoning.Length == 0)
-            {
-                var table = new Table().NoBorder();
-                table.AddColumn(new TableColumn(""));
-                table.AddRow(Markup.Escape(responseText));
-                return table;
-            }
-            var reasoningLines  = sbReasoning.ToString().Split('\n');
-            var visibleReasoning = reasoningLines.Length > 20
-                ? string.Join('\n', reasoningLines[^20..])
-                : sbReasoning.ToString();
-            var thinkingPanel = new Panel(
-                    new Markup($"[italic dim yellow]{Markup.Escape(visibleReasoning.TrimEnd('\n'))}[/]"))
-                .Header("[dim yellow]Thinking...[/]")
-                .BorderColor(Color.Yellow)
-                .Expand();
-            return sb.Length == 0 ? thinkingPanel : new Rows(thinkingPanel, new Text(sb.ToString()));
+            var frames  = Spinner.Known.Dots.Frames;
+            var glyph   = frames[spinnerFrame % frames.Count];
+            var elapsed = (int)(DateTime.UtcNow - turnStartedAt).TotalSeconds;
+            return $"[dodgerblue1]{Markup.Escape(glyph)}[/] [dim]{Markup.Escape(busyLabel)}... {elapsed}s[/]";
         }
 
-        // Assigned below, immediately before Enqueue — so by the time the lane task can reach
-        // OnStart it is guaranteed non-null. OnStart must await it: Spectre allows only one
-        // interactive display at a time, and starting Live while the spinner still holds the
-        // exclusivity lock throws "Trying to run one or more interactive functions concurrently".
-        Task? busyTask = null;
+        // `final` drops the busy line so the completed turn is left on screen as just its output.
+        IRenderable BuildDisplay(bool final = false)
+        {
+            var rows = new List<IRenderable>();
+
+            if (sbReasoning.Length > 0)
+            {
+                var reasoningLines   = sbReasoning.ToString().Split('\n');
+                var visibleReasoning = reasoningLines.Length > 20
+                    ? string.Join('\n', reasoningLines[^20..])
+                    : sbReasoning.ToString();
+                rows.Add(new Panel(
+                        new Markup($"[italic dim yellow]{Markup.Escape(visibleReasoning.TrimEnd('\n'))}[/]"))
+                    .Header("[dim yellow]Thinking...[/]")
+                    .BorderColor(Color.Yellow)
+                    .Expand());
+            }
+
+            if (sb.Length > 0)
+                rows.Add(new Text(sb.ToString()));
+
+            if (!final)
+                rows.Add(new Markup(BusyFooter()));
+
+            return rows.Count == 0 ? new Text(string.Empty) : new Rows(rows);
+        }
+
+        // Called from the first chunk of each turn. Spectre allows only one interactive display at
+        // a time, so the spinner must fully release the exclusivity lock before Live starts —
+        // otherwise it throws "Trying to run one or more interactive functions concurrently".
+        async Task<Channel<(bool IsReasoning, string Text)>> EnsureLiveDisplayAsync()
+        {
+            var existing = streamChannel;
+            if (existing != null) return existing;
+
+            handoff.TrySetResult();
+            if (busyTask != null) await busyTask;
+
+            var channel = SysChannel.CreateUnbounded<(bool IsReasoning, string Text)>(
+                new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
+            streamChannel = channel;
+
+            liveDisplayTask = AnsiConsole.Live(BuildDisplay())
+                .AutoClear(false)
+                .Overflow(VerticalOverflow.Ellipsis)
+                .Cropping(VerticalOverflowCropping.Top)
+                .StartAsync(async ctx =>
+                {
+                    var reader = channel.Reader;
+                    while (true)
+                    {
+                        // Tick even when no token arrives: a turn that streams some text and then
+                        // spends a minute in tool calls must keep animating, and batching whatever
+                        // did arrive beats repainting once per token.
+                        var wait = reader.WaitToReadAsync().AsTask();
+                        if (await Task.WhenAny(wait, Task.Delay(SpinnerTickMs)) == wait)
+                        {
+                            if (!await wait) break; // writer completed — turn is done streaming
+                            while (reader.TryRead(out var item))
+                            {
+                                if (item.IsReasoning) sbReasoning.Append(item.Text);
+                                else                  sb.Append(item.Text);
+                            }
+                        }
+
+                        spinnerFrame++;
+                        ctx.UpdateTarget(BuildDisplay());
+                        ctx.Refresh();
+                    }
+
+                    ctx.UpdateTarget(BuildDisplay(final: true));
+                    ctx.Refresh();
+                });
+
+            return channel;
+        }
 
         cmd.Streaming = new StreamingCallbacks
         {
-            OnStart = async () =>
+            OnStart = () =>
             {
-                streamStarted.TrySetResult();
-                if (busyTask != null)
-                    await busyTask;
-
-                var channel = SysChannel.CreateUnbounded<(bool IsReasoning, string Text)>(
-                    new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
-                streamChannel = channel;
-
-                if (!_uiConfig.RenderReasoning)
+                // A follow-up turn (EnsureTodosCompletedAsync) re-enters here after OnComplete tore
+                // the previous display down. Restart the spinner for its pre-token phase; on the
+                // first turn — or a turn that never streamed a chunk — busyTask is still running
+                // and already covers this.
+                if (busyTask is { IsCompleted: true })
                 {
-                    var table = new Table().NoBorder();
-                    table.AddColumn(new TableColumn(""));
-                    table.AddRow("Working...");
-                    liveDisplayTask = AnsiConsole.Live(table)
-                        .AutoClear(false)
-                        .Overflow(VerticalOverflow.Ellipsis)
-                        .Cropping(VerticalOverflowCropping.Top)
-                        .StartAsync(async ctx =>
-                        {
-                            await foreach (var (isReasoning, text) in channel.Reader.ReadAllAsync())
-                            {
-                                if (!isReasoning)
-                                {
-                                    sb.Append(text);
-                                    var chunk = sb.ToString();
-                                    if (!string.IsNullOrWhiteSpace(chunk))
-                                    {
-                                        table.Rows.Clear();
-                                        table.AddRow(Markup.Escape(chunk));
-                                        ctx.Refresh();
-                                    }
-                                }
-                            }
-                            return string.Empty;
-                        });
+                    streamChannel   = null;
+                    liveDisplayTask = null;
+                    handoff         = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    busyTask        = RunBusyIndicatorAsync(handoff.Task, tcs.Task, () => busyLabel, turnStartedAt);
                 }
-                else
+
+                busyLabel = "Thinking";
+                return Task.CompletedTask;
+            },
+            OnStatus = status =>
+            {
+                busyLabel = status switch
                 {
-                    // Seeded with the same placeholder as the branch above: the reasoning view
-                    // stays blank until the first reasoning/text chunk lands, which on a slow
-                    // first token is indistinguishable from a stalled turn.
-                    liveDisplayTask = AnsiConsole.Live(new Text("Working..."))
-                        .AutoClear(false)
-                        .Overflow(VerticalOverflow.Ellipsis)
-                        .Cropping(VerticalOverflowCropping.Top)
-                        .StartAsync(async ctx =>
-                        {
-                            await foreach (var (isReasoning, text) in channel.Reader.ReadAllAsync())
-                            {
-                                if (isReasoning) sbReasoning.Append(text);
-                                else             sb.Append(text);
-                                ctx.UpdateTarget(BuildDisplay());
-                                ctx.Refresh();
-                            }
-                            return string.Empty;
-                        });
-                }
+                    "thinking"           => "Thinking",
+                    "running_tools"      => "Running tools",
+                    "preparing_response" => "Finishing up",
+                    _                    => busyLabel,
+                };
+                return Task.CompletedTask;
+            },
+            OnToolActivity = activity =>
+            {
+                busyLabel = activity.Status == "running" && !string.IsNullOrWhiteSpace(activity.ToolName)
+                    ? $"Running {activity.ToolName}"
+                    : "Thinking";
+                return Task.CompletedTask;
             },
             OnReasoning = !_uiConfig.RenderReasoning ? null
                 : async chunk =>
                 {
-                    var channel = streamChannel;
-                    if (channel != null) await channel.Writer.WriteAsync((true, chunk));
+                    var channel = await EnsureLiveDisplayAsync();
+                    await channel.Writer.WriteAsync((true, chunk));
                 },
             OnToken = async chunk =>
             {
-                var channel = streamChannel;
-                if (channel != null) await channel.Writer.WriteAsync((false, chunk));
+                var channel = await EnsureLiveDisplayAsync();
+                await channel.Writer.WriteAsync((false, chunk));
             },
             OnComplete = async () =>
             {
@@ -534,7 +577,7 @@ public sealed class CliWorker : BackgroundService
             },
         };
 
-        busyTask = RunBusyIndicatorAsync(streamStarted.Task, tcs.Task);
+        busyTask = RunBusyIndicatorAsync(handoff.Task, tcs.Task, () => busyLabel, turnStartedAt);
         _commandQueue.Enqueue(cmd);
 
         AgentResult result;
@@ -549,7 +592,7 @@ public sealed class CliWorker : BackgroundService
         {
             // A lane that faults or cancels its ResultSource surfaces here. The Main lane
             // converts exceptions into a failed AgentResult instead, handled further down.
-            streamStarted.TrySetResult();
+            handoff.TrySetResult();
             streamChannel?.Writer.TryComplete();
             await SafeAwaitAsync(busyTask);
             await SafeAwaitAsync(liveDisplayTask);
@@ -558,10 +601,10 @@ public sealed class CliWorker : BackgroundService
             return;
         }
 
-        // Both are already finished on the normal path (OnStart drains the spinner, OnComplete
-        // awaits the live display), but a turn that fails *before* OnStart never fires either —
-        // leaving the spinner holding Spectre's exclusivity lock for every later write.
-        streamStarted.TrySetResult();
+        // Both are already finished on the normal path (the first chunk drains the spinner,
+        // OnComplete awaits the live display), but a turn that never streams a chunk leaves the
+        // spinner holding Spectre's exclusivity lock for every later write.
+        handoff.TrySetResult();
         streamChannel?.Writer.TryComplete();
         await SafeAwaitAsync(busyTask);
         await SafeAwaitAsync(liveDisplayTask);
@@ -590,22 +633,25 @@ public sealed class CliWorker : BackgroundService
             AnsiConsole.MarkupLine($"[bold blue]↳[/] Spawned [bold]{result.SpawnedSubAgents.Count}[/] sub-agent(s)");
     }
 
-    /// <summary>
-    /// Spinner shown from the moment a turn is queued until streaming starts (or the turn ends
-    /// without ever streaming). Returns once either happens, releasing Spectre's interactive
-    /// exclusivity lock so the streaming <c>Live</c> display can take over.
-    /// </summary>
-    private async Task RunBusyIndicatorAsync(Task streamStarted, Task<AgentResult> completed)
-    {
-        var startedAt = DateTime.UtcNow;
+    /// <summary>Repaint interval for the streaming display's busy line.</summary>
+    private const int SpinnerTickMs = 120;
 
+    /// <summary>
+    /// Spinner shown from the moment a turn is queued until the first streamed chunk (or the turn
+    /// ending without ever streaming one). Returns once either happens, releasing Spectre's
+    /// interactive exclusivity lock so the streaming <c>Live</c> display can take over — which then
+    /// carries the busy line itself, so the animation is continuous across the whole turn.
+    /// </summary>
+    private async Task RunBusyIndicatorAsync(
+        Task handoff, Task<AgentResult> completed, Func<string> label, DateTime startedAt)
+    {
         await AnsiConsole.Status()
             .Spinner(Spinner.Known.Dots)
             .SpinnerStyle(Style.Parse("dodgerblue1"))
             .StartAsync("[dim]Sending...[/]", async ctx =>
             {
-                var settled = Task.WhenAny(streamStarted, completed);
-                while (await Task.WhenAny(settled, Task.Delay(400)) != settled)
+                var settled = Task.WhenAny(handoff, completed);
+                while (await Task.WhenAny(settled, Task.Delay(SpinnerTickMs)) != settled)
                 {
                     var elapsed = (int)(DateTime.UtcNow - startedAt).TotalSeconds;
                     // Queue depth still counts this command while it waits, hence the -1: what the
@@ -614,7 +660,7 @@ public sealed class CliWorker : BackgroundService
                     var ahead   = Math.Max(0, _commandQueue.GetTotalQueueCount() - 1);
                     ctx.Status(ahead > 0
                         ? $"[dim]Queued behind {ahead} command(s)... {elapsed}s[/]"
-                        : $"[dim]Thinking... {elapsed}s[/]");
+                        : $"[dim]{Markup.Escape(label())}... {elapsed}s[/]");
                     ctx.Refresh();
                 }
             });

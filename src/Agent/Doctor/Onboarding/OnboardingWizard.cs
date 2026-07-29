@@ -594,22 +594,30 @@ public class OnboardingWizard
         // Write config to disk now so the service process can read it on first start
         WriteConfig(config);
 
-        // On Windows, if not admin, collect credentials HERE before the spinner starts.
-        // AnsiConsole prompts cannot run inside AnsiConsole.Status().
+        // On Windows, creating a service needs an elevated token. Typing an administrator's
+        // username/password here CANNOT produce one: Process.Start with UserName/Password uses
+        // CreateProcessWithLogonW, which hands back the filtered standard-user token for any
+        // UAC-subject account — so sc.exe still failed with "Access is denied". The installer
+        // now re-launches itself under a UAC consent prompt instead; just warn about the prompt.
         string? installUser = null, installPassword = null, installDomain = null;
         if (platform == "Windows" &&
             !AgentFox.Runtime.Services.Windows.WindowsServiceManager.IsAdministrator())
         {
             OnboardingUI.PrintLine();
-            OnboardingUI.PrintWarning("Not running as Administrator — credentials are needed to install the service.");
-            if (!OnboardingUI.Confirm("Provide administrator credentials now?", defaultValue: true) ||
-                !AgentFox.Runtime.Services.Windows.WindowsServiceManager
-                    .TryGetUserCredentials(out installUser, out installPassword, out installDomain))
-            {
-                //OnboardingUI.PrintInfo($"Skipped. Install manually with:  {fallbackCmd}");
-                //OnboardingUI.PrintLine();
-                //return;
-            }
+            OnboardingUI.PrintWarning("Not running as Administrator — Windows will show a consent (UAC) prompt.");
+            OnboardingUI.PrintInfo("Accept it to let AgentFox register the service.");
+        }
+
+        // Unix has no consent-prompt equivalent: writing the systemd unit or the LaunchDaemons
+        // plist needs root, and sudo is invoked with -n (there is no TTY here to type a password
+        // into). Say so before the attempt rather than after it fails.
+        bool needsRoot = (platform == "Linux" || (platform == "macOS" && runAsAdmin))
+                         && Environment.GetEnvironmentVariable("USER") != "root";
+        if (needsRoot)
+        {
+            OnboardingUI.PrintLine();
+            OnboardingUI.PrintWarning("Not running as root — this needs sudo without a password prompt.");
+            OnboardingUI.PrintInfo($"If it fails, re-run with:  {fallbackCmd}");
         }
 
         // Attempt installation ─────────────────────────────────────────────────
