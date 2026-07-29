@@ -136,7 +136,8 @@ irm https://raw.githubusercontent.com/UsmanSabir/AgentFox/main/install.ps1 -OutF
 | `-BuildFromSource` | `AGENTFOX_BUILD_FROM_SOURCE=1` | off | Skip the prebuilt download and build from source. |
 | `-RepoUrl <url>` | `AGENTFOX_REPO_URL` | this repo | Source repo to clone when building from source. |
 | `-Branch <name>` | `AGENTFOX_BRANCH` | default branch | Branch to clone (shallow). |
-| `-SkipService` | — | off | Suppress the Windows service hint (Windows only). |
+| `-InstallService` | `AGENTFOX_INSTALL_SERVICE=1` | off | Register AgentFox as a Windows service after install (prompts for elevation if the shell is not already an Administrator one). |
+| `-SkipService` | `AGENTFOX_SKIP_SERVICE=1` | off | Don't install the service and suppress the service hint (Windows only). |
 | `-SkipOnboarding` | `--skip-onboarding` / `AGENTFOX_SKIP_ONBOARDING=1` | wizard runs | Don't launch the interactive setup wizard after install. |
 
 ### Updating

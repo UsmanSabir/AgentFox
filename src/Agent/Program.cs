@@ -22,6 +22,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Spectre.Console;
 using System.Text;
@@ -74,7 +75,11 @@ class Program
 
         bool runDoctor    = args.Contains("--doctor");
         bool doctorFix    = args.Contains("--fix");
-        bool runOnboarding = args.Contains("--onboarding") || !File.Exists(appCfgPath); // If appsettings.json doesn't exist, default to onboarding mode to guide the user through initial setup.
+        // If appsettings.json doesn't exist, default to onboarding mode to guide the user through initial setup.
+        // Never in service mode: a service has no console, so the wizard would block forever on
+        // its first prompt and the SCM would kill the process with error 1053.
+        bool runOnboarding = !isServiceMode &&
+            (args.Contains("--onboarding") || !File.Exists(appCfgPath));
 
         // Extract service management commands
         string? serviceCommand = args.FirstOrDefault(a => ServiceCommandHandler.IsServiceCommand(a));
@@ -108,6 +113,20 @@ class Program
             .AddCommandLine(args);
 
         var configuration = builder.Configuration;
+
+        // ── Windows Service / systemd lifetime ────────────────────────────────
+        // The SCM starts the process and then waits for it to report SERVICE_RUNNING. A plain
+        // web host never does that, so the service is killed after 30 s with error 1053
+        // ("did not respond to the start request in a timely fashion"). AddWindowsService swaps
+        // in the WindowsServiceLifetime that performs the handshake. It self-checks
+        // WindowsServiceHelpers.IsWindowsService(), so it is inert for a normal console run.
+        if (isServiceMode && OperatingSystem.IsWindows())
+        {
+            builder.Services.AddWindowsService(options =>
+            {
+                options.ServiceName = configuration["Services:ServiceName"] ?? "AgentFox";
+            });
+        }
 
         // Bind the credential guard before anything can run a tool. It reads the composed
         // configuration to learn which values are live secrets, so it must come after the
@@ -435,10 +454,11 @@ class Program
         var modules         = pluginDiscovery.Modules;
 
         // Bind the HTTP listener to Services.Port (default 8080) when the web layer is active.
-        // Precedence (highest → lowest): --urls CLI arg  >  ASPNETCORE_URLS env  >  UseUrls()  >  applicationUrl in launchSettings.json
-        // The service installer always passes --urls, so it overrides this line unaffected.
-        // For bare  dotnet run  or single-file exe the port comes from Services.Port in appsettings.json.
-        if (requiresWeb)
+        // UseUrls writes the same "urls" configuration key the --urls switch does and is applied
+        // later, so it would otherwise silently win over an explicit --urls; skip it when one was
+        // supplied. For bare  dotnet run,  the single-file exe, or the Windows service, no --urls
+        // is passed and the port comes from Services.Port in the configuration file.
+        if (requiresWeb && string.IsNullOrWhiteSpace(configuration["urls"]))
             builder.WebHost.UseUrls($"http://*:{serviceCfg.Port}");
 
         // Expose ONLY enabled modules to DI consumers (AgentOrchestrator's OnAgentReadyAsync

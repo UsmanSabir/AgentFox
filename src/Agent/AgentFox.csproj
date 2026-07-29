@@ -89,6 +89,9 @@
 	  <PackageReference Include="Microsoft.Extensions.Configuration.Json" />
 	  <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
 	  <PackageReference Include="Microsoft.Extensions.Http.Resilience" />
+	  <!-- Windows Service lifetime: without this the SCM never receives a "running" report
+	       from the process and kills it after 30 s with error 1053. No-ops off Windows. -->
+	  <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" />
 	  <PackageReference Include="Microsoft.Extensions.Logging" />
 	  <PackageReference Include="Microsoft.Extensions.Logging.Console" />
 	  <PackageReference Include="Microsoft.Data.Sqlite" />

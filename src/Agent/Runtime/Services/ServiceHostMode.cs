@@ -24,9 +24,17 @@ public class ServiceHostMode
     /// Initializes service mode flags and returns true if running in service mode.
     /// Should be called early in Program.Main before CLI/web setup.
     /// </summary>
+    /// <remarks>
+    /// Matches both the bare switch and the <c>--service-mode=true</c> form. The installer uses
+    /// the <c>=</c> form because <see cref="Microsoft.Extensions.Configuration.IConfigurationBuilder"/>'s
+    /// command-line provider treats a bare <c>--switch</c> as a key whose value is the NEXT
+    /// token — so a bare <c>--service-mode</c> silently swallows the argument after it.
+    /// </remarks>
     public static bool DetectServiceMode(string[] args)
     {
-        return args.Contains("--service-mode");
+        return args.Any(a =>
+            a.Equals("--service-mode", StringComparison.OrdinalIgnoreCase) ||
+            a.StartsWith("--service-mode=", StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>
