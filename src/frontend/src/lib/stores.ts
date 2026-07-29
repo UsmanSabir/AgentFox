@@ -10,6 +10,11 @@ export const agentStatus = writable<AgentStatus | null>(null);
 // ── Sidebar collapsed state ───────────────────────────────────────────────
 export const sidebarCollapsed = writable(false);
 
+// Advanced is the safe default for existing installations. The root layout
+// restores the user's persisted preference once the browser is available.
+export type UiMode = 'simple' | 'advanced';
+export const uiMode = writable<UiMode>('advanced');
+
 // ── Active conversation ID ────────────────────────────────────────────────
 export const activeConversationId = writable<string | undefined>(undefined);
 export const activeAgentId = writable('main');
@@ -76,13 +81,19 @@ export function addAssistantMessage(content = '', streaming = false, retryConten
   return id;
 }
 
-export function addBackgroundResultMessage(content: string): string {
+export function addBackgroundResultMessage(content: string, streaming = false): string {
   const id = crypto.randomUUID();
   chatMessages.update(msgs => [...msgs, {
-    id, role: 'assistant', content, streaming: false,
+    id, role: 'assistant', content, streaming,
     isBackgroundResult: true, timestamp: new Date()
   }]);
   return id;
+}
+
+export function setBackgroundResult(id: string, isBackgroundResult: boolean) {
+  chatMessages.update(msgs =>
+    msgs.map(m => m.id === id ? { ...m, isBackgroundResult } : m)
+  );
 }
 
 export function appendToken(id: string, token: string) {
