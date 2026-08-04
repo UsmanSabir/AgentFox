@@ -448,11 +448,22 @@ public class FoxAgent
                 + "{Attempt}/{Max}.",
                 Name, remaining.Count, attempt + 1, _todoPlannerConfig.MaxContinuations);
 
+            // The wording matters: this is an automatic nudge, not a user asking for the work
+            // again. An item can be outstanding simply because the wrong id was completed, so a
+            // continuation that assumes the work is unfinished will happily redo it — including
+            // re-sending messages the user has already received.
             var continuation = await runTurn(
                 $"You ended your turn with {remaining.Count} incomplete todo item(s): {titles}.\n"
-                + "Continue working through them now. Complete each one and mark it done with "
-                + "`todos_complete`. If an item can no longer be done, remove it with `todos_remove` "
-                + "and say why. Do not restate work you have already finished.");
+                + "This is an automatic check, not a new request from the user.\n"
+                + "First decide, for each item, whether the work was actually done and the item was "
+                + "merely left open — ids are assigned by the system, so completing a guessed id "
+                + "closes the wrong item. If it is already done, just mark it done with "
+                + "`todos_complete` using an id from `todos_get_remaining`.\n"
+                + "Only do work that genuinely has not happened yet. Never repeat an action with an "
+                + "external effect — sending a message, notifying the user, posting an update, "
+                + "writing a file — if it already succeeded once this session.\n"
+                + "If an item can no longer be done, remove it with `todos_remove` and say why. "
+                + "Do not restate work you have already finished.");
 
             if (!string.IsNullOrWhiteSpace(continuation))
                 responseText = responseText + "\n\n" + continuation;
