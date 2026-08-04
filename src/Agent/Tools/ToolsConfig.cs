@@ -46,6 +46,29 @@ public class ToolsConfig
     /// <summary>MCP server management tool: manage_mcp_server.</summary>
     public bool Mcp { get; set; } = true;
 
+    // ── notify_user behaviour ─────────────────────────────────────────────────
+
+    /// <summary>
+    /// Allow a sub-agent to deliver to the user's channels via <c>notify_user</c>.
+    /// Off by default: a sub-agent's result is meant to travel back to the agent that spawned it,
+    /// which then decides what the user sees. With this on, a parent that delegates "gather the
+    /// data and post the update" produces two deliveries — one from the sub-agent, one from itself.
+    /// </summary>
+    public bool SubAgentNotify { get; set; } = false;
+
+    /// <summary>
+    /// Window (seconds) in which a near-identical <c>notify_user</c> message is treated as a
+    /// resend and suppressed. Scoped per session. 0 disables the check.
+    /// Guards against auto-continuations and stale todo items re-delivering the same update.
+    /// </summary>
+    public int DuplicateNotifyWindowSeconds { get; set; } = 300;
+
+    /// <summary>
+    /// Similarity (0–1) at or above which two messages count as the same for the check above.
+    /// Compared on word shingles, so a report where only a few figures changed still matches.
+    /// </summary>
+    public double DuplicateNotifyThreshold { get; set; } = 0.9;
+
     // ── Per-tool overrides ────────────────────────────────────────────────────
 
     /// <summary>

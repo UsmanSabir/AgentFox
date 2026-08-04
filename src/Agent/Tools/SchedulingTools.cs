@@ -161,7 +161,7 @@ public class ManageHeartbeatTool : BaseTool
 
         return ToolResult.Ok(
             $"Heartbeat '{b.Name}'\n" +
-            $"  Status:       {(b.IsPaused ? "paused" : "active")}\n" +
+            $"  Status:       {(b.IsPaused ? "paused" : b.IsRunning ? "active (running now)" : "active")}\n" +
             $"  Task:         {b.Task}\n" +
             $"  Interval:     {b.IntervalSeconds}s\n" +
             $"  Max missed:   {b.MaxMissed}\n" +
@@ -173,12 +173,16 @@ public class ManageHeartbeatTool : BaseTool
     private static ToolResult Trigger(HeartbeatManager manager, string? name)
     {
         if (string.IsNullOrWhiteSpace(name)) return ToolResult.Fail("'name' is required for trigger");
-        var b = manager.GetHeartbeat(name);
-        if (b == null) return ToolResult.Fail($"Heartbeat '{name}' not found.");
 
-        // Back-date LastTriggered so the next timer tick fires this beat immediately.
-        b.LastTriggered = DateTime.UtcNow.AddSeconds(-b.IntervalSeconds);
-        return ToolResult.Ok($"Heartbeat '{name}' will fire on the next timer tick.");
+        return manager.TriggerHeartbeat(name) switch
+        {
+            true  => ToolResult.Ok($"Heartbeat '{name}' will fire on the next timer tick."),
+            false => ToolResult.Fail($"Heartbeat '{name}' not found."),
+            // Already mid-run — forcing a second concurrent run is the duplicate-work case.
+            null  => ToolResult.Ok(
+                $"Heartbeat '{name}' is already running; it was not triggered again. "
+                + "Wait for the current run to finish.")
+        };
     }
 
     private static int ParseInt(object? value, int fallback) => value switch
@@ -213,35 +217,43 @@ public class ManageCronTool : BaseTool
         "Manage cron-scheduled tasks — jobs that run an agent task on a time-based schedule " +
         "using standard 5-field cron expressions (minute hour day month weekday). " +
         "No missed-count tracking; use manage_heartbeat instead when you need failure detection. " +
-        "Operations: add, remove, list.";
+        "Operations: add, remove, update, list. " +
+        "Call 'list' before 'add' — if a job for this purpose already exists, 'update' it rather " +
+        "than adding a second one under a different name.";
 
     public override Dictionary<string, ToolParameter> Parameters { get; } = new()
     {
         ["operation"] = new()
         {
             Type = "string",
-            Description = "add | remove | list",
+            Description = "add | remove | update | list",
             Required = true,
-            EnumValues = ["add", "remove", "list"]
+            EnumValues = ["add", "remove", "update", "list"]
         },
         ["name"] = new()
         {
             Type = "string",
-            Description = "Job name — required for 'add' and 'remove'",
+            Description = "Job name — required for 'add', 'remove' and 'update'",
             Required = false
         },
         ["cron"] = new()
         {
             Type = "string",
-            Description = "5-field cron expression. Examples: '* * * * *' = every minute, " +
+            Description = "5-field cron expression, evaluated in UTC. Examples: '* * * * *' = every minute, " +
                           "'0 * * * *' = every hour, '0 9 * * *' = 9 am daily, " +
-                          "'0 9 * * 1' = 9 am every Monday, '*/5 * * * *' = every 5 minutes",
+                          "'0 9 * * 1' = 9 am every Monday, '*/5 * * * *' = every 5 minutes. " +
+                          "Required for 'add'; optional for 'update'.",
             Required = false
         },
         ["task"] = new()
         {
             Type = "string",
-            Description = "A detailed Agent task to run when the cron fires (required for 'add'). Clear steps and parameters should be provided.",
+            Description = "A detailed Agent task to run when the cron fires (required for 'add'; optional " +
+                          "for 'update'). Clear steps and parameters should be provided. Write it as the " +
+                          "work to perform right now — e.g. 'Produce today's PSX summary and send it to the " +
+                          "user' — NOT as a request to set up a schedule. The schedule is this job; a task " +
+                          "phrased as 'check daily at 11am and share' invites the run to create another " +
+                          "cron job for the same thing.",
             Required = false
         }
     };
@@ -256,9 +268,10 @@ public class ManageCronTool : BaseTool
         {
             "add"    => Task.FromResult(Add(scheduler, name, arguments)),
             "remove" => Task.FromResult(Remove(scheduler, name)),
+            "update" => Task.FromResult(Update(scheduler, name, arguments)),
             "list"   => Task.FromResult(List(scheduler)),
             _ => Task.FromResult(ToolResult.Fail(
-                $"Unknown operation '{operation}'. Valid values: add, remove, list"))
+                $"Unknown operation '{operation}'. Valid values: add, remove, update, list"))
         };
     }
 
@@ -270,8 +283,22 @@ public class ManageCronTool : BaseTool
         var task = args.GetValueOrDefault("task")?.ToString();
         if (string.IsNullOrWhiteSpace(task)) return ToolResult.Fail("'task' is required for add");
 
+        // Point the caller at 'update' rather than leaving "remove it first" as the only way
+        // forward. Faced with a bare rejection the usual next move is to retry under a slightly
+        // different name, which is how two jobs end up delivering the same report.
         if (scheduler.GetJob(name) != null)
-            return ToolResult.Fail($"Cron job '{name}' already exists. Remove it first to replace it.");
+            return ToolResult.Fail(
+                $"Cron job '{name}' already exists. Use operation='update' to change its schedule "
+                + "or task. Do NOT add a second job under a different name for the same purpose.");
+
+        // Catch the near-miss too: "PSX Daily Summary" against an existing "psx-daily-summary".
+        var similar = scheduler.FindSimilarJob(name);
+        if (similar != null)
+            return ToolResult.Fail(
+                $"Cron job '{similar.Name}' already covers this — the name you asked for ('{name}') "
+                + $"differs only in case or punctuation, so adding it would schedule the same work "
+                + $"twice. Its schedule is '{similar.CronExpression}'. Use "
+                + $"operation='update' with name='{similar.Name}' if it needs changing.");
 
         scheduler.AddJob(name, cron, task);
         var next = scheduler.GetJob(name)?.NextExecution;
@@ -290,6 +317,36 @@ public class ManageCronTool : BaseTool
             : ToolResult.Fail($"Cron job '{name}' not found.");
     }
 
+    private static ToolResult Update(CronScheduler scheduler, string? name, Dictionary<string, object?> args)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return ToolResult.Fail("'name' is required for update");
+
+        var existing = scheduler.GetJob(name) ?? scheduler.FindSimilarJob(name);
+        if (existing == null)
+            return ToolResult.Fail(
+                $"Cron job '{name}' not found. Use operation='list' to see the configured jobs, "
+                + "or operation='add' to create it.");
+
+        var cron = args.GetValueOrDefault("cron")?.ToString();
+        var task = args.GetValueOrDefault("task")?.ToString();
+        if (string.IsNullOrWhiteSpace(cron) && string.IsNullOrWhiteSpace(task))
+            return ToolResult.Fail("Provide 'cron', 'task', or both to update.");
+
+        // UpdateJob preserves LastExecuted, so changing a task does not re-run today's occurrence.
+        if (!scheduler.UpdateJob(
+                existing.Name,
+                string.IsNullOrWhiteSpace(cron) ? existing.CronExpression : cron,
+                string.IsNullOrWhiteSpace(task) ? existing.Task : task))
+            return ToolResult.Fail($"Cron job '{existing.Name}' could not be updated.");
+
+        var updated = scheduler.GetJob(existing.Name);
+        return ToolResult.Ok(
+            $"Cron job '{existing.Name}' updated.\n" +
+            $"  Cron: {updated?.CronExpression}\n" +
+            $"  Task: {updated?.Task}\n" +
+            $"  Next run: {(updated != null ? updated.NextExecution.ToString("o") : "unknown")}");
+    }
+
     private static ToolResult List(CronScheduler scheduler)
     {
         var jobs = scheduler.GetJobs();
@@ -297,7 +354,7 @@ public class ManageCronTool : BaseTool
             return ToolResult.Ok("No cron jobs configured.");
 
         var lines = jobs.Values.Select(j =>
-            $"• {j.Name}  [{j.CronExpression}]\n" +
+            $"• {j.Name}  [{j.CronExpression}]{(j.IsRunning ? "  (running now)" : "")}\n" +
             $"  Task:       {j.Task}\n" +
             $"  Last run:   {(j.LastExecuted == DateTime.MinValue ? "never" : j.LastExecuted.ToString("o"))}\n" +
             $"  Next run:   {j.NextExecution:o}");

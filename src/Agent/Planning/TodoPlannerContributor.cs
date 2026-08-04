@@ -108,6 +108,27 @@ public sealed class TodoPlannerContributor : IPromptContributor
             - Do not end your turn while items remain incomplete. If you genuinely cannot finish
               one, `todos_remove` it and say plainly why, rather than leaving it dangling.
             - If the work changes shape, add or remove items so the list keeps matching reality.
+
+            ### Item ids
+            Ids are assigned by the system, never by you. This matters, because getting it wrong
+            leaves real work looking unfinished and side effects being repeated:
+
+            - Do NOT put an `id` field in `todos_add`. Anything you pass is discarded and a fresh
+              id is allocated, so an item you "added as id 1" may come back as id 7.
+            - Read the ids out of the `todos_add` result, or from `todos_get_remaining` /
+              `todos_get_all`, and use only those in `todos_complete` and `todos_remove`.
+            - Before completing items, if you are not certain of an id, call `todos_get_remaining`
+              and match on the title. Completing a guessed id silently closes the wrong item and
+              leaves the real one open.
+            - Do not re-add an item that already exists to "reset" it — you will end up with two
+              copies, and the stale one keeps asking to be done.
+
+            ### Items with side effects
+            If an item is a delivery — sending a message, notifying the user, posting an update —
+            complete it immediately after the send succeeds, in the same turn. An item that still
+            reads "share the update" after you have already shared it will be picked up again and
+            the user receives the same thing twice. If you are resuming and cannot tell whether a
+            delivery already happened, say so and ask, rather than sending again.
             """;
 
         if (_store == null)
