@@ -249,7 +249,13 @@ public sealed class AgentOrchestrator : IHostedService
                     appConfigPath,
                     _loggerFactory.CreateLogger<ManageChannelTool>()));
                 _toolRegistry.Register(new NotifyUserTool(
-                    _channelManager, _loggerFactory.CreateLogger<NotifyUserTool>()));
+                    _channelManager,
+                    _loggerFactory.CreateLogger<NotifyUserTool>(),
+                    _sessionManager,
+                    allowSubAgentSends: toolsConfig.SubAgentNotify,
+                    duplicateWindow: TimeSpan.FromSeconds(
+                        Math.Max(0, toolsConfig.DuplicateNotifyWindowSeconds)),
+                    duplicateThreshold: toolsConfig.DuplicateNotifyThreshold));
             }
 
             // ── HITL tools ────────────────────────────────────────────────────
