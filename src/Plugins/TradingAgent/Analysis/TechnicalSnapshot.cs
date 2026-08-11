@@ -54,10 +54,16 @@ public sealed record TechnicalSnapshot
 {
     public string Symbol { get; init; } = "";
 
-    /// <summary>Trading date of the last bar analyzed.</summary>
+    /// <summary>Trading session of the last bar analyzed.</summary>
     public DateOnly AsOf { get; init; }
 
-    /// <summary>True when the last bar is the live forming session rather than a settled close.</summary>
+    /// <summary>Start of the last bar for an intraday series; null for a daily series.</summary>
+    public DateTime? AsOfUtc { get; init; }
+
+    /// <summary>Bar width of the analyzed series: <c>1D</c>, <c>60m</c>, <c>15m</c>, <c>5m</c>.</summary>
+    public string Interval { get; init; } = "1D";
+
+    /// <summary>True when the last bar is still forming rather than settled.</summary>
     public bool UsesLiveBar { get; init; }
 
     public int Bars { get; init; }

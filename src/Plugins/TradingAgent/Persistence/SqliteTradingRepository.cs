@@ -289,6 +289,278 @@ public sealed class SqliteTradingRepository : ITradingRepository
         await command.ExecuteNonQueryAsync(ct);
     }
 
+    public async Task SaveDailySessionAsync(
+        DateOnly sessionDate,
+        IReadOnlyList<TradingAgent.Research.PsxCandle> bars,
+        CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+
+        var session = sessionDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        var nowUtc = DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture);
+
+        if (bars.Count > 0)
+        {
+            var insert = connection.CreateCommand();
+            insert.Transaction = (SqliteTransaction)transaction;
+            insert.CommandText = """
+                INSERT INTO daily_bars
+                    (symbol, session_date, open, high, low, close, previous_close, volume, saved_utc)
+                VALUES
+                    ($symbol, $session, $open, $high, $low, $close, $prev, $volume, $saved)
+                ON CONFLICT (symbol, session_date) DO UPDATE SET
+                    open = excluded.open, high = excluded.high, low = excluded.low,
+                    close = excluded.close, previous_close = excluded.previous_close,
+                    volume = excluded.volume, saved_utc = excluded.saved_utc
+                """;
+
+            var symbol = insert.Parameters.Add("$symbol", SqliteType.Text);
+            var date = insert.Parameters.Add("$session", SqliteType.Text);
+            var open = insert.Parameters.Add("$open", SqliteType.Text);
+            var high = insert.Parameters.Add("$high", SqliteType.Text);
+            var low = insert.Parameters.Add("$low", SqliteType.Text);
+            var close = insert.Parameters.Add("$close", SqliteType.Text);
+            var prev = insert.Parameters.Add("$prev", SqliteType.Text);
+            var volume = insert.Parameters.Add("$volume", SqliteType.Integer);
+            var saved = insert.Parameters.Add("$saved", SqliteType.Text);
+            saved.Value = nowUtc;
+
+            foreach (var bar in bars)
+            {
+                // A forming session is not archived: it would freeze an intraday snapshot as if it
+                // were that day's settled candle.
+                if (bar.IsLive || bar.IsIntraday) continue;
+
+                symbol.Value = bar.Symbol;
+                date.Value = bar.Date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+                open.Value = bar.Open.ToString(CultureInfo.InvariantCulture);
+                high.Value = bar.High.ToString(CultureInfo.InvariantCulture);
+                low.Value = bar.Low.ToString(CultureInfo.InvariantCulture);
+                close.Value = bar.Close.ToString(CultureInfo.InvariantCulture);
+                prev.Value = bar.PreviousClose is { } p
+                    ? p.ToString(CultureInfo.InvariantCulture)
+                    : (object)DBNull.Value;
+                volume.Value = bar.Volume;
+                await insert.ExecuteNonQueryAsync(ct);
+            }
+        }
+
+        var coverage = connection.CreateCommand();
+        coverage.Transaction = (SqliteTransaction)transaction;
+        coverage.CommandText = """
+            INSERT INTO daily_bar_coverage (session_date, symbol_count, fetched_utc)
+            VALUES ($session, $count, $fetched)
+            ON CONFLICT (session_date) DO UPDATE SET
+                symbol_count = excluded.symbol_count, fetched_utc = excluded.fetched_utc
+            """;
+        coverage.Parameters.AddWithValue("$session", session);
+        coverage.Parameters.AddWithValue("$count", bars.Count);
+        coverage.Parameters.AddWithValue("$fetched", nowUtc);
+        await coverage.ExecuteNonQueryAsync(ct);
+
+        await transaction.CommitAsync(ct);
+    }
+
+    public async Task<IReadOnlyList<TradingAgent.Research.PsxCandle>> GetDailyBarsAsync(
+        string symbol,
+        int maxBars,
+        CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+
+        symbol = symbol.Trim().ToUpperInvariant();
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT session_date, open, high, low, close, previous_close, volume
+            FROM daily_bars
+            WHERE symbol = $symbol
+            ORDER BY session_date DESC
+            LIMIT $limit
+            """;
+        command.Parameters.AddWithValue("$symbol", symbol);
+        command.Parameters.AddWithValue("$limit", Math.Clamp(maxBars, 1, 5000));
+
+        var bars = new List<TradingAgent.Research.PsxCandle>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            bars.Add(new TradingAgent.Research.PsxCandle
+            {
+                Symbol        = symbol,
+                Date          = DateOnly.ParseExact(reader.GetString(0), "yyyy-MM-dd", CultureInfo.InvariantCulture),
+                Open          = decimal.Parse(reader.GetString(1), CultureInfo.InvariantCulture),
+                High          = decimal.Parse(reader.GetString(2), CultureInfo.InvariantCulture),
+                Low           = decimal.Parse(reader.GetString(3), CultureInfo.InvariantCulture),
+                Close         = decimal.Parse(reader.GetString(4), CultureInfo.InvariantCulture),
+                PreviousClose = reader.IsDBNull(5)
+                                    ? null
+                                    : decimal.Parse(reader.GetString(5), CultureInfo.InvariantCulture),
+                Volume        = reader.GetInt64(6)
+            });
+        }
+
+        bars.Reverse();
+        return bars;
+    }
+
+    public async Task<IReadOnlySet<DateOnly>> GetCoveredDailyDatesAsync(
+        DateOnly fromInclusive,
+        DateOnly toInclusive,
+        CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT session_date FROM daily_bar_coverage
+            WHERE session_date >= $from AND session_date <= $to
+            """;
+        command.Parameters.AddWithValue("$from", fromInclusive.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+        command.Parameters.AddWithValue("$to", toInclusive.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+
+        var dates = new HashSet<DateOnly>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            dates.Add(DateOnly.ParseExact(reader.GetString(0), "yyyy-MM-dd", CultureInfo.InvariantCulture));
+
+        return dates;
+    }
+
+    public async Task<DailyArchiveStatus> GetDailyArchiveStatusAsync(CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT
+                (SELECT COUNT(DISTINCT symbol) FROM daily_bars),
+                (SELECT COUNT(*) FROM daily_bars),
+                (SELECT COUNT(*) FROM daily_bar_coverage),
+                (SELECT MIN(session_date) FROM daily_bars),
+                (SELECT MAX(session_date) FROM daily_bars)
+            """;
+
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct))
+            return new DailyArchiveStatus(0, 0, 0, null, null);
+
+        return new DailyArchiveStatus(
+            reader.GetInt32(0),
+            reader.GetInt32(1),
+            reader.GetInt32(2),
+            reader.IsDBNull(3) ? null : DateOnly.ParseExact(reader.GetString(3), "yyyy-MM-dd", CultureInfo.InvariantCulture),
+            reader.IsDBNull(4) ? null : DateOnly.ParseExact(reader.GetString(4), "yyyy-MM-dd", CultureInfo.InvariantCulture));
+    }
+
+    public async Task SaveIntradayBarsAsync(
+        IReadOnlyList<TradingAgent.Research.PsxCandle> bars,
+        CancellationToken ct = default)
+    {
+        // Only settled bars are archived. Persisting the in-progress bucket would freeze a partial
+        // bar into history the moment a scan happened to run mid-bucket.
+        var settled = bars.Where(b => !b.IsLive && b.IsIntraday && b.BucketStartUtc is not null).ToList();
+        if (settled.Count == 0) return;
+
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+
+        var command = connection.CreateCommand();
+        command.Transaction = (SqliteTransaction)transaction;
+        command.CommandText = """
+            INSERT INTO intraday_bars
+                (symbol, interval_minutes, bucket_start_utc, session_date, open, high, low, close, volume, saved_utc)
+            VALUES
+                ($symbol, $interval, $start, $session, $open, $high, $low, $close, $volume, $saved)
+            ON CONFLICT (symbol, interval_minutes, bucket_start_utc) DO UPDATE SET
+                open = excluded.open, high = excluded.high, low = excluded.low,
+                close = excluded.close, volume = excluded.volume, saved_utc = excluded.saved_utc
+            """;
+
+        var symbol = command.Parameters.Add("$symbol", SqliteType.Text);
+        var interval = command.Parameters.Add("$interval", SqliteType.Integer);
+        var start = command.Parameters.Add("$start", SqliteType.Text);
+        var session = command.Parameters.Add("$session", SqliteType.Text);
+        var open = command.Parameters.Add("$open", SqliteType.Text);
+        var high = command.Parameters.Add("$high", SqliteType.Text);
+        var low = command.Parameters.Add("$low", SqliteType.Text);
+        var close = command.Parameters.Add("$close", SqliteType.Text);
+        var volume = command.Parameters.Add("$volume", SqliteType.Integer);
+        var saved = command.Parameters.Add("$saved", SqliteType.Text);
+        saved.Value = DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture);
+
+        foreach (var bar in settled)
+        {
+            symbol.Value = bar.Symbol;
+            interval.Value = bar.IntervalMinutes;
+            start.Value = bar.BucketStartUtc!.Value.ToString("O", CultureInfo.InvariantCulture);
+            session.Value = bar.Date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+            open.Value = bar.Open.ToString(CultureInfo.InvariantCulture);
+            high.Value = bar.High.ToString(CultureInfo.InvariantCulture);
+            low.Value = bar.Low.ToString(CultureInfo.InvariantCulture);
+            close.Value = bar.Close.ToString(CultureInfo.InvariantCulture);
+            volume.Value = bar.Volume;
+            await command.ExecuteNonQueryAsync(ct);
+        }
+
+        await transaction.CommitAsync(ct);
+    }
+
+    public async Task<IReadOnlyList<TradingAgent.Research.PsxCandle>> GetIntradayBarsAsync(
+        string symbol,
+        int intervalMinutes,
+        int maxBars,
+        DateTime? beforeUtc = null,
+        CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT bucket_start_utc, session_date, open, high, low, close, volume
+            FROM intraday_bars
+            WHERE symbol = $symbol
+              AND interval_minutes = $interval
+              AND ($before IS NULL OR bucket_start_utc < $before)
+            ORDER BY bucket_start_utc DESC
+            LIMIT $limit
+            """;
+        command.Parameters.AddWithValue("$symbol", symbol.Trim().ToUpperInvariant());
+        command.Parameters.AddWithValue("$interval", intervalMinutes);
+        command.Parameters.AddWithValue("$before",
+            beforeUtc is null ? DBNull.Value : beforeUtc.Value.ToString("O", CultureInfo.InvariantCulture));
+        command.Parameters.AddWithValue("$limit", Math.Clamp(maxBars, 1, 5000));
+
+        var bars = new List<TradingAgent.Research.PsxCandle>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            bars.Add(new TradingAgent.Research.PsxCandle
+            {
+                Symbol          = symbol.Trim().ToUpperInvariant(),
+                BucketStartUtc  = DateTime.Parse(reader.GetString(0), CultureInfo.InvariantCulture,
+                                      DateTimeStyles.RoundtripKind),
+                Date            = DateOnly.ParseExact(reader.GetString(1), "yyyy-MM-dd", CultureInfo.InvariantCulture),
+                IntervalMinutes = intervalMinutes,
+                Open            = decimal.Parse(reader.GetString(2), CultureInfo.InvariantCulture),
+                High            = decimal.Parse(reader.GetString(3), CultureInfo.InvariantCulture),
+                Low             = decimal.Parse(reader.GetString(4), CultureInfo.InvariantCulture),
+                Close           = decimal.Parse(reader.GetString(5), CultureInfo.InvariantCulture),
+                Volume          = reader.GetInt64(6)
+            });
+        }
+
+        // Queried newest-first for the LIMIT; the analyzers want oldest-first.
+        bars.Reverse();
+        return bars;
+    }
+
     private async Task EnsureInitializedAsync(CancellationToken ct)
     {
         if (_initialized) return;
@@ -388,8 +660,44 @@ public sealed class SqliteTradingRepository : ITradingRepository
                     created_utc TEXT NOT NULL,
                     FOREIGN KEY (execution_id) REFERENCES trading_executions(execution_id)
                 );
+                CREATE TABLE IF NOT EXISTS daily_bars (
+                    symbol TEXT NOT NULL,
+                    session_date TEXT NOT NULL,
+                    open TEXT NOT NULL,
+                    high TEXT NOT NULL,
+                    low TEXT NOT NULL,
+                    close TEXT NOT NULL,
+                    previous_close TEXT NULL,
+                    volume INTEGER NOT NULL,
+                    saved_utc TEXT NOT NULL,
+                    PRIMARY KEY (symbol, session_date)
+                );
+                -- Which dates have been retrieved at all, so the backfill is resumable and a known
+                -- non-trading day (symbol_count = 0) is never refetched.
+                CREATE TABLE IF NOT EXISTS daily_bar_coverage (
+                    session_date TEXT PRIMARY KEY,
+                    symbol_count INTEGER NOT NULL,
+                    fetched_utc TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS intraday_bars (
+                    symbol TEXT NOT NULL,
+                    interval_minutes INTEGER NOT NULL,
+                    bucket_start_utc TEXT NOT NULL,
+                    session_date TEXT NOT NULL,
+                    open TEXT NOT NULL,
+                    high TEXT NOT NULL,
+                    low TEXT NOT NULL,
+                    close TEXT NOT NULL,
+                    volume INTEGER NOT NULL,
+                    saved_utc TEXT NOT NULL,
+                    PRIMARY KEY (symbol, interval_minutes, bucket_start_utc)
+                );
                 CREATE INDEX IF NOT EXISTS ix_trading_order_events_execution
                     ON trading_order_events(execution_id, event_id);
+                CREATE INDEX IF NOT EXISTS ix_intraday_bars_series
+                    ON intraday_bars(symbol, interval_minutes, bucket_start_utc DESC);
+                CREATE INDEX IF NOT EXISTS ix_daily_bars_series
+                    ON daily_bars(symbol, session_date DESC);
                 CREATE INDEX IF NOT EXISTS ix_trade_proposals_status_created
                     ON trade_proposals(status, created_utc DESC);
                 CREATE INDEX IF NOT EXISTS ix_trading_executions_state_created

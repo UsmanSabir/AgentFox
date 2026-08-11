@@ -9,7 +9,10 @@ namespace TradingAgent.Research;
 public sealed record PsxCandle
 {
     public string Symbol { get; init; } = "";
+
+    /// <summary>Trading session this bar belongs to (the session date for intraday bars too).</summary>
     public DateOnly Date { get; init; }
+
     public decimal Open { get; init; }
     public decimal High { get; init; }
     public decimal Low { get; init; }
@@ -18,11 +21,31 @@ public sealed record PsxCandle
     public long Volume { get; init; }
 
     /// <summary>
-    /// True when this bar is still forming — built from the live market watch during a session
-    /// rather than from the settled end-of-day summary.
+    /// True when this bar is still forming — the live market-watch bar for the current session, or
+    /// the in-progress bucket of an intraday series — rather than a settled bar.
     /// </summary>
     public bool IsLive { get; init; }
+
+    /// <summary>Bar width in minutes. 1440 (one session) for daily bars.</summary>
+    public int IntervalMinutes { get; init; } = DailyIntervalMinutes;
+
+    /// <summary>
+    /// Start of the bucket for an intraday bar; null for a daily bar. Intraday series are ordered by
+    /// this, so <see cref="Date"/> alone is never used to sequence bars inside one session.
+    /// </summary>
+    public DateTime? BucketStartUtc { get; init; }
+
+    public const int DailyIntervalMinutes = 1440;
+
+    public bool IsIntraday => IntervalMinutes < DailyIntervalMinutes;
+
+    /// <summary>Single sort key that orders daily and intraday bars alike.</summary>
+    public DateTime SortKeyUtc =>
+        BucketStartUtc ?? Date.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc);
 }
+
+/// <summary>One executed trade from the portal's intraday tick feed.</summary>
+public sealed record PsxTick(DateTime TimeUtc, decimal Price, long Quantity);
 
 /// <summary>
 /// Live (or last-traded) snapshot for one symbol from the exchange's market watch. This is the

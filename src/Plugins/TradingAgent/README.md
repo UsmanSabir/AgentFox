@@ -18,8 +18,10 @@ WhatsApp Group
 
   "Recommend something" / daily scan
   → scan_watchlist over AllowedSymbols
-      daily OHLC candles → support/resistance levels → buy-at-support / sell-at-resistance
-      (breakdowns excluded), ranked by distance to level and reward:risk
+      archived daily OHLC + weekly rollup → support/resistance on BOTH timeframes
+      → buy-at-support / sell-at-resistance, weekly-confirmed levels ranked first
+      (daily AND weekly breakdowns excluded)
+  → analyze_candles at 15m/60m to time the entry against those levels
   → research_stock on the top candidates → create_trade_proposal
 
   Authorized compatibility execution / bounded exit worker
@@ -124,7 +126,12 @@ Add the following sections to `appsettings.json`.
       "ResistanceProximityPercent": 2.5,
       "MinRewardRisk":              1.5,
       "MinAverageVolume":           25000,
-      "MaxResults":                 10
+      "MaxResults":                 10,
+      "BackfillYears":              2,
+      "WeeklyLookbackWeeks":        104,
+      "ConfluenceTolerancePercent": 2.0,
+      "ArchiveIntradayBars":        true,
+      "IntradayLookbackBars":       120
     }
   },
   "Ahk": {
@@ -176,6 +183,11 @@ disabled; this tool uses the explicit AgentFox provider bridge instead.
 | `Scan.MarketWatchCacheSeconds` | `60` | How long a live market-watch snapshot is reused. |
 | `Scan.MarketDayFetchConcurrency` | `4` | Concurrent portal requests while warming a cold candle cache (1–8). |
 | `Scan.MaxCachedMarketDays` | `120` | Settled sessions kept in the in-memory candle cache. |
+| `Scan.BackfillYears` | `2` | Years of daily OHLC the background worker archives for `AllowedSymbols`. Weekly levels need ~2 years. `0` disables it. |
+| `Scan.WeeklyLookbackWeeks` | `104` | Weekly bars requested when computing higher-timeframe structure. |
+| `Scan.ConfluenceTolerancePercent` | `2.0` | How close a weekly level must sit to a daily one to confirm it. Wider means more levels read as "confirmed" on weaker evidence. |
+| `Scan.ArchiveIntradayBars` | `true` | Persist completed intraday bars to `intraday_bars` in `trading.db`. The only way multi-session intraday history can exist — PSX serves the current session only. |
+| `Scan.IntradayLookbackBars` | `120` | Archived intraday bars loaded per analysis, on top of the current session rebuilt from ticks. |
 | `Scan.RangeWindow` | `20` | Sessions used for range position and new-low/new-high comparisons. |
 | `Scan.PivotWindow` | `3` | Bars either side of a bar for it to count as a swing pivot. |
 | `Scan.LevelClusterPercent` | `1.5` | Levels within this percent of each other merge into one (touch count). |
@@ -421,10 +433,65 @@ rather than from whatever the model recalls about the market:
 | Tool | Use |
 |---|---|
 | `scan_watchlist` | Rank the whole watchlist: which symbols are at support (buy) and which are pressing resistance (sell). Call this for "what should I buy today", "recommend a stock", or a daily scan. |
-| `analyze_candles` | One symbol in depth: levels, indicators, and a suggested entry/stop/target. |
+| `analyze_candles` | One symbol in depth: levels, indicators, and a suggested entry/stop/target. `interval` selects `1D` (default) or intraday `60m`/`30m`/`15m`/`5m`. |
 
 `research_stock` also carries a `technical` section now, so a tip's stated entry is judged against
 real support and resistance rather than only the 52-week range.
+
+### Multi-timeframe levels (weekly + daily + intraday)
+
+Levels drawn from one timeframe are unreliable, so the analysis works on three:
+
+| Timeframe | Role |
+|---|---|
+| **Weekly** | Structural levels — the ones that actually hold |
+| **Daily** | Swing levels and the trade plan (entry / stop / target) |
+| **Intraday** | Timing only, never levels |
+
+Weekly candles are **resampled from the daily archive**, not fetched — and they are exact rather than
+approximated, because the daily bars carry true highs and lows. (Resampling from the portal's long
+close-only JSON series would silently drop every wick and pull levels inward.)
+
+What that buys you:
+
+- **Confluence.** Each daily level is matched against weekly levels within
+  `Scan.ConfluenceTolerancePercent`; matches come back under `confirmed_supports` /
+  `confirmed_resistances` with both touch counts and the separation. A daily level with no weekly level
+  behind it is reported as exactly that — "treat it as a weaker floor and size accordingly".
+- **Alignment.** `timeframe_alignment` is `aligned`, `mixed`, `conflicting`, or `unknown`. A daily buy
+  under weekly resistance is `conflicting` — named rather than left for the model to notice.
+- **The weekly falling-knife filter.** A stock can look like a clean daily support test *because* the
+  weekly chart is collapsing through it. `scan_watchlist` moves those to `avoid` instead of offering
+  them as buys, and says why.
+- **Ranking that prefers structure.** Buy candidates sort by weekly-confirmed entry level first, then
+  alignment, then proximity and reward:risk — a level two timeframes recognise outranks one that is
+  merely closer.
+
+Observed on the live watchlist: HBL came back `aligned` (daily *and* weekly at resistance, entry level
+weekly-confirmed) and ranked above OGDC, whose daily entry had no weekly level behind it.
+
+### Deep history: the one-time backfill
+
+Weekly levels need roughly two years of daily candles, and each portal request covers one date, so
+`DailyCandleBackfillWorker` archives that history once into `daily_bars` rather than refetching it per
+process. It starts 45 s after launch, is **resumable** (`daily_bar_coverage` records every date already
+retrieved, including non-trading days), and paced one date at a time.
+
+Measured, not estimated — 215 weekdays of 6 symbols:
+
+| | Measured | Extrapolated to 2 years |
+|---|---|---|
+| Backfill runtime | 7 min 41 s for 215 dates (2.1 s/date) | **~18 min**, once, in the background |
+| Archive size | 336 KB for 1,230 bars | **~4 MB** for ~40 symbols |
+| Warm read, 6 symbols × 205 sessions | **630 ms** (was ~25 s from the portal) | unchanged |
+| `scan_watchlist` on a warm archive | **95 ms** | unchanged |
+
+Set `Scan.BackfillYears` to `0` to disable it and stay on the shallower on-demand window (no weekly
+structure). Because the backfill stores `AllowedSymbols` only, **adding a symbol to the watchlist later
+needs another pass** to pick up its history — the coverage table makes that resumable, but it is not
+instant. The portal answers bursts with empty tables, so the worker retries an empty date once and
+aborts the pass after four empty weekdays in a row rather than recording that stretch as if the market
+had been closed.
 
 ### Why the universe is `AllowedSymbols`
 
@@ -455,14 +522,45 @@ sessions is at the bottom of its range *because it is still falling*. It is repo
 never as a buy candidate — that is exactly the trade a naive "price near the low" screen would hand
 you. A pullback that holds above the prior low is still a normal `buy_at_support`.
 
+### Intraday candles
+
+`analyze_candles` with `interval` set to `60m`, `30m`, `15m`, or `5m` returns true intraday OHLCV.
+There is no intraday endpoint on the portal — bars are aggregated from the **complete tick tape** of
+the current session (`GET /timeseries/int/{symbol}`), which publishes every executed trade. The
+aggregation is verifiable: for FFC on 2026-08-11 the tape held 4,140 trades whose quantities summed to
+1,062,699, exactly the day's published volume, and rebucketing at 5m/15m/60m conserved that volume
+and the session's O/H/L/C exactly.
+
+**The constraint that shapes everything: PSX serves the current session only.** The tick endpoint
+ignores a date parameter and no historical intraday exists anywhere on the portal. So:
+
+- Every intraday call rebuilds today from ticks (never trusting a bar that was still forming when it
+  was last saved) and appends any **archived** earlier sessions.
+- Completed bars are written to `intraday_bars` in `trading.db` when `Scan.ArchiveIntradayBars` is on
+  (default). Intraday history therefore **accumulates from the day it is switched on** — expect a few
+  weeks before multi-session intraday levels mean anything. Only symbols actually analysed get
+  archived, so run the analysis across the watchlist near the close if you want the whole list covered.
+- Until then, a warning says how many sessions the series covers, and every intraday result carries
+  `daily_context` — the daily levels, setup, and trade plan.
+
+That last point is the intended workflow, not a workaround: **levels come from the daily candles,
+timing comes from the intraday bars.** The specialist is instructed to trade the daily levels and use
+intraday only to time the entry against them, because levels drawn from a single session's range are
+noise. Bar boundaries are epoch-aligned, which lands them on clean exchange-clock times (PKT is UTC+5
+with no DST), so a 60m series breaks at `:00` rather than 60 minutes after the first trade.
+
+Cost is one request per symbol per call (~90 KB for a liquid name), so intraday checks on a handful of
+scan candidates are cheap.
+
 ### Data sources and cost
 
-Candles come from the official portal's two market-wide tables, which is why a scan is cheap:
+Candles come from the official portal's market-wide tables, which is why a scan is cheap:
 
 | Endpoint | Provides |
 |---|---|
-| `POST dps.psx.com.pk/historical` (`date=yyyy-MM-dd`) | Settled OHLC for **every** symbol on one date |
-| `GET dps.psx.com.pk/market-watch` | The live forming bar for **every** symbol |
+| `POST dps.psx.com.pk/historical` (`date=yyyy-MM-dd`) | Settled daily OHLC for **every** symbol on one date |
+| `GET dps.psx.com.pk/market-watch` | The live forming daily bar for **every** symbol |
+| `GET dps.psx.com.pk/timeseries/int/{symbol}` | Every trade of the current session, for one symbol — the source of all intraday bars |
 
 History therefore costs **one request per trading day, regardless of symbol count** — a 12-symbol and
 a 200-symbol scan load the same days. Settled dates are immutable and cached for the process
@@ -494,6 +592,10 @@ resistance, then report the top candidates with their levels, entry, stop, targe
 Schedule it a little after the open (say 09:45 PKT) so the live bar has formed. The scan only
 proposes: everything it produces still passes through `ExecutionMode`, the risk engine, and HITL
 before any order exists.
+
+A second job near the close (say 15:35 PKT) that runs `analyze_candles` at `15m` across the watchlist
+archives that session's intraday bars, so intraday history accumulates for every symbol rather than
+only the ones you happened to ask about.
 
 ---
 

@@ -203,8 +203,9 @@ public sealed class TechnicalAnalyzerTests
         var snapshot = TechnicalAnalyzer.Analyze("TEST", bars, Options);
 
         Assert.IsTrue(snapshot.UsesLiveBar);
-        Assert.IsTrue(snapshot.Reasons.Any(r => r.Contains("live forming", StringComparison.OrdinalIgnoreCase)),
-            "An intraday verdict must say it is based on an unsettled bar.");
+        Assert.IsTrue(snapshot.Reasons.Any(r => r.Contains("forming", StringComparison.OrdinalIgnoreCase)
+                && r.Contains("not a closed one", StringComparison.OrdinalIgnoreCase)),
+            "A verdict drawn from an unsettled bar must say so: " + string.Join(" | ", snapshot.Reasons));
     }
 
     [TestMethod]

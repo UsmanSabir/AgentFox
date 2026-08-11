@@ -98,6 +98,7 @@ public sealed class TradingAgentModule : IAgentAwareModule
         services.AddSingleton<IBrokerStateReader>(sp => sp.GetRequiredService<AhkBrowserBrokerAdapter>());
         services.AddSingleton<IMarketCalendar, PsxMarketCalendar>();
         services.AddSingleton<PsxDataClient>();
+        services.AddSingleton<CandleHistoryProvider>();
         services.AddSingleton<TradingPolicyProvider>();
         services.AddSingleton<IPluginConfigDefinitionProvider, TradingPluginConfigDefinitionProvider>();
         services.AddSingleton<ITradingRepository, SqliteTradingRepository>();
@@ -118,6 +119,7 @@ public sealed class TradingAgentModule : IAgentAwareModule
         services.AddHostedService<TradingSafetyStartupValidator>();
         services.AddHostedService<BrokerReconciliationWorker>();
         services.AddHostedService<TakeProfitRetryWorker>();
+        services.AddHostedService<DailyCandleBackfillWorker>();
     }
 
     public void MapEndpoints(IEndpointRouteBuilder endpoints)
@@ -293,10 +295,13 @@ public sealed class TradingAgentModule : IAgentAwareModule
                 loggers.CreateLogger<ResearchIndexTool>()),
             new AnalyzeCandlesTool(
                 _services!.GetRequiredService<PsxDataClient>(),
+                _services!.GetRequiredService<CandleHistoryProvider>(),
+                repository,
                 agentOptions,
                 loggers.CreateLogger<AnalyzeCandlesTool>()),
             new ScanWatchlistTool(
                 _services!.GetRequiredService<PsxDataClient>(),
+                _services!.GetRequiredService<CandleHistoryProvider>(),
                 agentOptions,
                 loggers.CreateLogger<ScanWatchlistTool>()),
         };
@@ -383,15 +388,24 @@ public sealed class TradingAgentModule : IAgentAwareModule
                     * Call get_portfolio and pass its holdings to scan_watchlist so sell candidates you
                       actually own rank first and carry unrealized P&L.
                     * Recommend a BUY only from buy_candidates (at support). NEVER recommend anything
-                      listed under 'avoid': that is price falling through support, not a cheap entry,
-                      even though it sits at the bottom of its range.
+                      listed under 'avoid': that is price falling through support on the daily or the
+                      WEEKLY chart, not a cheap entry, even though it sits at the bottom of its range.
+                    * Prefer candidates whose entry_level_confirmed_weekly is true and whose
+                      timeframe_alignment is 'aligned' — a level both timeframes recognise is structure.
+                      Say so when a level has no weekly confirmation, and treat 'conflicting' alignment
+                      (a daily buy into weekly resistance) as counter-trend: smaller size or skip it.
                     * Recommend a SELL or take-profit from sell_candidates, preferring held positions.
                     * Quote the tool's own level, distance, entry, stop, target, and reward:risk. Never
                       adjust, round, or invent them, and never substitute your own price view.
                     * Then call research_stock on the top candidates for news and listing status before
                       presenting the final recommendation, and persist it with create_trade_proposal.
                 - For a candle, support, resistance, or "is now a good level" question about ONE stock,
-                  call analyze_candles.
+                  call analyze_candles. Interval 1D (the default) returns the daily read AND the weekly
+                  read with the levels both confirm — quote the weekly levels as the structural ones and
+                  the daily entry/stop/target as the plan. Add an intraday call (60m, then 15m or 5m)
+                  only to time an entry or exit today, and trade it against the higher-timeframe levels
+                  the result carries in weekly_context/daily_context — never against intraday levels
+                  alone. Say which interval each number came from, and note when a bar is still forming.
                 - For KSE30, KSE100, or another index question, call research_index and report the
                   returned official PSX evidence and retrieval time. Do not treat an index as a stock.
                 - For current PSX announcements, market commentary, or regulatory/news questions, call
