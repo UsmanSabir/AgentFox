@@ -391,6 +391,36 @@ export interface TradingStatus {
   checkedUtc: string;
 }
 
+/// Coverage of the local daily-candle archive that weekly support/resistance is derived from,
+/// plus whatever the backfill is doing right now.
+export interface CandleArchiveStatus {
+  backfillEnabled: boolean;
+  backfillYears: number;
+  configuredSymbols: number;
+  archive: {
+    symbols: number;
+    bars: number;
+    coveredDates: number;
+    earliestSession?: string;
+    latestSession?: string;
+  };
+  missingTradingDays: number;
+  targetTradingDays: number;
+  progress: {
+    isRunning: boolean;
+    startedUtc?: string;
+    completedUtc?: string;
+    datesTargeted: number;
+    datesCompleted: number;
+    sessionsStored: number;
+    emptyDates: number;
+    currentDate?: string;
+    abortedForThrottling: boolean;
+    message?: string;
+    percentComplete?: number;
+  };
+}
+
 export interface TradeProposal {
   proposalId: string;
   status: string;
@@ -637,6 +667,11 @@ export const api = {
     reconciliation: (limit = 100)         => get<ReconciliationRun[]>(`/trading/reconciliation?limit=${limit}`),
     setKillSwitch:  (active: boolean, reason?: string) =>
       post<{ killSwitch: boolean }>('/trading/kill-switch', { active, reason }),
+    candleArchive:  ()                    => get<CandleArchiveStatus>('/trading/candle-archive'),
+    // Returns as soon as the pass has STARTED — a two-year backfill runs for ~18 minutes, so the
+    // caller polls candleArchive() for progress instead of awaiting completion.
+    startBackfill:  (years?: number)      =>
+      post<{ started: boolean; status: CandleArchiveStatus }>('/trading/candle-archive/backfill', { years }),
   }
 };
 

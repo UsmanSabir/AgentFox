@@ -172,6 +172,39 @@ public sealed class TradingScanOptions
     /// <summary>Seconds a live market-watch snapshot is reused before refetching (clamped to 5–900).</summary>
     public int MarketWatchCacheSeconds { get; set; } = 60;
 
+    /// <summary>
+    /// Years of daily OHLC history the background backfill archives into the trading ledger, for the
+    /// configured AllowedSymbols. The exchange serves settled candles one date at a time (each request
+    /// covering every symbol), so a year is ~250 requests — paced and resumable, and done once rather
+    /// than on every process start. Weekly levels need roughly two years to be meaningful. Set 0 to
+    /// disable the backfill entirely and rely on the shallower on-demand window.
+    /// </summary>
+    public int BackfillYears { get; set; } = 2;
+
+    /// <summary>
+    /// Weekly bars requested when computing higher-timeframe structure. 104 ≈ two years.
+    /// </summary>
+    public int WeeklyLookbackWeeks { get; set; } = 104;
+
+    /// <summary>
+    /// How close a weekly level must sit to a daily level to count as confirming it. Wider means more
+    /// levels read as "confirmed" on weaker evidence.
+    /// </summary>
+    public decimal ConfluenceTolerancePercent { get; set; } = 2.0m;
+
+    /// <summary>
+    /// Archive completed intraday bars to the trading ledger. PSX serves intraday data for the CURRENT
+    /// session only, so this is the only way multi-session intraday history can exist — it accumulates
+    /// from the day it is switched on. Default true.
+    /// </summary>
+    public bool ArchiveIntradayBars { get; set; } = true;
+
+    /// <summary>
+    /// Archived intraday bars loaded per analysis, in addition to the current session rebuilt from
+    /// ticks. 120 covers roughly a week and a half of 15m bars.
+    /// </summary>
+    public int IntradayLookbackBars { get; set; } = 120;
+
     /// <summary>Within this percent of a support level counts as "at support" (buy zone).</summary>
     public decimal SupportProximityPercent { get; set; } = 2.5m;
 

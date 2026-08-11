@@ -254,21 +254,131 @@ public sealed partial class PsxDataClient
         return [$"{baseUrl}/historical", $"{baseUrl}/market-watch"];
     }
 
+    // ── Intraday candles ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Every executed trade of the CURRENT session for one symbol, oldest first.
+    ///
+    /// The portal serves the complete tick tape here — for a liquid symbol several thousand trades a
+    /// few seconds apart, whose quantities sum exactly to the day's published volume — which is what
+    /// makes true intraday candles possible at any bucket width. The hard limit is that only the
+    /// current session is available: the endpoint ignores a date parameter, and PSX publishes no
+    /// historical intraday anywhere. Past sessions therefore come from the local archive
+    /// (<see cref="TradingAgent.Persistence.ITradingRepository.GetIntradayBarsAsync"/>), which is why
+    /// intraday history accumulates from the day archiving is switched on rather than existing up front.
+    /// </summary>
+    public async Task<IReadOnlyList<PsxTick>> GetIntradayTicksAsync(
+        string symbol, CancellationToken ct = default)
+    {
+        symbol = NormalizeStockSymbol(symbol);
+        var points = await FetchSeriesAsync($"timeseries/int/{symbol}", ct);
+
+        return points
+            .Where(p => p.Price > 0)
+            .Select(p => new PsxTick(
+                DateTimeOffset.FromUnixTimeSeconds(p.Ts).UtcDateTime,
+                p.Price,
+                Math.Max(0, p.Volume)))
+            .OrderBy(t => t.TimeUtc)
+            .ToList();
+    }
+
+    /// <summary>
+    /// Buckets ticks into OHLCV candles of <paramref name="intervalMinutes"/> width. Pure and
+    /// deterministic so bucketing is unit-tested rather than trusted.
+    ///
+    /// Buckets are aligned to the epoch, which lands them on clean PKT wall-clock boundaries because
+    /// the exchange's offset (UTC+5, no DST) is a whole number of hours. The final bucket is flagged
+    /// <see cref="PsxCandle.IsLive"/> while its window has not elapsed: the analyzer wants that
+    /// forming bar, and the archive must not persist it as if it were complete.
+    /// </summary>
+    public static IReadOnlyList<PsxCandle> AggregateTicks(
+        string symbol,
+        IReadOnlyList<PsxTick> ticks,
+        int intervalMinutes,
+        DateTime? nowUtc = null)
+    {
+        if (ticks.Count == 0 || intervalMinutes <= 0) return [];
+
+        symbol = symbol.Trim().ToUpperInvariant();
+        var now = nowUtc ?? DateTime.UtcNow;
+        var width = intervalMinutes * 60L;
+        var bars = new List<PsxCandle>();
+
+        foreach (var group in ticks
+            .OrderBy(t => t.TimeUtc)
+            .GroupBy(t => new DateTimeOffset(t.TimeUtc, TimeSpan.Zero).ToUnixTimeSeconds() / width * width)
+            .OrderBy(g => g.Key))
+        {
+            var ordered = group.ToList();
+            var start = DateTimeOffset.FromUnixTimeSeconds(group.Key).UtcDateTime;
+
+            bars.Add(new PsxCandle
+            {
+                Symbol          = symbol,
+                Date            = DateOnly.FromDateTime(PsxTime.Now(start)),
+                BucketStartUtc  = start,
+                IntervalMinutes = intervalMinutes,
+                Open            = ordered[0].Price,
+                High            = ordered.Max(t => t.Price),
+                Low             = ordered.Min(t => t.Price),
+                Close           = ordered[^1].Price,
+                Volume          = ordered.Sum(t => t.Quantity),
+                IsLive          = start.AddMinutes(intervalMinutes) > now
+            });
+        }
+
+        return bars;
+    }
+
+    /// <summary>Intraday bar widths the tools accept, mapped from their request labels.</summary>
+    public static readonly IReadOnlyDictionary<string, int> SupportedIntervals =
+        new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["1d"] = PsxCandle.DailyIntervalMinutes,
+            ["1day"] = PsxCandle.DailyIntervalMinutes,
+            ["daily"] = PsxCandle.DailyIntervalMinutes,
+            ["60m"] = 60,
+            ["1h"] = 60,
+            ["30m"] = 30,
+            ["15m"] = 15,
+            ["5m"] = 5
+        };
+
+    /// <summary>Resolves an interval label to a bar width, or null when it is not supported.</summary>
+    public static int? ResolveInterval(string? label) =>
+        string.IsNullOrWhiteSpace(label) ? PsxCandle.DailyIntervalMinutes
+            : SupportedIntervals.TryGetValue(label.Trim(), out var minutes) ? minutes
+            : null;
+
+    /// <summary>Canonical label for a bar width, for output and archive keys.</summary>
+    public static string IntervalLabel(int intervalMinutes) =>
+        intervalMinutes >= PsxCandle.DailyIntervalMinutes ? "1D" : $"{intervalMinutes}m";
+
     // ── Fetching ──────────────────────────────────────────────────────────────
 
-    private async Task<IReadOnlyDictionary<string, PsxCandle>> FetchMarketDayAsync(DateOnly date)
+    /// <summary>
+    /// Fetches one date straight from the portal, bypassing the in-memory cache. Used by the backfill,
+    /// which walks hundreds of dates: routing those through the cache would evict the recent sessions
+    /// every scan depends on, to hold history that is being written to the durable archive anyway.
+    /// </summary>
+    public Task<IReadOnlyDictionary<string, PsxCandle>> FetchMarketDayUncachedAsync(
+        DateOnly date, CancellationToken ct = default) => FetchMarketDayAsync(date, ct);
+
+    private async Task<IReadOnlyDictionary<string, PsxCandle>> FetchMarketDayAsync(
+        DateOnly date, CancellationToken ct = default)
     {
         var gate = _marketDayGate.Value;
-        await gate.WaitAsync();
+        await gate.WaitAsync(ct);
         try
         {
             var baseUrl = _options.Value.PsxDataBaseUrl.TrimEnd('/');
             using var form = new FormUrlEncodedContent(
                 [new KeyValuePair<string, string>("date", date.ToString("yyyy-MM-dd"))]);
-            using var response = await _http.PostAsync($"{baseUrl}/historical", form);
+            using var response = await _http.PostAsync($"{baseUrl}/historical", form, ct);
             response.EnsureSuccessStatusCode();
 
-            var html = await response.Content.ReadAsStringAsync();
+            var html = await response.Content.ReadAsStringAsync(ct);
             var rows = ParseHistoricalTable(html, date);
             _logger.LogDebug("[PsxCandles] {Date:yyyy-MM-dd}: {Count} settled rows.", date, rows.Count);
             return rows;

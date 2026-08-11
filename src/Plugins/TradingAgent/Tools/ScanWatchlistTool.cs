@@ -40,15 +40,18 @@ public sealed class ScanWatchlistTool : BaseTool
     private const int WatchlistTableLimit = 60;
 
     private readonly PsxDataClient _dataClient;
+    private readonly CandleHistoryProvider _history;
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly ILogger<ScanWatchlistTool> _logger;
 
     public ScanWatchlistTool(
         PsxDataClient dataClient,
+        CandleHistoryProvider history,
         IOptions<TradingAgentOptions> options,
         ILogger<ScanWatchlistTool> logger)
     {
         _dataClient = dataClient;
+        _history = history;
         _options = options;
         _logger = logger;
     }
@@ -56,12 +59,14 @@ public sealed class ScanWatchlistTool : BaseTool
     public override string Name => "scan_watchlist";
 
     public override string Description =>
-        "Scan the configured allowed-symbols watchlist using daily candles and return ranked BUY " +
-        "candidates trading at support and SELL candidates pressing resistance, each with the level, " +
+        "Scan the configured allowed-symbols watchlist using daily AND weekly candles, returning ranked " +
+        "BUY candidates trading at support and SELL candidates pressing resistance, each with the level, " +
         "distance to it, RSI/ATR/volume context, and a suggested entry, stop, target and reward:risk. " +
-        "Stocks making fresh lows while still falling are returned under 'avoid' rather than as buys. " +
-        "Call this FIRST for any 'recommend a stock', 'what should I buy today', or daily-scan request; " +
-        "pass holdings from get_portfolio to rank sell candidates you actually own.";
+        "Candidates whose entry level is confirmed on the weekly chart rank first, and anything breaking " +
+        "down on either timeframe is returned under 'avoid' rather than as a buy — including a tidy " +
+        "daily support test inside a weekly breakdown. Call this FIRST for any 'recommend a stock', " +
+        "'what should I buy today', or daily-scan request; pass holdings from get_portfolio to rank " +
+        "sell candidates you actually own.";
 
     public override Dictionary<string, ToolParameter> Parameters => new()
     {
@@ -131,6 +136,12 @@ public sealed class ScanWatchlistTool : BaseTool
     /// <summary>One holding as supplied by the caller (normally copied straight from get_portfolio).</summary>
     private sealed record HoldingInput(string? Symbol, decimal? Quantity, decimal? AverageBuyPrice);
 
+    /// <summary>One analysed symbol: the daily read, the weekly corroboration, and any position held.</summary>
+    private sealed record Candidate(
+        TechnicalSnapshot Snapshot,
+        MultiTimeframeView Multi,
+        HoldingInput? Holding);
+
     protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
     {
         var options = _options.Value;
@@ -181,13 +192,18 @@ public sealed class ScanWatchlistTool : BaseTool
         var holdings = ParseHoldings(arguments.GetValueOrDefault("holdings"), notes);
 
         // ── Candles ───────────────────────────────────────────────────────────
+        // Weekly structure needs a far deeper window than the daily read; the archive serves it
+        // locally, so asking for it costs a query rather than hundreds of portal requests.
+        var weeklySessions = Math.Clamp(scan.WeeklyLookbackWeeks, 12, 600) * 6;
+        var sessionsWanted = Math.Max(lookback, weeklySessions);
+
         CandleHistory history;
         try
         {
             _logger.LogInformation(
                 "[ScanWatchlist] Scanning {Count} symbols over {Days} sessions (side={Side}).",
                 universe.Count, lookback, side);
-            history = await _dataClient.GetCandleHistoryAsync(universe, lookback, includeLive: true);
+            history = await _history.GetDailyAsync(universe, sessionsWanted, includeLive: true);
         }
         catch (Exception ex)
         {
@@ -197,12 +213,12 @@ public sealed class ScanWatchlistTool : BaseTool
 
         if (history.Sessions.Count == 0)
             return ToolResult.Fail(
-                "The PSX portal returned no settled trading sessions for the requested window, so no " +
+                "No settled trading sessions are available from the archive or the PSX portal, so no " +
                 "support or resistance levels can be computed. Check connectivity to the data portal.");
 
         // ── Analyze ───────────────────────────────────────────────────────────
         var technicalOptions = TechnicalOptions.From(scan);
-        var analyzed = new List<(TechnicalSnapshot Snapshot, HoldingInput? Holding)>();
+        var analyzed = new List<Candidate>();
 
         foreach (var symbol in universe)
         {
@@ -212,7 +228,10 @@ public sealed class ScanWatchlistTool : BaseTool
                 continue;
             }
 
-            var snapshot = TechnicalAnalyzer.Analyze(symbol, candles, technicalOptions);
+            // The daily read stays scoped to the requested lookback; the weekly rollup uses everything
+            // archived, so a deeper archive strengthens the weekly view without moving daily levels.
+            var dailyWindow = candles.TakeLast(lookback).ToList();
+            var snapshot = TechnicalAnalyzer.Analyze(symbol, dailyWindow, technicalOptions);
 
             if (snapshot.Setup == TradeSetup.InsufficientData)
             {
@@ -231,7 +250,10 @@ public sealed class ScanWatchlistTool : BaseTool
                 continue;
             }
 
-            analyzed.Add((snapshot, holdings.GetValueOrDefault(symbol)));
+            var multi = MultiTimeframeAnalyzer.Analyze(
+                symbol, candles, technicalOptions, scan.ConfluenceTolerancePercent);
+
+            analyzed.Add(new Candidate(snapshot, multi, holdings.GetValueOrDefault(symbol)));
         }
 
         // ── Rank ──────────────────────────────────────────────────────────────
@@ -239,7 +261,14 @@ public sealed class ScanWatchlistTool : BaseTool
         var buyRejected = new List<object>();
         if (side is "buy" or "both")
         {
-            var eligible = analyzed.Where(a => a.Snapshot.Setup == TradeSetup.BuyAtSupport).ToList();
+            var eligible = analyzed
+                .Where(a => a.Snapshot.Setup == TradeSetup.BuyAtSupport)
+                // A daily dip inside a WEEKLY breakdown is the falling-knife case one timeframe up:
+                // the daily levels look tidy precisely because the weekly one is collapsing through
+                // them. These are reported under `avoid`, never offered as buys.
+                .Where(a => !a.Multi.WeeklyBreakdown)
+                .ToList();
+
             foreach (var item in eligible)
             {
                 if (minRewardRisk > 0
@@ -259,10 +288,14 @@ public sealed class ScanWatchlistTool : BaseTool
             buyCandidates = eligible
                 .Where(a => minRewardRisk <= 0
                     || (a.Snapshot.RewardRiskRatio is { } rr && rr >= minRewardRisk))
-                .OrderBy(a => a.Snapshot.PercentAboveSupport ?? decimal.MaxValue)
+                // Weekly-confirmed entry levels first, then aligned timeframes, then proximity and
+                // reward:risk. A level two timeframes recognise outranks one that is merely closer.
+                .OrderByDescending(a => a.Multi.EntryLevelConfirmedWeekly)
+                .ThenByDescending(a => a.Multi.Alignment == TimeframeAlignment.Aligned)
+                .ThenBy(a => a.Snapshot.PercentAboveSupport ?? decimal.MaxValue)
                 .ThenByDescending(a => a.Snapshot.RewardRiskRatio ?? 0m)
                 .Take(maxResults)
-                .Select(a => Project(a.Snapshot, a.Holding))
+                .Select(Project)
                 .ToList();
         }
 
@@ -271,16 +304,20 @@ public sealed class ScanWatchlistTool : BaseTool
         {
             sellCandidates = analyzed
                 .Where(a => a.Snapshot.Setup == TradeSetup.SellAtResistance)
-                // Owned positions first: those are the sells that can actually be acted on.
+                // Owned positions first: those are the sells that can actually be acted on. Then
+                // weekly-confirmed resistance and timeframe agreement, which make rejection likelier,
+                // and only then raw proximity — same precedence as the buy side.
                 .OrderByDescending(a => a.Holding is not null)
+                .ThenByDescending(a => a.Multi.ConfirmedResistances.Count > 0)
+                .ThenByDescending(a => a.Multi.Alignment == TimeframeAlignment.Aligned)
                 .ThenBy(a => a.Snapshot.PercentBelowResistance ?? decimal.MaxValue)
                 .Take(maxResults)
-                .Select(a => Project(a.Snapshot, a.Holding))
+                .Select(Project)
                 .ToList();
         }
 
         var avoid = analyzed
-            .Where(a => a.Snapshot.Setup == TradeSetup.AvoidBreakdown)
+            .Where(a => a.Snapshot.Setup == TradeSetup.AvoidBreakdown || a.Multi.WeeklyBreakdown)
             .OrderBy(a => a.Snapshot.Symbol)
             .Select(a => new
             {
@@ -289,7 +326,12 @@ public sealed class ScanWatchlistTool : BaseTool
                 range_low = a.Snapshot.RangeLow,
                 consecutive_down_days = a.Snapshot.ConsecutiveDownDays,
                 held = a.Holding is not null,
-                reason = "At the bottom of its range while still falling — a breakdown, not a support test."
+                daily_setup = a.Snapshot.Setup,
+                weekly_setup = a.Multi.Weekly?.Setup,
+                reason = a.Multi.WeeklyBreakdown && a.Snapshot.Setup != TradeSetup.AvoidBreakdown
+                    ? "The WEEKLY chart is breaking down. The daily levels may look like a clean support " +
+                      "test, but price is falling through structure one timeframe up."
+                    : "At the bottom of its range while still falling — a breakdown, not a support test."
             })
             .ToList();
 
@@ -340,6 +382,8 @@ public sealed class ScanWatchlistTool : BaseTool
                         day_change_percent = a.Snapshot.DayChangePercent,
                         zone = a.Snapshot.Zone,
                         setup = a.Snapshot.Setup,
+                        weekly_setup = a.Multi.Weekly?.Setup,
+                        timeframe_alignment = a.Multi.Alignment,
                         percent_above_support = a.Snapshot.PercentAboveSupport,
                         percent_below_resistance = a.Snapshot.PercentBelowResistance,
                         range_position = a.Snapshot.RangePosition,
@@ -356,9 +400,13 @@ public sealed class ScanWatchlistTool : BaseTool
         }, JsonOptions));
     }
 
-    /// <summary>Flattens a snapshot into the compact candidate row the agent reasons over.</summary>
-    private static object Project(TechnicalSnapshot s, HoldingInput? holding)
+    /// <summary>Flattens a candidate into the compact row the agent reasons over.</summary>
+    private static object Project(Candidate candidate)
     {
+        var s = candidate.Snapshot;
+        var multi = candidate.Multi;
+        var holding = candidate.Holding;
+
         decimal? unrealizedPercent = holding?.AverageBuyPrice is > 0
             ? Math.Round((s.Close - holding.AverageBuyPrice!.Value) / holding.AverageBuyPrice.Value * 100m, 2)
             : null;
@@ -392,6 +440,20 @@ public sealed class ScanWatchlistTool : BaseTool
             consecutive_up_days = s.ConsecutiveUpDays,
             supports = s.Supports,
             resistances = s.Resistances,
+
+            // Higher-timeframe corroboration: whether the weekly chart recognises the same levels,
+            // and whether the two timeframes point the same way.
+            weekly_zone = multi.Weekly?.Zone,
+            weekly_setup = multi.Weekly?.Setup,
+            weekly_nearest_support = multi.Weekly?.NearestSupport,
+            weekly_nearest_resistance = multi.Weekly?.NearestResistance,
+            weekly_bars = multi.WeeklyBars,
+            timeframe_alignment = multi.Alignment,
+            entry_level_confirmed_weekly = multi.EntryLevelConfirmedWeekly,
+            confirmed_supports = multi.ConfirmedSupports,
+            confirmed_resistances = multi.ConfirmedResistances,
+            multi_timeframe_notes = multi.Notes,
+
             holding = holding is null ? null : new
             {
                 quantity = holding.Quantity,

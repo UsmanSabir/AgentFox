@@ -45,10 +45,18 @@ public static class TechnicalAnalyzer
                 Warnings = ["No candles were available for this symbol."]
             };
 
-        var bars = candles.OrderBy(c => c.Date).ToList();
+        // SortKeyUtc, not Date: an intraday series has many bars per session date.
+        var bars = candles.OrderBy(c => c.SortKeyUtc).ToList();
         var last = bars[^1];
         var warnings = new List<string>();
         var reasons = new List<string>();
+
+        // Every measure below is in BARS, so the prose has to follow the series: on a 15m series
+        // "3 consecutive down days" would be a plain lie about what was measured, and so would a
+        // "20-day range" on a weekly one.
+        var intraday = last.IsIntraday;
+        var unit = CandleInterval.Unit(last.IntervalMinutes);
+        var period = CandleInterval.Period(last.IntervalMinutes);
 
         var closes = bars.Select(b => b.Close).ToList();
         var rangeWindow = Math.Min(options.RangeWindow, bars.Count);
@@ -76,8 +84,8 @@ public static class TechnicalAnalyzer
         var raw = new List<(decimal Price, string Origin)>();
         foreach (var pivot in SwingPivots(bars, options.PivotWindow))
             raw.Add(pivot);
-        raw.Add((rangeLow, $"{rangeWindow}-day low"));
-        raw.Add((rangeHigh, $"{rangeWindow}-day high"));
+        raw.Add((rangeLow, $"{rangeWindow}-{unit} low"));
+        raw.Add((rangeHigh, $"{rangeWindow}-{unit} high"));
         if (low52Week is > 0) raw.Add((low52Week.Value, "52-week low"));
         if (high52Week is > 0) raw.Add((high52Week.Value, "52-week high"));
 
@@ -138,7 +146,7 @@ public static class TechnicalAnalyzer
         if (bars.Count < MinimumBars)
         {
             setup = TradeSetup.InsufficientData;
-            warnings.Add($"Only {bars.Count} sessions of candle history were available; " +
+            warnings.Add($"Only {bars.Count} {period}s of candle history were available; " +
                          $"{MinimumBars} are needed to classify a setup.");
         }
         else if (breakdown)
@@ -184,7 +192,7 @@ public static class TechnicalAnalyzer
                         $"the last price ({nearestResistance.Touches} touch(es), {nearestResistance.Origin}).");
 
         if (rangePosition is not null)
-            reasons.Add($"Range position {Round(rangePosition.Value * 100m)}% of the {rangeWindow}-day " +
+            reasons.Add($"Range position {Round(rangePosition.Value * 100m)}% of the {rangeWindow}-{unit} " +
                         $"{Round(rangeLow)}–{Round(rangeHigh)} range.");
 
         if (rsi is not null)
@@ -200,16 +208,18 @@ public static class TechnicalAnalyzer
 
         decimal? volumeRatio = avgVolume is > 0 ? Round((decimal)last.Volume / avgVolume.Value) : null;
         if (volumeRatio is not null)
-            reasons.Add($"Volume {last.Volume:N0} is {volumeRatio}× the 30-day average {avgVolume:N0}.");
+            reasons.Add($"Volume {last.Volume:N0} is {volumeRatio}× the 30-{unit} average {avgVolume:N0}.");
 
-        if (down > 0) reasons.Add($"{down} consecutive down session(s).");
-        else if (up > 0) reasons.Add($"{up} consecutive up session(s).");
+        if (down > 0) reasons.Add($"{down} consecutive down {period}(s).");
+        else if (up > 0) reasons.Add($"{up} consecutive up {period}(s).");
 
-        if (breakdown)
-            reasons.Add($"BREAKDOWN: a fresh {rangeWindow}-day low with " +
+        // Gated on the verdict, not on the raw condition: with too little history the setup is
+        // InsufficientData, and a reasons list still shouting BREAKDOWN would contradict it.
+        if (setup == TradeSetup.AvoidBreakdown)
+            reasons.Add($"BREAKDOWN: a fresh {rangeWindow}-{unit} low with " +
                         (brokeByAtr
                             ? $"the close more than one ATR below the prior low {Round(priorLow!.Value)}"
-                            : $"{down} consecutive down session(s)") +
+                            : $"{down} consecutive down {period}(s)") +
                         " — price is falling through support, not testing it.");
 
         if (rewardRisk is not null)
@@ -223,12 +233,16 @@ public static class TechnicalAnalyzer
                         $"(price is {pctBelowResistance}% below it), do not open a new long here.");
 
         if (last.IsLive)
-            reasons.Add("Last bar is the live forming session, not a settled close.");
+            reasons.Add(
+                $"Last bar is the forming {CandleInterval.Label(last.IntervalMinutes)} " +
+                $"{period}, not a closed one.");
 
         return new TechnicalSnapshot
         {
             Symbol                 = symbol,
             AsOf                   = last.Date,
+            AsOfUtc                = last.BucketStartUtc,
+            Interval               = CandleInterval.Label(last.IntervalMinutes),
             UsesLiveBar            = last.IsLive,
             Bars                   = bars.Count,
             Close                  = Round(last.Close),
@@ -413,7 +427,7 @@ public static class TechnicalAnalyzer
     {
         if (sma20 is null) return null;
         if (sma50 is null)
-            return close >= sma20 ? "above 20-day average" : "below 20-day average";
+            return close >= sma20 ? "above SMA20" : "below SMA20";
 
         return (close >= sma20, sma20 >= sma50) switch
         {
