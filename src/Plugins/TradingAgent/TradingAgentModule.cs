@@ -116,6 +116,7 @@ public sealed class TradingAgentModule : IAgentAwareModule
         // Disk-backed queue of take-profit sells awaiting retry, plus the background worker that retries
         // them while the market is open (placed via the host's IHostedService pipeline on app start).
         services.AddSingleton<PendingTakeProfitStore>();
+        services.AddSingleton<CandleBackfillRunner>();
         services.AddHostedService<TradingSafetyStartupValidator>();
         services.AddHostedService<BrokerReconciliationWorker>();
         services.AddHostedService<TakeProfitRetryWorker>();
@@ -178,6 +179,31 @@ public sealed class TradingAgentModule : IAgentAwareModule
             logger.LogWarning("[TradingAgent] Kill switch {State} via web API. Reason: {Reason}",
                 body.Active ? "ACTIVATED" : "cleared", body.Reason ?? "(none given)");
             return Results.Ok(new { killSwitch = body.Active });
+        }).RequireAuthorization("ManagementAdministrator");
+
+        // Candle archive: how much daily history is stored, how much is still missing, and what the
+        // backfill is doing right now. Read-only, so any management viewer can see it.
+        trading.MapGet("/candle-archive", async (
+            CandleBackfillRunner runner,
+            CancellationToken ct) => Results.Ok(await runner.GetStatusAsync(ct)));
+
+        // Starts a backfill pass and returns immediately: a two-year pass takes ~18 minutes, so the
+        // request must not wait on it. The pass is bound to the application lifetime and is
+        // single-flight — a second trigger while one is running reports the running pass rather than
+        // starting a competing one, which would double the request rate the portal sees.
+        trading.MapPost("/candle-archive/backfill", async (
+            CandleBackfillRequest? body,
+            CandleBackfillRunner runner,
+            ILogger<TradingAgentModule> logger,
+            CancellationToken ct) =>
+        {
+            var started = runner.TryStart(body?.Years);
+            logger.LogInformation(
+                "[TradingAgent] Candle backfill {Outcome} via web API (years={Years}).",
+                started ? "started" : "already running", body?.Years?.ToString() ?? "configured");
+
+            var status = await runner.GetStatusAsync(ct);
+            return Results.Accepted(value: new { started, status });
         }).RequireAuthorization("ManagementAdministrator");
 
         trading.MapGet("/proposals", async (
@@ -304,6 +330,9 @@ public sealed class TradingAgentModule : IAgentAwareModule
                 _services!.GetRequiredService<CandleHistoryProvider>(),
                 agentOptions,
                 loggers.CreateLogger<ScanWatchlistTool>()),
+            new ManageCandleArchiveTool(
+                _services!.GetRequiredService<CandleBackfillRunner>(),
+                loggers.CreateLogger<ManageCandleArchiveTool>()),
         };
 
         if (agentOptions.Value.ResearchWebEnabled && webSearchProvider is not null)
@@ -476,7 +505,8 @@ public sealed class TradingAgentModule : IAgentAwareModule
         {
             "parse_signal", "check_market", "log_signal", "create_trade_proposal",
             "get_trading_status", "get_portfolio", "research_stock", "research_index",
-            "scan_watchlist", "analyze_candles", "place_order", "place_orders"
+            "scan_watchlist", "analyze_candles", "manage_candle_archive",
+            "place_order", "place_orders"
         };
         if (researchWebEnabled && webSearchProvider is not null)
             names.Add("research_web");
@@ -485,3 +515,6 @@ public sealed class TradingAgentModule : IAgentAwareModule
 }
 
 public sealed record KillSwitchRequest(bool Active, string? Reason = null);
+
+/// <summary>Optional depth override for a manually triggered backfill; null uses the configured years.</summary>
+public sealed record CandleBackfillRequest(int? Years = null);
