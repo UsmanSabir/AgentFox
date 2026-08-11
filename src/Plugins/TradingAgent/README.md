@@ -472,10 +472,35 @@ weekly-confirmed) and ranked above OGDC, whose daily entry had no weekly level b
 
 ### Deep history: the one-time backfill
 
-Weekly levels need roughly two years of daily candles, and each portal request covers one date, so
-`DailyCandleBackfillWorker` archives that history once into `daily_bars` rather than refetching it per
-process. It starts 45 s after launch, is **resumable** (`daily_bar_coverage` records every date already
-retrieved, including non-trading days), and paced one date at a time.
+Weekly levels need roughly two years of daily candles, and each portal request covers one date, so that
+history is archived once into `daily_bars` rather than refetched per process. Passes are **resumable**
+(`daily_bar_coverage` records every date already retrieved, including non-trading days) and paced one
+date at a time.
+
+**Nothing needs to be run by hand** — `DailyCandleBackfillWorker` starts a pass 45 s after launch and
+every 6 hours after that, which also picks up each new session. But because a first pass takes ~18
+minutes, there are three ways to watch or drive it, all sharing one single-flight runner so two passes
+can never compete for the portal:
+
+| | How |
+|---|---|
+| **Web UI** | The *Candle archive* card on the Trading page: stored bars, symbols, coverage range, missing days, and a **Backfill N days** button with a live progress bar. The card polls only while a pass is running. |
+| **Ask the agent** | "How far back does the candle history go?" or "backfill the candle archive" — the `manage_candle_archive` tool (`status` / `backfill`). This is the quick command. |
+| **HTTP** | `GET /trading/candle-archive` for status; `POST /trading/candle-archive/backfill` (admin, optional `{"years": 2}`) to start one. Returns as soon as the pass has started. |
+
+```bash
+# Status
+curl -H "X-Api-Key: $KEY" http://localhost:5000/api/trading/candle-archive
+
+# Start a pass (returns immediately; poll the status endpoint for progress)
+curl -X POST -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' \
+     -d '{"years":2}' http://localhost:5000/api/trading/candle-archive/backfill
+```
+
+A manual trigger returns once the pass has **started**, not when it finishes — an 18-minute job must
+not hold an HTTP request or an agent turn open. The pass is bound to the application lifetime, so
+navigating away or letting the tool call return does not abandon it; only shutdown stops it, and the
+next start resumes.
 
 Measured, not estimated — 215 weekdays of 6 symbols:
 
@@ -488,10 +513,10 @@ Measured, not estimated — 215 weekdays of 6 symbols:
 
 Set `Scan.BackfillYears` to `0` to disable it and stay on the shallower on-demand window (no weekly
 structure). Because the backfill stores `AllowedSymbols` only, **adding a symbol to the watchlist later
-needs another pass** to pick up its history — the coverage table makes that resumable, but it is not
-instant. The portal answers bursts with empty tables, so the worker retries an empty date once and
-aborts the pass after four empty weekdays in a row rather than recording that stretch as if the market
-had been closed.
+needs another pass** to pick up its history — trigger it from the UI button or the tool; the coverage
+table makes it resumable, but it is not instant. The portal answers bursts with empty tables, so an
+empty date is retried once and a pass aborts after four empty weekdays in a row rather than recording
+that stretch as if the market had been closed (the UI shows that outcome in amber).
 
 ### Why the universe is `AllowedSymbols`
 
