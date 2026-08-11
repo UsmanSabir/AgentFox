@@ -28,6 +28,12 @@ public sealed class SpecialistAgentDescriptor
     public SpecialistMemoryMode MemoryMode { get; init; } = SpecialistMemoryMode.Shared;
     public int MaxIterations { get; init; } = 8;
     public int MaxConcurrentTurns { get; init; } = 1;
+    /// <summary>
+    /// Wall-clock budget for a single specialist turn, enforced by the Specialist lane handler.
+    /// Defaults to 300s; specialists that do slow work per turn (browser automation, multiple
+    /// external fetches across several tool-call iterations) should raise this explicitly.
+    /// </summary>
+    public int TimeoutSeconds { get; init; } = 300;
 }
 
 /// <summary>

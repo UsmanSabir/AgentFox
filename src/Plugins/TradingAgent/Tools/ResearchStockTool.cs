@@ -1,9 +1,13 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using AgentFox.Plugins.Interfaces;
 using AgentFox.Plugins.Research;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using TradingAgent.Analysis;
+using TradingAgent.Config;
 using TradingAgent.Research;
 
 namespace TradingAgent.Tools;
@@ -23,12 +27,14 @@ public sealed class ResearchStockTool : BaseTool
 {
     private readonly PsxDataClient _dataClient;
     private readonly IChatClient _chatClient;
+    private readonly IOptions<TradingAgentOptions> _options;
     private readonly ILogger<ResearchStockTool> _logger;
 
     private static readonly JsonSerializerOptions _snakeOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
-        PropertyNameCaseInsensitive = true
+        PropertyNameCaseInsensitive = true,
+        Converters = { new JsonStringEnumConverter(JsonNamingPolicy.SnakeCaseLower) }
     };
 
     private const string AnalystSystemPrompt = """
@@ -60,14 +66,32 @@ public sealed class ResearchStockTool : BaseTool
           the tip may be stale or fabricated.
         - A steep recent drop, price near the 52-week low with negative momentum, or bearish
           index conditions warrant CAUTION even for an otherwise clean tip.
+        - The `technical` section (when present) is computed deterministically from daily candles;
+          treat its levels and indicators as facts and never restate them with different numbers.
+          Read it as follows:
+            * setup = avoid_breakdown means price is at the bottom of its range because it is still
+              falling. Return AVOID for a BUY tip on it regardless of how attractive the price looks.
+            * setup = buy_at_support with an adequate reward_risk_ratio supports a BUY tip; the tip's
+              entry should be at or below nearest_support, and an entry far ABOVE it means the tip is
+              chasing — cap confidence at MEDIUM and name the level in your rationale.
+            * setup = sell_at_resistance supports taking profit and argues against a fresh BUY.
+            * A BUY tip whose stated stop-loss sits above nearest_support, or whose target sits above
+              nearest_resistance, is a risk factor: the stop is too tight and the target is unproven.
+          A missing or null `technical` section means candle data was unavailable — treat the levels
+          as unknown and lower confidence accordingly; do not substitute your own.
         - Missing price data entirely => INSUFFICIENT_DATA with confidence NONE.
         - You are advising a real-money retail account: when in doubt, be conservative.
         """;
 
-    public ResearchStockTool(PsxDataClient dataClient, IChatClient chatClient, ILogger<ResearchStockTool> logger)
+    public ResearchStockTool(
+        PsxDataClient dataClient,
+        IChatClient chatClient,
+        IOptions<TradingAgentOptions> options,
+        ILogger<ResearchStockTool> logger)
     {
         _dataClient = dataClient;
         _chatClient = chatClient;
+        _options = options;
         _logger = logger;
     }
 
@@ -108,6 +132,11 @@ public sealed class ResearchStockTool : BaseTool
         _logger.LogInformation("[ResearchStock] Researching {Symbol}…", symbol);
         var data = await _dataClient.GatherAsync(symbol);
 
+        // Candle-derived levels, so the analyst judges a tip's entry against actual support and
+        // resistance rather than only against the 52-week extremes. Fail-soft: if the OHLC feed is
+        // unavailable the assessment proceeds without levels rather than failing the research.
+        var technical = await GetTechnicalAsync(symbol, data.Quote);
+
         // Register the web sources consulted so the chat UI can cite them. Fail-soft: no-op when no
         // scope is open (e.g. the tool is invoked outside an agent turn).
         var scope = ResearchReferenceScope.Current;
@@ -123,6 +152,7 @@ public sealed class ResearchStockTool : BaseTool
         {
             symbol,
             quote          = data.Quote,
+            technical,
             kse100_index   = data.IndexQuote,
             listing_status = data.ListingStatus,
             company_news   = data.CompanyNews,
@@ -143,6 +173,30 @@ public sealed class ResearchStockTool : BaseTool
             assessment,
             evidence
         }, _snakeOptions));
+    }
+
+    /// <summary>
+    /// Loads daily candles and returns the deterministic level/indicator read, or null when the OHLC
+    /// feed is unavailable. Uses the same lookback as scan_watchlist so both share the cached
+    /// market-wide sessions instead of each warming its own window.
+    /// </summary>
+    private async Task<TechnicalSnapshot?> GetTechnicalAsync(string symbol, PsxQuoteSummary quote)
+    {
+        var scan = _options.Value.Scan;
+        try
+        {
+            var history = await _dataClient.GetCandleHistoryAsync([symbol], scan.LookbackDays);
+            if (!history.Series.TryGetValue(symbol, out var candles) || candles.Count == 0)
+                return null;
+
+            return TechnicalAnalyzer.Analyze(
+                symbol, candles, TechnicalOptions.From(scan), quote.High52Week, quote.Low52Week);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[ResearchStock] Candle analysis unavailable for {Symbol}.", symbol);
+            return null;
+        }
     }
 
     private async Task<ResearchAssessment> AssessAsync(object evidence, string? tipContext)

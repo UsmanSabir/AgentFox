@@ -74,7 +74,7 @@ public sealed record IndexResearchData
 /// fail-soft: a dead feed degrades the research evidence, it never throws out of
 /// <see cref="GatherAsync"/>.
 /// </summary>
-public sealed class PsxDataClient
+public sealed partial class PsxDataClient
 {
     private const string Kse100Symbol = "KSE100";
 
@@ -87,6 +87,8 @@ public sealed class PsxDataClient
         _options = options;
         _logger = logger;
         _http = HttpResilienceFactory.Create(TimeSpan.FromSeconds(25));
+        _marketDayGate = new Lazy<SemaphoreSlim>(() =>
+            new SemaphoreSlim(Math.Clamp(_options.Value.Scan.MarketDayFetchConcurrency, 1, 8)));
         // Google News RSS (and some CDNs in front of the PSX portal) reject requests without a UA.
         _http.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (compatible; AgentFox-TradingResearch/1.0)");
     }

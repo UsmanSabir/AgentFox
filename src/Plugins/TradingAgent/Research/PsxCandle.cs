@@ -1,0 +1,93 @@
+namespace TradingAgent.Research;
+
+/// <summary>
+/// One completed daily OHLC bar for a PSX security, as published by the exchange's historical
+/// market summary. <see cref="PreviousClose"/> is the portal's LDCP (last day closing price) and is
+/// nullable because the table occasionally omits it; O/H/L/C are required for a bar to exist at all,
+/// so a row missing any of them is dropped rather than zero-filled.
+/// </summary>
+public sealed record PsxCandle
+{
+    public string Symbol { get; init; } = "";
+    public DateOnly Date { get; init; }
+    public decimal Open { get; init; }
+    public decimal High { get; init; }
+    public decimal Low { get; init; }
+    public decimal Close { get; init; }
+    public decimal? PreviousClose { get; init; }
+    public long Volume { get; init; }
+
+    /// <summary>
+    /// True when this bar is still forming — built from the live market watch during a session
+    /// rather than from the settled end-of-day summary.
+    /// </summary>
+    public bool IsLive { get; init; }
+}
+
+/// <summary>
+/// Live (or last-traded) snapshot for one symbol from the exchange's market watch. This is the
+/// forming candle for the current session: <see cref="Open"/>/<see cref="High"/>/<see cref="Low"/>
+/// are today's range so far and <see cref="Current"/> is the last trade. All numeric fields are
+/// nullable — the market watch publishes zeros/blanks for symbols that have not traded, and those
+/// must read as "unknown", never as a real price of zero.
+/// </summary>
+public sealed record PsxLiveQuote
+{
+    public string Symbol { get; init; } = "";
+    public string? Sector { get; init; }
+    public decimal? PreviousClose { get; init; }
+    public decimal? Open { get; init; }
+    public decimal? High { get; init; }
+    public decimal? Low { get; init; }
+    public decimal? Current { get; init; }
+    public decimal? ChangePercent { get; init; }
+    public long? Volume { get; init; }
+    public DateTime RetrievedAtUtc { get; init; } = DateTime.UtcNow;
+
+    /// <summary>
+    /// Projects the quote onto a forming daily candle for <paramref name="date"/>, or null when the
+    /// symbol has not traded (no last price, or a degenerate all-zero row).
+    /// </summary>
+    public PsxCandle? ToCandle(DateOnly date)
+    {
+        if (Current is not > 0) return null;
+
+        var open  = Open is > 0 ? Open.Value : Current.Value;
+        var high  = High is > 0 ? High.Value : Math.Max(open, Current.Value);
+        var low   = Low  is > 0 ? Low.Value  : Math.Min(open, Current.Value);
+
+        return new PsxCandle
+        {
+            Symbol        = Symbol,
+            Date          = date,
+            Open          = open,
+            High          = Math.Max(high, Current.Value),
+            Low           = Math.Min(low, Current.Value),
+            Close         = Current.Value,
+            PreviousClose = PreviousClose,
+            Volume        = Volume ?? 0,
+            IsLive        = true
+        };
+    }
+}
+
+/// <summary>
+/// Daily candle history for a set of symbols plus the live tick that tops it up, along with the
+/// trading dates actually retrieved and any symbols the exchange feed did not cover.
+/// </summary>
+public sealed record CandleHistory
+{
+    public IReadOnlyDictionary<string, IReadOnlyList<PsxCandle>> Series { get; init; }
+        = new Dictionary<string, IReadOnlyList<PsxCandle>>();
+
+    public IReadOnlyDictionary<string, PsxLiveQuote> Live { get; init; }
+        = new Dictionary<string, PsxLiveQuote>();
+
+    /// <summary>Completed sessions covered, oldest first.</summary>
+    public IReadOnlyList<DateOnly> Sessions { get; init; } = [];
+
+    public DateTime RetrievedAtUtc { get; init; } = DateTime.UtcNow;
+
+    /// <summary>Non-fatal problems (a date that could not be fetched, a symbol with no rows).</summary>
+    public IReadOnlyList<string> Warnings { get; init; } = [];
+}
