@@ -12,7 +12,7 @@ namespace TradingAgent.Market;
 /// </summary>
 public sealed class PsxMarketCalendar : IMarketCalendar
 {
-    private static readonly TimeZoneInfo Pkt = ResolvePkt();
+    private static readonly TimeZoneInfo Pkt = PsxTime.Zone;
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly ILogger<PsxMarketCalendar> _logger;
 
@@ -152,13 +152,4 @@ public sealed class PsxMarketCalendar : IMarketCalendar
         return (start, end);
     }
 
-    private static TimeZoneInfo ResolvePkt()
-    {
-        foreach (var id in new[] { "Pakistan Standard Time", "Asia/Karachi" })
-        {
-            try { return TimeZoneInfo.FindSystemTimeZoneById(id); }
-            catch (TimeZoneNotFoundException) { }
-        }
-        return TimeZoneInfo.CreateCustomTimeZone("PKT", TimeSpan.FromHours(5), "PKT", "PKT");
-    }
 }

@@ -133,6 +133,90 @@ public class TradingAgentOptions
 
     /// <summary>Maximum characters retained from each external result snippet.</summary>
     public int ResearchWebMaxContentCharacters { get; set; } = 4000;
+
+    /// <summary>
+    /// Wall-clock budget for a single trading-agent turn (specialist lane timeout). A turn can chain
+    /// AHK browser automation (get_portfolio) with PSX/news fetches and an LLM verdict across several
+    /// tool-call iterations, which routinely exceeds the platform's 300s specialist default. Default 600.
+    /// </summary>
+    public int SpecialistTimeoutSeconds { get; set; } = 600;
+
+    /// <summary>
+    /// Candle-based technical scanning (scan_watchlist / analyze_candles) and the support/resistance
+    /// thresholds that turn a candle series into a buy-at-support or sell-at-resistance setup.
+    /// </summary>
+    public TradingScanOptions Scan { get; set; } = new();
+}
+
+/// <summary>
+/// Settings for the deterministic candle scanner. Nothing here can place an order: the scanner
+/// only ranks candidates, and execution stays behind <see cref="TradingAgentOptions.ExecutionMode"/>
+/// and the risk engine.
+/// </summary>
+public sealed class TradingScanOptions
+{
+    /// <summary>
+    /// Settled trading sessions of OHLC history loaded per scan (clamped to 5–250). Support and
+    /// resistance are only as meaningful as the window they are drawn from; 60 sessions ≈ 3 months.
+    /// Each session costs ONE market-wide portal request regardless of how many symbols are scanned,
+    /// and settled sessions are cached, so only a new trading day is ever fetched again.
+    /// </summary>
+    public int LookbackDays { get; set; } = 60;
+
+    /// <summary>Settled sessions kept in the in-memory cache (each holds a row per traded symbol).</summary>
+    public int MaxCachedMarketDays { get; set; } = 120;
+
+    /// <summary>Concurrent portal requests while warming a cold candle cache (clamped to 1–8).</summary>
+    public int MarketDayFetchConcurrency { get; set; } = 4;
+
+    /// <summary>Seconds a live market-watch snapshot is reused before refetching (clamped to 5–900).</summary>
+    public int MarketWatchCacheSeconds { get; set; } = 60;
+
+    /// <summary>Within this percent of a support level counts as "at support" (buy zone).</summary>
+    public decimal SupportProximityPercent { get; set; } = 2.5m;
+
+    /// <summary>Within this percent of a resistance level counts as "at resistance" (sell zone).</summary>
+    public decimal ResistanceProximityPercent { get; set; } = 2.5m;
+
+    /// <summary>
+    /// Minimum (target − entry) / (entry − stop) for a buy-at-support candidate to be reported.
+    /// Candidates below the floor are still analyzed; they are simply not offered as setups.
+    /// </summary>
+    public decimal MinRewardRisk { get; set; } = 1.5m;
+
+    /// <summary>
+    /// Minimum 30-session average volume for a scan candidate. Thinly traded symbols produce
+    /// support/resistance levels that cannot actually be traded at the quoted price.
+    /// </summary>
+    public long MinAverageVolume { get; set; } = 25_000;
+
+    /// <summary>Maximum candidates returned per side by scan_watchlist.</summary>
+    public int MaxResults { get; set; } = 10;
+
+    /// <summary>Sessions used for the range-position and new-low/new-high comparisons.</summary>
+    public int RangeWindow { get; set; } = 20;
+
+    /// <summary>Bars either side of a bar for it to count as a swing pivot high/low.</summary>
+    public int PivotWindow { get; set; } = 3;
+
+    /// <summary>Levels within this percent of each other are merged into one level (touch count).</summary>
+    public decimal LevelClusterPercent { get; set; } = 1.5m;
+
+    /// <summary>ATR multiple placed below the entry when suggesting a protective stop.</summary>
+    public decimal StopAtrMultiple { get; set; } = 1.0m;
+
+    /// <summary>RSI(14) at or below this reads as oversold (supports a bounce case).</summary>
+    public decimal RsiOversold { get; set; } = 35m;
+
+    /// <summary>RSI(14) at or above this reads as overbought (supports taking profit).</summary>
+    public decimal RsiOverbought { get; set; } = 70m;
+
+    /// <summary>
+    /// Consecutive down sessions that, combined with a fresh range low, mark a breakdown rather
+    /// than a support test — the "falling knife" guard that keeps a collapsing stock out of the
+    /// buy list even though its price is at the bottom of its range.
+    /// </summary>
+    public int BreakdownDownDays { get; set; } = 3;
 }
 
 public sealed class MarketSessionOverride

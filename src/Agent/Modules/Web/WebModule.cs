@@ -895,7 +895,7 @@ public class WebModule : IAppModule
                 SessionKey = conversationId,
                 AgentId = descriptor.Id,
                 Input = req.Message,
-                TimeoutSeconds = 300
+                TimeoutSeconds = descriptor.TimeoutSeconds
             };
             commandQueue.Enqueue(command);
 

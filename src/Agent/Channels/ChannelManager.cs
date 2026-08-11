@@ -290,7 +290,7 @@ public class ChannelManager
                         SessionKey = sessionId,
                         AgentId = specialist.Id,
                         Input = messageContent,
-                        TimeoutSeconds = 300
+                        TimeoutSeconds = specialist.TimeoutSeconds
                     };
                     _commandQueue.Enqueue(command);
                     response = await command.ResultSource.Task;

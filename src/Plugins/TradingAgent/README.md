@@ -16,6 +16,12 @@ WhatsApp Group
       log_signal     — records the signal
       create_trade_proposal — persists a non-executable proposal
 
+  "Recommend something" / daily scan
+  → scan_watchlist over AllowedSymbols
+      daily OHLC candles → support/resistance levels → buy-at-support / sell-at-resistance
+      (breakdowns excluded), ranked by distance to level and reward:risk
+  → research_stock on the top candidates → create_trade_proposal
+
   Authorized compatibility execution / bounded exit worker
   → Trading Manager
       policy + configured universe + risk + calendar + SQLite idempotency
@@ -109,8 +115,17 @@ Add the following sections to `appsettings.json`.
     "ResearchWebMaxResults": 5,
     "ResearchWebSearchDepth": "advanced",
     "ResearchWebMaxContentCharacters": 4000,
+    "SpecialistTimeoutSeconds": 600,
     "MarketHolidays":         [],
-    "MarketSessionOverrides": []
+    "MarketSessionOverrides": [],
+    "Scan": {
+      "LookbackDays":               60,
+      "SupportProximityPercent":    2.5,
+      "ResistanceProximityPercent": 2.5,
+      "MinRewardRisk":              1.5,
+      "MinAverageVolume":           25000,
+      "MaxResults":                 10
+    }
   },
   "Ahk": {
     "PortalUrl":        "https://www.ahktrading.com",
@@ -136,6 +151,7 @@ Add the following sections to `appsettings.json`.
 | `ResearchWebMaxResults` | `5` | Maximum provider results returned to the specialist. |
 | `ResearchWebSearchDepth` | `basic` | Provider search depth (`basic` or `advanced`). |
 | `ResearchWebMaxContentCharacters` | `4000` | Maximum snippet characters retained per external result. |
+| `SpecialistTimeoutSeconds` | `600` | Wall-clock budget for one trading-agent turn (specialist lane timeout). Raise further if AHK browser automation is slow on this machine. |
 
 When the Tavily plugin is installed and `TAVILY_API_KEY` (or `Plugins:Tavily:ApiKey`) is configured,
 the isolated specialist receives `research_web`. Results are read-only, treated as untrusted evidence,
@@ -151,6 +167,21 @@ disabled; this tool uses the explicit AgentFox provider bridge instead.
 | `MaxOrderValuePkr` | `50000` | Hard cap: `qty × price` above this value is rejected before the browser is touched. |
 | `SessionDir` | `session_ahk` | Directory for the persistent Chromium profile (keeps the AHK session logged in). |
 | `LogDir` | `logs/trading` | Directory for signal JSONL logs and order screenshots. |
+| `Scan.LookbackDays` | `60` | Trading sessions of OHLC history per candle scan (5–250). See [Candle scanning](#candle-scanning-buy-at-support-sell-at-resistance). |
+| `Scan.SupportProximityPercent` | `2.5` | Within this percent of a support level counts as "at support" (buy zone). |
+| `Scan.ResistanceProximityPercent` | `2.5` | Within this percent of a resistance level counts as "at resistance" (sell zone). |
+| `Scan.MinRewardRisk` | `1.5` | Minimum `(target−entry)/(entry−stop)` for a buy candidate to be offered. |
+| `Scan.MinAverageVolume` | `25000` | Minimum 30-session average volume; thinner symbols are excluded as untradable at the quoted level. |
+| `Scan.MaxResults` | `10` | Maximum candidates returned per side. |
+| `Scan.MarketWatchCacheSeconds` | `60` | How long a live market-watch snapshot is reused. |
+| `Scan.MarketDayFetchConcurrency` | `4` | Concurrent portal requests while warming a cold candle cache (1–8). |
+| `Scan.MaxCachedMarketDays` | `120` | Settled sessions kept in the in-memory candle cache. |
+| `Scan.RangeWindow` | `20` | Sessions used for range position and new-low/new-high comparisons. |
+| `Scan.PivotWindow` | `3` | Bars either side of a bar for it to count as a swing pivot. |
+| `Scan.LevelClusterPercent` | `1.5` | Levels within this percent of each other merge into one (touch count). |
+| `Scan.StopAtrMultiple` | `1.0` | ATR multiple below the entry for the suggested protective stop. |
+| `Scan.RsiOversold` / `Scan.RsiOverbought` | `35` / `70` | RSI(14) thresholds annotated in the reasons. |
+| `Scan.BreakdownDownDays` | `3` | Consecutive down sessions that, with a fresh range low, mark a breakdown instead of a support test. |
 
 ### 3. WhatsApp bridge channel
 
@@ -379,6 +410,90 @@ Screenshots of the AHK portal (before and after submit) are saved alongside:
 logs/trading/pre_buy_20260616_103500.png
 logs/trading/post_buy_20260616_103502.png
 ```
+
+---
+
+## Candle scanning (buy at support, sell at resistance)
+
+Two tools turn daily OHLC candles into recommendations drawn from the **configured** symbol list
+rather than from whatever the model recalls about the market:
+
+| Tool | Use |
+|---|---|
+| `scan_watchlist` | Rank the whole watchlist: which symbols are at support (buy) and which are pressing resistance (sell). Call this for "what should I buy today", "recommend a stock", or a daily scan. |
+| `analyze_candles` | One symbol in depth: levels, indicators, and a suggested entry/stop/target. |
+
+`research_stock` also carries a `technical` section now, so a tip's stated entry is judged against
+real support and resistance rather than only the 52-week range.
+
+### Why the universe is `AllowedSymbols`
+
+`scan_watchlist` defaults to `AllowedSymbols` — the same list `TradingRiskEngine` enforces at order
+time. Recommending outside it produces proposals the risk engine refuses, so the scanner and the
+executor deliberately read one list. Pass `symbols` explicitly to scan something else; the tool notes
+that those cannot be executed.
+
+### What the scan computes
+
+All of it is deterministic (`Analysis/TechnicalAnalyzer.cs`) — no model produces any number, which is
+what lets the specialist quote the figures without breaking its "never invent a price" rule:
+
+- **Levels** — swing pivot highs/lows plus range and 52-week extremes, merged into clusters with a
+  touch count. Levels are classified support/resistance by where they sit relative to the *current*
+  price, so a broken support correctly reappears as overhead resistance.
+- **Position** — nearest support/resistance, percent distance to each, and range position (0 = on the
+  range low, 1 = at the high).
+- **Indicators** — SMA20/50, RSI(14), ATR(14), volume vs 30-session average, consecutive up/down runs.
+- **Trade math** — entry at support, stop one ATR below it, target at the nearest resistance, and the
+  resulting reward:risk. The math is buy-side; on a sell setup the target level *is* the sell level,
+  and the reasons say so explicitly.
+- **Setup** — `buy_at_support`, `sell_at_resistance`, `wait`, `avoid_breakdown`, or
+  `insufficient_data`.
+
+`avoid_breakdown` is the load-bearing one: a stock making fresh range lows on consecutive down
+sessions is at the bottom of its range *because it is still falling*. It is reported under `avoid`,
+never as a buy candidate — that is exactly the trade a naive "price near the low" screen would hand
+you. A pullback that holds above the prior low is still a normal `buy_at_support`.
+
+### Data sources and cost
+
+Candles come from the official portal's two market-wide tables, which is why a scan is cheap:
+
+| Endpoint | Provides |
+|---|---|
+| `POST dps.psx.com.pk/historical` (`date=yyyy-MM-dd`) | Settled OHLC for **every** symbol on one date |
+| `GET dps.psx.com.pk/market-watch` | The live forming bar for **every** symbol |
+
+History therefore costs **one request per trading day, regardless of symbol count** — a 12-symbol and
+a 200-symbol scan load the same days. Settled dates are immutable and cached for the process
+lifetime, so:
+
+- **First scan of a session: ~25–35 s** (about 68 requests for a 60-day window).
+- **Every scan after that: well under a second**, plus one request for the live bar.
+
+Two portal behaviours the implementation has to work around, both observed live:
+
+- A rate-limited request is answered with **HTTP 200 and an empty table**, indistinguishable from a
+  market holiday. Empty days are therefore cached for only 15 minutes, and a scan that recovers
+  materially fewer sessions than requested says so in `warnings` instead of quietly analysing a
+  third of the intended history.
+- The live market-watch table's column labelled `CURRENT` is `data-name="close"` — during a session
+  it is the last trade, not a settled close. Both tables are read by header `data-name`, so a
+  reordered column cannot shift volume into a price field.
+
+### Daily trading mode
+
+Scheduled scanning uses the existing `CronScheduler` — no extra configuration. Add a job whose task
+runs the scan, for example:
+
+```
+Ask the trading agent to scan the watchlist for buy setups at support and sell setups at
+resistance, then report the top candidates with their levels, entry, stop, target and reward:risk.
+```
+
+Schedule it a little after the open (say 09:45 PKT) so the live bar has formed. The scan only
+proposes: everything it produces still passes through `ExecutionMode`, the risk engine, and HITL
+before any order exists.
 
 ---
 

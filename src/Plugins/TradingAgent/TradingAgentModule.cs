@@ -286,10 +286,19 @@ public sealed class TradingAgentModule : IAgentAwareModule
             new ResearchStockTool(
                 _services!.GetRequiredService<PsxDataClient>(),
                 chatClient,
+                agentOptions,
                 loggers.CreateLogger<ResearchStockTool>()),
             new ResearchIndexTool(
                 _services!.GetRequiredService<PsxDataClient>(),
                 loggers.CreateLogger<ResearchIndexTool>()),
+            new AnalyzeCandlesTool(
+                _services!.GetRequiredService<PsxDataClient>(),
+                agentOptions,
+                loggers.CreateLogger<AnalyzeCandlesTool>()),
+            new ScanWatchlistTool(
+                _services!.GetRequiredService<PsxDataClient>(),
+                agentOptions,
+                loggers.CreateLogger<ScanWatchlistTool>()),
         };
 
         if (agentOptions.Value.ResearchWebEnabled && webSearchProvider is not null)
@@ -354,6 +363,7 @@ public sealed class TradingAgentModule : IAgentAwareModule
                     : SpecialistMemoryMode.Shared,
             MaxIterations = 8,
             MaxConcurrentTurns = 1,
+            TimeoutSeconds = agentOptions.Value.SpecialistTimeoutSeconds,
             SystemPrompt = $"""
                 You are the isolated PSX Trading Agent for AgentFox.
 
@@ -364,6 +374,24 @@ public sealed class TradingAgentModule : IAgentAwareModule
                 - For EACH actionable signal, call research_stock (pass the tip as tip_context) to get a
                   grounded confidence assessment from live PSX data and news, and call get_portfolio to
                   learn the real available balance and whether the stock is already held.
+                - For a RECOMMENDATION or daily-scan request ("what should I buy today", "recommend a
+                  stock", "anything at support", "what should I sell"), call scan_watchlist FIRST:
+                    * Its universe is the configured allowed-symbols list — the same list the risk engine
+                      enforces at order time — so a recommendation from outside it cannot be executed.
+                      If that list is empty, say so and ask for it to be configured; do not scan the
+                      whole market instead.
+                    * Call get_portfolio and pass its holdings to scan_watchlist so sell candidates you
+                      actually own rank first and carry unrealized P&L.
+                    * Recommend a BUY only from buy_candidates (at support). NEVER recommend anything
+                      listed under 'avoid': that is price falling through support, not a cheap entry,
+                      even though it sits at the bottom of its range.
+                    * Recommend a SELL or take-profit from sell_candidates, preferring held positions.
+                    * Quote the tool's own level, distance, entry, stop, target, and reward:risk. Never
+                      adjust, round, or invent them, and never substitute your own price view.
+                    * Then call research_stock on the top candidates for news and listing status before
+                      presenting the final recommendation, and persist it with create_trade_proposal.
+                - For a candle, support, resistance, or "is now a good level" question about ONE stock,
+                  call analyze_candles.
                 - For KSE30, KSE100, or another index question, call research_index and report the
                   returned official PSX evidence and retrieval time. Do not treat an index as a stock.
                 - For current PSX announcements, market commentary, or regulatory/news questions, call
@@ -385,6 +413,7 @@ public sealed class TradingAgentModule : IAgentAwareModule
                 - AutoExecute: {startupPolicy.AutoExecute}
                 - MinConfidence: {startupPolicy.MinConfidence}
                 - PolicyVersion: {startupPolicy.Version}
+                - Allowed symbols ({agentOptions.Value.AllowedSymbols.Count}): {DescribeAllowedSymbols(agentOptions.Value.AllowedSymbols)}
                 """
         });
 
@@ -410,6 +439,21 @@ public sealed class TradingAgentModule : IAgentAwareModule
         return Task.CompletedTask;
     }
 
+    /// <summary>
+    /// Renders the tradable universe for the prompt. Truncated because the list is unbounded in
+    /// config and the prompt is rebuilt on every turn — scan_watchlist reads the full list itself,
+    /// so the prompt only needs to tell the model whether a universe exists and roughly what is in it.
+    /// </summary>
+    private static string DescribeAllowedSymbols(IReadOnlyList<string> symbols)
+    {
+        if (symbols.Count == 0)
+            return "none configured — recommendations cannot be executed until AllowedSymbols is set";
+
+        const int shown = 40;
+        var listed = string.Join(", ", symbols.Take(shown));
+        return symbols.Count > shown ? $"{listed}, … (+{symbols.Count - shown} more)" : listed;
+    }
+
     private static IReadOnlyList<string> BuildSpecialistToolNames(
         IWebSearchProvider? webSearchProvider,
         bool researchWebEnabled)
@@ -418,7 +462,7 @@ public sealed class TradingAgentModule : IAgentAwareModule
         {
             "parse_signal", "check_market", "log_signal", "create_trade_proposal",
             "get_trading_status", "get_portfolio", "research_stock", "research_index",
-            "place_order", "place_orders"
+            "scan_watchlist", "analyze_candles", "place_order", "place_orders"
         };
         if (researchWebEnabled && webSearchProvider is not null)
             names.Add("research_web");
