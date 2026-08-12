@@ -1,10 +1,12 @@
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using System.Globalization;
 using TradingAgent.Config;
 using TradingAgent.Market;
 using TradingAgent.Persistence;
 using TradingAgent.Research;
+using TradingAgent.Watchlist;
 
 namespace TradingAgent.Trading;
 
@@ -62,6 +64,8 @@ public sealed class CandleBackfillRunner
 
     private readonly PsxDataClient _dataClient;
     private readonly ITradingRepository _repository;
+    private readonly MonitoredUniverse _universe;
+    private readonly IMarketCalendar _calendar;
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly IHostApplicationLifetime _lifetime;
     private readonly ILogger<CandleBackfillRunner> _logger;
@@ -73,12 +77,16 @@ public sealed class CandleBackfillRunner
     public CandleBackfillRunner(
         PsxDataClient dataClient,
         ITradingRepository repository,
+        MonitoredUniverse universe,
+        IMarketCalendar calendar,
         IOptions<TradingAgentOptions> options,
         IHostApplicationLifetime lifetime,
         ILogger<CandleBackfillRunner> logger)
     {
         _dataClient = dataClient;
         _repository = repository;
+        _universe = universe;
+        _calendar = calendar;
         _options = options;
         _lifetime = lifetime;
         _logger = logger;
@@ -152,7 +160,7 @@ public sealed class CandleBackfillRunner
     {
         var options = _options.Value;
         var years = options.Scan.BackfillYears;
-        var symbols = options.AllowedSymbols.Count(s => !string.IsNullOrWhiteSpace(s));
+        var symbols = (await _universe.ForArchiveAsync(ct)).Count;
 
         var archive = await _repository.GetDailyArchiveStatusAsync(ct);
 
@@ -160,10 +168,12 @@ public sealed class CandleBackfillRunner
         var missing = 0;
         if (years > 0)
         {
-            var today = PsxTime.Today();
-            var from = today.AddYears(-Math.Clamp(years, 1, 15));
-            var weekdays = Weekdays(from, today);
-            var covered = await _repository.GetCoveredDailyDatesAsync(from, today, ct);
+            // Measured against the last SETTLED session, not today: counting a session still in
+            // progress as missing would leave the archive permanently reported as incomplete.
+            var settledThrough = LastSettledSession();
+            var from = settledThrough.AddYears(-Math.Clamp(years, 1, 15));
+            var weekdays = Weekdays(from, settledThrough);
+            var covered = await _repository.GetCoveredDailyDatesAsync(from, settledThrough, ct);
             target = weekdays.Count;
             missing = weekdays.Count(d => !covered.Contains(d));
         }
@@ -194,26 +204,33 @@ public sealed class CandleBackfillRunner
             return;
         }
 
-        var allowed = options.AllowedSymbols
-            .Select(s => s.Trim().ToUpperInvariant())
-            .Where(s => s.Length > 0)
+        // The archive universe — watchlist plus tradable symbols — so a watched symbol accumulates the
+        // same daily history, and therefore the same weekly levels, as a tradable one.
+        var allowed = (await _universe.ForArchiveAsync(ct))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         if (allowed.Count == 0)
         {
             SetProgress(_ => new CandleBackfillProgress
             {
-                Message = "No AllowedSymbols are configured, so there is nothing to archive. " +
-                          "Set the trading universe first — history is stored for those symbols only."
+                Message = "Nothing to archive: neither AllowedSymbols nor the watchlist has any symbols. " +
+                          "Add symbols to the watchlist (or configure AllowedSymbols) first."
             });
-            _logger.LogInformation("[CandleBackfill] Skipped: no AllowedSymbols configured.");
+            _logger.LogInformation("[CandleBackfill] Skipped: monitored universe is empty.");
             return;
         }
 
-        var today = PsxTime.Today();
-        var from = today.AddYears(-Math.Clamp(years, 1, 15));
-        var weekdays = Weekdays(from, today);
-        var covered = await _repository.GetCoveredDailyDatesAsync(from, today, ct);
+        // Only settled sessions are archived. Fetching the day still in progress stores a partial bar
+        // that the coverage marker then prevents from ever being corrected — or an empty table
+        // indistinguishable from a holiday, which becomes a permanent hole. Clearing coverage past the
+        // settlement point also repairs any date recorded prematurely by an earlier build or by an
+        // opportunistic archive write during the session.
+        var settledThrough = LastSettledSession();
+        await _repository.ClearDailyCoverageAfterAsync(settledThrough, ct);
+
+        var from = settledThrough.AddYears(-Math.Clamp(years, 1, 15));
+        var weekdays = Weekdays(from, settledThrough);
+        var covered = await _repository.GetCoveredDailyDatesAsync(from, settledThrough, ct);
 
         // Newest first: the sessions a scan needs today land before the deep history.
         var missing = weekdays.Where(d => !covered.Contains(d)).OrderByDescending(d => d).ToList();
@@ -346,6 +363,32 @@ public sealed class CandleBackfillRunner
     {
         lock (_progressLock) _progress = update(_progress);
     }
+
+    /// <summary>
+    /// The most recent trading day whose candles are final.
+    ///
+    /// <para>
+    /// Today counts only once the market is closed AND the exchange has had time to publish the
+    /// settled table (<see cref="TradingScanOptions.ArchiveSettleAfterPkt"/>, default 17:30 PKT — after
+    /// the latest scheduled close of 16:30 on Friday). Otherwise the cutoff steps back a day. Weekend
+    /// dates are left in place because <see cref="Weekdays"/> filters them out anyway.
+    /// </para>
+    /// </summary>
+    public DateOnly LastSettledSession(DateTime? utcNow = null)
+    {
+        var pktNow = PsxTime.Now(utcNow);
+        var today = DateOnly.FromDateTime(pktNow);
+        var settleAfter = ParseSettleTime(_options.Value.Scan.ArchiveSettleAfterPkt);
+        var status = _calendar.GetStatus(utcNow);
+
+        var settledToday = !status.IsOpen && TimeOnly.FromDateTime(pktNow) >= settleAfter;
+        return settledToday ? today : today.AddDays(-1);
+    }
+
+    private static TimeOnly ParseSettleTime(string? configured) =>
+        TimeOnly.TryParse(configured, CultureInfo.InvariantCulture, out var parsed)
+            ? parsed
+            : new TimeOnly(17, 30);
 
     private static List<DateOnly> Weekdays(DateOnly from, DateOnly to)
     {

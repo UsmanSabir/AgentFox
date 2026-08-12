@@ -430,6 +430,23 @@ public sealed class SqliteTradingRepository : ITradingRepository
         return dates;
     }
 
+    public async Task<int> ClearDailyCoverageAfterAsync(
+        DateOnly settledThrough, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM daily_bar_coverage WHERE session_date > $through";
+        command.Parameters.AddWithValue(
+            "$through", settledThrough.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+        var removed = await command.ExecuteNonQueryAsync(ct);
+        if (removed > 0)
+            _logger.LogInformation(
+                "[TradingLedger] Cleared {Count} unsettled daily-coverage marker(s) after {Through}; "
+                + "those sessions will be fetched again once settled.", removed, settledThrough);
+        return removed;
+    }
+
     public async Task<DailyArchiveStatus> GetDailyArchiveStatusAsync(CancellationToken ct = default)
     {
         await EnsureInitializedAsync(ct);
@@ -692,6 +709,25 @@ public sealed class SqliteTradingRepository : ITradingRepository
                     saved_utc TEXT NOT NULL,
                     PRIMARY KEY (symbol, interval_minutes, bucket_start_utc)
                 );
+                -- The user's monitoring universe: seeded from AllowedSymbols but independent of it
+                -- afterwards, so adding a symbol to watch never widens what may be traded (that
+                -- stays AllowedSymbols, read directly by TradingRiskEngine).
+                CREATE TABLE IF NOT EXISTS watchlist (
+                    symbol         TEXT PRIMARY KEY,
+                    added_utc      TEXT NOT NULL,
+                    source         TEXT NOT NULL,   -- 'seed' | 'user'
+                    sort_order     INTEGER NOT NULL DEFAULT 0,
+                    alerts_enabled INTEGER NOT NULL DEFAULT 1,
+                    notes          TEXT NULL
+                );
+                -- Single row. seed_hash records the AllowedSymbols the watchlist was seeded from, so
+                -- the UI can report that the configured universe has changed since — without ever
+                -- re-seeding on its own, which would silently discard the user's edits.
+                CREATE TABLE IF NOT EXISTS watchlist_meta (
+                    id         INTEGER PRIMARY KEY CHECK (id = 1),
+                    seeded_utc TEXT NULL,
+                    seed_hash  TEXT NULL
+                );
                 CREATE INDEX IF NOT EXISTS ix_trading_order_events_execution
                     ON trading_order_events(execution_id, event_id);
                 CREATE INDEX IF NOT EXISTS ix_intraday_bars_series
@@ -716,6 +752,219 @@ public sealed class SqliteTradingRepository : ITradingRepository
         finally
         {
             _initializeGate.Release();
+        }
+    }
+
+    // ── Watchlist ─────────────────────────────────────────────────────────────
+
+    public async Task<WatchlistSnapshot> GetWatchlistAsync(CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+
+        var entries = new List<WatchlistEntry>();
+        var read = connection.CreateCommand();
+        read.CommandText = """
+            SELECT symbol, added_utc, source, sort_order, alerts_enabled, notes
+            FROM watchlist
+            ORDER BY sort_order, symbol
+            """;
+        await using (var reader = await read.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                entries.Add(new WatchlistEntry(
+                    reader.GetString(0),
+                    ParseUtc(reader.GetString(1)),
+                    reader.GetString(2),
+                    reader.GetInt32(3),
+                    reader.GetInt64(4) != 0,
+                    reader.IsDBNull(5) ? null : reader.GetString(5)));
+            }
+        }
+
+        var meta = connection.CreateCommand();
+        meta.CommandText = "SELECT seeded_utc, seed_hash FROM watchlist_meta WHERE id = 1";
+        await using var metaReader = await meta.ExecuteReaderAsync(ct);
+        DateTime? seededUtc = null;
+        string? seedHash = null;
+        if (await metaReader.ReadAsync(ct))
+        {
+            seededUtc = metaReader.IsDBNull(0) ? null : ParseUtc(metaReader.GetString(0));
+            seedHash = metaReader.IsDBNull(1) ? null : metaReader.GetString(1);
+        }
+
+        return new WatchlistSnapshot(entries, seededUtc, seedHash);
+    }
+
+    public async Task<bool> EnsureWatchlistSeededAsync(
+        IReadOnlyList<string> seed, string seedHash, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+
+        // Claim the seeding right by inserting the single meta row. INSERT OR IGNORE means the second
+        // caller (another process, or a concurrent first request) inserts nothing and stops here, so
+        // the seed cannot be applied twice.
+        var claim = connection.CreateCommand();
+        claim.Transaction = (SqliteTransaction)transaction;
+        claim.CommandText = """
+            INSERT OR IGNORE INTO watchlist_meta (id, seeded_utc, seed_hash)
+            VALUES (1, $now, $hash)
+            """;
+        claim.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("O"));
+        claim.Parameters.AddWithValue("$hash", seedHash);
+        if (await claim.ExecuteNonQueryAsync(ct) != 1)
+        {
+            await transaction.RollbackAsync(ct);
+            return false;
+        }
+
+        await InsertWatchlistSymbolsAsync(connection, (SqliteTransaction)transaction, seed, "seed", ct);
+        await transaction.CommitAsync(ct);
+
+        _logger.LogInformation(
+            "[Watchlist] Seeded {Count} symbol(s) from AllowedSymbols. Edits from here on are the "
+            + "user's; the configured list is no longer followed automatically.", seed.Count);
+        return true;
+    }
+
+    public async Task<bool> AddWatchlistSymbolAsync(
+        string symbol, string source, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+
+        // Appended at the end of the display order rather than inserted alphabetically: a symbol the
+        // user just added should be where they can see it.
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT OR IGNORE INTO watchlist (symbol, added_utc, source, sort_order, alerts_enabled)
+            VALUES ($symbol, $now, $source,
+                    COALESCE((SELECT MAX(sort_order) + 1 FROM watchlist), 0), 1)
+            """;
+        command.Parameters.AddWithValue("$symbol", symbol);
+        command.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("O"));
+        command.Parameters.AddWithValue("$source", source);
+        return await command.ExecuteNonQueryAsync(ct) == 1;
+    }
+
+    public async Task<bool> RemoveWatchlistSymbolAsync(string symbol, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM watchlist WHERE symbol = $symbol";
+        command.Parameters.AddWithValue("$symbol", symbol);
+        return await command.ExecuteNonQueryAsync(ct) == 1;
+    }
+
+    public async Task<bool> UpdateWatchlistSymbolAsync(
+        string symbol, bool? alertsEnabled, string? notes, CancellationToken ct = default)
+    {
+        if (alertsEnabled is null && notes is null) return true;
+
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        // COALESCE against the parameter keeps an unspecified field untouched, so a PATCH of one
+        // field cannot blank the other.
+        command.CommandText = """
+            UPDATE watchlist
+               SET alerts_enabled = COALESCE($alerts, alerts_enabled),
+                   notes          = COALESCE($notes, notes)
+             WHERE symbol = $symbol
+            """;
+        command.Parameters.AddWithValue("$symbol", symbol);
+        command.Parameters.AddWithValue("$alerts",
+            alertsEnabled is null ? DBNull.Value : alertsEnabled.Value ? 1 : 0);
+        command.Parameters.AddWithValue("$notes", notes ?? (object)DBNull.Value);
+        return await command.ExecuteNonQueryAsync(ct) == 1;
+    }
+
+    public async Task<int> ResetWatchlistAsync(
+        IReadOnlyList<string> seed, string seedHash, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+
+        var clear = connection.CreateCommand();
+        clear.Transaction = (SqliteTransaction)transaction;
+        clear.CommandText = "DELETE FROM watchlist";
+        await clear.ExecuteNonQueryAsync(ct);
+
+        await InsertWatchlistSymbolsAsync(connection, (SqliteTransaction)transaction, seed, "seed", ct);
+
+        var stamp = connection.CreateCommand();
+        stamp.Transaction = (SqliteTransaction)transaction;
+        stamp.CommandText = """
+            INSERT INTO watchlist_meta (id, seeded_utc, seed_hash) VALUES (1, $now, $hash)
+            ON CONFLICT(id) DO UPDATE SET seeded_utc = $now, seed_hash = $hash
+            """;
+        stamp.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("O"));
+        stamp.Parameters.AddWithValue("$hash", seedHash);
+        await stamp.ExecuteNonQueryAsync(ct);
+
+        await transaction.CommitAsync(ct);
+        _logger.LogInformation("[Watchlist] Reset to the configured allowed list ({Count} symbols).",
+            seed.Count);
+        return seed.Count;
+    }
+
+    public async Task<IReadOnlyDictionary<string, int>> GetDailyBarCountsAsync(
+        IReadOnlyList<string> symbols, CancellationToken ct = default)
+    {
+        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        if (symbols.Count == 0) return counts;
+
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+
+        // One grouped scan over the requested symbols rather than a query each: the watchlist can hold
+        // a hundred symbols and this feeds a page load.
+        var command = connection.CreateCommand();
+        var names = new List<string>(symbols.Count);
+        for (var i = 0; i < symbols.Count; i++)
+        {
+            var name = $"$s{i}";
+            names.Add(name);
+            command.Parameters.AddWithValue(name, symbols[i]);
+        }
+        command.CommandText =
+            $"SELECT symbol, COUNT(*) FROM daily_bars WHERE symbol IN ({string.Join(",", names)}) "
+            + "GROUP BY symbol";
+
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            counts[reader.GetString(0)] = reader.GetInt32(1);
+        return counts;
+    }
+
+    private static async Task InsertWatchlistSymbolsAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        IReadOnlyList<string> symbols,
+        string source,
+        CancellationToken ct)
+    {
+        var now = DateTime.UtcNow.ToString("O");
+        var order = 0;
+        foreach (var symbol in symbols)
+        {
+            var insert = connection.CreateCommand();
+            insert.Transaction = transaction;
+            insert.CommandText = """
+                INSERT OR IGNORE INTO watchlist
+                    (symbol, added_utc, source, sort_order, alerts_enabled)
+                VALUES ($symbol, $now, $source, $order, 1)
+                """;
+            insert.Parameters.AddWithValue("$symbol", symbol);
+            insert.Parameters.AddWithValue("$now", now);
+            insert.Parameters.AddWithValue("$source", source);
+            insert.Parameters.AddWithValue("$order", order++);
+            await insert.ExecuteNonQueryAsync(ct);
         }
     }
 

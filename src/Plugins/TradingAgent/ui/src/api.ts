@@ -40,15 +40,24 @@ async function get<T>(path: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-async function post<T>(path: string, body?: unknown): Promise<T> {
+async function send<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
-    method: 'POST',
-    headers: headers(true),
+    method,
+    headers: headers(body !== undefined),
     body: body !== undefined ? JSON.stringify(body) : undefined
   });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    // The watchlist endpoints answer a rejected edit with { error, message }; surfacing that beats
+    // showing the user a bare "400 Bad Request".
+    const detail = await res.json().catch(() => null);
+    throw new Error(detail?.message ?? `${res.status} ${res.statusText}`);
+  }
   return res.json() as Promise<T>;
 }
+
+const post  = <T>(path: string, body?: unknown) => send<T>('POST', path, body);
+const patch = <T>(path: string, body?: unknown) => send<T>('PATCH', path, body);
+const del   = <T>(path: string) => send<T>('DELETE', path);
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -157,6 +166,129 @@ export interface ReconciliationRun {
   completedUtc?: string;
 }
 
+/**
+ * One watched symbol. `tradable` is the important one: the watchlist is deliberately wider than the
+ * configured AllowedSymbols, so a symbol can be charted and alerted on while an order for it would be
+ * refused by the risk engine. `hasWeeklyHistory` says whether enough daily bars are archived for
+ * weekly support/resistance to mean anything yet.
+ */
+export interface WatchlistEntry {
+  symbol: string;
+  addedUtc: string;
+  source: 'seed' | 'user' | string;
+  alertsEnabled: boolean;
+  notes?: string | null;
+  tradable: boolean;
+  archivedBars: number;
+  hasWeeklyHistory: boolean;
+}
+
+/** One bar plus the indicator values at that bar (null until enough history exists). */
+export interface ChartCandle {
+  /** Seconds since epoch — what lightweight-charts expects. */
+  time: number;
+  date: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  isLive: boolean;
+  sma20: number | null;
+  sma50: number | null;
+  rsi14: number | null;
+}
+
+/**
+ * A horizontal price level drawn from swing pivots and range extremes. `touches` is how many pivots
+ * merged into it — a level tested repeatedly is stronger than one drawn off a single bar — and
+ * `weeklyConfirmed` means the weekly chart recognises it too, which is what separates structure from
+ * a recent swing.
+ */
+export interface ChartLevel {
+  price: number;
+  touches: number;
+  origin: string;
+  weeklyConfirmed: boolean;
+  distancePercent: number | null;
+}
+
+export interface ChartData {
+  symbol: string;
+  interval: string;
+  /** False when an order for this symbol would be rejected by the risk engine. */
+  tradable: boolean;
+  barsAnalyzed: number;
+  sessionsAvailable: number;
+  /** The last bar is still forming — not a settled close. */
+  usesLiveBar: boolean;
+  /** RSI bands this analysis classified against (config, not the textbook 30/70). */
+  thresholds: { rsiOversold: number; rsiOverbought: number };
+  candles: ChartCandle[];
+  levels: { supports: ChartLevel[]; resistances: ChartLevel[] };
+  plan: {
+    entry: number | null;
+    stop: number | null;
+    target: number | null;
+    rewardRisk: number | null;
+    /**
+     * Whether THIS plan's entry level is confirmed on the weekly chart. Distinct from
+     * `weekly.entryLevelConfirmed`, which is computed against the full archived history and can refer
+     * to a different level than the one shown for the requested window.
+     */
+    entryWeeklyConfirmed: boolean;
+  };
+  snapshot: {
+    close: number;
+    asOf: string;
+    dayChangePercent: number | null;
+    zone: string;
+    setup: string;
+    trend: string | null;
+    rsi14: number | null;
+    atr14: number | null;
+    atrPercent: number | null;
+    sma20: number | null;
+    sma50: number | null;
+    volume: number;
+    averageVolume: number | null;
+    volumeRatio: number | null;
+    rangeLow: number;
+    rangeHigh: number;
+    rangePosition: number | null;
+    nearestSupport: number | null;
+    percentAboveSupport: number | null;
+    nearestResistance: number | null;
+    percentBelowResistance: number | null;
+    reasons: string[];
+  };
+  weekly: {
+    bars: number;
+    alignment: string;
+    breakdown: boolean;
+    entryLevelConfirmed: boolean;
+    zone: string | null;
+    setup: string | null;
+    nearestSupport: number | null;
+    nearestResistance: number | null;
+    notes: string[];
+  };
+  retrievedAtUtc: string;
+  warnings: string[];
+}
+
+export const CHART_INTERVALS = ['1D', '60m', '30m', '15m', '5m'] as const;
+export type ChartInterval = (typeof CHART_INTERVALS)[number];
+
+export interface WatchlistResponse {
+  entries: WatchlistEntry[];
+  seededUtc?: string | null;
+  /** AllowedSymbols changed since seeding — offer a reset, never reseed silently. */
+  configuredListChanged: boolean;
+  tradableSymbols: number;
+  maxSymbols: number;
+}
+
 // ── Endpoints ─────────────────────────────────────────────────────────────
 
 export const trading = {
@@ -174,5 +306,29 @@ export const trading = {
   // Returns as soon as the pass has STARTED — a two-year backfill runs for ~18 minutes, so the
   // caller polls candleArchive() for progress instead of awaiting completion.
   startBackfill: (years?: number) =>
-    post<{ started: boolean; status: CandleArchiveStatus }>('/trading/candle-archive/backfill', { years })
+    post<{ started: boolean; status: CandleArchiveStatus }>('/trading/candle-archive/backfill', { years }),
+
+  /** Bars, indicator lines, levels, and the level-anchored plan — one request per chart render. */
+  candles: (symbol: string, interval: ChartInterval = '1D', bars?: number) => {
+    const query = new URLSearchParams({ symbol, interval });
+    if (bars) query.set('bars', String(bars));
+    return get<ChartData>(`/trading/candles?${query}`);
+  },
+
+  watchlist: {
+    list:   ()               => get<WatchlistResponse>('/trading/watchlist'),
+    add:    (symbol: string) => post<{
+                                  symbol: string;
+                                  added: boolean;
+                                  tradable: boolean;
+                                  message?: string | null;
+                                  warning?: string | null;
+                                }>('/trading/watchlist', { symbol }),
+    remove: (symbol: string) =>
+      del<{ symbol: string; removed: boolean }>(`/trading/watchlist/${encodeURIComponent(symbol)}`),
+    update: (symbol: string, changes: { alertsEnabled?: boolean; notes?: string }) =>
+      patch<{ symbol: string; updated: boolean }>(
+        `/trading/watchlist/${encodeURIComponent(symbol)}`, changes),
+    reset:  ()               => post<{ symbols: number }>('/trading/watchlist/reset')
+  }
 };

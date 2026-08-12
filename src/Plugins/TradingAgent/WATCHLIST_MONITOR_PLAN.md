@@ -249,6 +249,16 @@ Returns everything needed to draw the decision, computed by existing code:
 (archive) + current session rebuilt from `GetIntradayTicksAsync` + `AggregateTicks`. Reuse
 `PsxDataClient.ResolveInterval` for validation. Response-cache intraday for `MarketWatchCacheSeconds`.
 
+*Phase 2 as built, plus two things worth recording:*
+
+- The loading/analysis was **extracted into `CandleAnalysisService`** and `analyze_candles` refactored
+  onto it (its output shape unchanged), rather than the endpoint growing a second implementation of
+  level discovery. One source of truth for support and resistance.
+- `weekly.entryLevelConfirmed` turned out to describe the **full-history** nearest support, not the
+  entry shown for the requested window — so the chart was about to print "no weekly confirmation"
+  beside a level the level list marked confirmed. The response now carries
+  `plan.entryWeeklyConfirmed` for the displayed plan, and both fields are documented.
+
 ### 3.2 UI
 
 `lightweight-charts`: candlestick series + volume histogram; horizontal price lines for each S/R
@@ -604,8 +614,8 @@ running with, so "why didn't it alert" is answerable from the UI rather than by 
 | Phase | Deliverable | Proves |
 | --- | --- | --- |
 | **0** ✅ | `IPluginUiContributor` + `/api/plugin-ui` + `/plugin-assets/{slug}` static + dynamic Sidebar + the trading page moved into `TradingAgent/ui/`; trading stripped from `api.ts`, Sidebar, and the plugins page | **Done** — isolation works, with no new features in flight |
-| **1** | `MonitoredUniverse`, watchlist table + endpoints + UI list (add/remove/reset); archive universe widened | Independent watchlist, weekly levels for added symbols |
-| **2** | `/trading/candles` + `lightweight-charts` pane with S/R overlays and interval switcher | Chart-driven decisions |
+| **1** ✅ | `MonitoredUniverse`, watchlist table + endpoints + UI list (add/remove/reset/mute); archive universe widened; settled-session archiving fix | **Done** — independent watchlist, weekly levels for added symbols |
+| **2** ✅ | `CandleAnalysisService` extracted (shared with `analyze_candles`), `IndicatorSeries`, `/trading/candles`, `lightweight-charts` pane with S/R overlays, RSI bands and interval switcher | **Done** — chart-driven decisions, drawn from the same levels the agent quotes |
 | **3** | `WatchlistMonitorWorker`, `watchlist_state` / `watchlist_alerts`, `/alerts` + SSE, UI highlighting | Continuous monitoring with controlled noise |
 | **4** | `StockAssessmentService` + `/assess` endpoints, confidence on the alert card | On-demand LLM confidence |
 | **5a** | Proposal lifecycle (execute/reject/expire + sweeper + retention) — turns the log into a signal inbox | WhatsApp signals become actionable |
@@ -626,6 +636,15 @@ and gives every future plugin (PageAgent included) a UI story.
 2. **Weekly levels need ~2 years.** A newly added watchlist symbol has none until the backfill
    reaches it. Surface `hasWeeklyHistory` in the list and offer a targeted backfill; until then,
    alerts for that symbol must say "no weekly confirmation".
+   *(Phase 1: done — the list badges it, and the archive universe now includes the watchlist so the
+   next scheduled pass fills it.)*
+
+2b. **Unsettled sessions were being archived** (found while implementing Phase 1, now fixed).
+   `daily_bar_coverage` is written even for an empty result, and the pass ran to `today` — so a pass
+   during market hours either stored a partial bar that the coverage marker then prevented from ever
+   being corrected, or recorded the day as non-trading, which is a permanent hole. The backfill now
+   stops at the last settled session (`Scan.ArchiveSettleAfterPkt`, default 17:30 PKT) and clears
+   coverage past it, which self-repairs dates recorded prematurely by earlier builds.
 3. **Watchlist ≠ tradable.** Badge monitor-only symbols; disable action buttons with the reason
    inline. `AllowedSymbols` stays appsettings-only for now, by choice.
 4. **Alert flicker** is the most likely reason this feature gets muted. `ConfirmPasses` +

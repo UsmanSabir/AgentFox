@@ -10,6 +10,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using TradingAgent.Analysis;
 using TradingAgent.Broker;
 using TradingAgent.Config;
 using TradingAgent.Manager;
@@ -21,6 +22,7 @@ using TradingAgent.Reconciliation;
 using TradingAgent.Safety;
 using TradingAgent.Tools;
 using TradingAgent.Trading;
+using TradingAgent.Watchlist;
 
 namespace TradingAgent;
 
@@ -140,7 +142,13 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         services.AddSingleton<IBrokerStateReader>(sp => sp.GetRequiredService<AhkBrowserBrokerAdapter>());
         services.AddSingleton<IMarketCalendar, PsxMarketCalendar>();
         services.AddSingleton<PsxDataClient>();
+        // Splits the one symbol list that used to do two jobs: what may be WATCHED (editable) from
+        // what may be TRADED (configuration only). Registered before its consumers for clarity.
+        services.AddSingleton<MonitoredUniverse>();
         services.AddSingleton<CandleHistoryProvider>();
+        // One loader + analyzer shared by analyze_candles and the chart endpoint, so the levels drawn
+        // on screen are the same ones the specialist quotes.
+        services.AddSingleton<CandleAnalysisService>();
         services.AddSingleton<TradingPolicyProvider>();
         services.AddSingleton<IPluginConfigDefinitionProvider, TradingPluginConfigDefinitionProvider>();
         services.AddSingleton<ITradingRepository, SqliteTradingRepository>();
@@ -247,6 +255,364 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             var status = await runner.GetStatusAsync(ct);
             return Results.Accepted(value: new { started, status });
         }).RequireAuthorization("ManagementAdministrator");
+
+        // ── Candles (chart data) ──────────────────────────────────────────────
+        // Everything the chart needs in ONE request: the bars, the indicator lines, the levels with
+        // their touch counts and weekly confirmation, and the level-anchored trade math. It is served
+        // from CandleAnalysisService — the same code path analyze_candles uses — so the chart cannot
+        // draw one set of levels while the agent quotes another.
+        trading.MapGet("/candles", async (
+            string symbol,
+            string? interval,
+            int? bars,
+            bool? includeLive,
+            CandleAnalysisService analysis,
+            MonitoredUniverse universe,
+            IOptions<TradingAgentOptions> options,
+            ILogger<TradingAgentModule> logger,
+            CancellationToken ct) =>
+        {
+            var minutes = PsxDataClient.ResolveInterval(interval);
+            if (minutes is null)
+                return Results.BadRequest(new
+                {
+                    error = "unsupported_interval",
+                    message = $"Interval '{interval}' is not supported. Use "
+                            + $"{string.Join(", ", PsxDataClient.SupportedIntervals.Keys)}."
+                });
+
+            try
+            {
+                var result = await analysis.AnalyzeAsync(
+                    symbol, minutes.Value, bars, includeLive ?? true, ct);
+
+                var candles = result.Candles;
+                var closes = IndicatorSeries.Closes(candles);
+                var sma20 = IndicatorSeries.Sma(closes, 20);
+                var sma50 = IndicatorSeries.Sma(closes, 50);
+                var rsi14 = IndicatorSeries.Rsi(closes, TechnicalOptions.From(
+                    options.Value.Scan).RsiPeriod);
+
+                // Weekly-confirmed levels are the structural ones. Matching by price (within the
+                // configured confluence tolerance) rather than by identity, because the weekly analysis
+                // derives its own level objects from resampled bars.
+                var tolerance = options.Value.Scan.ConfluenceTolerancePercent;
+                bool ConfirmedWeekly(decimal price, IEnumerable<ConfluenceLevel> confirmed) =>
+                    confirmed.Any(c => price > 0
+                        && Math.Abs(c.Price - price) / price * 100m <= tolerance);
+
+                var technical = TechnicalOptions.From(options.Value.Scan);
+                var snapshot = result.Snapshot;
+                return Results.Ok(new
+                {
+                    symbol = result.Symbol,
+                    interval = result.Interval,
+                    // The thresholds this analysis actually classified against, so the chart can draw
+                    // the same bands rather than assuming the textbook 30/70.
+                    thresholds = new
+                    {
+                        rsiOversold = technical.RsiOversold,
+                        rsiOverbought = technical.RsiOverbought
+                    },
+                    tradable = universe.IsTradable(result.Symbol),
+                    barsAnalyzed = candles.Count,
+                    sessionsAvailable = result.SessionsAvailable,
+                    // The last bar may still be forming; the chart labels it so a half-formed candle is
+                    // never read as a settled close.
+                    usesLiveBar = snapshot.UsesLiveBar,
+
+                    candles = candles.Select((c, i) => new
+                    {
+                        // Seconds since epoch: what lightweight-charts expects, and unambiguous for an
+                        // intraday series where several bars share one session date.
+                        time = new DateTimeOffset(
+                            c.BucketStartUtc ?? c.Date.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc),
+                            TimeSpan.Zero).ToUnixTimeSeconds(),
+                        date = c.Date.ToString("yyyy-MM-dd"),
+                        open = c.Open,
+                        high = c.High,
+                        low = c.Low,
+                        close = c.Close,
+                        volume = c.Volume,
+                        isLive = c.IsLive,
+                        sma20 = sma20[i],
+                        sma50 = sma50[i],
+                        rsi14 = rsi14[i]
+                    }),
+
+                    levels = new
+                    {
+                        supports = snapshot.Supports.Select(l => new
+                        {
+                            price = l.Price,
+                            touches = l.Touches,
+                            origin = l.Origin,
+                            weeklyConfirmed = ConfirmedWeekly(l.Price, result.Multi.ConfirmedSupports),
+                            distancePercent = snapshot.Close > 0
+                                ? Math.Round((snapshot.Close - l.Price) / snapshot.Close * 100m, 2)
+                                : (decimal?)null
+                        }),
+                        resistances = snapshot.Resistances.Select(l => new
+                        {
+                            price = l.Price,
+                            touches = l.Touches,
+                            origin = l.Origin,
+                            weeklyConfirmed = ConfirmedWeekly(l.Price, result.Multi.ConfirmedResistances),
+                            distancePercent = snapshot.Close > 0
+                                ? Math.Round((l.Price - snapshot.Close) / snapshot.Close * 100m, 2)
+                                : (decimal?)null
+                        })
+                    },
+
+                    plan = new
+                    {
+                        entry = snapshot.SuggestedEntry,
+                        stop = snapshot.SuggestedStop,
+                        target = snapshot.SuggestedTarget,
+                        rewardRisk = snapshot.RewardRiskRatio,
+                        // Confirmation of THIS plan's entry level. Deliberately not
+                        // weekly.entryLevelConfirmed: that one is computed against the full archived
+                        // history, whose nearest support can differ from the level shown for the
+                        // requested window. Reporting the wrong one next to the plan would tell the
+                        // user a displayed level has no weekly backing when it does.
+                        entryWeeklyConfirmed = snapshot.SuggestedEntry is { } entry
+                            && ConfirmedWeekly(entry, result.Multi.ConfirmedSupports)
+                    },
+
+                    snapshot = new
+                    {
+                        close = snapshot.Close,
+                        asOf = snapshot.AsOf.ToString("yyyy-MM-dd"),
+                        dayChangePercent = snapshot.DayChangePercent,
+                        zone = snapshot.Zone.ToString(),
+                        setup = snapshot.Setup.ToString(),
+                        trend = snapshot.Trend,
+                        rsi14 = snapshot.Rsi14,
+                        atr14 = snapshot.Atr14,
+                        atrPercent = snapshot.AtrPercent,
+                        sma20 = snapshot.Sma20,
+                        sma50 = snapshot.Sma50,
+                        volume = snapshot.Volume,
+                        averageVolume = snapshot.AverageVolume,
+                        volumeRatio = snapshot.VolumeRatio,
+                        rangeLow = snapshot.RangeLow,
+                        rangeHigh = snapshot.RangeHigh,
+                        rangePosition = snapshot.RangePosition,
+                        nearestSupport = snapshot.NearestSupport,
+                        percentAboveSupport = snapshot.PercentAboveSupport,
+                        nearestResistance = snapshot.NearestResistance,
+                        percentBelowResistance = snapshot.PercentBelowResistance,
+                        reasons = snapshot.Reasons
+                    },
+
+                    // Higher-timeframe read. Present for an intraday request too, where it is the
+                    // structure an intraday entry must actually be traded against.
+                    weekly = new
+                    {
+                        bars = result.Multi.WeeklyBars,
+                        alignment = result.Multi.Alignment.ToString(),
+                        breakdown = result.Multi.WeeklyBreakdown,
+                        // About the FULL-history nearest support (what analyze_candles reports), which
+                        // is not necessarily the level in `plan` — use plan.entryWeeklyConfirmed for that.
+                        entryLevelConfirmed = result.Multi.EntryLevelConfirmedWeekly,
+                        zone = result.Multi.Weekly?.Zone.ToString(),
+                        setup = result.Multi.Weekly?.Setup.ToString(),
+                        nearestSupport = result.Multi.Weekly?.NearestSupport,
+                        nearestResistance = result.Multi.Weekly?.NearestResistance,
+                        notes = result.Multi.Notes
+                    },
+
+                    retrievedAtUtc = result.RetrievedAtUtc,
+                    warnings = result.Warnings.Concat(snapshot.Warnings).Distinct()
+                });
+            }
+            catch (ArgumentException ex)
+            {
+                return Results.BadRequest(new { error = "invalid_symbol", message = ex.Message });
+            }
+            catch (CandleAnalysisException ex)
+            {
+                // Nothing to draw, and the message says why (bad ticker vs no trades today).
+                return Results.NotFound(new { error = "no_candles", message = ex.Message });
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogWarning(ex, "[Trading] Chart data failed for {Symbol}.", symbol);
+                return Results.Problem(
+                    title: "candle_analysis_failed", detail: ex.Message, statusCode: 502);
+            }
+        });
+
+        // ── Watchlist ─────────────────────────────────────────────────────────
+        // The user's monitoring universe. Reads are viewer-level; edits require TradingAnalyst.
+        // Nothing here can widen what may be traded — AllowedSymbols stays configuration-only, and
+        // each entry reports whether an order for it would pass the risk engine.
+
+        trading.MapGet("/watchlist", async (
+            MonitoredUniverse universe,
+            ITradingRepository repository,
+            IOptions<TradingAgentOptions> options,
+            CancellationToken ct) =>
+        {
+            await universe.SeedIfNeededAsync(ct: ct);
+            var snapshot = await repository.GetWatchlistAsync(ct);
+            var tradable = universe.ForExecution().ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var symbols = snapshot.Entries.Select(e => e.Symbol).ToList();
+            var barCounts = await repository.GetDailyBarCountsAsync(symbols, ct);
+
+            // MinimumWeeklyBars weekly bars need roughly six times as many daily sessions. Reported per
+            // symbol because a freshly added symbol has no deep history until the backfill reaches it,
+            // and without it there is no weekly confirmation to quote.
+            const int weeklyReadyBars = MultiTimeframeAnalyzer.MinimumWeeklyBars * 6;
+
+            return Results.Ok(new
+            {
+                entries = snapshot.Entries.Select(e => new
+                {
+                    symbol = e.Symbol,
+                    addedUtc = e.AddedUtc,
+                    source = e.Source,
+                    alertsEnabled = e.AlertsEnabled,
+                    notes = e.Notes,
+                    tradable = tradable.Contains(e.Symbol),
+                    archivedBars = barCounts.GetValueOrDefault(e.Symbol),
+                    hasWeeklyHistory = barCounts.GetValueOrDefault(e.Symbol) >= weeklyReadyBars
+                }),
+                seededUtc = snapshot.SeededUtc,
+                // True when AllowedSymbols has changed since the watchlist was seeded. Surfaced so the
+                // UI can offer a reset; the watchlist is never re-seeded automatically, because that
+                // would silently discard the user's edits.
+                configuredListChanged =
+                    snapshot.SeedHash is not null && snapshot.SeedHash != universe.CurrentSeedHash(),
+                tradableSymbols = tradable.Count,
+                maxSymbols = options.Value.Watchlist.MaxSymbols
+            });
+        });
+
+        trading.MapPost("/watchlist", async (
+            WatchlistSymbolRequest body,
+            MonitoredUniverse universe,
+            ITradingRepository repository,
+            PsxDataClient dataClient,
+            IOptions<TradingAgentOptions> options,
+            ILogger<TradingAgentModule> logger,
+            CancellationToken ct) =>
+        {
+            string symbol;
+            try
+            {
+                symbol = PsxDataClient.NormalizeStockSymbol(body.Symbol ?? "");
+            }
+            catch (ArgumentException ex)
+            {
+                return Results.BadRequest(new { error = "invalid_symbol", message = ex.Message });
+            }
+
+            await universe.SeedIfNeededAsync(ct: ct);
+            var existing = await repository.GetWatchlistAsync(ct);
+            var limit = Math.Max(1, options.Value.Watchlist.MaxSymbols);
+            if (existing.Entries.Count >= limit
+                && !existing.Entries.Any(e => e.Symbol.Equals(symbol, StringComparison.OrdinalIgnoreCase)))
+            {
+                return Results.BadRequest(new
+                {
+                    error = "watchlist_full",
+                    message = $"The watchlist already holds its maximum of {limit} symbols. "
+                            + "Remove one, or raise Plugins:TradingAgent:Watchlist:MaxSymbols."
+                });
+            }
+
+            // Catch a typo at the point of entry rather than letting it become a permanently empty
+            // chart. A portal outage must not block editing, so an unreachable market watch warns.
+            string? warning = null;
+            if (options.Value.Watchlist.ValidateAgainstMarketWatch)
+            {
+                try
+                {
+                    var quotes = await dataClient.GetMarketWatchAsync(ct);
+                    if (quotes.Count > 0 && !quotes.ContainsKey(symbol))
+                    {
+                        return Results.BadRequest(new
+                        {
+                            error = "unknown_symbol",
+                            message = $"'{symbol}' is not in the current PSX market watch. Check the ticker."
+                        });
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    logger.LogWarning(ex, "[Watchlist] Symbol validation skipped; market watch unavailable.");
+                    warning = "Could not reach the PSX market watch, so the ticker was not verified.";
+                }
+            }
+
+            var added = await repository.AddWatchlistSymbolAsync(symbol, "user", ct);
+            universe.Invalidate();
+            if (added)
+                logger.LogInformation("[Watchlist] Added {Symbol} via web API.", symbol);
+
+            return Results.Ok(new
+            {
+                symbol,
+                added,
+                tradable = universe.IsTradable(symbol),
+                // Said up front rather than discovered at order time.
+                message = universe.IsTradable(symbol)
+                    ? null
+                    : $"'{symbol}' will be monitored and charted, but it is not in AllowedSymbols, so an "
+                    + "order for it would be rejected by the risk engine.",
+                warning
+            });
+        }).RequireAuthorization("TradingAnalyst");
+
+        trading.MapDelete("/watchlist/{symbol}", async (
+            string symbol,
+            MonitoredUniverse universe,
+            ITradingRepository repository,
+            ILogger<TradingAgentModule> logger,
+            CancellationToken ct) =>
+        {
+            var normalized = symbol.Trim().ToUpperInvariant();
+            // Archived bars and alert history are deliberately kept: they are evidence, and re-adding
+            // the symbol should not have to re-download two years of history.
+            var removed = await repository.RemoveWatchlistSymbolAsync(normalized, ct);
+            universe.Invalidate();
+            if (removed) logger.LogInformation("[Watchlist] Removed {Symbol} via web API.", normalized);
+            return removed
+                ? Results.Ok(new { symbol = normalized, removed })
+                : Results.NotFound(new { symbol = normalized, removed });
+        }).RequireAuthorization("TradingAnalyst");
+
+        trading.MapPatch("/watchlist/{symbol}", async (
+            string symbol,
+            WatchlistUpdateRequest body,
+            MonitoredUniverse universe,
+            ITradingRepository repository,
+            CancellationToken ct) =>
+        {
+            var normalized = symbol.Trim().ToUpperInvariant();
+            var updated = await repository.UpdateWatchlistSymbolAsync(
+                normalized, body.AlertsEnabled, body.Notes, ct);
+            universe.Invalidate();
+            return updated
+                ? Results.Ok(new { symbol = normalized, updated })
+                : Results.NotFound(new { symbol = normalized, updated });
+        }).RequireAuthorization("TradingAnalyst");
+
+        trading.MapPost("/watchlist/reset", async (
+            MonitoredUniverse universe,
+            ITradingRepository repository,
+            ILogger<TradingAgentModule> logger,
+            CancellationToken ct) =>
+        {
+            // Explicitly discards the user's edits — which is the point of a reset, and why it is a
+            // separate endpoint from the automatic first-run seeding.
+            var seed = universe.ForExecution();
+            var count = await repository.ResetWatchlistAsync(seed, MonitoredUniverse.SeedHash(seed), ct);
+            universe.Invalidate();
+            logger.LogInformation("[Watchlist] Reset to AllowedSymbols ({Count}) via web API.", count);
+            return Results.Ok(new { symbols = count });
+        }).RequireAuthorization("TradingAnalyst");
 
         trading.MapGet("/proposals", async (
             int? limit,
@@ -362,14 +728,14 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                 _services!.GetRequiredService<PsxDataClient>(),
                 loggers.CreateLogger<ResearchIndexTool>()),
             new AnalyzeCandlesTool(
+                _services!.GetRequiredService<CandleAnalysisService>(),
                 _services!.GetRequiredService<PsxDataClient>(),
-                _services!.GetRequiredService<CandleHistoryProvider>(),
-                repository,
                 agentOptions,
                 loggers.CreateLogger<AnalyzeCandlesTool>()),
             new ScanWatchlistTool(
                 _services!.GetRequiredService<PsxDataClient>(),
                 _services!.GetRequiredService<CandleHistoryProvider>(),
+                _services!.GetRequiredService<MonitoredUniverse>(),
                 agentOptions,
                 loggers.CreateLogger<ScanWatchlistTool>()),
             new ManageCandleArchiveTool(
@@ -452,10 +818,13 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                   learn the real available balance and whether the stock is already held.
                 - For a RECOMMENDATION or daily-scan request ("what should I buy today", "recommend a
                   stock", "anything at support", "what should I sell"), call scan_watchlist FIRST:
-                    * Its universe is the configured allowed-symbols list — the same list the risk engine
-                      enforces at order time — so a recommendation from outside it cannot be executed.
-                      If that list is empty, say so and ask for it to be configured; do not scan the
-                      whole market instead.
+                    * Its universe is the user's watchlist plus the configured allowed-symbols list. Every
+                      result carries `tradable`. A candidate with tradable=false is NOT executable — the
+                      risk engine only accepts allowed symbols — so you may report it as something being
+                      watched, but you must say plainly that an order for it would be rejected, and never
+                      present it as an actionable buy or sell. Prefer tradable candidates.
+                      If the scan returns no symbols at all, say so and ask for the watchlist or
+                      AllowedSymbols to be set up; do not scan the whole market instead.
                     * Call get_portfolio and pass its holdings to scan_watchlist so sell candidates you
                       actually own rank first and carry unrealized P&L.
                     * Recommend a BUY only from buy_candidates (at support). NEVER recommend anything
@@ -557,6 +926,12 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
 }
 
 public sealed record KillSwitchRequest(bool Active, string? Reason = null);
+
+/// <summary>A ticker to add to the monitoring watchlist.</summary>
+public sealed record WatchlistSymbolRequest(string? Symbol);
+
+/// <summary>Per-symbol watchlist fields the user controls. Null means "leave unchanged".</summary>
+public sealed record WatchlistUpdateRequest(bool? AlertsEnabled = null, string? Notes = null);
 
 /// <summary>Optional depth override for a manually triggered backfill; null uses the configured years.</summary>
 public sealed record CandleBackfillRequest(int? Years = null);

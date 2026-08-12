@@ -3,6 +3,7 @@ using Microsoft.Extensions.Options;
 using TradingAgent.Config;
 using TradingAgent.Market;
 using TradingAgent.Persistence;
+using TradingAgent.Watchlist;
 
 namespace TradingAgent.Research;
 
@@ -14,8 +15,8 @@ namespace TradingAgent.Research;
 /// Reading the same history from <c>daily_bars</c> costs one query, leaving the portal to supply only
 /// the dates the archive is missing — in steady state, today's session and nothing else.
 ///
-/// The archive covers <see cref="TradingAgentOptions.AllowedSymbols"/> only (a deliberate storage
-/// choice), so a symbol outside that list falls back entirely to the portal path and is therefore
+/// The archive covers <see cref="MonitoredUniverse.ForArchiveAsync"/> — the watchlist plus the
+/// tradable list — so a symbol outside it falls back entirely to the portal path and is therefore
 /// limited to the configured lookback with no weekly structure. That fallback is reported in the
 /// returned warnings rather than left to be inferred from a short series.
 /// </summary>
@@ -23,17 +24,20 @@ public sealed class CandleHistoryProvider
 {
     private readonly PsxDataClient _dataClient;
     private readonly ITradingRepository _repository;
+    private readonly MonitoredUniverse _universe;
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly ILogger<CandleHistoryProvider> _logger;
 
     public CandleHistoryProvider(
         PsxDataClient dataClient,
         ITradingRepository repository,
+        MonitoredUniverse universe,
         IOptions<TradingAgentOptions> options,
         ILogger<CandleHistoryProvider> logger)
     {
         _dataClient = dataClient;
         _repository = repository;
+        _universe = universe;
         _options = options;
         _logger = logger;
     }
@@ -52,9 +56,9 @@ public sealed class CandleHistoryProvider
         var warnings = new List<string>();
         var archived = new Dictionary<string, IReadOnlyList<PsxCandle>>(StringComparer.OrdinalIgnoreCase);
 
-        var allowed = _options.Value.AllowedSymbols
-            .Select(s => s.Trim().ToUpperInvariant())
-            .Where(s => s.Length > 0)
+        // The archived universe, NOT the tradable one: a watchlist symbol needs the same deep history
+        // as a tradable one or its weekly levels cannot be computed.
+        var allowed = (await _universe.ForArchiveAsync(ct))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         var fromArchive = new List<string>();

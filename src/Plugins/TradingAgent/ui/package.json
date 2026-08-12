@@ -19,6 +19,7 @@
     "vite": "^6.2.0"
   },
   "dependencies": {
+    "lightweight-charts": "^5.2.1",
     "lucide-svelte": "^0.468.0"
   }
 }

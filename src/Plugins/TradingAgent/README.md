@@ -103,6 +103,24 @@ Then build the plugin. At startup the module contributes the page via
 - lists the page at `GET /api/plugin-ui`,
 - shows a **Trading** entry in the sidebar, which renders the page at `/ext/trading`.
 
+The page shows the watchlist beside a **chart pane**: candlesticks with a direction-tinted volume
+overlay, SMA20/50, an RSI sub-pane with the *configured* oversold/overbought bands (not the textbook
+30/70), horizontal support/resistance lines whose width encodes touch count and whose style shows
+weekly confirmation, entry/stop/target markers, and an interval switcher (1D / 60m / 30m / 15m / 5m).
+
+Chart data comes from `GET /api/trading/candles`, which is served by **`CandleAnalysisService`** — the
+same code path `analyze_candles` uses. That sharing is the point: the levels drawn on screen are the
+same objects the specialist quotes, so the chart cannot tell one story while the agent tells another.
+Two details worth knowing:
+
+- `IndicatorSeries` computes the full SMA/RSI lines the chart needs (`TechnicalAnalyzer` computes only
+  the latest value). `IndicatorSeriesTests` asserts the last element of each series equals the
+  snapshot's scalar, so the line and the number can never drift apart.
+- `plan.entryWeeklyConfirmed` describes the entry level **shown**, while
+  `weekly.entryLevelConfirmed` describes the nearest support in the *full* archived history. They can
+  legitimately differ, because the displayed plan is scoped to the requested window — the chart uses
+  the former so it never reports "no weekly confirmation" beside a level that has one.
+
 Notes:
 
 - **Build the UI before the DLL.** `wwwroot` is embedded at compile time. A build without it is
@@ -115,6 +133,48 @@ Notes:
   shared `sessionStorage`; the host also posts the key and the current theme on load.
 - **Standalone dev.** `npm run dev` in `ui/` runs the UI on its own port and proxies `/api` to
   `BACKEND_URL` (default `http://localhost:5000`).
+
+---
+
+## Watchlist vs AllowedSymbols — two different universes
+
+These are deliberately separate, and the distinction is the difference between "what am I watching"
+and "what am I allowed to trade":
+
+| | Source | Used for | Editable at runtime |
+| --- | --- | --- | --- |
+| **Watchlist** | `watchlist` table (seeded once from `AllowedSymbols`) | charting, scanning, monitoring, alerts, archived history | **yes** — Trading page, `/api/trading/watchlist` |
+| **AllowedSymbols** | `appsettings.json` | what an order may be placed for (`TradingRiskEngine`) | no — config + restart |
+
+`MonitoredUniverse` is the single place that answers "which symbols":
+
+- `ForExecution()` → `AllowedSymbols` only. **No watchlist edit can widen this** — otherwise the web
+  UI would have become an order-permission editor.
+- `ForMonitoringAsync()` → watchlist ∪ `AllowedSymbols`. Charts, `scan_watchlist`, alerts.
+- `ForArchiveAsync()` → same as monitoring by default, so a watched symbol accumulates the daily
+  history its weekly levels need. Costs no extra portal requests (a session fetch already returns
+  every symbol in the market), only rows.
+
+Consequences the UI states explicitly rather than leaving to be discovered at order time:
+
+- A watched symbol outside `AllowedSymbols` is badged **monitor-only**; `scan_watchlist` results carry
+  `tradable`, and the specialist must not present a non-tradable candidate as actionable.
+- A newly added symbol is badged **no weekly** until roughly two years of daily bars are archived —
+  until then there is no weekly confirmation to quote.
+- The watchlist is seeded from `AllowedSymbols` **once**. If the configured list changes later, the
+  watchlist is *not* updated (that would discard your edits); the API reports
+  `configuredListChanged: true` and the UI offers **Reset**, which is the only thing that re-seeds.
+
+### Endpoints
+
+| Verb | Route | Role |
+| --- | --- | --- |
+| GET | `/api/trading/candles?symbol=&interval=&bars=` — chart data (see below) | ManagementViewer |
+| GET | `/api/trading/watchlist` | ManagementViewer |
+| POST | `/api/trading/watchlist` — `{ symbol }`, validated against the live market watch | TradingAnalyst |
+| DELETE | `/api/trading/watchlist/{symbol}` — keeps archived bars | TradingAnalyst |
+| PATCH | `/api/trading/watchlist/{symbol}` — `{ alertsEnabled?, notes? }` | TradingAnalyst |
+| POST | `/api/trading/watchlist/reset` — reseed from `AllowedSymbols` | TradingAnalyst |
 
 ---
 
@@ -215,6 +275,11 @@ disabled; this tool uses the explicit AgentFox provider bridge instead.
 | `Scan.MinAverageVolume` | `25000` | Minimum 30-session average volume; thinner symbols are excluded as untradable at the quoted level. |
 | `Scan.MaxResults` | `10` | Maximum candidates returned per side. |
 | `Scan.MarketWatchCacheSeconds` | `60` | How long a live market-watch snapshot is reused. |
+| `Scan.ArchiveSettleAfterPkt` | `17:30` | PKT time after which the current session's candles count as final and may be archived. Earlier archiving stores a partial bar the coverage marker would prevent from ever being corrected. |
+| `Watchlist.SeedFromAllowedSymbols` | `true` | Prefill the watchlist from `AllowedSymbols` the first time it is used. Applies once; the watchlist is yours afterwards. |
+| `Watchlist.MaxSymbols` | `150` | Upper bound on watched symbols. |
+| `Watchlist.ArchiveWatchlistSymbols` | `true` | Archive daily history for watchlist symbols too, so they get weekly levels. Costs database rows, not portal requests. |
+| `Watchlist.ValidateAgainstMarketWatch` | `true` | Reject an unknown ticker when it is added, instead of letting a typo become an empty chart. A portal outage warns rather than blocks. |
 | `Scan.MarketDayFetchConcurrency` | `4` | Concurrent portal requests while warming a cold candle cache (1–8). |
 | `Scan.MaxCachedMarketDays` | `120` | Settled sessions kept in the in-memory candle cache. |
 | `Scan.BackfillYears` | `2` | Years of daily OHLC the background worker archives for `AllowedSymbols`. Weekly levels need ~2 years. `0` disables it. |
@@ -546,18 +611,32 @@ Measured, not estimated — 215 weekdays of 6 symbols:
 | `scan_watchlist` on a warm archive | **95 ms** | unchanged |
 
 Set `Scan.BackfillYears` to `0` to disable it and stay on the shallower on-demand window (no weekly
-structure). Because the backfill stores `AllowedSymbols` only, **adding a symbol to the watchlist later
-needs another pass** to pick up its history — trigger it from the UI button or the tool; the coverage
-table makes it resumable, but it is not instant. The portal answers bursts with empty tables, so an
-empty date is retried once and a pass aborts after four empty weekdays in a row rather than recording
-that stretch as if the market had been closed (the UI shows that outcome in amber).
+structure). The backfill archives `MonitoredUniverse.ForArchiveAsync()` — the watchlist plus
+`AllowedSymbols` — so **a symbol added to the watchlist gets its history on the next pass** (within 6
+hours automatically, or immediately from the UI button or the `manage_candle_archive` tool). Until then
+the UI badges it *no weekly*. The portal answers bursts with empty tables, so an empty date is retried
+once and a pass aborts after four empty weekdays in a row rather than recording that stretch as if the
+market had been closed (the UI shows that outcome in amber).
 
-### Why the universe is `AllowedSymbols`
+**Only settled sessions are archived.** A pass stops at the last session whose candles are final:
+today counts once the market is closed *and* the PKT clock is past `Scan.ArchiveSettleAfterPkt`
+(default `17:30`, an hour after Friday's 16:30 close). This matters because coverage is what makes the
+backfill resumable, and fetching a session still in progress writes a coverage marker that would stop
+the partial bar from ever being corrected — or, if the portal answers with an empty table, records the
+day as a non-trading day, which is a permanent hole. Each pass also *clears* coverage for anything
+past the settlement point, so a session recorded prematurely by an earlier build repairs itself on the
+next run at a cost of one request.
 
-`scan_watchlist` defaults to `AllowedSymbols` — the same list `TradingRiskEngine` enforces at order
-time. Recommending outside it produces proposals the risk engine refuses, so the scanner and the
-executor deliberately read one list. Pass `symbols` explicitly to scan something else; the tool notes
-that those cannot be executed.
+### What the scan's universe is
+
+`scan_watchlist` defaults to the **monitoring** universe — the editable watchlist plus
+`AllowedSymbols` (see [Watchlist vs AllowedSymbols](#watchlist-vs-allowedsymbols--two-different-universes)).
+Scanning wider than the tradable list is deliberate: a symbol you are watching should appear in a scan.
+
+Because of that, every result carries **`tradable`**, and the result notes how many scanned symbols are
+monitor-only. A candidate outside `AllowedSymbols` is information only — the risk engine will refuse an
+order for it — and the specialist is instructed to say so rather than present it as actionable. Pass
+`symbols` explicitly to scan something else again; the same `tradable` flag applies.
 
 ### What the scan computes
 

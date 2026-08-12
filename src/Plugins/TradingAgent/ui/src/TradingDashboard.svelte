@@ -2,6 +2,11 @@
   import { onMount, onDestroy } from 'svelte';
   import { trading, type TradingStatus, type TradeProposal, type TradingExecution, type TradingEvent, type ReconciliationRun, type CandleArchiveStatus } from './api';
   import { RefreshCw, ShieldAlert, Activity, FileText, ListChecks, Scale, History, Power, Database, Download } from 'lucide-svelte';
+  import WatchlistPanel from './WatchlistPanel.svelte';
+  import ChartPane from './ChartPane.svelte';
+
+  /** Symbol the watchlist has selected; drives the chart pane. */
+  let selectedSymbol: string | null = null;
 
   let loading = true;
   let killSwitchBusy = false;
@@ -128,6 +133,13 @@
       <div class="metric"><span>Unknown outcomes</span><b class:danger={status.ledger.unknownExecutions > 0}>{status.ledger.unknownExecutions}</b><small>Require manual reconciliation</small></div>
     </div>
 
+    <!-- Watchlist beside the archive: the two are related — the archive is what gives the watched
+         symbols their weekly levels — and the panel owns its own loading and refresh. -->
+    <div class="watch-row">
+      <WatchlistPanel bind:selected={selectedSymbol} />
+      <ChartPane symbol={selectedSymbol} />
+    </div>
+
     {#if archive}
       <section class="archive-card">
         <div class="archive-head">
@@ -232,6 +244,10 @@
   .status-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:.75rem; margin-bottom:1.25rem; }
   .metric { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:1rem; display:flex; flex-direction:column; gap:.35rem; }
   .metric span,.metric small { color:var(--text-3); font-size:.7rem; }.metric b { color:var(--text); font-size:1.05rem; }.metric b.good { color:var(--success); }.metric b.danger { color:var(--danger); }
+  /* minmax(0,1fr) not 1fr: the chart column must be allowed to shrink, or the canvas keeps its
+     widest measured size and pushes the grid wider on every re-render. */
+  .watch-row { display:grid; grid-template-columns:minmax(260px,320px) minmax(0,1fr); gap:.75rem; margin-bottom:1.25rem; align-items:start; }
+  @media (max-width: 820px) { .watch-row { grid-template-columns:minmax(0,1fr); } }
   .archive-card { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:1rem; margin-bottom:1.25rem; display:flex; flex-direction:column; gap:.85rem; }
   .archive-head { display:flex; justify-content:space-between; align-items:flex-start; gap:1rem; flex-wrap:wrap; }
   .archive-title { display:flex; gap:.6rem; align-items:flex-start; color:var(--primary); }

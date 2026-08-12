@@ -146,6 +146,48 @@ public class TradingAgentOptions
     /// thresholds that turn a candle series into a buy-at-support or sell-at-resistance setup.
     /// </summary>
     public TradingScanOptions Scan { get; set; } = new();
+
+    /// <summary>
+    /// The user-editable monitoring universe. Every value here has a working default, so the watchlist
+    /// needs no configuration to function.
+    /// </summary>
+    public TradingWatchlistOptions Watchlist { get; set; } = new();
+}
+
+/// <summary>
+/// Settings for the editable watchlist — what is WATCHED. Nothing here can widen what may be TRADED:
+/// that stays <see cref="TradingAgentOptions.AllowedSymbols"/>, which the risk engine reads directly.
+/// </summary>
+public sealed class TradingWatchlistOptions
+{
+    /// <summary>
+    /// Prefill the watchlist from <see cref="TradingAgentOptions.AllowedSymbols"/> the first time it is
+    /// used, so a new install starts with the configured universe rather than an empty page. Applies
+    /// once; afterwards the watchlist is the user's, and a changed allow-list is reported rather than
+    /// merged in. Set false to start empty.
+    /// </summary>
+    public bool SeedFromAllowedSymbols { get; set; } = true;
+
+    /// <summary>
+    /// Upper bound on watched symbols. The monitor's per-pass cost is one market-wide request
+    /// regardless of count, but each symbol still costs analysis time and archive rows.
+    /// </summary>
+    public int MaxSymbols { get; set; } = 150;
+
+    /// <summary>
+    /// Archive daily history for watchlist symbols too, not just the tradable ones. On by default
+    /// because weekly support/resistance needs roughly two years of daily bars, and a watched symbol
+    /// without them reports unknown timeframe alignment. Costs no additional portal requests — a
+    /// session fetch already covers every symbol in the market — only database rows.
+    /// </summary>
+    public bool ArchiveWatchlistSymbols { get; set; } = true;
+
+    /// <summary>
+    /// Check an added symbol against the live PSX market watch before accepting it, so a typo is
+    /// rejected at the point of entry rather than becoming a silently empty chart. When the portal is
+    /// unreachable the symbol is accepted with a warning — an outage should not block editing.
+    /// </summary>
+    public bool ValidateAgainstMarketWatch { get; set; } = true;
 }
 
 /// <summary>
@@ -185,6 +227,14 @@ public sealed class TradingScanOptions
     /// Weekly bars requested when computing higher-timeframe structure. 104 ≈ two years.
     /// </summary>
     public int WeeklyLookbackWeeks { get; set; } = 104;
+
+    /// <summary>
+    /// PKT time of day after which the current session's candles are treated as settled and may be
+    /// archived. Default 17:30 — an hour after the latest scheduled close (Friday's 16:30) — so the
+    /// exchange has published its final table. Archiving earlier stores a partial bar that the
+    /// coverage marker would stop us from ever correcting.
+    /// </summary>
+    public string ArchiveSettleAfterPkt { get; set; } = "17:30";
 
     /// <summary>
     /// How close a weekly level must sit to a daily level to count as confirming it. Wider means more
