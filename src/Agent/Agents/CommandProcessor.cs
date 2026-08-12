@@ -47,6 +47,20 @@ public class LanePolicy
 public class CommandProcessorConfig
 {
     /// <summary>
+    /// How long a single command may run before the watchdog reports it as stuck. 0 disables the
+    /// watchdog.
+    /// <para>
+    /// This does not cancel anything — it makes a wedge visible. A command that blocks forever
+    /// holds a lane slot forever, and because Main is serial that reads to the operator as a dead
+    /// terminal with no error anywhere: nothing logged, nothing printed, nothing to search for.
+    /// </para>
+    /// </summary>
+    public int StuckCommandWarningSeconds { get; init; } = 600;
+
+    /// <summary>How often the watchdog sweeps in-flight commands.</summary>
+    public int WatchdogIntervalSeconds { get; init; } = 60;
+
+    /// <summary>
     /// Per-lane policies. Lanes not listed fall back to <see cref="LanePolicy.Serial()"/>.
     /// </summary>
     public Dictionary<CommandLane, LanePolicy> LanePolicies { get; init; } = new()
@@ -111,6 +125,15 @@ public class CommandProcessor : IDisposable
     private readonly ConcurrentDictionary<Guid, Task> _inflight = new();
     private readonly ConcurrentDictionary<CommandLane, int> _activeByLane = new();
 
+    // What each in-flight task is, so a wedge can be named rather than just counted.
+    private readonly ConcurrentDictionary<Guid, InflightCommand> _inflightInfo = new();
+
+    // Reported-once set, so a permanently stuck command produces one warning and one escalation
+    // rather than a line every sweep for the rest of the process's life.
+    private readonly ConcurrentDictionary<Guid, bool> _reportedStuck = new();
+
+    private Task? _watchdogLoop;
+
     // Lane pump tasks (one per lane)
     private readonly List<Task> _laneLoops = [];
     private bool _started;
@@ -173,6 +196,9 @@ public class CommandProcessor : IDisposable
             _laneLoops.Add(RunLaneLoopAsync(lane, policy, _cts.Token));
         }
 
+        if (_config.StuckCommandWarningSeconds > 0)
+            _watchdogLoop = RunWatchdogLoopAsync(_cts.Token);
+
         _logger?.LogInformation("CommandProcessor started ({LaneCount} lanes)", _laneLoops.Count);
     }
 
@@ -188,6 +214,12 @@ public class CommandProcessor : IDisposable
         // Wait for pump loops to exit cleanly
         try { await Task.WhenAll(_laneLoops).ConfigureAwait(false); }
         catch (OperationCanceledException) { }
+
+        if (_watchdogLoop != null)
+        {
+            try { await _watchdogLoop.ConfigureAwait(false); }
+            catch (OperationCanceledException) { }
+        }
 
         // Drain in-flight handlers
         if (_inflight.Count > 0)
@@ -288,6 +320,8 @@ public class CommandProcessor : IDisposable
         try
         {
             _activeByLane.AddOrUpdate(lane, 1, (_, current) => current + 1);
+            _inflightInfo[taskId] = new InflightCommand(
+                command.RunId, command.SessionKey, lane, DateTime.UtcNow);
             _logger?.LogDebug("Executing {Lane} command {RunId}", lane, command.RunId);
             await handler(command, ct).ConfigureAwait(false);
             Interlocked.Increment(ref _totalProcessed);
@@ -306,7 +340,94 @@ public class CommandProcessor : IDisposable
             _activeByLane.AddOrUpdate(lane, 0, (_, current) => Math.Max(0, current - 1));
             semaphore.Release();
             _inflight.TryRemove(taskId, out _);
+
+            if (_inflightInfo.TryRemove(taskId, out var info) && _reportedStuck.TryRemove(taskId, out _))
+                _logger?.LogInformation(
+                    "{Lane} command {RunId} recovered after {Minutes:F1} min.",
+                    info.Lane, info.RunId, (DateTime.UtcNow - info.StartedAt).TotalMinutes);
         }
+    }
+
+    // ── Watchdog ─────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Periodically reports commands that have been running past
+    /// <see cref="CommandProcessorConfig.StuckCommandWarningSeconds"/>, and lanes that are fully
+    /// saturated while work is still queued behind them.
+    ///
+    /// <para>
+    /// Deliberately observational — it never cancels a handler. The cancellation ceilings live where
+    /// the blocking actually happens (tool timeouts, HITL expiry); killing a turn from out here
+    /// would abandon partial state with nothing to hand back. What this fixes is the diagnosis: a
+    /// wedged Main lane used to present as a terminal that stopped echoing, with no log line
+    /// anywhere pointing at the command responsible.
+    /// </para>
+    /// </summary>
+    private async Task RunWatchdogLoopAsync(CancellationToken ct)
+    {
+        var threshold = TimeSpan.FromSeconds(_config.StuckCommandWarningSeconds);
+        var interval  = TimeSpan.FromSeconds(Math.Max(5, _config.WatchdogIntervalSeconds));
+
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                await Task.Delay(interval, ct).ConfigureAwait(false);
+
+                var now = DateTime.UtcNow;
+
+                foreach (var (taskId, info) in _inflightInfo)
+                {
+                    var elapsed = now - info.StartedAt;
+                    if (elapsed < threshold) continue;
+                    if (!_reportedStuck.TryAdd(taskId, true)) continue; // already reported
+
+                    var maxConcurrency = _config.LanePolicies
+                        .GetValueOrDefault(info.Lane, LanePolicy.Serial()).MaxConcurrency;
+
+                    _logger?.LogWarning(
+                        "{Lane} command {RunId} (session {Session}) has been running for {Minutes:F1} min. " +
+                        "It is holding 1 of {Max} slot(s) on this lane" +
+                        "{MainNote}. Queued behind it: {Queued}.",
+                        info.Lane, info.RunId, info.SessionKey, elapsed.TotalMinutes,
+                        maxConcurrency,
+                        info.Lane == CommandLane.Main
+                            ? ", which is serial — the interactive prompt is blocked until it finishes"
+                            : string.Empty,
+                        _commandQueue.GetQueueCount(info.Lane));
+                }
+
+                foreach (var lane in Enum.GetValues<CommandLane>())
+                {
+                    var max    = _config.LanePolicies.GetValueOrDefault(lane, LanePolicy.Serial()).MaxConcurrency;
+                    var active = _activeByLane.GetValueOrDefault(lane);
+                    var queued = _commandQueue.GetQueueCount(lane);
+
+                    if (active >= max && queued > 0)
+                        _logger?.LogWarning(
+                            "Lane {Lane} is saturated ({Active}/{Max} slots busy) with {Queued} command(s) " +
+                            "waiting. If this persists, one of the running commands is not returning.",
+                            lane, active, max, queued);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            _logger?.LogDebug("CommandProcessor watchdog stopped");
+        }
+    }
+
+    /// <summary>
+    /// In-flight commands that have exceeded <paramref name="olderThan"/>, newest first.
+    /// Surfaced by <c>/agents stats</c> so a wedge is visible without reading the log file.
+    /// </summary>
+    public IReadOnlyList<InflightCommand> GetLongRunningCommands(TimeSpan olderThan)
+    {
+        var cutoff = DateTime.UtcNow - olderThan;
+        return _inflightInfo.Values
+            .Where(i => i.StartedAt <= cutoff)
+            .OrderBy(i => i.StartedAt)
+            .ToList();
     }
 
     // ── IDisposable ──────────────────────────────────────────────────────────
@@ -320,6 +441,16 @@ public class CommandProcessor : IDisposable
         _cts.Dispose();
         foreach (var s in _semaphores.Values) s.Dispose();
     }
+}
+
+/// <summary>A command currently occupying a lane slot.</summary>
+public sealed record InflightCommand(
+    string RunId,
+    string SessionKey,
+    CommandLane Lane,
+    DateTime StartedAt)
+{
+    public TimeSpan Elapsed => DateTime.UtcNow - StartedAt;
 }
 
 public sealed record CommandLaneStatistics(

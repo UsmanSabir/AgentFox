@@ -7,6 +7,7 @@ using Microsoft.Extensions.Options;
 using TradingAgent.Analysis;
 using TradingAgent.Config;
 using TradingAgent.Research;
+using TradingAgent.Watchlist;
 
 namespace TradingAgent.Tools;
 
@@ -14,10 +15,12 @@ namespace TradingAgent.Tools;
 /// Scans the configured symbol list for candle-based setups: which stocks are sitting at support
 /// (the buy-low case) and which are pressing resistance (the sell-high case).
 ///
-/// The universe defaults to <see cref="TradingAgentOptions.AllowedSymbols"/> — the same list
-/// <see cref="TradingAgent.Risk.TradingRiskEngine"/> enforces at order time. That alignment is the
-/// point: recommending outside the list produces proposals the risk engine will refuse, so the
-/// scanner and the executor read one list.
+/// The universe defaults to the user's monitoring list — the editable watchlist plus
+/// <see cref="TradingAgentOptions.AllowedSymbols"/> (see
+/// <see cref="TradingAgent.Watchlist.MonitoredUniverse"/>). Scanning a superset of the tradable list
+/// is deliberate: a watched symbol should show up in a scan. Each result therefore carries
+/// <c>tradable</c>, because a candidate outside AllowedSymbols is information only — the risk engine
+/// will refuse an order for it, and the caller must say so rather than recommend it as actionable.
 ///
 /// Ranking is deterministic (<see cref="TechnicalAnalyzer"/>), and stocks at the bottom of their
 /// range because they are still falling are reported under <c>avoid</c>, never as buy candidates.
@@ -41,17 +44,20 @@ public sealed class ScanWatchlistTool : BaseTool
 
     private readonly PsxDataClient _dataClient;
     private readonly CandleHistoryProvider _history;
+    private readonly MonitoredUniverse _universe;
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly ILogger<ScanWatchlistTool> _logger;
 
     public ScanWatchlistTool(
         PsxDataClient dataClient,
         CandleHistoryProvider history,
+        MonitoredUniverse universe,
         IOptions<TradingAgentOptions> options,
         ILogger<ScanWatchlistTool> logger)
     {
         _dataClient = dataClient;
         _history = history;
+        _universe = universe;
         _options = options;
         _logger = logger;
     }
@@ -161,8 +167,9 @@ public sealed class ScanWatchlistTool : BaseTool
 
         // ── Universe ──────────────────────────────────────────────────────────
         var explicitSymbols = ParseSymbols(arguments.GetValueOrDefault("symbols"));
-        var universeSource = explicitSymbols.Count > 0 ? "explicit_symbols" : "allowed_symbols";
-        var requested = explicitSymbols.Count > 0 ? explicitSymbols : options.AllowedSymbols;
+        var monitored = await _universe.ForMonitoringAsync();
+        var universeSource = explicitSymbols.Count > 0 ? "explicit_symbols" : "watchlist";
+        var requested = explicitSymbols.Count > 0 ? explicitSymbols : (IReadOnlyList<string>)monitored;
 
         var universe = new List<string>();
         foreach (var candidate in requested)
@@ -180,8 +187,9 @@ public sealed class ScanWatchlistTool : BaseTool
 
         if (universe.Count == 0)
             return ToolResult.Fail(
-                "There are no symbols to scan. Configure Plugins:TradingAgent:AllowedSymbols with the " +
-                "PSX tickers you trade (the same list the risk engine enforces), or pass 'symbols' explicitly.");
+                "There are no symbols to scan. Add PSX tickers to the watchlist on the Trading page, " +
+                "configure Plugins:TradingAgent:AllowedSymbols (the list the risk engine enforces at " +
+                "order time), or pass 'symbols' explicitly.");
 
         if (universe.Count > MaxUniverse)
         {
@@ -190,6 +198,15 @@ public sealed class ScanWatchlistTool : BaseTool
         }
 
         var holdings = ParseHoldings(arguments.GetValueOrDefault("holdings"), notes);
+
+        // Resolved once for the whole scan: which of these symbols an order could actually be placed
+        // for. Everything else here is analysis, which is allowed to range wider.
+        var tradable = _universe.ForExecution().ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var monitorOnly = universe.Count(sym => !tradable.Contains(sym));
+        if (monitorOnly > 0)
+            notes.Add($"{monitorOnly} of {universe.Count} scanned symbols are monitor-only: they are on "
+                    + "the watchlist but not in AllowedSymbols, so an order for them would be rejected. "
+                    + "Each result carries 'tradable'.");
 
         // ── Candles ───────────────────────────────────────────────────────────
         // Weekly structure needs a far deeper window than the daily read; the archive serves it
@@ -295,7 +312,7 @@ public sealed class ScanWatchlistTool : BaseTool
                 .ThenBy(a => a.Snapshot.PercentAboveSupport ?? decimal.MaxValue)
                 .ThenByDescending(a => a.Snapshot.RewardRiskRatio ?? 0m)
                 .Take(maxResults)
-                .Select(Project)
+                .Select(a => Project(a, tradable))
                 .ToList();
         }
 
@@ -312,7 +329,7 @@ public sealed class ScanWatchlistTool : BaseTool
                 .ThenByDescending(a => a.Multi.Alignment == TimeframeAlignment.Aligned)
                 .ThenBy(a => a.Snapshot.PercentBelowResistance ?? decimal.MaxValue)
                 .Take(maxResults)
-                .Select(Project)
+                .Select(a => Project(a, tradable))
                 .ToList();
         }
 
@@ -401,7 +418,7 @@ public sealed class ScanWatchlistTool : BaseTool
     }
 
     /// <summary>Flattens a candidate into the compact row the agent reasons over.</summary>
-    private static object Project(Candidate candidate)
+    private static object Project(Candidate candidate, IReadOnlySet<string> tradable)
     {
         var s = candidate.Snapshot;
         var multi = candidate.Multi;
@@ -414,6 +431,10 @@ public sealed class ScanWatchlistTool : BaseTool
         return new
         {
             symbol = s.Symbol,
+            // Whether an ORDER for this symbol can pass the risk engine. The scan universe is the
+            // watchlist, which is deliberately wider than AllowedSymbols, so a candidate can be a
+            // genuine setup and still not be executable — the caller must say so, not imply a trade.
+            tradable = tradable.Contains(s.Symbol),
             close = s.Close,
             as_of = s.AsOf.ToString("yyyy-MM-dd"),
             uses_live_bar = s.UsesLiveBar,

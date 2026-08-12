@@ -33,7 +33,8 @@ public sealed class TradingPluginConfigDefinitionProvider : IPluginConfigDefinit
         {
             PluginName = "trading-agent",
             DisplayName = "PSX Trading Agent",
-            Description = "Runtime policy overrides used by the isolated PSX specialist.",
+            Description = "Runtime policy overrides used by the isolated PSX specialist. Credentials, "
+                        + "risk limits, approvals, and the kill switch remain in the dedicated Trading page.",
             Fields =
             [
                 new PluginConfigFieldDefinition

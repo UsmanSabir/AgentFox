@@ -18,9 +18,14 @@
     CalendarClock,
     Radio,
     Cpu,
-    TrendingUp
+    TrendingUp,
+    LineChart,
+    Globe,
+    type Icon as IconType
   } from 'lucide-svelte';
 
+  // Built-in pages. Plugin pages are fetched at runtime from /api/plugin-ui and rendered between
+  // these and Settings, which stays last — nothing plugin-specific belongs in this file.
   const navItems = [
     { href: '/',            label: 'Dashboard',  icon: LayoutDashboard },
     { href: '/chat',        label: 'Chat',       icon: MessageSquare },
@@ -29,13 +34,29 @@
     { href: '/skills',      label: 'Skills',     icon: Puzzle },
     { href: '/tools',       label: 'Tools',      icon: Wrench },
     { href: '/plugins',     label: 'Plugins',    icon: Cpu },
-    { href: '/trading',     label: 'Trading',    icon: TrendingUp },
     { href: '/mcp',         label: 'MCP',        icon: Server },
     { href: '/channels',    label: 'Channels',   icon: Radio },
     { href: '/heartbeats',  label: 'Heartbeats', icon: Heart },
     { href: '/cron',        label: 'Cron Jobs',  icon: CalendarClock },
+  ];
+
+  const trailingNavItems = [
     { href: '/settings',    label: 'Settings',   icon: Settings },
   ];
+
+  // Icons a plugin may request by name. A plugin ships no markup into the host DOM, so an unknown
+  // name falls back to the generic plugin icon rather than rendering nothing.
+  const pluginIcons: Record<string, typeof IconType> = {
+    'trending-up': TrendingUp,
+    'line-chart':  LineChart,
+    'globe':       Globe,
+    'database':    Database,
+    'bot':         Bot,
+    'puzzle':      Puzzle,
+    'cpu':         Cpu
+  };
+
+  let pluginItems: { href: string; label: string; icon: typeof IconType }[] = [];
 
   $: collapsed = $sidebarCollapsed;
   $: current  = $page.url.pathname;
@@ -48,6 +69,17 @@
       if (info?.display) version = info.display;
     } catch {
       // keep fallback — version endpoint unavailable (e.g. not yet authenticated)
+    }
+
+    try {
+      const pages = await api.pluginUi.list();
+      pluginItems = pages.map(p => ({
+        href:  `/ext/${p.slug}`,
+        label: p.title,
+        icon:  pluginIcons[p.icon] ?? Puzzle
+      }));
+    } catch {
+      // No plugin pages (or not yet authenticated) — the built-in nav still works.
     }
   });
 
@@ -82,7 +114,7 @@
 
   <!-- Nav -->
   <nav class="nav">
-    {#each navItems as item}
+    {#each [...navItems, ...pluginItems, ...trailingNavItems] as item}
       <a
         href={item.href}
         class="nav-item"

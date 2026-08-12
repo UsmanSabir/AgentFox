@@ -291,10 +291,10 @@
         </div>
 
         {#if editingConfig.fields?.length}
-          {#if editingConfig.pluginName === 'trading-agent'}
-            <div class="config-notice">
-              These are runtime policy overrides. Credentials, risk limits, approvals, and the kill switch remain in the dedicated Trading controls.
-            </div>
+          <!-- The plugin's own config definition supplies this copy (PluginConfigDefinition.Description),
+               so no plugin is named in this generic editor. -->
+          {#if editingConfig.description}
+            <div class="config-notice">{editingConfig.description}</div>
           {/if}
           <div class="config-fields">
             {#each editingConfig.fields as field}

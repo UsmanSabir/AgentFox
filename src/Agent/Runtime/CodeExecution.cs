@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using AgentFox.Helpers;
 using AgentFox.Plugins.Interfaces;
 using AgentFox.Plugins.Security;
 using AgentFox.Tools;
@@ -125,10 +126,16 @@ public class CodeSandbox
             // Python or `process.env` in Node would read the operator's provider keys.
             SecretGuard.SanitizeChildEnvironment(startInfo);
 
+            // Sandboxed code must not be able to read the operator's terminal. Left inherited, a
+            // script that blocks on input (python's input(), a build tool's prompt) both hangs the
+            // turn and swallows keystrokes meant for the REPL.
+            ChildProcess.DetachStandardInput(startInfo);
+
             using var process = new Process { StartInfo = startInfo };
 
             process.Start();
-            
+            ChildProcess.CloseStandardInput(process);
+
             var timeoutTask = Task.Delay(TimeSpan.FromSeconds(_timeoutSeconds));
             var outputTask = process.StandardOutput.ReadToEndAsync();
             var errorTask = process.StandardError.ReadToEndAsync();
@@ -140,7 +147,10 @@ public class CodeSandbox
             
             if (completedTask == timeoutTask)
             {
-                process.Kill();
+                // Tree kill: `dotnet run` / `cmd /c` are wrappers, and killing only the wrapper
+                // leaves the actual workload running with the handles it inherited — the timeout
+                // reported success at cleaning up while the leak accumulated across runs.
+                ChildProcess.KillTree(process);
                 result.Success = false;
                 result.Error = $"Execution timed out after {_timeoutSeconds} seconds";
                 return result;

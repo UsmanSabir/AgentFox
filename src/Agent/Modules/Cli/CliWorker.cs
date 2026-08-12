@@ -26,7 +26,6 @@ using Spectre.Console;
 using Spectre.Console.Rendering;
 using System.Text;
 using System.Threading.Channels;
-using AgentFox.Helpers;
 using SysChannel = System.Threading.Channels.Channel;
 
 namespace AgentFox.Modules.Cli;
@@ -178,9 +177,11 @@ public sealed class CliWorker : BackgroundService
         // real clipboard paste, Ctrl-C to clear the current line) so the REPL no longer hand-rolls
         // key handling via raw Console.ReadKey. One instance is reused for the life of the session so
         // in-memory + persisted history accumulates across turns.
+        var callbacks = new ReplPromptCallbacks();
         await using var prompt = new Prompt(
             persistentHistoryFilepath: Path.Combine(_workspaceManager.ResolvePath(""), ".cli_history"),
-            callbacks: new ReplPromptCallbacks(),
+            callbacks: callbacks,
+            console: new GatedConsole(() => callbacks.InputIsEmpty),
             configuration: new PromptConfiguration(
                 prompt: new FormattedString(
                     "> ",
@@ -189,11 +190,25 @@ public sealed class CliWorker : BackgroundService
         // ── REPL loop ─────────────────────────────────────────────────────────
         while (!ct.IsCancellationRequested)
         {
-            var response = await prompt.ReadLineAsync();
-            if (!response.IsSuccess)
-                continue; // Ctrl-C cancelled the current line — start fresh instead of quitting.
+            // Anything a background lane produced while the last turn (or the last prompt) held
+            // the terminal goes out now, onto a clean screen, before the prompt is drawn over it.
+            ConsoleGate.Flush();
 
-            var input = response.Text;
+            string input;
+            // The prompt owns the terminal for as long as it is on screen: background writes are
+            // buffered rather than scribbled through PrettyPrompt's incremental render. GatedConsole
+            // surrenders the line as soon as something is waiting and the input buffer is empty, so
+            // buffered output surfaces in seconds rather than waiting on the next keystroke.
+            using (ConsoleGate.Suspend())
+            {
+                callbacks.ResetInput();
+                var response = await prompt.ReadLineAsync();
+                if (!response.IsSuccess)
+                    continue; // Ctrl-C, or a wake-up for pending output — redraw rather than quit.
+
+                input = response.Text;
+            }
+
             if (string.IsNullOrWhiteSpace(input))
                 continue;
 
@@ -354,6 +369,27 @@ public sealed class CliWorker : BackgroundService
             return ReplAction.Handled;
         }
 
+        // Free-form answer to a request_human_input raised by a session that does not own the
+        // terminal (cron, heartbeat, sub-agent, web). Those used to read stdin directly from a
+        // background thread, which is what stole the operator's keystrokes; now they wait here.
+        if (lower.StartsWith("hitl reply "))
+        {
+            var rest       = trimmed["hitl reply ".Length..].Trim();
+            var spaceIdx   = rest.IndexOf(' ');
+            var questionId = spaceIdx < 0 ? rest : rest[..spaceIdx];
+            var answer     = spaceIdx < 0 ? string.Empty : rest[(spaceIdx + 1)..].Trim();
+
+            if (string.IsNullOrWhiteSpace(answer))
+                AnsiConsole.MarkupLine("[yellow]Usage: /hitl reply <id> <your answer>[/]");
+            else if (_hitlManager.RespondToQuestion(questionId, answer))
+                AnsiConsole.MarkupLine($"[green]✅ Answered[/] [[{Markup.Escape(questionId)}]]");
+            else
+                AnsiConsole.MarkupLine(
+                    $"[yellow]No pending question with id '{Markup.Escape(questionId)}'.[/] " +
+                    "[dim]It may have expired — see /hitl.[/]");
+            return ReplAction.Handled;
+        }
+
         if (lower is "hitl" or "hitl list")
         {
             ShowHitlPending();
@@ -398,6 +434,11 @@ public sealed class CliWorker : BackgroundService
         string consoleSessionId,
         CancellationToken ct)
     {
+        // The streamed display owns the screen for the length of the turn. A cron run or a sub-agent
+        // announcement completing mid-turn used to print straight into the middle of it, corrupting
+        // both its own output and the live view; buffered here, it lands cleanly once the turn ends.
+        using var terminal = ConsoleGate.Suspend();
+
         // Visually separates the user's (possibly multi-line) input from the streamed response
         // that follows immediately after — without this, the response starts rendering right where
         // the cursor was left after Enter, and the two run together with nothing to tell them apart.
@@ -508,6 +549,12 @@ public sealed class CliWorker : BackgroundService
                                 else                  sb.Append(item.Text);
                             }
                         }
+
+                        // A tool that is asking the user something owns the screen until it has its
+                        // answer — repainting at 120ms on top of the line being typed makes it
+                        // unreadable. Tokens keep accumulating; only the paint is held.
+                        if (ConsoleGate.InteractiveReadInProgress)
+                            continue;
 
                         spinnerFrame++;
                         ctx.UpdateTarget(BuildDisplay());
@@ -653,6 +700,11 @@ public sealed class CliWorker : BackgroundService
                 var settled = Task.WhenAny(handoff, completed);
                 while (await Task.WhenAny(settled, Task.Delay(SpinnerTickMs)) != settled)
                 {
+                    // Same reason as the streaming display: hold the paint while a tool is reading
+                    // the user's answer off the terminal.
+                    if (ConsoleGate.InteractiveReadInProgress)
+                        continue;
+
                     var elapsed = (int)(DateTime.UtcNow - startedAt).TotalSeconds;
                     // Queue depth still counts this command while it waits, hence the -1: what the
                     // user wants to know is how much other work (channel, web, cron) is in front of
@@ -829,7 +881,7 @@ public sealed class CliWorker : BackgroundService
         AddSection("Sub-Agent Commands", new[]
         {
             new[] { "agents",              "List active sub-agents" },
-            new[] { "agents stats",        "Show sub-agent and processor statistics" },
+            new[] { "agents stats",        "Show processor stats and any long-running commands" },
             new[] { "agents pause <id>",   "Pause a running sub-agent" },
             new[] { "agents resume <id>",  "Resume a paused sub-agent" },
             new[] { "agents stop <id>",    "Gracefully stop a sub-agent" },
@@ -838,9 +890,10 @@ public sealed class CliWorker : BackgroundService
 
         AddSection("HITL (Human-in-the-Loop)", new[]
         {
-            new[] { "hitl",                "List pending approval requests" },
+            new[] { "hitl",                "List pending approvals and questions" },
             new[] { "hitl approve <id>",   "Approve a pending tool execution" },
             new[] { "hitl reject <id>",    "Reject a pending tool execution" },
+            new[] { "hitl reply <id> <a>", "Answer a question asked by a background session" },
         });
 
         AddSection("Service Commands", new[]
@@ -980,13 +1033,41 @@ public sealed class CliWorker : BackgroundService
 
     private void ShowHitlPending()
     {
-        var pending = _hitlManager.GetPending();
-        if (pending.Count == 0)
+        var pending   = _hitlManager.GetPending();
+        var questions = _hitlManager.GetPendingQuestions();
+
+        if (pending.Count == 0 && questions.Count == 0)
         {
-            AnsiConsole.MarkupLine("[dim]No pending HITL approvals.[/]");
+            AnsiConsole.MarkupLine("[dim]No pending HITL approvals or questions.[/]");
             AnsiConsole.WriteLine();
             return;
         }
+
+        if (questions.Count > 0)
+        {
+            var qTable = new Table()
+                .Border(TableBorder.Rounded).BorderColor(Color.Yellow)
+                .Title($"[bold] Pending Questions ({questions.Count}) [/]")
+                .AddColumn(new TableColumn("[bold]ID[/]").Width(10))
+                .AddColumn(new TableColumn("[bold]Question[/]"))
+                .AddColumn(new TableColumn("[bold]Waiting[/]").Width(9).RightAligned());
+
+            foreach (var q in questions)
+            {
+                var elapsed = (DateTime.UtcNow - q.CreatedAt).TotalSeconds;
+                qTable.AddRow(
+                    $"[bold yellow]{Markup.Escape(q.QuestionId)}[/]",
+                    Markup.Escape(q.Question.Length > 90 ? q.Question[..87] + "…" : q.Question),
+                    $"[dodgerblue1]{(elapsed < 60 ? $"{elapsed:F0}s" : $"{elapsed / 60:F0}m")}[/]");
+            }
+
+            AnsiConsole.Write(qTable);
+            AnsiConsole.MarkupLine("[dim]  /hitl reply <id> <your answer>[/]");
+            AnsiConsole.WriteLine();
+        }
+
+        if (pending.Count == 0)
+            return;
 
         var table = new Table()
             .Border(TableBorder.Rounded).BorderColor(Color.Yellow)
@@ -1068,8 +1149,40 @@ public sealed class CliWorker : BackgroundService
 
         AnsiConsole.Write(new Panel(agentTable) { Header = new PanelHeader("[bold] Sub-Agent Statistics [/]", Justify.Left), Border = BoxBorder.Rounded, BorderStyle = Style.Parse("blue"), Padding = new Padding(1, 0) });
         AnsiConsole.Write(new Panel(procTable)  { Header = new PanelHeader("[bold] Command Processor [/]",   Justify.Left), Border = BoxBorder.Rounded, BorderStyle = Style.Parse("blue"), Padding = new Padding(1, 0) });
+
+        // The first question after "why did everything stop?" is "what is still running?", and the
+        // answer used to be available only by reading the log file.
+        var stuck = _commandProcessor.GetLongRunningCommands(StuckCommandDisplayThreshold);
+        if (stuck.Count > 0)
+        {
+            var stuckTable = new Table()
+                .Border(TableBorder.Rounded).BorderColor(Color.Yellow)
+                .Title($"[bold] Long-Running Commands ({stuck.Count}) [/]")
+                .AddColumn(new TableColumn("[bold]Lane[/]").Width(11))
+                .AddColumn(new TableColumn("[bold]RunId[/]").Width(38))
+                .AddColumn(new TableColumn("[bold]Elapsed[/]").Width(9).RightAligned())
+                .AddColumn(new TableColumn("[bold]Session[/]"));
+
+            foreach (var c in stuck)
+            {
+                var session = c.SessionKey.Length > 32 ? "…" + c.SessionKey[^31..] : c.SessionKey;
+                stuckTable.AddRow(
+                    $"[bold]{Markup.Escape(c.Lane.ToString())}[/]",
+                    $"[grey]{Markup.Escape(c.RunId)}[/]",
+                    $"[yellow]{c.Elapsed:hh\\:mm\\:ss}[/]",
+                    $"[dim]{Markup.Escape(session)}[/]");
+            }
+
+            AnsiConsole.Write(stuckTable);
+            AnsiConsole.MarkupLine(
+                "[dim]A command on the serial [bold]Main[/] lane blocks this prompt until it returns.[/]");
+        }
+
         AnsiConsole.WriteLine();
     }
+
+    /// <summary>How long a command must have been running before /agents stats calls it out.</summary>
+    private static readonly TimeSpan StuckCommandDisplayThreshold = TimeSpan.FromMinutes(2);
 
     // ─────────────────────────────────────────────────────────────────────────
     // Agent management commands
@@ -1270,8 +1383,28 @@ internal sealed class ReplPromptCallbacks : PromptCallbacks
 
     protected override Task<(string Text, int Caret)> FormatInput(
         string text, int caret, KeyPress keyPress, CancellationToken cancellationToken)
-        => Task.FromResult(
-            keyPress.ConsoleKeyInfo.Key == ConsoleKey.Escape
-                ? (string.Empty, 0)
-                : (text, caret));
+    {
+        var formatted = keyPress.ConsoleKeyInfo.Key == ConsoleKey.Escape
+            ? (Text: string.Empty, Caret: 0)
+            : (Text: text, Caret: caret);
+
+        // Tracked so GatedConsole knows whether it may surrender the line to flush background
+        // output. Interrupting an empty prompt costs nothing; interrupting a half-typed command
+        // would throw the operator's work away to print a notification.
+        _inputIsEmpty = formatted.Text.Length == 0;
+
+        return Task.FromResult(formatted);
+    }
+
+    private volatile bool _inputIsEmpty = true;
+
+    /// <summary>True when the prompt's edit buffer holds nothing worth preserving.</summary>
+    public bool InputIsEmpty => _inputIsEmpty;
+
+    /// <summary>
+    /// Called by the REPL before each read. <see cref="FormatInput"/> only fires once a key is
+    /// pressed, so without this the buffer state from the previous line would still be reported for
+    /// a fresh, empty prompt.
+    /// </summary>
+    public void ResetInput() => _inputIsEmpty = true;
 }

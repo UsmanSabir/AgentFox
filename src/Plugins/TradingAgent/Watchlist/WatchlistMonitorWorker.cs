@@ -1,0 +1,582 @@
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using TradingAgent.Analysis;
+using TradingAgent.Config;
+using TradingAgent.Manager;
+using TradingAgent.Market;
+using TradingAgent.Models;
+using TradingAgent.Persistence;
+using TradingAgent.Research;
+
+namespace TradingAgent.Watchlist;
+
+/// <summary>
+/// Watches the whole watchlist for level and trend transitions, and raises alerts.
+///
+/// <para>
+/// <b>The cost model is what makes this viable.</b> A pass costs ONE market-wide request — PSX serves
+/// candles by DATE, covering every symbol, and the live market watch is a single snapshot — plus local
+/// archive reads. So 100 watched symbols cost the same as 5, and the pass rate is limited by the
+/// portal's patience rather than by universe size. Nothing in this loop may fetch per symbol; doing so
+/// would turn a 2-minute cadence into a rate-limit incident.
+/// </para>
+///
+/// <para>
+/// It raises alerts and nothing else. Execution stays behind the execution mode, the risk engine, and
+/// the kill switch — a monitor that could place orders would be a different, far more dangerous
+/// component.
+/// </para>
+/// </summary>
+public sealed class WatchlistMonitorWorker : BackgroundService
+{
+    /// <summary>Let the app finish starting before the first pass; monitoring is never urgent at t=0.</summary>
+    private static readonly TimeSpan StartupDelay = TimeSpan.FromSeconds(20);
+
+    /// <summary>Poll interval while the market is closed, purely to notice that it has opened.</summary>
+    private static readonly TimeSpan ClosedPoll = TimeSpan.FromMinutes(5);
+
+    private readonly MonitoredUniverse _universe;
+    private readonly CandleHistoryProvider _history;
+    private readonly PsxDataClient _dataClient;
+    private readonly ITradingRepository _repository;
+    private readonly IMarketCalendar _calendar;
+    private readonly AlertBroadcaster _broadcaster;
+    private readonly ApprovalGate _approvals;
+    private readonly TradingAgent.Manager.TradingManager _manager;
+    private readonly IOptions<TradingAgentOptions> _options;
+    private readonly ILogger<WatchlistMonitorWorker> _logger;
+
+    private readonly object _statusLock = new();
+    private MonitorStatus _status;
+
+    public WatchlistMonitorWorker(
+        MonitoredUniverse universe,
+        CandleHistoryProvider history,
+        PsxDataClient dataClient,
+        ITradingRepository repository,
+        IMarketCalendar calendar,
+        AlertBroadcaster broadcaster,
+        ApprovalGate approvals,
+        TradingAgent.Manager.TradingManager manager,
+        IOptions<TradingAgentOptions> options,
+        ILogger<WatchlistMonitorWorker> logger)
+    {
+        _universe = universe;
+        _history = history;
+        _dataClient = dataClient;
+        _repository = repository;
+        _calendar = calendar;
+        _broadcaster = broadcaster;
+        _approvals = approvals;
+        _manager = manager;
+        _options = options;
+        _logger = logger;
+
+        // Seeded from configuration rather than left at zero until the first pass. These values exist
+        // so a reader can answer "why did it not alert"; reporting "every 0s, 0 confirming passes"
+        // before the first pass would answer it wrongly, which is worse than not answering.
+        var monitor = options.Value.Monitor;
+        _status = new MonitorStatus
+        {
+            Enabled         = monitor.Enabled,
+            IntervalSeconds = Math.Clamp(monitor.IntervalSeconds, 30, 3600),
+            ConfirmPasses   = Math.Clamp(monitor.ConfirmPasses, 1, 10),
+            Message = monitor.Enabled
+                ? "No monitoring pass has run yet."
+                : "Monitoring is disabled (Monitor.Enabled = false)."
+        };
+    }
+
+    public MonitorStatus Status
+    {
+        get { lock (_statusLock) return _status; }
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        var monitor = _options.Value.Monitor;
+        if (!monitor.Enabled)
+        {
+            SetStatus(s => s with { Enabled = false, Message = "Monitoring is disabled (Monitor.Enabled = false)." });
+            _logger.LogInformation("[WatchlistMonitor] Disabled by configuration.");
+            return;
+        }
+
+        try { await Task.Delay(StartupDelay, stoppingToken); }
+        catch (OperationCanceledException) { return; }
+
+        // Tracks whether the post-close settle pass has already run for a given session, so it happens
+        // once per day rather than on every closed-market poll.
+        DateOnly? settledFor = null;
+
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            var options = _options.Value.Monitor;
+            var market = _calendar.GetStatus();
+            var today = PsxTime.Today();
+            var interval = TimeSpan.FromSeconds(Math.Clamp(options.IntervalSeconds, 30, 3600));
+
+            try
+            {
+                if (market.IsOpen)
+                {
+                    settledFor = null;
+                    await RunPassAsync("open", stoppingToken);
+                }
+                else if (options.RunAfterClose && settledFor != today)
+                {
+                    // One pass after the close, on the day's settled bars — the in-session passes all
+                    // ran against a forming candle.
+                    settledFor = today;
+                    await RunPassAsync("post-close", stoppingToken);
+                    await SweepProposalsAsync(stoppingToken);
+                    await PruneAsync(stoppingToken);
+                }
+                else
+                {
+                    SetStatus(s => s with
+                    {
+                        MarketOpen = false,
+                        Message = $"Market closed — {market.Reason}. Monitoring resumes at the next open."
+                    });
+                }
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[WatchlistMonitor] Pass failed; retrying next cycle.");
+                SetStatus(s => s with { Message = $"Last pass failed: {ex.Message}" });
+            }
+
+            try { await Task.Delay(market.IsOpen ? interval : ClosedPoll, stoppingToken); }
+            catch (OperationCanceledException) { return; }
+        }
+    }
+
+    /// <summary>Runs one detection pass. Public so the API can trigger it on demand.</summary>
+    public async Task<MonitorStatus> RunPassAsync(string trigger, CancellationToken ct = default)
+    {
+        var started = DateTime.UtcNow;
+        var options = _options.Value.Monitor;
+        var thresholds = MonitorThresholds.From(_options.Value);
+        var technicalOptions = TechnicalOptions.From(_options.Value.Scan);
+
+        var watchlist = await _repository.GetWatchlistAsync(ct);
+        // A muted symbol is still analyzed — its state must stay current, or unmuting would produce a
+        // burst of stale transitions — but nothing it produces is raised.
+        var muted = watchlist.Entries
+            .Where(e => !e.AlertsEnabled)
+            .Select(e => e.Symbol)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var symbols = await _universe.ForMonitoringAsync(ct);
+        if (symbols.Count == 0)
+        {
+            SetStatus(s => s with
+            {
+                LastPassUtc = started, SymbolsCovered = 0, AlertsRaised = 0,
+                Message = "Nothing to monitor: the watchlist and AllowedSymbols are both empty."
+            });
+            return Status;
+        }
+
+        // ONE market-wide load for every symbol. Deep enough for weekly structure, served from the
+        // archive with only missing dates reaching the portal.
+        var sessions = Math.Max(
+            _options.Value.Scan.LookbackDays,
+            Math.Clamp(_options.Value.Scan.WeeklyLookbackWeeks, 12, 600) * 6);
+        var history = await _history.GetDailyAsync(symbols, sessions, includeLive: true, ct);
+
+        var states = await _repository.GetMonitorStatesAsync(ct);
+        var cooldownStart = options.CooldownMinutes > 0
+            ? DateTime.UtcNow.AddMinutes(-options.CooldownMinutes)
+            // 0 means "the rest of the session": anchor the window at today's PKT midnight.
+            : PsxTime.Today().ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc);
+
+        var raised = new List<AlertRecord>();
+        var suppressed = 0;
+        var analyzed = 0;
+        var today = PsxTime.Today();
+
+        foreach (var symbol in symbols)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (!history.Series.TryGetValue(symbol, out var candles)
+                || candles.Count < TechnicalAnalyzer.MinimumBars)
+                continue;
+
+            analyzed++;
+            var lookback = candles.TakeLast(_options.Value.Scan.LookbackDays).ToList();
+            var snapshot = TechnicalAnalyzer.Analyze(symbol, lookback, technicalOptions);
+            var multi = MultiTimeframeAnalyzer.Analyze(
+                symbol, candles, technicalOptions, _options.Value.Scan.ConfluenceTolerancePercent);
+
+            var previous = states.GetValueOrDefault(symbol) ?? AlertDetector.Seed(symbol);
+            var detection = AlertDetector.Detect(previous, snapshot, multi, thresholds);
+            await _repository.SaveMonitorStateAsync(detection.NextState, ct);
+
+            if (muted.Contains(symbol)) continue;
+
+            foreach (var alert in detection.Fired)
+            {
+                if (raised.Count >= Math.Max(1, options.MaxAlertsPerPass))
+                {
+                    suppressed++;
+                    continue;
+                }
+
+                // Durable cooldown, so a restart cannot re-announce what was already said.
+                if (await _repository.HasRecentAlertAsync(
+                        alert.Symbol, alert.Kind, alert.LevelPrice, cooldownStart, ct))
+                    continue;
+
+                var id = await _repository.SaveAlertAsync(alert, today, ct);
+                var record = new AlertRecord
+                {
+                    AlertId         = id,
+                    Symbol          = alert.Symbol,
+                    Kind            = alert.Kind.ToString(),
+                    Severity        = alert.Severity.ToString(),
+                    LevelPrice      = alert.LevelPrice,
+                    Price           = alert.Price,
+                    Interval        = alert.Interval,
+                    Summary         = alert.Summary,
+                    Reasons         = alert.Reasons,
+                    WeeklyConfirmed = alert.WeeklyConfirmed,
+                    FromLiveBar     = alert.FromLiveBar,
+                    State           = "new",
+                    RaisedUtc       = DateTime.UtcNow,
+                    SessionDate     = today.ToString("yyyy-MM-dd")
+                };
+                raised.Add(record);
+                _broadcaster.Publish(record);
+
+                _logger.LogInformation("[WatchlistMonitor] {Severity} {Kind} {Symbol}: {Summary}",
+                    alert.Severity, alert.Kind, alert.Symbol, alert.Summary);
+            }
+        }
+
+        // Armed triggers are evaluated against the SAME snapshot the alerts came from, so an event
+        // trigger sees exactly the alerts this pass raised — no second fetch, no drift between what
+        // was detected and what fires on it.
+        await EvaluateArmedOrdersAsync(history.Live, raised, ct);
+
+        if (suppressed > 0)
+            _logger.LogWarning(
+                "[WatchlistMonitor] {Count} alert(s) suppressed by the per-pass cap of {Cap}. "
+                + "They were NOT raised; raise Monitor.MaxAlertsPerPass if this recurs.",
+                suppressed, options.MaxAlertsPerPass);
+
+        var elapsed = DateTime.UtcNow - started;
+        SetStatus(_ => new MonitorStatus
+        {
+            Enabled        = true,
+            MarketOpen     = _calendar.GetStatus().IsOpen,
+            LastPassUtc    = started,
+            LastPassMs     = (long)elapsed.TotalMilliseconds,
+            SymbolsCovered = analyzed,
+            AlertsRaised   = raised.Count,
+            AlertsSuppressed = suppressed,
+            IntervalSeconds = Math.Clamp(options.IntervalSeconds, 30, 3600),
+            ConfirmPasses  = thresholds.ConfirmPasses,
+            Trigger        = trigger,
+            Warnings       = history.Warnings,
+            Message = $"Analyzed {analyzed} symbol(s) in {elapsed.TotalSeconds:F1}s; "
+                    + $"{raised.Count} alert(s) raised."
+                    + (suppressed > 0 ? $" {suppressed} suppressed by the per-pass cap." : "")
+        });
+
+        return Status;
+    }
+
+    /// <summary>
+    /// Evaluates every armed order against this pass's prices and alerts, and submits the ones whose
+    /// condition is met.
+    ///
+    /// <para>
+    /// Three properties matter here. The trigger is claimed with a compare-and-set BEFORE the broker is
+    /// touched, so a slow submission overlapping the next pass cannot fire it twice. Approval is asked
+    /// for explicitly through <see cref="ApprovalGate"/> — an armed order fires with nobody watching, so
+    /// it must either be pre-authorised by policy or refuse to send. And a refusal returns the order to
+    /// <c>armed</c> rather than consuming it, because "the market just closed" should not silently
+    /// disarm a protective stop.
+    /// </para>
+    /// </summary>
+    private async Task EvaluateArmedOrdersAsync(
+        IReadOnlyDictionary<string, PsxLiveQuote> live,
+        IReadOnlyList<AlertRecord> raisedThisPass,
+        CancellationToken ct)
+    {
+        IReadOnlyList<ArmedOrder> armed;
+        try
+        {
+            armed = await _repository.GetArmedOrdersAsync(armedOnly: true, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "[ArmedOrders] Could not read armed orders this pass.");
+            return;
+        }
+
+        if (armed.Count == 0) return;
+
+        // Alerts raised this pass, indexed by symbol, for the event triggers.
+        var alertsBySymbol = raisedThisPass
+            .GroupBy(a => a.Symbol, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(
+                g => g.Key,
+                g => (IReadOnlyCollection<AlertKind>)g
+                    .Select(a => Enum.TryParse<AlertKind>(a.Kind, out var k) ? k : (AlertKind?)null)
+                    .Where(k => k is not null)
+                    .Select(k => k!.Value)
+                    .ToHashSet(),
+                StringComparer.OrdinalIgnoreCase);
+
+        var now = DateTime.UtcNow;
+
+        foreach (var order in armed)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            // Age it out first, so an expired trigger cannot fire on a late price tick.
+            if (order.ExpiresUtc is { } expiry && now >= expiry)
+            {
+                await _repository.TrySetArmedOrderStateAsync(
+                    order.ArmedId, "armed", "expired",
+                    $"Expired at {expiry:u} without triggering.", ct: ct);
+                _logger.LogInformation("[ArmedOrders] {ArmedId} ({Symbol}) expired unfired.",
+                    order.ArmedId, order.Symbol);
+                continue;
+            }
+
+            var price = live.TryGetValue(order.Symbol, out var quote) ? quote.Current : null;
+            var alerts = alertsBySymbol.GetValueOrDefault(order.Symbol, Array.Empty<AlertKind>());
+
+            if (!ArmedOrderEvaluator.ShouldFire(order, price, alerts, now, out var why))
+                continue;
+
+            // Claim it before the broker sees anything.
+            if (!await _repository.TrySetArmedOrderStateAsync(
+                    order.ArmedId, "armed", "firing", why, ct: ct))
+                continue;
+
+            _logger.LogWarning("[ArmedOrders] {ArmedId} ({Symbol}) triggered: {Why}",
+                order.ArmedId, order.Symbol, why);
+
+            try
+            {
+                var groups = new[] { (IReadOnlyList<TradingSignal>)[order.ToSignal()] };
+                var severity = raisedThisPass
+                    .FirstOrDefault(a => a.Symbol.Equals(order.Symbol, StringComparison.OrdinalIgnoreCase))
+                    ?.Severity;
+
+                var decision = _approvals.Decide(
+                    groups, $"armed:{order.ArmedId}",
+                    new ApprovalContext(severity, "armed-order"));
+                var approvalReason = decision.Reason;
+
+                if (!decision.MayProceed)
+                {
+                    // Not authorised to act unattended. Re-arm rather than consume: the condition may
+                    // still hold next pass, and losing a protective stop because approval was in
+                    // Always mode would be the worst possible outcome of a config choice.
+                    await _repository.TrySetArmedOrderStateAsync(
+                        order.ArmedId, "firing", "armed",
+                        $"Trigger met but not sent: {approvalReason}", ct: ct);
+                    _logger.LogWarning(
+                        "[ArmedOrders] {ArmedId} met its trigger but was NOT sent: {Reason} "
+                        + "(it remains armed).", order.ArmedId, approvalReason);
+                    continue;
+                }
+
+                var result = await _manager.ExecuteGroupsAsync(
+                    groups, $"armed:{order.ArmedId}", decision.Authorization, ct);
+
+                await _repository.TrySetArmedOrderStateAsync(
+                    order.ArmedId, "firing",
+                    result.Executed ? "fired" : "armed",
+                    result.Executed
+                        ? $"{why} {approvalReason}"
+                        : $"Trigger met but execution refused: {result.Reason}",
+                    string.IsNullOrWhiteSpace(result.ExecutionId) ? null : result.ExecutionId, ct);
+
+                _logger.LogWarning(
+                    "[ArmedOrders] {ArmedId} {Outcome}: {Reason}",
+                    order.ArmedId, result.Executed ? "FIRED" : "refused", result.Reason);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // A thrown submission is genuinely ambiguous — it may or may not have reached the
+                // broker — so it is NOT re-armed. Reconciliation owns that question.
+                await _repository.TrySetArmedOrderStateAsync(
+                    order.ArmedId, "firing", "failed",
+                    $"Submission threw: {ex.Message}. Verify manually before re-arming.", ct: ct);
+                _logger.LogError(ex, "[ArmedOrders] {ArmedId} submission failed.", order.ArmedId);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Ages the proposal queue: expires anything past its TTL or whose stated entry has drifted too far
+    /// from the live price, then prunes terminal rows past the retention window.
+    ///
+    /// <para>
+    /// This is what keeps the inbox honest. A proposal is a plan priced at a moment; left alone it
+    /// accumulates forever and eventually offers a level that no longer exists as though it were
+    /// current. Expiry is a state change WITH A REASON rather than a delete, so the audit trail
+    /// survives — only retention actually removes rows, and only terminal ones.
+    /// </para>
+    /// </summary>
+    private async Task SweepProposalsAsync(CancellationToken ct)
+    {
+        var options = _options.Value.Proposals;
+
+        try
+        {
+            var open = await _repository.GetOpenProposalsAsync(ct);
+            if (open.Count == 0) return;
+
+            var ttlCutoff = DateTime.UtcNow.AddHours(-Math.Max(1, options.TtlHours));
+            var drift = options.InvalidateOnDriftPercent;
+
+            // One market snapshot for the whole sweep, not one per proposal.
+            IReadOnlyDictionary<string, PsxLiveQuote> live = new Dictionary<string, PsxLiveQuote>();
+            if (drift > 0)
+            {
+                try { live = await _dataClient.GetMarketWatchAsync(ct); }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // Without prices only the TTL rule can be applied — which is the safe subset, so
+                    // carry on rather than skipping the sweep entirely.
+                    _logger.LogWarning(ex,
+                        "[Proposals] Live prices unavailable; expiring on age only this pass.");
+                }
+            }
+
+            var expired = 0;
+            foreach (var proposal in open)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                string? reason = null;
+                if (proposal.CreatedUtc < ttlCutoff)
+                    reason = $"Not acted on within {options.TtlHours}h of being raised.";
+                else if (drift > 0 && DriftedTooFar(proposal, live, drift) is { } drifted)
+                    reason = drifted;
+
+                if (reason is null) continue;
+
+                // 'executing' is deliberately not swept: something is mid-flight against the broker and
+                // expiring it underneath that would race a live submission.
+                if (proposal.Status == "executing") continue;
+
+                if (await _repository.TrySetProposalStateAsync(
+                        proposal.ProposalId, proposal.Status, "expired", reason, ct: ct))
+                    expired++;
+            }
+
+            if (expired > 0)
+                _logger.LogInformation("[Proposals] Expired {Count} stale proposal(s).", expired);
+
+            if (options.RetentionDays > 0)
+            {
+                var pruned = await _repository.PruneProposalsAsync(
+                    DateTime.UtcNow.AddDays(-options.RetentionDays), ct);
+                if (pruned > 0)
+                    _logger.LogInformation(
+                        "[Proposals] Pruned {Count} resolved proposal(s) older than {Days} days.",
+                        pruned, options.RetentionDays);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "[Proposals] Sweep failed; retrying after the next close.");
+        }
+    }
+
+    /// <summary>
+    /// Returns a reason when the proposal's stated entry has moved more than
+    /// <paramref name="maxDriftPercent"/> from the live price, or null when it is still current.
+    /// </summary>
+    private static string? DriftedTooFar(
+        TradeProposalRecord proposal,
+        IReadOnlyDictionary<string, PsxLiveQuote> live,
+        decimal maxDriftPercent)
+    {
+        if (!proposal.Proposal.TryGetProperty("orders", out var orders)
+            || orders.ValueKind != System.Text.Json.JsonValueKind.Array)
+            return null;
+
+        foreach (var order in orders.EnumerateArray())
+        {
+            if (order.ValueKind != System.Text.Json.JsonValueKind.Object) continue;
+            if (!order.TryGetProperty("symbol", out var s) || s.ValueKind != System.Text.Json.JsonValueKind.String)
+                continue;
+
+            decimal? entry = null;
+            foreach (var key in new[] { "entry_price", "entryPrice", "price" })
+            {
+                if (order.TryGetProperty(key, out var p)
+                    && p.ValueKind == System.Text.Json.JsonValueKind.Number
+                    && p.TryGetDecimal(out var parsed)) { entry = parsed; break; }
+            }
+
+            if (entry is not > 0) continue;
+            if (!live.TryGetValue(s.GetString() ?? "", out var quote)) continue;
+            if (quote.Current is not > 0) continue;
+
+            var moved = Math.Abs(quote.Current.Value - entry.Value) / entry.Value * 100m;
+            if (moved > maxDriftPercent)
+                return $"Stated entry {entry} for {s.GetString()} has drifted "
+                     + $"{Math.Round(moved, 2)}% from the live price {quote.Current} "
+                     + $"(limit {maxDriftPercent}%); the plan is no longer current.";
+        }
+
+        return null;
+    }
+
+    /// <summary>Drops alert history past the retention window so the table has a ceiling.</summary>
+    private async Task PruneAsync(CancellationToken ct)
+    {
+        var days = _options.Value.Monitor.RetentionDays;
+        if (days <= 0) return;
+
+        try
+        {
+            var removed = await _repository.PruneAlertsAsync(DateTime.UtcNow.AddDays(-days), ct);
+            if (removed > 0)
+                _logger.LogInformation("[WatchlistMonitor] Pruned {Count} alert(s) older than {Days} days.",
+                    removed, days);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[WatchlistMonitor] Alert pruning failed; retrying tomorrow.");
+        }
+    }
+
+    private void SetStatus(Func<MonitorStatus, MonitorStatus> update)
+    {
+        lock (_statusLock) _status = update(_status);
+    }
+}
+
+/// <summary>What the monitor is doing, and with which settings — so "why did it not alert" is answerable.</summary>
+public sealed record MonitorStatus
+{
+    public bool Enabled { get; init; } = true;
+    public bool MarketOpen { get; init; }
+    public DateTime? LastPassUtc { get; init; }
+    public long LastPassMs { get; init; }
+    public int SymbolsCovered { get; init; }
+    public int AlertsRaised { get; init; }
+    public int AlertsSuppressed { get; init; }
+    public int IntervalSeconds { get; init; }
+    public int ConfirmPasses { get; init; }
+    public string? Trigger { get; init; }
+    public IReadOnlyList<string> Warnings { get; init; } = [];
+    public string Message { get; init; } = "";
+}

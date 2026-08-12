@@ -84,6 +84,258 @@ The plugin loader discovers `TradingAgentModule` and `WhatsAppBridgeChannelProvi
 
 ---
 
+## Web UI
+
+The trading dashboard is part of **this plugin**, not the AgentFox frontend. It lives in
+[`ui/`](ui/) as its own npm project, so trading-only dependencies (charting in particular) never
+enter the host app's `package.json`, and the host has no trading route, type, or API client.
+
+```bash
+cd ui
+npm ci
+npm run build      # → ../wwwroot, embedded into TradingAgent.dll by the csproj
+```
+
+Then build the plugin. At startup the module contributes the page via
+`IPluginUiContributor`, and AgentFox:
+
+- serves the embedded assets at `/plugin-assets/trading/`,
+- lists the page at `GET /api/plugin-ui`,
+- shows a **Trading** entry in the sidebar, which renders the page at `/ext/trading`.
+
+The page shows the watchlist beside a **chart pane**: candlesticks with a direction-tinted volume
+overlay, SMA20/50, an RSI sub-pane with the *configured* oversold/overbought bands (not the textbook
+30/70), horizontal support/resistance lines whose width encodes touch count and whose style shows
+weekly confirmation, entry/stop/target markers, and an interval switcher (1D / 60m / 30m / 15m / 5m).
+
+### Making room
+
+Six labelled price lines, two panes and a volume overlay do not fit legibly in a small box, so the
+chart carries three controls for trading detail against readability:
+
+| Control | Effect |
+| --- | --- |
+| **Expand** | Chart takes the full row (784×400 → 1114×560) and the watchlist **stacks beneath** it rather than being hidden — losing symbol switching would be a poor trade for the extra width. |
+| **Levels: all / key / off** | `all` draws the nearest three each side; `key` only the weekly-confirmed ones (structure, not a recent swing); `off` leaves clean price action. |
+| **RSI** | Hides the sub-pane and gives its ~90px back to the candles. |
+
+Turning lines off hides *drawing*, never information: the levels legend under the chart always lists
+every level with its distance, touch count and weekly confirmation.
+
+Layout changes rebuild the chart rather than mutating it — lightweight-charts has no clean way to add
+or drop a pane after construction, and a rebuild over a few hundred bars is imperceptible.
+
+Chart data comes from `GET /api/trading/candles`, which is served by **`CandleAnalysisService`** — the
+same code path `analyze_candles` uses. That sharing is the point: the levels drawn on screen are the
+same objects the specialist quotes, so the chart cannot tell one story while the agent tells another.
+Two details worth knowing:
+
+- `IndicatorSeries` computes the full SMA/RSI lines the chart needs (`TechnicalAnalyzer` computes only
+  the latest value). `IndicatorSeriesTests` asserts the last element of each series equals the
+  snapshot's scalar, so the line and the number can never drift apart.
+- `plan.entryWeeklyConfirmed` describes the entry level **shown**, while
+  `weekly.entryLevelConfirmed` describes the nearest support in the *full* archived history. They can
+  legitimately differ, because the displayed plan is scoped to the requested window — the chart uses
+  the former so it never reports "no weekly confirmation" beside a level that has one.
+
+Notes:
+
+- **Build the UI before the DLL.** `wwwroot` is embedded at compile time. A build without it is
+  valid — the plugin simply contributes no page and the backend is unaffected — so a stale or
+  missing UI shows up as a missing sidebar entry, not an error.
+- **Asset base URL.** `ui/vite.config.ts` sets `base: '/plugin-assets/trading/'` to match
+  `PluginUiPaths.AssetPrefix`. That is deliberately *not* `/ext/trading`, which is the host page
+  that frames this UI; serving assets there would bypass the AgentFox sidebar and header.
+- **Auth.** The frame is same-origin, so `ui/src/api.ts` reads the management API key from the
+  shared `sessionStorage`; the host also posts the key and the current theme on load.
+- **Standalone dev.** `npm run dev` in `ui/` runs the UI on its own port and proxies `/api` to
+  `BACKEND_URL` (default `http://localhost:5000`).
+
+---
+
+## Proposals — the signal inbox
+
+A proposal is what the specialist produced from a signal that arrived **while nobody was watching**
+(a WhatsApp tip overnight). It has a lifecycle, which is what makes it a work queue rather than the
+write-only log it used to be:
+
+```
+proposed ──(execute)──► executing ──► executed        (execution_id recorded)
+    │                         └─────► proposed        (refused by a gate — stays actionable)
+    ├──(reject)───────► rejected     (reason recorded)
+    └──(TTL / drift)──► expired      (reason recorded)
+```
+
+| Verb | Route | Role |
+| --- | --- | --- |
+| GET | `/api/trading/proposals?openOnly=true` — the queue (default) | ManagementViewer |
+| POST | `/api/trading/proposals/{id}/execute` | **TradingTrader** |
+| POST | `/api/trading/proposals/{id}/reject` — `{ reason }` | TradingAnalyst |
+
+Details that matter:
+
+- **Execute adds no execution path.** It parses the proposal's orders and hands them to
+  `TradingManager.ExecuteGroupsAsync`, so execution mode, the risk engine, the market calendar, the
+  kill switch, idempotency and audit events all still apply. Each order goes in its own group, since
+  they are independent and one failing must not skip the rest.
+- **A double click cannot execute twice.** Claiming a proposal is a compare-and-set on its current
+  status (`WHERE status = @expected`); the loser gets a 409 rather than a second live order.
+- **A refusal returns the proposal to `proposed`**, not to a terminal state — the reason is usually
+  transient (market closed, reconciliation stale, approval required), so a failed attempt must not
+  burn the proposal.
+- **Ageing keeps the queue honest.** The monitor's post-close pass expires anything past
+  `Proposals.TtlHours` (24) or whose stated entry has drifted more than
+  `Proposals.InvalidateOnDriftPercent` (3 %) from the live price — a stale price is not a tradable
+  plan. Expiry is a state change *with a reason*, never a delete; only `Proposals.RetentionDays` (90)
+  removes rows, and only terminal ones.
+- The UI shows **open proposals only** by default, with a "show resolved" toggle. An empty inbox is
+  the normal state, and it says so.
+
+---
+
+## Watchlist vs AllowedSymbols — two different universes
+
+These are deliberately separate, and the distinction is the difference between "what am I watching"
+and "what am I allowed to trade":
+
+| | Source | Used for | Editable at runtime |
+| --- | --- | --- | --- |
+| **Watchlist** | `watchlist` table (seeded once from `AllowedSymbols`) | charting, scanning, monitoring, alerts, archived history | **yes** — Trading page, `/api/trading/watchlist` |
+| **AllowedSymbols** | `appsettings.json` | what an order may be placed for (`TradingRiskEngine`) | no — config + restart |
+
+`MonitoredUniverse` is the single place that answers "which symbols":
+
+- `ForExecution()` → `AllowedSymbols` only. **No watchlist edit can widen this** — otherwise the web
+  UI would have become an order-permission editor.
+- `ForMonitoringAsync()` → watchlist ∪ `AllowedSymbols`. Charts, `scan_watchlist`, alerts.
+- `ForArchiveAsync()` → same as monitoring by default, so a watched symbol accumulates the daily
+  history its weekly levels need. Costs no extra portal requests (a session fetch already returns
+  every symbol in the market), only rows.
+
+Consequences the UI states explicitly rather than leaving to be discovered at order time:
+
+- A watched symbol outside `AllowedSymbols` is badged **monitor-only**; `scan_watchlist` results carry
+  `tradable`, and the specialist must not present a non-tradable candidate as actionable.
+- A newly added symbol is badged **no weekly** until roughly two years of daily bars are archived —
+  until then there is no weekly confirmation to quote.
+- The watchlist is seeded from `AllowedSymbols` **once**. If the configured list changes later, the
+  watchlist is *not* updated (that would discard your edits); the API reports
+  `configuredListChanged: true` and the UI offers **Reset**, which is the only thing that re-seeds.
+
+---
+
+## Monitoring and alerts
+
+`WatchlistMonitorWorker` watches the whole monitoring universe for **transitions** and raises alerts.
+It runs every `Monitor.IntervalSeconds` while the market is open, plus one settle pass after the close,
+and it can only ever raise alerts — execution stays behind the execution mode, the risk engine, and
+the kill switch.
+
+**The cost model is the point.** One pass costs **one market-wide request** (PSX serves candles by
+date, covering every symbol) plus local archive reads, so 100 watched symbols cost the same as 5 —
+a real pass over 26 symbols measures ~2.6 s cold, ~0.2 s warm. Nothing in that loop may fetch per
+symbol; doing so would turn a 2-minute cadence into a rate-limit incident.
+
+### What it detects
+
+| Kind | Fires when | Severity |
+| --- | --- | --- |
+| `SupportBounce` | setup is buy-at-support **and** price is turning up off the level | High |
+| `ResistanceRejection` | setup is sell-at-resistance **and** price is turning down | High |
+| `SupportBreak` | fresh range low, still falling, past the buffer, volume-confirmed | High |
+| `ResistanceBreakout` | fresh range high, still rising, past the buffer, volume-confirmed | High |
+| `SetupChanged` | the deterministic setup classification changed | High into a breakdown, else Medium |
+| `TrendFlip` | SMA20 crossed SMA50 | Medium |
+| `WeeklyBreakdown` | the weekly chart entered a breakdown | Critical |
+| `RsiOversold` / `RsiOverbought` | RSI crossed into a band | Low |
+
+### Why it does not spam
+
+An alert feed that cries wolf gets muted, and a muted monitor is worth nothing. Four guards:
+
+1. **Transitions, not conditions.** "Price is at support" is true for days; "price has turned up off
+   support" happens once. Only the second is an alert.
+2. **Confirmation streaks.** A *sustained* condition must hold for `Monitor.ConfirmPasses` consecutive
+   passes (default 2) before firing.
+3. **A break buffer.** A close must clear a level by `Monitor.BreakBufferPercent` (default 0.5 %) and
+   be volume-confirmed to count as a break — a wick through a level is noise.
+4. **A durable cooldown.** The same symbol + kind + level does not re-alert within
+   `Monitor.CooldownMinutes` (0 = the rest of the session). It is a database check, so a restart
+   cannot re-announce what was already said.
+
+Two structural details worth knowing:
+
+- **A cold start fires nothing.** Every kind is a transition, and on first sight of a symbol there is
+  nothing to have transitioned from — so the first pass records state silently. Otherwise a restart
+  would alert on every standing condition at once.
+- **Edges fire on the pass they appear; sustained conditions wait for the streak.** A setup change, an
+  SMA cross, an RSI band entry and a weekly breakdown are visible for exactly one pass, because the
+  state they are compared against is rewritten at the end of every pass. Streak-gating those would not
+  delay them — it would silence them permanently. Their flicker protection is the cooldown instead.
+  `AlertDetectorTests` pins both behaviours.
+
+Alerts carry their evidence (the analyzer's own reasons), whether the level is weekly-confirmed, and
+whether they were raised off a **still-forming bar** — a trigger that can still un-happen before the
+close, which the UI labels rather than hiding.
+
+---
+
+## Confidence assessment (LLM, on demand)
+
+The numbers stay deterministic; the model only **judges** them. `StockAssessmentService` owns the one
+confidence rubric — `research_stock` and both `/assess` endpoints share it, so a verdict means the
+same thing wherever it appears.
+
+```
+POST /api/trading/assess              { symbol, interval?, context? }   → TradingAnalyst
+POST /api/trading/alerts/{id}/assess                                    → TradingAnalyst
+```
+
+Evidence is the same read the chart draws (`CandleAnalysisService`: levels, indicators, weekly
+structure) plus the portal quote, listing status and news. The reply is structured:
+confidence + score, `PROCEED` / `CAUTION` / `AVOID` / `INSUFFICIENT_DATA`, rationale, supporting and
+risk factors, an **invalidation level**, and the model that produced it.
+
+Four properties that matter more than the wording of the prompt:
+
+- **Never automatic.** A model call per alert would cost real money and hit rate limits on a busy day,
+  and most alerts are read and dismissed in a second. It is a button.
+- **Fails conservative.** A model error or unparseable output yields `INSUFFICIENT_DATA` with
+  confidence `NONE` — never a default optimism. A **delisted** security short-circuits to `AVOID`
+  without spending a call at all.
+- **The invalidation level is chosen, not invented.** The prompt requires it to come from the levels
+  already in the evidence (a support, a resistance, or the suggested stop), preserving the "never
+  invent a price" rule that lets the specialist quote these figures.
+- **Cached per symbol + level + session.** Clicking twice on one situation costs one call; a level
+  that has moved is a different question and gets a fresh answer. A *failed* assessment is never
+  cached, so a retry actually retries. An alert knows its own identity, so a repeat click on one
+  short-circuits before any fetching — measured **46 s → 57 ms**.
+
+The verdict reports the **model that actually answered** (read from the chat client's metadata), not
+the configured `ParserModelKey`: that key selects the specialist *agent's* model, while tools and
+endpoints use the default chat client, and naming a key that was not used would put a false entry in
+the audit trail.
+
+### Endpoints
+
+| Verb | Route | Role |
+| --- | --- | --- |
+| GET | `/api/trading/alerts?symbol=&state=&limit=` | ManagementViewer |
+| POST | `/api/trading/alerts/{id}/assess` — LLM confidence for that alert | TradingAnalyst |
+| POST | `/api/trading/assess` — LLM confidence for a symbol | TradingAnalyst |
+| GET | `/api/trading/alerts/stream` — SSE, live push | ManagementViewer |
+| POST | `/api/trading/alerts/{id}/ack` \| `/dismiss` | TradingAnalyst |
+| GET | `/api/trading/monitor/status` — last pass, coverage, and the *effective* settings | ManagementViewer |
+| POST | `/api/trading/monitor/run` — run a pass now | TradingAnalyst |
+| GET | `/api/trading/candles?symbol=&interval=&bars=` — chart data (see below) | ManagementViewer |
+| GET | `/api/trading/watchlist` | ManagementViewer |
+| POST | `/api/trading/watchlist` — `{ symbol }`, validated against the live market watch | TradingAnalyst |
+| DELETE | `/api/trading/watchlist/{symbol}` — keeps archived bars | TradingAnalyst |
+| PATCH | `/api/trading/watchlist/{symbol}` — `{ alertsEnabled?, notes? }` | TradingAnalyst |
+| POST | `/api/trading/watchlist/reset` — reseed from `AllowedSymbols` | TradingAnalyst |
+
+---
+
 ## Configuration
 
 Add the following sections to `appsettings.json`.
@@ -181,6 +433,26 @@ disabled; this tool uses the explicit AgentFox provider bridge instead.
 | `Scan.MinAverageVolume` | `25000` | Minimum 30-session average volume; thinner symbols are excluded as untradable at the quoted level. |
 | `Scan.MaxResults` | `10` | Maximum candidates returned per side. |
 | `Scan.MarketWatchCacheSeconds` | `60` | How long a live market-watch snapshot is reused. |
+| `Scan.ArchiveSettleAfterPkt` | `17:30` | PKT time after which the current session's candles count as final and may be archived. Earlier archiving stores a partial bar the coverage marker would prevent from ever being corrected. |
+| `Watchlist.SeedFromAllowedSymbols` | `true` | Prefill the watchlist from `AllowedSymbols` the first time it is used. Applies once; the watchlist is yours afterwards. |
+| `Watchlist.MaxSymbols` | `150` | Upper bound on watched symbols. |
+| `Watchlist.ArchiveWatchlistSymbols` | `true` | Archive daily history for watchlist symbols too, so they get weekly levels. Costs database rows, not portal requests. |
+| `Watchlist.ValidateAgainstMarketWatch` | `true` | Reject an unknown ticker when it is added, instead of letting a typo become an empty chart. A portal outage warns rather than blocks. |
+| `Monitor.Enabled` | `true` | Run the background watchlist monitor. |
+| `Monitor.IntervalSeconds` | `120` | Seconds between passes while the market is open (30–3600). One pass = one market-wide request regardless of symbol count. |
+| `Monitor.ConfirmPasses` | `2` | Consecutive passes a *sustained* condition must hold before it alerts. 1 fires immediately and flickers on a level. |
+| `Monitor.BreakBufferPercent` | `0.5` | How far past a level a close must be to count as a break rather than a wick. |
+| `Monitor.VolumeConfirmRatio` | `1.3` | Volume vs the 30-bar average required to confirm a break. 0 accepts any volume. |
+| `Monitor.CooldownMinutes` | `0` | Minutes before the same symbol+kind+level may alert again; 0 means the rest of the session. |
+| `Monitor.MaxAlertsPerPass` | `25` | Circuit breaker for a market-wide move. Excess is logged, never silently dropped. |
+| `Monitor.RunAfterClose` | `true` | One extra pass after the close, on the day's settled bars. |
+| `Monitor.RetentionDays` | `90` | Alert history retained; older rows are pruned so the table has a ceiling. |
+| `Proposals.TtlHours` | `24` | Hours a proposal stays actionable before it is expired. |
+| `Proposals.InvalidateOnDriftPercent` | `3` | Expire once the live price has moved this far from the stated entry. 0 disables drift expiry. |
+| `Proposals.RetentionDays` | `90` | Days a *terminal* proposal is kept. Open proposals are never pruned. |
+| `Ahk.VerifyOrderInBook` | `true` | Confirm a submitted order exists by reading the order book instead of trusting the result popup. |
+| `Ahk.OrderBookVerifyTimeoutMs` | `8000` | How long to wait for a submitted order to appear in the book. |
+| `Ahk.StopLimitSlippagePercent` | `1.0` | How far below the trigger a stop-loss SELL's limit is placed. 0 places it at the trigger. |
 | `Scan.MarketDayFetchConcurrency` | `4` | Concurrent portal requests while warming a cold candle cache (1–8). |
 | `Scan.MaxCachedMarketDays` | `120` | Settled sessions kept in the in-memory candle cache. |
 | `Scan.BackfillYears` | `2` | Years of daily OHLC the background worker archives for `AllowedSymbols`. Weekly levels need ~2 years. `0` disables it. |
@@ -371,6 +643,138 @@ sock.ev.on('messages.upsert', async ({ messages }) => {
 
 ---
 
+## Stop-loss orders, and proving an order exists
+
+The portal has a **native Stop Loss** order type, which is preferable to a locally-monitored stop
+because it rests at the broker and survives this process being down. Its shape, confirmed by direct
+inspection: `#sellprice` is the **trigger**, `#selllimitprice` is the **limit**, and the limit field is
+enabled *only* while the Stop Loss type is selected — which the adapter uses as a deterministic
+readiness signal rather than guessing at a delay.
+
+Send `OrderType = "STOPLOSS"` with `EntryPrice` as the trigger. `LimitPrice` is optional: left null it
+is derived as `trigger × (1 − Ahk.StopLimitSlippagePercent)` (default 1 %), because a stop limit set
+exactly *at* the trigger frequently misses the fast move that triggered it. The risk engine enforces
+the direction — a SELL stop's limit must be at or below its trigger, a BUY stop's at or above — since
+a stop that cannot fill is worse than no stop: it looks like protection.
+
+### Why success is verified against the order book
+
+Measured against the live portal: an off-hours submission returns **HTTP 200 with an empty body** and
+shows a green **"success"** alert while placing **nothing** — the order appears in neither the
+outstanding nor the activity log, and the happy path returns no order number either. A result popup
+therefore cannot distinguish "placed" from "silently discarded".
+
+So `Ahk.VerifyOrderInBook` (default **on**) re-reads the account's own book after every submission:
+
+- **Found** → the order exists whatever the popup said, and the exchange's order number is adopted
+  (this is the only place we can obtain one).
+- **Absent** → **not** success, even if the popup claimed it. Recorded as not placed.
+- **Unreadable** → the popup's verdict stands but a claimed success is downgraded to unconfirmed,
+  because "we could not check" and "it is there" are different statements.
+
+Both logs are consulted: a resting order shows in the outstanding book, but one that filled
+immediately never rests, and treating its absence there as "never placed" would be exactly backwards.
+
+---
+
+## Armed orders — an order waiting on a level or an event
+
+An armed order is a **trigger plus an order**, evaluated by the monitor pass:
+
+| Trigger | Fires when |
+| --- | --- |
+| `PriceBelow` | last price reaches or falls below the level — a protective exit |
+| `PriceAbove` | last price reaches or rises above it — a breakout entry |
+| `Event` | the monitor raises a given `AlertKind` for that symbol (bounce, break, trend flip) |
+
+```
+POST   /api/trading/armed-orders    { symbol, action, quantity, triggerKind, triggerPrice |
+                                      triggerAlertKind, orderType, price, limitPrice, expiresInDays }
+GET    /api/trading/armed-orders?all=false
+DELETE /api/trading/armed-orders/{id}                      → disarm
+POST   /api/trading/approval/arm    { minutes }             → suspend confirmation (RiskManager)
+POST   /api/trading/approval/disarm
+```
+
+**Prefer the broker's native stop where one fits.** It rests at the exchange and fires whether or not
+this process is running; an armed order only fires while AgentFox is up *and* the market is open. The
+API says so in every `GET` response rather than leaving it to be discovered.
+
+Safety properties, each deliberate:
+
+- **Arming a non-tradable symbol is refused** at arm time, not at fire time. An armed order for a
+  symbol outside `AllowedSymbols` would sit there looking like protection and be rejected by the risk
+  engine at the exact moment it mattered.
+- **A trigger is claimed with a compare-and-set before the broker is touched**, so a slow submission
+  overlapping the next pass cannot fire it twice.
+- **Approval is asked for explicitly.** An armed order fires with nobody watching, so it must be
+  pre-authorised by `Approval` policy or it does not send. In the default `Always` mode it stays armed
+  and logs that confirmation was required — and the arm response says this up front.
+- **A refusal re-arms; a thrown submission does not.** "The market just closed" must not silently
+  disarm a protective stop, but a submission that threw is genuinely ambiguous about whether it
+  reached the broker, so reconciliation owns that rather than a retry.
+- **Expiry outranks the condition**, and one is defaulted (30 days) — an entry trigger left open
+  indefinitely can fire months later against a thesis nobody remembers forming.
+
+### Arming one from the UI
+
+Two entry points on the Trading page, both opening the same dialog with different pre-fill:
+
+1. **A price level** — under the chart, the **Resistance** and **Support** lists are buttons (*"click to
+   arm"*). Clicking one opens the dialog with the level, the direction that side implies (a support →
+   `SELL` stop below it; a resistance → `BUY` above it), a `STOPLOSS` type, and the stop limit already
+   derived one percent past the trigger. The header restates the level's touch count and weekly
+   confirmation, so size is committed against a level you can see rather than one you remember.
+2. **An event** — the ⌖ button on any alert card. This arms on the **kind** of event, not that
+   instance: *"Fires the NEXT time Support Bounce is raised for OGDC. This alert is the example, not
+   the trigger."* Side is inferred from the event's direction.
+
+Everything stays editable — the pre-fill saves typing, it does not decide the trade. On submit the
+dialog **stays open** to show whether the order will fire unattended, because that is the single most
+important thing to read and closing would hide it.
+
+The **Armed orders** panel lists what is waiting, with a disarm button per row, the approval state
+beside it (an armed order that cannot be approved will not fire, so the two belong together), and an
+**Open window** button for a time-boxed confirmation-free period.
+
+### What actually makes an order fire unattended
+
+Three independent layers, and **all** must permit it. An armed order is only the *trigger* — it says
+WHEN, not whether a human must confirm:
+
+| Layer | Setting | For unattended firing |
+| --- | --- | --- |
+| 1. Master switch | `AutoExecute` | `true` |
+| 2. Execution mode | `ExecutionMode` | `BoundedAuto` **or** `ApprovalRequired` |
+| 3. Approval | `Approval.Mode` | ignored under `BoundedAuto`; under `ApprovalRequired` needs `Auto` (within caps) or an open `Window` |
+
+Plus the risk engine, every time: kill switch clear, symbol in `AllowedSymbols`, market open, order
+value within caps, reconciliation healthy.
+
+`BoundedAuto` is itself the operator saying "act within the configured bounds", so approval mode does
+not gate it — requiring an intent there would mean a trigger silently never fires on a system
+explicitly configured for automatic execution. Ask the API rather than reasoning it out: the arm
+response returns `willFireUnattended` with the reason, computed by `ApprovalGate` itself.
+
+> The approval window mode was originally called `Armed`, which collided with "armed order" and
+> invited exactly the wrong inference. It is now `Window`.
+
+### How a pre-approval works
+
+`ApprovalGate` does not bypass anything. When policy permits an unattended order it **mints a real
+`ApprovalIntent`** and passes it as an `ExecutionAuthorization`, so the order travels the identical
+path a clicked approval does — bound to the exact orders, policy version and expiry, with the hash
+re-checked immediately before submission. A price that moved between minting and submitting is
+rejected there. The only difference from a human approval is the recorded actor
+(`approval-auto` / `approval-armed:<who>`).
+
+`Approval.Mode`: `Always` (default) · `Auto` (within the caps in `Approval.Auto`) · `Window` (a
+time-boxed window). Arming reports whether it is **actually in force** — granting a window while the
+market is closed answers `inForce: false` with the reason, rather than implying protection that is not
+active.
+
+---
+
 ## AHK Submit Button
 
 The AHK portal submit button ID has not been confirmed from live inspection. The broker currently tries `#buySubmitBtn` / `#sellSubmitBtn` first, then falls back to a JS text-content search.
@@ -472,10 +876,35 @@ weekly-confirmed) and ranked above OGDC, whose daily entry had no weekly level b
 
 ### Deep history: the one-time backfill
 
-Weekly levels need roughly two years of daily candles, and each portal request covers one date, so
-`DailyCandleBackfillWorker` archives that history once into `daily_bars` rather than refetching it per
-process. It starts 45 s after launch, is **resumable** (`daily_bar_coverage` records every date already
-retrieved, including non-trading days), and paced one date at a time.
+Weekly levels need roughly two years of daily candles, and each portal request covers one date, so that
+history is archived once into `daily_bars` rather than refetched per process. Passes are **resumable**
+(`daily_bar_coverage` records every date already retrieved, including non-trading days) and paced one
+date at a time.
+
+**Nothing needs to be run by hand** — `DailyCandleBackfillWorker` starts a pass 45 s after launch and
+every 6 hours after that, which also picks up each new session. But because a first pass takes ~18
+minutes, there are three ways to watch or drive it, all sharing one single-flight runner so two passes
+can never compete for the portal:
+
+| | How |
+|---|---|
+| **Web UI** | The *Candle archive* card on the Trading page: stored bars, symbols, coverage range, missing days, and a **Backfill N days** button with a live progress bar. The card polls only while a pass is running. |
+| **Ask the agent** | "How far back does the candle history go?" or "backfill the candle archive" — the `manage_candle_archive` tool (`status` / `backfill`). This is the quick command. |
+| **HTTP** | `GET /trading/candle-archive` for status; `POST /trading/candle-archive/backfill` (admin, optional `{"years": 2}`) to start one. Returns as soon as the pass has started. |
+
+```bash
+# Status
+curl -H "X-Api-Key: $KEY" http://localhost:5000/api/trading/candle-archive
+
+# Start a pass (returns immediately; poll the status endpoint for progress)
+curl -X POST -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' \
+     -d '{"years":2}' http://localhost:5000/api/trading/candle-archive/backfill
+```
+
+A manual trigger returns once the pass has **started**, not when it finishes — an 18-minute job must
+not hold an HTTP request or an agent turn open. The pass is bound to the application lifetime, so
+navigating away or letting the tool call return does not abandon it; only shutdown stops it, and the
+next start resumes.
 
 Measured, not estimated — 215 weekdays of 6 symbols:
 
@@ -487,18 +916,32 @@ Measured, not estimated — 215 weekdays of 6 symbols:
 | `scan_watchlist` on a warm archive | **95 ms** | unchanged |
 
 Set `Scan.BackfillYears` to `0` to disable it and stay on the shallower on-demand window (no weekly
-structure). Because the backfill stores `AllowedSymbols` only, **adding a symbol to the watchlist later
-needs another pass** to pick up its history — the coverage table makes that resumable, but it is not
-instant. The portal answers bursts with empty tables, so the worker retries an empty date once and
-aborts the pass after four empty weekdays in a row rather than recording that stretch as if the market
-had been closed.
+structure). The backfill archives `MonitoredUniverse.ForArchiveAsync()` — the watchlist plus
+`AllowedSymbols` — so **a symbol added to the watchlist gets its history on the next pass** (within 6
+hours automatically, or immediately from the UI button or the `manage_candle_archive` tool). Until then
+the UI badges it *no weekly*. The portal answers bursts with empty tables, so an empty date is retried
+once and a pass aborts after four empty weekdays in a row rather than recording that stretch as if the
+market had been closed (the UI shows that outcome in amber).
 
-### Why the universe is `AllowedSymbols`
+**Only settled sessions are archived.** A pass stops at the last session whose candles are final:
+today counts once the market is closed *and* the PKT clock is past `Scan.ArchiveSettleAfterPkt`
+(default `17:30`, an hour after Friday's 16:30 close). This matters because coverage is what makes the
+backfill resumable, and fetching a session still in progress writes a coverage marker that would stop
+the partial bar from ever being corrected — or, if the portal answers with an empty table, records the
+day as a non-trading day, which is a permanent hole. Each pass also *clears* coverage for anything
+past the settlement point, so a session recorded prematurely by an earlier build repairs itself on the
+next run at a cost of one request.
 
-`scan_watchlist` defaults to `AllowedSymbols` — the same list `TradingRiskEngine` enforces at order
-time. Recommending outside it produces proposals the risk engine refuses, so the scanner and the
-executor deliberately read one list. Pass `symbols` explicitly to scan something else; the tool notes
-that those cannot be executed.
+### What the scan's universe is
+
+`scan_watchlist` defaults to the **monitoring** universe — the editable watchlist plus
+`AllowedSymbols` (see [Watchlist vs AllowedSymbols](#watchlist-vs-allowedsymbols--two-different-universes)).
+Scanning wider than the tradable list is deliberate: a symbol you are watching should appear in a scan.
+
+Because of that, every result carries **`tradable`**, and the result notes how many scanned symbols are
+monitor-only. A candidate outside `AllowedSymbols` is information only — the risk engine will refuse an
+order for it — and the specialist is instructed to say so rather than present it as actionable. Pass
+`symbols` explicitly to scan something else again; the same `tradable` flag applies.
 
 ### What the scan computes
 

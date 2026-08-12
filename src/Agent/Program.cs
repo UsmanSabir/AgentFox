@@ -20,6 +20,7 @@ using AgentFox.Skills;
 using AgentFox.Tools;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -395,6 +396,10 @@ class Program
         builder.Services.AddSingleton<SpecialistAgentRegistry>();
         builder.Services.AddSingleton<AgentFox.Plugins.Interfaces.IAgentRegistry>(sp =>
             sp.GetRequiredService<SpecialistAgentRegistry>());
+        // Bound explicitly so HitlManager picks up the approval/question expiry settings. Without
+        // it the manager falls back to its own defaults and the appsettings values are ignored.
+        builder.Services.AddSingleton(
+            configuration.GetSection("Hitl").Get<HitlConfig>() ?? new HitlConfig());
         builder.Services.AddSingleton<HitlManager>();
         builder.Services.AddSingleton<AgentFox.Planning.PlanStateStore>();
 
@@ -533,6 +538,28 @@ class Program
                 app.UseStaticFiles();
             }
 
+            // Plugin-supplied UI assets, served at /plugin-assets/{slug}/. Registered here — before
+            // UseRouting, with the other static-file middleware — because these are static assets.
+            //
+            // Note the prefix is NOT /ext/{slug}: that is the host's own SPA route which frames the
+            // page. Serving assets there instead would let this middleware answer /ext/{slug} with
+            // the plugin's raw index.html, and the user would lose the AgentFox sidebar and header.
+            var pluginUiPages = ResolvePluginUiPages(app);
+            foreach (var page in pluginUiPages)
+            {
+                var assetPath = PluginUiPaths.AssetPathFor(page.Slug);
+                app.UseDefaultFiles(new DefaultFilesOptions
+                {
+                    FileProvider = page.Assets,
+                    RequestPath  = assetPath
+                });
+                app.UseStaticFiles(new StaticFileOptions
+                {
+                    FileProvider = page.Assets,
+                    RequestPath  = assetPath
+                });
+            }
+
             app.UseRouting();
             app.UseAuthentication();
             app.UseAuthorization();
@@ -540,6 +567,23 @@ class Program
             var apiGroup = app.MapGroup("/api").RequireAuthorization("ManagementViewer");
             foreach (var module in modules.Where(m => IsModuleEnabled(m.Name)))
                 module.MapEndpoints(apiGroup);
+
+            // Navigation manifest for the pages mounted above. The host frontend renders these
+            // generically, so a plugin adds a page without any host-side route, type, or npm change.
+            apiGroup.MapGet("/plugin-ui", (HttpContext http) => Results.Ok(
+                pluginUiPages
+                    .Where(p => http.User.IsInRole(p.RequiredRole))
+                    .Select(p => new
+                    {
+                        slug        = p.Slug,
+                        title       = p.Title,
+                        icon        = p.Icon,
+                        description = p.Description,
+                        order       = p.Order,
+                        // Where the host renders the page vs where its assets live — see PluginUiPaths.
+                        path        = PluginUiPaths.PagePathFor(p.Slug),
+                        entry       = $"{PluginUiPaths.AssetPathFor(p.Slug)}/{p.EntryPath.TrimStart('/')}"
+                    })));
 
             // SPA fallback — all non-API routes resolve to index.html.
             // When serving from embedded resources, pass the same provider so the fallback
@@ -658,7 +702,10 @@ class Program
             .WithWorkspaceManager(workspaceManager)
             .WithSessionManager(sessionManager)
             .WithCompactionFromConfig(configuration)
-            .WithTodoPlannerFromConfig(configuration);
+            .WithTodoPlannerFromConfig(configuration)
+            .WithToolTimeout(
+                TimeSpan.FromSeconds(toolsConfig.TimeoutSeconds),
+                AgentFox.Tools.ToolTimeoutPolicy.ExemptTools);
 
         // No plan gate on this path, so the todo guidance is phase-independent.
         if (agentBuilder.IsTodoPlannerEnabled)
@@ -718,7 +765,7 @@ class Program
         var registry = new ToolRegistry();
 
         if (toolsConfig.Shell && toolsConfig.IsEnabled("shell"))
-            registry.Register(new ShellCommandTool(workspaceManager));
+            registry.Register(new ShellCommandTool(workspaceManager, toolsConfig.ShellTimeoutSeconds));
 
         if (toolsConfig.FileSystem)
         {
@@ -822,6 +869,85 @@ class Program
     // ─────────────────────────────────────────────────────────────────────────
     // Plugin / module loader
     // ─────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Collects the plugin-supplied UI pages to mount under <c>/ext/{slug}</c>.
+    ///
+    /// <para>
+    /// A bad slug is rejected rather than sanitized: it becomes a static-file request path, so
+    /// accepting a slash or <c>..</c> would let a plugin mount assets outside its own prefix (or over
+    /// the host's own routes). A duplicate slug is dropped for the same reason — the first
+    /// registration wins and the collision is reported, because silently serving one plugin's assets
+    /// from another's URL is worse than not serving them at all.
+    /// </para>
+    /// </summary>
+    private static List<PluginUiPage> ResolvePluginUiPages(WebApplication app)
+    {
+        var pages = new List<PluginUiPage>();
+        var claimed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var logger = app.Services.GetService<ILogger<Program>>();
+
+        // Two sources, so a plugin can either implement the interface on its module (nothing to
+        // register — the common case) or register a standalone contributor in DI. Reference-distinct
+        // in case it does both; slug collisions are caught below either way.
+        var contributors = app.Services.GetServices<IPluginUiContributor>()
+            .Concat(app.Services.GetServices<IAppModule>().OfType<IPluginUiContributor>())
+            .Distinct();
+
+        foreach (var contributor in contributors)
+        {
+            IReadOnlyList<PluginUiPage> contributed;
+            try
+            {
+                contributed = contributor.GetPages().ToList();
+            }
+            catch (Exception ex)
+            {
+                // A plugin whose UI fails to enumerate must not take the whole web layer down.
+                logger?.LogWarning(ex, "Plugin UI contributor {Contributor} failed; skipping it.",
+                    contributor.GetType().Name);
+                continue;
+            }
+
+            foreach (var page in contributed)
+            {
+                if (!IsValidUiSlug(page.Slug))
+                {
+                    logger?.LogWarning(
+                        "Plugin UI page '{Slug}' from {Contributor} was rejected: a slug must be a single "
+                        + "path segment of lowercase letters, digits, or hyphens.",
+                        page.Slug, contributor.GetType().Name);
+                    continue;
+                }
+
+                if (!claimed.Add(page.Slug))
+                {
+                    logger?.LogWarning(
+                        "Plugin UI slug '{Slug}' is already mounted; ignoring the copy from {Contributor}.",
+                        page.Slug, contributor.GetType().Name);
+                    continue;
+                }
+
+                pages.Add(page);
+            }
+        }
+
+        pages.Sort((left, right) => left.Order != right.Order
+            ? left.Order.CompareTo(right.Order)
+            : string.Compare(left.Title, right.Title, StringComparison.OrdinalIgnoreCase));
+
+        if (pages.Count > 0)
+            AnsiConsole.MarkupLineInterpolated(
+                $"[green]✓[/] Mounted {pages.Count} plugin UI page(s): {string.Join(", ", pages.Select(p => PluginUiPaths.PagePathFor(p.Slug)))}");
+
+        return pages;
+    }
+
+    private static bool IsValidUiSlug(string? slug) =>
+        !string.IsNullOrWhiteSpace(slug)
+        && slug.Length <= 40
+        && char.IsAsciiLetterOrDigit(slug[0])
+        && slug.All(c => char.IsAsciiLetterLower(c) || char.IsAsciiDigit(c) || c == '-');
 
     private sealed record PluginDiscovery(
         List<IAppModule> Modules,

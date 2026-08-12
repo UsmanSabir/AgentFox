@@ -14,6 +14,38 @@ public interface ITradingRepository
 
     Task<TradingLedgerStatus> GetStatusAsync(CancellationToken ct = default);
 
+    // ── Proposal lifecycle ────────────────────────────────────────────────────
+    // A proposal used to be write-only: created, listed, never resolved, so the table only grew and
+    // "pending proposals" only climbed. These give it the states that make it a work queue — the
+    // WhatsApp signal that arrived overnight can now be executed, rejected, or aged out.
+
+    /// <summary>One proposal by id, or null.</summary>
+    Task<TradeProposalRecord?> GetProposalAsync(string proposalId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Moves a proposal from <paramref name="expectedStatus"/> to <paramref name="newStatus"/>, and
+    /// returns false when it was not in the expected state.
+    ///
+    /// <para>
+    /// Compare-and-set rather than a blind update, because that is what makes a double click safe: the
+    /// second request finds the row already moved on and declines instead of executing the same
+    /// proposal twice.
+    /// </para>
+    /// </summary>
+    Task<bool> TrySetProposalStateAsync(
+        string proposalId,
+        string expectedStatus,
+        string newStatus,
+        string? reason = null,
+        string? executionId = null,
+        CancellationToken ct = default);
+
+    /// <summary>Proposals not yet in a terminal state — the actionable queue.</summary>
+    Task<IReadOnlyList<TradeProposalRecord>> GetOpenProposalsAsync(CancellationToken ct = default);
+
+    /// <summary>Deletes TERMINAL proposals older than <paramref name="before"/>; open ones are kept.</summary>
+    Task<int> PruneProposalsAsync(DateTime before, CancellationToken ct = default);
+
     Task<IReadOnlyList<TradeProposalRecord>> GetProposalsAsync(
         int limit = 100,
         CancellationToken ct = default);
@@ -77,6 +109,22 @@ public interface ITradingRepository
         DateOnly toInclusive,
         CancellationToken ct = default);
 
+    /// <summary>
+    /// Forgets coverage for dates after <paramref name="settledThrough"/> so they are fetched again.
+    ///
+    /// <para>
+    /// This repairs the one way the archive can go permanently wrong: a session recorded before it
+    /// settled. Fetching the current trading day returns either a partial bar (stored, then never
+    /// corrected because the date counts as covered) or an empty table that looks identical to a
+    /// holiday (recorded as a non-trading day — a permanent hole). Coverage is only a resume marker, so
+    /// dropping it for unsettled dates costs one request to redo and cannot lose data: the bars
+    /// themselves are upserted.
+    /// </para>
+    /// </summary>
+    Task<int> ClearDailyCoverageAfterAsync(
+        DateOnly settledThrough,
+        CancellationToken ct = default);
+
     /// <summary>Row and symbol counts for the daily archive, for status reporting.</summary>
     Task<DailyArchiveStatus> GetDailyArchiveStatusAsync(CancellationToken ct = default);
 
@@ -100,7 +148,153 @@ public interface ITradingRepository
         int maxBars,
         DateTime? beforeUtc = null,
         CancellationToken ct = default);
+
+    // ── Watchlist ─────────────────────────────────────────────────────────────
+    // The user's monitoring universe. Independent of AllowedSymbols after seeding: what may be
+    // WATCHED is editable here, what may be TRADED stays in configuration.
+
+    /// <summary>Watchlist entries in display order, plus when it was seeded and from what.</summary>
+    Task<WatchlistSnapshot> GetWatchlistAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Seeds the watchlist from <paramref name="seed"/> the first time only, and records the hash of
+    /// that seed. Later calls are no-ops even when the configured list has changed — re-seeding would
+    /// discard the user's edits, so drift is reported instead (see <see cref="WatchlistSnapshot"/>).
+    /// Returns true when this call performed the seeding.
+    /// </summary>
+    Task<bool> EnsureWatchlistSeededAsync(
+        IReadOnlyList<string> seed,
+        string seedHash,
+        CancellationToken ct = default);
+
+    /// <summary>Adds a symbol. False when it is already present.</summary>
+    Task<bool> AddWatchlistSymbolAsync(
+        string symbol,
+        string source,
+        CancellationToken ct = default);
+
+    /// <summary>Removes a symbol. False when it was not present. Archived bars are kept.</summary>
+    Task<bool> RemoveWatchlistSymbolAsync(string symbol, CancellationToken ct = default);
+
+    /// <summary>Updates the per-symbol fields the user controls. False when the symbol is unknown.</summary>
+    Task<bool> UpdateWatchlistSymbolAsync(
+        string symbol,
+        bool? alertsEnabled,
+        string? notes,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Clears the watchlist and reseeds it from <paramref name="seed"/>, re-stamping the seed hash.
+    /// This is the explicit "reset to the configured allowed list" action; it discards user edits by
+    /// design. Returns the number of symbols after reseeding.
+    /// </summary>
+    Task<int> ResetWatchlistAsync(
+        IReadOnlyList<string> seed,
+        string seedHash,
+        CancellationToken ct = default);
+
+    /// <summary>Per-symbol archived-bar counts, for reporting how much history a symbol has.</summary>
+    Task<IReadOnlyDictionary<string, int>> GetDailyBarCountsAsync(
+        IReadOnlyList<string> symbols,
+        CancellationToken ct = default);
+
+    // ── Monitor state and alerts ──────────────────────────────────────────────
+
+    /// <summary>Per-symbol monitor state from the previous pass, keyed by symbol.</summary>
+    Task<IReadOnlyDictionary<string, TradingAgent.Watchlist.SymbolMonitorState>> GetMonitorStatesAsync(
+        CancellationToken ct = default);
+
+    /// <summary>Upserts the state produced by a pass.</summary>
+    Task SaveMonitorStateAsync(
+        TradingAgent.Watchlist.SymbolMonitorState state,
+        CancellationToken ct = default);
+
+    /// <summary>Persists a raised alert and returns its id.</summary>
+    Task<string> SaveAlertAsync(
+        TradingAgent.Watchlist.DetectedAlert alert,
+        DateOnly sessionDate,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// True when an equivalent alert was already raised since <paramref name="since"/> — same symbol,
+    /// same kind, and the same level (rounded, so a level that shifts by a paisa is still the same
+    /// level). This is the cooldown that stops one situation being reported repeatedly.
+    /// </summary>
+    Task<bool> HasRecentAlertAsync(
+        string symbol,
+        TradingAgent.Watchlist.AlertKind kind,
+        decimal? levelPrice,
+        DateTime since,
+        CancellationToken ct = default);
+
+    /// <summary>Alerts newest first, optionally filtered by symbol and state.</summary>
+    Task<IReadOnlyList<TradingAgent.Watchlist.AlertRecord>> GetAlertsAsync(
+        string? symbol = null,
+        string? state = null,
+        int limit = 100,
+        CancellationToken ct = default);
+
+    /// <summary>One alert by id, or null. Indexed lookup rather than scanning the recent list.</summary>
+    Task<TradingAgent.Watchlist.AlertRecord?> GetAlertAsync(
+        string alertId,
+        CancellationToken ct = default);
+
+    /// <summary>Moves an alert to <paramref name="state"/> (acknowledged/dismissed). False if unknown.</summary>
+    Task<bool> SetAlertStateAsync(
+        string alertId,
+        string state,
+        CancellationToken ct = default);
+
+    /// <summary>Count of alerts in the <c>new</c> state, per symbol, for the watchlist badges.</summary>
+    Task<IReadOnlyDictionary<string, int>> GetOpenAlertCountsAsync(CancellationToken ct = default);
+
+    /// <summary>Deletes alerts raised before <paramref name="before"/>. Returns how many were removed.</summary>
+    Task<int> PruneAlertsAsync(DateTime before, CancellationToken ct = default);
+
+    // ── Armed orders ──────────────────────────────────────────────────────────
+    // Orders waiting on a price level or an alert event. Durable, so an armed trigger survives a
+    // restart — a stop that forgets itself when the process bounces is not a stop.
+
+    Task<string> SaveArmedOrderAsync(
+        TradingAgent.Watchlist.ArmedOrder order,
+        CancellationToken ct = default);
+
+    /// <summary>Armed orders; <paramref name="armedOnly"/> false includes fired/cancelled history.</summary>
+    Task<IReadOnlyList<TradingAgent.Watchlist.ArmedOrder>> GetArmedOrdersAsync(
+        bool armedOnly = true,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Compare-and-set on the current state, so a trigger seen by two overlapping passes cannot fire
+    /// twice. False when it was not in the expected state.
+    /// </summary>
+    Task<bool> TrySetArmedOrderStateAsync(
+        string armedId,
+        string expectedState,
+        string newState,
+        string? reason = null,
+        string? executionId = null,
+        CancellationToken ct = default);
 }
+
+/// <summary>One watched symbol.</summary>
+public sealed record WatchlistEntry(
+    string Symbol,
+    DateTime AddedUtc,
+    string Source,
+    int SortOrder,
+    bool AlertsEnabled,
+    string? Notes);
+
+/// <summary>
+/// The watchlist plus its seeding provenance. <see cref="SeedHash"/> is the hash of the
+/// AllowedSymbols it was seeded from; comparing it with the current configuration is how the UI can
+/// say "the configured list has changed since seeding" without anything re-seeding automatically.
+/// </summary>
+public sealed record WatchlistSnapshot(
+    IReadOnlyList<WatchlistEntry> Entries,
+    DateTime? SeededUtc,
+    string? SeedHash);
 
 /// <summary>
 /// Size and reach of the archived daily-candle history. <see cref="CoveredDates"/> counts dates
@@ -121,13 +315,25 @@ public sealed record TradingLedgerStatus(
     int AcceptedExecutions,
     DateTime CheckedUtc);
 
+/// <summary>
+/// A persisted proposal. <see cref="Status"/> moves
+/// <c>proposed → executing → executed | rejected | expired</c>; the terminal states are why this is a
+/// work queue rather than the write-only log it used to be.
+/// </summary>
 public sealed record TradeProposalRecord(
     string ProposalId,
     string Status,
     JsonElement Proposal,
     string PolicyVersion,
     DateTime CreatedUtc,
-    DateTime UpdatedUtc);
+    DateTime UpdatedUtc)
+{
+    /// <summary>Execution this proposal became, once executed.</summary>
+    public string? ExecutionId { get; init; }
+
+    /// <summary>Why it was rejected or expired — recorded so a terminal state is explicable.</summary>
+    public string? StateReason { get; init; }
+}
 
 public sealed record TradingExecutionRecord(
     string ExecutionId,

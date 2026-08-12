@@ -55,8 +55,30 @@ public sealed partial class TradingRiskEngine : ITradingRiskEngine
                 violations.Add($"{label}: symbol '{symbol}' is not in AllowedSymbols.");
             if (order.Quantity is not > 0)
                 violations.Add($"{label}: quantity must be a positive integer.");
-            if (orderType is not ("LIMIT" or "MARKET"))
-                violations.Add($"{label}: order type must be LIMIT or MARKET.");
+            if (orderType is not ("LIMIT" or "MARKET" or "STOPLOSS"))
+                violations.Add($"{label}: order type must be LIMIT, MARKET, or STOPLOSS.");
+
+            // A stop order is a trigger plus a limit, and the limit has to sit on the side the market
+            // will be moving when the trigger fires: BELOW the trigger for a protective sell, ABOVE it
+            // for a buy stop. The opposite asks for a better price than the move that triggered it,
+            // which simply never fills — a stop that cannot fill is worse than no stop, because it
+            // looks like protection.
+            if (orderType == "STOPLOSS" && order.LimitPrice is { } stopLimit)
+            {
+                if (stopLimit <= 0)
+                    violations.Add($"{label}: stop-loss limit price must be positive.");
+                else if (order.EntryPrice is { } trigger && trigger > 0)
+                {
+                    if (action == "SELL" && stopLimit > trigger)
+                        violations.Add(
+                            $"{label}: a SELL stop's limit ({stopLimit}) must be at or below its "
+                            + $"trigger ({trigger}), or it cannot fill once triggered.");
+                    if (action == "BUY" && stopLimit < trigger)
+                        violations.Add(
+                            $"{label}: a BUY stop's limit ({stopLimit}) must be at or above its "
+                            + $"trigger ({trigger}), or it cannot fill once triggered.");
+                }
+            }
 
             if (orderType == "MARKET")
             {

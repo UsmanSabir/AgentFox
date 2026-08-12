@@ -1,5 +1,6 @@
 using AgentFox.Agents;
 using AgentFox.Channels;
+using AgentFox.Helpers;
 using AgentFox.Hitl;
 using AgentFox.Planning;
 using AgentFox.Plugins.Channels;
@@ -123,12 +124,17 @@ public class SubmitPlanTool : BaseTool
             ? await _channelManager.BroadcastActionableAsync(msg, actions)
             : 0;
 
-        AnsiConsole.WriteLine();
-        AnsiConsole.MarkupLine($"[bold yellow]📋 Plan Approval Required[/] [[{Markup.Escape(approvalId)}]]");
-        if (summary is { Length: > 0 })
-            AnsiConsole.MarkupLine($"[dim]{Markup.Escape(summary)}[/]");
-        AnsiConsole.WriteLine(plan);
-        AnsiConsole.MarkupLine($"[dim]Type [bold]hitl approve {Markup.Escape(approvalId)}[/] or [bold]hitl reject {Markup.Escape(approvalId)} [reason][/][/]");
+        // Gated: submit_plan runs on whichever lane the turn is on, so this banner is routinely
+        // printed from a background turn while the REPL owns the screen.
+        ConsoleGate.Write(() =>
+        {
+            AnsiConsole.WriteLine();
+            AnsiConsole.MarkupLine($"[bold yellow]📋 Plan Approval Required[/] [[{Markup.Escape(approvalId)}]]");
+            if (summary is { Length: > 0 })
+                AnsiConsole.MarkupLine($"[dim]{Markup.Escape(summary)}[/]");
+            AnsiConsole.WriteLine(plan);
+            AnsiConsole.MarkupLine($"[dim]Type [bold]/hitl approve {Markup.Escape(approvalId)}[/] or [bold]/hitl reject {Markup.Escape(approvalId)} [reason][/][/]");
+        });
 
         if (deliveredTo == 0 && Console.IsInputRedirected)
             _logger?.LogWarning(

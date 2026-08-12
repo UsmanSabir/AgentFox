@@ -59,6 +59,12 @@
 
   $: title = (() => {
     const p = $page.url.pathname;
+    // Plugin-supplied pages (/ext/{slug}) are not in the static map — title them from the slug so a
+    // plugin page doesn't have to register anything host-side just to name its own header.
+    if (p.startsWith('/ext/')) {
+      const slug = p.slice('/ext/'.length).split('/')[0];
+      return slug ? slug.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : 'Plugin';
+    }
     for (const [k, v] of Object.entries(pageTitles)) {
       if (p === '/' ? p === k : p.startsWith(k) && k !== '/') return v;
     }

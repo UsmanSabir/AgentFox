@@ -109,6 +109,16 @@ jobs:
           -p:InformationalVersion=${{ needs.version.outputs.info }}
           -o staging/${{ matrix.rid }}
 
+      # The trading plugin ships its own web UI, built from a SEPARATE npm project so its
+      # dependencies never enter the host frontend. It writes to src/Plugins/TradingAgent/wwwroot,
+      # which TradingAgent.csproj embeds as EmbeddedResource — so like the host wwwroot above, this
+      # must run BEFORE the plugin is published or the plugin ships with no UI (the host then simply
+      # shows no Trading page; the backend is unaffected).
+      - name: Build Trading plugin UI
+        shell: bash
+        run: npm ci && npm run build
+        working-directory: src/Plugins/TradingAgent/ui
+
       - name: Publish Trading plugin
         shell: bash
         run: >

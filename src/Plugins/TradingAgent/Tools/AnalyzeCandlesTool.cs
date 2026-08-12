@@ -31,22 +31,19 @@ public sealed class AnalyzeCandlesTool : BaseTool
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
     };
 
+    private readonly CandleAnalysisService _analysis;
     private readonly PsxDataClient _dataClient;
-    private readonly CandleHistoryProvider _history;
-    private readonly ITradingRepository _repository;
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly ILogger<AnalyzeCandlesTool> _logger;
 
     public AnalyzeCandlesTool(
+        CandleAnalysisService analysis,
         PsxDataClient dataClient,
-        CandleHistoryProvider history,
-        ITradingRepository repository,
         IOptions<TradingAgentOptions> options,
         ILogger<AnalyzeCandlesTool> logger)
     {
+        _analysis = analysis;
         _dataClient = dataClient;
-        _history = history;
-        _repository = repository;
         _options = options;
         _logger = logger;
     }
@@ -128,36 +125,15 @@ public sealed class AnalyzeCandlesTool : BaseTool
             _logger.LogInformation("[AnalyzeCandles] {Symbol} at {Interval} over {Days} sessions…",
                 symbol, PsxDataClient.IntervalLabel(interval.Value), lookback);
 
-            // Weekly structure needs far more history than the daily read does, so ask for whichever
-            // window is larger. The archive serves it locally; only missing dates hit the portal.
-            var weeklySessions = Math.Clamp(scan.WeeklyLookbackWeeks, 12, 600) * 6;
-            var sessionsWanted = Math.Max(lookback, weeklySessions);
+            // Loading and analysis live in CandleAnalysisService so the chart endpoint draws the very
+            // same levels this tool quotes. This method is now just the agent-facing projection.
+            var analysis = await _analysis.AnalyzeAsync(symbol, interval.Value, lookback, includeLive);
 
-            var historyTask = _history.GetDailyAsync([symbol], sessionsWanted, includeLive);
-            var quoteTask = _dataClient.GetQuoteSummaryAsync(symbol);
-            await Task.WhenAll(historyTask, quoteTask);
+            var multi = analysis.Multi;
+            var daily = analysis.Daily;
+            var quote = analysis.Quote;
+            var warnings = analysis.Warnings.ToList();
 
-            var history = await historyTask;
-            var quote = await quoteTask;
-
-            if (!history.Series.TryGetValue(symbol, out var fullDaily) || fullDaily.Count == 0)
-                return ToolResult.Fail(
-                    $"No candles were returned for {symbol}. " +
-                    string.Join(" ", history.Warnings.DefaultIfEmpty(
-                        "Verify the ticker is listed on the PSX.")));
-
-            var technicalOptions = TechnicalOptions.From(scan);
-
-            // The DAILY read stays scoped to the requested lookback — widening it silently would move
-            // every level the caller asked about. Weekly resampling uses the full archived series.
-            var dailyCandles = fullDaily.TakeLast(lookback).ToList();
-            var multi = MultiTimeframeAnalyzer.Analyze(
-                symbol, fullDaily, technicalOptions, scan.ConfluenceTolerancePercent,
-                quote.High52Week, quote.Low52Week);
-            var daily = TechnicalAnalyzer.Analyze(
-                symbol, dailyCandles, technicalOptions, quote.High52Week, quote.Low52Week);
-
-            var warnings = history.Warnings.ToList();
             var scope = ResearchReferenceScope.Current;
             if (scope is not null)
             {
@@ -172,8 +148,8 @@ public sealed class AnalyzeCandlesTool : BaseTool
                 {
                     symbol,
                     interval = "1D",
-                    sessions_analyzed = dailyCandles.Count,
-                    sessions_available = fullDaily.Count,
+                    sessions_analyzed = analysis.Candles.Count,
+                    sessions_available = analysis.SessionsAvailable,
                     snapshot = daily,
                     // Weekly is the structural timeframe: a daily level the weekly chart also
                     // recognises is structure, one it does not is often just a recent swing.
@@ -186,33 +162,25 @@ public sealed class AnalyzeCandlesTool : BaseTool
                     confirmed_resistances = multi.ConfirmedResistances,
                     multi_timeframe_notes = multi.Notes,
                     quote,
-                    recent_candles = Project(dailyCandles.TakeLast(20)),
-                    recent_weekly_candles = Project(CandleResampler.ToWeekly(fullDaily).TakeLast(12)),
-                    retrieved_at_utc = history.RetrievedAtUtc,
-                    source_urls = _dataClient.CandleSourceUrls(),
+                    recent_candles = Project(analysis.Candles.TakeLast(20)),
+                    recent_weekly_candles = Project(analysis.WeeklyCandles.TakeLast(12)),
+                    retrieved_at_utc = analysis.RetrievedAtUtc,
+                    source_urls = analysis.SourceUrls,
                     warnings
                 }, JsonOptions));
             }
 
             // ── Intraday ──────────────────────────────────────────────────────
-            var intraday = await LoadIntradayAsync(symbol, interval.Value, warnings);
-            if (intraday.Count == 0)
-                return ToolResult.Fail(
-                    $"No intraday trades are available for {symbol} at " +
-                    $"{PsxDataClient.IntervalLabel(interval.Value)}. The PSX tick feed covers the current " +
-                    "session only, so this happens before the open or when the symbol has not traded today " +
-                    "and no earlier session has been archived. Use interval '1D' instead.");
-
-            var snapshot = TechnicalAnalyzer.Analyze(symbol, intraday, technicalOptions);
+            var intraday = analysis.Candles;
             var sessions = intraday.Select(b => b.Date).Distinct().OrderBy(d => d).ToList();
 
             return ToolResult.Ok(JsonSerializer.Serialize(new
             {
                 symbol,
-                interval = PsxDataClient.IntervalLabel(interval.Value),
+                interval = analysis.Interval,
                 bars_analyzed = intraday.Count,
                 sessions_covered = sessions.Select(d => d.ToString("yyyy-MM-dd")),
-                snapshot,
+                snapshot = analysis.Snapshot,
                 // The levels that matter are the daily and weekly ones; the intraday series is for
                 // timing the entry against them. Reporting intraday alone invites trading noise as if
                 // it were structure.
@@ -247,78 +215,21 @@ public sealed class AnalyzeCandlesTool : BaseTool
                 },
                 quote,
                 recent_candles = Project(intraday.TakeLast(30)),
-                retrieved_at_utc = DateTime.UtcNow,
-                source_urls = _dataClient.CandleSourceUrls()
-                    .Append($"{_options.Value.PsxDataBaseUrl.TrimEnd('/')}/timeseries/int/{symbol}"),
+                retrieved_at_utc = analysis.RetrievedAtUtc,
+                source_urls = analysis.SourceUrls,
                 warnings
             }, JsonOptions));
+        }
+        catch (CandleAnalysisException ex)
+        {
+            // Expected "there is nothing to analyze" case; the message already explains why.
+            return ToolResult.Fail(ex.Message);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "[AnalyzeCandles] Candle analysis failed for {Symbol}.", symbol);
             return ToolResult.Fail($"Candle analysis failed for {symbol}: {ex.Message}");
         }
-    }
-
-    /// <summary>
-    /// Builds the intraday series: archived bars from earlier sessions, plus the current session
-    /// rebuilt from the live tick tape. Today is always recomputed rather than read from the archive,
-    /// so a bar that was still forming when it was last saved is never treated as final. Completed
-    /// bars are written back (when archiving is enabled), which is how multi-session intraday history
-    /// accumulates at all — PSX serves the current session only.
-    /// </summary>
-    private async Task<IReadOnlyList<PsxCandle>> LoadIntradayAsync(
-        string symbol, int interval, List<string> warnings)
-    {
-        var scan = _options.Value.Scan;
-
-        var ticks = await _dataClient.GetIntradayTicksAsync(symbol);
-        var live = PsxDataClient.AggregateTicks(symbol, ticks, interval);
-
-        var earliestLive = live.Count > 0 ? live[0].BucketStartUtc : null;
-        IReadOnlyList<PsxCandle> archived = [];
-        try
-        {
-            archived = await _repository.GetIntradayBarsAsync(
-                symbol, interval, Math.Clamp(scan.IntradayLookbackBars, 20, 5000), earliestLive);
-        }
-        catch (Exception ex)
-        {
-            // The archive is an enhancement; losing it degrades history, it must not fail the analysis.
-            _logger.LogWarning(ex, "[AnalyzeCandles] Intraday archive read failed for {Symbol}.", symbol);
-            warnings.Add($"Archived intraday history could not be read ({ex.Message}); " +
-                         "analysis uses the current session only.");
-        }
-
-        if (scan.ArchiveIntradayBars && live.Count > 0)
-        {
-            try
-            {
-                await _repository.SaveIntradayBarsAsync(live);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "[AnalyzeCandles] Intraday archive write failed for {Symbol}.", symbol);
-                warnings.Add($"This session's intraday bars could not be archived ({ex.Message}).");
-            }
-        }
-
-        var merged = archived.Concat(live).OrderBy(b => b.SortKeyUtc).ToList();
-        if (merged.Count == 0) return merged;
-
-        // Session count, not bar count, is what makes intraday levels meaningful: one session of 5m
-        // bars is 76 bars and still only one day's range, so a bar-count check would stay silent
-        // exactly when the levels are least trustworthy.
-        var sessions = merged.Select(b => b.Date).Distinct().Count();
-        if (sessions < 3)
-            warnings.Add(
-                $"Intraday history covers only {sessions} session(s) " +
-                $"({merged.Count} {PsxDataClient.IntervalLabel(interval)} bars). PSX publishes no " +
-                "historical intraday, so this builds up from the sessions this agent has archived. " +
-                "Levels drawn from it are weak — trade the daily_context levels and use these bars only " +
-                "for timing.");
-
-        return merged;
     }
 
     private static IEnumerable<object> Project(IEnumerable<PsxCandle> candles) =>

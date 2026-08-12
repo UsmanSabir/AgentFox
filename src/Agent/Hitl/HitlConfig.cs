@@ -19,6 +19,20 @@ public class HitlConfig
     /// Use for trusted channels, automated origins (cron/heartbeat), or trusted agent roles.
     /// </summary>
     public HitlBypassConfig Bypass { get; set; } = new();
+
+    /// <summary>
+    /// How long an approval request waits for a human before it expires and is treated as rejected.
+    /// Default 30 minutes. Set to 0 to wait indefinitely — only safe when a human is guaranteed to
+    /// be watching, because the waiting command holds a lane slot for as long as it blocks, and the
+    /// Main lane is serial (an unanswered approval there freezes the interactive prompt outright).
+    /// </summary>
+    public int ApprovalTimeoutSeconds { get; set; } = 1800;
+
+    /// <summary>
+    /// How long <c>request_human_input</c> waits for a reply before giving up and telling the model
+    /// nobody answered. Default 30 minutes; 0 waits indefinitely, with the same caveat as above.
+    /// </summary>
+    public int QuestionTimeoutSeconds { get; set; } = 1800;
 }
 
 /// <summary>

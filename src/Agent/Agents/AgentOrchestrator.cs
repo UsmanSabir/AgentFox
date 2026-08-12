@@ -416,7 +416,11 @@ public sealed class AgentOrchestrator : IHostedService
             .WithSessionManager(_sessionManager)
             .WithExperienceLearning(_experienceLearning)
             .WithCompactionFromConfig(_configuration)
-            .WithTodoPlannerFromConfig(_configuration);
+            .WithTodoPlannerFromConfig(_configuration)
+            .WithToolTimeout(
+                TimeSpan.FromSeconds(
+                    (_configuration.GetSection("Tools").Get<ToolsConfig>() ?? new ToolsConfig()).TimeoutSeconds),
+                ToolTimeoutPolicy.ExemptTools);
 
         if (withLogger)
             builder = builder.WithLogger(_loggerFactory.CreateLogger<FoxAgent>());
@@ -495,12 +499,17 @@ public sealed class AgentOrchestrator : IHostedService
                 // Console fallback — always prints; it's one more parallel notification
                 // surface now, not gated on "no channel configured" (matters for a headless
                 // service deployment with channels but no interactive console, and vice versa).
-                AnsiConsole.WriteLine();
-                AnsiConsole.MarkupLine($"[bold yellow]🔐 Approval Required[/] [[{Markup.Escape(approvalId)}]]");
-                AnsiConsole.MarkupLine($"Tool: [bold]{Markup.Escape(toolName)}[/]");
-                if (argsPreview.Length > 0)
-                    AnsiConsole.MarkupLine($"Args: [dim]{Markup.Escape(argsPreview)}[/]");
-                AnsiConsole.MarkupLine($"[dim]Type [bold]hitl approve {Markup.Escape(approvalId)}[/] or [bold]hitl reject {Markup.Escape(approvalId)}[/][/]");
+                // Through ConsoleGate because this gate fires on every lane: printed directly from
+                // a cron or sub-agent turn it lands in the middle of whatever the REPL was drawing.
+                ConsoleGate.Write(() =>
+                {
+                    AnsiConsole.WriteLine();
+                    AnsiConsole.MarkupLine($"[bold yellow]🔐 Approval Required[/] [[{Markup.Escape(approvalId)}]]");
+                    AnsiConsole.MarkupLine($"Tool: [bold]{Markup.Escape(toolName)}[/]");
+                    if (argsPreview.Length > 0)
+                        AnsiConsole.MarkupLine($"Args: [dim]{Markup.Escape(argsPreview)}[/]");
+                    AnsiConsole.MarkupLine($"[dim]Type [bold]/hitl approve {Markup.Escape(approvalId)}[/] or [bold]/hitl reject {Markup.Escape(approvalId)}[/][/]");
+                });
 
                 if (deliveredTo == 0 && Console.IsInputRedirected)
                     _logger?.LogWarning(
@@ -816,10 +825,11 @@ public sealed class AgentOrchestrator : IHostedService
                     : announcement.SessionKey;
 
                 if (isInteractive)
-                {
-                    AnsiConsole.WriteLine();
-                    AnsiConsole.MarkupLine($"[bold blue][[SUB-AGENT]][/] Reporting to parent agent [dim](session: {Markup.Escape(parentKey)})[/]...");
-                }
+                    ConsoleGate.Write(() =>
+                    {
+                        AnsiConsole.WriteLine();
+                        AnsiConsole.MarkupLine($"[bold blue][[SUB-AGENT]][/] Reporting to parent agent [dim](session: {Markup.Escape(parentKey)})[/]...");
+                    });
 
                 // Push the sub-agent's own output first so a watching client renders it above the
                 // agent's reaction, matching the console's ordering instead of having it appear
@@ -891,10 +901,16 @@ public sealed class AgentOrchestrator : IHostedService
 
                     if (isInteractive && enriched != null)
                     {
-                        AnsiConsole.WriteLine();
-                        AnsiConsole.MarkupLine("[bold cyan][[AGENT]][/]");
-                        AnsiConsole.WriteLine(enriched);
-                        AnsiConsole.Markup("\n[bold dodgerblue1]>[/] ");
+                        var text = enriched;
+                        ConsoleGate.Write(() =>
+                        {
+                            AnsiConsole.WriteLine();
+                            AnsiConsole.MarkupLine("[bold cyan][[AGENT]][/]");
+                            AnsiConsole.WriteLine(text);
+                            // No hand-drawn "> " here any more: PrettyPrompt draws the real prompt
+                            // when the REPL resumes, and painting a fake one left two prompts on
+                            // screen with only one of them accepting input.
+                        });
                     }
                 }
                 catch (Exception ex)
@@ -914,8 +930,11 @@ public sealed class AgentOrchestrator : IHostedService
                         parentKey);
 
                     if (isInteractive)
-                        AnsiConsole.MarkupLine(
-                            $"[bold red][[ERR]][/] Could not relay sub-agent result: {Markup.Escape(failure)}");
+                    {
+                        var reason = failure;
+                        ConsoleGate.Write(() => AnsiConsole.MarkupLine(
+                            $"[bold red][[ERR]][/] Could not relay sub-agent result: {Markup.Escape(reason)}"));
+                    }
                 }
 
                 // Closes the live bubble on any watching client. Sent whether the turn produced
@@ -975,18 +994,19 @@ public sealed class AgentOrchestrator : IHostedService
             // Local announcement (no channel, no parent) — log + console if interactive
             _logger.LogInformation("Sub-agent {Session} completed.", announcement.SessionKey);
             if (isInteractive)
-            {
-                AnsiConsole.WriteLine();
-                AnsiConsole.MarkupLine($"[bold blue][[BG]][/] Sub-agent finished: {Markup.Escape(announcement.FormatMessage())}");
-                AnsiConsole.Markup("\n[bold dodgerblue1]>[/] ");
-            }
+                ConsoleGate.Write(() =>
+                {
+                    AnsiConsole.WriteLine();
+                    AnsiConsole.MarkupLine($"[bold blue][[BG]][/] Sub-agent finished: {Markup.Escape(announcement.FormatMessage())}");
+                });
         });
 
         // Background sub-agent result callback
         _subAgentManager.RegisterResultCallback(async (task, result) =>
         {
             if (isInteractive)
-                AnsiConsole.MarkupLine($"\n[bold blue][[BG]][/] Sub-agent [dim]{Markup.Escape(task.SessionKey)}[/] finished — status: [bold]{Markup.Escape(result.Status.ToString())}[/]");
+                ConsoleGate.Write(() => AnsiConsole.MarkupLine(
+                    $"\n[bold blue][[BG]][/] Sub-agent [dim]{Markup.Escape(task.SessionKey)}[/] finished — status: [bold]{Markup.Escape(result.Status.ToString())}[/]"));
             else
                 _logger.LogInformation("Background sub-agent {Session} finished with status {Status}.", task.SessionKey, result.Status);
 

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using AgentFox.Plugins;
 using Microsoft.Extensions.Configuration;
@@ -1596,9 +1597,11 @@ public sealed class AhkBroker : IAsyncDisposable
             (var finalPrice, priceAdjustment) = await ResolveLimitPriceAsync(requestedPrice.Value, "buy");
             submittedPrice = finalPrice;
 
-            var price = finalPrice.ToString("F2");
-            await FillFieldAsync("#buyprice",      price);
-            await FillFieldAsync("#buylimitprice", price);
+            // #buylimitprice is DISABLED for every order type except Stop Loss (the portal's
+            // order-type handler owns that), so writing to it on an ordinary limit order targets a
+            // disabled input: the value never sticks and FillFieldAsync spends its verify-and-refill
+            // retry for nothing. Only #buyprice matters here.
+            await FillFieldAsync("#buyprice", finalPrice.ToString("F2"));
         }
 
         await FillFieldAsync("#buyPIN", cfg.TradingPin);
@@ -1608,7 +1611,9 @@ public sealed class AhkBroker : IAsyncDisposable
         await ClickSubmitAsync("buy");
         var confirmed = await ConfirmOrderAsync("Buy");
 
-        var outcome = await ReadOrderOutcomeAsync(cfg.OrderConfirmTimeoutMs, confirmed);
+        var popup   = await ReadOrderOutcomeAsync(cfg.OrderConfirmTimeoutMs, confirmed);
+        // The popup is a hint; the account's own order book is the evidence.
+        var outcome = await ConfirmAgainstBookAsync(signal, popup);
         var after   = await ScreenshotAsync("post_buy");
 
         return new OrderResult
@@ -1630,9 +1635,11 @@ public sealed class AhkBroker : IAsyncDisposable
 
     private async Task<OrderResult> PlaceSellAsync(TradingSignal signal)
     {
-        var cfg     = _config.Current;
-        var qty     = signal.Quantity ?? cfg.DefaultQty;
-        var isLimit = !signal.OrderType.Equals("MARKET", StringComparison.OrdinalIgnoreCase);
+        var cfg      = _config.Current;
+        var qty      = signal.Quantity ?? cfg.DefaultQty;
+        var isStop   = signal.OrderType.Equals("STOPLOSS", StringComparison.OrdinalIgnoreCase);
+        var isMarket = signal.OrderType.Equals("MARKET", StringComparison.OrdinalIgnoreCase);
+        var isLimit  = !isMarket;
 
         _logger.LogInformation("[AhkBroker] SELL {Symbol} x{Qty} @ {Price} ({Type})",
             signal.Symbol, qty, signal.EntryPrice, signal.OrderType);
@@ -1641,8 +1648,16 @@ public sealed class AhkBroker : IAsyncDisposable
         // DOM — open it first so the fields and the SELL button are actually interactable.
         await OpenOrderDialogAsync("sell");
 
-        // Set order type explicitly so a stale "Market"/"Limit" from a prior order can't misroute this one.
-        await SelectByVisibleTextAsync("#sellordertype", isLimit ? "Limit" : "Market");
+        // Set order type explicitly so a stale type from a prior order can't misroute this one. The
+        // portal's option LABELS are what SelectByVisibleText matches ("Stop Loss" carries a space,
+        // while the underlying option value is "StopLoss"); selecting it is also what ENABLES
+        // #selllimitprice — see the readiness wait below.
+        await SelectByVisibleTextAsync("#sellordertype", isStop ? "Stop Loss" : isMarket ? "Market" : "Limit");
+
+        // The trade type is NOT reset when the dialog is opened from the toolbar (only the portal's own
+        // SellOrder() resets it), so a stale "Short Sell" from a previous dialog would otherwise ride
+        // along and turn a protective exit into a short.
+        await SelectByVisibleTextAsync("#selltradetype", "SEL");
 
         await FillFieldAsync("#sellsymbol", signal.Symbol);
         await ResolveSymbolAsync("sell");
@@ -1657,9 +1672,29 @@ public sealed class AhkBroker : IAsyncDisposable
             (var finalPrice, priceAdjustment) = await ResolveLimitPriceAsync(requestedPrice.Value, "sell");
             submittedPrice = finalPrice;
 
-            var price = finalPrice.ToString("F2");
-            await FillFieldAsync("#sellprice",      price);
-            await FillFieldAsync("#selllimitprice", price);
+            // #sellprice is the TRIGGER for a stop order and the limit for an ordinary one; the portal
+            // reads it as whichever the selected type implies.
+            await FillFieldAsync("#sellprice", finalPrice.ToString("F2"));
+
+            if (isStop)
+            {
+                // Only a Stop Loss order enables #selllimitprice — writing to it for any other type
+                // targets a DISABLED input, where the value silently fails to stick and FillFieldAsync
+                // then burns its verify-and-refill retry. Wait for the enable rather than assuming the
+                // change handler has run.
+                await WaitForLimitPriceEnabledAsync("sell");
+
+                // A stop limit placed exactly AT the trigger frequently misses the fast move that
+                // triggered it, so the limit sits a slippage allowance BELOW it for a sell.
+                var limit = signal.LimitPrice
+                    ?? decimal.Round(finalPrice * (1m - Math.Clamp(cfg.StopLimitSlippagePercent, 0m, 20m) / 100m), 2);
+                (limit, _) = await ResolveLimitPriceAsync(limit, "sell");
+
+                await FillFieldAsync("#selllimitprice", limit.ToString("F2"));
+                _logger.LogInformation(
+                    "[AhkBroker] SELL {Symbol} STOP trigger {Trigger} → limit {Limit}.",
+                    signal.Symbol, finalPrice, limit);
+            }
         }
 
         await FillFieldAsync("#sellPIN", cfg.TradingPin);
@@ -1669,7 +1704,8 @@ public sealed class AhkBroker : IAsyncDisposable
         await ClickSubmitAsync("sell");
         var confirmed = await ConfirmOrderAsync("Sell");
 
-        var outcome = await ReadOrderOutcomeAsync(cfg.OrderConfirmTimeoutMs, confirmed);
+        var popup   = await ReadOrderOutcomeAsync(cfg.OrderConfirmTimeoutMs, confirmed);
+        var outcome = await ConfirmAgainstBookAsync(signal, popup);
         var after   = await ScreenshotAsync("post_sell");
 
         return new OrderResult
@@ -1742,24 +1778,258 @@ public sealed class AhkBroker : IAsyncDisposable
         var deadline = DateTime.UtcNow.AddMilliseconds(timeout);
         while (true)
         {
-            var raw = await _page.EvaluateFunctionAsync<string>(
-                "(sel) => { const e = document.querySelector(sel); return e ? (e.value || '') : ''; }",
-                priceField) ?? "";
-
-            var cleaned = Regex.Replace(raw, @"[^0-9.]", "");
-            if (decimal.TryParse(cleaned, NumberStyles.Any, CultureInfo.InvariantCulture, out var price) && price > 0m)
-                return price;
+            // The authoritative signal that the portal accepted the symbol is the PRICE BAND, not the
+            // price field: entering a symbol populates the upperCap/lowerCap globals (from the
+            // preloaded objUpperLower table) even when no price is auto-filled. On the SELL path the
+            // price field is never populated at all — only the portal's own SellOrder() sets it, and
+            // that runs when opening from a market-watch row rather than the toolbar we click — so
+            // waiting on the price alone burned this entire timeout on every sell.
+            var band = await ReadPriceBandAsync();
+            if (band is { Upper: > 0m })
+            {
+                var raw = await _page.EvaluateFunctionAsync<string>(
+                    "(sel) => { const e = document.querySelector(sel); return e ? (e.value || '') : ''; }",
+                    priceField) ?? "";
+                var cleaned = Regex.Replace(raw, @"[^0-9.]", "");
+                return decimal.TryParse(cleaned, NumberStyles.Any, CultureInfo.InvariantCulture, out var price)
+                    && price > 0m ? price : null;
+            }
 
             if (DateTime.UtcNow >= deadline) break;
             await Task.Delay(150);
         }
 
-        // Not fatal: a market order has no price to populate, and an explicit limit price is typed
-        // below regardless. Logged because it is also the signature of an unresolved symbol.
+        // Not fatal on its own, but it is the signature of an unresolved symbol — and the portal's own
+        // submit handler refuses silently when the band is missing, so this is worth shouting about.
         _logger.LogWarning(
-            "[AhkBroker] {Field} did not populate within {Timeout}ms after symbol entry — the portal may not have resolved the symbol.",
-            priceField, timeout);
+            "[AhkBroker] No price band appeared within {Timeout}ms after entering the symbol. The portal "
+            + "may not have resolved it; submission would be rejected client-side without an error.",
+            timeout);
         return null;
+    }
+
+    /// <summary>
+    /// Reconciles the popup's verdict against the account's order book and returns the outcome we are
+    /// actually willing to record.
+    ///
+    /// <para>
+    /// The book wins in both directions. Found in the book ⇒ the order exists, whatever the popup said,
+    /// and we adopt the exchange's order number. Absent from the book after a successful-looking
+    /// submission ⇒ NOT success: the portal is known to answer HTTP 200 with an empty body and a green
+    /// alert while placing nothing. A book we could not read at all leaves the popup's verdict alone
+    /// but downgrades a claimed success to unconfirmed, because "we could not check" and "it is there"
+    /// are not the same statement.
+    /// </para>
+    /// </summary>
+    private async Task<OrderOutcome> ConfirmAgainstBookAsync(TradingSignal signal, OrderOutcome popup)
+    {
+        if (!_config.Current.VerifyOrderInBook) return popup;
+
+        var match = await VerifyOrderInBookAsync(signal);
+        if (match is not null)
+        {
+            return new OrderOutcome(
+                true,
+                $"Order verified in the {match.Book} log"
+                + (match.OrderNo is not null ? $" (order no {match.OrderNo})" : "")
+                + $". Portal said: {popup.Message}",
+                match.OrderNo ?? popup.OrderId);
+        }
+
+        return new OrderOutcome(
+            false,
+            popup.Success
+                ? "The portal reported success, but the order does NOT appear in the outstanding or "
+                + "activity log. Treating it as NOT placed: this portal returns an empty 200 with a "
+                + $"'success' alert while placing nothing (e.g. outside market hours). Portal said: {popup.Message}"
+                : $"{popup.Message} The order does not appear in the order book either.",
+            popup.OrderId);
+    }
+
+    /// <summary>
+    /// Confirms a submitted order actually exists, by reading the account's own order book rather than
+    /// believing the portal's result popup.
+    ///
+    /// <para>
+    /// <b>Why this exists.</b> Measured against the live portal: an off-hours submission returns
+    /// HTTP 200 with an empty response body and displays a green "success" alert, while placing
+    /// nothing — the order appears in neither the outstanding nor the activity log. The happy path
+    /// returns no order number either. So the popup cannot distinguish "placed" from "silently
+    /// discarded", and the book is the only ground truth.
+    /// </para>
+    ///
+    /// <para>
+    /// Both logs are checked: a resting order shows in the outstanding book, but an order that filled
+    /// immediately never rests, and treating its absence there as "never placed" would be exactly
+    /// backwards. Returns the exchange's order number when found — which is the only place we can get
+    /// one at all.
+    /// </para>
+    /// </summary>
+    private async Task<OrderBookMatch?> VerifyOrderInBookAsync(TradingSignal signal)
+    {
+        var cfg = _config.Current;
+        if (!cfg.VerifyOrderInBook) return null;
+
+        var symbol   = signal.Symbol.Trim().ToUpperInvariant();
+        var deadline = DateTime.UtcNow.AddMilliseconds(Math.Max(1_000, cfg.OrderBookVerifyTimeoutMs));
+
+        while (DateTime.UtcNow < deadline)
+        {
+            foreach (var (tab, panel, book) in new[]
+                     {
+                         (cfg.OutstandingLogTabSelector, cfg.OutstandingLogPanelSelector, "outstanding"),
+                         (cfg.ActivityLogTabSelector,    cfg.ActivityLogPanelSelector,    "activity")
+                     })
+            {
+                try
+                {
+                    var match = await ReadOrderBookAsync(tab, panel, book, symbol);
+                    if (match is not null) return match;
+                }
+                catch (Exception ex)
+                {
+                    // A failure to READ the book must not be reported as a failure to place the order —
+                    // those are opposite conclusions, and guessing between them is how a real position
+                    // becomes invisible.
+                    _logger.LogWarning(ex, "[AhkBroker] Could not read the {Book} log while verifying.", book);
+                }
+            }
+
+            await Task.Delay(500);
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Opens a log tab, refreshes it, and looks for a row for <paramref name="symbol"/>. Row shape was
+    /// taken from the live portal: the outstanding table's columns are
+    /// Trader, Market, Scrip, Price, Remaining, Account, Order No, … and the activity table's are
+    /// Trader, Market, Scrip, Account, Price, Order No, … so the symbol and order number are located
+    /// by HEADER NAME rather than by index, which survives the portal reordering its columns.
+    /// </summary>
+    private async Task<OrderBookMatch?> ReadOrderBookAsync(
+        string tabSelector, string panelSelector, string book, string symbol)
+    {
+        // Open the tab and press its own Refresh, so the grid is current rather than whatever was
+        // rendered when the page loaded.
+        await _page!.EvaluateFunctionAsync(
+            @"(tabSel, panelSel) => {
+                document.querySelector(tabSel)?.click();
+                const panel = document.querySelector(panelSel);
+                const refresh = panel && [...panel.querySelectorAll('button,input[type=button],a')]
+                    .find(b => ((b.textContent || b.value || '').trim().toLowerCase() === 'refresh'));
+                refresh?.click();
+            }", tabSelector, panelSelector);
+
+        // The grids load over AJAX, so wait for the DOM to settle rather than a fixed delay.
+        await WaitForDomSettledAsync(quietMs: 500, timeoutMs: 3_000);
+
+        var json = await _page.EvaluateFunctionAsync<string>(
+            @"(panelSel, symbol) => {
+                const panel = document.querySelector(panelSel);
+                const table = panel && panel.querySelector('table');
+                if (!table) return '';
+                const rows = [...table.querySelectorAll('tr')]
+                    .map(tr => [...tr.querySelectorAll('th,td')].map(c => (c.textContent || '').trim()))
+                    .filter(r => r.length);
+                if (rows.length < 2) return '';
+
+                const header = rows[0].map(h => h.toLowerCase());
+                const col = (...names) => {
+                    for (const n of names) {
+                        const i = header.findIndex(h => h === n);
+                        if (i >= 0) return i;
+                    }
+                    return -1;
+                };
+                const iScrip = col('scrip', 'symbol');
+                const iOrder = col('order no', 'order no.', 'orderno');
+                const iPrice = col('price');
+                if (iScrip < 0) return '';
+
+                for (const r of rows.slice(1)) {
+                    if ((r[iScrip] || '').trim().toUpperCase() !== symbol.toUpperCase()) continue;
+                    return JSON.stringify({
+                        orderNo: iOrder >= 0 ? (r[iOrder] || '') : '',
+                        price:   iPrice >= 0 ? (r[iPrice] || '') : '',
+                        row:     r.join(' | ')
+                    });
+                }
+                return '';
+            }", panelSelector, symbol);
+
+        if (string.IsNullOrWhiteSpace(json)) return null;
+
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        var orderNo = root.TryGetProperty("orderNo", out var o) ? o.GetString() : null;
+
+        _logger.LogInformation(
+            "[AhkBroker] Verified {Symbol} in the {Book} log (order no {OrderNo}).",
+            symbol, book, string.IsNullOrWhiteSpace(orderNo) ? "n/a" : orderNo);
+
+        return new OrderBookMatch(
+            book,
+            string.IsNullOrWhiteSpace(orderNo) ? null : orderNo,
+            root.TryGetProperty("row", out var r) ? r.GetString() ?? "" : "");
+    }
+
+    /// <summary>An order found in the account's own book, and where it was found.</summary>
+    private sealed record OrderBookMatch(string Book, string? OrderNo, string Row);
+
+    /// <summary>
+    /// Reads the portal's tradable price band for the symbol currently entered in the order dialog.
+    ///
+    /// <para>
+    /// This is the same pair the portal's own submit handler gates on: it refuses to send when the
+    /// price falls outside <c>lowerCap..upperCap</c>, and it does so with a modal alert rather than an
+    /// error — a silent no-op that looks like success unless we check first.
+    /// </para>
+    /// </summary>
+    private async Task<(decimal Lower, decimal Upper)?> ReadPriceBandAsync()
+    {
+        try
+        {
+            var raw = await _page!.EvaluateFunctionAsync<string>(
+                "() => `${window.lowerCap ?? 0}|${window.upperCap ?? 0}`");
+            var parts = (raw ?? "").Split('|');
+            if (parts.Length == 2
+                && decimal.TryParse(parts[0], NumberStyles.Any, CultureInfo.InvariantCulture, out var lower)
+                && decimal.TryParse(parts[1], NumberStyles.Any, CultureInfo.InvariantCulture, out var upper))
+                return (lower, upper);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "[AhkBroker] Price band could not be read.");
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Waits for the portal's order-type change handler to enable the stop-limit field. Selecting
+    /// "Stop Loss" is what enables it, so this is a deterministic readiness signal rather than a
+    /// guess at how long the handler takes — which is what makes the flow behave the same on a slow
+    /// machine as on a fast one.
+    /// </summary>
+    private async Task WaitForLimitPriceEnabledAsync(string side)
+    {
+        var selector = side == "sell" ? "#selllimitprice" : "#buylimitprice";
+        var timeout  = Math.Max(1_000, _config.Current.DialogOpenTimeoutMs);
+        var deadline = DateTime.UtcNow.AddMilliseconds(timeout);
+
+        while (DateTime.UtcNow < deadline)
+        {
+            var enabled = await _page!.EvaluateFunctionAsync<bool>(
+                "(sel) => { const e = document.querySelector(sel); return !!e && !e.disabled; }", selector);
+            if (enabled) return;
+            await Task.Delay(100);
+        }
+
+        throw new InvalidOperationException(
+            $"{selector} never became editable after selecting the Stop Loss order type. The portal "
+            + "enables it from its order-type change handler, so this means the type did not actually "
+            + "change — submitting now would send an ordinary order with no stop.");
     }
 
     /// <summary>

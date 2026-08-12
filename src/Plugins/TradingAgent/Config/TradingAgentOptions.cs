@@ -146,6 +146,237 @@ public class TradingAgentOptions
     /// thresholds that turn a candle series into a buy-at-support or sell-at-resistance setup.
     /// </summary>
     public TradingScanOptions Scan { get; set; } = new();
+
+    /// <summary>
+    /// The user-editable monitoring universe. Every value here has a working default, so the watchlist
+    /// needs no configuration to function.
+    /// </summary>
+    public TradingWatchlistOptions Watchlist { get; set; } = new();
+
+    /// <summary>
+    /// Continuous trend/level monitoring of the watchlist. Ready to run as configured — the defaults
+    /// are chosen to alert on real transitions without flooding, and nothing here can place an order.
+    /// </summary>
+    public TradingMonitorOptions Monitor { get; set; } = new();
+
+    /// <summary>Lifecycle of persisted trade proposals — the signal inbox.</summary>
+    public TradingProposalOptions Proposals { get; set; } = new();
+
+    /// <summary>
+    /// When an order needs a human confirmation, and when it may be pre-authorised. Defaults to
+    /// <c>Always</c>, so nothing changes for an existing install until this is deliberately relaxed.
+    /// </summary>
+    public TradingApprovalOptions Approval { get; set; } = new();
+}
+
+/// <summary>
+/// Approval policy for order submission.
+///
+/// <para>
+/// This layer decides only whether a HUMAN CONFIRMATION is required. It can never bypass the risk
+/// engine: the kill switch, <see cref="TradingAgentOptions.AllowedSymbols"/>, the market calendar,
+/// reconciliation health and the value caps apply to a pre-approved order exactly as they do to a
+/// confirmed one. Every auto-redeemed approval records WHICH rule redeemed it, so a bypassed order is
+/// as traceable as one someone clicked.
+/// </para>
+/// </summary>
+public sealed class TradingApprovalOptions
+{
+    /// <summary>
+    /// <c>Always</c> (default) — every order needs a fresh confirmation.
+    /// <c>Auto</c> — orders matching every cap in <see cref="Auto"/> proceed without a prompt;
+    /// anything outside them still prompts.
+    /// <c>Window</c> — prompting is suspended for a bounded, explicitly opened window (see
+    /// <see cref="Window"/>).
+    ///
+    /// <para>
+    /// Note this is only consulted when <see cref="TradingAgentOptions.ExecutionMode"/> is
+    /// <c>ApprovalRequired</c>. <c>BoundedAuto</c> already authorises unattended execution by
+    /// definition, so approval mode does not gate it — the risk engine's limits do.
+    /// </para>
+    ///
+    /// <para>
+    /// The value was originally <c>Armed</c>, which collided badly with an "armed order" (an order
+    /// waiting on a trigger) and led to exactly the question you would expect: does armed mean
+    /// auto-execute? They are orthogonal — a trigger says WHEN, this says WHETHER a human must confirm —
+    /// so the window mode is named for what it is.
+    /// </para>
+    /// </summary>
+    public string Mode { get; set; } = "Always";
+
+    public AutoApprovalOptions Auto { get; set; } = new();
+
+    /// <summary>The time-boxed window used by <c>Window</c> mode.</summary>
+    public ApprovalWindowOptions Window { get; set; } = new();
+}
+
+/// <summary>Caps that define a pre-approved order. ALL of them must hold, or the order still prompts.</summary>
+public sealed class AutoApprovalOptions
+{
+    /// <summary>Largest order value that may skip confirmation.</summary>
+    public decimal MaxOrderValuePkr { get; set; } = 25_000m;
+
+    /// <summary>Cap on auto-approved orders per session, so a bad day cannot compound silently.</summary>
+    public int MaxOrdersPerSession { get; set; } = 5;
+
+    /// <summary>
+    /// Sides eligible for auto-approval. Includes BUY as well as SELL by operator decision — worth
+    /// knowing that an auto-approved entry OPENS risk while an auto-approved exit only closes it, so
+    /// <see cref="MaxOrderValuePkr"/> and <see cref="MaxOrdersPerSession"/> are the real guardrails
+    /// here rather than the side filter. Narrow to ["SELL"] for exits-only.
+    /// </summary>
+    public List<string> Sides { get; set; } = ["BUY", "SELL"];
+
+    /// <summary>Symbols eligible; empty means any TRADABLE symbol (AllowedSymbols still applies).</summary>
+    public List<string> Symbols { get; set; } = [];
+
+    /// <summary>
+    /// Only auto-approve an order originating from an alert of at least this severity. Blank allows
+    /// ad-hoc orders too. Requiring an alert means a pre-approved order always has a recorded,
+    /// deterministic reason behind it.
+    /// </summary>
+    public string MinAlertSeverity { get; set; } = "High";
+
+    /// <summary>Never auto-approve while the market is closed.</summary>
+    public bool RequireMarketOpen { get; set; } = true;
+}
+
+/// <summary>A sudo-style window during which confirmation is not requested.</summary>
+public sealed class ApprovalWindowOptions
+{
+    /// <summary>Minutes granted when no explicit duration is asked for.</summary>
+    public int DefaultMinutes { get; set; } = 30;
+
+    /// <summary>Upper bound on any single arming request.</summary>
+    public int MaxMinutes { get; set; } = 120;
+
+    /// <summary>
+    /// Disarm as soon as the market closes, on top of the window expiring. Combined with the automatic
+    /// disarm on kill-switch activation and on restart, an armed window cannot outlive the session it
+    /// was granted for.
+    /// </summary>
+    public bool DisarmAtMarketClose { get; set; } = true;
+}
+
+/// <summary>
+/// Ageing rules for the proposal queue. A proposal is a plan priced at a moment; these settle how long
+/// that plan stays actionable, so the queue cannot grow without bound and cannot offer a stale price as
+/// though it were current.
+/// </summary>
+public sealed class TradingProposalOptions
+{
+    /// <summary>
+    /// Hours a proposal stays actionable before it is expired. Default 24 — a tip parsed overnight is
+    /// reasonable to act on in the morning, but not days later.
+    /// </summary>
+    public int TtlHours { get; set; } = 24;
+
+    /// <summary>
+    /// Expire a proposal once the live price has moved more than this percent from its stated entry.
+    /// Default 3. A stale price is not a tradable plan, and offering one invites acting on a level that
+    /// no longer exists. Set 0 to disable drift-based expiry and rely on the TTL alone.
+    /// </summary>
+    public decimal InvalidateOnDriftPercent { get; set; } = 3m;
+
+    /// <summary>
+    /// Days a TERMINAL proposal is retained before pruning. Open proposals are never pruned. Default 90.
+    /// </summary>
+    public int RetentionDays { get; set; } = 90;
+}
+
+/// <summary>
+/// Settings for the background watchlist monitor. It only ever raises alerts: execution stays behind
+/// <see cref="TradingAgentOptions.ExecutionMode"/>, the risk engine, and the kill switch.
+/// </summary>
+public sealed class TradingMonitorOptions
+{
+    /// <summary>Run the monitor at all. On by default; the watchlist is not much use unwatched.</summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>
+    /// Seconds between passes while the market is open (clamped 30–3600). A pass costs ONE market-wide
+    /// request regardless of how many symbols are watched, so 120 s is cheap; the limit on going
+    /// faster is the portal's patience, not ours.
+    /// </summary>
+    public int IntervalSeconds { get; set; } = 120;
+
+    /// <summary>
+    /// Consecutive passes a condition must hold before it becomes an alert. 1 fires immediately and
+    /// will flicker when price sits on a level; 2 is the smallest value that filters that.
+    /// </summary>
+    public int ConfirmPasses { get; set; } = 2;
+
+    /// <summary>
+    /// How far past a level a close must be to count as breaking it, in percent. A wick through a
+    /// level is noise, and reporting it as a break is how an alert feed loses its reader.
+    /// </summary>
+    public decimal BreakBufferPercent { get; set; } = 0.5m;
+
+    /// <summary>
+    /// Volume (as a multiple of the 30-bar average) required before a break is called confirmed. A
+    /// break on thin volume is frequently retraced. Set 0 to accept any volume.
+    /// </summary>
+    public decimal VolumeConfirmRatio { get; set; } = 1.3m;
+
+    /// <summary>
+    /// Minutes before the same symbol + kind + level may alert again. 0 means "the rest of the
+    /// session", which is the usual intent: one situation, one alert.
+    /// </summary>
+    public int CooldownMinutes { get; set; } = 0;
+
+    /// <summary>
+    /// Upper bound on alerts raised in a single pass. A circuit breaker for a market-wide move, where
+    /// every symbol would otherwise fire at once; the excess is logged rather than silently dropped.
+    /// </summary>
+    public int MaxAlertsPerPass { get; set; } = 25;
+
+    /// <summary>
+    /// Run one settle pass after the close, on top of the in-session cadence, so the day's final bars
+    /// are analyzed once they are settled rather than only mid-session.
+    /// </summary>
+    public bool RunAfterClose { get; set; } = true;
+
+    /// <summary>
+    /// Days of alert history retained. Older rows are pruned so the table has a ceiling; the ledger's
+    /// own audit trail is unaffected.
+    /// </summary>
+    public int RetentionDays { get; set; } = 90;
+}
+
+/// <summary>
+/// Settings for the editable watchlist — what is WATCHED. Nothing here can widen what may be TRADED:
+/// that stays <see cref="TradingAgentOptions.AllowedSymbols"/>, which the risk engine reads directly.
+/// </summary>
+public sealed class TradingWatchlistOptions
+{
+    /// <summary>
+    /// Prefill the watchlist from <see cref="TradingAgentOptions.AllowedSymbols"/> the first time it is
+    /// used, so a new install starts with the configured universe rather than an empty page. Applies
+    /// once; afterwards the watchlist is the user's, and a changed allow-list is reported rather than
+    /// merged in. Set false to start empty.
+    /// </summary>
+    public bool SeedFromAllowedSymbols { get; set; } = true;
+
+    /// <summary>
+    /// Upper bound on watched symbols. The monitor's per-pass cost is one market-wide request
+    /// regardless of count, but each symbol still costs analysis time and archive rows.
+    /// </summary>
+    public int MaxSymbols { get; set; } = 150;
+
+    /// <summary>
+    /// Archive daily history for watchlist symbols too, not just the tradable ones. On by default
+    /// because weekly support/resistance needs roughly two years of daily bars, and a watched symbol
+    /// without them reports unknown timeframe alignment. Costs no additional portal requests — a
+    /// session fetch already covers every symbol in the market — only database rows.
+    /// </summary>
+    public bool ArchiveWatchlistSymbols { get; set; } = true;
+
+    /// <summary>
+    /// Check an added symbol against the live PSX market watch before accepting it, so a typo is
+    /// rejected at the point of entry rather than becoming a silently empty chart. When the portal is
+    /// unreachable the symbol is accepted with a warning — an outage should not block editing.
+    /// </summary>
+    public bool ValidateAgainstMarketWatch { get; set; } = true;
 }
 
 /// <summary>
@@ -185,6 +416,14 @@ public sealed class TradingScanOptions
     /// Weekly bars requested when computing higher-timeframe structure. 104 ≈ two years.
     /// </summary>
     public int WeeklyLookbackWeeks { get; set; } = 104;
+
+    /// <summary>
+    /// PKT time of day after which the current session's candles are treated as settled and may be
+    /// archived. Default 17:30 — an hour after the latest scheduled close (Friday's 16:30) — so the
+    /// exchange has published its final table. Archiving earlier stores a partial bar that the
+    /// coverage marker would stop us from ever correcting.
+    /// </summary>
+    public string ArchiveSettleAfterPkt { get; set; } = "17:30";
 
     /// <summary>
     /// How close a weekly level must sit to a daily level to count as confirming it. Wider means more
