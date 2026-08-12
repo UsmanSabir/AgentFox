@@ -178,11 +178,21 @@ public sealed class AhkSlowPortalOrderTests
               if (k in D) D[k] = parseInt(v, 10);
             });
             window.__submitClicks = 0;
+            // The real portal exposes the tradable band as globals, and the broker now waits for them
+            // instead of for a price field that never populates on the sell path.
+            window.lowerCap = 40.00;
+            window.upperCap = 60.00;
 
             // 1. The toolbar renders seconds after the page reports "loaded".
             setTimeout(function () {
               document.getElementById('app').innerHTML =
-                '<button id="buyorder">Buy Order</button> <button id="sellorder">Sell Order</button>';
+                '<button id="buyorder">Buy Order</button> <button id="sellorder">Sell Order</button>' +
+                // The account's own order book: the ONLY place that distinguishes a placed order from
+                // one the portal merely claimed to place. Column names mirror the live portal.
+                '<a href="#out_log">Outstanding Log</a>' +
+                '<div id="out_log"><button>Refresh</button><table><tr>' +
+                '<th>Trader</th><th>Market</th><th>Scrip</th><th>Price</th><th>Remaining</th>' +
+                '<th>Account</th><th>Order No</th><th>Type</th></tr></table></div>';
 
               // 2. ...and its click handler binds later still. Clicks before this are swallowed.
               setTimeout(function () {
@@ -254,7 +264,18 @@ public sealed class AhkSlowPortalOrderTests
               });
             }
 
+            function bookOrder() {
+              var t = document.querySelector('#out_log table');
+              if (!t) return;
+              var row = t.insertRow(-1);
+              ['t1', 'REG', window.__order.symbol, window.__order.price, window.__order.volume,
+               'CC00000', '998877', 'Limit'].forEach(function (v) {
+                row.insertCell(-1).textContent = v;
+              });
+            }
+
             function showResultPopup() {
+              bookOrder();
               var r = document.createElement('div');
               r.className = 'swal-overlay';
               r.innerHTML =

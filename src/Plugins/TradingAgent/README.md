@@ -153,6 +153,46 @@ Notes:
 
 ---
 
+## Proposals — the signal inbox
+
+A proposal is what the specialist produced from a signal that arrived **while nobody was watching**
+(a WhatsApp tip overnight). It has a lifecycle, which is what makes it a work queue rather than the
+write-only log it used to be:
+
+```
+proposed ──(execute)──► executing ──► executed        (execution_id recorded)
+    │                         └─────► proposed        (refused by a gate — stays actionable)
+    ├──(reject)───────► rejected     (reason recorded)
+    └──(TTL / drift)──► expired      (reason recorded)
+```
+
+| Verb | Route | Role |
+| --- | --- | --- |
+| GET | `/api/trading/proposals?openOnly=true` — the queue (default) | ManagementViewer |
+| POST | `/api/trading/proposals/{id}/execute` | **TradingTrader** |
+| POST | `/api/trading/proposals/{id}/reject` — `{ reason }` | TradingAnalyst |
+
+Details that matter:
+
+- **Execute adds no execution path.** It parses the proposal's orders and hands them to
+  `TradingManager.ExecuteGroupsAsync`, so execution mode, the risk engine, the market calendar, the
+  kill switch, idempotency and audit events all still apply. Each order goes in its own group, since
+  they are independent and one failing must not skip the rest.
+- **A double click cannot execute twice.** Claiming a proposal is a compare-and-set on its current
+  status (`WHERE status = @expected`); the loser gets a 409 rather than a second live order.
+- **A refusal returns the proposal to `proposed`**, not to a terminal state — the reason is usually
+  transient (market closed, reconciliation stale, approval required), so a failed attempt must not
+  burn the proposal.
+- **Ageing keeps the queue honest.** The monitor's post-close pass expires anything past
+  `Proposals.TtlHours` (24) or whose stated entry has drifted more than
+  `Proposals.InvalidateOnDriftPercent` (3 %) from the live price — a stale price is not a tradable
+  plan. Expiry is a state change *with a reason*, never a delete; only `Proposals.RetentionDays` (90)
+  removes rows, and only terminal ones.
+- The UI shows **open proposals only** by default, with a "show resolved" toggle. An empty inbox is
+  the normal state, and it says so.
+
+---
+
 ## Watchlist vs AllowedSymbols — two different universes
 
 These are deliberately separate, and the distinction is the difference between "what am I watching"
@@ -407,6 +447,12 @@ disabled; this tool uses the explicit AgentFox provider bridge instead.
 | `Monitor.MaxAlertsPerPass` | `25` | Circuit breaker for a market-wide move. Excess is logged, never silently dropped. |
 | `Monitor.RunAfterClose` | `true` | One extra pass after the close, on the day's settled bars. |
 | `Monitor.RetentionDays` | `90` | Alert history retained; older rows are pruned so the table has a ceiling. |
+| `Proposals.TtlHours` | `24` | Hours a proposal stays actionable before it is expired. |
+| `Proposals.InvalidateOnDriftPercent` | `3` | Expire once the live price has moved this far from the stated entry. 0 disables drift expiry. |
+| `Proposals.RetentionDays` | `90` | Days a *terminal* proposal is kept. Open proposals are never pruned. |
+| `Ahk.VerifyOrderInBook` | `true` | Confirm a submitted order exists by reading the order book instead of trusting the result popup. |
+| `Ahk.OrderBookVerifyTimeoutMs` | `8000` | How long to wait for a submitted order to appear in the book. |
+| `Ahk.StopLimitSlippagePercent` | `1.0` | How far below the trigger a stop-loss SELL's limit is placed. 0 places it at the trigger. |
 | `Scan.MarketDayFetchConcurrency` | `4` | Concurrent portal requests while warming a cold candle cache (1–8). |
 | `Scan.MaxCachedMarketDays` | `120` | Settled sessions kept in the in-memory candle cache. |
 | `Scan.BackfillYears` | `2` | Years of daily OHLC the background worker archives for `AllowedSymbols`. Weekly levels need ~2 years. `0` disables it. |
@@ -594,6 +640,40 @@ sock.ev.on('messages.upsert', async ({ messages }) => {
   }
 });
 ```
+
+---
+
+## Stop-loss orders, and proving an order exists
+
+The portal has a **native Stop Loss** order type, which is preferable to a locally-monitored stop
+because it rests at the broker and survives this process being down. Its shape, confirmed by direct
+inspection: `#sellprice` is the **trigger**, `#selllimitprice` is the **limit**, and the limit field is
+enabled *only* while the Stop Loss type is selected — which the adapter uses as a deterministic
+readiness signal rather than guessing at a delay.
+
+Send `OrderType = "STOPLOSS"` with `EntryPrice` as the trigger. `LimitPrice` is optional: left null it
+is derived as `trigger × (1 − Ahk.StopLimitSlippagePercent)` (default 1 %), because a stop limit set
+exactly *at* the trigger frequently misses the fast move that triggered it. The risk engine enforces
+the direction — a SELL stop's limit must be at or below its trigger, a BUY stop's at or above — since
+a stop that cannot fill is worse than no stop: it looks like protection.
+
+### Why success is verified against the order book
+
+Measured against the live portal: an off-hours submission returns **HTTP 200 with an empty body** and
+shows a green **"success"** alert while placing **nothing** — the order appears in neither the
+outstanding nor the activity log, and the happy path returns no order number either. A result popup
+therefore cannot distinguish "placed" from "silently discarded".
+
+So `Ahk.VerifyOrderInBook` (default **on**) re-reads the account's own book after every submission:
+
+- **Found** → the order exists whatever the popup said, and the exchange's order number is adopted
+  (this is the only place we can obtain one).
+- **Absent** → **not** success, even if the popup claimed it. Recorded as not placed.
+- **Unreadable** → the popup's verdict stands but a claimed success is downgraded to unconfirmed,
+  because "we could not check" and "it is there" are different statements.
+
+Both logs are consulted: a resting order shows in the outstanding book, but one that filled
+immediately never rests, and treating its absence there as "never placed" would be exactly backwards.
 
 ---
 

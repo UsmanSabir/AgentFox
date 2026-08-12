@@ -334,5 +334,15 @@ public sealed class WatchlistUniverseTests
             throw new NotSupportedException();
         public Task<int> PruneAlertsAsync(DateTime before, CancellationToken ct = default) =>
             throw new NotSupportedException();
+        public Task<TradeProposalRecord?> GetProposalAsync(string id, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<bool> TrySetProposalStateAsync(
+            string id, string expected, string next, string? reason = null,
+            string? executionId = null, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<IReadOnlyList<TradeProposalRecord>> GetOpenProposalsAsync(CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<int> PruneProposalsAsync(DateTime before, CancellationToken ct = default) =>
+            throw new NotSupportedException();
     }
 }

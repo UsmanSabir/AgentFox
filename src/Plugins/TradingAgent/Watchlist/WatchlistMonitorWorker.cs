@@ -36,6 +36,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService
 
     private readonly MonitoredUniverse _universe;
     private readonly CandleHistoryProvider _history;
+    private readonly PsxDataClient _dataClient;
     private readonly ITradingRepository _repository;
     private readonly IMarketCalendar _calendar;
     private readonly AlertBroadcaster _broadcaster;
@@ -48,6 +49,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService
     public WatchlistMonitorWorker(
         MonitoredUniverse universe,
         CandleHistoryProvider history,
+        PsxDataClient dataClient,
         ITradingRepository repository,
         IMarketCalendar calendar,
         AlertBroadcaster broadcaster,
@@ -56,6 +58,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService
     {
         _universe = universe;
         _history = history;
+        _dataClient = dataClient;
         _repository = repository;
         _calendar = calendar;
         _broadcaster = broadcaster;
@@ -119,6 +122,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService
                     // ran against a forming candle.
                     settledFor = today;
                     await RunPassAsync("post-close", stoppingToken);
+                    await SweepProposalsAsync(stoppingToken);
                     await PruneAsync(stoppingToken);
                 }
                 else
@@ -274,6 +278,125 @@ public sealed class WatchlistMonitorWorker : BackgroundService
         });
 
         return Status;
+    }
+
+    /// <summary>
+    /// Ages the proposal queue: expires anything past its TTL or whose stated entry has drifted too far
+    /// from the live price, then prunes terminal rows past the retention window.
+    ///
+    /// <para>
+    /// This is what keeps the inbox honest. A proposal is a plan priced at a moment; left alone it
+    /// accumulates forever and eventually offers a level that no longer exists as though it were
+    /// current. Expiry is a state change WITH A REASON rather than a delete, so the audit trail
+    /// survives — only retention actually removes rows, and only terminal ones.
+    /// </para>
+    /// </summary>
+    private async Task SweepProposalsAsync(CancellationToken ct)
+    {
+        var options = _options.Value.Proposals;
+
+        try
+        {
+            var open = await _repository.GetOpenProposalsAsync(ct);
+            if (open.Count == 0) return;
+
+            var ttlCutoff = DateTime.UtcNow.AddHours(-Math.Max(1, options.TtlHours));
+            var drift = options.InvalidateOnDriftPercent;
+
+            // One market snapshot for the whole sweep, not one per proposal.
+            IReadOnlyDictionary<string, PsxLiveQuote> live = new Dictionary<string, PsxLiveQuote>();
+            if (drift > 0)
+            {
+                try { live = await _dataClient.GetMarketWatchAsync(ct); }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // Without prices only the TTL rule can be applied — which is the safe subset, so
+                    // carry on rather than skipping the sweep entirely.
+                    _logger.LogWarning(ex,
+                        "[Proposals] Live prices unavailable; expiring on age only this pass.");
+                }
+            }
+
+            var expired = 0;
+            foreach (var proposal in open)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                string? reason = null;
+                if (proposal.CreatedUtc < ttlCutoff)
+                    reason = $"Not acted on within {options.TtlHours}h of being raised.";
+                else if (drift > 0 && DriftedTooFar(proposal, live, drift) is { } drifted)
+                    reason = drifted;
+
+                if (reason is null) continue;
+
+                // 'executing' is deliberately not swept: something is mid-flight against the broker and
+                // expiring it underneath that would race a live submission.
+                if (proposal.Status == "executing") continue;
+
+                if (await _repository.TrySetProposalStateAsync(
+                        proposal.ProposalId, proposal.Status, "expired", reason, ct: ct))
+                    expired++;
+            }
+
+            if (expired > 0)
+                _logger.LogInformation("[Proposals] Expired {Count} stale proposal(s).", expired);
+
+            if (options.RetentionDays > 0)
+            {
+                var pruned = await _repository.PruneProposalsAsync(
+                    DateTime.UtcNow.AddDays(-options.RetentionDays), ct);
+                if (pruned > 0)
+                    _logger.LogInformation(
+                        "[Proposals] Pruned {Count} resolved proposal(s) older than {Days} days.",
+                        pruned, options.RetentionDays);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "[Proposals] Sweep failed; retrying after the next close.");
+        }
+    }
+
+    /// <summary>
+    /// Returns a reason when the proposal's stated entry has moved more than
+    /// <paramref name="maxDriftPercent"/> from the live price, or null when it is still current.
+    /// </summary>
+    private static string? DriftedTooFar(
+        TradeProposalRecord proposal,
+        IReadOnlyDictionary<string, PsxLiveQuote> live,
+        decimal maxDriftPercent)
+    {
+        if (!proposal.Proposal.TryGetProperty("orders", out var orders)
+            || orders.ValueKind != System.Text.Json.JsonValueKind.Array)
+            return null;
+
+        foreach (var order in orders.EnumerateArray())
+        {
+            if (order.ValueKind != System.Text.Json.JsonValueKind.Object) continue;
+            if (!order.TryGetProperty("symbol", out var s) || s.ValueKind != System.Text.Json.JsonValueKind.String)
+                continue;
+
+            decimal? entry = null;
+            foreach (var key in new[] { "entry_price", "entryPrice", "price" })
+            {
+                if (order.TryGetProperty(key, out var p)
+                    && p.ValueKind == System.Text.Json.JsonValueKind.Number
+                    && p.TryGetDecimal(out var parsed)) { entry = parsed; break; }
+            }
+
+            if (entry is not > 0) continue;
+            if (!live.TryGetValue(s.GetString() ?? "", out var quote)) continue;
+            if (quote.Current is not > 0) continue;
+
+            var moved = Math.Abs(quote.Current.Value - entry.Value) / entry.Value * 100m;
+            if (moved > maxDriftPercent)
+                return $"Stated entry {entry} for {s.GetString()} has drifted "
+                     + $"{Math.Round(moved, 2)}% from the live price {quote.Current} "
+                     + $"(limit {maxDriftPercent}%); the plan is no longer current.";
+        }
+
+        return null;
     }
 
     /// <summary>Drops alert history past the retention window so the table has a ceiling.</summary>

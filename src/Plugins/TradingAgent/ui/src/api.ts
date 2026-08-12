@@ -127,9 +127,15 @@ export interface CandleArchiveStatus {
   };
 }
 
+/**
+ * A proposal is what the specialist produced from a signal that arrived while nobody was watching —
+ * a WhatsApp tip overnight, typically. It has a lifecycle:
+ * `proposed → executing → executed | rejected | expired`, which is what makes this an inbox rather
+ * than the write-only log it used to be.
+ */
 export interface TradeProposal {
   proposalId: string;
-  status: string;
+  status: 'proposed' | 'executing' | 'executed' | 'rejected' | 'expired' | string;
   proposal: {
     orders?: Array<Record<string, unknown>>;
     source_message?: string;
@@ -138,6 +144,10 @@ export interface TradeProposal {
   policyVersion: string;
   createdUtc: string;
   updatedUtc: string;
+  /** The execution this became, once executed. */
+  executionId?: string | null;
+  /** Why it was rejected or expired. */
+  stateReason?: string | null;
 }
 
 export interface TradingExecution {
@@ -350,7 +360,25 @@ export interface WatchlistResponse {
 
 export const trading = {
   status:         ()            => get<TradingStatus>('/trading/status'),
-  proposals:      (limit = 100) => get<TradeProposal[]>(`/trading/proposals?limit=${limit}`),
+  // Open-only by default: an empty inbox is the normal state, and a list dominated by last month's
+  // resolved proposals is exactly what made this feel like a log rather than a queue.
+  proposals: (openOnly = true, limit = 100) =>
+    get<TradeProposal[]>(`/trading/proposals?openOnly=${openOnly}&limit=${limit}`),
+
+  /** Hands the proposal's orders to the deterministic manager. Adds no new execution path. */
+  executeProposal: (proposalId: string) =>
+    post<{
+      proposalId: string;
+      status: string;
+      accepted: boolean;
+      isReplay: boolean;
+      executionId: string;
+      reason: string;
+    }>(`/trading/proposals/${encodeURIComponent(proposalId)}/execute`),
+
+  rejectProposal: (proposalId: string, reason?: string) =>
+    post<{ proposalId: string; status: string }>(
+      `/trading/proposals/${encodeURIComponent(proposalId)}/reject`, { reason }),
   executions:     (limit = 100) => get<TradingExecution[]>(`/trading/executions?limit=${limit}`),
   events:         (limit = 200) => get<TradingEvent[]>(`/trading/events?limit=${limit}`),
   reconciliation: (limit = 100) => get<ReconciliationRun[]>(`/trading/reconciliation?limit=${limit}`),

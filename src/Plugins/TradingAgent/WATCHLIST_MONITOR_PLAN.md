@@ -732,7 +732,8 @@ running with, so "why didn't it alert" is answerable from the UI rather than by 
 | **2** ✅ | `CandleAnalysisService` extracted (shared with `analyze_candles`), `IndicatorSeries`, `/trading/candles`, `lightweight-charts` pane with S/R overlays, RSI bands and interval switcher | **Done** — chart-driven decisions, drawn from the same levels the agent quotes |
 | **3** ✅ | `AlertDetector` (pure), `WatchlistMonitorWorker`, `watchlist_state` / `watchlist_alerts`, `/alerts` + SSE + `/monitor/status`, alerts panel and row badges | **Done** — continuous monitoring with controlled noise |
 | **4** ✅ | `StockAssessmentService` extracted (shared with `research_stock`), `/assess` + `/alerts/{id}/assess`, verdict card on the alert and the chart | **Done** — on-demand LLM confidence, deterministic numbers unchanged |
-| **5a** | Proposal lifecycle (execute/reject/expire + sweeper + retention) — turns the log into a signal inbox | WhatsApp signals become actionable |
+| **5a** ✅ | Proposal lifecycle (execute/reject/expire, compare-and-set claim, TTL + drift sweeper, retention) and the inbox UI | **Done** — WhatsApp signals are actionable |
+| **5b·1** ✅ | Native stop-loss in the broker, `STOPLOSS` risk validation, order-book verification, three adapter bugs fixed | **Done** — a stop rests at the broker, and "placed" is provable |
 | **5b** | `probe_order_form` discovery → `/orders` + approval modes (`Auto`/`Armed`) + `PendingExitStore` + `armed_exits` trigger evaluation | Actions and stops, all through the risk engine |
 | **6** | `Ahk.CaptureNetwork` → `AhkRestClient` for portfolio reads (browser fallback retained) | Fast holdings, no Chromium in the alert path |
 | **7** | Optional: `ICandleSource`, WhatsApp alert fan-out, chat notifications, runtime-editable `AllowedSymbols` | Redundancy and reach |

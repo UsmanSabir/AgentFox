@@ -21,6 +21,15 @@
   export let expanded = false;
 
   /**
+   * Incremented by the dashboard on its own timer. The parent owns the clock so there is ONE interval
+   * for the page rather than one per component, and so the market-open flag driving it stays fresh.
+   */
+  export let refreshTick = 0;
+
+  /** Whether the market is currently open — a closed market has nothing new to fetch. */
+  export let marketOpen = false;
+
+  /**
    * How much level detail to draw. Six labelled price lines plus the axis chips is more than a small
    * pane can carry legibly, so this trades completeness for readability:
    *   all → the nearest three each side   key → weekly-confirmed only   off → clean price action
@@ -286,13 +295,17 @@
     else markers = createSeriesMarkers(candleSeries, list);
   }
 
-  async function load() {
+  /**
+   * @param keepAssessment true for an auto-refresh of the SAME symbol and interval — the verdict is
+   * still about this chart, and discarding it every minute would make the button useless.
+   */
+  async function load(keepAssessment = false) {
     if (!symbol) { data = null; return; }
     loading = true;
     error = null;
-    // A verdict belongs to the symbol and interval it was produced for; carrying it across would
-    // attach one stock's judgement to another's chart.
-    assessment = null;
+    // A verdict belongs to the symbol and interval it was produced for; carrying it across a change
+    // would attach one stock's judgement to another's chart.
+    if (!keepAssessment) assessment = null;
     try {
       data = await trading.candles(symbol, interval);
       rsiOversold = data.thresholds.rsiOversold;
@@ -318,6 +331,21 @@
   $: if (symbol && symbol !== lastLoaded) {
     lastLoaded = symbol;
     load();
+  }
+
+  /**
+   * Follow the market while it is open.
+   *
+   * Skipped when the tab is hidden (a background tab does not need a live chart, and the request still
+   * costs a portal round-trip), while a load is already in flight, and while the market is closed —
+   * settled candles do not change, so polling them is pure waste.
+   */
+  let lastTick = 0;
+  $: if (refreshTick !== lastTick) {
+    lastTick = refreshTick;
+    if (symbol && marketOpen && !loading && typeof document !== 'undefined' && !document.hidden) {
+      load(true);
+    }
   }
 
   // The container only exists once a symbol is selected, so rendering waits for the element rather

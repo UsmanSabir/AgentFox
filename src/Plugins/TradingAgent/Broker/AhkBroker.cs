@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using AgentFox.Plugins;
 using Microsoft.Extensions.Configuration;
@@ -1610,7 +1611,9 @@ public sealed class AhkBroker : IAsyncDisposable
         await ClickSubmitAsync("buy");
         var confirmed = await ConfirmOrderAsync("Buy");
 
-        var outcome = await ReadOrderOutcomeAsync(cfg.OrderConfirmTimeoutMs, confirmed);
+        var popup   = await ReadOrderOutcomeAsync(cfg.OrderConfirmTimeoutMs, confirmed);
+        // The popup is a hint; the account's own order book is the evidence.
+        var outcome = await ConfirmAgainstBookAsync(signal, popup);
         var after   = await ScreenshotAsync("post_buy");
 
         return new OrderResult
@@ -1701,7 +1704,8 @@ public sealed class AhkBroker : IAsyncDisposable
         await ClickSubmitAsync("sell");
         var confirmed = await ConfirmOrderAsync("Sell");
 
-        var outcome = await ReadOrderOutcomeAsync(cfg.OrderConfirmTimeoutMs, confirmed);
+        var popup   = await ReadOrderOutcomeAsync(cfg.OrderConfirmTimeoutMs, confirmed);
+        var outcome = await ConfirmAgainstBookAsync(signal, popup);
         var after   = await ScreenshotAsync("post_sell");
 
         return new OrderResult
@@ -1803,6 +1807,176 @@ public sealed class AhkBroker : IAsyncDisposable
             timeout);
         return null;
     }
+
+    /// <summary>
+    /// Reconciles the popup's verdict against the account's order book and returns the outcome we are
+    /// actually willing to record.
+    ///
+    /// <para>
+    /// The book wins in both directions. Found in the book ⇒ the order exists, whatever the popup said,
+    /// and we adopt the exchange's order number. Absent from the book after a successful-looking
+    /// submission ⇒ NOT success: the portal is known to answer HTTP 200 with an empty body and a green
+    /// alert while placing nothing. A book we could not read at all leaves the popup's verdict alone
+    /// but downgrades a claimed success to unconfirmed, because "we could not check" and "it is there"
+    /// are not the same statement.
+    /// </para>
+    /// </summary>
+    private async Task<OrderOutcome> ConfirmAgainstBookAsync(TradingSignal signal, OrderOutcome popup)
+    {
+        if (!_config.Current.VerifyOrderInBook) return popup;
+
+        var match = await VerifyOrderInBookAsync(signal);
+        if (match is not null)
+        {
+            return new OrderOutcome(
+                true,
+                $"Order verified in the {match.Book} log"
+                + (match.OrderNo is not null ? $" (order no {match.OrderNo})" : "")
+                + $". Portal said: {popup.Message}",
+                match.OrderNo ?? popup.OrderId);
+        }
+
+        return new OrderOutcome(
+            false,
+            popup.Success
+                ? "The portal reported success, but the order does NOT appear in the outstanding or "
+                + "activity log. Treating it as NOT placed: this portal returns an empty 200 with a "
+                + $"'success' alert while placing nothing (e.g. outside market hours). Portal said: {popup.Message}"
+                : $"{popup.Message} The order does not appear in the order book either.",
+            popup.OrderId);
+    }
+
+    /// <summary>
+    /// Confirms a submitted order actually exists, by reading the account's own order book rather than
+    /// believing the portal's result popup.
+    ///
+    /// <para>
+    /// <b>Why this exists.</b> Measured against the live portal: an off-hours submission returns
+    /// HTTP 200 with an empty response body and displays a green "success" alert, while placing
+    /// nothing — the order appears in neither the outstanding nor the activity log. The happy path
+    /// returns no order number either. So the popup cannot distinguish "placed" from "silently
+    /// discarded", and the book is the only ground truth.
+    /// </para>
+    ///
+    /// <para>
+    /// Both logs are checked: a resting order shows in the outstanding book, but an order that filled
+    /// immediately never rests, and treating its absence there as "never placed" would be exactly
+    /// backwards. Returns the exchange's order number when found — which is the only place we can get
+    /// one at all.
+    /// </para>
+    /// </summary>
+    private async Task<OrderBookMatch?> VerifyOrderInBookAsync(TradingSignal signal)
+    {
+        var cfg = _config.Current;
+        if (!cfg.VerifyOrderInBook) return null;
+
+        var symbol   = signal.Symbol.Trim().ToUpperInvariant();
+        var deadline = DateTime.UtcNow.AddMilliseconds(Math.Max(1_000, cfg.OrderBookVerifyTimeoutMs));
+
+        while (DateTime.UtcNow < deadline)
+        {
+            foreach (var (tab, panel, book) in new[]
+                     {
+                         (cfg.OutstandingLogTabSelector, cfg.OutstandingLogPanelSelector, "outstanding"),
+                         (cfg.ActivityLogTabSelector,    cfg.ActivityLogPanelSelector,    "activity")
+                     })
+            {
+                try
+                {
+                    var match = await ReadOrderBookAsync(tab, panel, book, symbol);
+                    if (match is not null) return match;
+                }
+                catch (Exception ex)
+                {
+                    // A failure to READ the book must not be reported as a failure to place the order —
+                    // those are opposite conclusions, and guessing between them is how a real position
+                    // becomes invisible.
+                    _logger.LogWarning(ex, "[AhkBroker] Could not read the {Book} log while verifying.", book);
+                }
+            }
+
+            await Task.Delay(500);
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Opens a log tab, refreshes it, and looks for a row for <paramref name="symbol"/>. Row shape was
+    /// taken from the live portal: the outstanding table's columns are
+    /// Trader, Market, Scrip, Price, Remaining, Account, Order No, … and the activity table's are
+    /// Trader, Market, Scrip, Account, Price, Order No, … so the symbol and order number are located
+    /// by HEADER NAME rather than by index, which survives the portal reordering its columns.
+    /// </summary>
+    private async Task<OrderBookMatch?> ReadOrderBookAsync(
+        string tabSelector, string panelSelector, string book, string symbol)
+    {
+        // Open the tab and press its own Refresh, so the grid is current rather than whatever was
+        // rendered when the page loaded.
+        await _page!.EvaluateFunctionAsync(
+            @"(tabSel, panelSel) => {
+                document.querySelector(tabSel)?.click();
+                const panel = document.querySelector(panelSel);
+                const refresh = panel && [...panel.querySelectorAll('button,input[type=button],a')]
+                    .find(b => ((b.textContent || b.value || '').trim().toLowerCase() === 'refresh'));
+                refresh?.click();
+            }", tabSelector, panelSelector);
+
+        // The grids load over AJAX, so wait for the DOM to settle rather than a fixed delay.
+        await WaitForDomSettledAsync(quietMs: 500, timeoutMs: 3_000);
+
+        var json = await _page.EvaluateFunctionAsync<string>(
+            @"(panelSel, symbol) => {
+                const panel = document.querySelector(panelSel);
+                const table = panel && panel.querySelector('table');
+                if (!table) return '';
+                const rows = [...table.querySelectorAll('tr')]
+                    .map(tr => [...tr.querySelectorAll('th,td')].map(c => (c.textContent || '').trim()))
+                    .filter(r => r.length);
+                if (rows.length < 2) return '';
+
+                const header = rows[0].map(h => h.toLowerCase());
+                const col = (...names) => {
+                    for (const n of names) {
+                        const i = header.findIndex(h => h === n);
+                        if (i >= 0) return i;
+                    }
+                    return -1;
+                };
+                const iScrip = col('scrip', 'symbol');
+                const iOrder = col('order no', 'order no.', 'orderno');
+                const iPrice = col('price');
+                if (iScrip < 0) return '';
+
+                for (const r of rows.slice(1)) {
+                    if ((r[iScrip] || '').trim().toUpperCase() !== symbol.toUpperCase()) continue;
+                    return JSON.stringify({
+                        orderNo: iOrder >= 0 ? (r[iOrder] || '') : '',
+                        price:   iPrice >= 0 ? (r[iPrice] || '') : '',
+                        row:     r.join(' | ')
+                    });
+                }
+                return '';
+            }", panelSelector, symbol);
+
+        if (string.IsNullOrWhiteSpace(json)) return null;
+
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        var orderNo = root.TryGetProperty("orderNo", out var o) ? o.GetString() : null;
+
+        _logger.LogInformation(
+            "[AhkBroker] Verified {Symbol} in the {Book} log (order no {OrderNo}).",
+            symbol, book, string.IsNullOrWhiteSpace(orderNo) ? "n/a" : orderNo);
+
+        return new OrderBookMatch(
+            book,
+            string.IsNullOrWhiteSpace(orderNo) ? null : orderNo,
+            root.TryGetProperty("row", out var r) ? r.GetString() ?? "" : "");
+    }
+
+    /// <summary>An order found in the account's own book, and where it was found.</summary>
+    private sealed record OrderBookMatch(string Book, string? OrderNo, string Row);
 
     /// <summary>
     /// Reads the portal's tradable price band for the symbol currently entered in the order dialog.

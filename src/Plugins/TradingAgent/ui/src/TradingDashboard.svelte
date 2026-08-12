@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { trading, type TradingStatus, type TradeProposal, type TradingExecution, type TradingEvent, type ReconciliationRun, type CandleArchiveStatus } from './api';
-  import { RefreshCw, ShieldAlert, Activity, FileText, ListChecks, Scale, History, Power, Database, Download } from 'lucide-svelte';
+  import { RefreshCw, ShieldAlert, Activity, FileText, ListChecks, Scale, History, Power, Database, Download, Play, XCircle } from 'lucide-svelte';
   import WatchlistPanel from './WatchlistPanel.svelte';
   import ChartPane from './ChartPane.svelte';
   import AlertsPanel from './AlertsPanel.svelte';
@@ -11,6 +11,59 @@
 
   /** Full-width chart mode, toggled from the chart's own header. */
   let chartExpanded = false;
+
+  /** Proposal inbox: open-only by default, since a decision queue should read as empty when it is. */
+  let showResolvedProposals = false;
+  let proposalBusy: string | null = null;
+
+  async function loadProposals() {
+    try {
+      proposals = await trading.proposals(!showResolvedProposals);
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async function executeProposal(item: TradeProposal) {
+    if (proposalBusy) return;
+    const orders = item.proposal.orders?.length ?? 0;
+    if (!confirm(
+      `Execute this proposal?\n\n` +
+      `${orders} order(s) will be handed to the trading manager. Every safety gate still applies ` +
+      `(execution mode, risk limits, market hours, kill switch), so it may still be refused — but if ` +
+      `they pass, this places REAL orders.`
+    )) return;
+
+    proposalBusy = item.proposalId;
+    error = null;
+    try {
+      const result = await trading.executeProposal(item.proposalId);
+      // A refusal is not a failure of the click: it usually means a gate said no (market closed,
+      // reconciliation stale), and the proposal stays actionable. Say which happened.
+      if (!result.accepted) error = `Not executed: ${result.reason}`;
+      await Promise.all([loadProposals(), load()]);
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      proposalBusy = null;
+    }
+  }
+
+  async function rejectProposal(item: TradeProposal) {
+    if (proposalBusy) return;
+    const reason = prompt('Reject this proposal — why? (recorded on the audit trail)');
+    if (reason === null) return;
+
+    proposalBusy = item.proposalId;
+    try {
+      await trading.rejectProposal(item.proposalId, reason || undefined);
+      await Promise.all([loadProposals(), load()]);
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      proposalBusy = null;
+    }
+  }
 
   let loading = true;
   let killSwitchBusy = false;
@@ -30,7 +83,7 @@
     error = null;
     try {
       [status, archive, proposals, executions, reconciliation, events] = await Promise.all([
-        trading.status(), trading.candleArchive(), trading.proposals(),
+        trading.status(), trading.candleArchive(), trading.proposals(!showResolvedProposals),
         trading.executions(), trading.reconciliation(), trading.events()
       ]);
       syncArchivePolling();
@@ -81,7 +134,32 @@
     }
   }
 
-  onDestroy(() => { if (archivePoll) clearInterval(archivePoll); });
+  /**
+   * The page's single clock. One interval here rather than one per component: it refreshes the cheap
+   * status (which carries the market-open flag the chart's refresh is gated on) and ticks a counter the
+   * chart watches. The status call is what keeps that flag current, so a market that opens while the
+   * page is left open is noticed within a minute instead of never.
+   */
+  const MARKET_TICK_MS = 60_000;
+  let marketTick = 0;
+  let marketTimer: ReturnType<typeof setInterval> | null = null;
+
+  function startMarketClock() {
+    marketTimer ??= setInterval(async () => {
+      if (typeof document !== 'undefined' && document.hidden) return; // a hidden tab needs nothing
+      try {
+        status = await trading.status();
+      } catch {
+        /* transient — the next tick retries, and the chart simply does not refresh this round */
+      }
+      marketTick += 1;
+    }, MARKET_TICK_MS);
+  }
+
+  onDestroy(() => {
+    if (archivePoll) clearInterval(archivePoll);
+    if (marketTimer) clearInterval(marketTimer);
+  });
 
   const date = (value?: string) => value ? new Date(value).toLocaleString() : '—';
   const json = (value: unknown) => JSON.stringify(value, null, 2);
@@ -101,7 +179,7 @@
     }
   }
 
-  onMount(load);
+  onMount(() => { load(); startMarketClock(); });
 </script>
 
 <div class="page-wrap fade-in">
@@ -141,7 +219,12 @@
          symbols their weekly levels — and the panel owns its own loading and refresh. -->
     <div class="watch-row" class:expanded={chartExpanded}>
       <WatchlistPanel bind:selected={selectedSymbol} />
-      <ChartPane symbol={selectedSymbol} bind:expanded={chartExpanded} />
+      <ChartPane
+        symbol={selectedSymbol}
+        bind:expanded={chartExpanded}
+        refreshTick={marketTick}
+        marketOpen={status.market.isOpen}
+      />
     </div>
 
     <div class="alerts-row">
@@ -219,9 +302,49 @@
 
     {#if tab === 'proposals'}
       <div class="records">
-        {#each proposals as item}
-          <article class="record"><header><b>{item.proposalId}</b><span class="state">{item.status}</span></header><div class="meta">{date(item.createdUtc)} · policy {item.policyVersion}</div>{#if item.proposal.rationale}<p>{item.proposal.rationale}</p>{/if}<pre>{json(item.proposal.orders ?? [])}</pre></article>
-        {:else}<div class="empty"><Activity size={26}/> No proposals recorded</div>{/each}
+        <div class="inbox-head">
+          <p>
+            Proposals the specialist produced from signals that arrived while nobody was watching.
+            Executing one hands its orders to the deterministic manager — policy, risk engine, market
+            calendar and kill switch all still apply.
+          </p>
+          <label class="toggle">
+            <input type="checkbox" bind:checked={showResolvedProposals} on:change={loadProposals} />
+            show resolved
+          </label>
+        </div>
+
+        {#each proposals as item (item.proposalId)}
+          <article class="record" class:resolved={item.status !== 'proposed'}>
+            <header>
+              <b>{item.proposalId}</b>
+              <span class="state">{item.status}</span>
+            </header>
+            <div class="meta">
+              {date(item.createdUtc)} · policy {item.policyVersion}
+              {#if item.executionId} · execution {item.executionId}{/if}
+            </div>
+            {#if item.proposal.rationale}<p>{item.proposal.rationale}</p>{/if}
+            {#if item.stateReason}<p class="reason">{item.stateReason}</p>{/if}
+            <pre>{json(item.proposal.orders ?? [])}</pre>
+
+            {#if item.status === 'proposed'}
+              <div class="record-actions">
+                <button class="btn btn-primary" on:click={() => executeProposal(item)} disabled={proposalBusy !== null}>
+                  <Play size={13} /> {proposalBusy === item.proposalId ? 'Executing…' : 'Execute'}
+                </button>
+                <button class="btn btn-danger" on:click={() => rejectProposal(item)} disabled={proposalBusy !== null}>
+                  <XCircle size={13} /> Reject
+                </button>
+              </div>
+            {/if}
+          </article>
+        {:else}
+          <div class="empty">
+            <Activity size={26}/>
+            {showResolvedProposals ? 'No proposals recorded' : 'Inbox empty — nothing waiting on a decision'}
+          </div>
+        {/each}
       </div>
     {:else if tab === 'executions'}
       <div class="records">
@@ -282,5 +405,12 @@
   .archive-note code { background:var(--surface-2); padding:.1rem .3rem; border-radius:3px; font-size:.68rem; }
   .tabs { display:flex; flex-wrap:wrap; gap:.4rem; border-bottom:1px solid var(--border); margin-bottom:1rem; }
   .tabs button { display:flex; gap:.4rem; align-items:center; border:0; border-bottom:2px solid transparent; background:none; color:var(--text-2); padding:.7rem .8rem; cursor:pointer; }.tabs button.active { color:var(--primary); border-bottom-color:var(--primary); }
+  .inbox-head { display:flex; justify-content:space-between; align-items:flex-start; gap:1rem; flex-wrap:wrap; }
+  .inbox-head p { margin:0; color:var(--text-3); font-size:.72rem; line-height:1.55; max-width:70ch; }
+  .inbox-head .toggle { display:flex; align-items:center; gap:.3rem; color:var(--text-3); font-size:.7rem; cursor:pointer; white-space:nowrap; }
+  .record.resolved { opacity:.6; }
+  .record .reason { color:var(--warning); font-size:.73rem; }
+  .record-actions { display:flex; gap:.5rem; margin-top:.6rem; }
+  .record-actions .btn { display:flex; align-items:center; gap:.35rem; }
   .records { display:flex; flex-direction:column; gap:.7rem; }.record { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:1rem; }.record header { display:flex; justify-content:space-between; gap:1rem; color:var(--text); }.record header b { font-family:monospace; font-size:.8rem; overflow-wrap:anywhere; }.state { color:var(--primary); text-transform:uppercase; font-size:.68rem; }.meta { color:var(--text-3); font-size:.68rem; margin-top:.35rem; }.record p { color:var(--text-2); font-size:.8rem; }.record pre { background:var(--surface-2); border-radius:var(--radius-sm); padding:.7rem; max-height:240px; overflow:auto; color:var(--text-2); font-size:.7rem; white-space:pre-wrap; }
 </style>

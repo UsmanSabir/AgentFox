@@ -158,6 +158,115 @@ public class TradingAgentOptions
     /// are chosen to alert on real transitions without flooding, and nothing here can place an order.
     /// </summary>
     public TradingMonitorOptions Monitor { get; set; } = new();
+
+    /// <summary>Lifecycle of persisted trade proposals — the signal inbox.</summary>
+    public TradingProposalOptions Proposals { get; set; } = new();
+
+    /// <summary>
+    /// When an order needs a human confirmation, and when it may be pre-authorised. Defaults to
+    /// <c>Always</c>, so nothing changes for an existing install until this is deliberately relaxed.
+    /// </summary>
+    public TradingApprovalOptions Approval { get; set; } = new();
+}
+
+/// <summary>
+/// Approval policy for order submission.
+///
+/// <para>
+/// This layer decides only whether a HUMAN CONFIRMATION is required. It can never bypass the risk
+/// engine: the kill switch, <see cref="TradingAgentOptions.AllowedSymbols"/>, the market calendar,
+/// reconciliation health and the value caps apply to a pre-approved order exactly as they do to a
+/// confirmed one. Every auto-redeemed approval records WHICH rule redeemed it, so a bypassed order is
+/// as traceable as one someone clicked.
+/// </para>
+/// </summary>
+public sealed class TradingApprovalOptions
+{
+    /// <summary>
+    /// <c>Always</c> (default) — every order needs a fresh confirmation.
+    /// <c>Auto</c> — orders matching every cap in <see cref="Auto"/> are redeemed without a prompt;
+    /// anything outside them still prompts.
+    /// <c>Armed</c> — prompting is suspended for a bounded window (see <see cref="Armed"/>).
+    /// </summary>
+    public string Mode { get; set; } = "Always";
+
+    public AutoApprovalOptions Auto { get; set; } = new();
+
+    public ArmedApprovalOptions Armed { get; set; } = new();
+}
+
+/// <summary>Caps that define a pre-approved order. ALL of them must hold, or the order still prompts.</summary>
+public sealed class AutoApprovalOptions
+{
+    /// <summary>Largest order value that may skip confirmation.</summary>
+    public decimal MaxOrderValuePkr { get; set; } = 25_000m;
+
+    /// <summary>Cap on auto-approved orders per session, so a bad day cannot compound silently.</summary>
+    public int MaxOrdersPerSession { get; set; } = 5;
+
+    /// <summary>
+    /// Sides eligible for auto-approval. Includes BUY as well as SELL by operator decision — worth
+    /// knowing that an auto-approved entry OPENS risk while an auto-approved exit only closes it, so
+    /// <see cref="MaxOrderValuePkr"/> and <see cref="MaxOrdersPerSession"/> are the real guardrails
+    /// here rather than the side filter. Narrow to ["SELL"] for exits-only.
+    /// </summary>
+    public List<string> Sides { get; set; } = ["BUY", "SELL"];
+
+    /// <summary>Symbols eligible; empty means any TRADABLE symbol (AllowedSymbols still applies).</summary>
+    public List<string> Symbols { get; set; } = [];
+
+    /// <summary>
+    /// Only auto-approve an order originating from an alert of at least this severity. Blank allows
+    /// ad-hoc orders too. Requiring an alert means a pre-approved order always has a recorded,
+    /// deterministic reason behind it.
+    /// </summary>
+    public string MinAlertSeverity { get; set; } = "High";
+
+    /// <summary>Never auto-approve while the market is closed.</summary>
+    public bool RequireMarketOpen { get; set; } = true;
+}
+
+/// <summary>A sudo-style window during which confirmation is not requested.</summary>
+public sealed class ArmedApprovalOptions
+{
+    /// <summary>Minutes granted when no explicit duration is asked for.</summary>
+    public int DefaultMinutes { get; set; } = 30;
+
+    /// <summary>Upper bound on any single arming request.</summary>
+    public int MaxMinutes { get; set; } = 120;
+
+    /// <summary>
+    /// Disarm as soon as the market closes, on top of the window expiring. Combined with the automatic
+    /// disarm on kill-switch activation and on restart, an armed window cannot outlive the session it
+    /// was granted for.
+    /// </summary>
+    public bool DisarmAtMarketClose { get; set; } = true;
+}
+
+/// <summary>
+/// Ageing rules for the proposal queue. A proposal is a plan priced at a moment; these settle how long
+/// that plan stays actionable, so the queue cannot grow without bound and cannot offer a stale price as
+/// though it were current.
+/// </summary>
+public sealed class TradingProposalOptions
+{
+    /// <summary>
+    /// Hours a proposal stays actionable before it is expired. Default 24 — a tip parsed overnight is
+    /// reasonable to act on in the morning, but not days later.
+    /// </summary>
+    public int TtlHours { get; set; } = 24;
+
+    /// <summary>
+    /// Expire a proposal once the live price has moved more than this percent from its stated entry.
+    /// Default 3. A stale price is not a tradable plan, and offering one invites acting on a level that
+    /// no longer exists. Set 0 to disable drift-based expiry and rely on the TTL alone.
+    /// </summary>
+    public decimal InvalidateOnDriftPercent { get; set; } = 3m;
+
+    /// <summary>
+    /// Days a TERMINAL proposal is retained before pruning. Open proposals are never pruned. Default 90.
+    /// </summary>
+    public int RetentionDays { get; set; } = 90;
 }
 
 /// <summary>

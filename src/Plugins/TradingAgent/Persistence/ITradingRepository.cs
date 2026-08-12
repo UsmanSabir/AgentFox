@@ -14,6 +14,38 @@ public interface ITradingRepository
 
     Task<TradingLedgerStatus> GetStatusAsync(CancellationToken ct = default);
 
+    // ── Proposal lifecycle ────────────────────────────────────────────────────
+    // A proposal used to be write-only: created, listed, never resolved, so the table only grew and
+    // "pending proposals" only climbed. These give it the states that make it a work queue — the
+    // WhatsApp signal that arrived overnight can now be executed, rejected, or aged out.
+
+    /// <summary>One proposal by id, or null.</summary>
+    Task<TradeProposalRecord?> GetProposalAsync(string proposalId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Moves a proposal from <paramref name="expectedStatus"/> to <paramref name="newStatus"/>, and
+    /// returns false when it was not in the expected state.
+    ///
+    /// <para>
+    /// Compare-and-set rather than a blind update, because that is what makes a double click safe: the
+    /// second request finds the row already moved on and declines instead of executing the same
+    /// proposal twice.
+    /// </para>
+    /// </summary>
+    Task<bool> TrySetProposalStateAsync(
+        string proposalId,
+        string expectedStatus,
+        string newStatus,
+        string? reason = null,
+        string? executionId = null,
+        CancellationToken ct = default);
+
+    /// <summary>Proposals not yet in a terminal state — the actionable queue.</summary>
+    Task<IReadOnlyList<TradeProposalRecord>> GetOpenProposalsAsync(CancellationToken ct = default);
+
+    /// <summary>Deletes TERMINAL proposals older than <paramref name="before"/>; open ones are kept.</summary>
+    Task<int> PruneProposalsAsync(DateTime before, CancellationToken ct = default);
+
     Task<IReadOnlyList<TradeProposalRecord>> GetProposalsAsync(
         int limit = 100,
         CancellationToken ct = default);
@@ -258,13 +290,25 @@ public sealed record TradingLedgerStatus(
     int AcceptedExecutions,
     DateTime CheckedUtc);
 
+/// <summary>
+/// A persisted proposal. <see cref="Status"/> moves
+/// <c>proposed → executing → executed | rejected | expired</c>; the terminal states are why this is a
+/// work queue rather than the write-only log it used to be.
+/// </summary>
 public sealed record TradeProposalRecord(
     string ProposalId,
     string Status,
     JsonElement Proposal,
     string PolicyVersion,
     DateTime CreatedUtc,
-    DateTime UpdatedUtc);
+    DateTime UpdatedUtc)
+{
+    /// <summary>Execution this proposal became, once executed.</summary>
+    public string? ExecutionId { get; init; }
+
+    /// <summary>Why it was rejected or expired — recorded so a terminal state is explicable.</summary>
+    public string? StateReason { get; init; }
+}
 
 public sealed record TradingExecutionRecord(
     string ExecutionId,

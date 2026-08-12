@@ -59,6 +59,38 @@ public class AhkConfig
     public bool AllowMarketOrders { get; set; } = false;
 
     /// <summary>
+    /// After submitting, confirm the order actually exists by reading the account's own order book
+    /// (Outstanding Log, then Activity Log) instead of trusting the portal's result popup.
+    ///
+    /// <para>
+    /// This is not belt-and-braces, it is the only reliable signal. Observed directly against the live
+    /// portal: an off-hours submission returns HTTP 200 with an EMPTY body and shows a green "success"
+    /// alert while placing nothing at all, and the happy path returns no order number either. The order
+    /// book is the only place that distinguishes "placed" from "silently discarded".
+    /// </para>
+    /// </summary>
+    public bool VerifyOrderInBook { get; set; } = true;
+
+    /// <summary>How long to wait for a submitted order to appear in the order book. Default 8s.</summary>
+    public int OrderBookVerifyTimeoutMs { get; set; } = 8_000;
+
+    /// <summary>Tab that reveals resting orders.</summary>
+    public string OutstandingLogTabSelector { get; set; } = "a[href='#out_log']";
+
+    /// <summary>Panel containing the resting-order table.</summary>
+    public string OutstandingLogPanelSelector { get; set; } = "#out_log";
+
+    /// <summary>
+    /// Tab that reveals filled/working activity. Checked as well as the outstanding log because an
+    /// order that filled immediately never rests, so its absence from the outstanding book would
+    /// otherwise be misread as "never placed".
+    /// </summary>
+    public string ActivityLogTabSelector { get; set; } = "a[href='#act_log']";
+
+    /// <summary>Panel containing the activity table.</summary>
+    public string ActivityLogPanelSelector { get; set; } = "#act_log";
+
+    /// <summary>
     /// How far below the trigger a stop-loss SELL's limit price is placed, in percent (default 1.0).
     /// A stop limit set exactly AT the trigger frequently fails to fill in the fast move that
     /// triggered it — the market is already through the level by the time the order is working. Set 0

@@ -780,6 +780,17 @@ public sealed class SqliteTradingRepository : ITradingRepository
                     ON reconciliation_runs(started_utc DESC);
                 """;
             await command.ExecuteNonQueryAsync(ct);
+
+            // ── Additive migrations ───────────────────────────────────────────
+            // CREATE TABLE IF NOT EXISTS never alters an existing table, so columns added after a
+            // database was first created have to be applied separately. Each is attempted
+            // independently and a "duplicate column" failure is the expected no-op on an
+            // already-migrated database — cheaper and clearer than maintaining a version table for
+            // what are purely additive, nullable columns.
+            await AddColumnIfMissingAsync(connection, "trade_proposals", "execution_id", "TEXT NULL", ct);
+            await AddColumnIfMissingAsync(connection, "trade_proposals", "state_reason", "TEXT NULL", ct);
+            await AddColumnIfMissingAsync(connection, "trade_proposals", "terminal_utc", "TEXT NULL", ct);
+
             _initialized = true;
         }
         catch (Exception ex)
@@ -1259,6 +1270,125 @@ public sealed class SqliteTradingRepository : ITradingRepository
             await insert.ExecuteNonQueryAsync(ct);
         }
     }
+
+    /// <summary>
+    /// Adds a column when it is absent, using the table's own metadata rather than catching an error —
+    /// so a genuine failure (locked database, bad type) still surfaces instead of being swallowed as
+    /// "already migrated".
+    /// </summary>
+    private static async Task AddColumnIfMissingAsync(
+        SqliteConnection connection, string table, string column, string definition, CancellationToken ct)
+    {
+        var probe = connection.CreateCommand();
+        probe.CommandText = $"SELECT 1 FROM pragma_table_info('{table}') WHERE name = $name";
+        probe.Parameters.AddWithValue("$name", column);
+        if (await probe.ExecuteScalarAsync(ct) is not null) return;
+
+        var alter = connection.CreateCommand();
+        alter.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {definition}";
+        await alter.ExecuteNonQueryAsync(ct);
+    }
+
+    // ── Proposal lifecycle ────────────────────────────────────────────────────
+
+    public async Task<TradeProposalRecord?> GetProposalAsync(
+        string proposalId, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT proposal_id, status, proposal_json, policy_version, created_utc, updated_utc,
+                   execution_id, state_reason
+            FROM trade_proposals WHERE proposal_id = $id
+            """;
+        command.Parameters.AddWithValue("$id", proposalId);
+
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        return await reader.ReadAsync(ct) ? ReadProposal(reader) : null;
+    }
+
+    public async Task<bool> TrySetProposalStateAsync(
+        string proposalId,
+        string expectedStatus,
+        string newStatus,
+        string? reason = null,
+        string? executionId = null,
+        CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+
+        // Compare-and-set on the CURRENT status. This is what makes a double-click safe: the second
+        // request finds the row already moved on and returns false rather than executing the same
+        // proposal twice. Same discipline as the execution idempotency claim.
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE trade_proposals
+               SET status = $new,
+                   state_reason = COALESCE($reason, state_reason),
+                   execution_id = COALESCE($execution, execution_id),
+                   updated_utc = $now,
+                   terminal_utc = CASE WHEN $new IN ('executed','rejected','expired')
+                                       THEN $now ELSE terminal_utc END
+             WHERE proposal_id = $id AND status = $expected
+            """;
+        command.Parameters.AddWithValue("$id", proposalId);
+        command.Parameters.AddWithValue("$expected", expectedStatus);
+        command.Parameters.AddWithValue("$new", newStatus);
+        command.Parameters.AddWithValue("$reason", reason ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$execution", executionId ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("O"));
+
+        return await command.ExecuteNonQueryAsync(ct) == 1;
+    }
+
+    public async Task<IReadOnlyList<TradeProposalRecord>> GetOpenProposalsAsync(
+        CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT proposal_id, status, proposal_json, policy_version, created_utc, updated_utc,
+                   execution_id, state_reason
+            FROM trade_proposals
+            WHERE status NOT IN ('executed','rejected','expired')
+            ORDER BY created_utc DESC
+            """;
+
+        var proposals = new List<TradeProposalRecord>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct)) proposals.Add(ReadProposal(reader));
+        return proposals;
+    }
+
+    public async Task<int> PruneProposalsAsync(DateTime before, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        // Only TERMINAL rows are pruned; an open proposal is never silently discarded by retention.
+        command.CommandText = """
+            DELETE FROM trade_proposals
+            WHERE status IN ('executed','rejected','expired')
+              AND COALESCE(terminal_utc, updated_utc) < $before
+            """;
+        command.Parameters.AddWithValue("$before", before.ToString("O"));
+        return await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static TradeProposalRecord ReadProposal(Microsoft.Data.Sqlite.SqliteDataReader reader) => new(
+        reader.GetString(0),
+        reader.GetString(1),
+        ParseJson(reader.GetString(2)),
+        reader.GetString(3),
+        ParseUtc(reader.GetString(4)),
+        ParseUtc(reader.GetString(5)))
+    {
+        ExecutionId = reader.FieldCount > 6 && !reader.IsDBNull(6) ? reader.GetString(6) : null,
+        StateReason = reader.FieldCount > 7 && !reader.IsDBNull(7) ? reader.GetString(7) : null
+    };
 
     private async Task<SqliteConnection> OpenAsync(CancellationToken ct)
     {
