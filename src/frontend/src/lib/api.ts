@@ -357,107 +357,14 @@ export interface PendingNotificationsResponse {
   pendingApproval: PendingApprovalInfo | null;
 }
 
-export interface TradingStatus {
-  policy: {
-    autoExecute: boolean;
-    executionMode: string;
-    minConfidence: string;
-    version: string;
-  };
-  ledger: {
-    pendingProposals: number;
-    submittingExecutions: number;
-    unknownExecutions: number;
-    acceptedExecutions: number;
-    checkedUtc: string;
-  };
-  market: {
-    isOpen: boolean;
-    pktNow: string;
-    reason: string;
-    nextOpenPkt?: string;
-    scheduleSource: string;
-  };
-  reconciliation: {
-    supported: boolean;
-    healthy: boolean;
-    reason: string;
-    checkedUtc: string;
-    detailsJson: string;
-  };
-  killSwitch: boolean;
-  reconciliationFresh: boolean;
-  liveExecutionReady: boolean;
-  checkedUtc: string;
-}
-
-/// Coverage of the local daily-candle archive that weekly support/resistance is derived from,
-/// plus whatever the backfill is doing right now.
-export interface CandleArchiveStatus {
-  backfillEnabled: boolean;
-  backfillYears: number;
-  configuredSymbols: number;
-  archive: {
-    symbols: number;
-    bars: number;
-    coveredDates: number;
-    earliestSession?: string;
-    latestSession?: string;
-  };
-  missingTradingDays: number;
-  targetTradingDays: number;
-  progress: {
-    isRunning: boolean;
-    startedUtc?: string;
-    completedUtc?: string;
-    datesTargeted: number;
-    datesCompleted: number;
-    sessionsStored: number;
-    emptyDates: number;
-    currentDate?: string;
-    abortedForThrottling: boolean;
-    message?: string;
-    percentComplete?: number;
-  };
-}
-
-export interface TradeProposal {
-  proposalId: string;
-  status: string;
-  proposal: {
-    orders?: Array<Record<string, unknown>>;
-    source_message?: string;
-    rationale?: string;
-  };
-  policyVersion: string;
-  createdUtc: string;
-  updatedUtc: string;
-}
-
-export interface TradingExecution {
-  executionId: string;
-  state: string;
-  request: unknown;
-  result?: unknown;
-  policyVersion: string;
-  createdUtc: string;
-  updatedUtc: string;
-}
-
-export interface TradingEvent {
-  eventId: number;
-  executionId: string;
-  eventType: string;
-  payload: unknown;
-  createdUtc: string;
-}
-
-export interface ReconciliationRun {
-  reconciliationId: string;
-  state: string;
-  details: unknown;
-  startedUtc: string;
-  completedUtc?: string;
+export interface PluginUiPageInfo {
+  slug: string;
+  title: string;
+  icon: string;
+  description: string;
+  order: number;
+  path: string;
+  entry: string;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -659,19 +566,12 @@ export const api = {
     remove:     (pluginName: string)              => del<{ success: boolean }>(`/plugin-config/${encodeURIComponent(pluginName)}`),
   },
 
-  trading: {
-    status:         ()                    => get<TradingStatus>('/trading/status'),
-    proposals:      (limit = 100)         => get<TradeProposal[]>(`/trading/proposals?limit=${limit}`),
-    executions:     (limit = 100)         => get<TradingExecution[]>(`/trading/executions?limit=${limit}`),
-    events:         (limit = 200)         => get<TradingEvent[]>(`/trading/events?limit=${limit}`),
-    reconciliation: (limit = 100)         => get<ReconciliationRun[]>(`/trading/reconciliation?limit=${limit}`),
-    setKillSwitch:  (active: boolean, reason?: string) =>
-      post<{ killSwitch: boolean }>('/trading/kill-switch', { active, reason }),
-    candleArchive:  ()                    => get<CandleArchiveStatus>('/trading/candle-archive'),
-    // Returns as soon as the pass has STARTED — a two-year backfill runs for ~18 minutes, so the
-    // caller polls candleArchive() for progress instead of awaiting completion.
-    startBackfill:  (years?: number)      =>
-      post<{ started: boolean; status: CandleArchiveStatus }>('/trading/candle-archive/backfill', { years }),
+  // ── Plugin-supplied UI pages ───────────────────────────────────────────
+  // Plugins ship their own web UI (assets served by the host at /ext/{slug}); this endpoint is the
+  // only thing the host frontend knows about them. Deliberately generic: no plugin-specific types,
+  // endpoints, or npm dependencies live in this app.
+  pluginUi: {
+    list: () => get<PluginUiPageInfo[]>('/plugin-ui'),
   }
 };
 

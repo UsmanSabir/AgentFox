@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { api, type TradingStatus, type TradeProposal, type TradingExecution, type TradingEvent, type ReconciliationRun, type CandleArchiveStatus } from '$lib/api';
+  import { trading, type TradingStatus, type TradeProposal, type TradingExecution, type TradingEvent, type ReconciliationRun, type CandleArchiveStatus } from './api';
   import { RefreshCw, ShieldAlert, Activity, FileText, ListChecks, Scale, History, Power, Database, Download } from 'lucide-svelte';
 
   let loading = true;
@@ -21,8 +21,8 @@
     error = null;
     try {
       [status, archive, proposals, executions, reconciliation, events] = await Promise.all([
-        api.trading.status(), api.trading.candleArchive(), api.trading.proposals(),
-        api.trading.executions(), api.trading.reconciliation(), api.trading.events()
+        trading.status(), trading.candleArchive(), trading.proposals(),
+        trading.executions(), trading.reconciliation(), trading.events()
       ]);
       syncArchivePolling();
     } catch (e) {
@@ -39,7 +39,7 @@
     if (running && !archivePoll) {
       archivePoll = setInterval(async () => {
         try {
-          archive = await api.trading.candleArchive();
+          archive = await trading.candleArchive();
           if (!archive.progress.isRunning) syncArchivePolling();
         } catch { /* transient: the next tick retries */ }
       }, 4000);
@@ -61,7 +61,7 @@
 
     backfillBusy = true;
     try {
-      const result = await api.trading.startBackfill();
+      const result = await trading.startBackfill();
       archive = result.status;
       syncArchivePolling();
       if (!result.started) error = 'A backfill pass is already running.';
@@ -83,7 +83,7 @@
     if (next && !confirm('Activate the kill switch? This blocks ALL trading orders immediately.')) return;
     killSwitchBusy = true;
     try {
-      await api.trading.setKillSwitch(next);
+      await trading.setKillSwitch(next);
       await load();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);

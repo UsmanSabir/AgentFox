@@ -1,0 +1,130 @@
+/*
+ * The plugin's own copy of the AgentFox design tokens and the handful of global classes its markup
+ * uses (.btn, .page-wrap, .page-title, …).
+ *
+ * Copied deliberately rather than imported: this UI is built and shipped inside TradingAgent.dll and
+ * must render correctly on its own, with no build-time or runtime dependency on the host app's CSS.
+ * The host frames the page and posts its current theme, which main.ts applies to <html data-theme>.
+ */
+
+/* ── Design tokens (dark, the host's default) ───────────────────────────── */
+:root {
+  --bg:          #0c0d10;
+  --surface:     #141519;
+  --surface-2:   #1c1d23;
+  --surface-3:   #242630;
+  --border:      rgba(255, 255, 255, 0.06);
+  --border-md:   rgba(255, 255, 255, 0.10);
+  --border-high: rgba(255, 255, 255, 0.16);
+
+  --primary:     #818cf8;
+  --primary-dim: rgba(129, 140, 248, 0.12);
+  --accent:      #a78bfa;
+
+  --success:     #34d399;
+  --warning:     #fbbf24;
+  --danger:      #f87171;
+  --info:        #60a5fa;
+
+  --text:        #e2e4ec;
+  --text-2:      #9ea3b5;
+  --text-3:      #5f6377;
+
+  --radius:      10px;
+  --radius-sm:   6px;
+  --radius-lg:   16px;
+}
+
+/* Light theme, applied when the host tells us it is in light mode. */
+:root[data-theme='light'] {
+  --bg:          #f7f8fa;
+  --surface:     #ffffff;
+  --surface-2:   #f1f2f6;
+  --surface-3:   #e6e8ee;
+  --border:      rgba(0, 0, 0, 0.08);
+  --border-md:   rgba(0, 0, 0, 0.12);
+  --border-high: rgba(0, 0, 0, 0.18);
+
+  --primary:     #4f46e5;
+  --primary-dim: rgba(79, 70, 229, 0.10);
+
+  --success:     #059669;
+  --warning:     #b45309;
+  --danger:      #dc2626;
+
+  --text:        #1f2430;
+  --text-2:      #4b5162;
+  --text-3:      #808799;
+}
+
+/* ── Base ───────────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', system-ui, sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+#app { min-height: 100%; }
+
+/* ── Buttons ────────────────────────────────────────────────────────────── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.4rem 0.875rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+
+.btn-primary { background: var(--primary); color: #0c0d10; }
+.btn-primary:hover { filter: brightness(1.08); }
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-2);
+  border-color: var(--border-md);
+}
+.btn-ghost:hover {
+  background: var(--surface-2);
+  color: var(--text);
+  border-color: var(--border-high);
+}
+
+.btn-danger {
+  background: transparent;
+  color: var(--danger);
+  border-color: rgba(248, 113, 113, 0.3);
+}
+.btn-danger:hover { background: rgba(248, 113, 113, 0.1); }
+
+.btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+/* ── Page skeleton ──────────────────────────────────────────────────────── */
+.page-wrap { padding: 1.75rem 2rem; max-width: 1200px; }
+
+.page-title {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0 0 0.25rem;
+}
+
+.page-sub { font-size: 0.8125rem; color: var(--text-2); margin: 0; }
+
+/* ── Fade-in ────────────────────────────────────────────────────────────── */
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.fade-in { animation: fade-in 0.2s ease-out both; }

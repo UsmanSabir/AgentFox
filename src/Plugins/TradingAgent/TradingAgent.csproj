@@ -11,7 +11,24 @@
     <OutputPath>..\..\Agent\bin\$(Configuration)\$(TargetFramework)\plugins\</OutputPath>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <AppendConfigurationToOutputPath>false</AppendConfigurationToOutputPath>
+    <!-- Required for ManifestEmbeddedFileProvider to serve the plugin's own wwwroot from inside
+         TradingAgent.dll (see the UI ItemGroup below). -->
+    <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
   </PropertyGroup>
+
+  <!-- ── Plugin web UI ──────────────────────────────────────────────────────
+       The trading UI is a SEPARATE npm project (ui/) so its dependencies — charting in
+       particular — never enter the host frontend's package.json. It builds to wwwroot/ and is
+       embedded here, so the UI travels inside the plugin DLL exactly as the host's SPA travels
+       inside the host assembly. TradingAgentModule serves it via IPluginUiContributor, and the
+       host mounts it at /ext/trading.
+
+       Build with: cd ui && npm ci && npm run build
+       The condition means a build without a compiled UI still succeeds — the plugin then simply
+       contributes no page, and the backend is unaffected. -->
+  <ItemGroup Condition="Exists('$(MSBuildProjectDirectory)\wwwroot')">
+    <EmbeddedResource Include="wwwroot\**\*" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Agents.AI.Harness" />
@@ -25,6 +42,10 @@
          Microsoft.Extensions.* version (10.0.9); PluginLoadContext delegates these to the host's load
          context at runtime, and roll-forward only binds UP, so never build against a higher version. -->
     <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" />
+    <!-- ManifestEmbeddedFileProvider, for serving the embedded plugin UI. Same pinning rule as the
+         other Microsoft.Extensions.* references above: PluginLoadContext delegates these to the
+         host's load context, so never build against a higher version than the host ships. -->
+    <PackageReference Include="Microsoft.Extensions.FileProviders.Embedded" />
     <PackageReference Include="Microsoft.Data.Sqlite" />
     <!-- Override Microsoft.Data.Sqlite's minimum native bundle with the maintained release;
          2.1.11 is deprecated and affected by GHSA-2m69-gcr7-jv3q. -->

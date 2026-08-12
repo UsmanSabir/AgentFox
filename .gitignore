@@ -63,6 +63,8 @@ appsettings.*.json
 /src/Agent/wwwroot/
 #!/src/Agent/wwwroot/
 #!/src/Agent/wwwroot/**
+# Plugin web UIs: build output of each plugin's own ui/ npm project, embedded into its DLL.
+/src/Plugins/*/wwwroot/
 .pnpm-store/
 *.env
 *.env.local

@@ -1,0 +1,5 @@
+node_modules/
+# Build output — embedded into TradingAgent.dll, so it is generated, never committed.
+../wwwroot/
+.env.local
+.env.*.local

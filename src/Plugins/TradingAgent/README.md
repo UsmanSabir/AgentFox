@@ -84,6 +84,40 @@ The plugin loader discovers `TradingAgentModule` and `WhatsAppBridgeChannelProvi
 
 ---
 
+## Web UI
+
+The trading dashboard is part of **this plugin**, not the AgentFox frontend. It lives in
+[`ui/`](ui/) as its own npm project, so trading-only dependencies (charting in particular) never
+enter the host app's `package.json`, and the host has no trading route, type, or API client.
+
+```bash
+cd ui
+npm ci
+npm run build      # → ../wwwroot, embedded into TradingAgent.dll by the csproj
+```
+
+Then build the plugin. At startup the module contributes the page via
+`IPluginUiContributor`, and AgentFox:
+
+- serves the embedded assets at `/plugin-assets/trading/`,
+- lists the page at `GET /api/plugin-ui`,
+- shows a **Trading** entry in the sidebar, which renders the page at `/ext/trading`.
+
+Notes:
+
+- **Build the UI before the DLL.** `wwwroot` is embedded at compile time. A build without it is
+  valid — the plugin simply contributes no page and the backend is unaffected — so a stale or
+  missing UI shows up as a missing sidebar entry, not an error.
+- **Asset base URL.** `ui/vite.config.ts` sets `base: '/plugin-assets/trading/'` to match
+  `PluginUiPaths.AssetPrefix`. That is deliberately *not* `/ext/trading`, which is the host page
+  that frames this UI; serving assets there would bypass the AgentFox sidebar and header.
+- **Auth.** The frame is same-origin, so `ui/src/api.ts` reads the management API key from the
+  shared `sessionStorage`; the host also posts the key and the current theme on load.
+- **Standalone dev.** `npm run dev` in `ui/` runs the UI on its own port and proxies `/api` to
+  `BACKEND_URL` (default `http://localhost:5000`).
+
+---
+
 ## Configuration
 
 Add the following sections to `appsettings.json`.

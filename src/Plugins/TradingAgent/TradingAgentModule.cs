@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using TradingAgent.Broker;
@@ -70,11 +71,52 @@ namespace TradingAgent;
 /// ]
 /// </code>
 /// </summary>
-public sealed class TradingAgentModule : IAgentAwareModule
+public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
 {
     private IServiceProvider? _services;
 
     public string Name => "trading-agent";
+
+    // ── IPluginUiContributor ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// The trading dashboard, mounted by the host at <c>/ext/trading</c>. Assets come from this
+    /// assembly's embedded <c>wwwroot</c> (built from <c>ui/</c>), so no trading route, type, or npm
+    /// dependency exists in the host frontend.
+    ///
+    /// <para>
+    /// Returns nothing when the UI was not built — <c>ui/</c> is a separate npm project and a
+    /// backend-only build is legitimate. Contributing a page whose assets do not exist would put a
+    /// dead link in the navigation, so a missing manifest simply means no page.
+    /// </para>
+    /// </summary>
+    public IEnumerable<PluginUiPage> GetPages()
+    {
+        IFileProvider assets;
+        try
+        {
+            assets = new ManifestEmbeddedFileProvider(typeof(TradingAgentModule).Assembly, "wwwroot");
+            // The manifest can exist while wwwroot is empty (a build that embedded nothing); a page
+            // with no entry document is a dead link, so treat it as "no UI".
+            if (!assets.GetFileInfo("index.html").Exists)
+                yield break;
+        }
+        catch (InvalidOperationException)
+        {
+            // No embedded-files manifest in this build — the UI was not compiled.
+            yield break;
+        }
+
+        yield return new PluginUiPage
+        {
+            Slug        = "trading",
+            Title       = "Trading",
+            Icon        = "trending-up",
+            Description = "PSX watchlist, charts, alerts, and the deterministic trading ledger.",
+            Assets      = assets,
+            Order       = 10
+        };
+    }
 
     // ── IAppModule ────────────────────────────────────────────────────────────
 
