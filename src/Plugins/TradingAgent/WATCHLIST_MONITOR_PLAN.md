@@ -314,6 +314,15 @@ alerts with the holdings age.
 
 ### 4.3 Noise control (the make-or-break detail)
 
+*Phase 3 correction, found by the tests:* the plan assumed one confirmation rule for everything. It
+does not work. State is rewritten at the end of every pass, so a **change-vs-previous** signal (setup
+changed, SMA cross, RSI band entry, weekly breakdown) exists for exactly one pass — gating it behind
+`ConfirmPasses` would not delay it, it would make it **unfireable**. Sustained conditions (bouncing off
+support, making fresh lows on volume) do persist and are streak-confirmed as planned. Edges fire
+immediately and rely on the durable cooldown instead. Break detection likewise reads its level from the
+current snapshot — the analyzer already reclassifies a broken support as overhead resistance — rather
+than from a remembered level that drifts on the very next pass.
+
 - **Transitions, not conditions.** Persist `watchlist_state(symbol, zone, setup, level_price,
   sma_relation, rsi_band, updated_utc)`; fire only on change.
 - **Confirmation:** the condition must hold for `Monitor.ConfirmPasses` consecutive passes
@@ -616,7 +625,7 @@ running with, so "why didn't it alert" is answerable from the UI rather than by 
 | **0** ✅ | `IPluginUiContributor` + `/api/plugin-ui` + `/plugin-assets/{slug}` static + dynamic Sidebar + the trading page moved into `TradingAgent/ui/`; trading stripped from `api.ts`, Sidebar, and the plugins page | **Done** — isolation works, with no new features in flight |
 | **1** ✅ | `MonitoredUniverse`, watchlist table + endpoints + UI list (add/remove/reset/mute); archive universe widened; settled-session archiving fix | **Done** — independent watchlist, weekly levels for added symbols |
 | **2** ✅ | `CandleAnalysisService` extracted (shared with `analyze_candles`), `IndicatorSeries`, `/trading/candles`, `lightweight-charts` pane with S/R overlays, RSI bands and interval switcher | **Done** — chart-driven decisions, drawn from the same levels the agent quotes |
-| **3** | `WatchlistMonitorWorker`, `watchlist_state` / `watchlist_alerts`, `/alerts` + SSE, UI highlighting | Continuous monitoring with controlled noise |
+| **3** ✅ | `AlertDetector` (pure), `WatchlistMonitorWorker`, `watchlist_state` / `watchlist_alerts`, `/alerts` + SSE + `/monitor/status`, alerts panel and row badges | **Done** — continuous monitoring with controlled noise |
 | **4** | `StockAssessmentService` + `/assess` endpoints, confidence on the alert card | On-demand LLM confidence |
 | **5a** | Proposal lifecycle (execute/reject/expire + sweeper + retention) — turns the log into a signal inbox | WhatsApp signals become actionable |
 | **5b** | `probe_order_form` discovery → `/orders` + approval modes (`Auto`/`Armed`) + `PendingExitStore` + `armed_exits` trigger evaluation | Actions and stops, all through the risk engine |

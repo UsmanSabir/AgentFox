@@ -160,6 +160,11 @@
           <button class="pick" on:click={() => selected = entry.symbol}>
             <span class="symbol">{entry.symbol}</span>
             <span class="tags">
+              {#if entry.openAlerts > 0}
+                <span class="tag alert" title="{entry.openAlerts} unacknowledged alert(s)">
+                  <Bell size={11} /> {entry.openAlerts}
+                </span>
+              {/if}
               {#if !entry.tradable}
                 <span class="tag monitor" title="Not in AllowedSymbols — an order for it would be rejected by the risk engine">
                   <Eye size={11} /> monitor-only
@@ -251,6 +256,10 @@
   }
   .tag.monitor { color:var(--info); border-color:color-mix(in srgb, var(--info) 35%, transparent); }
   .tag.pending { color:var(--warning); border-color:color-mix(in srgb, var(--warning) 35%, transparent); }
+  .tag.alert {
+    color:var(--danger); border-color:color-mix(in srgb, var(--danger) 45%, transparent);
+    background:color-mix(in srgb, var(--danger) 12%, transparent); font-weight:600;
+  }
 
   .row-actions { display:flex; gap:.15rem; }
   .icon {

@@ -1,0 +1,219 @@
+<script lang="ts">
+  import { onMount, onDestroy, createEventDispatcher } from 'svelte';
+  import { trading, type TradingAlert, type MonitorStatus } from './api';
+  import { Bell, Check, X, Activity, RefreshCw, Radio, AlertTriangle } from 'lucide-svelte';
+
+  /** Selecting an alert drives the chart pane to that symbol. */
+  const dispatch = createEventDispatcher<{ select: string }>();
+
+  let alerts: TradingAlert[] = [];
+  let status: MonitorStatus | null = null;
+  let loading = true;
+  let busy = false;
+  let error: string | null = null;
+  let showDismissed = false;
+  let live = false;
+  let stopStream: (() => void) | null = null;
+
+  async function load() {
+    loading = true;
+    error = null;
+    try {
+      [alerts, status] = await Promise.all([
+        trading.alerts.list({ limit: 100 }),
+        trading.monitor.status()
+      ]);
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      loading = false;
+    }
+  }
+
+  async function runNow() {
+    if (busy) return;
+    busy = true;
+    error = null;
+    try {
+      status = await trading.monitor.run();
+      alerts = await trading.alerts.list({ limit: 100 });
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function setState(alert: TradingAlert, action: 'ack' | 'dismiss') {
+    if (busy) return;
+    busy = true;
+    try {
+      const result = action === 'ack'
+        ? await trading.alerts.ack(alert.alertId)
+        : await trading.alerts.dismiss(alert.alertId);
+      // Patch in place rather than refetching: the list can be long and the change is one field.
+      alerts = alerts.map(a => a.alertId === alert.alertId ? { ...a, state: result.state } : a);
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  onMount(() => {
+    load();
+    // Live push, so a level break reaches an open page in seconds rather than at the next poll.
+    // Prepending only if unseen keeps this safe against a duplicate from a concurrent reload.
+    stopStream = trading.alerts.stream(
+      alert => {
+        if (!alerts.some(a => a.alertId === alert.alertId)) alerts = [alert, ...alerts];
+      },
+      connected => { live = connected; }
+    );
+  });
+
+  onDestroy(() => stopStream?.());
+
+  $: visible = showDismissed ? alerts : alerts.filter(a => a.state !== 'dismissed');
+  $: openCount = alerts.filter(a => a.state === 'new').length;
+
+  const when = (iso: string) => new Date(iso).toLocaleString();
+  const label = (kind: string) => kind.replace(/([a-z])([A-Z])/g, '$1 $2');
+</script>
+
+<section class="alerts">
+  <header>
+    <div class="head-copy">
+      <Bell size={15} />
+      <div>
+        <b>Alerts {#if openCount}<span class="count">{openCount}</span>{/if}</b>
+        <span>
+          {#if status}
+            {status.enabled
+              ? `Monitoring every ${status.intervalSeconds}s · ${status.confirmPasses} confirming passes`
+              : 'Monitoring is disabled'}
+            {#if status.lastPassUtc} · last pass {when(status.lastPassUtc)}{/if}
+          {:else}Trend, support, and resistance transitions{/if}
+        </span>
+      </div>
+    </div>
+    <div class="head-actions">
+      {#if live}<span class="chip live" title="Connected to the live alert stream"><Radio size={11} /> live</span>{/if}
+      <label class="toggle">
+        <input type="checkbox" bind:checked={showDismissed} /> show dismissed
+      </label>
+      <button class="btn btn-ghost" on:click={runNow} disabled={busy || loading} title="Run a monitoring pass now">
+        <RefreshCw size={13} /> Check now
+      </button>
+    </div>
+  </header>
+
+  {#if status?.message}
+    <p class="status-line" class:warn={status.alertsSuppressed > 0}>{status.message}</p>
+  {/if}
+  {#if error}<p class="status-line danger">{error}</p>{/if}
+
+  {#if loading}
+    <p class="status-line">Loading alerts…</p>
+  {:else if !visible.length}
+    <p class="empty">
+      <Activity size={22} />
+      No alerts. The monitor reports transitions — a bounce off support, a level breaking, a trend
+      flip — not standing conditions, so a quiet list is the normal state.
+    </p>
+  {:else}
+    <ul class="list">
+      {#each visible as alert (alert.alertId)}
+        <li class="alert {alert.severity.toLowerCase()}" class:resolved={alert.state !== 'new'}>
+          <button class="body" on:click={() => dispatch('select', alert.symbol)}>
+            <div class="row-1">
+              <span class="symbol">{alert.symbol}</span>
+              <span class="kind">{label(alert.kind)}</span>
+              {#if alert.weeklyConfirmed}<span class="chip ok">weekly ✓</span>{/if}
+              {#if alert.fromLiveBar}<span class="chip warn" title="Raised from a still-forming bar — it can still un-happen before the close">forming bar</span>{/if}
+              {#if alert.state !== 'new'}<span class="chip">{alert.state}</span>{/if}
+            </div>
+            <p class="summary">{alert.summary}</p>
+            <div class="meta">{alert.interval} · {when(alert.raisedUtc)}</div>
+          </button>
+          {#if alert.state === 'new'}
+            <div class="actions">
+              <button class="icon" title="Acknowledge" on:click={() => setState(alert, 'ack')} disabled={busy}>
+                <Check size={13} />
+              </button>
+              <button class="icon" title="Dismiss" on:click={() => setState(alert, 'dismiss')} disabled={busy}>
+                <X size={13} />
+              </button>
+            </div>
+          {/if}
+        </li>
+      {/each}
+    </ul>
+  {/if}
+
+  {#if status?.warnings?.length}
+    <div class="warnings">
+      {#each status.warnings as warning}<p><AlertTriangle size={12} /> {warning}</p>{/each}
+    </div>
+  {/if}
+</section>
+
+<style>
+  .alerts {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 1rem; display: flex; flex-direction: column; gap: .7rem; margin-bottom: 1.25rem;
+  }
+  header { display:flex; justify-content:space-between; align-items:flex-start; gap:1rem; flex-wrap:wrap; }
+  .head-copy { display:flex; gap:.55rem; align-items:flex-start; color:var(--primary); }
+  .head-copy div { display:flex; flex-direction:column; gap:.2rem; }
+  .head-copy b { color:var(--text); font-size:.9rem; display:flex; align-items:center; gap:.4rem; }
+  .head-copy span { color:var(--text-3); font-size:.72rem; }
+  .count {
+    background:var(--danger); color:#0c0d10; border-radius:999px;
+    font-size:.65rem; padding:.05rem .35rem; font-weight:700;
+  }
+  .head-actions { display:flex; align-items:center; gap:.6rem; flex-wrap:wrap; }
+  .head-actions .btn { display:flex; align-items:center; gap:.35rem; }
+  .toggle { display:flex; align-items:center; gap:.3rem; color:var(--text-3); font-size:.7rem; cursor:pointer; }
+
+  .status-line { margin:0; color:var(--text-3); font-size:.72rem; }
+  .status-line.warn { color:var(--warning); }
+  .status-line.danger { color:var(--danger); }
+
+  .empty {
+    color:var(--text-3); font-size:.75rem; margin:0; padding:1.25rem 0; text-align:center;
+    display:flex; flex-direction:column; align-items:center; gap:.5rem; line-height:1.6;
+  }
+
+  .list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:.35rem; max-height:340px; overflow-y:auto; }
+  .alert {
+    display:flex; gap:.4rem; align-items:flex-start;
+    background:var(--surface-2); border-radius:var(--radius-sm);
+    border-left:3px solid var(--text-3);
+  }
+  /* Severity is the only colour signal in the list, so it has to be immediately legible. */
+  .alert.critical { border-left-color:var(--danger); }
+  .alert.high     { border-left-color:var(--warning); }
+  .alert.medium   { border-left-color:var(--info); }
+  .alert.low      { border-left-color:var(--text-3); }
+  .alert.resolved { opacity:.55; }
+
+  .body { flex:1; background:none; border:0; text-align:left; cursor:pointer; padding:.5rem .6rem; font:inherit; color:var(--text); display:flex; flex-direction:column; gap:.25rem; min-width:0; }
+  .row-1 { display:flex; align-items:center; gap:.4rem; flex-wrap:wrap; }
+  .symbol { font-family:ui-monospace, monospace; font-weight:600; font-size:.78rem; }
+  .kind { color:var(--text-2); font-size:.7rem; text-transform:lowercase; }
+  .summary { margin:0; color:var(--text-2); font-size:.73rem; line-height:1.5; }
+  .meta { color:var(--text-3); font-size:.65rem; }
+
+  .chip { font-size:.6rem; padding:.05rem .35rem; border-radius:999px; border:1px solid var(--border-md); color:var(--text-3); }
+  .chip.ok { color:var(--success); border-color:color-mix(in srgb, var(--success) 35%, transparent); }
+  .chip.warn { color:var(--warning); border-color:color-mix(in srgb, var(--warning) 35%, transparent); }
+  .chip.live { color:var(--success); display:inline-flex; align-items:center; gap:.2rem; }
+
+  .actions { display:flex; gap:.15rem; padding:.4rem .3rem; }
+  .icon { background:none; border:0; cursor:pointer; color:var(--text-3); padding:.25rem; border-radius:var(--radius-sm); display:flex; }
+  .icon:hover { background:var(--surface-3); color:var(--text); }
+  .icon:disabled { opacity:.5; cursor:wait; }
+
+  .warnings p { margin:0; color:var(--warning); font-size:.68rem; display:flex; gap:.3rem; align-items:flex-start; }
+</style>

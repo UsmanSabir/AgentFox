@@ -181,6 +181,8 @@ export interface WatchlistEntry {
   tradable: boolean;
   archivedBars: number;
   hasWeeklyHistory: boolean;
+  /** Alerts still in the `new` state for this symbol — drives the row badge. */
+  openAlerts: number;
 }
 
 /** One bar plus the indicator values at that bar (null until enough history exists). */
@@ -280,6 +282,42 @@ export interface ChartData {
 export const CHART_INTERVALS = ['1D', '60m', '30m', '15m', '5m'] as const;
 export type ChartInterval = (typeof CHART_INTERVALS)[number];
 
+/** An alert the monitor raised. Every kind is a transition, not a standing condition. */
+export interface TradingAlert {
+  alertId: string;
+  symbol: string;
+  kind: string;
+  severity: 'Low' | 'Medium' | 'High' | 'Critical' | string;
+  levelPrice: number | null;
+  price: number;
+  interval: string;
+  summary: string;
+  reasons: string[];
+  /** The level is confirmed on the weekly chart — structure rather than a recent swing. */
+  weeklyConfirmed: boolean;
+  /** Raised off a still-forming bar, so the trigger could still un-happen before the close. */
+  fromLiveBar: boolean;
+  state: 'new' | 'acknowledged' | 'dismissed' | string;
+  raisedUtc: string;
+  sessionDate: string;
+}
+
+export interface MonitorStatus {
+  enabled: boolean;
+  marketOpen: boolean;
+  lastPassUtc: string | null;
+  lastPassMs: number;
+  symbolsCovered: number;
+  alertsRaised: number;
+  alertsSuppressed: number;
+  intervalSeconds: number;
+  confirmPasses: number;
+  trigger: string | null;
+  warnings: string[];
+  message: string;
+  liveSubscribers: number;
+}
+
 export interface WatchlistResponse {
   entries: WatchlistEntry[];
   seededUtc?: string | null;
@@ -313,6 +351,78 @@ export const trading = {
     const query = new URLSearchParams({ symbol, interval });
     if (bars) query.set('bars', String(bars));
     return get<ChartData>(`/trading/candles?${query}`);
+  },
+
+  alerts: {
+    list:    (opts: { symbol?: string; state?: string; limit?: number } = {}) => {
+      const query = new URLSearchParams();
+      if (opts.symbol) query.set('symbol', opts.symbol);
+      if (opts.state) query.set('state', opts.state);
+      if (opts.limit) query.set('limit', String(opts.limit));
+      const suffix = query.toString();
+      return get<TradingAlert[]>(`/trading/alerts${suffix ? `?${suffix}` : ''}`);
+    },
+    ack:     (id: string) => post<{ alertId: string; state: string }>(`/trading/alerts/${id}/ack`),
+    dismiss: (id: string) => post<{ alertId: string; state: string }>(`/trading/alerts/${id}/dismiss`),
+
+    /**
+     * Live stream of new alerts. Uses fetch rather than EventSource because the /api group requires
+     * the management API key header, which EventSource cannot send. Returns a stop function.
+     */
+    stream: (
+      onAlert: (alert: TradingAlert) => void,
+      onConnectionChange?: (connected: boolean) => void
+    ): (() => void) => {
+      const controller = new AbortController();
+
+      (async () => {
+        try {
+          const res = await fetch(`${BASE}/trading/alerts/stream`, {
+            headers: headers(),
+            signal: controller.signal
+          });
+          if (!res.ok || !res.body) return;
+          // Reported on connect, not on the first alert: the indicator means "the stream is open",
+          // and a quiet market is the normal case.
+          onConnectionChange?.(true);
+
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+
+            // SSE frames are separated by a blank line; anything after the last one is a partial
+            // frame and stays in the buffer.
+            const frames = buffer.split('\n\n');
+            buffer = frames.pop() ?? '';
+            for (const frame of frames) {
+              const line = frame.split('\n').find(l => l.startsWith('data: '));
+              if (!line) continue;
+              try {
+                onAlert(JSON.parse(line.slice(6)) as TradingAlert);
+              } catch {
+                /* malformed frame: skip it rather than tearing down the stream */
+              }
+            }
+          }
+        } catch {
+          // Aborted or dropped. The alert list is re-read on the next load; SQLite is the durable path.
+        } finally {
+          onConnectionChange?.(false);
+        }
+      })();
+
+      return () => controller.abort();
+    }
+  },
+
+  monitor: {
+    status: () => get<MonitorStatus>('/trading/monitor/status'),
+    run:    () => post<MonitorStatus>('/trading/monitor/run')
   },
 
   watchlist: {

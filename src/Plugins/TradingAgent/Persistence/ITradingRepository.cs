@@ -165,6 +165,54 @@ public interface ITradingRepository
     Task<IReadOnlyDictionary<string, int>> GetDailyBarCountsAsync(
         IReadOnlyList<string> symbols,
         CancellationToken ct = default);
+
+    // ── Monitor state and alerts ──────────────────────────────────────────────
+
+    /// <summary>Per-symbol monitor state from the previous pass, keyed by symbol.</summary>
+    Task<IReadOnlyDictionary<string, TradingAgent.Watchlist.SymbolMonitorState>> GetMonitorStatesAsync(
+        CancellationToken ct = default);
+
+    /// <summary>Upserts the state produced by a pass.</summary>
+    Task SaveMonitorStateAsync(
+        TradingAgent.Watchlist.SymbolMonitorState state,
+        CancellationToken ct = default);
+
+    /// <summary>Persists a raised alert and returns its id.</summary>
+    Task<string> SaveAlertAsync(
+        TradingAgent.Watchlist.DetectedAlert alert,
+        DateOnly sessionDate,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// True when an equivalent alert was already raised since <paramref name="since"/> — same symbol,
+    /// same kind, and the same level (rounded, so a level that shifts by a paisa is still the same
+    /// level). This is the cooldown that stops one situation being reported repeatedly.
+    /// </summary>
+    Task<bool> HasRecentAlertAsync(
+        string symbol,
+        TradingAgent.Watchlist.AlertKind kind,
+        decimal? levelPrice,
+        DateTime since,
+        CancellationToken ct = default);
+
+    /// <summary>Alerts newest first, optionally filtered by symbol and state.</summary>
+    Task<IReadOnlyList<TradingAgent.Watchlist.AlertRecord>> GetAlertsAsync(
+        string? symbol = null,
+        string? state = null,
+        int limit = 100,
+        CancellationToken ct = default);
+
+    /// <summary>Moves an alert to <paramref name="state"/> (acknowledged/dismissed). False if unknown.</summary>
+    Task<bool> SetAlertStateAsync(
+        string alertId,
+        string state,
+        CancellationToken ct = default);
+
+    /// <summary>Count of alerts in the <c>new</c> state, per symbol, for the watchlist badges.</summary>
+    Task<IReadOnlyDictionary<string, int>> GetOpenAlertCountsAsync(CancellationToken ct = default);
+
+    /// <summary>Deletes alerts raised before <paramref name="before"/>. Returns how many were removed.</summary>
+    Task<int> PruneAlertsAsync(DateTime before, CancellationToken ct = default);
 }
 
 /// <summary>One watched symbol.</summary>

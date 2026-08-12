@@ -152,6 +152,71 @@ public class TradingAgentOptions
     /// needs no configuration to function.
     /// </summary>
     public TradingWatchlistOptions Watchlist { get; set; } = new();
+
+    /// <summary>
+    /// Continuous trend/level monitoring of the watchlist. Ready to run as configured — the defaults
+    /// are chosen to alert on real transitions without flooding, and nothing here can place an order.
+    /// </summary>
+    public TradingMonitorOptions Monitor { get; set; } = new();
+}
+
+/// <summary>
+/// Settings for the background watchlist monitor. It only ever raises alerts: execution stays behind
+/// <see cref="TradingAgentOptions.ExecutionMode"/>, the risk engine, and the kill switch.
+/// </summary>
+public sealed class TradingMonitorOptions
+{
+    /// <summary>Run the monitor at all. On by default; the watchlist is not much use unwatched.</summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>
+    /// Seconds between passes while the market is open (clamped 30–3600). A pass costs ONE market-wide
+    /// request regardless of how many symbols are watched, so 120 s is cheap; the limit on going
+    /// faster is the portal's patience, not ours.
+    /// </summary>
+    public int IntervalSeconds { get; set; } = 120;
+
+    /// <summary>
+    /// Consecutive passes a condition must hold before it becomes an alert. 1 fires immediately and
+    /// will flicker when price sits on a level; 2 is the smallest value that filters that.
+    /// </summary>
+    public int ConfirmPasses { get; set; } = 2;
+
+    /// <summary>
+    /// How far past a level a close must be to count as breaking it, in percent. A wick through a
+    /// level is noise, and reporting it as a break is how an alert feed loses its reader.
+    /// </summary>
+    public decimal BreakBufferPercent { get; set; } = 0.5m;
+
+    /// <summary>
+    /// Volume (as a multiple of the 30-bar average) required before a break is called confirmed. A
+    /// break on thin volume is frequently retraced. Set 0 to accept any volume.
+    /// </summary>
+    public decimal VolumeConfirmRatio { get; set; } = 1.3m;
+
+    /// <summary>
+    /// Minutes before the same symbol + kind + level may alert again. 0 means "the rest of the
+    /// session", which is the usual intent: one situation, one alert.
+    /// </summary>
+    public int CooldownMinutes { get; set; } = 0;
+
+    /// <summary>
+    /// Upper bound on alerts raised in a single pass. A circuit breaker for a market-wide move, where
+    /// every symbol would otherwise fire at once; the excess is logged rather than silently dropped.
+    /// </summary>
+    public int MaxAlertsPerPass { get; set; } = 25;
+
+    /// <summary>
+    /// Run one settle pass after the close, on top of the in-session cadence, so the day's final bars
+    /// are analyzed once they are settled rather than only mid-session.
+    /// </summary>
+    public bool RunAfterClose { get; set; } = true;
+
+    /// <summary>
+    /// Days of alert history retained. Older rows are pruned so the table has a ceiling; the ledger's
+    /// own audit trail is unaffected.
+    /// </summary>
+    public int RetentionDays { get; set; } = 90;
 }
 
 /// <summary>

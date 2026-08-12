@@ -167,6 +167,11 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         // them while the market is open (placed via the host's IHostedService pipeline on app start).
         services.AddSingleton<PendingTakeProfitStore>();
         services.AddSingleton<CandleBackfillRunner>();
+        services.AddSingleton<AlertBroadcaster>();
+        // Registered as a singleton AND as the hosted service, so the API can read its live status and
+        // trigger a pass on the same instance the timer drives.
+        services.AddSingleton<WatchlistMonitorWorker>();
+        services.AddHostedService(sp => sp.GetRequiredService<WatchlistMonitorWorker>());
         services.AddHostedService<TradingSafetyStartupValidator>();
         services.AddHostedService<BrokerReconciliationWorker>();
         services.AddHostedService<TakeProfitRetryWorker>();
@@ -255,6 +260,97 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             var status = await runner.GetStatusAsync(ct);
             return Results.Accepted(value: new { started, status });
         }).RequireAuthorization("ManagementAdministrator");
+
+        // ── Alerts ────────────────────────────────────────────────────────────
+        // What the monitor noticed. Read-only for viewers; acknowledging or dismissing is an analyst
+        // action because it changes what the next person sees.
+
+        trading.MapGet("/alerts", async (
+            string? symbol,
+            string? state,
+            int? limit,
+            ITradingRepository repository,
+            CancellationToken ct) =>
+            Results.Ok(await repository.GetAlertsAsync(symbol, state, limit ?? 100, ct)));
+
+        trading.MapGet("/monitor/status", (
+            WatchlistMonitorWorker monitor,
+            AlertBroadcaster broadcaster) => Results.Ok(new
+            {
+                monitor.Status.Enabled,
+                monitor.Status.MarketOpen,
+                monitor.Status.LastPassUtc,
+                monitor.Status.LastPassMs,
+                monitor.Status.SymbolsCovered,
+                monitor.Status.AlertsRaised,
+                monitor.Status.AlertsSuppressed,
+                // The effective settings it is running with, so "why did it not alert" is answerable
+                // from the UI instead of by reading JSON on disk.
+                monitor.Status.IntervalSeconds,
+                monitor.Status.ConfirmPasses,
+                monitor.Status.Trigger,
+                monitor.Status.Warnings,
+                monitor.Status.Message,
+                liveSubscribers = broadcaster.SubscriberCount
+            }));
+
+        // Run a pass now rather than waiting for the next tick. Analyst-level because it costs a
+        // portal request and can raise alerts.
+        trading.MapPost("/monitor/run", async (
+            WatchlistMonitorWorker monitor,
+            CancellationToken ct) =>
+            Results.Ok(await monitor.RunPassAsync("manual", ct)))
+            .RequireAuthorization("TradingAnalyst");
+
+        trading.MapPost("/alerts/{alertId}/ack", async (
+            string alertId,
+            ITradingRepository repository,
+            CancellationToken ct) =>
+        {
+            var ok = await repository.SetAlertStateAsync(alertId, "acknowledged", ct);
+            return ok ? Results.Ok(new { alertId, state = "acknowledged" }) : Results.NotFound();
+        }).RequireAuthorization("TradingAnalyst");
+
+        trading.MapPost("/alerts/{alertId}/dismiss", async (
+            string alertId,
+            ITradingRepository repository,
+            CancellationToken ct) =>
+        {
+            var ok = await repository.SetAlertStateAsync(alertId, "dismissed", ct);
+            return ok ? Results.Ok(new { alertId, state = "dismissed" }) : Results.NotFound();
+        }).RequireAuthorization("TradingAnalyst");
+
+        // Live alert stream. SSE rather than polling so a level break reaches an open page in seconds.
+        // The client reads it with fetch (not EventSource) because the /api group needs the management
+        // API key header, which EventSource cannot send — the same reason the host's chat stream does.
+        trading.MapGet("/alerts/stream", async (
+            HttpContext http,
+            AlertBroadcaster broadcaster,
+            CancellationToken ct) =>
+        {
+            http.Response.Headers.ContentType = "text/event-stream";
+            http.Response.Headers.CacheControl = "no-cache";
+            // Proxies that buffer would defeat the point of a stream.
+            http.Response.Headers["X-Accel-Buffering"] = "no";
+
+            // An immediate comment frame so the client knows it is connected even on a quiet market.
+            await http.Response.WriteAsync(": connected\n\n", ct);
+            await http.Response.Body.FlushAsync(ct);
+
+            try
+            {
+                await foreach (var alert in broadcaster.SubscribeAsync(ct))
+                {
+                    await http.Response.WriteAsync(
+                        $"data: {System.Text.Json.JsonSerializer.Serialize(alert)}\n\n", ct);
+                    await http.Response.Body.FlushAsync(ct);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Client navigated away; nothing to report.
+            }
+        });
 
         // ── Candles (chart data) ──────────────────────────────────────────────
         // Everything the chart needs in ONE request: the bars, the indicator lines, the levels with
@@ -459,6 +555,7 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             var tradable = universe.ForExecution().ToHashSet(StringComparer.OrdinalIgnoreCase);
             var symbols = snapshot.Entries.Select(e => e.Symbol).ToList();
             var barCounts = await repository.GetDailyBarCountsAsync(symbols, ct);
+            var openAlerts = await repository.GetOpenAlertCountsAsync(ct);
 
             // MinimumWeeklyBars weekly bars need roughly six times as many daily sessions. Reported per
             // symbol because a freshly added symbol has no deep history until the backfill reaches it,
@@ -476,7 +573,8 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                     notes = e.Notes,
                     tradable = tradable.Contains(e.Symbol),
                     archivedBars = barCounts.GetValueOrDefault(e.Symbol),
-                    hasWeeklyHistory = barCounts.GetValueOrDefault(e.Symbol) >= weeklyReadyBars
+                    hasWeeklyHistory = barCounts.GetValueOrDefault(e.Symbol) >= weeklyReadyBars,
+                    openAlerts = openAlerts.GetValueOrDefault(e.Symbol)
                 }),
                 seededUtc = snapshot.SeededUtc,
                 // True when AllowedSymbols has changed since the watchlist was seeded. Surfaced so the

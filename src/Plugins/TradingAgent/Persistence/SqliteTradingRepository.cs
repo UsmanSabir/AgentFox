@@ -4,9 +4,11 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System.Globalization;
 using System.Text.Json;
+using TradingAgent.Analysis;
 using TradingAgent.Config;
 using TradingAgent.Manager;
 using TradingAgent.Reconciliation;
+using TradingAgent.Watchlist;
 
 namespace TradingAgent.Persistence;
 
@@ -728,6 +730,42 @@ public sealed class SqliteTradingRepository : ITradingRepository
                     seeded_utc TEXT NULL,
                     seed_hash  TEXT NULL
                 );
+                -- What the monitor remembers between passes. Without it there are no transitions,
+                -- only conditions, and a standing situation would be re-reported forever.
+                CREATE TABLE IF NOT EXISTS watchlist_state (
+                    symbol           TEXT PRIMARY KEY,
+                    zone             TEXT NOT NULL,
+                    setup            TEXT NOT NULL,
+                    support          TEXT NULL,
+                    resistance       TEXT NULL,
+                    sma_relation     TEXT NULL,
+                    rsi_band         TEXT NULL,
+                    weekly_breakdown INTEGER NOT NULL DEFAULT 0,
+                    streaks_json     TEXT NOT NULL DEFAULT '{}',
+                    updated_utc      TEXT NOT NULL
+                );
+                -- Append-only record of what the monitor raised. evidence_json is snapshotted at raise
+                -- time so an alert stays explicable after the market has moved on.
+                CREATE TABLE IF NOT EXISTS watchlist_alerts (
+                    alert_id        TEXT PRIMARY KEY,
+                    symbol          TEXT NOT NULL,
+                    kind            TEXT NOT NULL,
+                    severity        TEXT NOT NULL,
+                    level_price     TEXT NULL,
+                    price           TEXT NOT NULL,
+                    interval        TEXT NOT NULL,
+                    summary         TEXT NOT NULL,
+                    evidence_json   TEXT NOT NULL,
+                    weekly_confirmed INTEGER NOT NULL DEFAULT 0,
+                    from_live_bar   INTEGER NOT NULL DEFAULT 0,
+                    state           TEXT NOT NULL DEFAULT 'new',
+                    raised_utc      TEXT NOT NULL,
+                    session_date    TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS ix_watchlist_alerts_raised
+                    ON watchlist_alerts(raised_utc DESC);
+                CREATE INDEX IF NOT EXISTS ix_watchlist_alerts_dedupe
+                    ON watchlist_alerts(symbol, kind, raised_utc DESC);
                 CREATE INDEX IF NOT EXISTS ix_trading_order_events_execution
                     ON trading_order_events(execution_id, event_id);
                 CREATE INDEX IF NOT EXISTS ix_intraday_bars_series
@@ -940,6 +978,241 @@ public sealed class SqliteTradingRepository : ITradingRepository
         while (await reader.ReadAsync(ct))
             counts[reader.GetString(0)] = reader.GetInt32(1);
         return counts;
+    }
+
+    // ── Monitor state and alerts ──────────────────────────────────────────────
+
+    public async Task<IReadOnlyDictionary<string, SymbolMonitorState>> GetMonitorStatesAsync(
+        CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT symbol, zone, setup, support, resistance, sma_relation, rsi_band,
+                   weekly_breakdown, streaks_json, updated_utc
+            FROM watchlist_state
+            """;
+
+        var states = new Dictionary<string, SymbolMonitorState>(StringComparer.OrdinalIgnoreCase);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var symbol = reader.GetString(0);
+            states[symbol] = new SymbolMonitorState
+            {
+                Symbol          = symbol,
+                Zone            = Enum.TryParse<PriceZone>(reader.GetString(1), out var zone)
+                                      ? zone : PriceZone.Unknown,
+                Setup           = Enum.TryParse<TradeSetup>(reader.GetString(2), out var setup)
+                                      ? setup : TradeSetup.InsufficientData,
+                Support         = ParseDecimal(reader, 3),
+                Resistance      = ParseDecimal(reader, 4),
+                SmaRelation     = reader.IsDBNull(5) ? null : reader.GetString(5),
+                RsiBand         = reader.IsDBNull(6) ? null : reader.GetString(6),
+                WeeklyBreakdown = reader.GetInt64(7) != 0,
+                Streaks         = ParseStreaks(reader.GetString(8)),
+                UpdatedUtc      = ParseUtc(reader.GetString(9)),
+                IsNew           = false
+            };
+        }
+        return states;
+    }
+
+    public async Task SaveMonitorStateAsync(SymbolMonitorState state, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO watchlist_state
+                (symbol, zone, setup, support, resistance, sma_relation, rsi_band,
+                 weekly_breakdown, streaks_json, updated_utc)
+            VALUES ($symbol, $zone, $setup, $support, $resistance, $sma, $rsi,
+                    $breakdown, $streaks, $now)
+            ON CONFLICT(symbol) DO UPDATE SET
+                zone = $zone, setup = $setup, support = $support, resistance = $resistance,
+                sma_relation = $sma, rsi_band = $rsi, weekly_breakdown = $breakdown,
+                streaks_json = $streaks, updated_utc = $now
+            """;
+        command.Parameters.AddWithValue("$symbol", state.Symbol);
+        command.Parameters.AddWithValue("$zone", state.Zone.ToString());
+        command.Parameters.AddWithValue("$setup", state.Setup.ToString());
+        command.Parameters.AddWithValue("$support", Money(state.Support));
+        command.Parameters.AddWithValue("$resistance", Money(state.Resistance));
+        command.Parameters.AddWithValue("$sma", state.SmaRelation ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$rsi", state.RsiBand ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$breakdown", state.WeeklyBreakdown ? 1 : 0);
+        command.Parameters.AddWithValue("$streaks", JsonSerializer.Serialize(
+            state.Streaks.ToDictionary(kv => kv.Key.ToString(), kv => kv.Value)));
+        command.Parameters.AddWithValue("$now", state.UpdatedUtc.ToString("O"));
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<string> SaveAlertAsync(
+        DetectedAlert alert, DateOnly sessionDate, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+
+        var id = Guid.NewGuid().ToString("N");
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO watchlist_alerts
+                (alert_id, symbol, kind, severity, level_price, price, interval, summary,
+                 evidence_json, weekly_confirmed, from_live_bar, state, raised_utc, session_date)
+            VALUES ($id, $symbol, $kind, $severity, $level, $price, $interval, $summary,
+                    $evidence, $confirmed, $live, 'new', $now, $session)
+            """;
+        command.Parameters.AddWithValue("$id", id);
+        command.Parameters.AddWithValue("$symbol", alert.Symbol);
+        command.Parameters.AddWithValue("$kind", alert.Kind.ToString());
+        command.Parameters.AddWithValue("$severity", alert.Severity.ToString());
+        command.Parameters.AddWithValue("$level", Money(alert.LevelPrice));
+        command.Parameters.AddWithValue("$price", alert.Price.ToString(CultureInfo.InvariantCulture));
+        command.Parameters.AddWithValue("$interval", alert.Interval);
+        command.Parameters.AddWithValue("$summary", alert.Summary);
+        command.Parameters.AddWithValue("$evidence", JsonSerializer.Serialize(alert.Reasons));
+        command.Parameters.AddWithValue("$confirmed", alert.WeeklyConfirmed ? 1 : 0);
+        command.Parameters.AddWithValue("$live", alert.FromLiveBar ? 1 : 0);
+        command.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("O"));
+        command.Parameters.AddWithValue(
+            "$session", sessionDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+        await command.ExecuteNonQueryAsync(ct);
+        return id;
+    }
+
+    public async Task<bool> HasRecentAlertAsync(
+        string symbol, AlertKind kind, decimal? levelPrice, DateTime since, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+
+        var command = connection.CreateCommand();
+        // Levels are compared as rounded text: the same structural level re-derived on the next pass
+        // can differ in the last paisa, and treating that as a new level would defeat the cooldown.
+        command.CommandText = """
+            SELECT 1 FROM watchlist_alerts
+            WHERE symbol = $symbol AND kind = $kind AND raised_utc >= $since
+              AND ($level IS NULL OR level_price IS NULL OR level_price = $level)
+            LIMIT 1
+            """;
+        command.Parameters.AddWithValue("$symbol", symbol);
+        command.Parameters.AddWithValue("$kind", kind.ToString());
+        command.Parameters.AddWithValue("$since", since.ToString("O"));
+        command.Parameters.AddWithValue("$level", Money(levelPrice));
+        return await command.ExecuteScalarAsync(ct) is not null;
+    }
+
+    public async Task<IReadOnlyList<AlertRecord>> GetAlertsAsync(
+        string? symbol = null, string? state = null, int limit = 100, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT alert_id, symbol, kind, severity, level_price, price, interval, summary,
+                   evidence_json, weekly_confirmed, from_live_bar, state, raised_utc, session_date
+            FROM watchlist_alerts
+            WHERE ($symbol IS NULL OR symbol = $symbol)
+              AND ($state IS NULL OR state = $state)
+            ORDER BY raised_utc DESC
+            LIMIT $limit
+            """;
+        command.Parameters.AddWithValue("$symbol", (object?)symbol?.ToUpperInvariant() ?? DBNull.Value);
+        command.Parameters.AddWithValue("$state", (object?)state ?? DBNull.Value);
+        command.Parameters.AddWithValue("$limit", Math.Clamp(limit, 1, 1000));
+
+        var alerts = new List<AlertRecord>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            alerts.Add(new AlertRecord
+            {
+                AlertId         = reader.GetString(0),
+                Symbol          = reader.GetString(1),
+                Kind            = reader.GetString(2),
+                Severity        = reader.GetString(3),
+                LevelPrice      = ParseDecimal(reader, 4),
+                Price           = decimal.Parse(reader.GetString(5), CultureInfo.InvariantCulture),
+                Interval        = reader.GetString(6),
+                Summary         = reader.GetString(7),
+                Reasons         = JsonSerializer.Deserialize<List<string>>(reader.GetString(8)) ?? [],
+                WeeklyConfirmed = reader.GetInt64(9) != 0,
+                FromLiveBar     = reader.GetInt64(10) != 0,
+                State           = reader.GetString(11),
+                RaisedUtc       = ParseUtc(reader.GetString(12)),
+                SessionDate     = reader.GetString(13)
+            });
+        }
+        return alerts;
+    }
+
+    public async Task<bool> SetAlertStateAsync(string alertId, string state, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = "UPDATE watchlist_alerts SET state = $state WHERE alert_id = $id";
+        command.Parameters.AddWithValue("$id", alertId);
+        command.Parameters.AddWithValue("$state", state);
+        return await command.ExecuteNonQueryAsync(ct) == 1;
+    }
+
+    public async Task<IReadOnlyDictionary<string, int>> GetOpenAlertCountsAsync(CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT symbol, COUNT(*) FROM watchlist_alerts WHERE state = 'new' GROUP BY symbol";
+
+        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            counts[reader.GetString(0)] = reader.GetInt32(1);
+        return counts;
+    }
+
+    public async Task<int> PruneAlertsAsync(DateTime before, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM watchlist_alerts WHERE raised_utc < $before";
+        command.Parameters.AddWithValue("$before", before.ToString("O"));
+        return await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static object Money(decimal? value) => value is null
+        ? DBNull.Value
+        : Math.Round(value.Value, 2, MidpointRounding.AwayFromZero).ToString(CultureInfo.InvariantCulture);
+
+    private static decimal? ParseDecimal(Microsoft.Data.Sqlite.SqliteDataReader reader, int ordinal) =>
+        reader.IsDBNull(ordinal)
+            ? null
+            : decimal.Parse(reader.GetString(ordinal), CultureInfo.InvariantCulture);
+
+    private static IReadOnlyDictionary<AlertKind, int> ParseStreaks(string json)
+    {
+        var streaks = new Dictionary<AlertKind, int>();
+        try
+        {
+            var raw = JsonSerializer.Deserialize<Dictionary<string, int>>(json);
+            if (raw is null) return streaks;
+            foreach (var (key, value) in raw)
+            {
+                if (Enum.TryParse<AlertKind>(key, out var kind)) streaks[kind] = value;
+            }
+        }
+        catch (JsonException)
+        {
+            // Corrupt state costs at most one delayed alert; losing the monitor to it would be worse.
+        }
+        return streaks;
     }
 
     private static async Task InsertWatchlistSymbolsAsync(

@@ -4,6 +4,7 @@
   import { RefreshCw, ShieldAlert, Activity, FileText, ListChecks, Scale, History, Power, Database, Download } from 'lucide-svelte';
   import WatchlistPanel from './WatchlistPanel.svelte';
   import ChartPane from './ChartPane.svelte';
+  import AlertsPanel from './AlertsPanel.svelte';
 
   /** Symbol the watchlist has selected; drives the chart pane. */
   let selectedSymbol: string | null = null;
@@ -138,6 +139,10 @@
     <div class="watch-row">
       <WatchlistPanel bind:selected={selectedSymbol} />
       <ChartPane symbol={selectedSymbol} />
+    </div>
+
+    <div class="alerts-row">
+      <AlertsPanel on:select={(e) => selectedSymbol = e.detail} />
     </div>
 
     {#if archive}

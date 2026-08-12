@@ -165,10 +165,71 @@ Consequences the UI states explicitly rather than leaving to be discovered at or
   watchlist is *not* updated (that would discard your edits); the API reports
   `configuredListChanged: true` and the UI offers **Reset**, which is the only thing that re-seeds.
 
+---
+
+## Monitoring and alerts
+
+`WatchlistMonitorWorker` watches the whole monitoring universe for **transitions** and raises alerts.
+It runs every `Monitor.IntervalSeconds` while the market is open, plus one settle pass after the close,
+and it can only ever raise alerts — execution stays behind the execution mode, the risk engine, and
+the kill switch.
+
+**The cost model is the point.** One pass costs **one market-wide request** (PSX serves candles by
+date, covering every symbol) plus local archive reads, so 100 watched symbols cost the same as 5 —
+a real pass over 26 symbols measures ~2.6 s cold, ~0.2 s warm. Nothing in that loop may fetch per
+symbol; doing so would turn a 2-minute cadence into a rate-limit incident.
+
+### What it detects
+
+| Kind | Fires when | Severity |
+| --- | --- | --- |
+| `SupportBounce` | setup is buy-at-support **and** price is turning up off the level | High |
+| `ResistanceRejection` | setup is sell-at-resistance **and** price is turning down | High |
+| `SupportBreak` | fresh range low, still falling, past the buffer, volume-confirmed | High |
+| `ResistanceBreakout` | fresh range high, still rising, past the buffer, volume-confirmed | High |
+| `SetupChanged` | the deterministic setup classification changed | High into a breakdown, else Medium |
+| `TrendFlip` | SMA20 crossed SMA50 | Medium |
+| `WeeklyBreakdown` | the weekly chart entered a breakdown | Critical |
+| `RsiOversold` / `RsiOverbought` | RSI crossed into a band | Low |
+
+### Why it does not spam
+
+An alert feed that cries wolf gets muted, and a muted monitor is worth nothing. Four guards:
+
+1. **Transitions, not conditions.** "Price is at support" is true for days; "price has turned up off
+   support" happens once. Only the second is an alert.
+2. **Confirmation streaks.** A *sustained* condition must hold for `Monitor.ConfirmPasses` consecutive
+   passes (default 2) before firing.
+3. **A break buffer.** A close must clear a level by `Monitor.BreakBufferPercent` (default 0.5 %) and
+   be volume-confirmed to count as a break — a wick through a level is noise.
+4. **A durable cooldown.** The same symbol + kind + level does not re-alert within
+   `Monitor.CooldownMinutes` (0 = the rest of the session). It is a database check, so a restart
+   cannot re-announce what was already said.
+
+Two structural details worth knowing:
+
+- **A cold start fires nothing.** Every kind is a transition, and on first sight of a symbol there is
+  nothing to have transitioned from — so the first pass records state silently. Otherwise a restart
+  would alert on every standing condition at once.
+- **Edges fire on the pass they appear; sustained conditions wait for the streak.** A setup change, an
+  SMA cross, an RSI band entry and a weekly breakdown are visible for exactly one pass, because the
+  state they are compared against is rewritten at the end of every pass. Streak-gating those would not
+  delay them — it would silence them permanently. Their flicker protection is the cooldown instead.
+  `AlertDetectorTests` pins both behaviours.
+
+Alerts carry their evidence (the analyzer's own reasons), whether the level is weekly-confirmed, and
+whether they were raised off a **still-forming bar** — a trigger that can still un-happen before the
+close, which the UI labels rather than hiding.
+
 ### Endpoints
 
 | Verb | Route | Role |
 | --- | --- | --- |
+| GET | `/api/trading/alerts?symbol=&state=&limit=` | ManagementViewer |
+| GET | `/api/trading/alerts/stream` — SSE, live push | ManagementViewer |
+| POST | `/api/trading/alerts/{id}/ack` \| `/dismiss` | TradingAnalyst |
+| GET | `/api/trading/monitor/status` — last pass, coverage, and the *effective* settings | ManagementViewer |
+| POST | `/api/trading/monitor/run` — run a pass now | TradingAnalyst |
 | GET | `/api/trading/candles?symbol=&interval=&bars=` — chart data (see below) | ManagementViewer |
 | GET | `/api/trading/watchlist` | ManagementViewer |
 | POST | `/api/trading/watchlist` — `{ symbol }`, validated against the live market watch | TradingAnalyst |
@@ -280,6 +341,15 @@ disabled; this tool uses the explicit AgentFox provider bridge instead.
 | `Watchlist.MaxSymbols` | `150` | Upper bound on watched symbols. |
 | `Watchlist.ArchiveWatchlistSymbols` | `true` | Archive daily history for watchlist symbols too, so they get weekly levels. Costs database rows, not portal requests. |
 | `Watchlist.ValidateAgainstMarketWatch` | `true` | Reject an unknown ticker when it is added, instead of letting a typo become an empty chart. A portal outage warns rather than blocks. |
+| `Monitor.Enabled` | `true` | Run the background watchlist monitor. |
+| `Monitor.IntervalSeconds` | `120` | Seconds between passes while the market is open (30–3600). One pass = one market-wide request regardless of symbol count. |
+| `Monitor.ConfirmPasses` | `2` | Consecutive passes a *sustained* condition must hold before it alerts. 1 fires immediately and flickers on a level. |
+| `Monitor.BreakBufferPercent` | `0.5` | How far past a level a close must be to count as a break rather than a wick. |
+| `Monitor.VolumeConfirmRatio` | `1.3` | Volume vs the 30-bar average required to confirm a break. 0 accepts any volume. |
+| `Monitor.CooldownMinutes` | `0` | Minutes before the same symbol+kind+level may alert again; 0 means the rest of the session. |
+| `Monitor.MaxAlertsPerPass` | `25` | Circuit breaker for a market-wide move. Excess is logged, never silently dropped. |
+| `Monitor.RunAfterClose` | `true` | One extra pass after the close, on the day's settled bars. |
+| `Monitor.RetentionDays` | `90` | Alert history retained; older rows are pruned so the table has a ceiling. |
 | `Scan.MarketDayFetchConcurrency` | `4` | Concurrent portal requests while warming a cold candle cache (1–8). |
 | `Scan.MaxCachedMarketDays` | `120` | Settled sessions kept in the in-memory candle cache. |
 | `Scan.BackfillYears` | `2` | Years of daily OHLC the background worker archives for `AllowedSymbols`. Weekly levels need ~2 years. `0` disables it. |

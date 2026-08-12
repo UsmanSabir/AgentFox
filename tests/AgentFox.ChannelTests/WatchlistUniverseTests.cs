@@ -314,5 +314,23 @@ public sealed class WatchlistUniverseTests
             throw new NotSupportedException();
         public Task<IReadOnlyDictionary<string, int>> GetDailyBarCountsAsync(
             IReadOnlyList<string> symbols, CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<IReadOnlyDictionary<string, SymbolMonitorState>> GetMonitorStatesAsync(
+            CancellationToken ct = default) => throw new NotSupportedException();
+        public Task SaveMonitorStateAsync(SymbolMonitorState s, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<string> SaveAlertAsync(DetectedAlert a, DateOnly d, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<bool> HasRecentAlertAsync(
+            string s, AlertKind k, decimal? l, DateTime since, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<IReadOnlyList<AlertRecord>> GetAlertsAsync(
+            string? s = null, string? st = null, int limit = 100, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<bool> SetAlertStateAsync(string id, string state, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<IReadOnlyDictionary<string, int>> GetOpenAlertCountsAsync(CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<int> PruneAlertsAsync(DateTime before, CancellationToken ct = default) =>
+            throw new NotSupportedException();
     }
 }
