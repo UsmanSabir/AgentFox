@@ -1,6 +1,20 @@
 namespace AgentFox.Tools;
 
 /// <summary>
+/// Tools whose long block is intentional and must not be cut short by
+/// <see cref="ToolsConfig.TimeoutSeconds"/>. These wait on a human by design and are bounded
+/// instead by the <c>Hitl</c> timeouts.
+/// </summary>
+public static class ToolTimeoutPolicy
+{
+    public static readonly string[] ExemptTools =
+    [
+        "request_human_input",
+        "submit_plan",
+    ];
+}
+
+/// <summary>
 /// Controls which built-in tool groups are registered at startup.
 /// Bound from the "Tools" section of appsettings.json.
 /// All groups default to enabled — set a group to false to skip registration entirely.
@@ -68,6 +82,27 @@ public class ToolsConfig
     /// Compared on word shingles, so a report where only a few figures changed still matches.
     /// </summary>
     public double DuplicateNotifyThreshold { get; set; } = 0.9;
+
+    // ── Execution ceilings ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Ceiling (seconds) on any single tool invocation. 0 disables it.
+    /// <para>
+    /// A tool call runs inside a command, a command occupies a lane slot, and the Main lane is
+    /// serial — so a tool with no ceiling is an interactive prompt with no ceiling. On expiry the
+    /// turn stops waiting and the model gets a failed tool call it can react to.
+    /// </para>
+    /// The HITL tools (<c>request_human_input</c>, <c>submit_plan</c>) are exempt: waiting on a
+    /// human is their job, and they expire on the <c>Hitl</c> timeouts instead.
+    /// </summary>
+    public int TimeoutSeconds { get; set; } = 300;
+
+    /// <summary>
+    /// Ceiling (seconds) on a single <c>shell</c> command, applied inside the tool so the child
+    /// process tree is actually killed rather than merely abandoned. 0 disables it, leaving only
+    /// <see cref="TimeoutSeconds"/>. Kept below it so shell failures surface with their output.
+    /// </summary>
+    public int ShellTimeoutSeconds { get; set; } = 120;
 
     // ── Per-tool overrides ────────────────────────────────────────────────────
 

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using AgentFox.Helpers;
 using AgentFox.Plugins.Interfaces;
 using AgentFox.Plugins.Security;
 using ToolParameter = AgentFox.Plugins.Interfaces.ToolParameter;
@@ -11,10 +12,14 @@ namespace AgentFox.Tools;
 public class ShellCommandTool : BaseTool
 {
     private readonly WorkspaceManager _workspaceManager;
+    private readonly TimeSpan _timeout;
 
-    public ShellCommandTool(WorkspaceManager workspaceManager)
+    public ShellCommandTool(WorkspaceManager workspaceManager, int timeoutSeconds = 120)
     {
         _workspaceManager = workspaceManager;
+        // A non-positive setting means "no ceiling"; it is still bounded by the per-tool timeout in
+        // the tool gateway, so it can no longer wedge a lane the way an unbounded wait once did.
+        _timeout = timeoutSeconds > 0 ? TimeSpan.FromSeconds(timeoutSeconds) : Timeout.InfiniteTimeSpan;
     }
 
     public override string Name => "shell";
@@ -62,12 +67,43 @@ public class ShellCommandTool : BaseTool
             };
             SecretGuard.SanitizeChildEnvironment(startInfo);
 
-            var process = new Process { StartInfo = startInfo };
+            // Without this the child inherits the console's input handle and any command that
+            // prompts (git credentials, a package manager's [y/N], a stray REPL) sits there eating
+            // the operator's keystrokes forever. Redirected and closed, it reads EOF and moves on.
+            ChildProcess.DetachStandardInput(startInfo);
+
+            using var process = new Process { StartInfo = startInfo };
 
             process.Start();
-            var output = await process.StandardOutput.ReadToEndAsync();
-            var error = await process.StandardError.ReadToEndAsync();
-            await process.WaitForExitAsync();
+            ChildProcess.CloseStandardInput(process);
+
+            var outputTask = process.StandardOutput.ReadToEndAsync();
+            var errorTask  = process.StandardError.ReadToEndAsync();
+
+            using var timeoutCts = new CancellationTokenSource();
+            if (_timeout != Timeout.InfiniteTimeSpan)
+                timeoutCts.CancelAfter(_timeout);
+
+            try
+            {
+                await process.WaitForExitAsync(timeoutCts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                // The tree kill matters more than the kill: `cmd /c` is only the wrapper, and
+                // killing it alone leaves the real command running with the handles it inherited.
+                ChildProcess.KillTree(process);
+
+                // Whatever it managed to emit before the deadline is still the most useful thing
+                // to hand back — a build that times out has usually already printed the error.
+                var partial = await ReadAvailableAsync(outputTask, errorTask);
+                return ToolResult.Fail(
+                    $"Command timed out after {_timeout.TotalSeconds:F0}s and was terminated: {command}" +
+                    (partial.Length > 0 ? $"\n\nOutput before termination:\n{partial}" : string.Empty));
+            }
+
+            var output = await outputTask;
+            var error  = await errorTask;
 
             if (!string.IsNullOrEmpty(error))
             {
@@ -78,6 +114,29 @@ public class ShellCommandTool : BaseTool
         catch (Exception ex)
         {
             return ToolResult.Fail(ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Collects whatever the killed child had already written. The tree kill closes the pipes, so
+    /// both reads normally complete immediately; the short deadline is there so a grandchild that
+    /// somehow survived holding the write end cannot re-introduce the hang we just removed.
+    /// </summary>
+    private static async Task<string> ReadAvailableAsync(Task<string> outputTask, Task<string> errorTask)
+    {
+        try
+        {
+            var both = Task.WhenAll(outputTask, errorTask);
+            if (await Task.WhenAny(both, Task.Delay(TimeSpan.FromSeconds(2))) != both)
+                return string.Empty;
+
+            var output = await outputTask;
+            var error  = await errorTask;
+            return string.IsNullOrEmpty(error) ? output : $"{output}\n{error}";
+        }
+        catch
+        {
+            return string.Empty;
         }
     }
 }

@@ -395,6 +395,10 @@ class Program
         builder.Services.AddSingleton<SpecialistAgentRegistry>();
         builder.Services.AddSingleton<AgentFox.Plugins.Interfaces.IAgentRegistry>(sp =>
             sp.GetRequiredService<SpecialistAgentRegistry>());
+        // Bound explicitly so HitlManager picks up the approval/question expiry settings. Without
+        // it the manager falls back to its own defaults and the appsettings values are ignored.
+        builder.Services.AddSingleton(
+            configuration.GetSection("Hitl").Get<HitlConfig>() ?? new HitlConfig());
         builder.Services.AddSingleton<HitlManager>();
         builder.Services.AddSingleton<AgentFox.Planning.PlanStateStore>();
 
@@ -658,7 +662,10 @@ class Program
             .WithWorkspaceManager(workspaceManager)
             .WithSessionManager(sessionManager)
             .WithCompactionFromConfig(configuration)
-            .WithTodoPlannerFromConfig(configuration);
+            .WithTodoPlannerFromConfig(configuration)
+            .WithToolTimeout(
+                TimeSpan.FromSeconds(toolsConfig.TimeoutSeconds),
+                AgentFox.Tools.ToolTimeoutPolicy.ExemptTools);
 
         // No plan gate on this path, so the todo guidance is phase-independent.
         if (agentBuilder.IsTodoPlannerEnabled)
@@ -718,7 +725,7 @@ class Program
         var registry = new ToolRegistry();
 
         if (toolsConfig.Shell && toolsConfig.IsEnabled("shell"))
-            registry.Register(new ShellCommandTool(workspaceManager));
+            registry.Register(new ShellCommandTool(workspaceManager, toolsConfig.ShellTimeoutSeconds));
 
         if (toolsConfig.FileSystem)
         {

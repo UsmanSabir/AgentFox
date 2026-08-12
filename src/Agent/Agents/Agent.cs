@@ -1060,6 +1060,15 @@ public class AgentBuilder
     /// </summary>
     private Func<string, Dictionary<string, object?>, CancellationToken, Task<bool>>? _toolApprovalGate;
 
+    /// <summary>
+    /// Ceiling on a single tool invocation. <see cref="Timeout.InfiniteTimeSpan"/> disables it.
+    /// </summary>
+    private TimeSpan _toolTimeout = Timeout.InfiniteTimeSpan;
+
+    /// <summary>Tools exempt from <see cref="_toolTimeout"/> — see <see cref="WithToolTimeout"/>.</summary>
+    private IReadOnlySet<string> _toolTimeoutExempt =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
     public AgentBuilder(ToolRegistry toolRegistry)
     {
         _toolRegistry = toolRegistry;
@@ -1183,6 +1192,25 @@ public class AgentBuilder
         Func<string, Dictionary<string, object?>, CancellationToken, Task<bool>> gate)
     {
         _toolApprovalGate = gate;
+        return this;
+    }
+
+    /// <summary>
+    /// Caps how long any one tool invocation may occupy the turn. A turn occupies a lane slot and
+    /// the Main lane is serial, so an unbounded tool is not just a slow tool — it is the whole
+    /// interactive prompt, and every queued command behind it, stopped indefinitely.
+    ///
+    /// <para>
+    /// <paramref name="exempt"/> names tools whose long block is the feature rather than a fault —
+    /// the HITL tools, which wait on a human and carry their own expiry. Everything else gets the
+    /// ceiling.
+    /// </para>
+    /// </summary>
+    public AgentBuilder WithToolTimeout(TimeSpan timeout, IEnumerable<string>? exempt = null)
+    {
+        _toolTimeout = timeout > TimeSpan.Zero ? timeout : Timeout.InfiniteTimeSpan;
+        if (exempt != null)
+            _toolTimeoutExempt = new HashSet<string>(exempt, StringComparer.OrdinalIgnoreCase);
         return this;
     }
 
@@ -1552,7 +1580,7 @@ public class AgentBuilder
         await _toolRegistry.HookRegistry.InvokeToolPreExecuteAsync(toolName, arguments, executionId);
         try
         {
-            var result = await tool.ExecuteAsync(arguments);
+            var result = await RunWithTimeoutAsync(tool, toolName, arguments, ct);
             // Credential backstop at the gateway, in addition to BaseTool's own scrub: tools
             // that implement ITool directly (MCP bridges, ComposioToolWrapper) never pass
             // through BaseTool, and this is the one path every model-invoked tool takes.
@@ -1575,6 +1603,53 @@ public class AgentBuilder
             _experienceLearning?.RecordCurrent(toolName, arguments, failed);
             return failed;
         }
+    }
+
+    /// <summary>
+    /// Runs a tool under the configured ceiling.
+    ///
+    /// <para>
+    /// <see cref="ITool.ExecuteAsync"/> takes no cancellation token, so a tool that ignores the
+    /// clock cannot be stopped from here — what this guarantees is that the *turn* stops waiting.
+    /// The abandoned invocation is left to finish on its own (the tools that could previously run
+    /// forever, shell and the code sandbox, now bound and tree-kill themselves), while the lane
+    /// slot, the queue behind it and the interactive prompt are all released. A hung tool becomes
+    /// one failed tool call the model can react to, instead of a dead process.
+    /// </para>
+    /// </summary>
+    private async Task<ToolResult> RunWithTimeoutAsync(
+        ITool tool, string toolName, Dictionary<string, object?> arguments, CancellationToken ct)
+    {
+        var execution = tool.ExecuteAsync(arguments);
+
+        if (_toolTimeout == Timeout.InfiniteTimeSpan || _toolTimeoutExempt.Contains(toolName))
+            return await execution;
+
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var delay = Task.Delay(_toolTimeout, timeoutCts.Token);
+
+        if (await Task.WhenAny(execution, delay) == execution)
+        {
+            timeoutCts.Cancel(); // stop the timer task so it does not linger for the full duration
+            return await execution;
+        }
+
+        ct.ThrowIfCancellationRequested();
+
+        _logger?.LogError(
+            "Tool '{ToolName}' exceeded the {Seconds}s ceiling and was abandoned. The turn continues; " +
+            "the invocation may still be running.",
+            toolName, _toolTimeout.TotalSeconds);
+
+        // Keep observing the abandoned task so its eventual failure is not an unobserved exception.
+        _ = execution.ContinueWith(
+            t => _logger?.LogWarning(t.Exception,
+                "Abandoned tool '{ToolName}' finished after its timeout.", toolName),
+            TaskContinuationOptions.OnlyOnFaulted);
+
+        return ToolResult.Fail(
+            $"Tool '{toolName}' timed out after {_toolTimeout.TotalSeconds:F0}s and was abandoned. " +
+            "Do not retry it unchanged — narrow the request, or use a different approach.");
     }
 
     private static JsonElement BuildJsonSchema(ToolDefinition tool)
