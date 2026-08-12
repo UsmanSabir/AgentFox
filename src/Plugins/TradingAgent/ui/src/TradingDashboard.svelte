@@ -5,6 +5,15 @@
   import WatchlistPanel from './WatchlistPanel.svelte';
   import ChartPane from './ChartPane.svelte';
   import AlertsPanel from './AlertsPanel.svelte';
+  import ArmedOrdersPanel from './ArmedOrdersPanel.svelte';
+  import ArmOrderDialog from './ArmOrderDialog.svelte';
+
+  /**
+   * Non-null while the arming dialog is open. Both entry points — a chart level and an alert — raise the
+   * same event with pre-filled context, so there is one dialog rather than one per origin.
+   */
+  let armContext: Record<string, unknown> | null = null;
+  let armedPanel: ArmedOrdersPanel | null = null;
 
   /** Symbol the watchlist has selected; drives the chart pane. */
   let selectedSymbol: string | null = null;
@@ -182,6 +191,14 @@
   onMount(() => { load(); startMarketClock(); });
 </script>
 
+{#if armContext}
+  <ArmOrderDialog
+    {...armContext}
+    on:armed={() => armedPanel?.load()}
+    on:close={() => armContext = null}
+  />
+{/if}
+
 <div class="page-wrap fade-in">
   <div class="page-header-row">
     <div><h1 class="page-title">Trading Manager</h1><p class="page-sub">Read-only operational view of the isolated PSX specialist and deterministic ledger</p></div>
@@ -224,11 +241,16 @@
         bind:expanded={chartExpanded}
         refreshTick={marketTick}
         marketOpen={status.market.isOpen}
+        on:arm={(e) => armContext = e.detail}
       />
     </div>
 
     <div class="alerts-row">
-      <AlertsPanel on:select={(e) => selectedSymbol = e.detail} />
+      <ArmedOrdersPanel bind:this={armedPanel} refreshTick={marketTick} />
+      <AlertsPanel
+        on:select={(e) => selectedSymbol = e.detail}
+        on:arm={(e) => armContext = e.detail}
+      />
     </div>
 
     {#if archive}

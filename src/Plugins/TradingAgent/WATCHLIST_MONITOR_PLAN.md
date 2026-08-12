@@ -734,6 +734,7 @@ running with, so "why didn't it alert" is answerable from the UI rather than by 
 | **4** ✅ | `StockAssessmentService` extracted (shared with `research_stock`), `/assess` + `/alerts/{id}/assess`, verdict card on the alert and the chart | **Done** — on-demand LLM confidence, deterministic numbers unchanged |
 | **5a** ✅ | Proposal lifecycle (execute/reject/expire, compare-and-set claim, TTL + drift sweeper, retention) and the inbox UI | **Done** — WhatsApp signals are actionable |
 | **5b·1** ✅ | Native stop-loss in the broker, `STOPLOSS` risk validation, order-book verification, three adapter bugs fixed | **Done** — a stop rests at the broker, and "placed" is provable |
+| **5b·2** ✅ | `ApprovalGate` (Always/Auto/Armed, minting real intents), `armed_orders` + pure evaluator, monitor firing, arm/disarm endpoints, chart auto-refresh | **Done** — orders can wait on a level or an event |
 | **5b** | `probe_order_form` discovery → `/orders` + approval modes (`Auto`/`Armed`) + `PendingExitStore` + `armed_exits` trigger evaluation | Actions and stops, all through the risk engine |
 | **6** | `Ahk.CaptureNetwork` → `AhkRestClient` for portfolio reads (browser fallback retained) | Fast holdings, no Chromium in the alert path |
 | **7** | Optional: `ICandleSource`, WhatsApp alert fan-out, chat notifications, runtime-editable `AllowedSymbols` | Redundancy and reach |

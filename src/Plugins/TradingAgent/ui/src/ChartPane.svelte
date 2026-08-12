@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, tick } from 'svelte';
+  import { onDestroy, tick, createEventDispatcher } from 'svelte';
   import {
     createChart,
     CandlestickSeries,
@@ -16,6 +16,9 @@
   import AssessmentCard from './AssessmentCard.svelte';
 
   export let symbol: string | null = null;
+
+  /** Raised when the user clicks a level to arm an order at it; the dashboard opens the dialog. */
+  const dispatch = createEventDispatcher<{ arm: Record<string, unknown> }>();
 
   /** Full-width mode: the chart takes the row and the watchlist stacks beneath it. Bound by the parent. */
   export let expanded = false;
@@ -45,6 +48,31 @@
   /** On-demand verdict for the charted symbol. Cleared when the symbol or interval changes. */
   let assessment: StockAssessment | null = null;
   let assessing = false;
+
+  /**
+   * Asks the parent to open the arming dialog, pre-filled from the clicked level.
+   *
+   * The direction is inferred from which side the level sits on: a support is where a protective SELL
+   * stop belongs, a resistance is where a BUY breakout does. Both remain editable in the dialog — the
+   * pre-fill saves typing, it does not decide the trade.
+   */
+  function armAtLevel(level: ChartData['levels']['supports'][number], side: 'support' | 'resistance') {
+    if (!symbol || !data) return;
+    const isSupport = side === 'support';
+    dispatch('arm', {
+      symbol,
+      triggerKind: isSupport ? 'PriceBelow' : 'PriceAbove',
+      triggerPrice: level.price,
+      action: isSupport ? 'SELL' : 'BUY',
+      orderType: 'STOPLOSS',
+      price: level.price,
+      context:
+        `${symbol} last ${data.snapshot.close} · ${side} ${level.price} `
+        + `(${level.touches} touch${level.touches === 1 ? '' : 'es'}`
+        + `${level.weeklyConfirmed ? ', weekly-confirmed' : ', no weekly confirmation'}) `
+        + `· ${isSupport ? 'a SELL stop fires if price falls to it' : 'a BUY fires if price rises to it'}.`
+    });
+  }
 
   async function assess() {
     if (!symbol || assessing) return;
@@ -475,23 +503,33 @@
           </div>
         {/if}
 
+        <!-- Levels are buttons: clicking one arms an order at it, pre-filled with the direction that
+             makes sense for that side (sell below a support, buy above a resistance). -->
         <div class="levels">
           <div>
-            <b>Resistance</b>
+            <b>Resistance <em class="hint">click to arm</em></b>
             {#each data.levels.resistances.slice(0, 3) as level}
-              <span class="level">
+              <button
+                class="level armable"
+                title="Arm a BUY breakout above {level.price}"
+                on:click={() => armAtLevel(level, 'resistance')}
+              >
                 {level.price}
                 <em>{pct(level.distancePercent)} · ×{level.touches}{level.weeklyConfirmed ? ' · weekly ✓' : ''}</em>
-              </span>
+              </button>
             {:else}<span class="level muted">none above price</span>{/each}
           </div>
           <div>
-            <b>Support</b>
+            <b>Support <em class="hint">click to arm</em></b>
             {#each data.levels.supports.slice(0, 3) as level}
-              <span class="level">
+              <button
+                class="level armable"
+                title="Arm a SELL stop below {level.price}"
+                on:click={() => armAtLevel(level, 'support')}
+              >
                 {level.price}
                 <em>−{level.distancePercent ?? '—'}% · ×{level.touches}{level.weeklyConfirmed ? ' · weekly ✓' : ''}</em>
-              </span>
+              </button>
             {:else}<span class="level muted">none below price</span>{/each}
           </div>
         </div>
@@ -584,6 +622,13 @@
   .levels > div { display:flex; flex-direction:column; gap:.2rem; }
   .levels b { color:var(--text-3); font-size:.65rem; text-transform:uppercase; letter-spacing:.04em; }
   .level { font-size:.72rem; color:var(--text); font-family:ui-monospace, monospace; }
+  .hint { color:var(--text-3); font-size:.6rem; font-style:normal; text-transform:none; letter-spacing:0; margin-left:.3rem; }
+  button.level.armable {
+    background:none; border:0; padding:.1rem .25rem; margin-left:-.25rem; text-align:left;
+    cursor:pointer; border-radius:var(--radius-sm); font:inherit; font-size:.72rem;
+    font-family:ui-monospace, monospace; color:var(--text); width:fit-content;
+  }
+  button.level.armable:hover { background:var(--surface-3); color:var(--primary); }
   .level em { color:var(--text-3); font-style:normal; font-size:.66rem; font-family:inherit; }
   .level.muted { color:var(--text-3); }
 

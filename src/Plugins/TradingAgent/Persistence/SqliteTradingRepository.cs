@@ -762,6 +762,30 @@ public sealed class SqliteTradingRepository : ITradingRepository
                     raised_utc      TEXT NOT NULL,
                     session_date    TEXT NOT NULL
                 );
+                -- Orders waiting on a condition. Durable so an armed trigger survives a restart, which
+                -- is the whole point: a stop that forgets itself when the process bounces is not a stop.
+                CREATE TABLE IF NOT EXISTS armed_orders (
+                    armed_id      TEXT PRIMARY KEY,
+                    symbol        TEXT NOT NULL,
+                    trigger_kind  TEXT NOT NULL,
+                    trigger_price TEXT NULL,
+                    trigger_alert TEXT NULL,
+                    action        TEXT NOT NULL,
+                    quantity      INTEGER NOT NULL,
+                    order_type    TEXT NOT NULL,
+                    price         TEXT NULL,
+                    limit_price   TEXT NULL,
+                    state         TEXT NOT NULL DEFAULT 'armed',
+                    armed_utc     TEXT NOT NULL,
+                    expires_utc   TEXT NULL,
+                    fired_utc     TEXT NULL,
+                    execution_id  TEXT NULL,
+                    state_reason  TEXT NULL,
+                    note          TEXT NULL,
+                    source_alert  TEXT NULL
+                );
+                CREATE INDEX IF NOT EXISTS ix_armed_orders_state
+                    ON armed_orders(state, symbol);
                 CREATE INDEX IF NOT EXISTS ix_watchlist_alerts_raised
                     ON watchlist_alerts(raised_utc DESC);
                 CREATE INDEX IF NOT EXISTS ix_watchlist_alerts_dedupe
@@ -1216,6 +1240,117 @@ public sealed class SqliteTradingRepository : ITradingRepository
         command.Parameters.AddWithValue("$before", before.ToString("O"));
         return await command.ExecuteNonQueryAsync(ct);
     }
+
+    // ── Armed orders ──────────────────────────────────────────────────────────
+
+    public async Task<string> SaveArmedOrderAsync(ArmedOrder order, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO armed_orders
+                (armed_id, symbol, trigger_kind, trigger_price, trigger_alert, action, quantity,
+                 order_type, price, limit_price, state, armed_utc, expires_utc, note, source_alert)
+            VALUES ($id, $symbol, $kind, $tprice, $talert, $action, $qty,
+                    $otype, $price, $limit, $state, $armed, $expires, $note, $alert)
+            """;
+        command.Parameters.AddWithValue("$id", order.ArmedId);
+        command.Parameters.AddWithValue("$symbol", order.Symbol);
+        command.Parameters.AddWithValue("$kind", order.TriggerKind.ToString());
+        command.Parameters.AddWithValue("$tprice", Money(order.TriggerPrice));
+        command.Parameters.AddWithValue("$talert",
+            order.TriggerAlertKind?.ToString() ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$action", order.Action);
+        command.Parameters.AddWithValue("$qty", order.Quantity);
+        command.Parameters.AddWithValue("$otype", order.OrderType);
+        command.Parameters.AddWithValue("$price", Money(order.Price));
+        command.Parameters.AddWithValue("$limit", Money(order.LimitPrice));
+        command.Parameters.AddWithValue("$state", order.State);
+        command.Parameters.AddWithValue("$armed", order.ArmedUtc.ToString("O"));
+        command.Parameters.AddWithValue("$expires",
+            order.ExpiresUtc?.ToString("O") ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$note", order.Note ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$alert", order.SourceAlertId ?? (object)DBNull.Value);
+        await command.ExecuteNonQueryAsync(ct);
+        return order.ArmedId;
+    }
+
+    public async Task<IReadOnlyList<ArmedOrder>> GetArmedOrdersAsync(
+        bool armedOnly = true, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = $"""
+            SELECT armed_id, symbol, trigger_kind, trigger_price, trigger_alert, action, quantity,
+                   order_type, price, limit_price, state, armed_utc, expires_utc, fired_utc,
+                   execution_id, state_reason, note, source_alert
+            FROM armed_orders
+            {(armedOnly ? "WHERE state = 'armed'" : "")}
+            ORDER BY armed_utc DESC
+            """;
+
+        var orders = new List<ArmedOrder>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct)) orders.Add(ReadArmedOrder(reader));
+        return orders;
+    }
+
+    public async Task<bool> TrySetArmedOrderStateAsync(
+        string armedId,
+        string expectedState,
+        string newState,
+        string? reason = null,
+        string? executionId = null,
+        CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+
+        // Compare-and-set, so a trigger evaluated by two overlapping passes cannot fire twice.
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE armed_orders
+               SET state = $new,
+                   state_reason = COALESCE($reason, state_reason),
+                   execution_id = COALESCE($execution, execution_id),
+                   fired_utc = CASE WHEN $new = 'fired' THEN $now ELSE fired_utc END
+             WHERE armed_id = $id AND state = $expected
+            """;
+        command.Parameters.AddWithValue("$id", armedId);
+        command.Parameters.AddWithValue("$expected", expectedState);
+        command.Parameters.AddWithValue("$new", newState);
+        command.Parameters.AddWithValue("$reason", reason ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$execution", executionId ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("O"));
+        return await command.ExecuteNonQueryAsync(ct) == 1;
+    }
+
+    private static ArmedOrder ReadArmedOrder(Microsoft.Data.Sqlite.SqliteDataReader reader) => new()
+    {
+        ArmedId          = reader.GetString(0),
+        Symbol           = reader.GetString(1),
+        TriggerKind      = Enum.TryParse<ArmedTriggerKind>(reader.GetString(2), out var k)
+                               ? k : ArmedTriggerKind.PriceBelow,
+        TriggerPrice     = ParseDecimal(reader, 3),
+        TriggerAlertKind = reader.IsDBNull(4)
+                               ? null
+                               : Enum.TryParse<AlertKind>(reader.GetString(4), out var a) ? a : null,
+        Action           = reader.GetString(5),
+        Quantity         = reader.GetInt32(6),
+        OrderType        = reader.GetString(7),
+        Price            = ParseDecimal(reader, 8),
+        LimitPrice       = ParseDecimal(reader, 9),
+        State            = reader.GetString(10),
+        ArmedUtc         = ParseUtc(reader.GetString(11)),
+        ExpiresUtc       = reader.IsDBNull(12) ? null : ParseUtc(reader.GetString(12)),
+        FiredUtc         = reader.IsDBNull(13) ? null : ParseUtc(reader.GetString(13)),
+        ExecutionId      = reader.IsDBNull(14) ? null : reader.GetString(14),
+        StateReason      = reader.IsDBNull(15) ? null : reader.GetString(15),
+        Note             = reader.IsDBNull(16) ? null : reader.GetString(16),
+        SourceAlertId    = reader.IsDBNull(17) ? null : reader.GetString(17)
+    };
 
     private static object Money(decimal? value) => value is null
         ? DBNull.Value

@@ -250,6 +250,31 @@ public interface ITradingRepository
 
     /// <summary>Deletes alerts raised before <paramref name="before"/>. Returns how many were removed.</summary>
     Task<int> PruneAlertsAsync(DateTime before, CancellationToken ct = default);
+
+    // ── Armed orders ──────────────────────────────────────────────────────────
+    // Orders waiting on a price level or an alert event. Durable, so an armed trigger survives a
+    // restart — a stop that forgets itself when the process bounces is not a stop.
+
+    Task<string> SaveArmedOrderAsync(
+        TradingAgent.Watchlist.ArmedOrder order,
+        CancellationToken ct = default);
+
+    /// <summary>Armed orders; <paramref name="armedOnly"/> false includes fired/cancelled history.</summary>
+    Task<IReadOnlyList<TradingAgent.Watchlist.ArmedOrder>> GetArmedOrdersAsync(
+        bool armedOnly = true,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Compare-and-set on the current state, so a trigger seen by two overlapping passes cannot fire
+    /// twice. False when it was not in the expected state.
+    /// </summary>
+    Task<bool> TrySetArmedOrderStateAsync(
+        string armedId,
+        string expectedState,
+        string newState,
+        string? reason = null,
+        string? executionId = null,
+        CancellationToken ct = default);
 }
 
 /// <summary>One watched symbol.</summary>

@@ -160,6 +160,9 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         services.AddSingleton<ITradingRiskEngine, TradingRiskEngine>();
         services.AddSingleton<TradingReconciliationState>();
         services.AddSingleton<ApprovalIntentRegistry>();
+        // Decides whether an order may proceed unattended, and expresses that as a real validated
+        // intent — so a pre-approval travels the same path a clicked approval does.
+        services.AddSingleton<ApprovalGate>();
         services.AddSingleton<TradingAgent.Manager.TradingManager>();
 
         services.AddSingleton<DuplicateSignalFilter>(sp =>
@@ -265,6 +268,239 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             var status = await runner.GetStatusAsync(ct);
             return Results.Accepted(value: new { started, status });
         }).RequireAuthorization("ManagementAdministrator");
+
+        // ── Armed orders: orders waiting on a level or an event ────────────────
+        // Evaluated by the monitor pass. Prefer the broker's NATIVE stop where one fits: it rests at the
+        // exchange and fires whether or not this process is running, whereas an armed order here only
+        // fires while AgentFox is up and the market is open. The response says which kind you got.
+
+        trading.MapGet("/armed-orders", async (
+            bool? all,
+            ITradingRepository repository,
+            ApprovalGate approvals,
+            IOptions<TradingAgentOptions> options,
+            CancellationToken ct) =>
+        {
+            var orders = await repository.GetArmedOrdersAsync(armedOnly: !(all ?? false), ct);
+            var window = approvals.ArmedWindow;
+            return Results.Ok(new
+            {
+                // Projected rather than serialized straight from the record: an enum defaults to its
+                // NUMBER on the wire, so the client would receive triggerKind: 0 and have to know the
+                // ordinal. Names are the stable contract here.
+                orders = orders.Select(o => new
+                {
+                    o.ArmedId,
+                    o.Symbol,
+                    triggerKind = o.TriggerKind.ToString(),
+                    o.TriggerPrice,
+                    triggerAlertKind = o.TriggerAlertKind?.ToString(),
+                    o.Action,
+                    o.Quantity,
+                    o.OrderType,
+                    o.Price,
+                    o.LimitPrice,
+                    o.State,
+                    o.ArmedUtc,
+                    o.ExpiresUtc,
+                    o.FiredUtc,
+                    o.ExecutionId,
+                    o.StateReason,
+                    o.Note,
+                    o.SourceAlertId
+                }),
+                // Surfaced together because an armed ORDER that cannot be approved will not fire, and
+                // that pairing is the first thing to check when one does not.
+                approval = new
+                {
+                    mode = options.Value.Approval.Mode,
+                    armedUntilUtc = window?.UntilUtc,
+                    armedBy = window?.By,
+                    autoApprovedThisSession = approvals.AutoApprovedThisSession,
+                    maxOrdersPerSession = options.Value.Approval.Auto.MaxOrdersPerSession
+                },
+                monitorRequired = true,
+                caveat = "An armed order is evaluated by the monitor, so it only fires while AgentFox is "
+                       + "running and the market is open. A native broker stop has neither limitation."
+            });
+        });
+
+        trading.MapPost("/armed-orders", async (
+            ArmOrderRequest body,
+            ITradingRepository repository,
+            MonitoredUniverse universe,
+            ApprovalGate approvals,
+            IOptions<TradingAgentOptions> options,
+            ILogger<TradingAgentModule> logger,
+            CancellationToken ct) =>
+        {
+            string symbol;
+            try { symbol = PsxDataClient.NormalizeStockSymbol(body.Symbol ?? ""); }
+            catch (ArgumentException ex)
+            {
+                return Results.BadRequest(new { error = "invalid_symbol", message = ex.Message });
+            }
+
+            var action = (body.Action ?? "").Trim().ToUpperInvariant();
+            if (action is not ("BUY" or "SELL"))
+                return Results.BadRequest(new { error = "invalid_action", message = "Action must be BUY or SELL." });
+
+            if (body.Quantity is not > 0)
+                return Results.BadRequest(new { error = "invalid_quantity", message = "Quantity must be positive." });
+
+            if (!Enum.TryParse<ArmedTriggerKind>(body.TriggerKind, ignoreCase: true, out var kind))
+                return Results.BadRequest(new
+                {
+                    error = "invalid_trigger",
+                    message = $"Trigger kind must be one of {string.Join(", ", Enum.GetNames<ArmedTriggerKind>())}."
+                });
+
+            AlertKind? alertKind = null;
+            if (kind == ArmedTriggerKind.Event)
+            {
+                if (!Enum.TryParse<AlertKind>(body.TriggerAlertKind, ignoreCase: true, out var parsed))
+                    return Results.BadRequest(new
+                    {
+                        error = "invalid_alert_kind",
+                        message = $"Event triggers need an alert kind: {string.Join(", ", Enum.GetNames<AlertKind>())}."
+                    });
+                alertKind = parsed;
+            }
+            else if (body.TriggerPrice is not > 0)
+            {
+                return Results.BadRequest(new
+                {
+                    error = "invalid_trigger_price",
+                    message = "A price trigger needs a positive level."
+                });
+            }
+
+            // Refuse up front rather than at fire time. An armed order for a non-tradable symbol would
+            // sit there looking like protection and be rejected by the risk engine the moment it
+            // mattered — which is the failure mode worth designing out.
+            if (!universe.IsTradable(symbol))
+                return Results.BadRequest(new
+                {
+                    error = "not_tradable",
+                    message = $"'{symbol}' is not in AllowedSymbols, so an order for it would be refused "
+                            + "by the risk engine. Arming one would be protection in name only."
+                });
+
+            var order = new ArmedOrder
+            {
+                ArmedId          = Guid.NewGuid().ToString("N"),
+                Symbol           = symbol,
+                TriggerKind      = kind,
+                TriggerPrice     = kind == ArmedTriggerKind.Event ? null : body.TriggerPrice,
+                TriggerAlertKind = alertKind,
+                Action           = action,
+                Quantity         = body.Quantity!.Value,
+                OrderType        = (body.OrderType ?? "LIMIT").Trim().ToUpperInvariant(),
+                Price            = body.Price,
+                LimitPrice       = body.LimitPrice,
+                // Default an expiry: an entry trigger left open indefinitely can fire months later
+                // against a thesis nobody remembers forming.
+                ExpiresUtc       = body.ExpiresUtc
+                                   ?? DateTime.UtcNow.AddDays(Math.Clamp(body.ExpiresInDays ?? 30, 1, 365)),
+                Note             = body.Note,
+                SourceAlertId    = body.SourceAlertId
+            };
+
+            var id = await repository.SaveArmedOrderAsync(order, ct);
+            var unattended = approvals.DescribeUnattendedPolicy();
+            logger.LogWarning(
+                "[ArmedOrders] Armed {ArmedId}: {Action} {Qty} {Symbol} on {Kind} {Level}. Approval mode {Mode}.",
+                id, action, order.Quantity, symbol, kind,
+                order.TriggerPrice?.ToString() ?? alertKind?.ToString() ?? "", options.Value.Approval.Mode);
+
+            return Results.Ok(new
+            {
+                armedId = id,
+                order = new
+                {
+                    order.ArmedId,
+                    order.Symbol,
+                    triggerKind = order.TriggerKind.ToString(),
+                    order.TriggerPrice,
+                    triggerAlertKind = order.TriggerAlertKind?.ToString(),
+                    order.Action,
+                    order.Quantity,
+                    order.OrderType,
+                    order.Price,
+                    order.LimitPrice,
+                    order.State,
+                    order.ArmedUtc,
+                    order.ExpiresUtc,
+                    order.Note
+                },
+                // Said plainly at arm time, not discovered at fire time — and asked of the gate rather
+                // than re-derived here, since the execution mode matters as much as the approval mode.
+                willFireUnattended = unattended.WillFireUnattended,
+                note = unattended.Explanation
+            });
+        }).RequireAuthorization("TradingTrader");
+
+        trading.MapDelete("/armed-orders/{armedId}", async (
+            string armedId,
+            ITradingRepository repository,
+            ILogger<TradingAgentModule> logger,
+            CancellationToken ct) =>
+        {
+            var cancelled = await repository.TrySetArmedOrderStateAsync(
+                armedId, "armed", "cancelled", "Disarmed by the operator.", ct: ct);
+            if (cancelled) logger.LogWarning("[ArmedOrders] {ArmedId} disarmed.", armedId);
+            return cancelled
+                ? Results.Ok(new { armedId, state = "cancelled" })
+                : Results.NotFound(new
+                {
+                    error = "not_armed",
+                    message = "No armed order with that id is currently armed (it may have already fired)."
+                });
+        }).RequireAuthorization("TradingAnalyst");
+
+        // ── Approval window ───────────────────────────────────────────────────
+
+        trading.MapPost("/approval/arm", (
+            ArmApprovalRequest? body,
+            ApprovalGate approvals,
+            IMarketCalendar calendar,
+            IOptions<TradingAgentOptions> options,
+            HttpContext http) =>
+        {
+            var until = approvals.Arm(body?.Minutes, http.User.Identity?.Name ?? "operator");
+
+            // Report what is actually IN FORCE, not merely what was granted. Arming disarms itself while
+            // the market is closed, so returning the granted window alone would tell the caller they are
+            // armed when the gate considers them not — the same "green tick that means nothing" the
+            // order-book verification exists to avoid.
+            var effective = approvals.ArmedWindow;
+            var mode = options.Value.Approval.Mode;
+            var marketOpen = calendar.GetStatus().IsOpen;
+
+            return Results.Ok(new
+            {
+                grantedUntilUtc = until,
+                inForce = effective is not null,
+                armedUntilUtc = effective?.UntilUtc,
+                note = effective is not null
+                    ? null
+                    : !marketOpen && options.Value.Approval.Window.DisarmAtMarketClose
+                        ? "Granted, but NOT in force: the market is closed and arming does not survive "
+                        + "the close. It will need re-arming during a session."
+                        : !mode.Equals("Armed", StringComparison.OrdinalIgnoreCase)
+                            ? $"Granted, but approval mode is '{mode}' — only 'Armed' mode consults the "
+                            + "window. Set Approval.Mode to Armed for this to have any effect."
+                            : "Granted, but not currently in force."
+            });
+        }).RequireAuthorization("TradingRiskManager");
+
+        trading.MapPost("/approval/disarm", (
+            ApprovalGate approvals,
+            HttpContext http) =>
+        {
+            approvals.Disarm(http.User.Identity?.Name ?? "operator");
+            return Results.Ok(new { armed = false });
+        }).RequireAuthorization("TradingAnalyst");
 
         // ── Alerts ────────────────────────────────────────────────────────────
         // What the monitor noticed. Read-only for viewers; acknowledging or dismissing is an analyst
@@ -1398,6 +1634,25 @@ public sealed record AssessRequest(string? Symbol, string? Interval = null, stri
 
 /// <summary>Why a proposal was rejected — recorded so a terminal state is explicable later.</summary>
 public sealed record ProposalRejectRequest(string? Reason = null);
+
+/// <summary>An order to hold until a price level is reached or an alert kind fires.</summary>
+public sealed record ArmOrderRequest(
+    string? Symbol,
+    string? Action,
+    int? Quantity,
+    string? TriggerKind,
+    decimal? TriggerPrice = null,
+    string? TriggerAlertKind = null,
+    string? OrderType = "LIMIT",
+    decimal? Price = null,
+    decimal? LimitPrice = null,
+    DateTime? ExpiresUtc = null,
+    int? ExpiresInDays = null,
+    string? Note = null,
+    string? SourceAlertId = null);
+
+/// <summary>How long to suspend order confirmation for.</summary>
+public sealed record ArmApprovalRequest(int? Minutes = null);
 
 /// <summary>Per-symbol watchlist fields the user controls. Null means "leave unchanged".</summary>
 public sealed record WatchlistUpdateRequest(bool? AlertsEnabled = null, string? Notes = null);

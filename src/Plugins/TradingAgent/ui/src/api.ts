@@ -331,6 +331,69 @@ export interface StockAssessment {
   fromCache: boolean;
 }
 
+/** Trigger kinds an armed order can wait on. */
+export const TRIGGER_KINDS = ['PriceBelow', 'PriceAbove', 'Event'] as const;
+export type TriggerKind = (typeof TRIGGER_KINDS)[number];
+
+/** Alert kinds an Event trigger can key off — must match the backend's AlertKind enum. */
+export const ALERT_KINDS = [
+  'SupportBounce', 'ResistanceRejection', 'SupportBreak', 'ResistanceBreakout',
+  'SetupChanged', 'TrendFlip', 'WeeklyBreakdown', 'RsiOversold', 'RsiOverbought'
+] as const;
+
+/**
+ * An order waiting on a condition. Only fires while AgentFox is running and the market is open — a
+ * native broker stop has neither limitation, which the UI states rather than implies.
+ */
+export interface ArmedOrder {
+  armedId: string;
+  symbol: string;
+  triggerKind: TriggerKind | string;
+  triggerPrice: number | null;
+  triggerAlertKind: string | null;
+  action: 'BUY' | 'SELL' | string;
+  quantity: number;
+  orderType: string;
+  price: number | null;
+  limitPrice: number | null;
+  state: 'armed' | 'firing' | 'fired' | 'cancelled' | 'expired' | 'failed' | string;
+  armedUtc: string;
+  expiresUtc: string | null;
+  firedUtc: string | null;
+  executionId: string | null;
+  stateReason: string | null;
+  note: string | null;
+  sourceAlertId: string | null;
+}
+
+export interface ArmedOrdersResponse {
+  orders: ArmedOrder[];
+  approval: {
+    mode: string;
+    armedUntilUtc: string | null;
+    armedBy: string | null;
+    autoApprovedThisSession: number;
+    maxOrdersPerSession: number;
+  };
+  caveat: string;
+}
+
+/** What the UI needs to arm an order. Levels and sizes are pre-filled from the chart or the alert. */
+export interface ArmOrderRequest {
+  symbol: string;
+  action: 'BUY' | 'SELL';
+  quantity: number;
+  triggerKind: TriggerKind;
+  triggerPrice?: number | null;
+  triggerAlertKind?: string | null;
+  orderType?: string;
+  price?: number | null;
+  limitPrice?: number | null;
+  expiresInDays?: number;
+  note?: string;
+  sourceAlertId?: string | null;
+}
+
 export interface MonitorStatus {
   enabled: boolean;
   marketOpen: boolean;
@@ -470,6 +533,40 @@ export const trading = {
   monitor: {
     status: () => get<MonitorStatus>('/trading/monitor/status'),
     run:    () => post<MonitorStatus>('/trading/monitor/run')
+  },
+
+  armed: {
+    list: (all = false) => get<ArmedOrdersResponse>(`/trading/armed-orders?all=${all}`),
+
+    /**
+     * `willFireUnattended` comes from the backend's own approval gate rather than being inferred
+     * client-side — the execution mode matters as much as the approval mode, and guessing produced a
+     * message that said the opposite of the truth.
+     */
+    arm: (request: ArmOrderRequest) =>
+      post<{
+        armedId: string;
+        order: ArmedOrder;
+        willFireUnattended: boolean;
+        note: string;
+      }>('/trading/armed-orders', request),
+
+    disarm: (armedId: string) =>
+      del<{ armedId: string; state: string }>(
+        `/trading/armed-orders/${encodeURIComponent(armedId)}`)
+  },
+
+  approval: {
+    /** Opens a confirmation-free window. The reply says whether it is actually IN FORCE. */
+    openWindow: (minutes?: number) =>
+      post<{
+        grantedUntilUtc: string;
+        inForce: boolean;
+        armedUntilUtc: string | null;
+        note: string | null;
+      }>('/trading/approval/arm', { minutes }),
+
+    closeWindow: () => post<{ armed: boolean }>('/trading/approval/disarm')
   },
 
   /**

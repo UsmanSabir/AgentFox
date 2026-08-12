@@ -344,5 +344,13 @@ public sealed class WatchlistUniverseTests
             throw new NotSupportedException();
         public Task<int> PruneProposalsAsync(DateTime before, CancellationToken ct = default) =>
             throw new NotSupportedException();
+        public Task<string> SaveArmedOrderAsync(ArmedOrder order, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<IReadOnlyList<ArmedOrder>> GetArmedOrdersAsync(
+            bool armedOnly = true, CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<bool> TrySetArmedOrderStateAsync(
+            string id, string expected, string next, string? reason = null,
+            string? executionId = null, CancellationToken ct = default) =>
+            throw new NotSupportedException();
     }
 }

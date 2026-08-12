@@ -677,6 +677,104 @@ immediately never rests, and treating its absence there as "never placed" would 
 
 ---
 
+## Armed orders — an order waiting on a level or an event
+
+An armed order is a **trigger plus an order**, evaluated by the monitor pass:
+
+| Trigger | Fires when |
+| --- | --- |
+| `PriceBelow` | last price reaches or falls below the level — a protective exit |
+| `PriceAbove` | last price reaches or rises above it — a breakout entry |
+| `Event` | the monitor raises a given `AlertKind` for that symbol (bounce, break, trend flip) |
+
+```
+POST   /api/trading/armed-orders    { symbol, action, quantity, triggerKind, triggerPrice |
+                                      triggerAlertKind, orderType, price, limitPrice, expiresInDays }
+GET    /api/trading/armed-orders?all=false
+DELETE /api/trading/armed-orders/{id}                      → disarm
+POST   /api/trading/approval/arm    { minutes }             → suspend confirmation (RiskManager)
+POST   /api/trading/approval/disarm
+```
+
+**Prefer the broker's native stop where one fits.** It rests at the exchange and fires whether or not
+this process is running; an armed order only fires while AgentFox is up *and* the market is open. The
+API says so in every `GET` response rather than leaving it to be discovered.
+
+Safety properties, each deliberate:
+
+- **Arming a non-tradable symbol is refused** at arm time, not at fire time. An armed order for a
+  symbol outside `AllowedSymbols` would sit there looking like protection and be rejected by the risk
+  engine at the exact moment it mattered.
+- **A trigger is claimed with a compare-and-set before the broker is touched**, so a slow submission
+  overlapping the next pass cannot fire it twice.
+- **Approval is asked for explicitly.** An armed order fires with nobody watching, so it must be
+  pre-authorised by `Approval` policy or it does not send. In the default `Always` mode it stays armed
+  and logs that confirmation was required — and the arm response says this up front.
+- **A refusal re-arms; a thrown submission does not.** "The market just closed" must not silently
+  disarm a protective stop, but a submission that threw is genuinely ambiguous about whether it
+  reached the broker, so reconciliation owns that rather than a retry.
+- **Expiry outranks the condition**, and one is defaulted (30 days) — an entry trigger left open
+  indefinitely can fire months later against a thesis nobody remembers forming.
+
+### Arming one from the UI
+
+Two entry points on the Trading page, both opening the same dialog with different pre-fill:
+
+1. **A price level** — under the chart, the **Resistance** and **Support** lists are buttons (*"click to
+   arm"*). Clicking one opens the dialog with the level, the direction that side implies (a support →
+   `SELL` stop below it; a resistance → `BUY` above it), a `STOPLOSS` type, and the stop limit already
+   derived one percent past the trigger. The header restates the level's touch count and weekly
+   confirmation, so size is committed against a level you can see rather than one you remember.
+2. **An event** — the ⌖ button on any alert card. This arms on the **kind** of event, not that
+   instance: *"Fires the NEXT time Support Bounce is raised for OGDC. This alert is the example, not
+   the trigger."* Side is inferred from the event's direction.
+
+Everything stays editable — the pre-fill saves typing, it does not decide the trade. On submit the
+dialog **stays open** to show whether the order will fire unattended, because that is the single most
+important thing to read and closing would hide it.
+
+The **Armed orders** panel lists what is waiting, with a disarm button per row, the approval state
+beside it (an armed order that cannot be approved will not fire, so the two belong together), and an
+**Open window** button for a time-boxed confirmation-free period.
+
+### What actually makes an order fire unattended
+
+Three independent layers, and **all** must permit it. An armed order is only the *trigger* — it says
+WHEN, not whether a human must confirm:
+
+| Layer | Setting | For unattended firing |
+| --- | --- | --- |
+| 1. Master switch | `AutoExecute` | `true` |
+| 2. Execution mode | `ExecutionMode` | `BoundedAuto` **or** `ApprovalRequired` |
+| 3. Approval | `Approval.Mode` | ignored under `BoundedAuto`; under `ApprovalRequired` needs `Auto` (within caps) or an open `Window` |
+
+Plus the risk engine, every time: kill switch clear, symbol in `AllowedSymbols`, market open, order
+value within caps, reconciliation healthy.
+
+`BoundedAuto` is itself the operator saying "act within the configured bounds", so approval mode does
+not gate it — requiring an intent there would mean a trigger silently never fires on a system
+explicitly configured for automatic execution. Ask the API rather than reasoning it out: the arm
+response returns `willFireUnattended` with the reason, computed by `ApprovalGate` itself.
+
+> The approval window mode was originally called `Armed`, which collided with "armed order" and
+> invited exactly the wrong inference. It is now `Window`.
+
+### How a pre-approval works
+
+`ApprovalGate` does not bypass anything. When policy permits an unattended order it **mints a real
+`ApprovalIntent`** and passes it as an `ExecutionAuthorization`, so the order travels the identical
+path a clicked approval does — bound to the exact orders, policy version and expiry, with the hash
+re-checked immediately before submission. A price that moved between minting and submitting is
+rejected there. The only difference from a human approval is the recorded actor
+(`approval-auto` / `approval-armed:<who>`).
+
+`Approval.Mode`: `Always` (default) · `Auto` (within the caps in `Approval.Auto`) · `Window` (a
+time-boxed window). Arming reports whether it is **actually in force** — granting a window while the
+market is closed answers `inForce: false` with the reason, rather than implying protection that is not
+active.
+
+---
+
 ## AHK Submit Button
 
 The AHK portal submit button ID has not been confirmed from live inspection. The broker currently tries `#buySubmitBtn` / `#sellSubmitBtn` first, then falls back to a JS text-content search.

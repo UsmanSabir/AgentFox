@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy, createEventDispatcher } from 'svelte';
   import { trading, type TradingAlert, type MonitorStatus, type StockAssessment } from './api';
-  import { Bell, Check, X, Activity, RefreshCw, Radio, AlertTriangle, Brain } from 'lucide-svelte';
+  import { Bell, Check, X, Activity, RefreshCw, Radio, AlertTriangle, Brain, Crosshair } from 'lucide-svelte';
   import AssessmentCard from './AssessmentCard.svelte';
 
   /** Verdicts fetched on demand, by alert id. Never fetched automatically — see api.assess. */
@@ -9,7 +9,7 @@
   let assessing: string | null = null;
 
   /** Selecting an alert drives the chart pane to that symbol. */
-  const dispatch = createEventDispatcher<{ select: string }>();
+  const dispatch = createEventDispatcher<{ select: string; arm: Record<string, unknown> }>();
 
   let alerts: TradingAlert[] = [];
   let status: MonitorStatus | null = null;
@@ -63,6 +63,27 @@
     } finally {
       busy = false;
     }
+  }
+
+  /**
+   * Arms an order on the KIND of event this alert is — not on this instance, which has already
+   * happened. Side is inferred from the event's direction (a bounce or breakout is a buy case, a
+   * rejection or breakdown a sell case) and stays editable.
+   */
+  function armFromAlert(alert: TradingAlert) {
+    const bullish = ['SupportBounce', 'ResistanceBreakout'].includes(alert.kind);
+    dispatch('arm', {
+      symbol: alert.symbol,
+      triggerKind: 'Event',
+      triggerAlertKind: alert.kind,
+      action: bullish ? 'BUY' : 'SELL',
+      orderType: 'LIMIT',
+      price: alert.levelPrice ?? alert.price,
+      sourceAlertId: alert.alertId,
+      context:
+        `Fires the NEXT time ${label(alert.kind)} is raised for ${alert.symbol}. ` +
+        `This alert is the example, not the trigger — it has already happened.`
+    });
   }
 
   async function assess(alert: TradingAlert) {
@@ -166,6 +187,13 @@
               disabled={!!assessing}
             >
               <Brain size={13} />
+            </button>
+            <button
+              class="icon"
+              title="Arm an order that fires the next time this event happens on {alert.symbol}"
+              on:click={() => armFromAlert(alert)}
+            >
+              <Crosshair size={13} />
             </button>
             {#if alert.state === 'new'}
               <button class="icon" title="Acknowledge" on:click={() => setState(alert, 'ack')} disabled={busy}>

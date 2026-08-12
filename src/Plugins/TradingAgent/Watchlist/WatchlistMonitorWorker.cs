@@ -3,7 +3,9 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using TradingAgent.Analysis;
 using TradingAgent.Config;
+using TradingAgent.Manager;
 using TradingAgent.Market;
+using TradingAgent.Models;
 using TradingAgent.Persistence;
 using TradingAgent.Research;
 
@@ -40,6 +42,8 @@ public sealed class WatchlistMonitorWorker : BackgroundService
     private readonly ITradingRepository _repository;
     private readonly IMarketCalendar _calendar;
     private readonly AlertBroadcaster _broadcaster;
+    private readonly ApprovalGate _approvals;
+    private readonly TradingAgent.Manager.TradingManager _manager;
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly ILogger<WatchlistMonitorWorker> _logger;
 
@@ -53,6 +57,8 @@ public sealed class WatchlistMonitorWorker : BackgroundService
         ITradingRepository repository,
         IMarketCalendar calendar,
         AlertBroadcaster broadcaster,
+        ApprovalGate approvals,
+        TradingAgent.Manager.TradingManager manager,
         IOptions<TradingAgentOptions> options,
         ILogger<WatchlistMonitorWorker> logger)
     {
@@ -62,6 +68,8 @@ public sealed class WatchlistMonitorWorker : BackgroundService
         _repository = repository;
         _calendar = calendar;
         _broadcaster = broadcaster;
+        _approvals = approvals;
+        _manager = manager;
         _options = options;
         _logger = logger;
 
@@ -252,6 +260,11 @@ public sealed class WatchlistMonitorWorker : BackgroundService
             }
         }
 
+        // Armed triggers are evaluated against the SAME snapshot the alerts came from, so an event
+        // trigger sees exactly the alerts this pass raised — no second fetch, no drift between what
+        // was detected and what fires on it.
+        await EvaluateArmedOrdersAsync(history.Live, raised, ct);
+
         if (suppressed > 0)
             _logger.LogWarning(
                 "[WatchlistMonitor] {Count} alert(s) suppressed by the per-pass cap of {Cap}. "
@@ -278,6 +291,133 @@ public sealed class WatchlistMonitorWorker : BackgroundService
         });
 
         return Status;
+    }
+
+    /// <summary>
+    /// Evaluates every armed order against this pass's prices and alerts, and submits the ones whose
+    /// condition is met.
+    ///
+    /// <para>
+    /// Three properties matter here. The trigger is claimed with a compare-and-set BEFORE the broker is
+    /// touched, so a slow submission overlapping the next pass cannot fire it twice. Approval is asked
+    /// for explicitly through <see cref="ApprovalGate"/> — an armed order fires with nobody watching, so
+    /// it must either be pre-authorised by policy or refuse to send. And a refusal returns the order to
+    /// <c>armed</c> rather than consuming it, because "the market just closed" should not silently
+    /// disarm a protective stop.
+    /// </para>
+    /// </summary>
+    private async Task EvaluateArmedOrdersAsync(
+        IReadOnlyDictionary<string, PsxLiveQuote> live,
+        IReadOnlyList<AlertRecord> raisedThisPass,
+        CancellationToken ct)
+    {
+        IReadOnlyList<ArmedOrder> armed;
+        try
+        {
+            armed = await _repository.GetArmedOrdersAsync(armedOnly: true, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "[ArmedOrders] Could not read armed orders this pass.");
+            return;
+        }
+
+        if (armed.Count == 0) return;
+
+        // Alerts raised this pass, indexed by symbol, for the event triggers.
+        var alertsBySymbol = raisedThisPass
+            .GroupBy(a => a.Symbol, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(
+                g => g.Key,
+                g => (IReadOnlyCollection<AlertKind>)g
+                    .Select(a => Enum.TryParse<AlertKind>(a.Kind, out var k) ? k : (AlertKind?)null)
+                    .Where(k => k is not null)
+                    .Select(k => k!.Value)
+                    .ToHashSet(),
+                StringComparer.OrdinalIgnoreCase);
+
+        var now = DateTime.UtcNow;
+
+        foreach (var order in armed)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            // Age it out first, so an expired trigger cannot fire on a late price tick.
+            if (order.ExpiresUtc is { } expiry && now >= expiry)
+            {
+                await _repository.TrySetArmedOrderStateAsync(
+                    order.ArmedId, "armed", "expired",
+                    $"Expired at {expiry:u} without triggering.", ct: ct);
+                _logger.LogInformation("[ArmedOrders] {ArmedId} ({Symbol}) expired unfired.",
+                    order.ArmedId, order.Symbol);
+                continue;
+            }
+
+            var price = live.TryGetValue(order.Symbol, out var quote) ? quote.Current : null;
+            var alerts = alertsBySymbol.GetValueOrDefault(order.Symbol, Array.Empty<AlertKind>());
+
+            if (!ArmedOrderEvaluator.ShouldFire(order, price, alerts, now, out var why))
+                continue;
+
+            // Claim it before the broker sees anything.
+            if (!await _repository.TrySetArmedOrderStateAsync(
+                    order.ArmedId, "armed", "firing", why, ct: ct))
+                continue;
+
+            _logger.LogWarning("[ArmedOrders] {ArmedId} ({Symbol}) triggered: {Why}",
+                order.ArmedId, order.Symbol, why);
+
+            try
+            {
+                var groups = new[] { (IReadOnlyList<TradingSignal>)[order.ToSignal()] };
+                var severity = raisedThisPass
+                    .FirstOrDefault(a => a.Symbol.Equals(order.Symbol, StringComparison.OrdinalIgnoreCase))
+                    ?.Severity;
+
+                var decision = _approvals.Decide(
+                    groups, $"armed:{order.ArmedId}",
+                    new ApprovalContext(severity, "armed-order"));
+                var approvalReason = decision.Reason;
+
+                if (!decision.MayProceed)
+                {
+                    // Not authorised to act unattended. Re-arm rather than consume: the condition may
+                    // still hold next pass, and losing a protective stop because approval was in
+                    // Always mode would be the worst possible outcome of a config choice.
+                    await _repository.TrySetArmedOrderStateAsync(
+                        order.ArmedId, "firing", "armed",
+                        $"Trigger met but not sent: {approvalReason}", ct: ct);
+                    _logger.LogWarning(
+                        "[ArmedOrders] {ArmedId} met its trigger but was NOT sent: {Reason} "
+                        + "(it remains armed).", order.ArmedId, approvalReason);
+                    continue;
+                }
+
+                var result = await _manager.ExecuteGroupsAsync(
+                    groups, $"armed:{order.ArmedId}", decision.Authorization, ct);
+
+                await _repository.TrySetArmedOrderStateAsync(
+                    order.ArmedId, "firing",
+                    result.Executed ? "fired" : "armed",
+                    result.Executed
+                        ? $"{why} {approvalReason}"
+                        : $"Trigger met but execution refused: {result.Reason}",
+                    string.IsNullOrWhiteSpace(result.ExecutionId) ? null : result.ExecutionId, ct);
+
+                _logger.LogWarning(
+                    "[ArmedOrders] {ArmedId} {Outcome}: {Reason}",
+                    order.ArmedId, result.Executed ? "FIRED" : "refused", result.Reason);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // A thrown submission is genuinely ambiguous — it may or may not have reached the
+                // broker — so it is NOT re-armed. Reconciliation owns that question.
+                await _repository.TrySetArmedOrderStateAsync(
+                    order.ArmedId, "firing", "failed",
+                    $"Submission threw: {ex.Message}. Verify manually before re-arming.", ct: ct);
+                _logger.LogError(ex, "[ArmedOrders] {ArmedId} submission failed.", order.ArmedId);
+            }
+        }
     }
 
     /// <summary>

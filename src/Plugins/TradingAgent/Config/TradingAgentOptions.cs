@@ -184,15 +184,30 @@ public sealed class TradingApprovalOptions
 {
     /// <summary>
     /// <c>Always</c> (default) — every order needs a fresh confirmation.
-    /// <c>Auto</c> — orders matching every cap in <see cref="Auto"/> are redeemed without a prompt;
+    /// <c>Auto</c> — orders matching every cap in <see cref="Auto"/> proceed without a prompt;
     /// anything outside them still prompts.
-    /// <c>Armed</c> — prompting is suspended for a bounded window (see <see cref="Armed"/>).
+    /// <c>Window</c> — prompting is suspended for a bounded, explicitly opened window (see
+    /// <see cref="Window"/>).
+    ///
+    /// <para>
+    /// Note this is only consulted when <see cref="TradingAgentOptions.ExecutionMode"/> is
+    /// <c>ApprovalRequired</c>. <c>BoundedAuto</c> already authorises unattended execution by
+    /// definition, so approval mode does not gate it — the risk engine's limits do.
+    /// </para>
+    ///
+    /// <para>
+    /// The value was originally <c>Armed</c>, which collided badly with an "armed order" (an order
+    /// waiting on a trigger) and led to exactly the question you would expect: does armed mean
+    /// auto-execute? They are orthogonal — a trigger says WHEN, this says WHETHER a human must confirm —
+    /// so the window mode is named for what it is.
+    /// </para>
     /// </summary>
     public string Mode { get; set; } = "Always";
 
     public AutoApprovalOptions Auto { get; set; } = new();
 
-    public ArmedApprovalOptions Armed { get; set; } = new();
+    /// <summary>The time-boxed window used by <c>Window</c> mode.</summary>
+    public ApprovalWindowOptions Window { get; set; } = new();
 }
 
 /// <summary>Caps that define a pre-approved order. ALL of them must hold, or the order still prompts.</summary>
@@ -227,7 +242,7 @@ public sealed class AutoApprovalOptions
 }
 
 /// <summary>A sudo-style window during which confirmation is not requested.</summary>
-public sealed class ArmedApprovalOptions
+public sealed class ApprovalWindowOptions
 {
     /// <summary>Minutes granted when no explicit duration is asked for.</summary>
     public int DefaultMinutes { get; set; } = 30;
