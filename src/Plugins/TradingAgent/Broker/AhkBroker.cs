@@ -1596,9 +1596,11 @@ public sealed class AhkBroker : IAsyncDisposable
             (var finalPrice, priceAdjustment) = await ResolveLimitPriceAsync(requestedPrice.Value, "buy");
             submittedPrice = finalPrice;
 
-            var price = finalPrice.ToString("F2");
-            await FillFieldAsync("#buyprice",      price);
-            await FillFieldAsync("#buylimitprice", price);
+            // #buylimitprice is DISABLED for every order type except Stop Loss (the portal's
+            // order-type handler owns that), so writing to it on an ordinary limit order targets a
+            // disabled input: the value never sticks and FillFieldAsync spends its verify-and-refill
+            // retry for nothing. Only #buyprice matters here.
+            await FillFieldAsync("#buyprice", finalPrice.ToString("F2"));
         }
 
         await FillFieldAsync("#buyPIN", cfg.TradingPin);
@@ -1630,9 +1632,11 @@ public sealed class AhkBroker : IAsyncDisposable
 
     private async Task<OrderResult> PlaceSellAsync(TradingSignal signal)
     {
-        var cfg     = _config.Current;
-        var qty     = signal.Quantity ?? cfg.DefaultQty;
-        var isLimit = !signal.OrderType.Equals("MARKET", StringComparison.OrdinalIgnoreCase);
+        var cfg      = _config.Current;
+        var qty      = signal.Quantity ?? cfg.DefaultQty;
+        var isStop   = signal.OrderType.Equals("STOPLOSS", StringComparison.OrdinalIgnoreCase);
+        var isMarket = signal.OrderType.Equals("MARKET", StringComparison.OrdinalIgnoreCase);
+        var isLimit  = !isMarket;
 
         _logger.LogInformation("[AhkBroker] SELL {Symbol} x{Qty} @ {Price} ({Type})",
             signal.Symbol, qty, signal.EntryPrice, signal.OrderType);
@@ -1641,8 +1645,16 @@ public sealed class AhkBroker : IAsyncDisposable
         // DOM — open it first so the fields and the SELL button are actually interactable.
         await OpenOrderDialogAsync("sell");
 
-        // Set order type explicitly so a stale "Market"/"Limit" from a prior order can't misroute this one.
-        await SelectByVisibleTextAsync("#sellordertype", isLimit ? "Limit" : "Market");
+        // Set order type explicitly so a stale type from a prior order can't misroute this one. The
+        // portal's option LABELS are what SelectByVisibleText matches ("Stop Loss" carries a space,
+        // while the underlying option value is "StopLoss"); selecting it is also what ENABLES
+        // #selllimitprice — see the readiness wait below.
+        await SelectByVisibleTextAsync("#sellordertype", isStop ? "Stop Loss" : isMarket ? "Market" : "Limit");
+
+        // The trade type is NOT reset when the dialog is opened from the toolbar (only the portal's own
+        // SellOrder() resets it), so a stale "Short Sell" from a previous dialog would otherwise ride
+        // along and turn a protective exit into a short.
+        await SelectByVisibleTextAsync("#selltradetype", "SEL");
 
         await FillFieldAsync("#sellsymbol", signal.Symbol);
         await ResolveSymbolAsync("sell");
@@ -1657,9 +1669,29 @@ public sealed class AhkBroker : IAsyncDisposable
             (var finalPrice, priceAdjustment) = await ResolveLimitPriceAsync(requestedPrice.Value, "sell");
             submittedPrice = finalPrice;
 
-            var price = finalPrice.ToString("F2");
-            await FillFieldAsync("#sellprice",      price);
-            await FillFieldAsync("#selllimitprice", price);
+            // #sellprice is the TRIGGER for a stop order and the limit for an ordinary one; the portal
+            // reads it as whichever the selected type implies.
+            await FillFieldAsync("#sellprice", finalPrice.ToString("F2"));
+
+            if (isStop)
+            {
+                // Only a Stop Loss order enables #selllimitprice — writing to it for any other type
+                // targets a DISABLED input, where the value silently fails to stick and FillFieldAsync
+                // then burns its verify-and-refill retry. Wait for the enable rather than assuming the
+                // change handler has run.
+                await WaitForLimitPriceEnabledAsync("sell");
+
+                // A stop limit placed exactly AT the trigger frequently misses the fast move that
+                // triggered it, so the limit sits a slippage allowance BELOW it for a sell.
+                var limit = signal.LimitPrice
+                    ?? decimal.Round(finalPrice * (1m - Math.Clamp(cfg.StopLimitSlippagePercent, 0m, 20m) / 100m), 2);
+                (limit, _) = await ResolveLimitPriceAsync(limit, "sell");
+
+                await FillFieldAsync("#selllimitprice", limit.ToString("F2"));
+                _logger.LogInformation(
+                    "[AhkBroker] SELL {Symbol} STOP trigger {Trigger} → limit {Limit}.",
+                    signal.Symbol, finalPrice, limit);
+            }
         }
 
         await FillFieldAsync("#sellPIN", cfg.TradingPin);
@@ -1742,24 +1774,88 @@ public sealed class AhkBroker : IAsyncDisposable
         var deadline = DateTime.UtcNow.AddMilliseconds(timeout);
         while (true)
         {
-            var raw = await _page.EvaluateFunctionAsync<string>(
-                "(sel) => { const e = document.querySelector(sel); return e ? (e.value || '') : ''; }",
-                priceField) ?? "";
-
-            var cleaned = Regex.Replace(raw, @"[^0-9.]", "");
-            if (decimal.TryParse(cleaned, NumberStyles.Any, CultureInfo.InvariantCulture, out var price) && price > 0m)
-                return price;
+            // The authoritative signal that the portal accepted the symbol is the PRICE BAND, not the
+            // price field: entering a symbol populates the upperCap/lowerCap globals (from the
+            // preloaded objUpperLower table) even when no price is auto-filled. On the SELL path the
+            // price field is never populated at all — only the portal's own SellOrder() sets it, and
+            // that runs when opening from a market-watch row rather than the toolbar we click — so
+            // waiting on the price alone burned this entire timeout on every sell.
+            var band = await ReadPriceBandAsync();
+            if (band is { Upper: > 0m })
+            {
+                var raw = await _page.EvaluateFunctionAsync<string>(
+                    "(sel) => { const e = document.querySelector(sel); return e ? (e.value || '') : ''; }",
+                    priceField) ?? "";
+                var cleaned = Regex.Replace(raw, @"[^0-9.]", "");
+                return decimal.TryParse(cleaned, NumberStyles.Any, CultureInfo.InvariantCulture, out var price)
+                    && price > 0m ? price : null;
+            }
 
             if (DateTime.UtcNow >= deadline) break;
             await Task.Delay(150);
         }
 
-        // Not fatal: a market order has no price to populate, and an explicit limit price is typed
-        // below regardless. Logged because it is also the signature of an unresolved symbol.
+        // Not fatal on its own, but it is the signature of an unresolved symbol — and the portal's own
+        // submit handler refuses silently when the band is missing, so this is worth shouting about.
         _logger.LogWarning(
-            "[AhkBroker] {Field} did not populate within {Timeout}ms after symbol entry — the portal may not have resolved the symbol.",
-            priceField, timeout);
+            "[AhkBroker] No price band appeared within {Timeout}ms after entering the symbol. The portal "
+            + "may not have resolved it; submission would be rejected client-side without an error.",
+            timeout);
         return null;
+    }
+
+    /// <summary>
+    /// Reads the portal's tradable price band for the symbol currently entered in the order dialog.
+    ///
+    /// <para>
+    /// This is the same pair the portal's own submit handler gates on: it refuses to send when the
+    /// price falls outside <c>lowerCap..upperCap</c>, and it does so with a modal alert rather than an
+    /// error — a silent no-op that looks like success unless we check first.
+    /// </para>
+    /// </summary>
+    private async Task<(decimal Lower, decimal Upper)?> ReadPriceBandAsync()
+    {
+        try
+        {
+            var raw = await _page!.EvaluateFunctionAsync<string>(
+                "() => `${window.lowerCap ?? 0}|${window.upperCap ?? 0}`");
+            var parts = (raw ?? "").Split('|');
+            if (parts.Length == 2
+                && decimal.TryParse(parts[0], NumberStyles.Any, CultureInfo.InvariantCulture, out var lower)
+                && decimal.TryParse(parts[1], NumberStyles.Any, CultureInfo.InvariantCulture, out var upper))
+                return (lower, upper);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "[AhkBroker] Price band could not be read.");
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Waits for the portal's order-type change handler to enable the stop-limit field. Selecting
+    /// "Stop Loss" is what enables it, so this is a deterministic readiness signal rather than a
+    /// guess at how long the handler takes — which is what makes the flow behave the same on a slow
+    /// machine as on a fast one.
+    /// </summary>
+    private async Task WaitForLimitPriceEnabledAsync(string side)
+    {
+        var selector = side == "sell" ? "#selllimitprice" : "#buylimitprice";
+        var timeout  = Math.Max(1_000, _config.Current.DialogOpenTimeoutMs);
+        var deadline = DateTime.UtcNow.AddMilliseconds(timeout);
+
+        while (DateTime.UtcNow < deadline)
+        {
+            var enabled = await _page!.EvaluateFunctionAsync<bool>(
+                "(sel) => { const e = document.querySelector(sel); return !!e && !e.disabled; }", selector);
+            if (enabled) return;
+            await Task.Delay(100);
+        }
+
+        throw new InvalidOperationException(
+            $"{selector} never became editable after selecting the Stop Loss order type. The portal "
+            + "enables it from its order-type change handler, so this means the type did not actually "
+            + "change — submitting now would send an ordinary order with no stop.");
     }
 
     /// <summary>

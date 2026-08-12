@@ -108,6 +108,23 @@ overlay, SMA20/50, an RSI sub-pane with the *configured* oversold/overbought ban
 30/70), horizontal support/resistance lines whose width encodes touch count and whose style shows
 weekly confirmation, entry/stop/target markers, and an interval switcher (1D / 60m / 30m / 15m / 5m).
 
+### Making room
+
+Six labelled price lines, two panes and a volume overlay do not fit legibly in a small box, so the
+chart carries three controls for trading detail against readability:
+
+| Control | Effect |
+| --- | --- |
+| **Expand** | Chart takes the full row (784×400 → 1114×560) and the watchlist **stacks beneath** it rather than being hidden — losing symbol switching would be a poor trade for the extra width. |
+| **Levels: all / key / off** | `all` draws the nearest three each side; `key` only the weekly-confirmed ones (structure, not a recent swing); `off` leaves clean price action. |
+| **RSI** | Hides the sub-pane and gives its ~90px back to the candles. |
+
+Turning lines off hides *drawing*, never information: the levels legend under the chart always lists
+every level with its distance, touch count and weekly confirmation.
+
+Layout changes rebuild the chart rather than mutating it — lightweight-charts has no clean way to add
+or drop a pane after construction, and a rebuild over a few hundred bars is imperceptible.
+
 Chart data comes from `GET /api/trading/candles`, which is served by **`CandleAnalysisService`** — the
 same code path `analyze_candles` uses. That sharing is the point: the levels drawn on screen are the
 same objects the specialist quotes, so the chart cannot tell one story while the agent tells another.
@@ -221,11 +238,51 @@ Alerts carry their evidence (the analyzer's own reasons), whether the level is w
 whether they were raised off a **still-forming bar** — a trigger that can still un-happen before the
 close, which the UI labels rather than hiding.
 
+---
+
+## Confidence assessment (LLM, on demand)
+
+The numbers stay deterministic; the model only **judges** them. `StockAssessmentService` owns the one
+confidence rubric — `research_stock` and both `/assess` endpoints share it, so a verdict means the
+same thing wherever it appears.
+
+```
+POST /api/trading/assess              { symbol, interval?, context? }   → TradingAnalyst
+POST /api/trading/alerts/{id}/assess                                    → TradingAnalyst
+```
+
+Evidence is the same read the chart draws (`CandleAnalysisService`: levels, indicators, weekly
+structure) plus the portal quote, listing status and news. The reply is structured:
+confidence + score, `PROCEED` / `CAUTION` / `AVOID` / `INSUFFICIENT_DATA`, rationale, supporting and
+risk factors, an **invalidation level**, and the model that produced it.
+
+Four properties that matter more than the wording of the prompt:
+
+- **Never automatic.** A model call per alert would cost real money and hit rate limits on a busy day,
+  and most alerts are read and dismissed in a second. It is a button.
+- **Fails conservative.** A model error or unparseable output yields `INSUFFICIENT_DATA` with
+  confidence `NONE` — never a default optimism. A **delisted** security short-circuits to `AVOID`
+  without spending a call at all.
+- **The invalidation level is chosen, not invented.** The prompt requires it to come from the levels
+  already in the evidence (a support, a resistance, or the suggested stop), preserving the "never
+  invent a price" rule that lets the specialist quote these figures.
+- **Cached per symbol + level + session.** Clicking twice on one situation costs one call; a level
+  that has moved is a different question and gets a fresh answer. A *failed* assessment is never
+  cached, so a retry actually retries. An alert knows its own identity, so a repeat click on one
+  short-circuits before any fetching — measured **46 s → 57 ms**.
+
+The verdict reports the **model that actually answered** (read from the chat client's metadata), not
+the configured `ParserModelKey`: that key selects the specialist *agent's* model, while tools and
+endpoints use the default chat client, and naming a key that was not used would put a false entry in
+the audit trail.
+
 ### Endpoints
 
 | Verb | Route | Role |
 | --- | --- | --- |
 | GET | `/api/trading/alerts?symbol=&state=&limit=` | ManagementViewer |
+| POST | `/api/trading/alerts/{id}/assess` — LLM confidence for that alert | TradingAnalyst |
+| POST | `/api/trading/assess` — LLM confidence for a symbol | TradingAnalyst |
 | GET | `/api/trading/alerts/stream` — SSE, live push | ManagementViewer |
 | POST | `/api/trading/alerts/{id}/ack` \| `/dismiss` | TradingAnalyst |
 | GET | `/api/trading/monitor/status` — last pass, coverage, and the *effective* settings | ManagementViewer |

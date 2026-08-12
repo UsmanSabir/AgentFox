@@ -9,6 +9,9 @@
   /** Symbol the watchlist has selected; drives the chart pane. */
   let selectedSymbol: string | null = null;
 
+  /** Full-width chart mode, toggled from the chart's own header. */
+  let chartExpanded = false;
+
   let loading = true;
   let killSwitchBusy = false;
   let backfillBusy = false;
@@ -136,9 +139,9 @@
 
     <!-- Watchlist beside the archive: the two are related — the archive is what gives the watched
          symbols their weekly levels — and the panel owns its own loading and refresh. -->
-    <div class="watch-row">
+    <div class="watch-row" class:expanded={chartExpanded}>
       <WatchlistPanel bind:selected={selectedSymbol} />
-      <ChartPane symbol={selectedSymbol} />
+      <ChartPane symbol={selectedSymbol} bind:expanded={chartExpanded} />
     </div>
 
     <div class="alerts-row">
@@ -253,6 +256,11 @@
      widest measured size and pushes the grid wider on every re-render. */
   .watch-row { display:grid; grid-template-columns:minmax(260px,320px) minmax(0,1fr); gap:.75rem; margin-bottom:1.25rem; align-items:start; }
   @media (max-width: 820px) { .watch-row { grid-template-columns:minmax(0,1fr); } }
+
+  /* Expanded: the chart takes the full width and the watchlist STACKS BENEATH it rather than being
+     hidden — losing the ability to switch symbols would be a poor trade for the extra width. */
+  .watch-row.expanded { grid-template-columns:minmax(0,1fr); }
+  .watch-row.expanded :global(> section:first-child) { order: 2; }
   .archive-card { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:1rem; margin-bottom:1.25rem; display:flex; flex-direction:column; gap:.85rem; }
   .archive-head { display:flex; justify-content:space-between; align-items:flex-start; gap:1rem; flex-wrap:wrap; }
   .archive-title { display:flex; gap:.6rem; align-items:flex-start; color:var(--primary); }

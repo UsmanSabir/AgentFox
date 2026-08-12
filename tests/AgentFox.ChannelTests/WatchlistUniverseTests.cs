@@ -326,6 +326,8 @@ public sealed class WatchlistUniverseTests
         public Task<IReadOnlyList<AlertRecord>> GetAlertsAsync(
             string? s = null, string? st = null, int limit = 100, CancellationToken ct = default) =>
             throw new NotSupportedException();
+        public Task<AlertRecord?> GetAlertAsync(string alertId, CancellationToken ct = default) =>
+            throw new NotSupportedException();
         public Task<bool> SetAlertStateAsync(string id, string state, CancellationToken ct = default) =>
             throw new NotSupportedException();
         public Task<IReadOnlyDictionary<string, int>> GetOpenAlertCountsAsync(CancellationToken ct = default) =>

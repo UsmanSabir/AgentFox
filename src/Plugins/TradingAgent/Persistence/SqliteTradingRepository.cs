@@ -1129,26 +1129,45 @@ public sealed class SqliteTradingRepository : ITradingRepository
         var alerts = new List<AlertRecord>();
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
-        {
-            alerts.Add(new AlertRecord
-            {
-                AlertId         = reader.GetString(0),
-                Symbol          = reader.GetString(1),
-                Kind            = reader.GetString(2),
-                Severity        = reader.GetString(3),
-                LevelPrice      = ParseDecimal(reader, 4),
-                Price           = decimal.Parse(reader.GetString(5), CultureInfo.InvariantCulture),
-                Interval        = reader.GetString(6),
-                Summary         = reader.GetString(7),
-                Reasons         = JsonSerializer.Deserialize<List<string>>(reader.GetString(8)) ?? [],
-                WeeklyConfirmed = reader.GetInt64(9) != 0,
-                FromLiveBar     = reader.GetInt64(10) != 0,
-                State           = reader.GetString(11),
-                RaisedUtc       = ParseUtc(reader.GetString(12)),
-                SessionDate     = reader.GetString(13)
-            });
-        }
+            alerts.Add(ReadAlert(reader));
         return alerts;
+    }
+
+    /// <summary>Shared projection so the by-id and list queries cannot drift apart.</summary>
+    private static AlertRecord ReadAlert(Microsoft.Data.Sqlite.SqliteDataReader reader) => new()
+    {
+        AlertId         = reader.GetString(0),
+        Symbol          = reader.GetString(1),
+        Kind            = reader.GetString(2),
+        Severity        = reader.GetString(3),
+        LevelPrice      = ParseDecimal(reader, 4),
+        Price           = decimal.Parse(reader.GetString(5), CultureInfo.InvariantCulture),
+        Interval        = reader.GetString(6),
+        Summary         = reader.GetString(7),
+        Reasons         = JsonSerializer.Deserialize<List<string>>(reader.GetString(8)) ?? [],
+        WeeklyConfirmed = reader.GetInt64(9) != 0,
+        FromLiveBar     = reader.GetInt64(10) != 0,
+        State           = reader.GetString(11),
+        RaisedUtc       = ParseUtc(reader.GetString(12)),
+        SessionDate     = reader.GetString(13)
+    };
+
+    public async Task<AlertRecord?> GetAlertAsync(string alertId, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT alert_id, symbol, kind, severity, level_price, price, interval, summary,
+                   evidence_json, weekly_confirmed, from_live_bar, state, raised_utc, session_date
+            FROM watchlist_alerts
+            WHERE alert_id = $id
+            """;
+        command.Parameters.AddWithValue("$id", alertId);
+
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        return await reader.ReadAsync(ct) ? ReadAlert(reader) : null;
     }
 
     public async Task<bool> SetAlertStateAsync(string alertId, string state, CancellationToken ct = default)

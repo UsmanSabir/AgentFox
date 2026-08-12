@@ -302,6 +302,25 @@ export interface TradingAlert {
   sessionDate: string;
 }
 
+/**
+ * A structured confidence verdict. The numbers it reasons over are deterministic; the model only
+ * judges them, and `invalidationLevel` is chosen from the levels in the evidence rather than invented.
+ */
+export interface StockAssessment {
+  confidence: 'HIGH' | 'MEDIUM' | 'LOW' | 'NONE' | string;
+  confidenceScore: number;
+  recommendation: 'PROCEED' | 'CAUTION' | 'AVOID' | 'INSUFFICIENT_DATA' | string;
+  rationale: string;
+  supportingFactors: string[];
+  riskFactors: string[];
+  invalidationLevel: number | null;
+  /** The model that produced it, for the audit trail. */
+  model: string | null;
+  assessedUtc: string;
+  /** Served from the session cache rather than a fresh model call. */
+  fromCache: boolean;
+}
+
 export interface MonitorStatus {
   enabled: boolean;
   marketOpen: boolean;
@@ -423,6 +442,20 @@ export const trading = {
   monitor: {
     status: () => get<MonitorStatus>('/trading/monitor/status'),
     run:    () => post<MonitorStatus>('/trading/monitor/run')
+  },
+
+  /**
+   * On-demand LLM confidence. Never called automatically — a model call per alert would cost real
+   * money and hit rate limits on a busy day, and most alerts are read and dismissed without needing
+   * one. Repeat calls for the same symbol+level+session are served from the server-side cache.
+   */
+  assess: {
+    symbol: (symbol: string, interval = '1D', context?: string) =>
+      post<{ symbol: string; assessment: StockAssessment; evidence: unknown }>(
+        '/trading/assess', { symbol, interval, context }),
+    alert: (alertId: string) =>
+      post<{ alertId: string; symbol: string; kind: string; assessment: StockAssessment }>(
+        `/trading/alerts/${alertId}/assess`)
   },
 
   watchlist: {

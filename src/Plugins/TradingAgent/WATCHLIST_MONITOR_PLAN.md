@@ -397,6 +397,22 @@ Refactor note: `ResearchStockTool` already does this assessment. Extract a
 `StockAssessmentService` used by both the tool and the endpoint rather than duplicating the prompt —
 one place where the confidence rubric lives.
 
+*Phase 4 as built, plus three corrections:*
+
+- **`modelKey` was wrong.** The plan said the assessment runs on `ParserModelKey`. It cannot: named
+  model resolution (`LLMFactory.CreateWithModelOverride`) lives in the host assembly, and a plugin
+  cannot reach it. `ParserModelKey` selects the specialist *agent's* model; tools and endpoints use
+  the injected default chat client. The verdict now reports the model that actually answered, read
+  from the client's own metadata, rather than a key it never used.
+- **A decimal-scale trap in the cache key.** `Math.Round(309.0m, 2)` keeps the value's *scale*, so
+  `309.0` formatted as "309.0" while `309.004` formatted as "309.00" — two identical levels, two keys,
+  two model calls. Now formatted with an explicit `F2`. Caught by a test, not in production.
+- **The alert short-circuit was dead code.** It derived its own cache key from `alert.LevelPrice`
+  while the inner path fell back to the suggested entry, so a level-less alert (a trend flip has no
+  level) never matched and every repeat click paid for the full evidence gather. One key is now
+  computed once and threaded through: 46 s → 57 ms on a repeat click.
+- `ResearchStockTool` shrank from 277 lines to 161 in the process.
+
 ---
 
 ## 6. Feature 5 — Actions (buy / sell / stop-loss)
@@ -498,6 +514,88 @@ event recording *which rule* redeemed it, so a bypassed order is as traceable as
 
 ### 6.4 Stop-loss — a trigger price plus a limit order
 
+> **DISCOVERY DONE (live portal inspection, read-only).** The `probe_order_form` step below is no
+> longer speculative — the portal was inspected directly and the answers are recorded here. No order
+> was submitted.
+>
+> **The portal HAS a native stop order.** `#sellordertype` offers `Limit`, `StopLoss`, `Market`,
+> `FOK`, `MIT` — note the option **value** is `StopLoss` while its **label** is `"Stop Loss"`.
+> `sellorderTypeChange(value)` enables `#selllimitprice` **only** for `StopLoss` and disables it for
+> every other type, which confirms the semantics: **`#sellprice` is the trigger, `#selllimitprice` is
+> the limit.** Prefer this over the monitored soft stop — it rests at the broker and survives our
+> process being down.
+>
+> **Submit contract** (`placeSellOrder()`, read from source; never called):
+> `POST /Home/PlaceOrder`, form-encoded —
+> `Account`, `BuySell`, `Market`, `OrderType`, `Volume`, `Script`, `Exchange:"KSE"`, `Price`, `PIN`,
+> `LimitPrice`. Two traps: `OrderType` and `Account` send the option **text**, not the value (so
+> `"Stop Loss"` with a space), and `LimitPrice` is always sent, unvalidated, empty when disabled.
+> A client-side gate `Price >= lowerCap && Price <= upperCap` shows a sweetAlert and **never sends**
+> when it fails — a silent no-op, not an error. Success returns a plain **string** which the page
+> renders via `sweetAlert(res)`; that is what `ReadOrderOutcomeAsync` already parses.
+>
+> **Fields:** `#sellmarket` (REG/FUT/ODL/LB), `#sellordertype`, `#sellvolume`, `#sellsymbol`,
+> `#sellprice`, `#sellaccount`, `#selltradetype` (`Sel`/`SHS`/`LSELL`, labels SEL / Short Sell /
+> LB Sell), `#sellPIN`, `#issellpinsave`, `#selllimitprice`, and an id-less SELL button carrying
+> `onclick="placeSellOrder()"`.
+>
+> **Three bugs this found in the existing adapter:**
+> 1. `FillFieldAsync("#selllimitprice", …)` runs for LIMIT orders, where the field is **disabled** —
+>    a guaranteed wasted fill-and-retry on every order.
+> 2. `#selltradetype` is never set. Opening via the toolbar does not reset it (only `SellOrder()`
+>    does), so a stale `Short Sell` can ride along. Set it explicitly.
+> 3. `ResolveSymbolAsync` waits for `#sellprice` to auto-populate, which on the sell path **never
+>    happens** — only `SellOrder()` sets it (from `bestBuy`), and that runs when opening from a
+>    market-watch row, not the toolbar. Every sell therefore burns the full `SymbolResolveTimeoutMs`
+>    and logs a warning. Verified live: after typing `OGDC`, `#sellprice` stayed empty while the caps
+>    populated.
+>
+> **LIVE SUBMISSION TEST (one real order, off-hours, operator-authorised).** A `Stop Loss` SELL of
+> **1 OGDC** with trigger and limit at the lower cap (287.03, a 10% drop from the 318.92 market) was
+> submitted end to end. The flow behaved exactly as the source predicted — order type `Stop Loss`
+> selected, `#selllimitprice` enabled, trade type `SEL`, band check passed, the
+> *"Are you sure? You want to execute Sell order!"* prompt appeared and was confirmed.
+>
+> **The result is the important part, and it is a trap:**
+>
+> | Signal | Observed |
+> | --- | --- |
+> | `POST /Home/PlaceOrder` | HTTP 200 |
+> | Response body | **empty** (the success handler's `sweetAlert(res, "success")` rendered a blank title) |
+> | UI feedback | a green **"success"** alert |
+> | Outstanding Log | **empty** (after an explicit Refresh) |
+> | Activity Log | **empty** |
+>
+> So off-hours the portal reports success and places **nothing**. A green success alert is therefore
+> **not evidence that an order exists**, and there is no order number on this path at all.
+>
+> What this means for us:
+>
+> - `ReadOrderOutcomeAsync` is, fortunately, already conservative: `_successMarkers` requires a real
+>   phrase ("order placed", "order accepted", "order number", …) and a bare `"success"` matches none
+>   of them, so it does **not** claim success. It falls through to its timeout and returns
+>   `Success = false` with "no confirmation or error was detected", which the Trading Manager records
+>   as an unknown outcome for reconciliation. Correct — but it costs the full
+>   `OrderConfirmTimeoutMs` and produces an unknown outcome for what the UI called a success.
+> - **The only ground truth is the order book.** The adapter should verify a submission by re-reading
+>   the Outstanding Log (or the Activity Log) rather than by scraping the result popup. That single
+>   change removes this entire class of ambiguity, and is now the recommended next step for 5b.
+> - The market-closed gate in `TradingManager` already prevents this path in normal operation — this
+>   test only reached it because it bypassed the manager and drove the portal directly.
+>
+> **Deterministic readiness signals — the fix for "load time differs per machine".** The variable part
+> is one-time reference data, not the dialog. Wait on these instead of sleeping:
+>
+> | Condition | Signal |
+> | --- | --- |
+> | App ready | `objUpperLower.length > 0 && symbolList.length > 0` (1,972 / 1,563 rows, from `GetUpperLowerCap` + `GetSymolsList`) |
+> | Dialog open | `#sellsymbol` visible |
+> | Symbol accepted | `window.upperCap > 0` (**not** `#sellprice` populated) |
+> | Stop armed | `!#selllimitprice.disabled` |
+> | Price submittable | `lowerCap <= price <= upperCap`, checked before clicking |
+>
+> All are instant boolean checks, so behaviour is identical on a fast or slow machine.
+
 Correcting the earlier framing: a stop-loss is a **trigger** (`sell if the price drops below N`) that
 submits a **limit order** when breached. Two layers, and we want both:
 
@@ -549,6 +647,13 @@ would replace a multi-second browser round-trip with a plain `HttpClient` call �
 for §4.2's position-aware alerts, where `get_portfolio` currently launches a whole Chromium.
 
 Plan:
+
+> **MAPPED ALREADY (live inspection).** The portal's whole surface is plain REST with **long
+> polling — no WebSocket, no SignalR**: `GET /Home/GetUserData`, `GET /Home/GetSymolsList` (sic),
+> `GET /Home/GetUpperLowerCap`, `POST /Home/SendSubscriptionofSymbols`, `GET /Home/GetFeed`
+> (repeating long-poll), `GET /Home/PingPong` (keepalive), `POST /Home/PlaceOrder`. So an
+> `AhkRestClient` reusing the Puppeteer session cookies is straightforward, and the read endpoints —
+> which is all we want first — need no new discovery work.
 
 1. **Capture** — opt-in `Ahk.CaptureNetwork` (default off). During a normal authenticated session,
    subscribe to PuppeteerSharp's `Page.Request` / `Page.Response` and write method, URL, headers,
@@ -626,7 +731,7 @@ running with, so "why didn't it alert" is answerable from the UI rather than by 
 | **1** ✅ | `MonitoredUniverse`, watchlist table + endpoints + UI list (add/remove/reset/mute); archive universe widened; settled-session archiving fix | **Done** — independent watchlist, weekly levels for added symbols |
 | **2** ✅ | `CandleAnalysisService` extracted (shared with `analyze_candles`), `IndicatorSeries`, `/trading/candles`, `lightweight-charts` pane with S/R overlays, RSI bands and interval switcher | **Done** — chart-driven decisions, drawn from the same levels the agent quotes |
 | **3** ✅ | `AlertDetector` (pure), `WatchlistMonitorWorker`, `watchlist_state` / `watchlist_alerts`, `/alerts` + SSE + `/monitor/status`, alerts panel and row badges | **Done** — continuous monitoring with controlled noise |
-| **4** | `StockAssessmentService` + `/assess` endpoints, confidence on the alert card | On-demand LLM confidence |
+| **4** ✅ | `StockAssessmentService` extracted (shared with `research_stock`), `/assess` + `/alerts/{id}/assess`, verdict card on the alert and the chart | **Done** — on-demand LLM confidence, deterministic numbers unchanged |
 | **5a** | Proposal lifecycle (execute/reject/expire + sweeper + retention) — turns the log into a signal inbox | WhatsApp signals become actionable |
 | **5b** | `probe_order_form` discovery → `/orders` + approval modes (`Auto`/`Armed`) + `PendingExitStore` + `armed_exits` trigger evaluation | Actions and stops, all through the risk engine |
 | **6** | `Ahk.CaptureNetwork` → `AhkRestClient` for portfolio reads (browser fallback retained) | Fast holdings, no Chromium in the alert path |

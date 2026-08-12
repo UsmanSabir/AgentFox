@@ -59,6 +59,14 @@ public class AhkConfig
     public bool AllowMarketOrders { get; set; } = false;
 
     /// <summary>
+    /// How far below the trigger a stop-loss SELL's limit price is placed, in percent (default 1.0).
+    /// A stop limit set exactly AT the trigger frequently fails to fill in the fast move that
+    /// triggered it — the market is already through the level by the time the order is working. Set 0
+    /// to place the limit at the trigger itself, accepting that risk.
+    /// </summary>
+    public decimal StopLimitSlippagePercent { get; set; } = 1.0m;
+
+    /// <summary>
     /// How long to wait for the portal to show an order confirmation/error after submit. Also covers a
     /// LATE "Are you sure?" prompt (see <see cref="ConfirmPromptTimeoutMs"/>), so on a slow machine this
     /// must be comfortably larger than the prompt timeout or a confirmed order reads back as unconfirmed.

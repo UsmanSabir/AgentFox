@@ -1,7 +1,12 @@
 <script lang="ts">
   import { onMount, onDestroy, createEventDispatcher } from 'svelte';
-  import { trading, type TradingAlert, type MonitorStatus } from './api';
-  import { Bell, Check, X, Activity, RefreshCw, Radio, AlertTriangle } from 'lucide-svelte';
+  import { trading, type TradingAlert, type MonitorStatus, type StockAssessment } from './api';
+  import { Bell, Check, X, Activity, RefreshCw, Radio, AlertTriangle, Brain } from 'lucide-svelte';
+  import AssessmentCard from './AssessmentCard.svelte';
+
+  /** Verdicts fetched on demand, by alert id. Never fetched automatically — see api.assess. */
+  let assessments: Record<string, StockAssessment> = {};
+  let assessing: string | null = null;
 
   /** Selecting an alert drives the chart pane to that symbol. */
   const dispatch = createEventDispatcher<{ select: string }>();
@@ -57,6 +62,20 @@
       error = e instanceof Error ? e.message : String(e);
     } finally {
       busy = false;
+    }
+  }
+
+  async function assess(alert: TradingAlert) {
+    if (assessing) return;
+    assessing = alert.alertId;
+    error = null;
+    try {
+      const result = await trading.assess.alert(alert.alertId);
+      assessments = { ...assessments, [alert.alertId]: result.assessment };
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      assessing = null;
     }
   }
 
@@ -135,17 +154,28 @@
             </div>
             <p class="summary">{alert.summary}</p>
             <div class="meta">{alert.interval} · {when(alert.raisedUtc)}</div>
+            {#if assessments[alert.alertId]}
+              <AssessmentCard assessment={assessments[alert.alertId]} compact />
+            {/if}
           </button>
-          {#if alert.state === 'new'}
-            <div class="actions">
+          <div class="actions">
+            <button
+              class="icon"
+              title="Ask the model how much confidence the evidence supports (one model call)"
+              on:click={() => assess(alert)}
+              disabled={!!assessing}
+            >
+              <Brain size={13} />
+            </button>
+            {#if alert.state === 'new'}
               <button class="icon" title="Acknowledge" on:click={() => setState(alert, 'ack')} disabled={busy}>
                 <Check size={13} />
               </button>
               <button class="icon" title="Dismiss" on:click={() => setState(alert, 'dismiss')} disabled={busy}>
                 <X size={13} />
               </button>
-            </div>
-          {/if}
+            {/if}
+          </div>
         </li>
       {/each}
     </ul>

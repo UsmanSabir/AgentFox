@@ -202,6 +202,11 @@ public interface ITradingRepository
         int limit = 100,
         CancellationToken ct = default);
 
+    /// <summary>One alert by id, or null. Indexed lookup rather than scanning the recent list.</summary>
+    Task<TradingAgent.Watchlist.AlertRecord?> GetAlertAsync(
+        string alertId,
+        CancellationToken ct = default);
+
     /// <summary>Moves an alert to <paramref name="state"/> (acknowledged/dismissed). False if unknown.</summary>
     Task<bool> SetAlertStateAsync(
         string alertId,

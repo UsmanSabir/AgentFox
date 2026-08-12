@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onDestroy, tick } from 'svelte';
   import {
     createChart,
     CandlestickSeries,
@@ -11,10 +11,45 @@
     type IPriceLine,
     type UTCTimestamp
   } from 'lightweight-charts';
-  import { trading, CHART_INTERVALS, type ChartData, type ChartInterval } from './api';
-  import { LineChart, AlertTriangle, Eye, RefreshCw } from 'lucide-svelte';
+  import { trading, CHART_INTERVALS, type ChartData, type ChartInterval, type StockAssessment } from './api';
+  import { LineChart, AlertTriangle, Eye, RefreshCw, Brain, Maximize2, Minimize2, Activity } from 'lucide-svelte';
+  import AssessmentCard from './AssessmentCard.svelte';
 
   export let symbol: string | null = null;
+
+  /** Full-width mode: the chart takes the row and the watchlist stacks beneath it. Bound by the parent. */
+  export let expanded = false;
+
+  /**
+   * How much level detail to draw. Six labelled price lines plus the axis chips is more than a small
+   * pane can carry legibly, so this trades completeness for readability:
+   *   all → the nearest three each side   key → weekly-confirmed only   off → clean price action
+   * The full list is always in the legend below the chart, so nothing is actually hidden from view.
+   */
+  let levelMode: 'all' | 'key' | 'off' = 'all';
+
+  /** RSI in its own pane costs ~90px of candles; worth reclaiming when the pane is small. */
+  let showRsi = true;
+
+  const LEVEL_MODES = ['all', 'key', 'off'] as const;
+
+  /** On-demand verdict for the charted symbol. Cleared when the symbol or interval changes. */
+  let assessment: StockAssessment | null = null;
+  let assessing = false;
+
+  async function assess() {
+    if (!symbol || assessing) return;
+    assessing = true;
+    error = null;
+    try {
+      const result = await trading.assess.symbol(symbol, interval);
+      assessment = result.assessment;
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      assessing = false;
+    }
+  }
 
   let interval: ChartInterval = '1D';
   let data: ChartData | null = null;
@@ -97,23 +132,26 @@
       priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false
     });
 
-    // RSI gets its own pane: plotted on the price scale it would be an invisible flat line.
-    rsiSeries = chart.addSeries(LineSeries, {
-      color: token('--info', '#60a5fa'), lineWidth: 1, priceLineVisible: false
-    }, 1);
-    chart.panes()[1]?.setHeight(90);
+    // RSI gets its own pane: plotted on the price scale it would be an invisible flat line. Omitted
+    // entirely when hidden, so the candles get the height back rather than a collapsed empty pane.
+    if (showRsi) {
+      rsiSeries = chart.addSeries(LineSeries, {
+        color: token('--info', '#60a5fa'), lineWidth: 1, priceLineVisible: false
+      }, 1);
+      chart.panes()[1]?.setHeight(expanded ? 120 : 90);
 
-    // The oversold/overbought bands the analyzer actually classifies against (defaults 35/70), so a
-    // reader can see why a snapshot called RSI extreme rather than guessing at the usual 30/70.
-    for (const band of [{ price: rsiOverbought, label: 'overbought' }, { price: rsiOversold, label: 'oversold' }]) {
-      rsiSeries.createPriceLine({
-        price: band.price,
-        color: token('--text-3', '#5f6377'),
-        lineWidth: 1,
-        lineStyle: 3,
-        axisLabelVisible: true,
-        title: band.label
-      });
+      // The oversold/overbought bands the analyzer actually classifies against (defaults 35/70), so a
+      // reader can see why a snapshot called RSI extreme rather than guessing at the usual 30/70.
+      for (const band of [{ price: rsiOverbought, label: 'overbought' }, { price: rsiOversold, label: 'oversold' }]) {
+        rsiSeries.createPriceLine({
+          price: band.price,
+          color: token('--text-3', '#5f6377'),
+          lineWidth: 1,
+          lineStyle: 3,
+          axisLabelVisible: true,
+          title: band.label
+        });
+      }
     }
 
     resizeObserver = new ResizeObserver(() => {
@@ -127,7 +165,7 @@
   function render(d: ChartData) {
     if (!container) return;
     if (!chart) buildChart(container);
-    if (!chart || !candleSeries || !volumeSeries || !sma20Series || !sma50Series || !rsiSeries) return;
+    if (!chart || !candleSeries || !volumeSeries || !sma20Series || !sma50Series) return;
 
     chart.applyOptions({ timeScale: { timeVisible: d.interval !== '1D', secondsVisible: false } });
 
@@ -152,7 +190,7 @@
       .map(c => ({ time: c.time as UTCTimestamp, value: c.sma20! })));
     sma50Series.setData(d.candles.filter(c => c.sma50 != null)
       .map(c => ({ time: c.time as UTCTimestamp, value: c.sma50! })));
-    rsiSeries.setData(d.candles.filter(c => c.rsi14 != null)
+    rsiSeries?.setData(d.candles.filter(c => c.rsi14 != null)
       .map(c => ({ time: c.time as UTCTimestamp, value: c.rsi14! })));
 
     drawLevels(d);
@@ -169,6 +207,7 @@
     if (!candleSeries) return;
     for (const line of priceLines) candleSeries.removePriceLine(line);
     priceLines = [];
+    if (levelMode === 'off') return;
 
     const add = (level: ChartData['levels']['supports'][number], color: string, side: string) => {
       priceLines.push(candleSeries!.createPriceLine({
@@ -181,9 +220,48 @@
       }));
     };
 
-    // Only the nearest few each way: every cluster drawn at once is an unreadable grid.
-    for (const s of d.levels.supports.slice(0, 3)) add(s, token('--success', '#34d399'), 'S');
-    for (const r of d.levels.resistances.slice(0, 3)) add(r, token('--danger', '#f87171'), 'R');
+    // Only the nearest few each way: every cluster drawn at once is an unreadable grid. In 'key' mode
+    // just the weekly-confirmed ones — the levels that are structure rather than a recent swing.
+    for (const s of pickLevels(d.levels.supports)) add(s, token('--success', '#34d399'), 'S');
+    for (const r of pickLevels(d.levels.resistances)) add(r, token('--danger', '#f87171'), 'R');
+  }
+
+  function pickLevels(levels: ChartData['levels']['supports']) {
+    const nearest = levels.slice(0, 3);
+    return levelMode === 'key' ? nearest.filter(l => l.weeklyConfirmed) : nearest;
+  }
+
+  /**
+   * Tears the chart down and builds it again. Used for layout changes (pane count, size) rather than
+   * mutating the existing chart: lightweight-charts has no clean way to add or drop a pane after the
+   * fact, and a rebuild over a few hundred bars is imperceptible.
+   */
+  async function rebuild() {
+    await tick(); // let the container take its new size first, so the canvas is measured correctly
+    resizeObserver?.disconnect();
+    resizeObserver = null;
+    chart?.remove();
+    chart = null;
+    candleSeries = volumeSeries = sma20Series = sma50Series = rsiSeries = null;
+    priceLines = [];
+    markers = null;
+    if (data) render(data);
+  }
+
+  function cycleLevels() {
+    levelMode = LEVEL_MODES[(LEVEL_MODES.indexOf(levelMode) + 1) % LEVEL_MODES.length];
+    // Levels are price lines on an existing series, so this needs no rebuild.
+    if (data) drawLevels(data);
+  }
+
+  function toggleRsi() {
+    showRsi = !showRsi;
+    rebuild();
+  }
+
+  function toggleExpand() {
+    expanded = !expanded;
+    rebuild();
   }
 
   /** Entry / stop / target from the deterministic plan, anchored on the last bar. */
@@ -212,6 +290,9 @@
     if (!symbol) { data = null; return; }
     loading = true;
     error = null;
+    // A verdict belongs to the symbol and interval it was produced for; carrying it across would
+    // attach one stock's judgement to another's chart.
+    assessment = null;
     try {
       data = await trading.candles(symbol, interval);
       rsiOversold = data.thresholds.rsiOversold;
@@ -284,8 +365,40 @@
           </button>
         {/each}
       </div>
+
+      <!-- Declutter controls. The full level list stays in the legend below, so turning lines off
+           hides drawing, never information. -->
+      <div class="view-controls">
+        <button
+          class:muted={levelMode === 'off'}
+          on:click={cycleLevels}
+          disabled={!symbol}
+          title={levelMode === 'all' ? 'Showing the nearest 3 levels each side — click for weekly-confirmed only'
+               : levelMode === 'key' ? 'Showing weekly-confirmed levels only — click to hide all lines'
+               : 'Level lines hidden — click to show all'}
+        >Levels: {levelMode}</button>
+        <button class:muted={!showRsi} on:click={toggleRsi} disabled={!symbol}
+          title={showRsi ? 'Hide the RSI pane and give the height back to the candles' : 'Show the RSI pane'}>
+          <Activity size={11} /> RSI
+        </button>
+      </div>
+
+      <button
+        class="btn btn-ghost assess-btn"
+        title="Ask the model how much confidence the evidence supports (one model call)"
+        on:click={assess}
+        disabled={assessing || loading || !symbol}
+      ><Brain size={13} /> {assessing ? 'Assessing…' : 'Assess'}</button>
       <button class="icon" title="Refresh" on:click={load} disabled={loading || !symbol}>
         <RefreshCw size={13} />
+      </button>
+      <button
+        class="icon"
+        title={expanded ? 'Collapse — put the watchlist back beside the chart' : 'Expand — full width, taller, watchlist moves below'}
+        on:click={toggleExpand}
+        disabled={!symbol}
+      >
+        {#if expanded}<Minimize2 size={13} />{:else}<Maximize2 size={13} />{/if}
       </button>
     </div>
   </header>
@@ -295,10 +408,14 @@
   {:else if error}
     <p class="msg danger">{error}</p>
   {:else}
-    <div class="plot" class:loading bind:this={container}></div>
+    <div class="plot" class:loading class:tall={expanded} bind:this={container}></div>
 
     {#if data}
       <div class="readout">
+        {#if assessment}
+          <AssessmentCard {assessment} />
+        {/if}
+
         <div class="metrics">
           <div><span>Zone</span><b>{data.snapshot.zone}</b></div>
           <div><span>RSI(14)</span><b>{data.snapshot.rsi14 ?? '—'}</b></div>
@@ -394,9 +511,27 @@
     padding:.3rem; border-radius:var(--radius-sm); display:flex;
   }
   .icon:hover { background:var(--surface-2); color:var(--text); }
+  .assess-btn { display:flex; align-items:center; gap:.35rem; }
 
-  .plot { width:100%; height:340px; min-width:0; }
+  /* Taller than the original 340px: six labelled price lines plus an RSI pane needs the room, and
+     the axis chips overlap each other below roughly 400px. Expanded scales with the viewport. */
+  .plot { width:100%; height:400px; min-width:0; }
+  /* A fixed height rather than a vh clamp: this renders inside an iframe whose viewport is shorter
+     than the browser window, so a vh-based value collapsed back to its minimum and the expand button
+     gained width but almost no height. The page scrolls, so a definite 560px is the honest choice. */
+  .plot.tall { height:560px; }
   .plot.loading { opacity:.5; }
+
+  .view-controls { display:flex; gap:.25rem; }
+  .view-controls button {
+    display:inline-flex; align-items:center; gap:.25rem;
+    border:1px solid var(--border-md); background:var(--surface-2); color:var(--text-2);
+    border-radius:999px; padding:.2rem .5rem; font:inherit; font-size:.66rem; cursor:pointer;
+    text-transform:lowercase; white-space:nowrap;
+  }
+  .view-controls button:hover { color:var(--text); border-color:var(--border-high); }
+  .view-controls button.muted { color:var(--text-3); opacity:.7; }
+  .view-controls button:disabled { opacity:.4; cursor:default; }
 
   .msg { color:var(--text-3); font-size:.78rem; margin:0; padding:1.5rem 0; text-align:center; }
   .msg.danger { color:var(--danger); }
