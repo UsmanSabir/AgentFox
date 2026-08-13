@@ -147,8 +147,22 @@ export interface CandleArchiveStatus {
     earliestSession?: string;
     latestSession?: string;
   };
+  /**
+   * Trading days not yet retrieved for *every* archived symbol. Symbol-aware on purpose: coverage is
+   * recorded per (date, symbol), so a symbol added after the deep history was fetched shows up here
+   * instead of the archive claiming completeness while that symbol has almost no bars.
+   */
   missingTradingDays: number;
   targetTradingDays: number;
+  /** Archived daily sessions a symbol needs before weekly levels can be computed from them. */
+  dailyBarsForWeekly: number;
+  /** Symbols below that threshold, shortest history first — each offers a targeted backfill. */
+  symbolsShortOfWeekly: {
+    symbol: string;
+    archivedBars: number;
+    /** Sessions a backfill scoped to this symbol would fetch. */
+    missingSessions: number;
+  }[];
   progress: {
     isRunning: boolean;
     startedUtc?: string;
@@ -431,6 +445,23 @@ export interface ArmOrderRequest {
   sourceAlertId?: string | null;
 }
 
+/**
+ * Editable values used to pre-fill the arm-order dialog from a chart level or an alert. Unlike the
+ * API request, quantity is intentionally absent because the user must always choose it explicitly.
+ */
+export interface ArmOrderDialogContext {
+  symbol: string;
+  triggerKind?: TriggerKind;
+  triggerPrice?: number | null;
+  triggerAlertKind?: string | null;
+  action?: 'BUY' | 'SELL';
+  orderType?: string;
+  price?: number | null;
+  limitPrice?: number | null;
+  sourceAlertId?: string | null;
+  context?: string | null;
+}
+
 export interface MonitorStatus {
   enabled: boolean;
   marketOpen: boolean;
@@ -490,8 +521,14 @@ export const trading = {
 
   // Returns as soon as the pass has STARTED — a two-year backfill runs for ~18 minutes, so the
   // caller polls candleArchive() for progress instead of awaiting completion.
-  startBackfill: (years?: number) =>
-    post<{ started: boolean; status: CandleArchiveStatus }>('/trading/candle-archive/backfill', { years }),
+  //
+  // `symbols` scopes the pass to the dates those symbols are missing rather than to which symbols get
+  // stored (a session fetch returns the whole market either way). It is the only way to fill a symbol
+  // added after the deep history was archived: every date is already on record, so an unscoped pass
+  // finds nothing to do. Symbols must already be in the archive universe.
+  startBackfill: (years?: number, symbols?: string[]) =>
+    post<{ started: boolean; status: CandleArchiveStatus }>(
+      '/trading/candle-archive/backfill', { years, symbols }),
 
   /** Bars, indicator lines, levels, and the level-anchored plan — one request per chart render. */
   candles: (symbol: string, interval: ChartInterval = '1D', bars?: number) => {
@@ -521,49 +558,70 @@ export const trading = {
       onConnectionChange?: (connected: boolean) => void
     ): (() => void) => {
       const controller = new AbortController();
+      let stopped = false;
+      let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
       (async () => {
-        try {
-          const res = await fetch(`${BASE}/trading/alerts/stream`, {
-            headers: headers(),
-            signal: controller.signal
-          });
-          if (!res.ok || !res.body) return;
-          // Reported on connect, not on the first alert: the indicator means "the stream is open",
-          // and a quiet market is the normal case.
-          onConnectionChange?.(true);
+        let retryMs = 1_000;
+        while (!stopped) {
+          let connected = false;
+          try {
+            const res = await fetch(`${BASE}/trading/alerts/stream`, {
+              headers: headers(),
+              signal: controller.signal
+            });
+            if (!res.ok || !res.body) throw new Error(`Alert stream returned ${res.status}`);
+            // Reported on connect, not on the first alert: the indicator means "the stream is open",
+            // and a quiet market is the normal case.
+            connected = true;
+            retryMs = 1_000;
+            onConnectionChange?.(true);
 
-          const reader = res.body.getReader();
-          const decoder = new TextDecoder();
-          let buffer = '';
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
 
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
+            while (!stopped) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              // Normalise CRLF so proxy/platform newline choices cannot prevent frame detection.
+              buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
 
-            // SSE frames are separated by a blank line; anything after the last one is a partial
-            // frame and stays in the buffer.
-            const frames = buffer.split('\n\n');
-            buffer = frames.pop() ?? '';
-            for (const frame of frames) {
-              const line = frame.split('\n').find(l => l.startsWith('data: '));
-              if (!line) continue;
-              try {
-                onAlert(JSON.parse(line.slice(6)) as TradingAlert);
-              } catch {
-                /* malformed frame: skip it rather than tearing down the stream */
+              // SSE frames are separated by a blank line; anything after the last one is a partial
+              // frame and stays in the buffer.
+              const frames = buffer.split('\n\n');
+              buffer = frames.pop() ?? '';
+              for (const frame of frames) {
+                const line = frame.split('\n').find(l => l.startsWith('data: '));
+                if (!line) continue;
+                try {
+                  onAlert(JSON.parse(line.slice(6)) as TradingAlert);
+                } catch {
+                  /* malformed frame: skip it rather than tearing down the stream */
+                }
               }
             }
+          } catch {
+            // Authentication may arrive just after the iframe mounts, and long-lived connections can
+            // be dropped by sleep or a proxy. Retry below; SQLite remains the durable source of truth.
+          } finally {
+            if (connected) onConnectionChange?.(false);
           }
-        } catch {
-          // Aborted or dropped. The alert list is re-read on the next load; SQLite is the durable path.
-        } finally {
-          onConnectionChange?.(false);
+
+          if (stopped) break;
+          await new Promise<void>(resolve => {
+            retryTimer = setTimeout(resolve, retryMs);
+          });
+          retryTimer = null;
+          retryMs = Math.min(retryMs * 2, 15_000);
         }
       })();
 
-      return () => controller.abort();
+      return () => {
+        stopped = true;
+        if (retryTimer) clearTimeout(retryTimer);
+        controller.abort();
+      };
     }
   },
 

@@ -181,20 +181,116 @@ public sealed class WatchlistUniverseTests
         var settled = new DateOnly(2026, 8, 11);
         var unsettled = new DateOnly(2026, 8, 12);
 
-        await env.Repository.SaveDailySessionAsync(settled, []);
+        await env.Repository.SaveNonTradingDayAsync(settled);
         // Simulates the damage: the in-progress session was recorded as covered (as an empty day, i.e.
         // indistinguishable from a holiday), which without repair is a permanent hole.
-        await env.Repository.SaveDailySessionAsync(unsettled, []);
+        await env.Repository.SaveNonTradingDayAsync(unsettled);
 
-        var covered = await env.Repository.GetCoveredDailyDatesAsync(settled, unsettled);
+        string[] universe = ["OGDC"];
+        var covered = await env.Repository.GetCoveredDailyDatesAsync(settled, unsettled, universe);
         Assert.AreEqual(2, covered.Count);
 
         Assert.AreEqual(1, await env.Repository.ClearDailyCoverageAfterAsync(settled));
 
-        covered = await env.Repository.GetCoveredDailyDatesAsync(settled, unsettled);
+        covered = await env.Repository.GetCoveredDailyDatesAsync(settled, unsettled, universe);
         CollectionAssert.AreEqual(new[] { settled }, covered.ToArray(),
             "Only the unsettled date's marker may be dropped, so the settled history is untouched.");
     }
+
+    // ── Symbol-aware coverage ────────────────────────────────────────────────
+
+    [TestMethod]
+    public async Task Coverage_IsRecordedPerSymbolSoALaterSymbolIsNotSilentlySkipped()
+    {
+        using var env = TestEnv.Create(["OGDC"]);
+        var session = new DateOnly(2026, 8, 11);
+
+        // The archive universe when the date was fetched. GHNI joined afterwards.
+        await env.Repository.SaveDailySessionAsync(session, [Candle("OGDC", session)], ["OGDC"]);
+
+        Assert.AreEqual(
+            1, (await env.Repository.GetCoveredDailyDatesAsync(session, session, ["OGDC"])).Count,
+            "The symbol the fetch was filtered to is covered.");
+
+        Assert.AreEqual(
+            0, (await env.Repository.GetCoveredDailyDatesAsync(session, session, ["OGDC", "GHNI"])).Count,
+            "A date is only skippable once EVERY requested symbol has been asked for on it. Counting it "
+            + "covered for a symbol added later is what left that symbol permanently starved of history.");
+
+        // A pass targeting GHNI refetches the date, which stores the whole market for it.
+        await env.Repository.SaveDailySessionAsync(
+            session, [Candle("OGDC", session), Candle("GHNI", session)], ["OGDC", "GHNI"]);
+
+        Assert.AreEqual(
+            1, (await env.Repository.GetCoveredDailyDatesAsync(session, session, ["OGDC", "GHNI"])).Count,
+            "Once both symbols have been requested the date is complete for the pair.");
+    }
+
+    [TestMethod]
+    public async Task NonTradingDay_CountsAsCoveredForSymbolsAddedLater()
+    {
+        using var env = TestEnv.Create(["OGDC"]);
+        var holiday = new DateOnly(2026, 8, 14);
+
+        await env.Repository.SaveNonTradingDayAsync(holiday);
+
+        // A day the market was shut has nothing to fetch for anyone, ever. Requiring a per-symbol row
+        // would make every holiday reappear as missing the moment a symbol is added.
+        Assert.AreEqual(
+            1,
+            (await env.Repository.GetCoveredDailyDatesAsync(holiday, holiday, ["OGDC", "GHNI"])).Count,
+            "A non-trading day is covered for every symbol, including ones added later.");
+
+        var counts = await env.Repository.GetCoveredDailyDateCountsAsync(
+            holiday, holiday, ["OGDC", "GHNI"]);
+        Assert.AreEqual(1, counts["GHNI"],
+            "The market-wide closure counts toward a symbol that has no rows of its own.");
+    }
+
+    [TestMethod]
+    public async Task CoveredDateCounts_ReportEachSymbolsOwnShortfall()
+    {
+        using var env = TestEnv.Create(["OGDC"]);
+        var first = new DateOnly(2026, 8, 10);
+        var second = new DateOnly(2026, 8, 11);
+
+        await env.Repository.SaveDailySessionAsync(first, [Candle("OGDC", first)], ["OGDC"]);
+        await env.Repository.SaveDailySessionAsync(
+            second, [Candle("OGDC", second), Candle("GHNI", second)], ["OGDC", "GHNI"]);
+
+        var counts = await env.Repository.GetCoveredDailyDateCountsAsync(first, second, ["OGDC", "GHNI"]);
+
+        Assert.AreEqual(2, counts["OGDC"]);
+        Assert.AreEqual(1, counts["GHNI"],
+            "GHNI was only in the universe for the second session, so it is one session short — the "
+            + "number a targeted backfill has to fetch.");
+    }
+
+    [TestMethod]
+    public async Task SaveDailySession_DoesNotClaimCoverageForAnUnsettledBar()
+    {
+        using var env = TestEnv.Create(["OGDC"]);
+        var session = new DateOnly(2026, 8, 11);
+
+        var live = Candle("OGDC", session) with { IsLive = true };
+        await env.Repository.SaveDailySessionAsync(session, [live], ["OGDC"]);
+
+        Assert.AreEqual(
+            0, (await env.Repository.GetCoveredDailyDatesAsync(session, session, ["OGDC"])).Count,
+            "The bar was rejected as unsettled, so claiming the symbol as covered would freeze the gap "
+            + "that rejection exists to avoid.");
+    }
+
+    private static TradingAgent.Research.PsxCandle Candle(string symbol, DateOnly date) => new()
+    {
+        Symbol = symbol,
+        Date   = date,
+        Open   = 100m,
+        High   = 105m,
+        Low    = 99m,
+        Close  = 104m,
+        Volume = 1_000
+    };
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -287,12 +383,19 @@ public sealed class WatchlistUniverseTests
         public Task AppendEventAsync(string a, string b, string c, CancellationToken ct = default) =>
             throw new NotSupportedException();
         public Task SaveDailySessionAsync(
-            DateOnly d, IReadOnlyList<TradingAgent.Research.PsxCandle> b, CancellationToken ct = default) =>
+            DateOnly d, IReadOnlyList<TradingAgent.Research.PsxCandle> b,
+            IReadOnlyCollection<string> r, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task SaveNonTradingDayAsync(DateOnly d, CancellationToken ct = default) =>
             throw new NotSupportedException();
         public Task<IReadOnlyList<TradingAgent.Research.PsxCandle>> GetDailyBarsAsync(
             string s, int m, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<IReadOnlySet<DateOnly>> GetCoveredDailyDatesAsync(
-            DateOnly f, DateOnly t, CancellationToken ct = default) => throw new NotSupportedException();
+            DateOnly f, DateOnly t, IReadOnlyCollection<string> y, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<IReadOnlyDictionary<string, int>> GetCoveredDailyDateCountsAsync(
+            DateOnly f, DateOnly t, IReadOnlyCollection<string> y, CancellationToken ct = default) =>
+            throw new NotSupportedException();
         public Task<int> ClearDailyCoverageAfterAsync(DateOnly t, CancellationToken ct = default) =>
             throw new NotSupportedException();
         public Task<DailyArchiveStatus> GetDailyArchiveStatusAsync(CancellationToken ct = default) =>

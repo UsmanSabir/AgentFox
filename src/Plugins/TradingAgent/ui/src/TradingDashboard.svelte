@@ -1,6 +1,10 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { trading, type TradingStatus, type TradeProposal, type TradingExecution, type TradingEvent, type ReconciliationRun, type CandleArchiveStatus } from './api';
+  import {
+    trading,
+    type ArmOrderDialogContext, type TradingStatus, type TradeProposal, type TradingExecution,
+    type TradingEvent, type ReconciliationRun, type CandleArchiveStatus
+  } from './api';
   import { RefreshCw, ShieldAlert, Activity, FileText, ListChecks, Scale, History, Power, Database, Download, Play, XCircle } from 'lucide-svelte';
   import WatchlistPanel from './WatchlistPanel.svelte';
   import ChartPane from './ChartPane.svelte';
@@ -12,7 +16,7 @@
    * Non-null while the arming dialog is open. Both entry points — a chart level and an alert — raise the
    * same event with pre-filled context, so there is one dialog rather than one per origin.
    */
-  let armContext: Record<string, unknown> | null = null;
+  let armContext: ArmOrderDialogContext | null = null;
   let armedPanel: ArmedOrdersPanel | null = null;
   let watchlistPanel: WatchlistPanel | null = null;
 
@@ -305,6 +309,17 @@
 
         {#if archive.progress.message}
           <p class="archive-note" class:warn={archive.progress.abortedForThrottling}>{archive.progress.message}</p>
+        {/if}
+
+        {#if archive.symbolsShortOfWeekly.length}
+          <p class="archive-note warn">
+            {archive.symbolsShortOfWeekly.length} symbol(s) cannot produce weekly levels yet:
+            {#each archive.symbolsShortOfWeekly as gap, i}{i > 0 ? ', ' : ''}<b>{gap.symbol}</b>
+              ({gap.archivedBars}/{archive.dailyBarsForWeekly} bars{#if gap.missingSessions}, {gap.missingSessions} sessions never requested{/if}){/each}.
+            Coverage is tracked per symbol and date, so a symbol added after the deep history was
+            archived is missing those dates even when every date is on record. Use the download action
+            on its watchlist row to fetch just what it needs.
+          </p>
         {/if}
 
         {#if !archive.backfillEnabled}

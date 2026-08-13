@@ -8,17 +8,22 @@
     createSeriesMarkers,
     type IChartApi,
     type ISeriesApi,
+    type ISeriesMarkersPluginApi,
     type IPriceLine,
+    type Time,
     type UTCTimestamp
   } from 'lightweight-charts';
-  import { trading, CHART_INTERVALS, type ChartData, type ChartInterval, type StockAssessment } from './api';
+  import {
+    trading, CHART_INTERVALS,
+    type ArmOrderDialogContext, type ChartData, type ChartInterval, type StockAssessment
+  } from './api';
   import { LineChart, AlertTriangle, Eye, RefreshCw, Brain, Maximize2, Minimize2, Activity } from 'lucide-svelte';
   import AssessmentCard from './AssessmentCard.svelte';
 
   export let symbol: string | null = null;
 
   /** Raised when the user clicks a level to arm an order at it; the dashboard opens the dialog. */
-  const dispatch = createEventDispatcher<{ arm: Record<string, unknown> }>();
+  const dispatch = createEventDispatcher<{ arm: ArmOrderDialogContext }>();
 
   /** Full-width mode: the chart takes the row and the watchlist stacks beneath it. Bound by the parent. */
   export let expanded = false;
@@ -101,7 +106,7 @@
   let sma50Series: ISeriesApi<'Line'> | null = null;
   let rsiSeries: ISeriesApi<'Line'> | null = null;
   let priceLines: IPriceLine[] = [];
-  let markers: ReturnType<typeof createSeriesMarkers> | null = null;
+  let markers: ISeriesMarkersPluginApi<Time> | null = null;
   let resizeObserver: ResizeObserver | null = null;
 
   // Set from the response before the chart is built, so the RSI bands drawn are the ones the backend
@@ -445,7 +450,7 @@
         on:click={assess}
         disabled={assessing || loading || !symbol}
       ><Brain size={13} /> {assessing ? 'Assessing…' : 'Assess'}</button>
-      <button class="icon" title="Refresh" on:click={load} disabled={loading || !symbol}>
+      <button class="icon" title="Refresh" on:click={() => load()} disabled={loading || !symbol}>
         <RefreshCw size={13} />
       </button>
       <button
@@ -579,13 +584,13 @@
   .icon:hover { background:var(--surface-2); color:var(--text); }
   .assess-btn { display:flex; align-items:center; gap:.35rem; }
 
-  /* Taller than the original 340px: six labelled price lines plus an RSI pane needs the room, and
-     the axis chips overlap each other below roughly 400px. Expanded scales with the viewport. */
-  .plot { width:100%; height:400px; min-width:0; }
+  /* The price action, volume, and RSI share this canvas. Give them enough vertical separation for
+     level labels and recent candles to remain legible on ordinary desktop screens. */
+  .plot { width:100%; height:520px; min-width:0; }
   /* A fixed height rather than a vh clamp: this renders inside an iframe whose viewport is shorter
      than the browser window, so a vh-based value collapsed back to its minimum and the expand button
-     gained width but almost no height. The page scrolls, so a definite 560px is the honest choice. */
-  .plot.tall { height:560px; }
+     gained width but almost no height. The page scrolls, so a definite 680px is the honest choice. */
+  .plot.tall { height:680px; }
   .plot.loading { opacity:.5; }
 
   .view-controls { display:flex; gap:.25rem; }

@@ -1,6 +1,9 @@
 <script lang="ts">
   import { onMount, onDestroy, createEventDispatcher } from 'svelte';
-  import { trading, type TradingAlert, type MonitorStatus, type StockAssessment } from './api';
+  import {
+    trading,
+    type ArmOrderDialogContext, type TradingAlert, type MonitorStatus, type StockAssessment
+  } from './api';
   import { Bell, Check, X, Activity, RefreshCw, Radio, AlertTriangle, Brain, Crosshair } from 'lucide-svelte';
   import AssessmentCard from './AssessmentCard.svelte';
 
@@ -13,7 +16,11 @@
    * count could have moved (ack/dismiss, a manual pass, or a new alert over the live stream) — the
    * watchlist's per-symbol open-alert badge is fetched separately and has no other way to learn this.
    */
-  const dispatch = createEventDispatcher<{ select: string; arm: Record<string, unknown>; alertsChanged: void }>();
+  const dispatch = createEventDispatcher<{
+    select: string;
+    arm: ArmOrderDialogContext;
+    alertsChanged: void;
+  }>();
 
   let alerts: TradingAlert[] = [];
   let status: MonitorStatus | null = null;
@@ -26,19 +33,41 @@
   let live = false;
   let stopStream: (() => void) | null = null;
 
+  /**
+   * Reconcile a REST snapshot with alerts that may have arrived over SSE while the request was in
+   * flight. The snapshot wins for matching ids because it carries the latest ack/dismiss state;
+   * stream-only ids are retained so the initial load can never erase a just-arrived alert.
+   */
+  function mergeAlerts(incoming: TradingAlert[]) {
+    const byId = new Map(alerts.map(alert => [alert.alertId, alert]));
+    for (const alert of incoming) byId.set(alert.alertId, alert);
+    alerts = [...byId.values()].sort(
+      (a, b) => new Date(b.raisedUtc).getTime() - new Date(a.raisedUtc).getTime()
+    );
+  }
+
+  async function refreshAlerts() {
+    const incoming = await trading.alerts.list({ limit: 100 });
+    mergeAlerts(incoming);
+  }
+
   async function load() {
     loading = true;
     error = null;
-    try {
-      [alerts, status] = await Promise.all([
-        trading.alerts.list({ limit: 100 }),
-        trading.monitor.status()
-      ]);
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
-    } finally {
-      loading = false;
-    }
+    const [alertsResult, statusResult] = await Promise.allSettled([
+      trading.alerts.list({ limit: 100 }),
+      trading.monitor.status()
+    ]);
+
+    const failures: string[] = [];
+    if (alertsResult.status === 'fulfilled') mergeAlerts(alertsResult.value);
+    else failures.push(`Alerts: ${alertsResult.reason instanceof Error ? alertsResult.reason.message : String(alertsResult.reason)}`);
+
+    if (statusResult.status === 'fulfilled') status = statusResult.value;
+    else failures.push(`Monitor status: ${statusResult.reason instanceof Error ? statusResult.reason.message : String(statusResult.reason)}`);
+
+    error = failures.length ? failures.join(' · ') : null;
+    loading = false;
   }
 
   async function runNow() {
@@ -47,7 +76,7 @@
     error = null;
     try {
       status = await trading.monitor.run();
-      alerts = await trading.alerts.list({ limit: 100 });
+      await refreshAlerts();
       dispatch('alertsChanged');
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -121,7 +150,13 @@
           dispatch('alertsChanged');
         }
       },
-      connected => { live = connected; }
+      connected => {
+        const reconnected = connected && !live;
+        live = connected;
+        // Re-read SQLite whenever a stream (re)connects. Alerts raised during a network gap are
+        // durable even though their one-time push event has already passed.
+        if (reconnected && !loading) refreshAlerts().catch(() => {});
+      }
     );
   });
 

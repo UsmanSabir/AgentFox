@@ -1,12 +1,18 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { trading, type WatchlistEntry, type WatchlistResponse } from './api';
-  import { Plus, RotateCcw, Trash2, Bell, BellOff, Eye, AlertTriangle, Clock, Search } from 'lucide-svelte';
+  import { trading, type WatchlistEntry, type WatchlistResponse, type CandleArchiveStatus } from './api';
+  import { Plus, RotateCcw, Trash2, Bell, BellOff, Eye, AlertTriangle, Clock, Search, Download } from 'lucide-svelte';
 
   /** Selected symbol, so the chart pane (Phase 2) can follow the list. */
   export let selected: string | null = null;
 
   let data: WatchlistResponse | null = null;
+  /**
+   * Archive coverage, for the "no weekly" rows only: it says how many sessions each starved symbol was
+   * never requested for, which is what the targeted backfill below would fetch. Optional — the list
+   * still works without it, the offer just loses its numbers.
+   */
+  let archive: CandleArchiveStatus | null = null;
   let loading = true;
   let error: string | null = null;
   let notice: string | null = null;
@@ -14,6 +20,8 @@
   let busy = false;
   /** Narrows the rows below by symbol — separate from `input`, which is for adding a new ticker. */
   let search = '';
+  /** When active, show only symbols that currently have one or more unacknowledged alerts. */
+  let alertsOnly = false;
 
   async function load() {
     loading = true;
@@ -25,6 +33,56 @@
       error = e instanceof Error ? e.message : String(e);
     } finally {
       loading = false;
+    }
+    await loadArchive();
+  }
+
+  /** Never fatal: a missing archive status costs the badge its detail, not the list. */
+  async function loadArchive() {
+    try {
+      archive = await trading.candleArchive();
+    } catch {
+      /* leave whatever was last known */
+    }
+  }
+
+  /**
+   * Fills the daily history one symbol was never asked for.
+   *
+   * Needed as its own action because the archive can be complete market-wide while this symbol is
+   * starved: coverage is per (date, symbol), and a symbol added after the deep history was fetched was
+   * never requested for any of those dates. An unscoped backfill finds every date on record and does
+   * nothing, so without this the badge would never clear.
+   */
+  async function fillHistory(entry: WatchlistEntry) {
+    if (busy) return;
+    const missing = gapBySymbol.get(entry.symbol)?.missingSessions ?? 0;
+    const needed = archive?.dailyBarsForWeekly ?? 0;
+
+    if (!confirm(
+      `Backfill the daily history ${entry.symbol} is missing?\n\n` +
+      (missing > 0
+        ? `${missing} session(s) were never requested for it — one portal request each, so expect ` +
+          `roughly ${Math.max(1, Math.round(missing * 0.4 / 60))} minute(s).\n\n`
+        : '') +
+      `It has ${entry.archivedBars} bar(s)` +
+      (needed > 0 ? ` and needs ${needed} before weekly levels can be computed` : '') + `.\n\n` +
+      `Each day fetched returns the whole market, so every other archived symbol is stored too.`
+    )) return;
+
+    busy = true;
+    error = null;
+    notice = null;
+    try {
+      const result = await trading.startBackfill(undefined, [entry.symbol]);
+      archive = result.status;
+      notice = result.started
+        ? `Backfilling ${entry.symbol}. Progress is on the Candle archive card below.`
+        : `A backfill pass is already running — start this one once it finishes.`;
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = false;
     }
   }
 
@@ -117,19 +175,29 @@
     } catch {
       /* transient: the next refresh or the panel's own actions will retry */
     }
+    await loadArchive();
   }
 
   onMount(load);
 
-  $: filteredEntries = (data?.entries ?? []).filter(
-    e => e.symbol.toLowerCase().includes(search.trim().toLowerCase())
+  $: gapBySymbol = new Map(
+    (archive?.symbolsShortOfWeekly ?? []).map(gap => [gap.symbol, gap]));
+  $: openAlertCount = (data?.entries ?? []).reduce((total, entry) => total + entry.openAlerts, 0);
+  $: filteredEntries = (data?.entries ?? []).filter(entry =>
+    (!alertsOnly || entry.openAlerts > 0) &&
+    entry.symbol.toLowerCase().includes(search.trim().toLowerCase())
   );
 </script>
 
 <section class="watchlist">
   <header>
     <div class="head-copy">
-      <b>Watchlist</b>
+      <b>
+        Watchlist
+        {#if data}
+          <span class="alert-count" title="{openAlertCount} unacknowledged alert(s)">({openAlertCount})</span>
+        {/if}
+      </b>
       <span>
         {#if data}
           {data.entries.length} / {data.maxSymbols} watched · {data.tradableSymbols} tradable
@@ -174,17 +242,37 @@
       allowed-symbols list.
     </p>
   {:else}
-    <div class="search-row">
-      <Search size={13} />
-      <input
-        class="search-input"
-        placeholder="Search watched symbols…"
-        bind:value={search}
-        spellcheck="false"
-      />
+    <div class="filter-row">
+      <div class="search-row">
+        <Search size={13} />
+        <input
+          class="search-input"
+          placeholder="Search watched symbols…"
+          bind:value={search}
+          spellcheck="false"
+        />
+      </div>
+      <button
+        class="alerts-filter"
+        class:active={alertsOnly}
+        type="button"
+        aria-pressed={alertsOnly}
+        title={alertsOnly ? 'Show all watched symbols' : 'Show only symbols with unacknowledged alerts'}
+        on:click={() => alertsOnly = !alertsOnly}
+      >
+        <Bell size={13} /> Alerts only
+      </button>
     </div>
     {#if !filteredEntries.length}
-      <p class="note">No watched symbols match "{search}".</p>
+      <p class="note">
+        {#if alertsOnly && search.trim()}
+          No symbols with open alerts match "{search}".
+        {:else if alertsOnly}
+          No watched symbols have open alerts.
+        {:else}
+          No watched symbols match "{search}".
+        {/if}
+      </p>
     {:else}
     <ul class="rows">
       {#each filteredEntries as entry (entry.symbol)}
@@ -203,13 +291,26 @@
                 </span>
               {/if}
               {#if !entry.hasWeeklyHistory}
-                <span class="tag pending" title="{entry.archivedBars} daily bars archived — weekly support/resistance needs roughly two years, so it is not confirmed yet">
+                <span
+                  class="tag pending"
+                  title="{entry.archivedBars} daily bars archived{archive ? ` of the ${archive.dailyBarsForWeekly} needed` : ''} — weekly support/resistance is not confirmed for this symbol yet.{gapBySymbol.get(entry.symbol)?.missingSessions ? ` ${gapBySymbol.get(entry.symbol)?.missingSessions} session(s) were never requested for it; use the download action to fetch them.` : ''}"
+                >
                   <Clock size={11} /> no weekly
                 </span>
               {/if}
             </span>
           </button>
           <div class="row-actions">
+            {#if !entry.hasWeeklyHistory}
+              <button
+                class="icon"
+                title="Fetch the daily sessions this symbol was never requested for, so weekly levels can be computed"
+                on:click={() => fillHistory(entry)}
+                disabled={busy || archive?.progress.isRunning}
+              >
+                <Download size={13} />
+              </button>
+            {/if}
             <button
               class="icon"
               title={entry.alertsEnabled ? 'Mute alerts for this symbol' : 'Unmute alerts'}
@@ -245,6 +346,9 @@
   .head-copy { display:flex; flex-direction:column; gap:.2rem; }
   .head-copy b { color:var(--text); font-size:.9rem; }
   .head-copy span { color:var(--text-3); font-size:.72rem; }
+  .head-copy .alert-count {
+    color:var(--danger); font-size:.72rem; font-weight:700; margin-left:.15rem;
+  }
   header .btn { display:flex; align-items:center; gap:.35rem; white-space:nowrap; }
 
   .add-row { display:flex; gap:.5rem; }
@@ -257,16 +361,28 @@
   .symbol-input:focus { outline:none; border-color:var(--primary); }
   .add-row .btn { display:flex; align-items:center; gap:.35rem; }
 
+  .filter-row { display:flex; align-items:center; gap:.45rem; }
   .search-row {
-    display:flex; align-items:center; gap:.4rem;
+    flex:1; min-width:0; display:flex; align-items:center; gap:.4rem;
     background:var(--surface-2); border:1px solid var(--border-md);
     border-radius:var(--radius-sm); padding:.4rem .6rem; color:var(--text-3);
   }
   .search-input {
-    flex:1; background:none; border:0; color:var(--text); font:inherit; font-size:.78rem;
+    flex:1; min-width:0; background:none; border:0; color:var(--text); font:inherit; font-size:.78rem;
   }
   .search-input::placeholder { color:var(--text-3); }
   .search-input:focus { outline:none; }
+  .alerts-filter {
+    display:flex; align-items:center; gap:.3rem; white-space:nowrap;
+    background:var(--surface-2); border:1px solid var(--border-md);
+    border-radius:var(--radius-sm); padding:.4rem .55rem; color:var(--text-3);
+    font:inherit; font-size:.7rem; cursor:pointer;
+  }
+  .alerts-filter:hover { border-color:var(--danger); color:var(--text); }
+  .alerts-filter.active {
+    color:var(--danger); border-color:color-mix(in srgb, var(--danger) 55%, transparent);
+    background:color-mix(in srgb, var(--danger) 12%, transparent);
+  }
 
   .note {
     margin:0; color:var(--text-2); font-size:.72rem;
