@@ -431,6 +431,23 @@ export interface ArmOrderRequest {
   sourceAlertId?: string | null;
 }
 
+/**
+ * Editable values used to pre-fill the arm-order dialog from a chart level or an alert. Unlike the
+ * API request, quantity is intentionally absent because the user must always choose it explicitly.
+ */
+export interface ArmOrderDialogContext {
+  symbol: string;
+  triggerKind?: TriggerKind;
+  triggerPrice?: number | null;
+  triggerAlertKind?: string | null;
+  action?: 'BUY' | 'SELL';
+  orderType?: string;
+  price?: number | null;
+  limitPrice?: number | null;
+  sourceAlertId?: string | null;
+  context?: string | null;
+}
+
 export interface MonitorStatus {
   enabled: boolean;
   marketOpen: boolean;

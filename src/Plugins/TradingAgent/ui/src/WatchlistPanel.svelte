@@ -14,6 +14,8 @@
   let busy = false;
   /** Narrows the rows below by symbol — separate from `input`, which is for adding a new ticker. */
   let search = '';
+  /** When active, show only symbols that currently have one or more unacknowledged alerts. */
+  let alertsOnly = false;
 
   async function load() {
     loading = true;
@@ -121,15 +123,22 @@
 
   onMount(load);
 
-  $: filteredEntries = (data?.entries ?? []).filter(
-    e => e.symbol.toLowerCase().includes(search.trim().toLowerCase())
+  $: openAlertCount = (data?.entries ?? []).reduce((total, entry) => total + entry.openAlerts, 0);
+  $: filteredEntries = (data?.entries ?? []).filter(entry =>
+    (!alertsOnly || entry.openAlerts > 0) &&
+    entry.symbol.toLowerCase().includes(search.trim().toLowerCase())
   );
 </script>
 
 <section class="watchlist">
   <header>
     <div class="head-copy">
-      <b>Watchlist</b>
+      <b>
+        Watchlist
+        {#if data}
+          <span class="alert-count" title="{openAlertCount} unacknowledged alert(s)">({openAlertCount})</span>
+        {/if}
+      </b>
       <span>
         {#if data}
           {data.entries.length} / {data.maxSymbols} watched · {data.tradableSymbols} tradable
@@ -174,17 +183,37 @@
       allowed-symbols list.
     </p>
   {:else}
-    <div class="search-row">
-      <Search size={13} />
-      <input
-        class="search-input"
-        placeholder="Search watched symbols…"
-        bind:value={search}
-        spellcheck="false"
-      />
+    <div class="filter-row">
+      <div class="search-row">
+        <Search size={13} />
+        <input
+          class="search-input"
+          placeholder="Search watched symbols…"
+          bind:value={search}
+          spellcheck="false"
+        />
+      </div>
+      <button
+        class="alerts-filter"
+        class:active={alertsOnly}
+        type="button"
+        aria-pressed={alertsOnly}
+        title={alertsOnly ? 'Show all watched symbols' : 'Show only symbols with unacknowledged alerts'}
+        on:click={() => alertsOnly = !alertsOnly}
+      >
+        <Bell size={13} /> Alerts only
+      </button>
     </div>
     {#if !filteredEntries.length}
-      <p class="note">No watched symbols match "{search}".</p>
+      <p class="note">
+        {#if alertsOnly && search.trim()}
+          No symbols with open alerts match "{search}".
+        {:else if alertsOnly}
+          No watched symbols have open alerts.
+        {:else}
+          No watched symbols match "{search}".
+        {/if}
+      </p>
     {:else}
     <ul class="rows">
       {#each filteredEntries as entry (entry.symbol)}
@@ -245,6 +274,9 @@
   .head-copy { display:flex; flex-direction:column; gap:.2rem; }
   .head-copy b { color:var(--text); font-size:.9rem; }
   .head-copy span { color:var(--text-3); font-size:.72rem; }
+  .head-copy .alert-count {
+    color:var(--danger); font-size:.72rem; font-weight:700; margin-left:.15rem;
+  }
   header .btn { display:flex; align-items:center; gap:.35rem; white-space:nowrap; }
 
   .add-row { display:flex; gap:.5rem; }
@@ -257,16 +289,28 @@
   .symbol-input:focus { outline:none; border-color:var(--primary); }
   .add-row .btn { display:flex; align-items:center; gap:.35rem; }
 
+  .filter-row { display:flex; align-items:center; gap:.45rem; }
   .search-row {
-    display:flex; align-items:center; gap:.4rem;
+    flex:1; min-width:0; display:flex; align-items:center; gap:.4rem;
     background:var(--surface-2); border:1px solid var(--border-md);
     border-radius:var(--radius-sm); padding:.4rem .6rem; color:var(--text-3);
   }
   .search-input {
-    flex:1; background:none; border:0; color:var(--text); font:inherit; font-size:.78rem;
+    flex:1; min-width:0; background:none; border:0; color:var(--text); font:inherit; font-size:.78rem;
   }
   .search-input::placeholder { color:var(--text-3); }
   .search-input:focus { outline:none; }
+  .alerts-filter {
+    display:flex; align-items:center; gap:.3rem; white-space:nowrap;
+    background:var(--surface-2); border:1px solid var(--border-md);
+    border-radius:var(--radius-sm); padding:.4rem .55rem; color:var(--text-3);
+    font:inherit; font-size:.7rem; cursor:pointer;
+  }
+  .alerts-filter:hover { border-color:var(--danger); color:var(--text); }
+  .alerts-filter.active {
+    color:var(--danger); border-color:color-mix(in srgb, var(--danger) 55%, transparent);
+    background:color-mix(in srgb, var(--danger) 12%, transparent);
+  }
 
   .note {
     margin:0; color:var(--text-2); font-size:.72rem;

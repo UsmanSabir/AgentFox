@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
+  import { createEventDispatcher, onMount } from 'svelte';
   import {
     trading, TRIGGER_KINDS, ALERT_KINDS,
     type ArmOrderRequest, type TriggerKind
@@ -30,6 +30,17 @@
   let busy = false;
   let error: string | null = null;
   let result: { willFireUnattended: boolean; note: string } | null = null;
+  let dialogElement: HTMLDivElement;
+
+  onMount(() => dialogElement.focus());
+
+  function closeOnBackdrop(event: MouseEvent) {
+    if (event.target === event.currentTarget) dispatch('close');
+  }
+
+  function closeOnEscape(event: KeyboardEvent) {
+    if (event.key === 'Escape') dispatch('close');
+  }
 
   $: isEvent = triggerKind === 'Event';
   $: isStop = orderType === 'STOPLOSS';
@@ -77,8 +88,16 @@
   }
 </script>
 
-<div class="backdrop" on:click={() => dispatch('close')} role="presentation">
-  <div class="dialog" on:click|stopPropagation role="dialog" aria-label="Arm an order">
+<div class="backdrop" on:click={closeOnBackdrop} role="presentation">
+  <div
+    class="dialog"
+    bind:this={dialogElement}
+    role="dialog"
+    aria-modal="true"
+    aria-label="Arm an order"
+    tabindex="-1"
+    on:keydown={closeOnEscape}
+  >
     <header>
       <div class="title"><Crosshair size={15} /> <b>Arm an order</b> <span>{symbol}</span></div>
       <button class="icon" on:click={() => dispatch('close')} aria-label="Close"><X size={14} /></button>

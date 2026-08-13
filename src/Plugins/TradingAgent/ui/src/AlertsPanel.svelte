@@ -1,6 +1,9 @@
 <script lang="ts">
   import { onMount, onDestroy, createEventDispatcher } from 'svelte';
-  import { trading, type TradingAlert, type MonitorStatus, type StockAssessment } from './api';
+  import {
+    trading,
+    type ArmOrderDialogContext, type TradingAlert, type MonitorStatus, type StockAssessment
+  } from './api';
   import { Bell, Check, X, Activity, RefreshCw, Radio, AlertTriangle, Brain, Crosshair } from 'lucide-svelte';
   import AssessmentCard from './AssessmentCard.svelte';
 
@@ -13,7 +16,11 @@
    * count could have moved (ack/dismiss, a manual pass, or a new alert over the live stream) — the
    * watchlist's per-symbol open-alert badge is fetched separately and has no other way to learn this.
    */
-  const dispatch = createEventDispatcher<{ select: string; arm: Record<string, unknown>; alertsChanged: void }>();
+  const dispatch = createEventDispatcher<{
+    select: string;
+    arm: ArmOrderDialogContext;
+    alertsChanged: void;
+  }>();
 
   let alerts: TradingAlert[] = [];
   let status: MonitorStatus | null = null;

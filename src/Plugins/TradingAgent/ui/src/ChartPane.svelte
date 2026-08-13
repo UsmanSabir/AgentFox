@@ -8,17 +8,22 @@
     createSeriesMarkers,
     type IChartApi,
     type ISeriesApi,
+    type ISeriesMarkersPluginApi,
     type IPriceLine,
+    type Time,
     type UTCTimestamp
   } from 'lightweight-charts';
-  import { trading, CHART_INTERVALS, type ChartData, type ChartInterval, type StockAssessment } from './api';
+  import {
+    trading, CHART_INTERVALS,
+    type ArmOrderDialogContext, type ChartData, type ChartInterval, type StockAssessment
+  } from './api';
   import { LineChart, AlertTriangle, Eye, RefreshCw, Brain, Maximize2, Minimize2, Activity } from 'lucide-svelte';
   import AssessmentCard from './AssessmentCard.svelte';
 
   export let symbol: string | null = null;
 
   /** Raised when the user clicks a level to arm an order at it; the dashboard opens the dialog. */
-  const dispatch = createEventDispatcher<{ arm: Record<string, unknown> }>();
+  const dispatch = createEventDispatcher<{ arm: ArmOrderDialogContext }>();
 
   /** Full-width mode: the chart takes the row and the watchlist stacks beneath it. Bound by the parent. */
   export let expanded = false;
@@ -101,7 +106,7 @@
   let sma50Series: ISeriesApi<'Line'> | null = null;
   let rsiSeries: ISeriesApi<'Line'> | null = null;
   let priceLines: IPriceLine[] = [];
-  let markers: ReturnType<typeof createSeriesMarkers> | null = null;
+  let markers: ISeriesMarkersPluginApi<Time> | null = null;
   let resizeObserver: ResizeObserver | null = null;
 
   // Set from the response before the chart is built, so the RSI bands drawn are the ones the backend
@@ -445,7 +450,7 @@
         on:click={assess}
         disabled={assessing || loading || !symbol}
       ><Brain size={13} /> {assessing ? 'Assessing…' : 'Assess'}</button>
-      <button class="icon" title="Refresh" on:click={load} disabled={loading || !symbol}>
+      <button class="icon" title="Refresh" on:click={() => load()} disabled={loading || !symbol}>
         <RefreshCw size={13} />
       </button>
       <button
