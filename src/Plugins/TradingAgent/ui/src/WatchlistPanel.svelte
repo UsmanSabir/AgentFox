@@ -103,6 +103,20 @@
     }
   }
 
+  /**
+   * Called by the dashboard when an alert's state changes elsewhere — the openAlerts badge below is
+   * otherwise only refreshed by this panel's own actions. Silent (no loading flag) since it can fire
+   * on every acknowledged alert; a background refetch shouldn't flash the list back to a spinner.
+   */
+  export async function refresh() {
+    if (busy) return;
+    try {
+      data = await trading.watchlist.list();
+    } catch {
+      /* transient: the next refresh or the panel's own actions will retry */
+    }
+  }
+
   onMount(load);
 </script>
 

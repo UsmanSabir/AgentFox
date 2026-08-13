@@ -34,25 +34,54 @@ function headers(json = false): Record<string, string> {
   return h;
 }
 
+// A request that never resolves (a dropped connection, a starved browser connection pool sitting
+// behind the live alert stream) would otherwise leave a caller's busy flag stuck forever with no way
+// to recover short of a page refresh. A hard timeout turns that into an ordinary rejected promise.
+const REQUEST_TIMEOUT_MS = 20_000;
+
+function withTimeout(signal?: AbortSignal): { signal: AbortSignal; cancel: () => void } {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  signal?.addEventListener('abort', () => controller.abort());
+  return { signal: controller.signal, cancel: () => clearTimeout(timer) };
+}
+
 async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, { headers: headers() });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  return res.json() as Promise<T>;
+  const { signal, cancel } = withTimeout();
+  try {
+    const res = await fetch(`${BASE}${path}`, { headers: headers(), signal });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    return await (res.json() as Promise<T>);
+  } catch (e) {
+    if (e instanceof Error && e.name === 'AbortError') throw new Error('Request timed out.');
+    throw e;
+  } finally {
+    cancel();
+  }
 }
 
 async function send<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    method,
-    headers: headers(body !== undefined),
-    body: body !== undefined ? JSON.stringify(body) : undefined
-  });
-  if (!res.ok) {
-    // The watchlist endpoints answer a rejected edit with { error, message }; surfacing that beats
-    // showing the user a bare "400 Bad Request".
-    const detail = await res.json().catch(() => null);
-    throw new Error(detail?.message ?? `${res.status} ${res.statusText}`);
+  const { signal, cancel } = withTimeout();
+  try {
+    const res = await fetch(`${BASE}${path}`, {
+      method,
+      headers: headers(body !== undefined),
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal
+    });
+    if (!res.ok) {
+      // The watchlist endpoints answer a rejected edit with { error, message }; surfacing that beats
+      // showing the user a bare "400 Bad Request".
+      const detail = await res.json().catch(() => null);
+      throw new Error(detail?.message ?? `${res.status} ${res.statusText}`);
+    }
+    return await (res.json() as Promise<T>);
+  } catch (e) {
+    if (e instanceof Error && e.name === 'AbortError') throw new Error('Request timed out.');
+    throw e;
+  } finally {
+    cancel();
   }
-  return res.json() as Promise<T>;
 }
 
 const post  = <T>(path: string, body?: unknown) => send<T>('POST', path, body);

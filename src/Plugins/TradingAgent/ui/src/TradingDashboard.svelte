@@ -14,6 +14,7 @@
    */
   let armContext: Record<string, unknown> | null = null;
   let armedPanel: ArmedOrdersPanel | null = null;
+  let watchlistPanel: WatchlistPanel | null = null;
 
   /** Symbol the watchlist has selected; drives the chart pane. */
   let selectedSymbol: string | null = null;
@@ -235,7 +236,7 @@
     <!-- Watchlist beside the archive: the two are related — the archive is what gives the watched
          symbols their weekly levels — and the panel owns its own loading and refresh. -->
     <div class="watch-row" class:expanded={chartExpanded}>
-      <WatchlistPanel bind:selected={selectedSymbol} />
+      <WatchlistPanel bind:this={watchlistPanel} bind:selected={selectedSymbol} />
       <ChartPane
         symbol={selectedSymbol}
         bind:expanded={chartExpanded}
@@ -250,6 +251,7 @@
       <AlertsPanel
         on:select={(e) => selectedSymbol = e.detail}
         on:arm={(e) => armContext = e.detail}
+        on:alertsChanged={() => watchlistPanel?.refresh()}
       />
     </div>
 
