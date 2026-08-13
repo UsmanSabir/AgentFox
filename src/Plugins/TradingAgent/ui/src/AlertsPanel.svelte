@@ -8,13 +8,19 @@
   let assessments: Record<string, StockAssessment> = {};
   let assessing: string | null = null;
 
-  /** Selecting an alert drives the chart pane to that symbol. */
-  const dispatch = createEventDispatcher<{ select: string; arm: Record<string, unknown> }>();
+  /**
+   * Selecting an alert drives the chart pane to that symbol. `alertsChanged` fires whenever the open
+   * count could have moved (ack/dismiss, a manual pass, or a new alert over the live stream) — the
+   * watchlist's per-symbol open-alert badge is fetched separately and has no other way to learn this.
+   */
+  const dispatch = createEventDispatcher<{ select: string; arm: Record<string, unknown>; alertsChanged: void }>();
 
   let alerts: TradingAlert[] = [];
   let status: MonitorStatus | null = null;
   let loading = true;
   let busy = false;
+  /** Alert ids with an ack/dismiss in flight — scoped per row so one slow request doesn't grey out the rest of the list. */
+  let busyAlertIds = new Set<string>();
   let error: string | null = null;
   let showDismissed = false;
   let live = false;
@@ -42,6 +48,7 @@
     try {
       status = await trading.monitor.run();
       alerts = await trading.alerts.list({ limit: 100 });
+      dispatch('alertsChanged');
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -50,18 +57,21 @@
   }
 
   async function setState(alert: TradingAlert, action: 'ack' | 'dismiss') {
-    if (busy) return;
-    busy = true;
+    if (busyAlertIds.has(alert.alertId)) return;
+    busyAlertIds = new Set(busyAlertIds).add(alert.alertId);
     try {
       const result = action === 'ack'
         ? await trading.alerts.ack(alert.alertId)
         : await trading.alerts.dismiss(alert.alertId);
       // Patch in place rather than refetching: the list can be long and the change is one field.
       alerts = alerts.map(a => a.alertId === alert.alertId ? { ...a, state: result.state } : a);
+      dispatch('alertsChanged');
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
-      busy = false;
+      const next = new Set(busyAlertIds);
+      next.delete(alert.alertId);
+      busyAlertIds = next;
     }
   }
 
@@ -106,7 +116,10 @@
     // Prepending only if unseen keeps this safe against a duplicate from a concurrent reload.
     stopStream = trading.alerts.stream(
       alert => {
-        if (!alerts.some(a => a.alertId === alert.alertId)) alerts = [alert, ...alerts];
+        if (!alerts.some(a => a.alertId === alert.alertId)) {
+          alerts = [alert, ...alerts];
+          dispatch('alertsChanged');
+        }
       },
       connected => { live = connected; }
     );
@@ -196,10 +209,12 @@
               <Crosshair size={13} />
             </button>
             {#if alert.state === 'new'}
-              <button class="icon" title="Acknowledge" on:click={() => setState(alert, 'ack')} disabled={busy}>
+              <button class="icon" title="Acknowledge" on:click={() => setState(alert, 'ack')} disabled={busyAlertIds.has(alert.alertId)}>
                 <Check size={13} />
               </button>
-              <button class="icon" title="Dismiss" on:click={() => setState(alert, 'dismiss')} disabled={busy}>
+            {/if}
+            {#if alert.state !== 'dismissed'}
+              <button class="icon" title="Dismiss" on:click={() => setState(alert, 'dismiss')} disabled={busyAlertIds.has(alert.alertId)}>
                 <X size={13} />
               </button>
             {/if}

@@ -205,6 +205,14 @@
   .collapse-btn :global(svg) { transition: transform 0.2s; }
   .collapse-btn.rotated :global(svg) { transform: rotate(180deg); }
 
+  /* The collapsed rail is only 64px wide. Remove the expanded row's generous spacing so the
+     30px brand mark and 24px expander both fit inside it instead of clipping the chevron. */
+  .sidebar.collapsed .brand {
+    gap: 1px;
+    padding-inline: 4px;
+  }
+  .sidebar.collapsed .collapse-btn { margin-left: auto; }
+
   /* Nav */
   .nav {
     flex: 1;
@@ -263,5 +271,13 @@
   .version {
     font-size: 0.6875rem;
     color: var(--text-3);
+  }
+
+  @media (max-width: 760px) {
+    /* An expanded mobile sidebar is a drawer. The page keeps the usable width of the 64px rail and
+       all navigation remains available when the user opens it. */
+    .sidebar:not(.collapsed) {
+      box-shadow: 12px 0 32px rgba(0, 0, 0, 0.38);
+    }
   }
 </style>

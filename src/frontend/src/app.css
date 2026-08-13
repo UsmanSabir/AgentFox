@@ -156,8 +156,10 @@ html, body {
 
 /* ── Page skeleton ─────────────────────────────────────────────────────── */
 .page-wrap {
-  padding: 1.75rem 2rem;
-  max-width: 1200px;
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+  padding: 1.75rem clamp(1rem, 2vw, 2rem);
 }
 
 .page-header {

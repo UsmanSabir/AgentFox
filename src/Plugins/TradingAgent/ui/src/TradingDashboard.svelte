@@ -14,6 +14,7 @@
    */
   let armContext: Record<string, unknown> | null = null;
   let armedPanel: ArmedOrdersPanel | null = null;
+  let watchlistPanel: WatchlistPanel | null = null;
 
   /** Symbol the watchlist has selected; drives the chart pane. */
   let selectedSymbol: string | null = null;
@@ -235,7 +236,7 @@
     <!-- Watchlist beside the archive: the two are related — the archive is what gives the watched
          symbols their weekly levels — and the panel owns its own loading and refresh. -->
     <div class="watch-row" class:expanded={chartExpanded}>
-      <WatchlistPanel bind:selected={selectedSymbol} />
+      <WatchlistPanel bind:this={watchlistPanel} bind:selected={selectedSymbol} />
       <ChartPane
         symbol={selectedSymbol}
         bind:expanded={chartExpanded}
@@ -250,6 +251,7 @@
       <AlertsPanel
         on:select={(e) => selectedSymbol = e.detail}
         on:arm={(e) => armContext = e.detail}
+        on:alertsChanged={() => watchlistPanel?.refresh()}
       />
     </div>
 
@@ -399,13 +401,14 @@
   .metric span,.metric small { color:var(--text-3); font-size:.7rem; }.metric b { color:var(--text); font-size:1.05rem; }.metric b.good { color:var(--success); }.metric b.danger { color:var(--danger); }
   /* minmax(0,1fr) not 1fr: the chart column must be allowed to shrink, or the canvas keeps its
      widest measured size and pushes the grid wider on every re-render. */
-  .watch-row { display:grid; grid-template-columns:minmax(260px,320px) minmax(0,1fr); gap:.75rem; margin-bottom:1.25rem; align-items:start; }
+  .watch-row { display:grid; grid-template-columns:minmax(260px,320px) minmax(0,1fr); gap:.75rem; margin-bottom:1.25rem; align-items:stretch; }
   @media (max-width: 820px) { .watch-row { grid-template-columns:minmax(0,1fr); } }
 
   /* Expanded: the chart takes the full width and the watchlist STACKS BENEATH it rather than being
      hidden — losing the ability to switch symbols would be a poor trade for the extra width. */
   .watch-row.expanded { grid-template-columns:minmax(0,1fr); }
-  .watch-row.expanded :global(> section:first-child) { order: 2; }
+  .watch-row.expanded :global(> section:first-child) { order:2; height:auto; }
+  .watch-row.expanded :global(> section:first-child .rows) { flex:none; max-height:min(52vh,420px); }
   .archive-card { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:1rem; margin-bottom:1.25rem; display:flex; flex-direction:column; gap:.85rem; }
   .archive-head { display:flex; justify-content:space-between; align-items:flex-start; gap:1rem; flex-wrap:wrap; }
   .archive-title { display:flex; gap:.6rem; align-items:flex-start; color:var(--primary); }
@@ -435,4 +438,20 @@
   .record-actions { display:flex; gap:.5rem; margin-top:.6rem; }
   .record-actions .btn { display:flex; align-items:center; gap:.35rem; }
   .records { display:flex; flex-direction:column; gap:.7rem; }.record { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:1rem; }.record header { display:flex; justify-content:space-between; gap:1rem; color:var(--text); }.record header b { font-family:monospace; font-size:.8rem; overflow-wrap:anywhere; }.state { color:var(--primary); text-transform:uppercase; font-size:.68rem; }.meta { color:var(--text-3); font-size:.68rem; margin-top:.35rem; }.record p { color:var(--text-2); font-size:.8rem; }.record pre { background:var(--surface-2); border-radius:var(--radius-sm); padding:.7rem; max-height:240px; overflow:auto; color:var(--text-2); font-size:.7rem; white-space:pre-wrap; }
+
+  @media (max-width: 640px) {
+    .page-header-row { flex-direction:column; align-items:stretch; margin-bottom:1rem; }
+    .header-actions { flex-wrap:wrap; }
+    .kill-switch-btn { flex:1 1 230px; white-space:normal; justify-content:center; }
+    .safety-banner { align-items:flex-start; }
+    .status-grid { grid-template-columns:repeat(auto-fit,minmax(145px,1fr)); gap:.5rem; }
+    .metric { padding:.75rem; }
+    .archive-stats { grid-template-columns:repeat(auto-fit,minmax(125px,1fr)); }
+    .tabs { flex-wrap:nowrap; overflow-x:auto; }
+    .tabs button { flex:0 0 auto; padding-inline:.6rem; }
+  }
+
+  @media (max-width: 420px) {
+    .status-grid, .archive-stats { grid-template-columns:minmax(0,1fr); }
+  }
 </style>

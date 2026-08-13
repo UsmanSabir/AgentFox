@@ -210,7 +210,10 @@ public sealed class StockAssessmentService
 
             _logger.LogWarning("[Assessment] Model returned unparseable output for {Symbol}.", request.Symbol);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        // Guard on the request's OWN token, not the exception type: a dead local-model connection or
+        // the SDK's internal network timeout also surfaces as OperationCanceledException, and that is
+        // a real failure to degrade conservatively from — only a caller-cancelled ct should bypass this.
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             _logger.LogWarning(ex, "[Assessment] Model call failed for {Symbol}.", request.Symbol);
         }

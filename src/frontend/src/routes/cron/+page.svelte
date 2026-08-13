@@ -254,7 +254,7 @@
 </div>
 
 <style>
-  .page { padding: 1.5rem; max-width: 1100px; margin: 0 auto; display: flex; flex-direction: column; gap: 1.25rem; }
+  .page { width: 100%; min-width: 0; padding: 1.5rem; display: flex; flex-direction: column; gap: 1.25rem; }
 
   .page-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.75rem; }
   .page-title  { display: flex; align-items: center; gap: 0.5rem; }

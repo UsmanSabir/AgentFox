@@ -625,7 +625,20 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             {
                 return Results.NotFound(new { error = "no_candles", message = ex.Message });
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            // The caller hung up (navigated away, or its own fetch timeout fired mid-model-call).
+            // Nothing to report and nobody left to report it to, but it must still be caught: an
+            // OperationCanceledException escaping the handler reaches the exception page and breaks
+            // into the debugger on what is a routine event.
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                logger.LogDebug("[Trading] Assessment for {Symbol} abandoned — caller disconnected.",
+                    body.Symbol);
+                return Results.StatusCode(499);
+            }
+            // Guard on ct, not the exception type: a dead local-model connection or the SDK's own
+            // network timeout also throws OperationCanceledException, and that is a real failure that
+            // should come back as a 502 rather than crash.
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 logger.LogWarning(ex, "[Trading] Assessment failed for {Symbol}.", body.Symbol);
                 return Results.Problem(title: "assessment_failed", detail: ex.Message, statusCode: 502);
@@ -678,7 +691,13 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             {
                 return Results.NotFound(new { error = "no_candles", message = ex.Message });
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                logger.LogDebug("[Trading] Alert assessment {AlertId} abandoned — caller disconnected.",
+                    alertId);
+                return Results.StatusCode(499);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 logger.LogWarning(ex, "[Trading] Alert assessment failed for {AlertId}.", alertId);
                 return Results.Problem(title: "assessment_failed", detail: ex.Message, statusCode: 502);

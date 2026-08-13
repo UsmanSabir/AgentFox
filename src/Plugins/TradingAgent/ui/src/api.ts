@@ -34,28 +34,65 @@ function headers(json = false): Record<string, string> {
   return h;
 }
 
-async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, { headers: headers() });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  return res.json() as Promise<T>;
+// A request that never resolves (a dropped connection, a starved browser connection pool sitting
+// behind the live alert stream) would otherwise leave a caller's busy flag stuck forever with no way
+// to recover short of a page refresh. A hard timeout turns that into an ordinary rejected promise.
+const REQUEST_TIMEOUT_MS = 20_000;
+
+// Model-backed endpoints get their own ceiling. 20s is a sane bound for CRUD against the local
+// database, but an assessment is a full LLM round-trip over a large evidence bundle — against a
+// local model that routinely takes minutes. Aborting at 20s killed the socket mid-generation, which
+// surfaced as a TaskCanceledException from the OpenAI pipeline and threw away work already paid for.
+const MODEL_TIMEOUT_MS = 180_000;
+
+function withTimeout(timeoutMs = REQUEST_TIMEOUT_MS): { signal: AbortSignal; cancel: () => void } {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return { signal: controller.signal, cancel: () => clearTimeout(timer) };
 }
 
-async function send<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    method,
-    headers: headers(body !== undefined),
-    body: body !== undefined ? JSON.stringify(body) : undefined
-  });
-  if (!res.ok) {
-    // The watchlist endpoints answer a rejected edit with { error, message }; surfacing that beats
-    // showing the user a bare "400 Bad Request".
-    const detail = await res.json().catch(() => null);
-    throw new Error(detail?.message ?? `${res.status} ${res.statusText}`);
+async function get<T>(path: string, timeoutMs?: number): Promise<T> {
+  const { signal, cancel } = withTimeout(timeoutMs);
+  try {
+    const res = await fetch(`${BASE}${path}`, { headers: headers(), signal });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    return await (res.json() as Promise<T>);
+  } catch (e) {
+    if (e instanceof Error && e.name === 'AbortError') throw new Error('Request timed out.');
+    throw e;
+  } finally {
+    cancel();
   }
-  return res.json() as Promise<T>;
 }
 
-const post  = <T>(path: string, body?: unknown) => send<T>('POST', path, body);
+async function send<T>(
+  method: string, path: string, body?: unknown, timeoutMs?: number
+): Promise<T> {
+  const { signal, cancel } = withTimeout(timeoutMs);
+  try {
+    const res = await fetch(`${BASE}${path}`, {
+      method,
+      headers: headers(body !== undefined),
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal
+    });
+    if (!res.ok) {
+      // The watchlist endpoints answer a rejected edit with { error, message }; surfacing that beats
+      // showing the user a bare "400 Bad Request".
+      const detail = await res.json().catch(() => null);
+      throw new Error(detail?.message ?? `${res.status} ${res.statusText}`);
+    }
+    return await (res.json() as Promise<T>);
+  } catch (e) {
+    if (e instanceof Error && e.name === 'AbortError') throw new Error('Request timed out.');
+    throw e;
+  } finally {
+    cancel();
+  }
+}
+
+const post  = <T>(path: string, body?: unknown, timeoutMs?: number) =>
+  send<T>('POST', path, body, timeoutMs);
 const patch = <T>(path: string, body?: unknown) => send<T>('PATCH', path, body);
 const del   = <T>(path: string) => send<T>('DELETE', path);
 
@@ -577,10 +614,10 @@ export const trading = {
   assess: {
     symbol: (symbol: string, interval = '1D', context?: string) =>
       post<{ symbol: string; assessment: StockAssessment; evidence: unknown }>(
-        '/trading/assess', { symbol, interval, context }),
+        '/trading/assess', { symbol, interval, context }, MODEL_TIMEOUT_MS),
     alert: (alertId: string) =>
       post<{ alertId: string; symbol: string; kind: string; assessment: StockAssessment }>(
-        `/trading/alerts/${alertId}/assess`)
+        `/trading/alerts/${alertId}/assess`, undefined, MODEL_TIMEOUT_MS)
   },
 
   watchlist: {
