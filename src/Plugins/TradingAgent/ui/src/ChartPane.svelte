@@ -53,6 +53,8 @@
   /** On-demand verdict for the charted symbol. Cleared when the symbol or interval changes. */
   let assessment: StockAssessment | null = null;
   let assessing = false;
+  let assessmentError: string | null = null;
+  let assessmentGeneration = 0;
 
   /**
    * Asks the parent to open the arming dialog, pre-filled from the clicked level.
@@ -81,22 +83,30 @@
 
   async function assess() {
     if (!symbol || assessing) return;
+    const requestedSymbol = symbol;
+    const requestedInterval = interval;
+    const generation = ++assessmentGeneration;
     assessing = true;
-    error = null;
+    assessmentError = null;
     try {
-      const result = await trading.assess.symbol(symbol, interval);
-      assessment = result.assessment;
+      const result = await trading.assess.symbol(requestedSymbol, requestedInterval);
+      if (generation === assessmentGeneration
+          && symbol === requestedSymbol && interval === requestedInterval) {
+        assessment = result.assessment;
+      }
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      if (generation === assessmentGeneration)
+        assessmentError = e instanceof Error ? e.message : String(e);
     } finally {
-      assessing = false;
+      if (generation === assessmentGeneration) assessing = false;
     }
   }
 
   let interval: ChartInterval = '1D';
   let data: ChartData | null = null;
   let loading = false;
-  let error: string | null = null;
+  let chartError: string | null = null;
+  let loadGeneration = 0;
 
   let container: HTMLDivElement | null = null;
   let chart: IChartApi | null = null;
@@ -334,21 +344,45 @@
    */
   async function load(keepAssessment = false) {
     if (!symbol) { data = null; return; }
+    const requestedSymbol = symbol;
+    const requestedInterval = interval;
+    const sameChart = data?.symbol === requestedSymbol && data.interval === requestedInterval;
+    const generation = ++loadGeneration;
     loading = true;
-    error = null;
+    chartError = null;
     // A verdict belongs to the symbol and interval it was produced for; carrying it across a change
     // would attach one stock's judgement to another's chart.
-    if (!keepAssessment) assessment = null;
-    try {
-      data = await trading.candles(symbol, interval);
-      rsiOversold = data.thresholds.rsiOversold;
-      rsiOverbought = data.thresholds.rsiOverbought;
-      render(data);
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+    if (!keepAssessment) {
+      assessmentGeneration++;
+      assessment = null;
+      assessmentError = null;
+      assessing = false;
+    }
+    // A stale refresh is useful for the same chart, but showing the previous ticker or timeframe
+    // under a newly selected header is dangerous. Tear down only when the chart's identity changed.
+    if (!sameChart) {
+      resizeObserver?.disconnect();
+      resizeObserver = null;
+      chart?.remove();
+      chart = null;
+      candleSeries = volumeSeries = sma20Series = sma50Series = rsiSeries = null;
+      priceLines = [];
+      markers = null;
       data = null;
+    }
+    try {
+      const next = await trading.candles(requestedSymbol, requestedInterval);
+      if (generation !== loadGeneration
+          || symbol !== requestedSymbol || interval !== requestedInterval) return;
+      data = next;
+      rsiOversold = next.thresholds.rsiOversold;
+      rsiOverbought = next.thresholds.rsiOverbought;
+      render(next);
+    } catch (e) {
+      if (generation === loadGeneration)
+        chartError = e instanceof Error ? e.message : String(e);
     } finally {
-      loading = false;
+      if (generation === loadGeneration) loading = false;
     }
   }
 
@@ -466,13 +500,23 @@
 
   {#if !symbol}
     <p class="msg">Select a symbol from the watchlist.</p>
-  {:else if error}
-    <p class="msg danger">{error}</p>
+  {:else if chartError && !data}
+    <p class="msg danger">{chartError} <button class="retry" on:click={() => load()}>Retry</button></p>
   {:else}
     <div class="plot" class:loading class:tall={expanded} bind:this={container}></div>
 
     {#if data}
       <div class="readout">
+        {#if chartError}
+          <p class="inline-error">Chart refresh failed; showing the last successful data. {chartError}
+            <button class="retry" on:click={() => load(true)}>Retry</button>
+          </p>
+        {/if}
+        {#if assessmentError}
+          <p class="inline-error">Assessment failed: {assessmentError}
+            <button class="retry" on:click={assess}>Retry</button>
+          </p>
+        {/if}
         {#if assessment}
           <AssessmentCard {assessment} />
         {/if}
@@ -606,6 +650,15 @@
 
   .msg { color:var(--text-3); font-size:.78rem; margin:0; padding:1.5rem 0; text-align:center; }
   .msg.danger { color:var(--danger); }
+  .inline-error {
+    margin:0; padding:.4rem .55rem; border:1px solid color-mix(in srgb, var(--danger) 30%, transparent);
+    border-radius:var(--radius-sm); background:color-mix(in srgb, var(--danger) 7%, transparent);
+    color:var(--danger); font-size:.7rem;
+  }
+  .retry {
+    border:0; background:none; color:inherit; font:inherit; font-weight:600;
+    text-decoration:underline; cursor:pointer; padding:.1rem .2rem;
+  }
 
   .readout { display:flex; flex-direction:column; gap:.6rem; }
   .metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(110px,1fr)); gap:.4rem; }

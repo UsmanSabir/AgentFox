@@ -13,6 +13,10 @@ public static class HttpResilienceFactory
     public static HttpClient Create(TimeSpan? totalTimeout = null)
     {
         var pipeline = new ResiliencePipelineBuilder<HttpResponseMessage>()
+            // Outermost on purpose: this is a TOTAL operation budget, including retries and their
+            // backoff delays. Putting timeout after retry gives every attempt a fresh full budget,
+            // so a nominal 25s request can occupy its caller for well over a minute.
+            .AddTimeout(totalTimeout ?? TimeSpan.FromSeconds(60))
             .AddRetry(new HttpRetryStrategyOptions
             {
                 MaxRetryAttempts = 3,
@@ -27,7 +31,6 @@ public static class HttpResilienceFactory
                 FailureRatio = 0.5,
                 BreakDuration = TimeSpan.FromSeconds(15),
             })
-            .AddTimeout(totalTimeout ?? TimeSpan.FromSeconds(60))
             .Build();
 
         return BuildClient(pipeline);

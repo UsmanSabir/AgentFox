@@ -39,11 +39,9 @@ function headers(json = false): Record<string, string> {
 // to recover short of a page refresh. A hard timeout turns that into an ordinary rejected promise.
 const REQUEST_TIMEOUT_MS = 20_000;
 
-// Model-backed endpoints get their own ceiling. 20s is a sane bound for CRUD against the local
-// database, but an assessment is a full LLM round-trip over a large evidence bundle — against a
-// local model that routinely takes minutes. Aborting at 20s killed the socket mid-generation, which
-// surfaced as a TaskCanceledException from the OpenAI pipeline and threw away work already paid for.
-const MODEL_TIMEOUT_MS = 180_000;
+// Candle reads may top up an incomplete archive from the PSX portal. That path has a 25s upstream
+// attempt budget, so it cannot share the 20s CRUD ceiling without the browser giving up first.
+const CANDLE_TIMEOUT_MS = 60_000;
 
 function withTimeout(timeoutMs = REQUEST_TIMEOUT_MS): { signal: AbortSignal; cancel: () => void } {
   const controller = new AbortController();
@@ -382,6 +380,30 @@ export interface StockAssessment {
   fromCache: boolean;
 }
 
+interface AssessmentJobSubmission {
+  jobId: string;
+  state: 'queued' | 'running' | 'succeeded' | 'failed';
+  reused: boolean;
+}
+
+interface AssessmentJob<T> {
+  jobId: string;
+  state: 'queued' | 'running' | 'succeeded' | 'failed';
+  result: T | null;
+  error: string | null;
+}
+
+/** Polls short status requests; the model keeps running even if this page is refreshed or closed. */
+async function waitForAssessment<T>(jobId: string): Promise<T> {
+  for (;;) {
+    const job = await get<AssessmentJob<T>>(
+      `/trading/assessment-jobs/${encodeURIComponent(jobId)}`);
+    if (job.state === 'succeeded' && job.result) return job.result;
+    if (job.state === 'failed') throw new Error(job.error ?? 'Assessment failed.');
+    await new Promise(resolve => setTimeout(resolve, 1_000));
+  }
+}
+
 /** Trigger kinds an armed order can wait on. */
 export const TRIGGER_KINDS = ['PriceBelow', 'PriceAbove', 'Event'] as const;
 export type TriggerKind = (typeof TRIGGER_KINDS)[number];
@@ -534,7 +556,7 @@ export const trading = {
   candles: (symbol: string, interval: ChartInterval = '1D', bars?: number) => {
     const query = new URLSearchParams({ symbol, interval });
     if (bars) query.set('bars', String(bars));
-    return get<ChartData>(`/trading/candles?${query}`);
+    return get<ChartData>(`/trading/candles?${query}`, CANDLE_TIMEOUT_MS);
   },
 
   alerts: {
@@ -670,12 +692,18 @@ export const trading = {
    * one. Repeat calls for the same symbol+level+session are served from the server-side cache.
    */
   assess: {
-    symbol: (symbol: string, interval = '1D', context?: string) =>
-      post<{ symbol: string; assessment: StockAssessment; evidence: unknown }>(
-        '/trading/assess', { symbol, interval, context }, MODEL_TIMEOUT_MS),
-    alert: (alertId: string) =>
-      post<{ alertId: string; symbol: string; kind: string; assessment: StockAssessment }>(
-        `/trading/alerts/${alertId}/assess`, undefined, MODEL_TIMEOUT_MS)
+    symbol: async (symbol: string, interval = '1D', context?: string) => {
+      const job = await post<AssessmentJobSubmission>(
+        '/trading/assessment-jobs', { symbol, interval, context });
+      return waitForAssessment<{ symbol: string; assessment: StockAssessment; evidence: unknown }>(job.jobId);
+    },
+    alert: async (alertId: string) => {
+      const job = await post<AssessmentJobSubmission>(
+        `/trading/alerts/${alertId}/assessment-jobs`);
+      return waitForAssessment<{
+        alertId: string; symbol: string; kind: string; assessment: StockAssessment
+      }>(job.jobId);
+    }
   },
 
   watchlist: {

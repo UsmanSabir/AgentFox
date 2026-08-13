@@ -154,6 +154,10 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         services.AddSingleton<CandleAnalysisService>();
         // One confidence rubric, shared by research_stock and the /assess endpoints.
         services.AddSingleton<StockAssessmentService>();
+        // Slow local-model calls outlive the HTTP request that submits them. Register one instance as
+        // both the API-facing coordinator and its single-reader hosted worker.
+        services.AddSingleton<AssessmentJobCoordinator>();
+        services.AddHostedService(sp => sp.GetRequiredService<AssessmentJobCoordinator>());
         services.AddSingleton<TradingPolicyProvider>();
         services.AddSingleton<IPluginConfigDefinitionProvider, TradingPluginConfigDefinitionProvider>();
         services.AddSingleton<ITradingRepository, SqliteTradingRepository>();
@@ -602,6 +606,109 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         // Deliberately NOT automatic: a model call per alert would cost real money and hit rate limits
         // on a busy day, and most alerts are read and dismissed in a second without needing one. The
         // numbers stay deterministic — this only adds a judgement over them.
+
+        trading.MapPost("/assessment-jobs", (
+            AssessRequest body,
+            AssessmentJobCoordinator jobs,
+            StockAssessmentService assessments,
+            CandleAnalysisService analysis,
+            PsxDataClient dataClient,
+            MonitoredUniverse universe) =>
+        {
+            if (string.IsNullOrWhiteSpace(body.Symbol))
+                return Results.BadRequest(new { error = "symbol_required" });
+
+            try
+            {
+                var symbol = PsxDataClient.NormalizeStockSymbol(body.Symbol);
+                var interval = body.Interval?.Trim() ?? "1D";
+                var key = $"symbol|{symbol}|{interval}|{body.Context?.Trim()}";
+                var submitted = jobs.Submit(key, async jobCt =>
+                    (object)await AssessSymbolAsync(
+                        symbol, interval, body.Context, null,
+                        assessments, analysis, dataClient, universe, jobCt));
+
+                return Results.Accepted($"/api/trading/assessment-jobs/{submitted.JobId}", new
+                {
+                    jobId = submitted.JobId,
+                    state = "queued",
+                    reused = submitted.Reused
+                });
+            }
+            catch (ArgumentException ex)
+            {
+                return Results.BadRequest(new { error = "invalid_symbol", message = ex.Message });
+            }
+            catch (AssessmentQueueFullException ex)
+            {
+                return Results.Json(new { error = "assessment_queue_full", message = ex.Message },
+                    statusCode: StatusCodes.Status429TooManyRequests);
+            }
+        }).RequireAuthorization("TradingAnalyst");
+
+        trading.MapGet("/assessment-jobs/{jobId}", (
+            string jobId,
+            AssessmentJobCoordinator jobs) =>
+        {
+            var job = jobs.Get(jobId);
+            return job is null
+                ? Results.NotFound(new { error = "unknown_assessment_job", jobId })
+                : Results.Ok(job);
+        }).RequireAuthorization("TradingAnalyst");
+
+        trading.MapPost("/alerts/{alertId}/assessment-jobs", async (
+            string alertId,
+            ITradingRepository repository,
+            AssessmentJobCoordinator jobs,
+            StockAssessmentService assessments,
+            CandleAnalysisService analysis,
+            PsxDataClient dataClient,
+            MonitoredUniverse universe,
+            CancellationToken requestCt) =>
+        {
+            var alert = await repository.GetAlertAsync(alertId, requestCt);
+            if (alert is null) return Results.NotFound(new { error = "unknown_alert", alertId });
+
+            try
+            {
+                var submitted = jobs.Submit($"alert|{alertId}", async jobCt =>
+                {
+                    var key = StockAssessmentService.CacheKeyFor(
+                        alert.Symbol, alert.LevelPrice, alert.Interval);
+                    if (assessments.TryGetCached(key, out var cached))
+                        return (object)new
+                        {
+                            alertId,
+                            alert.Symbol,
+                            alert.Kind,
+                            assessment = cached,
+                            evidence = (object?)null
+                        };
+
+                    var context =
+                        $"MONITOR ALERT: {alert.Kind} on {alert.Symbol} at {alert.Price} "
+                        + $"(level {alert.LevelPrice?.ToString() ?? "n/a"}, "
+                        + $"weekly-confirmed: {alert.WeeklyConfirmed}, "
+                        + $"raised from a still-forming bar: {alert.FromLiveBar}). {alert.Summary}";
+                    var result = await AssessSymbolAsync(
+                        alert.Symbol, alert.Interval, context, key,
+                        assessments, analysis, dataClient, universe, jobCt);
+                    return (object)new { alertId, alert.Symbol, alert.Kind, result.assessment, result.evidence };
+                });
+
+                return Results.Accepted($"/api/trading/assessment-jobs/{submitted.JobId}", new
+                {
+                    jobId = submitted.JobId,
+                    state = "queued",
+                    reused = submitted.Reused
+                });
+            }
+            catch (AssessmentQueueFullException ex)
+            {
+                return Results.Json(new { error = "assessment_queue_full", message = ex.Message },
+                    statusCode: StatusCodes.Status429TooManyRequests);
+            }
+        }).RequireAuthorization("TradingAnalyst");
 
         trading.MapPost("/assess", async (
             AssessRequest body,
