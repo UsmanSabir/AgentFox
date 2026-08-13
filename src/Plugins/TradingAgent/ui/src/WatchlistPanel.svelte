@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { trading, type WatchlistEntry, type WatchlistResponse } from './api';
-  import { Plus, RotateCcw, Trash2, Bell, BellOff, Eye, AlertTriangle, Clock } from 'lucide-svelte';
+  import { Plus, RotateCcw, Trash2, Bell, BellOff, Eye, AlertTriangle, Clock, Search } from 'lucide-svelte';
 
   /** Selected symbol, so the chart pane (Phase 2) can follow the list. */
   export let selected: string | null = null;
@@ -12,6 +12,8 @@
   let notice: string | null = null;
   let input = '';
   let busy = false;
+  /** Narrows the rows below by symbol — separate from `input`, which is for adding a new ticker. */
+  let search = '';
 
   async function load() {
     loading = true;
@@ -118,6 +120,10 @@
   }
 
   onMount(load);
+
+  $: filteredEntries = (data?.entries ?? []).filter(
+    e => e.symbol.toLowerCase().includes(search.trim().toLowerCase())
+  );
 </script>
 
 <section class="watchlist">
@@ -168,8 +174,20 @@
       allowed-symbols list.
     </p>
   {:else}
+    <div class="search-row">
+      <Search size={13} />
+      <input
+        class="search-input"
+        placeholder="Search watched symbols…"
+        bind:value={search}
+        spellcheck="false"
+      />
+    </div>
+    {#if !filteredEntries.length}
+      <p class="note">No watched symbols match "{search}".</p>
+    {:else}
     <ul class="rows">
-      {#each data.entries as entry (entry.symbol)}
+      {#each filteredEntries as entry (entry.symbol)}
         <li class:selected={selected === entry.symbol} class:muted={!entry.alertsEnabled}>
           <button class="pick" on:click={() => selected = entry.symbol}>
             <span class="symbol">{entry.symbol}</span>
@@ -207,6 +225,7 @@
         </li>
       {/each}
     </ul>
+    {/if}
   {/if}
 </section>
 
@@ -216,6 +235,8 @@
     border: 1px solid var(--border);
     border-radius: var(--radius);
     padding: 1rem;
+    height: 100%;
+    min-height: 0;
     display: flex;
     flex-direction: column;
     gap: .7rem;
@@ -236,6 +257,17 @@
   .symbol-input:focus { outline:none; border-color:var(--primary); }
   .add-row .btn { display:flex; align-items:center; gap:.35rem; }
 
+  .search-row {
+    display:flex; align-items:center; gap:.4rem;
+    background:var(--surface-2); border:1px solid var(--border-md);
+    border-radius:var(--radius-sm); padding:.4rem .6rem; color:var(--text-3);
+  }
+  .search-input {
+    flex:1; background:none; border:0; color:var(--text); font:inherit; font-size:.78rem;
+  }
+  .search-input::placeholder { color:var(--text-3); }
+  .search-input:focus { outline:none; }
+
   .note {
     margin:0; color:var(--text-2); font-size:.72rem;
     display:flex; align-items:flex-start; gap:.4rem; line-height:1.5;
@@ -246,7 +278,7 @@
   /* Scrolls internally: a 150-symbol watchlist must not push the rest of the page off-screen. */
   .rows {
     list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:2px;
-    max-height:min(52vh, 420px); overflow-y:auto; overflow-x:hidden;
+    flex:1; min-height:0; max-height:none; overflow-y:auto; overflow-x:hidden;
   }
   .rows li {
     display:flex; align-items:center; gap:.4rem;
@@ -283,4 +315,10 @@
   .icon:hover { background:var(--surface-3); color:var(--text); }
   .icon.danger:hover { color:var(--danger); }
   .icon:disabled { opacity:.5; cursor:wait; }
+
+  /* In the stacked mobile layout the chart no longer establishes this panel's height. */
+  @media (max-width: 820px) {
+    .watchlist { height:auto; }
+    .rows { flex:none; max-height:min(52vh, 420px); }
+  }
 </style>

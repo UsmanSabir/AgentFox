@@ -634,4 +634,15 @@
 
   .reasons { margin:0; padding-left:1.1rem; color:var(--text-2); font-size:.71rem; line-height:1.6; }
   .warnings p { margin:0; color:var(--warning); font-size:.69rem; display:flex; gap:.3rem; align-items:flex-start; line-height:1.5; }
+
+  @media (max-width: 640px) {
+    .chart-card { padding:.75rem; }
+    header { gap:.65rem; }
+    .head-actions { width:100%; gap:.35rem; }
+    .intervals { max-width:100%; overflow-x:auto; }
+    .intervals button { padding-inline:.42rem; }
+    .plot, .plot.tall { height:clamp(300px, 88vw, 420px); }
+    .metrics { grid-template-columns:repeat(auto-fit,minmax(90px,1fr)); }
+    .levels { grid-template-columns:minmax(0,1fr); }
+  }
 </style>

@@ -111,7 +111,12 @@ html, body {
 .btn:disabled { opacity: 0.6; cursor: not-allowed; }
 
 /* ── Page skeleton ──────────────────────────────────────────────────────── */
-.page-wrap { padding: 1.75rem 2rem; max-width: 1200px; }
+.page-wrap {
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+  padding: 1.75rem clamp(1rem, 2vw, 2rem);
+}
 
 .page-title {
   font-size: 1.25rem;
@@ -128,3 +133,7 @@ html, body {
   to   { opacity: 1; transform: translateY(0); }
 }
 .fade-in { animation: fade-in 0.2s ease-out both; }
+
+@media (max-width: 640px) {
+  .page-wrap { padding: 1rem .75rem; }
+}

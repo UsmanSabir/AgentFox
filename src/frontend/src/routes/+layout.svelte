@@ -24,6 +24,10 @@
 
   // Restore the display preference and poll agent status every 5 s.
   onMount(() => {
+    // Start narrow screens on the compact rail. Users can still open the sidebar as a drawer, while
+    // the page retains enough width for plugin dashboards and chat content.
+    if (window.matchMedia('(max-width: 760px)').matches) sidebarCollapsed.set(true);
+
     const savedMode = localStorage.getItem(UI_MODE_KEY);
     if (savedMode === 'simple' || savedMode === 'advanced') {
       uiMode.set(savedMode);
@@ -109,7 +113,11 @@
 
         {#if !simpleMode}
         <!-- Agent status pill -->
-        <div class="status-pill" class:ready={status?.ready}>
+        <div
+          class="status-pill"
+          class:ready={status?.ready}
+          title={`${status?.name ?? 'AgentFox'} ${status?.status ?? '…'}`}
+        >
           <span class="status-dot" class:ready={status?.ready}></span>
           <span>{status?.name ?? 'AgentFox'}</span>
           <span class="status-text">{status?.status ?? '…'}</span>
@@ -250,5 +258,23 @@
     .header { padding: 0 0.75rem; }
     .chat-shortcut span { display: none; }
     .simple-brand { font-size: 0.875rem; }
+    .status-text { display: none; }
+    .status-pill { padding-inline: 0.55rem; }
+    .header-right { gap: 0.4rem; }
+  }
+
+  @media (max-width: 760px) {
+    /* The expanded sidebar overlays the page as a drawer at narrow widths instead of reducing the
+       already-small content viewport to 80px or less. */
+    .app-shell { --offset: 64px !important; }
+  }
+
+  @media (max-width: 480px) {
+    .header { gap: 0.5rem; padding-inline: 0.5rem; }
+    .header-left { min-width: 0; }
+    .header-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .mode-switch button { padding-inline: 0.4rem; font-size: 0.6875rem; }
+    .status-pill { padding: 0.5rem; }
+    .status-pill span:not(.status-dot) { display: none; }
   }
 </style>
