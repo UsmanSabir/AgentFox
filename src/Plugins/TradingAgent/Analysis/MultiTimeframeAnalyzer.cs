@@ -77,6 +77,14 @@ public static class MultiTimeframeAnalyzer
     /// <summary>Weekly bars needed before the weekly read is worth reporting at all.</summary>
     public const int MinimumWeeklyBars = 12;
 
+    /// <summary>
+    /// Archived daily sessions needed before <see cref="MinimumWeeklyBars"/> weekly bars can be
+    /// resampled. A trading week is five sessions; six leaves room for the holidays every real calendar
+    /// has. Shared so the watchlist badge, the archive card, and a targeted backfill all agree on when a
+    /// symbol has enough history — three separate thresholds would let the UI contradict itself.
+    /// </summary>
+    public const int MinimumDailyBarsForWeekly = MinimumWeeklyBars * 6;
+
     public static MultiTimeframeView Analyze(
         string symbol,
         IReadOnlyList<PsxCandle> dailyBars,

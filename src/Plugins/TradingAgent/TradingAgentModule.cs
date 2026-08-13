@@ -254,16 +254,21 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         // request must not wait on it. The pass is bound to the application lifetime and is
         // single-flight — a second trigger while one is running reports the running pass rather than
         // starting a competing one, which would double the request rate the portal sees.
+        // `symbols` scopes the pass to the dates those symbols are actually missing, which is the only
+        // way to fill a symbol added to the archive universe after the deep history was fetched: the
+        // dates are all on record, so an unscoped pass finds nothing to do and the symbol stays starved.
         trading.MapPost("/candle-archive/backfill", async (
             CandleBackfillRequest? body,
             CandleBackfillRunner runner,
             ILogger<TradingAgentModule> logger,
             CancellationToken ct) =>
         {
-            var started = runner.TryStart(body?.Years);
+            var started = runner.TryStart(body?.Years, body?.Symbols);
             logger.LogInformation(
-                "[TradingAgent] Candle backfill {Outcome} via web API (years={Years}).",
-                started ? "started" : "already running", body?.Years?.ToString() ?? "configured");
+                "[TradingAgent] Candle backfill {Outcome} via web API (years={Years}, symbols={Symbols}).",
+                started ? "started" : "already running",
+                body?.Years?.ToString() ?? "configured",
+                body?.Symbols is { Count: > 0 } s ? string.Join(",", s) : "all archived");
 
             var status = await runner.GetStatusAsync(ct);
             return Results.Accepted(value: new { started, status });
@@ -583,7 +588,7 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                 await foreach (var alert in broadcaster.SubscribeAsync(ct))
                 {
                     await http.Response.WriteAsync(
-                        $"data: {System.Text.Json.JsonSerializer.Serialize(alert)}\n\n", ct);
+                        $"data: {SerializeAlertForSse(alert)}\n\n", ct);
                     await http.Response.Body.FlushAsync(ct);
                 }
             }
@@ -909,10 +914,10 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             var barCounts = await repository.GetDailyBarCountsAsync(symbols, ct);
             var openAlerts = await repository.GetOpenAlertCountsAsync(ct);
 
-            // MinimumWeeklyBars weekly bars need roughly six times as many daily sessions. Reported per
-            // symbol because a freshly added symbol has no deep history until the backfill reaches it,
-            // and without it there is no weekly confirmation to quote.
-            const int weeklyReadyBars = MultiTimeframeAnalyzer.MinimumWeeklyBars * 6;
+            // Reported per symbol because a freshly added symbol has no deep history until a backfill
+            // reaches it, and without it there is no weekly confirmation to quote. The threshold is
+            // shared with the archive card so the two cannot disagree about who is ready.
+            const int weeklyReadyBars = MultiTimeframeAnalyzer.MinimumDailyBarsForWeekly;
 
             return Results.Ok(new
             {
@@ -1211,6 +1216,12 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             CancellationToken ct) =>
             Results.Ok(await repository.GetReconciliationRunsAsync(limit ?? 100, ct)));
     }
+
+    // The REST endpoints use ASP.NET's web JSON defaults (camelCase). Keep the SSE contract identical:
+    // serializing with the reflection defaults produces PascalCase properties that the browser client
+    // cannot read even though the event itself arrives successfully.
+    private static string SerializeAlertForSse(AlertRecord alert) =>
+        JsonSerializer.Serialize(alert, JsonSerializerOptions.Web);
 
     public Task StartAsync(IServiceProvider services)
     {
@@ -1677,4 +1688,9 @@ public sealed record ArmApprovalRequest(int? Minutes = null);
 public sealed record WatchlistUpdateRequest(bool? AlertsEnabled = null, string? Notes = null);
 
 /// <summary>Optional depth override for a manually triggered backfill; null uses the configured years.</summary>
-public sealed record CandleBackfillRequest(int? Years = null);
+/// <summary>
+/// A backfill trigger. <paramref name="Symbols"/> scopes which dates count as missing — the dates those
+/// symbols were never requested for — not which symbols are stored; a session fetch returns the whole
+/// market regardless. Null or empty means every archived symbol.
+/// </summary>
+public sealed record CandleBackfillRequest(int? Years = null, IReadOnlyList<string>? Symbols = null);

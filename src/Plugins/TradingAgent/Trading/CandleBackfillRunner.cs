@@ -2,6 +2,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System.Globalization;
+using TradingAgent.Analysis;
 using TradingAgent.Config;
 using TradingAgent.Market;
 using TradingAgent.Persistence;
@@ -35,6 +36,14 @@ public sealed record CandleBackfillProgress
         : null;
 }
 
+/// <summary>
+/// One symbol that cannot yet produce weekly levels, and how far off it is. Reported per symbol because
+/// the archive can be complete market-wide while an individual symbol is starved: coverage is per
+/// (date, symbol), and a symbol added to the universe after a date was fetched was never requested for
+/// it. <c>MissingSessions</c> is what a backfill targeting this symbol would have to fetch.
+/// </summary>
+public sealed record SymbolArchiveGap(string Symbol, int ArchivedBars, int MissingSessions);
+
 /// <summary>Archive coverage plus whatever the backfill is currently doing.</summary>
 public sealed record CandleArchiveStatus(
     bool BackfillEnabled,
@@ -43,6 +52,8 @@ public sealed record CandleArchiveStatus(
     DailyArchiveStatus Archive,
     int MissingTradingDays,
     int TargetTradingDays,
+    int DailyBarsForWeekly,
+    IReadOnlyList<SymbolArchiveGap> SymbolsShortOfWeekly,
     CandleBackfillProgress Progress);
 
 /// <summary>
@@ -101,8 +112,17 @@ public sealed class CandleBackfillRunner
     /// Starts a pass in the background and returns whether it started (false = one is already running).
     /// Bound to the application lifetime, not to the caller's request, so closing the page or letting a
     /// tool call return does not abandon the pass halfway through.
+    ///
+    /// <para>
+    /// <paramref name="symbols"/> narrows which dates the pass considers missing — the dates those
+    /// symbols have never been requested for — rather than which symbols get stored. A session fetch
+    /// returns the whole market for one request, so every archived symbol is written for each date
+    /// visited either way; scoping only avoids revisiting dates that are already complete for everyone
+    /// else. That is the difference between filling one starved symbol in a few hundred requests and not
+    /// being able to fill it at all.
+    /// </para>
     /// </summary>
-    public bool TryStart(int? years = null)
+    public bool TryStart(int? years = null, IReadOnlyCollection<string>? symbols = null)
     {
         if (!_gate.Wait(0)) return false;
 
@@ -110,7 +130,7 @@ public sealed class CandleBackfillRunner
         {
             try
             {
-                await ExecutePassAsync(years, _lifetime.ApplicationStopping);
+                await ExecutePassAsync(years, symbols, _lifetime.ApplicationStopping);
             }
             catch (OperationCanceledException)
             {
@@ -142,12 +162,13 @@ public sealed class CandleBackfillRunner
     }
 
     /// <summary>Runs a pass and awaits it. Used by the scheduled worker; no-ops if one is running.</summary>
-    public async Task RunOnceAsync(int? years, CancellationToken ct)
+    public async Task RunOnceAsync(
+        int? years, CancellationToken ct, IReadOnlyCollection<string>? symbols = null)
     {
         if (!await _gate.WaitAsync(0, ct)) return;
         try
         {
-            await ExecutePassAsync(years, ct);
+            await ExecutePassAsync(years, symbols, ct);
         }
         finally
         {
@@ -160,12 +181,15 @@ public sealed class CandleBackfillRunner
     {
         var options = _options.Value;
         var years = options.Scan.BackfillYears;
-        var symbols = (await _universe.ForArchiveAsync(ct)).Count;
+        var symbols = await _universe.ForArchiveAsync(ct);
 
         var archive = await _repository.GetDailyArchiveStatusAsync(ct);
+        var barCounts = await _repository.GetDailyBarCountsAsync(symbols, ct);
 
         var target = 0;
         var missing = 0;
+        var gaps = new List<SymbolArchiveGap>();
+
         if (years > 0)
         {
             // Measured against the last SETTLED session, not today: counting a session still in
@@ -173,24 +197,48 @@ public sealed class CandleBackfillRunner
             var settledThrough = LastSettledSession();
             var from = settledThrough.AddYears(-Math.Clamp(years, 1, 15));
             var weekdays = Weekdays(from, settledThrough);
-            var covered = await _repository.GetCoveredDailyDatesAsync(from, settledThrough, ct);
             target = weekdays.Count;
+
+            // Symbol-aware: a date counts as covered only once every archived symbol has been requested
+            // for it. Measured per date alone, an archive could report itself complete while a symbol
+            // added after those dates were fetched held almost no history — which is exactly the state
+            // that made a starved symbol unfixable.
+            var covered = await _repository.GetCoveredDailyDatesAsync(from, settledThrough, symbols, ct);
             missing = weekdays.Count(d => !covered.Contains(d));
+
+            var perSymbol = await _repository.GetCoveredDailyDateCountsAsync(
+                from, settledThrough, symbols, ct);
+
+            foreach (var symbol in symbols)
+            {
+                var bars = barCounts.GetValueOrDefault(symbol);
+                if (bars >= MultiTimeframeAnalyzer.MinimumDailyBarsForWeekly) continue;
+
+                gaps.Add(new SymbolArchiveGap(
+                    Symbol: symbol,
+                    ArchivedBars: bars,
+                    MissingSessions: Math.Max(0, target - perSymbol.GetValueOrDefault(symbol))));
+            }
+
+            gaps.Sort((a, b) => a.ArchivedBars.CompareTo(b.ArchivedBars));
         }
 
         return new CandleArchiveStatus(
             BackfillEnabled: years > 0,
             BackfillYears: years,
-            ConfiguredSymbols: symbols,
+            ConfiguredSymbols: symbols.Count,
             Archive: archive,
             MissingTradingDays: missing,
             TargetTradingDays: target,
+            DailyBarsForWeekly: MultiTimeframeAnalyzer.MinimumDailyBarsForWeekly,
+            SymbolsShortOfWeekly: gaps,
             Progress: Progress);
     }
 
     // ── The pass ──────────────────────────────────────────────────────────────
 
-    private async Task ExecutePassAsync(int? yearsOverride, CancellationToken ct)
+    private async Task ExecutePassAsync(
+        int? yearsOverride, IReadOnlyCollection<string>? symbolScope, CancellationToken ct)
     {
         var options = _options.Value;
         var years = yearsOverride ?? options.Scan.BackfillYears;
@@ -220,6 +268,34 @@ public sealed class CandleBackfillRunner
             return;
         }
 
+        // A scope narrows which dates count as missing, never which symbols are stored. Symbols outside
+        // the archive universe are refused rather than silently dropped: their rows would be filtered out
+        // of every session fetched, so they could never become covered and the pass would be asked to run
+        // again forever.
+        var scope = allowed;
+        if (symbolScope is { Count: > 0 })
+        {
+            var requested = symbolScope
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .Select(s => s.Trim().ToUpperInvariant())
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+            var unknown = requested.Where(s => !allowed.Contains(s)).ToList();
+
+            if (unknown.Count > 0)
+            {
+                var message =
+                    $"Cannot backfill {string.Join(", ", unknown)}: not in the archive universe. Add the " +
+                    "symbol to the watchlist (or to AllowedSymbols) first — a session fetch is filtered " +
+                    "to that universe, so nothing would be stored for it.";
+                _logger.LogWarning("[CandleBackfill] {Message}", message);
+                SetProgress(_ => new CandleBackfillProgress { Message = message });
+                return;
+            }
+
+            scope = requested.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        }
+
         // Only settled sessions are archived. Fetching the day still in progress stores a partial bar
         // that the coverage marker then prevents from ever being corrected — or an empty table
         // indistinguishable from a holiday, which becomes a permanent hole. Clearing coverage past the
@@ -230,10 +306,18 @@ public sealed class CandleBackfillRunner
 
         var from = settledThrough.AddYears(-Math.Clamp(years, 1, 15));
         var weekdays = Weekdays(from, settledThrough);
-        var covered = await _repository.GetCoveredDailyDatesAsync(from, settledThrough, ct);
+        var covered = await _repository.GetCoveredDailyDatesAsync(from, settledThrough, scope, ct);
 
         // Newest first: the sessions a scan needs today land before the deep history.
         var missing = weekdays.Where(d => !covered.Contains(d)).OrderByDescending(d => d).ToList();
+
+        // Named when scoped, because which symbols a targeted pass is for is the whole point of it;
+        // capped so a caller passing the full universe by hand cannot turn the status into a wall of
+        // tickers.
+        var scopeLabel = ReferenceEquals(scope, allowed)
+            ? $"all {allowed.Count} archived symbols"
+            : string.Join(", ", scope.Order(StringComparer.Ordinal).Take(6))
+              + (scope.Count > 6 ? $" and {scope.Count - 6} more" : "");
 
         if (missing.Count == 0)
         {
@@ -242,11 +326,13 @@ public sealed class CandleBackfillRunner
             {
                 CompletedUtc = DateTime.UtcNow,
                 DatesTargeted = 0,
-                Message = $"Archive already complete: {complete.Bars:N0} bars for {complete.Symbols} " +
-                          $"symbols, {complete.EarliestSession} to {complete.LatestSession}."
+                Message = $"Archive already complete for {scopeLabel}: {complete.Bars:N0} bars for " +
+                          $"{complete.Symbols} symbols, {complete.EarliestSession} to " +
+                          $"{complete.LatestSession}."
             });
-            _logger.LogInformation("[CandleBackfill] Archive complete ({Bars} bars, {Symbols} symbols).",
-                complete.Bars, complete.Symbols);
+            _logger.LogInformation(
+                "[CandleBackfill] Archive complete for {Scope} ({Bars} bars, {Symbols} symbols).",
+                scopeLabel, complete.Bars, complete.Symbols);
             return;
         }
 
@@ -255,13 +341,14 @@ public sealed class CandleBackfillRunner
             IsRunning = true,
             StartedUtc = DateTime.UtcNow,
             DatesTargeted = missing.Count,
-            Message = $"Archiving {missing.Count} trading days back to {from:yyyy-MM-dd} " +
-                      $"for {allowed.Count} symbols."
+            Message = $"Archiving {missing.Count} trading days back to {from:yyyy-MM-dd}, targeting " +
+                      $"{scopeLabel}. Every archived symbol is stored for each day fetched."
         });
 
         _logger.LogInformation(
-            "[CandleBackfill] {Missing} of {Total} weekdays missing back to {From}. Archiving {Symbols} symbols…",
-            missing.Count, weekdays.Count, from, allowed.Count);
+            "[CandleBackfill] {Missing} of {Total} weekdays missing back to {From} for {Scope}. "
+            + "Archiving {Symbols} symbols…",
+            missing.Count, weekdays.Count, from, scopeLabel, allowed.Count);
 
         var stored = 0;
         var empty = 0;
@@ -298,7 +385,7 @@ public sealed class CandleBackfillRunner
                     return;
                 }
 
-                await _repository.SaveDailySessionAsync(date, [], ct);
+                await _repository.SaveNonTradingDayAsync(date, ct);
                 empty++;
                 completed++;
                 SetProgress(p => p with { EmptyDates = empty, DatesCompleted = completed });
@@ -307,8 +394,11 @@ public sealed class CandleBackfillRunner
             }
 
             streak = 0;
+            // Filtered to (and recorded as covering) the whole archive universe, not just the scope: the
+            // fetch returned the entire market for this date, so claiming less would leave the other
+            // symbols looking unrequested and drag them into the next pass for no extra data.
             var bars = rows.Values.Where(b => allowed.Contains(b.Symbol)).ToList();
-            await _repository.SaveDailySessionAsync(date, bars, ct);
+            await _repository.SaveDailySessionAsync(date, bars, allowed, ct);
             stored++;
             completed++;
             SetProgress(p => p with { SessionsStored = stored, DatesCompleted = completed });

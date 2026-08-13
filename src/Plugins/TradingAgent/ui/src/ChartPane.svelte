@@ -584,13 +584,13 @@
   .icon:hover { background:var(--surface-2); color:var(--text); }
   .assess-btn { display:flex; align-items:center; gap:.35rem; }
 
-  /* Taller than the original 340px: six labelled price lines plus an RSI pane needs the room, and
-     the axis chips overlap each other below roughly 400px. Expanded scales with the viewport. */
-  .plot { width:100%; height:400px; min-width:0; }
+  /* The price action, volume, and RSI share this canvas. Give them enough vertical separation for
+     level labels and recent candles to remain legible on ordinary desktop screens. */
+  .plot { width:100%; height:520px; min-width:0; }
   /* A fixed height rather than a vh clamp: this renders inside an iframe whose viewport is shorter
      than the browser window, so a vh-based value collapsed back to its minimum and the expand button
-     gained width but almost no height. The page scrolls, so a definite 560px is the honest choice. */
-  .plot.tall { height:560px; }
+     gained width but almost no height. The page scrolls, so a definite 680px is the honest choice. */
+  .plot.tall { height:680px; }
   .plot.loading { opacity:.5; }
 
   .view-controls { display:flex; gap:.25rem; }

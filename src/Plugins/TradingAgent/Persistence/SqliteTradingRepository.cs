@@ -294,6 +294,7 @@ public sealed class SqliteTradingRepository : ITradingRepository
     public async Task SaveDailySessionAsync(
         DateOnly sessionDate,
         IReadOnlyList<TradingAgent.Research.PsxCandle> bars,
+        IReadOnlyCollection<string> requestedSymbols,
         CancellationToken ct = default)
     {
         await EnsureInitializedAsync(ct);
@@ -302,6 +303,11 @@ public sealed class SqliteTradingRepository : ITradingRepository
 
         var session = sessionDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
         var nowUtc = DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture);
+
+        // Symbols whose bar was rejected as unsettled must not be claimed as covered: recording them
+        // would freeze the gap the guard below exists to avoid.
+        var unsettled = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var stored = 0;
 
         if (bars.Count > 0)
         {
@@ -333,7 +339,11 @@ public sealed class SqliteTradingRepository : ITradingRepository
             {
                 // A forming session is not archived: it would freeze an intraday snapshot as if it
                 // were that day's settled candle.
-                if (bar.IsLive || bar.IsIntraday) continue;
+                if (bar.IsLive || bar.IsIntraday)
+                {
+                    unsettled.Add(bar.Symbol);
+                    continue;
+                }
 
                 symbol.Value = bar.Symbol;
                 date.Value = bar.Date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
@@ -346,21 +356,74 @@ public sealed class SqliteTradingRepository : ITradingRepository
                     : (object)DBNull.Value;
                 volume.Value = bar.Volume;
                 await insert.ExecuteNonQueryAsync(ct);
+                stored++;
             }
         }
 
         var coverage = connection.CreateCommand();
         coverage.Transaction = (SqliteTransaction)transaction;
+        // market_closed is left alone rather than forced to 0: a date already known to be a non-trading
+        // day stays covered for every symbol, and re-saving it must not narrow that.
         coverage.CommandText = """
-            INSERT INTO daily_bar_coverage (session_date, symbol_count, fetched_utc)
-            VALUES ($session, $count, $fetched)
+            INSERT INTO daily_bar_coverage (session_date, symbol_count, fetched_utc, market_closed)
+            VALUES ($session, $count, $fetched, 0)
             ON CONFLICT (session_date) DO UPDATE SET
                 symbol_count = excluded.symbol_count, fetched_utc = excluded.fetched_utc
             """;
         coverage.Parameters.AddWithValue("$session", session);
-        coverage.Parameters.AddWithValue("$count", bars.Count);
+        coverage.Parameters.AddWithValue("$count", stored);
         coverage.Parameters.AddWithValue("$fetched", nowUtc);
         await coverage.ExecuteNonQueryAsync(ct);
+
+        if (requestedSymbols.Count > 0)
+        {
+            var mark = connection.CreateCommand();
+            mark.Transaction = (SqliteTransaction)transaction;
+            mark.CommandText = """
+                INSERT OR IGNORE INTO daily_bar_coverage_symbols (session_date, symbol)
+                VALUES ($session, $symbol)
+                """;
+            mark.Parameters.AddWithValue("$session", session);
+            var covered = mark.Parameters.Add("$symbol", SqliteType.Text);
+
+            foreach (var requested in Normalize(requestedSymbols))
+            {
+                if (unsettled.Contains(requested)) continue;
+                covered.Value = requested;
+                await mark.ExecuteNonQueryAsync(ct);
+            }
+        }
+
+        await transaction.CommitAsync(ct);
+    }
+
+    public async Task SaveNonTradingDayAsync(DateOnly sessionDate, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+
+        var session = sessionDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+
+        var coverage = connection.CreateCommand();
+        coverage.Transaction = (SqliteTransaction)transaction;
+        coverage.CommandText = """
+            INSERT INTO daily_bar_coverage (session_date, symbol_count, fetched_utc, market_closed)
+            VALUES ($session, 0, $fetched, 1)
+            ON CONFLICT (session_date) DO UPDATE SET
+                symbol_count = 0, fetched_utc = excluded.fetched_utc, market_closed = 1
+            """;
+        coverage.Parameters.AddWithValue("$session", session);
+        coverage.Parameters.AddWithValue("$fetched", DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+        await coverage.ExecuteNonQueryAsync(ct);
+
+        // Per-symbol rows are redundant once the whole market is known to have been shut, and leaving
+        // them would let the two records disagree about who is covered.
+        var drop = connection.CreateCommand();
+        drop.Transaction = (SqliteTransaction)transaction;
+        drop.CommandText = "DELETE FROM daily_bar_coverage_symbols WHERE session_date = $session";
+        drop.Parameters.AddWithValue("$session", session);
+        await drop.ExecuteNonQueryAsync(ct);
 
         await transaction.CommitAsync(ct);
     }
@@ -411,16 +474,49 @@ public sealed class SqliteTradingRepository : ITradingRepository
     public async Task<IReadOnlySet<DateOnly>> GetCoveredDailyDatesAsync(
         DateOnly fromInclusive,
         DateOnly toInclusive,
+        IReadOnlyCollection<string> symbols,
         CancellationToken ct = default)
     {
         await EnsureInitializedAsync(ct);
         await using var connection = await OpenAsync(ct);
 
+        var wanted = Normalize(symbols);
         var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT session_date FROM daily_bar_coverage
-            WHERE session_date >= $from AND session_date <= $to
-            """;
+
+        if (wanted.Count == 0)
+        {
+            // No universe to check against, so "on record at all" is the only answer available.
+            command.CommandText = """
+                SELECT session_date FROM daily_bar_coverage
+                WHERE session_date >= $from AND session_date <= $to
+                """;
+        }
+        else
+        {
+            // A date is skippable only when every requested symbol has been asked for on it. Counting
+            // matched rows against the requested total is exact because (session_date, symbol) is the
+            // primary key, so the count can never exceed it.
+            var names = new List<string>(wanted.Count);
+            for (var i = 0; i < wanted.Count; i++)
+            {
+                var name = $"$s{i}";
+                names.Add(name);
+                command.Parameters.AddWithValue(name, wanted[i]);
+            }
+
+            command.CommandText = $"""
+                SELECT c.session_date
+                FROM daily_bar_coverage c
+                WHERE c.session_date >= $from AND c.session_date <= $to
+                  AND (c.market_closed = 1
+                       OR (SELECT COUNT(*)
+                           FROM daily_bar_coverage_symbols s
+                           WHERE s.session_date = c.session_date
+                             AND s.symbol IN ({string.Join(",", names)})) = $wanted)
+                """;
+            command.Parameters.AddWithValue("$wanted", wanted.Count);
+        }
+
         command.Parameters.AddWithValue("$from", fromInclusive.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
         command.Parameters.AddWithValue("$to", toInclusive.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
 
@@ -432,22 +528,106 @@ public sealed class SqliteTradingRepository : ITradingRepository
         return dates;
     }
 
+    public async Task<IReadOnlyDictionary<string, int>> GetCoveredDailyDateCountsAsync(
+        DateOnly fromInclusive,
+        DateOnly toInclusive,
+        IReadOnlyCollection<string> symbols,
+        CancellationToken ct = default)
+    {
+        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var wanted = Normalize(symbols);
+        if (wanted.Count == 0) return counts;
+
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+
+        var from = fromInclusive.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        var to = toInclusive.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+
+        // Non-trading days are covered for every symbol, so they are counted once here rather than
+        // stored as a row per symbol.
+        var closedCommand = connection.CreateCommand();
+        closedCommand.CommandText = """
+            SELECT COUNT(*) FROM daily_bar_coverage
+            WHERE session_date >= $from AND session_date <= $to AND market_closed = 1
+            """;
+        closedCommand.Parameters.AddWithValue("$from", from);
+        closedCommand.Parameters.AddWithValue("$to", to);
+        var closed = Convert.ToInt32(await closedCommand.ExecuteScalarAsync(ct) ?? 0);
+
+        var command = connection.CreateCommand();
+        var names = new List<string>(wanted.Count);
+        for (var i = 0; i < wanted.Count; i++)
+        {
+            var name = $"$s{i}";
+            names.Add(name);
+            command.Parameters.AddWithValue(name, wanted[i]);
+        }
+
+        // Joined so a per-symbol row left over from before a date was reclassified as non-trading is not
+        // counted a second time on top of the market-wide total.
+        command.CommandText = $"""
+            SELECT s.symbol, COUNT(*)
+            FROM daily_bar_coverage_symbols s
+            JOIN daily_bar_coverage c ON c.session_date = s.session_date
+            WHERE s.session_date >= $from AND s.session_date <= $to
+              AND c.market_closed = 0
+              AND s.symbol IN ({string.Join(",", names)})
+            GROUP BY s.symbol
+            """;
+        command.Parameters.AddWithValue("$from", from);
+        command.Parameters.AddWithValue("$to", to);
+
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            counts[reader.GetString(0)] = reader.GetInt32(1) + closed;
+
+        if (closed > 0)
+            foreach (var symbol in wanted)
+                if (!counts.ContainsKey(symbol)) counts[symbol] = closed;
+
+        return counts;
+    }
+
     public async Task<int> ClearDailyCoverageAfterAsync(
         DateOnly settledThrough, CancellationToken ct = default)
     {
         await EnsureInitializedAsync(ct);
         await using var connection = await OpenAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+
+        var through = settledThrough.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+
         var command = connection.CreateCommand();
+        command.Transaction = (SqliteTransaction)transaction;
         command.CommandText = "DELETE FROM daily_bar_coverage WHERE session_date > $through";
-        command.Parameters.AddWithValue(
-            "$through", settledThrough.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+        command.Parameters.AddWithValue("$through", through);
         var removed = await command.ExecuteNonQueryAsync(ct);
+
+        // Dropped with the date marker: a per-symbol row surviving on its own would leave the date
+        // refetchable yet still counted as covered for the symbols recorded prematurely.
+        var symbolRows = connection.CreateCommand();
+        symbolRows.Transaction = (SqliteTransaction)transaction;
+        symbolRows.CommandText =
+            "DELETE FROM daily_bar_coverage_symbols WHERE session_date > $through";
+        symbolRows.Parameters.AddWithValue("$through", through);
+        await symbolRows.ExecuteNonQueryAsync(ct);
+
+        await transaction.CommitAsync(ct);
+
         if (removed > 0)
             _logger.LogInformation(
                 "[TradingLedger] Cleared {Count} unsettled daily-coverage marker(s) after {Through}; "
                 + "those sessions will be fetched again once settled.", removed, settledThrough);
         return removed;
     }
+
+    /// <summary>Trimmed, upper-cased, de-duplicated symbols, matching how they are stored.</summary>
+    private static List<string> Normalize(IReadOnlyCollection<string> symbols) =>
+        [.. symbols
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Select(s => s.Trim().ToUpperInvariant())
+            .Distinct(StringComparer.Ordinal)];
 
     public async Task<DailyArchiveStatus> GetDailyArchiveStatusAsync(CancellationToken ct = default)
     {
@@ -691,13 +871,27 @@ public sealed class SqliteTradingRepository : ITradingRepository
                     saved_utc TEXT NOT NULL,
                     PRIMARY KEY (symbol, session_date)
                 );
-                -- Which dates have been retrieved at all, so the backfill is resumable and a known
-                -- non-trading day (symbol_count = 0) is never refetched.
+                -- Which dates have been retrieved at all, so the backfill is resumable. market_closed
+                -- marks a day the market did not trade, which is covered for every symbol forever;
+                -- symbol_count is informational (how many bars that fetch stored).
                 CREATE TABLE IF NOT EXISTS daily_bar_coverage (
                     session_date TEXT PRIMARY KEY,
                     symbol_count INTEGER NOT NULL,
-                    fetched_utc TEXT NOT NULL
+                    fetched_utc TEXT NOT NULL,
+                    market_closed INTEGER NOT NULL DEFAULT 0
                 );
+                -- Which symbols each trading date was actually requested for. A session fetch returns
+                -- the whole market and is then filtered to the archive universe, so a date-only marker
+                -- lost the one fact that matters here: WHICH symbols it covered. Without it, a symbol
+                -- added to the universe after a date was fetched could never be filled in — the date
+                -- counted as covered, the backfill skipped it, and the symbol stayed permanently short
+                -- of the history weekly levels need. Absence of a row means "never requested", not
+                -- "did not trade", which is what makes a symbol-targeted backfill possible.
+                CREATE TABLE IF NOT EXISTS daily_bar_coverage_symbols (
+                    session_date TEXT NOT NULL,
+                    symbol       TEXT NOT NULL,
+                    PRIMARY KEY (session_date, symbol)
+                ) WITHOUT ROWID;
                 CREATE TABLE IF NOT EXISTS intraday_bars (
                     symbol TEXT NOT NULL,
                     interval_minutes INTEGER NOT NULL,
@@ -796,6 +990,10 @@ public sealed class SqliteTradingRepository : ITradingRepository
                     ON intraday_bars(symbol, interval_minutes, bucket_start_utc DESC);
                 CREATE INDEX IF NOT EXISTS ix_daily_bars_series
                     ON daily_bars(symbol, session_date DESC);
+                -- The primary key already orders by date; this serves the other direction, counting one
+                -- symbol's covered dates across a range.
+                CREATE INDEX IF NOT EXISTS ix_daily_bar_coverage_symbols_symbol
+                    ON daily_bar_coverage_symbols(symbol, session_date);
                 CREATE INDEX IF NOT EXISTS ix_trade_proposals_status_created
                     ON trade_proposals(status, created_utc DESC);
                 CREATE INDEX IF NOT EXISTS ix_trading_executions_state_created
@@ -814,6 +1012,9 @@ public sealed class SqliteTradingRepository : ITradingRepository
             await AddColumnIfMissingAsync(connection, "trade_proposals", "execution_id", "TEXT NULL", ct);
             await AddColumnIfMissingAsync(connection, "trade_proposals", "state_reason", "TEXT NULL", ct);
             await AddColumnIfMissingAsync(connection, "trade_proposals", "terminal_utc", "TEXT NULL", ct);
+            await AddColumnIfMissingAsync(
+                connection, "daily_bar_coverage", "market_closed", "INTEGER NOT NULL DEFAULT 0", ct);
+            await SeedPerSymbolCoverageAsync(connection, ct);
 
             _initialized = true;
         }
@@ -1422,6 +1623,66 @@ public sealed class SqliteTradingRepository : ITradingRepository
         var alter = connection.CreateCommand();
         alter.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {definition}";
         await alter.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
+    /// Reconstructs per-symbol coverage for a database written before coverage was symbol-aware.
+    ///
+    /// <para>
+    /// The old schema recorded only that a date had been fetched, not which symbols it was filtered to.
+    /// Read literally after the upgrade, every date would look unrequested for every symbol and the
+    /// first pass would ask the portal for two years of history the archive already holds. The bars
+    /// themselves carry the missing fact: a symbol with a bar on a date was plainly requested for it.
+    /// A date recorded with no bars at all was a market-wide non-trading day, so it stays covered for
+    /// everyone via <c>market_closed</c> rather than needing a row per symbol.
+    /// </para>
+    ///
+    /// <para>
+    /// Runs once — the pair table being non-empty means an earlier start already did this. The one
+    /// inaccuracy is a trading date on which an established symbol genuinely did not trade: it has no
+    /// bar to derive from, so it reads as unrequested and gets refetched once, after which the real
+    /// coverage row is written. That self-heals in a single request and cannot lose data.
+    /// </para>
+    /// </summary>
+    private async Task SeedPerSymbolCoverageAsync(SqliteConnection connection, CancellationToken ct)
+    {
+        var probe = connection.CreateCommand();
+        probe.CommandText = """
+            SELECT (SELECT COUNT(*) FROM daily_bar_coverage_symbols),
+                   (SELECT COUNT(*) FROM daily_bar_coverage)
+            """;
+        await using (var reader = await probe.ExecuteReaderAsync(ct))
+        {
+            if (!await reader.ReadAsync(ct)) return;
+            // Already migrated, or a fresh database with nothing to reconstruct.
+            if (reader.GetInt64(0) > 0 || reader.GetInt64(1) == 0) return;
+        }
+
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+
+        var closed = connection.CreateCommand();
+        closed.Transaction = (SqliteTransaction)transaction;
+        closed.CommandText = "UPDATE daily_bar_coverage SET market_closed = 1 WHERE symbol_count = 0";
+        var closedDays = await closed.ExecuteNonQueryAsync(ct);
+
+        var pairs = connection.CreateCommand();
+        pairs.Transaction = (SqliteTransaction)transaction;
+        // Joined to coverage so a bar written for a date that was never registered as fetched does not
+        // invent coverage for it.
+        pairs.CommandText = """
+            INSERT OR IGNORE INTO daily_bar_coverage_symbols (session_date, symbol)
+            SELECT b.session_date, b.symbol
+            FROM daily_bars b
+            JOIN daily_bar_coverage c ON c.session_date = b.session_date
+            WHERE c.market_closed = 0
+            """;
+        var seeded = await pairs.ExecuteNonQueryAsync(ct);
+
+        await transaction.CommitAsync(ct);
+        _logger.LogInformation(
+            "[TradingLedger] Migrated daily coverage to per-symbol: {Pairs} (date, symbol) pairs "
+            + "derived from archived bars, {Closed} non-trading day(s) marked covered for all symbols.",
+            seeded, closedDays);
     }
 
     // ── Proposal lifecycle ────────────────────────────────────────────────────

@@ -1,12 +1,18 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { trading, type WatchlistEntry, type WatchlistResponse } from './api';
-  import { Plus, RotateCcw, Trash2, Bell, BellOff, Eye, AlertTriangle, Clock, Search } from 'lucide-svelte';
+  import { trading, type WatchlistEntry, type WatchlistResponse, type CandleArchiveStatus } from './api';
+  import { Plus, RotateCcw, Trash2, Bell, BellOff, Eye, AlertTriangle, Clock, Search, Download } from 'lucide-svelte';
 
   /** Selected symbol, so the chart pane (Phase 2) can follow the list. */
   export let selected: string | null = null;
 
   let data: WatchlistResponse | null = null;
+  /**
+   * Archive coverage, for the "no weekly" rows only: it says how many sessions each starved symbol was
+   * never requested for, which is what the targeted backfill below would fetch. Optional — the list
+   * still works without it, the offer just loses its numbers.
+   */
+  let archive: CandleArchiveStatus | null = null;
   let loading = true;
   let error: string | null = null;
   let notice: string | null = null;
@@ -27,6 +33,56 @@
       error = e instanceof Error ? e.message : String(e);
     } finally {
       loading = false;
+    }
+    await loadArchive();
+  }
+
+  /** Never fatal: a missing archive status costs the badge its detail, not the list. */
+  async function loadArchive() {
+    try {
+      archive = await trading.candleArchive();
+    } catch {
+      /* leave whatever was last known */
+    }
+  }
+
+  /**
+   * Fills the daily history one symbol was never asked for.
+   *
+   * Needed as its own action because the archive can be complete market-wide while this symbol is
+   * starved: coverage is per (date, symbol), and a symbol added after the deep history was fetched was
+   * never requested for any of those dates. An unscoped backfill finds every date on record and does
+   * nothing, so without this the badge would never clear.
+   */
+  async function fillHistory(entry: WatchlistEntry) {
+    if (busy) return;
+    const missing = gapBySymbol.get(entry.symbol)?.missingSessions ?? 0;
+    const needed = archive?.dailyBarsForWeekly ?? 0;
+
+    if (!confirm(
+      `Backfill the daily history ${entry.symbol} is missing?\n\n` +
+      (missing > 0
+        ? `${missing} session(s) were never requested for it — one portal request each, so expect ` +
+          `roughly ${Math.max(1, Math.round(missing * 0.4 / 60))} minute(s).\n\n`
+        : '') +
+      `It has ${entry.archivedBars} bar(s)` +
+      (needed > 0 ? ` and needs ${needed} before weekly levels can be computed` : '') + `.\n\n` +
+      `Each day fetched returns the whole market, so every other archived symbol is stored too.`
+    )) return;
+
+    busy = true;
+    error = null;
+    notice = null;
+    try {
+      const result = await trading.startBackfill(undefined, [entry.symbol]);
+      archive = result.status;
+      notice = result.started
+        ? `Backfilling ${entry.symbol}. Progress is on the Candle archive card below.`
+        : `A backfill pass is already running — start this one once it finishes.`;
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = false;
     }
   }
 
@@ -119,10 +175,13 @@
     } catch {
       /* transient: the next refresh or the panel's own actions will retry */
     }
+    await loadArchive();
   }
 
   onMount(load);
 
+  $: gapBySymbol = new Map(
+    (archive?.symbolsShortOfWeekly ?? []).map(gap => [gap.symbol, gap]));
   $: openAlertCount = (data?.entries ?? []).reduce((total, entry) => total + entry.openAlerts, 0);
   $: filteredEntries = (data?.entries ?? []).filter(entry =>
     (!alertsOnly || entry.openAlerts > 0) &&
@@ -232,13 +291,26 @@
                 </span>
               {/if}
               {#if !entry.hasWeeklyHistory}
-                <span class="tag pending" title="{entry.archivedBars} daily bars archived — weekly support/resistance needs roughly two years, so it is not confirmed yet">
+                <span
+                  class="tag pending"
+                  title="{entry.archivedBars} daily bars archived{archive ? ` of the ${archive.dailyBarsForWeekly} needed` : ''} — weekly support/resistance is not confirmed for this symbol yet.{gapBySymbol.get(entry.symbol)?.missingSessions ? ` ${gapBySymbol.get(entry.symbol)?.missingSessions} session(s) were never requested for it; use the download action to fetch them.` : ''}"
+                >
                   <Clock size={11} /> no weekly
                 </span>
               {/if}
             </span>
           </button>
           <div class="row-actions">
+            {#if !entry.hasWeeklyHistory}
+              <button
+                class="icon"
+                title="Fetch the daily sessions this symbol was never requested for, so weekly levels can be computed"
+                on:click={() => fillHistory(entry)}
+                disabled={busy || archive?.progress.isRunning}
+              >
+                <Download size={13} />
+              </button>
+            {/if}
             <button
               class="icon"
               title={entry.alertsEnabled ? 'Mute alerts for this symbol' : 'Unmute alerts'}

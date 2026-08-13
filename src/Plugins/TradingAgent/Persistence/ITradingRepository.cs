@@ -85,14 +85,36 @@ public interface ITradingRepository
         CancellationToken ct = default);
 
     /// <summary>
-    /// Persists one settled trading session's daily bars and records the date as covered — including
-    /// when <paramref name="bars"/> is empty, which marks a known non-trading day so the backfill
-    /// never asks the portal for it again. Bars are upserted, so re-running a date is idempotent.
+    /// Persists one settled trading session's daily bars and records the date as covered for
+    /// <paramref name="requestedSymbols"/>. Bars are upserted, so re-running a date is idempotent.
+    ///
+    /// <para>
+    /// Coverage is recorded per (date, symbol) rather than per date because a session fetch returns the
+    /// whole market at once and is then filtered to the archive universe. With a date-only marker, a
+    /// symbol added to that universe afterwards could never be filled in: the date already counted as
+    /// covered, so the backfill skipped it forever and the symbol stayed permanently short of the
+    /// history weekly levels need. <paramref name="requestedSymbols"/> is the universe the fetch was
+    /// filtered against — the symbols we can honestly claim to have looked for. A symbol absent from it
+    /// was never requested; a requested symbol with no bar simply did not trade, and is still covered.
+    /// </para>
+    ///
+    /// <para>
+    /// Use <see cref="SaveNonTradingDayAsync"/> for a date the market was closed. Passing an empty
+    /// <paramref name="bars"/> here records a session that traded but held nothing we asked for, which
+    /// is a different fact and must not silence the whole date.
+    /// </para>
     /// </summary>
     Task SaveDailySessionAsync(
         DateOnly sessionDate,
         IReadOnlyList<TradingAgent.Research.PsxCandle> bars,
+        IReadOnlyCollection<string> requestedSymbols,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// Records a date the market did not trade at all, which is covered for every symbol — now and for
+    /// any symbol added later — so the backfill never asks the portal for it again.
+    /// </summary>
+    Task SaveNonTradingDayAsync(DateOnly sessionDate, CancellationToken ct = default);
 
     /// <summary>
     /// Archived daily bars for one symbol, oldest first, most recent <paramref name="maxBars"/> kept.
@@ -103,10 +125,28 @@ public interface ITradingRepository
         int maxBars,
         CancellationToken ct = default);
 
-    /// <summary>Dates already retrieved from the portal within a range, whether or not they traded.</summary>
+    /// <summary>
+    /// Dates in the range already retrieved for <em>every</em> symbol in <paramref name="symbols"/> —
+    /// the dates a backfill for that set can skip. A non-trading day counts for any symbol; a trading
+    /// day counts only once each symbol has been requested for it. An empty
+    /// <paramref name="symbols"/> falls back to "any date on record".
+    /// </summary>
     Task<IReadOnlySet<DateOnly>> GetCoveredDailyDatesAsync(
         DateOnly fromInclusive,
         DateOnly toInclusive,
+        IReadOnlyCollection<string> symbols,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Per-symbol count of dates in the range already retrieved for that symbol, so a caller holding
+    /// the trading calendar can report how many sessions each symbol is still short of. Non-trading days
+    /// count toward every symbol; a symbol with no coverage of its own at all is absent rather than
+    /// present with zero.
+    /// </summary>
+    Task<IReadOnlyDictionary<string, int>> GetCoveredDailyDateCountsAsync(
+        DateOnly fromInclusive,
+        DateOnly toInclusive,
+        IReadOnlyCollection<string> symbols,
         CancellationToken ct = default);
 
     /// <summary>
@@ -118,7 +158,8 @@ public interface ITradingRepository
     /// corrected because the date counts as covered) or an empty table that looks identical to a
     /// holiday (recorded as a non-trading day — a permanent hole). Coverage is only a resume marker, so
     /// dropping it for unsettled dates costs one request to redo and cannot lose data: the bars
-    /// themselves are upserted.
+    /// themselves are upserted. Per-symbol coverage for those dates is dropped with it, or the date
+    /// would be refetched while still counting as covered for the symbols recorded prematurely.
     /// </para>
     /// </summary>
     Task<int> ClearDailyCoverageAfterAsync(

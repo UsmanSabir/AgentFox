@@ -187,7 +187,14 @@ public sealed class CandleHistoryProvider
         {
             try
             {
-                await _repository.SaveDailySessionAsync(session.Key, session.ToList(), ct);
+                // Coverage is claimed only for the symbols this session actually yielded a bar for.
+                // Unlike the backfill, which fetches the whole market for a date and can honestly speak
+                // for every symbol in it, this path fetched a per-symbol series: a symbol with no bar
+                // here may simply not have been asked about, and claiming it would freeze a gap the
+                // backfill could never revisit. Under-claiming costs at most one refetch later.
+                var bars = session.ToList();
+                await _repository.SaveDailySessionAsync(
+                    session.Key, bars, [.. bars.Select(b => b.Symbol).Distinct()], ct);
             }
             catch (Exception ex)
             {

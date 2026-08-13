@@ -311,6 +311,17 @@
           <p class="archive-note" class:warn={archive.progress.abortedForThrottling}>{archive.progress.message}</p>
         {/if}
 
+        {#if archive.symbolsShortOfWeekly.length}
+          <p class="archive-note warn">
+            {archive.symbolsShortOfWeekly.length} symbol(s) cannot produce weekly levels yet:
+            {#each archive.symbolsShortOfWeekly as gap, i}{i > 0 ? ', ' : ''}<b>{gap.symbol}</b>
+              ({gap.archivedBars}/{archive.dailyBarsForWeekly} bars{#if gap.missingSessions}, {gap.missingSessions} sessions never requested{/if}){/each}.
+            Coverage is tracked per symbol and date, so a symbol added after the deep history was
+            archived is missing those dates even when every date is on record. Use the download action
+            on its watchlist row to fetch just what it needs.
+          </p>
+        {/if}
+
         {#if !archive.backfillEnabled}
           <p class="archive-note">Backfill is disabled (<code>Scan.BackfillYears = 0</code>). Weekly levels
             need roughly two years of daily history; without it the analysis reports unknown alignment.</p>
