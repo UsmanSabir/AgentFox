@@ -120,6 +120,22 @@ public class TradingAgentOptions
     public int ReconciliationIntervalSeconds { get; set; } = 60;
     public int ReconciliationMaxAgeSeconds { get; set; } = 180;
 
+    // ── Execution alerts ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Broadcast an alert to every connected messaging channel whenever an execution completes —
+    /// accepted, failed, or unknown. Covers every path into the broker (manual tool calls, armed
+    /// orders, take-profit retries, protective stops), because they all run through
+    /// <c>TradingManager.ExecuteGroupsAsync</c>. Default true.
+    /// </summary>
+    public bool NotifyOnExecution { get; set; } = true;
+
+    /// <summary>
+    /// Include Paper/Shadow executions in those alerts. Default false: in those modes nothing
+    /// reaches the broker, and alerting on every simulated fill trains you to ignore the channel.
+    /// </summary>
+    public bool NotifyOnSimulatedExecution { get; set; } = false;
+
     // ── Stock research (research_stock tool) ──────────────────────────────────
 
     /// <summary>Base URL of the official PSX data portal used for quotes and price history.</summary>

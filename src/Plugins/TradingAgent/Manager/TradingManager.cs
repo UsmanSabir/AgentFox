@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using AgentFox.Plugins.Interfaces;
 using Microsoft.Extensions.Logging;
 using TradingAgent.Broker;
 using TradingAgent.Config;
@@ -29,7 +30,15 @@ public sealed class TradingManager
     private readonly ApprovalIntentRegistry _intentRegistry;
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly ILogger<TradingManager> _logger;
+    private readonly IUserNotifier? _notifier;
 
+    /// <summary>How long an execution alert may take to reach the channels before it is abandoned.</summary>
+    private static readonly TimeSpan NotifyTimeout = TimeSpan.FromSeconds(20);
+
+    /// <param name="notifier">
+    /// Optional channel broadcaster. Defaulted so the manager still activates in a host that does
+    /// not register <see cref="IUserNotifier"/> (and in tests); alerts are simply skipped then.
+    /// </param>
     public TradingManager(
         IBrokerAdapter broker,
         ITradingRepository repository,
@@ -39,8 +48,10 @@ public sealed class TradingManager
         TradingReconciliationState reconciliation,
         ApprovalIntentRegistry intentRegistry,
         IOptions<TradingAgentOptions> options,
-        ILogger<TradingManager> logger)
+        ILogger<TradingManager> logger,
+        IUserNotifier? notifier = null)
     {
+        _notifier = notifier;
         _broker = broker;
         _repository = repository;
         _calendar = calendar;
@@ -141,6 +152,7 @@ public sealed class TradingManager
                 OrderId = $"{mode.ToLowerInvariant()}-{Guid.NewGuid():N}",
                 Action = order.Action,
                 Symbol = order.Symbol,
+                Quantity = order.Quantity,
                 Message = $"{mode} mode: broker submission suppressed.",
                 RequestedPrice = order.EntryPrice,
                 SubmittedPrice = order.EntryPrice
@@ -183,6 +195,92 @@ public sealed class TradingManager
         var json = JsonSerializer.Serialize(result, Json);
         await _repository.CompleteExecutionAsync(result.ExecutionId, state, json, ct);
         await _repository.AppendEventAsync(result.ExecutionId, state, json, ct);
+
+        // Deliberately after the ledger writes: the durable record is the source of truth, and a
+        // channel outage must never cost us an execution record. Every path into the broker funnels
+        // through here, so this one call covers manual orders, armed orders, take-profit retries
+        // and protective stops alike.
+        await NotifyExecutionAsync(result, state);
+    }
+
+    /// <summary>
+    /// Broadcasts the execution outcome to the user's messaging channels. Failure to deliver is
+    /// logged and swallowed — the execution has already happened and been recorded, so throwing
+    /// here would misreport a completed trade as a failed one.
+    /// </summary>
+    private async Task NotifyExecutionAsync(TradingExecutionResult result, string state)
+    {
+        if (_notifier is null) return;
+
+        var options = _options.Value;
+        if (!options.NotifyOnExecution) return;
+        if (state == "simulated" && !options.NotifyOnSimulatedExecution) return;
+
+        try
+        {
+            // Not cancelled with the caller's token: the orders are already at the broker, so the
+            // user needs to hear about them even if the originating request was abandoned.
+            var sent = await _notifier
+                .NotifyAsync(BuildExecutionMessage(result, state))
+                .WaitAsync(NotifyTimeout);
+
+            if (sent == 0)
+                _logger.LogWarning(
+                    "[TradingManager] Execution {ExecutionId} ({State}) reached no channels.",
+                    result.ExecutionId, state);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "[TradingManager] Failed to deliver the execution alert for {ExecutionId} ({State}).",
+                result.ExecutionId, state);
+        }
+    }
+
+    private static string BuildExecutionMessage(TradingExecutionResult result, string state)
+    {
+        var heading = state switch
+        {
+            "accepted"  => "✅ Orders placed",
+            "failed"    => "⚠️ Order execution partially failed",
+            "unknown"   => "🚨 Broker outcome UNKNOWN — manual reconciliation required",
+            "simulated" => "🧪 Simulated execution (no broker submission)",
+            _           => $"Order execution ({state})"
+        };
+
+        var sb = new StringBuilder();
+        sb.Append("**").Append(heading).Append("**\n");
+
+        var orders = result.Groups.SelectMany(g => g).ToList();
+        foreach (var order in orders)
+        {
+            var price = order.SubmittedPrice ?? order.RequestedPrice;
+            sb.Append(order.Success ? "• " : "• ❌ ")
+              .Append(order.Action.ToUpperInvariant())
+              .Append(' ')
+              .Append(order.Symbol);
+
+            // Size before price. "BUY FFC @ 551" reads the same whether it bought 45 shares or
+            // 4,500, and the difference is the entire trade.
+            if (order.Quantity is { } quantity) sb.Append(' ').Append(quantity.ToString("N0"));
+            if (price.HasValue) sb.Append(" @ ").Append(price.Value.ToString("0.##"));
+
+            if (order.Quantity is { } qty && price is { } unit && qty > 0 && unit > 0)
+                sb.Append(" = ").Append((qty * unit).ToString("N0")).Append(" PKR");
+
+            if (!string.IsNullOrWhiteSpace(order.OrderId)) sb.Append(" (#").Append(order.OrderId).Append(')');
+            if (order.PriceAdjustment is { Length: > 0 } adj) sb.Append(" — ").Append(adj);
+            if (!order.Success && !string.IsNullOrWhiteSpace(order.Message)) sb.Append(" — ").Append(order.Message);
+
+            sb.Append('\n');
+        }
+
+        // An "unknown" outcome carries no orders at all, so the reason is the only useful content.
+        if (orders.Count == 0 && !string.IsNullOrWhiteSpace(result.Reason))
+            sb.Append(result.Reason).Append('\n');
+
+        sb.Append("_Execution ").Append(result.ExecutionId).Append('_');
+        return sb.ToString();
     }
 
     /// <summary>

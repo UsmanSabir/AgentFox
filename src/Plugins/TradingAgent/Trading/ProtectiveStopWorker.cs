@@ -1,3 +1,4 @@
+using AgentFox.Plugins.Interfaces;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -41,6 +42,16 @@ public sealed class ProtectiveStopWorker : BackgroundService
     private readonly TradingPolicyProvider _policy;
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly ILogger<ProtectiveStopWorker> _logger;
+    private readonly IUserNotifier? _notifier;
+
+    /// <summary>
+    /// Alerts already sent, keyed by stop and reason, so a condition that persists across passes is
+    /// reported once rather than every few minutes. A stop that cannot be placed stays unplaceable
+    /// all session; re-sending that every 3 minutes is how a channel becomes noise the user mutes,
+    /// which would cost them the one alert that mattered.
+    /// </summary>
+    private readonly HashSet<string> _alerted = [];
+    private DateOnly _alertedFor;
 
     /// <summary>Serialises ad-hoc baseline captures and guards the shared snapshot below.</summary>
     private readonly SemaphoreSlim _baselineGate = new(1, 1);
@@ -64,8 +75,10 @@ public sealed class ProtectiveStopWorker : BackgroundService
         IMarketCalendar calendar,
         TradingPolicyProvider policy,
         IOptions<TradingAgentOptions> options,
-        ILogger<ProtectiveStopWorker> logger)
+        ILogger<ProtectiveStopWorker> logger,
+        IUserNotifier? notifier = null)
     {
+        _notifier  = notifier;
         _scopes    = scopes;
         _broker    = broker;
         _manager   = manager;
@@ -316,6 +329,12 @@ public sealed class ProtectiveStopWorker : BackgroundService
                 _logger.LogError(
                     "[ProtectiveStops] {StopId} ({Symbol}) cannot be confirmed: {Why}",
                     stop.StopId, stop.Symbol, verdict.Reason);
+                await AlertOnceAsync(stop, "no-baseline", DateOnly.FromDateTime(_calendar.GetStatus().PktNow),
+                    $"🛡️ **Stop needs you — {stop.Symbol}**\n"
+                    + $"• The entry fired, but your holding before it was never recorded, so the fill "
+                    + "cannot be confirmed\n"
+                    + $"• The stop at {stop.StopTrigger:0.##} will NOT be placed automatically\n"
+                    + "_Place it manually, or disarm it from the trading UI._");
                 break;
 
             default:
@@ -353,6 +372,13 @@ public sealed class ProtectiveStopWorker : BackgroundService
         {
             case PlacementAction.Close:
                 await CloseAsync(repository, stop, decision.Reason, ct);
+                // The position going to zero usually means the stop fired — an exit the operator did
+                // not initiate, and the single most important thing on this worker to hear about.
+                await AlertOnceAsync(stop, "closed", today,
+                    $"🛡️ **Protection ended — {stop.Symbol}**\n"
+                    + $"• {decision.Reason}\n"
+                    + $"• The stop at {stop.StopTrigger:0.##} is no longer being managed\n"
+                    + "_If the stop executed, the sale itself was reported separately._");
                 return;
 
             case PlacementAction.Skip:
@@ -404,6 +430,12 @@ public sealed class ProtectiveStopWorker : BackgroundService
                 "[ProtectiveStops] {StopId} ({Symbol}) needs a stop placed but was NOT authorised: "
                 + "{Reason}. The position is UNPROTECTED at the broker.",
                 stop.StopId, stop.Symbol, approval.Reason);
+
+            await AlertOnceAsync(stop, "unauthorised", today,
+                $"🛡️ **Stop NOT placed — {stop.Symbol} is unprotected**\n"
+                + $"• SELL {decision.Quantity:N0} {stop.Symbol} at {stop.StopTrigger:0.##} was not authorised\n"
+                + $"• {approval.Reason}\n"
+                + "_Nothing is resting at the broker. Place it manually, or fix the approval mode._");
             return;
         }
 
@@ -428,6 +460,13 @@ public sealed class ProtectiveStopWorker : BackgroundService
             "[ProtectiveStops] {StopId} ({Symbol}): the native stop was NOT placed — {Reason}. "
             + "The position is protected only by the local backstop until this succeeds.",
             stop.StopId, stop.Symbol, order?.Message ?? result.Reason);
+
+        await AlertOnceAsync(stop, "placement-failed", today,
+            $"🛡️ **Stop rejected by the broker — {stop.Symbol}**\n"
+            + $"• SELL {decision.Quantity:N0} {stop.Symbol} at {stop.StopTrigger:0.##} was refused\n"
+            + $"• {order?.Message ?? result.Reason}\n"
+            + "_Retrying next pass. Until it succeeds the position is covered only by the local "
+            + "backstop, which needs AgentFox running._");
     }
 
     // ── Local backstop ────────────────────────────────────────────────────────
@@ -518,6 +557,39 @@ public sealed class ProtectiveStopWorker : BackgroundService
         {
             _logger.LogWarning(ex, "[ProtectiveStops] The outstanding book could not be read this pass.");
             return null;
+        }
+    }
+
+    // ── Alerts ────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Tells the user, once per stop per session, that a position is not protected.
+    ///
+    /// <para>
+    /// A successful placement needs no alert here — it goes to the broker through
+    /// <c>TradingManager</c>, which already broadcasts every execution. What that path cannot report
+    /// is the <b>absence</b> of an order: nothing was executed, so nothing is announced, and the
+    /// operator is left believing a stop exists. This covers exactly that hole.
+    /// </para>
+    /// </summary>
+    private async Task AlertOnceAsync(ProtectiveStop stop, string reasonKey, DateOnly today, string message)
+    {
+        if (_notifier is null) return;
+
+        if (_alertedFor != today)
+        {
+            // A new session is a new chance for the same condition to matter, and a stop that failed
+            // to go in yesterday failing again today is news.
+            _alerted.Clear();
+            _alertedFor = today;
+        }
+
+        if (!_alerted.Add($"{stop.StopId}:{reasonKey}")) return;
+
+        try { await _notifier.NotifyAsync(message); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[ProtectiveStops] Could not deliver the alert for {StopId}.", stop.StopId);
         }
     }
 

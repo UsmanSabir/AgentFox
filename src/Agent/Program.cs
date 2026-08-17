@@ -410,6 +410,10 @@ class Program
         builder.Services.AddSingleton<AgentFox.Harness.HarnessAgentFactory>();
         builder.Services.AddSingleton<FoxAgentHolder>();
         builder.Services.AddSingleton<ChannelManagerHolder>();
+        // Shared seam that lets plugins broadcast to the user's channels from background code.
+        // ChannelManager itself is host-assembly-only and unreachable from a PluginLoadContext.
+        builder.Services.AddSingleton<AgentFox.Plugins.Interfaces.IUserNotifier,
+            AgentFox.Channels.ChannelUserNotifier>();
         builder.Services.AddSingleton<SchedulingHolder>();
         builder.Services.AddSingleton<AgentFox.Plugins.Interfaces.IAgentService, FoxAgentService>();
 

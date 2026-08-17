@@ -7,6 +7,18 @@ public class OrderResult
     public string Action { get; set; } = "";
     public string Symbol { get; set; } = "";
     public string Message { get; set; } = "";
+
+    /// <summary>
+    /// Shares actually submitted, as resolved by the broker (which falls back to a configured default
+    /// when the signal carried none). Null when the order never reached submission.
+    ///
+    /// <para>
+    /// Recorded on the RESULT, not just the request: "BUY FFC @ 551" is not a reportable outcome —
+    /// 45 shares and 4,500 shares are the same sentence and very different trades. Both the ledger
+    /// row and the execution alert read this.
+    /// </para>
+    /// </summary>
+    public int? Quantity { get; set; }
     public string? ScreenshotBefore { get; set; }
     public string? ScreenshotAfter { get; set; }
 
