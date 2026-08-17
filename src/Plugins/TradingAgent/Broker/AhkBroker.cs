@@ -8,6 +8,7 @@ using Microsoft.Extensions.Logging;
 using PuppeteerSharp;
 using TradingAgent.Config;
 using TradingAgent.Models;
+using TradingAgent.Watchlist;
 
 namespace TradingAgent.Broker;
 
@@ -1977,6 +1978,138 @@ public sealed class AhkBroker : IAsyncDisposable
 
     /// <summary>An order found in the account's own book, and where it was found.</summary>
     private sealed record OrderBookMatch(string Book, string? OrderNo, string Row);
+
+    // ── Outstanding book as data ────────────────────────────────────────────────
+
+    /// <summary>
+    /// Every order currently RESTING in the outstanding book, optionally narrowed to one symbol.
+    ///
+    /// <para>
+    /// <see cref="VerifyOrderInBookAsync"/> answers "did my order arrive?" and stops at the first
+    /// match; this answers "what is resting right now?", which is a different question and the one a
+    /// protective stop has to ask before placing another. The distinction matters: only the
+    /// <b>outstanding</b> book is read here, never the activity log, because an order in the activity
+    /// log has already been dealt with and treating it as live protection would leave a position
+    /// uncovered.
+    /// </para>
+    ///
+    /// <para>
+    /// Columns are located by header name and every one of them is optional — a column the portal does
+    /// not expose comes back null, meaning <b>unknown</b>. Callers must not read null as zero or as
+    /// "not mine"; <see cref="ProtectiveStopDecisions"/> treats an unreadable field as ambiguity and
+    /// declines to act on it.
+    /// </para>
+    /// </summary>
+    public async Task<IReadOnlyList<RestingOrder>> GetOutstandingOrdersAsync(string? symbol = null)
+    {
+        await _gate.WaitAsync();
+        try
+        {
+            await PrepareSessionWithRetryAsync();
+            return await ReadOutstandingOrdersAsync(symbol?.Trim().ToUpperInvariant());
+        }
+        finally
+        {
+            if (_config.Current.CloseBrowserAfterOrder)
+                await TeardownAsync();
+            _gate.Release();
+        }
+    }
+
+    /// <summary>ASSUMES the gate is held and the session is prepared.</summary>
+    private async Task<IReadOnlyList<RestingOrder>> ReadOutstandingOrdersAsync(string? symbol)
+    {
+        var cfg = _config.Current;
+
+        await _page!.EvaluateFunctionAsync(
+            @"(tabSel, panelSel) => {
+                document.querySelector(tabSel)?.click();
+                const panel = document.querySelector(panelSel);
+                const refresh = panel && [...panel.querySelectorAll('button,input[type=button],a')]
+                    .find(b => ((b.textContent || b.value || '').trim().toLowerCase() === 'refresh'));
+                refresh?.click();
+            }", cfg.OutstandingLogTabSelector, cfg.OutstandingLogPanelSelector);
+
+        await WaitForDomSettledAsync(quietMs: 500, timeoutMs: 3_000);
+
+        var json = await _page.EvaluateFunctionAsync<string>(
+            @"(panelSel) => {
+                const panel = document.querySelector(panelSel);
+                const table = panel && panel.querySelector('table');
+                if (!table) return '[]';
+                const rows = [...table.querySelectorAll('tr')]
+                    .map(tr => [...tr.querySelectorAll('th,td')].map(c => (c.textContent || '').trim()))
+                    .filter(r => r.length);
+                if (rows.length < 2) return '[]';
+
+                const header = rows[0].map(h => h.toLowerCase());
+                const col = (...names) => {
+                    for (const n of names) {
+                        const i = header.findIndex(h => h === n);
+                        if (i >= 0) return i;
+                    }
+                    return -1;
+                };
+                const iScrip = col('scrip', 'symbol');
+                const iSide  = col('side', 'type', 'buy/sell', 'order side', 'trade type');
+                const iKind  = col('order type', 'ordertype');
+                const iQty   = col('remaining', 'quantity', 'qty', 'volume');
+                const iPrice = col('price', 'rate');
+                const iOrder = col('order no', 'order no.', 'orderno');
+                if (iScrip < 0) return '[]';
+
+                const at = (r, i) => (i >= 0 ? (r[i] || '').trim() : '');
+                return JSON.stringify(rows.slice(1)
+                    .filter(r => at(r, iScrip).length > 0)
+                    .map(r => ({
+                        symbol:  at(r, iScrip).toUpperCase(),
+                        side:    at(r, iSide),
+                        kind:    at(r, iKind),
+                        qty:     at(r, iQty),
+                        price:   at(r, iPrice),
+                        orderNo: at(r, iOrder),
+                        row:     r.join(' | ')
+                    })));
+            }", cfg.OutstandingLogPanelSelector);
+
+        var orders = new List<RestingOrder>();
+        if (string.IsNullOrWhiteSpace(json)) return orders;
+
+        using var doc = JsonDocument.Parse(json);
+        foreach (var element in doc.RootElement.EnumerateArray())
+        {
+            var rowSymbol = Text(element, "symbol");
+            if (rowSymbol is null) continue;
+            if (symbol is not null && !rowSymbol.Equals(symbol, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            orders.Add(new RestingOrder(
+                rowSymbol,
+                Text(element, "side"),
+                Text(element, "kind"),
+                ParseQuantity(Text(element, "qty")),
+                ParsePrice(Text(element, "price")),
+                Text(element, "orderNo"),
+                Text(element, "row") ?? ""));
+        }
+
+        _logger.LogInformation(
+            "[AhkBroker] Outstanding book: {Count} resting order(s){Filter}.",
+            orders.Count, symbol is null ? "" : $" for {symbol}");
+        return orders;
+
+        static string? Text(JsonElement element, string name) =>
+            element.TryGetProperty(name, out var value)
+            && value.GetString() is { Length: > 0 } text ? text : null;
+
+        static int? ParseQuantity(string? raw) =>
+            int.TryParse((raw ?? "").Replace(",", "").Trim(),
+                NumberStyles.Any, CultureInfo.InvariantCulture, out var value) ? value : null;
+
+        static decimal? ParsePrice(string? raw) =>
+            decimal.TryParse((raw ?? "").Replace(",", "").Trim(),
+                NumberStyles.Any, CultureInfo.InvariantCulture, out var value) && value > 0 ? value : null;
+    }
 
     /// <summary>
     /// Reads the portal's tradable price band for the symbol currently entered in the order dialog.

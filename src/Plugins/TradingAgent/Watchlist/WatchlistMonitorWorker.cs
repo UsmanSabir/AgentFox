@@ -44,6 +44,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService
     private readonly AlertBroadcaster _broadcaster;
     private readonly ApprovalGate _approvals;
     private readonly TradingAgent.Manager.TradingManager _manager;
+    private readonly TradingAgent.Broker.AhkBroker _broker;
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly ILogger<WatchlistMonitorWorker> _logger;
 
@@ -59,6 +60,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService
         AlertBroadcaster broadcaster,
         ApprovalGate approvals,
         TradingAgent.Manager.TradingManager manager,
+        TradingAgent.Broker.AhkBroker broker,
         IOptions<TradingAgentOptions> options,
         ILogger<WatchlistMonitorWorker> logger)
     {
@@ -70,6 +72,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService
         _broadcaster = broadcaster;
         _approvals = approvals;
         _manager = manager;
+        _broker = broker;
         _options = options;
         _logger = logger;
 
@@ -359,6 +362,19 @@ public sealed class WatchlistMonitorWorker : BackgroundService
             if (!ArmedOrderEvaluator.ShouldFire(order, price, alerts, now, out var why))
                 continue;
 
+            // A backstop is not an ordinary armed order: it exists to cover the window where the
+            // native stop does not, and must stand down the moment that stop is resting. Skipping
+            // this check is exactly how "native plus a local backstop" becomes two orders selling
+            // the same position — and this broker offers no way to cancel either of them.
+            if (order.ProtectiveStopId is not null
+                && await BackstopMustStandDownAsync(order, ct) is { } standDown)
+            {
+                _logger.LogInformation(
+                    "[ArmedOrders] {ArmedId} ({Symbol}) met its trigger but stood down: {Why}",
+                    order.ArmedId, order.Symbol, standDown);
+                continue;
+            }
+
             // Claim it before the broker sees anything.
             if (!await _repository.TrySetArmedOrderStateAsync(
                     order.ArmedId, "armed", "firing", why, ct: ct))
@@ -418,6 +434,41 @@ public sealed class WatchlistMonitorWorker : BackgroundService
                 _logger.LogError(ex, "[ArmedOrders] {ArmedId} submission failed.", order.ArmedId);
             }
         }
+    }
+
+    /// <summary>
+    /// Whether a protective stop's local backstop must hold fire, and why. Null means it may proceed.
+    ///
+    /// <para>
+    /// The outstanding book is read only at this point — when a backstop has actually reached its
+    /// trigger — rather than every pass, because it drives the real browser. That is a rare event, and
+    /// paying one page read to avoid selling a position twice is the right trade.
+    /// </para>
+    /// </summary>
+    private async Task<string?> BackstopMustStandDownAsync(ArmedOrder order, CancellationToken ct)
+    {
+        var stop = (await _repository.GetProtectiveStopsAsync(openOnly: false, ct))
+            .FirstOrDefault(s => s.StopId == order.ProtectiveStopId);
+
+        if (stop is null)
+            return "the protective stop it backs no longer exists";
+
+        if (stop.State == "closed")
+            return $"the protective stop it backs is closed ({stop.StateReason})";
+
+        IReadOnlyList<RestingOrder>? resting;
+        try { resting = await _broker.GetOutstandingOrdersAsync(order.Symbol); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "[ArmedOrders] Could not read the outstanding book before firing backstop {ArmedId}.",
+                order.ArmedId);
+            resting = null;   // unreadable counts as "cannot rule out a resting stop"
+        }
+
+        return ProtectiveStopDecisions.BackstopShouldStandDown(stop, resting, out var reason)
+            ? reason
+            : null;
     }
 
     /// <summary>

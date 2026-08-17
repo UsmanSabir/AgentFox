@@ -49,6 +49,18 @@ public class TradingAgentOptions
     public int TakeProfitRetryIntervalMinutes { get; set; } = 10;
 
     /// <summary>
+    /// Minutes between protective-stop passes — confirming entry fills and re-placing native stops
+    /// (only while the market is open, and only while a stop is open). Default 3, clamped to 1..60.
+    ///
+    /// <para>
+    /// Each pass reads holdings and the outstanding book, both of which drive the real browser and
+    /// serialise against order submission, so this is deliberately slower than the monitor's cadence.
+    /// Lowering it makes fills confirm sooner at the cost of delaying orders behind page scrapes.
+    /// </para>
+    /// </summary>
+    public int ProtectiveStopPollMinutes { get; set; } = 3;
+
+    /// <summary>
     /// Seconds an approval intent stays valid between validation and broker submission
     /// (ApprovalRequired mode). Expired intents are rejected and need re-approval. Default 120,
     /// floored at 10.

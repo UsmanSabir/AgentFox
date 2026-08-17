@@ -437,10 +437,45 @@ export interface ArmedOrder {
   stateReason: string | null;
   note: string | null;
   sourceAlertId: string | null;
+  /** Set when this order is the local backstop for a protective stop, not an ordinary trigger. */
+  protectiveStopId: string | null;
+}
+
+/**
+ * A standing intent to keep a position protected — not a queued order.
+ *
+ * The venue clears outstanding orders at the close, so a native stop placed today does not exist
+ * tomorrow. The durable thing is the intent, and a native day order is re-placed from it each
+ * session while `recurring` holds.
+ */
+export interface ProtectiveStop {
+  stopId: string;
+  symbol: string;
+  parentArmedId: string | null;
+  stopTrigger: number;
+  stopLimit: number;
+  desiredQuantity: number;
+  recurring: boolean;
+  state: 'pending_fill' | 'active' | 'closed' | string;
+  /** Holding before the entry went in. `null` means never captured — which is not zero. */
+  baselineQuantity: number | null;
+  placedQuantity: number;
+  lastPlacedSessionDate: string | null;
+  lastOrderNo: string | null;
+  localBackstopArmedId: string | null;
+  createdUtc: string;
+  fillConfirmedUtc: string | null;
+  closedUtc: string | null;
+  stateReason: string | null;
+  note: string | null;
+  /** Whether a native stop is resting at the broker right now — the only protection that survives
+   *  AgentFox being down. */
+  restingToday: boolean;
 }
 
 export interface ArmedOrdersResponse {
   orders: ArmedOrder[];
+  protectiveStops: ProtectiveStop[];
   approval: {
     mode: string;
     armedUntilUtc: string | null;
@@ -465,6 +500,18 @@ export interface ArmOrderRequest {
   expiresInDays?: number;
   note?: string;
   sourceAlertId?: string | null;
+  /** BUY only. Arms a protective stop that stays dormant until the entry is confirmed filled. */
+  attachStop?: AttachStopRequest | null;
+}
+
+/** A protective stop to attach to a BUY entry. Sized at fill time, not here. */
+export interface AttachStopRequest {
+  stopTrigger: number;
+  /** Defaults server-side to just below the trigger; a limit AT the trigger routinely misses. */
+  stopLimit?: number | null;
+  quantity?: number | null;
+  /** Re-place the native stop each session. Off means it lapses after one day. */
+  recurring: boolean;
 }
 
 /**
@@ -666,11 +713,34 @@ export const trading = {
         order: ArmedOrder;
         willFireUnattended: boolean;
         note: string;
+        attachedStop: {
+          stopId: string;
+          stopTrigger: number;
+          stopLimit: number;
+          recurring: boolean;
+          state: string;
+          note: string;
+        } | null;
       }>('/trading/armed-orders', request),
 
     disarm: (armedId: string) =>
       del<{ armedId: string; state: string }>(
         `/trading/armed-orders/${encodeURIComponent(armedId)}`)
+  },
+
+  stops: {
+    /**
+     * Stops managing the intent. It does NOT retract an order already resting at the broker — that
+     * is impossible from here — so the reply says whether one is still live and needs cancelling in
+     * the portal by hand.
+     */
+    disarm: (stopId: string) =>
+      del<{
+        stopId: string;
+        state: string;
+        brokerOrderStillResting: boolean;
+        message: string;
+      }>(`/trading/protective-stops/${encodeURIComponent(stopId)}`)
   },
 
   approval: {

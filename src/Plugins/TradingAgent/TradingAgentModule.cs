@@ -187,6 +187,10 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         services.AddHostedService<TradingSafetyStartupValidator>();
         services.AddHostedService<BrokerReconciliationWorker>();
         services.AddHostedService<TakeProfitRetryWorker>();
+        // Singleton AND hosted service, so the arm endpoint can kick an immediate baseline capture on
+        // the same instance the timer drives.
+        services.AddSingleton<ProtectiveStopWorker>();
+        services.AddHostedService(sp => sp.GetRequiredService<ProtectiveStopWorker>());
         services.AddHostedService<DailyCandleBackfillWorker>();
     }
 
@@ -287,11 +291,14 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             bool? all,
             ITradingRepository repository,
             ApprovalGate approvals,
+            IMarketCalendar calendar,
             IOptions<TradingAgentOptions> options,
             CancellationToken ct) =>
         {
             var orders = await repository.GetArmedOrdersAsync(armedOnly: !(all ?? false), ct);
+            var stops  = await repository.GetProtectiveStopsAsync(openOnly: !(all ?? false), ct);
             var window = approvals.ArmedWindow;
+            var pktNow = calendar.GetStatus().PktNow;
             return Results.Ok(new
             {
                 // Projected rather than serialized straight from the record: an enum defaults to its
@@ -316,7 +323,37 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                     o.ExecutionId,
                     o.StateReason,
                     o.Note,
-                    o.SourceAlertId
+                    o.SourceAlertId,
+                    o.ProtectiveStopId
+                }),
+                // Sent with the orders because a stop and the entry it protects are one thing to
+                // read: "did my buy fill, and is the stop actually at the broker" is a single
+                // question, and answering half of it is how a position looks covered when it is not.
+                protectiveStops = stops.Select(s => new
+                {
+                    s.StopId,
+                    s.Symbol,
+                    s.ParentArmedId,
+                    s.StopTrigger,
+                    s.StopLimit,
+                    s.DesiredQuantity,
+                    s.Recurring,
+                    s.State,
+                    s.BaselineQuantity,
+                    s.PlacedQuantity,
+                    lastPlacedSessionDate = s.LastPlacedSessionDate?.ToString("yyyy-MM-dd"),
+                    s.LastOrderNo,
+                    s.LocalBackstopArmedId,
+                    s.CreatedUtc,
+                    s.FillConfirmedUtc,
+                    s.ClosedUtc,
+                    s.StateReason,
+                    s.Note,
+                    // Whether a native stop is resting at the broker RIGHT NOW, which is the only
+                    // form of protection that survives this process being down.
+                    restingToday = s.State == "active"
+                                   && s.LastPlacedSessionDate == DateOnly.FromDateTime(pktNow)
+                                   && s.PlacedQuantity > 0
                 }),
                 // Surfaced together because an armed ORDER that cannot be approved will not fire, and
                 // that pairing is the first thing to check when one does not.
@@ -339,6 +376,7 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             ITradingRepository repository,
             MonitoredUniverse universe,
             ApprovalGate approvals,
+            ProtectiveStopWorker protectiveStops,
             IOptions<TradingAgentOptions> options,
             ILogger<TradingAgentModule> logger,
             CancellationToken ct) =>
@@ -415,7 +453,83 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                 SourceAlertId    = body.SourceAlertId
             };
 
+            // A stop may only be attached to a BUY: it protects a position this entry creates, and
+            // attaching one to a SELL would arm a second sell of stock the first one is disposing of.
+            ProtectiveStop? attached = null;
+            if (body.AttachStop is { } attach)
+            {
+                if (action != "BUY")
+                    return Results.BadRequest(new
+                    {
+                        error = "stop_requires_buy",
+                        message = "A protective stop can only be attached to a BUY entry."
+                    });
+
+                if (attach.StopTrigger is not > 0)
+                    return Results.BadRequest(new
+                    {
+                        error = "invalid_stop_trigger",
+                        message = "A protective stop needs a positive trigger price."
+                    });
+
+                var entryPrice = order.Price ?? order.TriggerPrice;
+                if (entryPrice is { } entry && attach.StopTrigger >= entry)
+                    return Results.BadRequest(new
+                    {
+                        error = "stop_above_entry",
+                        message = $"A protective stop at {attach.StopTrigger} sits at or above the entry "
+                                + $"({entry}), so it would trigger immediately rather than protect anything."
+                    });
+
+                // Default the limit just below the trigger. A stop limit set exactly AT its trigger
+                // routinely misses the move that triggered it, which is protection in name only.
+                var stopLimit = attach.StopLimit
+                    ?? Math.Round(attach.StopTrigger!.Value * 0.99m, 2, MidpointRounding.AwayFromZero);
+
+                if (stopLimit > attach.StopTrigger)
+                    return Results.BadRequest(new
+                    {
+                        error = "invalid_stop_limit",
+                        message = $"A SELL stop's limit ({stopLimit}) must be at or below its trigger "
+                                + $"({attach.StopTrigger}), or it cannot fill once triggered."
+                    });
+
+                attached = new ProtectiveStop
+                {
+                    StopId        = Guid.NewGuid().ToString("N"),
+                    Symbol        = symbol,
+                    ParentArmedId = order.ArmedId,
+                    StopTrigger   = attach.StopTrigger!.Value,
+                    StopLimit     = stopLimit,
+                    // Sized at fill time, never here: what matters is what the entry actually buys.
+                    DesiredQuantity = 0,
+                    Recurring     = attach.Recurring,
+                    State         = "pending_fill",
+                    Note          = attach.Quantity is { } wanted
+                                        ? $"Requested cover: {wanted} share(s)."
+                                        : null
+                };
+            }
+
             var id = await repository.SaveArmedOrderAsync(order, ct);
+            if (attached is not null)
+            {
+                await repository.SaveProtectiveStopAsync(attached, ct);
+
+                // Not awaited, on purpose. A fill is proved by holdings RISING, which needs the
+                // holding from before the entry went in — and an entry armed at a level the price is
+                // already touching can trigger before the periodic pass ever takes that reading.
+                // Kicking it here shrinks the window from minutes to seconds without making the
+                // operator wait on a page scrape.
+                protectiveStops.CaptureBaselineSoon(attached.StopId);
+
+                logger.LogWarning(
+                    "[ProtectiveStops] {StopId} attached to entry {ArmedId}: SELL stop {Trigger}/{Limit} "
+                    + "on {Symbol}, recurring={Recurring}.",
+                    attached.StopId, id, attached.StopTrigger, attached.StopLimit, symbol,
+                    attached.Recurring);
+            }
+
             var unattended = approvals.DescribeUnattendedPolicy();
             logger.LogWarning(
                 "[ArmedOrders] Armed {ArmedId}: {Action} {Qty} {Symbol} on {Kind} {Level}. Approval mode {Mode}.",
@@ -445,7 +559,24 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                 // Said plainly at arm time, not discovered at fire time — and asked of the gate rather
                 // than re-derived here, since the execution mode matters as much as the approval mode.
                 willFireUnattended = unattended.WillFireUnattended,
-                note = unattended.Explanation
+                note = unattended.Explanation,
+                attachedStop = attached is null ? null : new
+                {
+                    attached.StopId,
+                    attached.StopTrigger,
+                    attached.StopLimit,
+                    attached.Recurring,
+                    attached.State,
+                    // The honest version of "and then it's protected". Each clause is a real gap the
+                    // operator would otherwise find out about from a position that was not covered.
+                    note = "The stop is dormant until the entry is confirmed filled by an increase in "
+                         + "your holdings, which is checked every few minutes while the market is open. "
+                         + (attached.Recurring
+                                ? "It is then re-placed at the broker each session, because outstanding "
+                                + "orders are cleared at the close."
+                                : "It is placed once and NOT re-placed after that session, so the "
+                                + "position stops being protected the next day.")
+                }
             });
         }).RequireAuthorization("TradingTrader");
 
@@ -465,6 +596,55 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                     error = "not_armed",
                     message = "No armed order with that id is currently armed (it may have already fired)."
                 });
+        }).RequireAuthorization("TradingAnalyst");
+
+        // A stop is disarmed rather than cancelled, and the difference is not pedantry: this broker
+        // exposes no way to retract a resting order, so an order already at the exchange stays there.
+        // Reporting "cancelled" would be a lie about a live sell order.
+        trading.MapDelete("/protective-stops/{stopId}", async (
+            string stopId,
+            ITradingRepository repository,
+            IMarketCalendar calendar,
+            ILogger<TradingAgentModule> logger,
+            CancellationToken ct) =>
+        {
+            var stop = (await repository.GetProtectiveStopsAsync(openOnly: true, ct))
+                .FirstOrDefault(s => s.StopId == stopId);
+
+            if (stop is null)
+                return Results.NotFound(new
+                {
+                    error = "not_found",
+                    message = "No open protective stop with that id."
+                });
+
+            await repository.TrySetProtectiveStopStateAsync(
+                stopId, stop.State, "closed", "Disarmed by the operator.", ct);
+
+            if (stop.LocalBackstopArmedId is { } backstopId)
+                await repository.TrySetArmedOrderStateAsync(
+                    backstopId, "armed", "cancelled",
+                    "The protective stop it backed was disarmed by the operator.", ct: ct);
+
+            var restingToday = stop.State == "active"
+                               && stop.LastPlacedSessionDate == DateOnly.FromDateTime(calendar.GetStatus().PktNow)
+                               && stop.PlacedQuantity > 0;
+
+            logger.LogWarning(
+                "[ProtectiveStops] {StopId} ({Symbol}) disarmed. Native order resting today: {Resting}.",
+                stopId, stop.Symbol, restingToday);
+
+            return Results.Ok(new
+            {
+                stopId,
+                state = "closed",
+                brokerOrderStillResting = restingToday,
+                message = restingToday
+                    ? $"This system will no longer manage the stop, but a native SELL stop for "
+                    + $"{stop.PlacedQuantity} {stop.Symbol} was placed at the broker today and CANNOT be "
+                    + "cancelled from here. Cancel it in the portal if you do not want it to fire."
+                    : "Disarmed. No native stop was resting at the broker for this session."
+            });
         }).RequireAuthorization("TradingAnalyst");
 
         // ── Approval window ───────────────────────────────────────────────────
@@ -1786,7 +1966,25 @@ public sealed record ArmOrderRequest(
     DateTime? ExpiresUtc = null,
     int? ExpiresInDays = null,
     string? Note = null,
-    string? SourceAlertId = null);
+    string? SourceAlertId = null,
+    AttachStopRequest? AttachStop = null);
+
+/// <summary>
+/// A protective stop to attach to a BUY entry, armed only once the entry is confirmed filled.
+/// </summary>
+/// <param name="Quantity">
+/// Shares to protect. Null follows the entry's own quantity, clamped to what actually fills.
+/// </param>
+/// <param name="Recurring">
+/// Re-place the native stop every session. On by default, because this venue clears outstanding
+/// orders at the close — a one-shot stop protects the position for a single day and then lapses
+/// silently.
+/// </param>
+public sealed record AttachStopRequest(
+    decimal? StopTrigger,
+    decimal? StopLimit = null,
+    int? Quantity = null,
+    bool Recurring = true);
 
 /// <summary>How long to suspend order confirmation for.</summary>
 public sealed record ArmApprovalRequest(int? Minutes = null);

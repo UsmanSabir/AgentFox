@@ -316,6 +316,66 @@ public interface ITradingRepository
         string? reason = null,
         string? executionId = null,
         CancellationToken ct = default);
+
+    // ── Protective stops ──────────────────────────────────────────────────────
+    // A standing intent to keep a position protected at a level. Durable and re-materialised as a
+    // native day order each session, because this venue clears outstanding orders at the close — a
+    // one-shot child order would protect the position for one day and then silently stop.
+
+    Task<string> SaveProtectiveStopAsync(
+        TradingAgent.Watchlist.ProtectiveStop stop,
+        CancellationToken ct = default);
+
+    /// <summary>Stops not yet closed; <paramref name="openOnly"/> false includes the history.</summary>
+    Task<IReadOnlyList<TradingAgent.Watchlist.ProtectiveStop>> GetProtectiveStopsAsync(
+        bool openOnly = true,
+        CancellationToken ct = default);
+
+    /// <summary>Compare-and-set on the current state. False when it was not in the expected one.</summary>
+    Task<bool> TrySetProtectiveStopStateAsync(
+        string stopId,
+        string expectedState,
+        string newState,
+        string? reason = null,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Promotes a stop to <c>active</c> against a confirmed holdings increase, raising the protected
+    /// quantity. Never lowers it: a later, smaller delta must not shrink protection a bigger fill
+    /// already established.
+    /// </summary>
+    Task<bool> RecordProtectiveStopFillAsync(
+        string stopId,
+        int confirmedQuantity,
+        string reason,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Records a native placement. Coverage accumulates within a session and resets when the session
+    /// rolls, mirroring the venue clearing resting orders overnight.
+    /// </summary>
+    Task<bool> RecordProtectiveStopPlacementAsync(
+        string stopId,
+        DateOnly sessionDate,
+        int placedQuantity,
+        string? orderNo,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Refreshes the pre-entry holding a fill will be measured against. Confined to
+    /// <c>pending_fill</c>, because overwriting it after the entry has gone in would erase the very
+    /// number that proves a fill happened.
+    /// </summary>
+    Task<bool> RecordProtectiveStopBaselineAsync(
+        string stopId,
+        int baselineQuantity,
+        CancellationToken ct = default);
+
+    /// <summary>Links (or unlinks) the locally-armed SELL that covers the gaps the native stop cannot.</summary>
+    Task<bool> SetProtectiveStopBackstopAsync(
+        string stopId,
+        string? backstopArmedId,
+        CancellationToken ct = default);
 }
 
 /// <summary>One watched symbol.</summary>
