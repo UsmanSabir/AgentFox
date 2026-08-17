@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import {
-    Radio, RefreshCw,
+    Radio, RefreshCw, Pencil, Check, X, AlertTriangle,
     MessageSquare, Send, Hash, Phone, Mail,
     Smartphone, Wifi, Rss, Globe, Bot, Users
   } from 'lucide-svelte';
@@ -11,6 +11,71 @@
   let loading = true;
   let error = '';
   let intervalId: ReturnType<typeof setInterval>;
+
+  // ── Subscription editing ─────────────────────────────────────────────────
+  let editingId: string | null = null;
+  let draft = '';
+  let saving = false;
+  let saveError = '';
+  /** Set when a save applied live but could not be written to appsettings.json. */
+  let saveWarning = '';
+
+  const CATCH_ALL = '>';
+
+  function beginEdit(ch: ChannelInfo) {
+    editingId = ch.id;
+    draft = ch.receivesAll ? CATCH_ALL : (ch.subscriptions ?? []).join(', ');
+    saveError = '';
+    saveWarning = '';
+  }
+
+  function cancelEdit() {
+    editingId = null;
+    draft = '';
+    saveError = '';
+  }
+
+  /** Toggles one filter in the draft, so the topic list doubles as a picker. */
+  function toggleFilter(filter: string) {
+    const parts = draft.split(',').map((p) => p.trim()).filter(Boolean);
+    const at = parts.indexOf(filter);
+    if (at >= 0) parts.splice(at, 1);
+    else parts.push(filter);
+    draft = parts.join(', ');
+  }
+
+  function draftHas(filter: string) {
+    return draft.split(',').map((p) => p.trim()).includes(filter);
+  }
+
+  async function save(ch: ChannelInfo) {
+    saving = true;
+    saveError = '';
+    saveWarning = '';
+    try {
+      const result = await api.setChannelSubscriptions(ch.id, draft.trim());
+
+      // The change is already live on the server; a failed write only means it reverts on
+      // restart. Saying so is the point — silently succeeding would leave the operator
+      // believing a setting is permanent when it is not.
+      if (!result.persisted)
+        saveWarning =
+          `Applied to the running channel, but not saved: ${result.persistError ?? 'unknown error'}. ` +
+          'It will revert when the agent restarts.';
+
+      editingId = null;
+      await load();
+    } catch (e: unknown) {
+      saveError = e instanceof Error ? e.message : String(e);
+    } finally {
+      saving = false;
+    }
+  }
+
+  function onKeydown(event: KeyboardEvent, ch: ChannelInfo) {
+    if (event.key === 'Enter') { event.preventDefault(); save(ch); }
+    else if (event.key === 'Escape') { event.preventDefault(); cancelEdit(); }
+  }
 
   // Icon map keyed by stable backend channel type id.
   const typeIcons: Record<string, typeof Radio> = {
@@ -54,6 +119,10 @@
   }
 
   async function load() {
+    // The 5s poll would overwrite a half-typed filter with the server's copy, so an open editor
+    // pauses it. Saving reloads explicitly.
+    if (editingId !== null) return;
+
     error = '';
     try { status = await api.channels(); }
     catch (e: unknown) { error = e instanceof Error ? e.message : String(e); }
@@ -87,6 +156,16 @@
 
   {#if error}
     <div class="error-banner">{error}</div>
+  {/if}
+
+  {#if saveWarning}
+    <div class="warn-banner">
+      <AlertTriangle size={14} />
+      <span>{saveWarning}</span>
+      <button class="icon-btn" title="Dismiss" on:click={() => (saveWarning = '')}>
+        <X size={13} />
+      </button>
+    </div>
   {/if}
 
   <!-- Summary pills -->
@@ -164,10 +243,116 @@
                   {ch.status}
                 </span>
               </div>
+              <div class="detail-row detail-row-wrap">
+                <span class="detail-label">Receives</span>
+                {#if editingId === ch.id}
+                  <span class="edit-spacer"></span>
+                {:else}
+                  <span class="filters">
+                    {#if ch.receivesAll}
+                      <code class="filter filter-all" title="Catch-all — every topic">everything</code>
+                    {:else}
+                      {#each ch.subscriptions ?? [] as filter}
+                        <code class="filter">{filter}</code>
+                      {/each}
+                    {/if}
+                    <button
+                      class="icon-btn"
+                      title="Edit subscriptions"
+                      aria-label="Edit subscriptions for {ch.name}"
+                      on:click={() => beginEdit(ch)}
+                    >
+                      <Pencil size={12} />
+                    </button>
+                  </span>
+                {/if}
+              </div>
+
+              <!-- Inline subscription editor -->
+              {#if editingId === ch.id}
+                <div class="editor">
+                  <div class="editor-row">
+                    <!-- svelte-ignore a11y-autofocus -->
+                    <input
+                      class="editor-input mono"
+                      bind:value={draft}
+                      placeholder={CATCH_ALL}
+                      autofocus
+                      disabled={saving}
+                      aria-label="Topic filters, comma separated"
+                      on:keydown={(e) => onKeydown(e, ch)}
+                    />
+                    <button class="icon-btn icon-btn-ok" title="Save (Enter)" disabled={saving} on:click={() => save(ch)}>
+                      <Check size={14} />
+                    </button>
+                    <button class="icon-btn" title="Cancel (Esc)" disabled={saving} on:click={cancelEdit}>
+                      <X size={14} />
+                    </button>
+                  </div>
+
+                  <p class="editor-hint">
+                    Comma-separated. <code>*</code> = one segment, <code>&gt;</code> = one or more
+                    trailing segments (last only). Empty or <code>&gt;</code> receives everything.
+                  </p>
+
+                  {#if (status?.topics ?? []).length > 0}
+                    <div class="picker">
+                      <button
+                        class="pick"
+                        class:pick-on={draftHas(CATCH_ALL)}
+                        on:click={() => toggleFilter(CATCH_ALL)}
+                      >everything</button>
+                      {#each status?.topics ?? [] as topic (topic.name)}
+                        <button
+                          class="pick"
+                          class:pick-on={draftHas(topic.name)}
+                          title={topic.description}
+                          on:click={() => toggleFilter(topic.name)}
+                        >{topic.name}</button>
+                      {/each}
+                    </div>
+                  {/if}
+
+                  {#if saveError}
+                    <p class="editor-error">{saveError}</p>
+                  {/if}
+                </div>
+              {/if}
             </div>
           </div>
         </div>
       {/each}
+    </div>
+  {/if}
+
+  <!-- Published topics -->
+  {#if status?.ready && (status.topics ?? []).length > 0}
+    <div class="topics card">
+      <div class="topics-header">
+        <Radio size={15} />
+        <h2>Published topics</h2>
+      </div>
+      <p class="topics-intro">
+        Subjects the agent and its plugins publish on. A channel's <code>Subscribe</code> filters are
+        matched against these — <code>*</code> matches exactly one segment,
+        <code>&gt;</code> matches one or more trailing segments and must come last. So
+        <code>trading.*</code> matches <code>trading.order</code> but not
+        <code>trading.order.accepted</code>, while <code>trading.&gt;</code> matches both.
+        A filter matching no topic is silent, not an error.
+      </p>
+      <ul class="topic-list">
+        {#each status.topics as topic (topic.name)}
+          <li class="topic">
+            <code class="topic-name">{topic.name}</code>
+            <span class="topic-desc">{topic.description}</span>
+            {#if topic.mandatory}
+              <span class="badge badge-amber" title="Delivered to every channel if nothing subscribes to it">
+                always delivered
+              </span>
+            {/if}
+          </li>
+        {/each}
+      </ul>
     </div>
   {/if}
 
@@ -176,7 +361,9 @@
     <p>
       Channels are configured in <code>appsettings.json</code> → <code>Channels[]</code>.
       Set <code>"Enabled": false</code> on any entry to disable it without removing it.
-      Changes take effect on next restart.
+      Add <code>"Name"</code> to pin a stable id (required if you run two channels of the same type),
+      and <code>"Subscribe": "trading.&gt;, hitl.&gt;"</code> to narrow what it receives — omit it and
+      the channel receives everything. Changes take effect on next restart.
     </p>
   </div>
 </div>
@@ -231,6 +418,48 @@
   .badge        { display: inline-flex; padding: 0.15rem 0.5rem; border-radius: 99px; font-size: 0.6875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
   .badge-green  { background: rgba(52,211,153,0.12); color: #34d399; }
   .badge-red    { background: rgba(239,68,68,0.12);  color: #f87171; }
+  .badge-amber  { background: rgba(251,191,36,0.12); color: #fbbf24; }
+
+  /* Subscriptions */
+  .detail-row-wrap { align-items: flex-start; }
+  .filters      { display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem; justify-content: flex-end; }
+  .filter       { font-family: var(--font-mono, monospace); font-size: 0.6875rem; background: var(--surface-2); color: var(--text-2); padding: 0.1em 0.4em; border-radius: 4px; white-space: nowrap; }
+  .filter-all   { color: var(--text-3); font-style: italic; }
+  .edit-spacer  { flex: 1; }
+
+  .icon-btn     { display: inline-flex; align-items: center; justify-content: center; background: transparent; border: 1px solid transparent; color: var(--text-3); border-radius: 4px; padding: 0.15rem; cursor: pointer; line-height: 0; }
+  .icon-btn:hover:not(:disabled) { color: var(--text); background: var(--surface-2); border-color: var(--border); }
+  .icon-btn:disabled { opacity: 0.5; cursor: default; }
+  .icon-btn-ok:hover:not(:disabled) { color: #34d399; }
+
+  /* Inline editor */
+  .editor       { display: flex; flex-direction: column; gap: 0.5rem; padding-top: 0.5rem; border-top: 1px solid var(--border); }
+  .editor-row   { display: flex; align-items: center; gap: 0.375rem; }
+  .editor-input { flex: 1; min-width: 0; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm, 6px); color: var(--text); padding: 0.35rem 0.5rem; font-size: 0.75rem; }
+  .editor-input:focus { outline: none; border-color: var(--primary); }
+  .editor-hint  { margin: 0; font-size: 0.6875rem; color: var(--text-3); line-height: 1.5; }
+  .editor-hint code { font-family: var(--font-mono, monospace); background: var(--surface-2); padding: 0 0.25em; border-radius: 3px; color: var(--accent); }
+  .editor-error { margin: 0; font-size: 0.75rem; color: #f87171; line-height: 1.5; }
+
+  .picker       { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+  .pick         { font-family: var(--font-mono, monospace); font-size: 0.6875rem; background: var(--surface-2); border: 1px solid var(--border); color: var(--text-3); padding: 0.1em 0.4em; border-radius: 4px; cursor: pointer; }
+  .pick:hover   { color: var(--text); }
+  .pick-on      { background: rgba(52,211,153,0.12); border-color: rgba(52,211,153,0.35); color: #34d399; }
+
+  .warn-banner  { display: flex; align-items: center; gap: 0.5rem; background: rgba(251,191,36,0.1); border: 1px solid rgba(251,191,36,0.3); color: #fbbf24; padding: 0.625rem 0.875rem; border-radius: var(--radius-sm); font-size: 0.8125rem; }
+  .warn-banner span { flex: 1; }
+
+  /* Topics */
+  .topics        { padding: 1rem 1.125rem; display: flex; flex-direction: column; gap: 0.625rem; }
+  .topics-header { display: flex; align-items: center; gap: 0.5rem; }
+  .topics-header h2 { font-size: 0.9375rem; font-weight: 700; color: var(--text); margin: 0; }
+  .topics-header :global(svg) { color: var(--primary); }
+  .topics-intro  { margin: 0; font-size: 0.8125rem; color: var(--text-3); line-height: 1.6; }
+  .topics code   { font-family: var(--font-mono, monospace); background: var(--surface-2); padding: 0.1em 0.35em; border-radius: 4px; color: var(--accent); }
+  .topic-list    { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.375rem; }
+  .topic         { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem; font-size: 0.8125rem; }
+  .topic-name    { flex-shrink: 0; }
+  .topic-desc    { color: var(--text-3); }
 
   /* Loading / empty */
   .loading { text-align: center; color: var(--text-3); padding: 3rem; font-size: 0.875rem; }

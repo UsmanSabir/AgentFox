@@ -26,7 +26,10 @@ public sealed class ChannelUserNotifier : IUserNotifier
         _logger = logger;
     }
 
-    public async Task<int> NotifyAsync(string message, CancellationToken ct = default)
+    public Task<int> NotifyAsync(string message, CancellationToken ct = default) =>
+        NotifyAsync(message, topic: null, ct);
+
+    public async Task<int> NotifyAsync(string message, string? topic, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(message)) return 0;
 
@@ -34,21 +37,24 @@ public sealed class ChannelUserNotifier : IUserNotifier
         if (manager is null)
         {
             _logger?.LogWarning(
-                "IUserNotifier: channels are not ready yet; dropped a {Length}-char notification.",
-                message.Length);
+                "IUserNotifier: channels are not ready yet; dropped a {Length}-char notification on '{Topic}'.",
+                message.Length, topic ?? "(none)");
             return 0;
         }
 
-        var sent = await manager.BroadcastAsync(message);
+        var sent = await manager.BroadcastAsync(message, topic);
 
+        // ChannelManager already warns when a topic matched no subscription — that is a routing
+        // problem. This one stays because a zero here also covers "no channels at all", which is a
+        // different thing for a caller deciding whether its alert reached anyone.
         if (sent == 0)
             _logger?.LogWarning(
-                "IUserNotifier: no connected channel accepted a {Length}-char notification.",
-                message.Length);
+                "IUserNotifier: no connected channel accepted a {Length}-char notification on '{Topic}'.",
+                message.Length, topic ?? "(none)");
         else
             _logger?.LogInformation(
-                "IUserNotifier: delivered a {Length}-char notification to {Count} channel(s).",
-                message.Length, sent);
+                "IUserNotifier: delivered a {Length}-char notification on '{Topic}' to {Count} channel(s).",
+                message.Length, topic ?? "(none)", sent);
 
         return sent;
     }

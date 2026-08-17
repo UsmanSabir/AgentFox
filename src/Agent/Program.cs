@@ -338,6 +338,10 @@ class Program
         builder.Services.AddSingleton<IChannelProvider, TeamsChannelProvider>();
         builder.Services.AddSingleton<IChannelProvider, WhatsAppChannelProvider>();
         builder.Services.AddSingleton<ChannelProviderCatalog>();
+        // One writer for the Channels array: manage_channel and the web UI's subscription editor
+        // both mutate it, and two independent read-modify-write cycles lose entries.
+        builder.Services.AddSingleton(_ => new AgentFox.Channels.ChannelConfigStore(
+            AgentFox.Helpers.AppSettingsHelper.ResolveAppSettingsPath()));
 
         // LLM
         builder.Services.AddSingleton(_ => LLMFactory.CreateFromConfiguration(configuration));

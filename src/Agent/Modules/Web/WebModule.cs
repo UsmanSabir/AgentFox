@@ -1,8 +1,10 @@
+using AgentFox.Channels;
 using AgentFox.Helpers;
 using AgentFox.Hitl;
 using AgentFox.LLM;
 using AgentFox.MCP;
 using AgentFox.Memory;
+using AgentFox.Plugins.Channels;
 using AgentFox.Plugins.Models;
 using AgentFox.Planning;
 using AgentFox.Sessions;
@@ -1054,11 +1056,13 @@ public class WebModule : IAppModule
 
             var channels = manager.Channels.Values.Select(ch => new
             {
-                id          = ch.ChannelId,
-                name        = ch.Name,
-                type        = ch.Type,
-                isConnected = ch.IsConnected,
-                status      = ch.IsConnected ? "connected" : "disconnected"
+                id            = ch.ChannelId,
+                name          = ch.Name,
+                type          = ch.Type,
+                isConnected   = ch.IsConnected,
+                status        = ch.IsConnected ? "connected" : "disconnected",
+                subscriptions = ch.Subscriptions.Filters,
+                receivesAll   = ch.Subscriptions.IsCatchAll
             });
 
             return Results.Ok(new
@@ -1066,7 +1070,55 @@ public class WebModule : IAppModule
                 ready    = true,
                 channels,
                 total     = manager.Channels.Count,
-                connected = manager.Channels.Values.Count(c => c.IsConnected)
+                connected = manager.Channels.Values.Count(c => c.IsConnected),
+
+                // The published topics, so the UI can show what is subscribable rather than making
+                // operators guess a subject and find out from the absence of messages.
+                topics = NotificationTopics.Known.Select(t => new
+                {
+                    name        = t.Name,
+                    description = t.Description,
+                    mandatory   = t.Mandatory
+                })
+            });
+        });
+
+        // PUT /channels/{id}/subscriptions — repoint one channel's topic filters.
+        // The live channel is updated first and the config file second: routing reads the live
+        // object, so a save that fails costs the setting at next restart, not the change itself.
+        // That is reported back rather than swallowed, since "it worked but won't survive a
+        // restart" is the one outcome an operator has to act on.
+        endpoints.MapPut("/channels/{id}/subscriptions", (
+            string id,
+            ChannelSubscriptionRequest? body,
+            ChannelManagerHolder channelHolder,
+            ChannelConfigStore configStore) =>
+        {
+            var manager = channelHolder.Manager;
+            if (manager == null)
+                return Results.Json(new { error = "Channel manager is not ready yet." },
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+
+            var channel = manager.GetChannelByName(id);
+            if (channel == null)
+                return Results.NotFound(new { error = $"Channel '{id}' is not registered." });
+
+            if (!TopicSubscription.TryParse(body?.Subscribe, out var subscription, out var errors))
+                return Results.BadRequest(new { error = string.Join(" ", errors) });
+
+            var previous = channel.Subscriptions.ToString();
+            channel.Subscriptions = subscription;
+
+            var persistError = configStore.SetSubscription(channel, subscription);
+
+            return Results.Ok(new
+            {
+                id            = channel.ChannelId,
+                subscriptions = subscription.Filters,
+                receivesAll   = subscription.IsCatchAll,
+                previous,
+                persisted     = persistError == null,
+                persistError
             });
         });
 
@@ -1510,6 +1562,12 @@ public class WebModule : IAppModule
 
 /// <summary>Optional feedback/reason accompanying a HITL /hitl/{id}/approve|reject call.</summary>
 public record HitlDecisionRequest(string? Message);
+
+/// <summary>
+/// Body of <c>PUT /channels/{id}/subscriptions</c>. <paramref name="Subscribe"/> is the same
+/// comma-separated filter spec used in appsettings; null or blank means the catch-all.
+/// </summary>
+public record ChannelSubscriptionRequest(string? Subscribe);
 
 public record HeartbeatRequest(
     string Name,

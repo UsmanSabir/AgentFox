@@ -320,6 +320,18 @@ export interface ChannelInfo {
   type: string;
   isConnected: boolean;
   status: 'connected' | 'disconnected';
+  /** Topic filters this channel receives. `['>']` is the catch-all. */
+  subscriptions: string[];
+  /** True when `subscriptions` is the plain catch-all and nothing is filtered out. */
+  receivesAll: boolean;
+}
+
+/** A subject the backend publishes notifications on. */
+export interface NotificationTopicInfo {
+  name: string;
+  description: string;
+  /** Never filtered to nothing — falls back to every channel if unsubscribed. */
+  mandatory: boolean;
 }
 
 export interface ChannelsStatus {
@@ -327,6 +339,18 @@ export interface ChannelsStatus {
   channels: ChannelInfo[];
   total: number;
   connected: number;
+  topics: NotificationTopicInfo[];
+}
+
+export interface ChannelSubscriptionResult {
+  id: string;
+  subscriptions: string[];
+  receivesAll: boolean;
+  /** The filters this replaced, in their config string form. */
+  previous: string;
+  /** False when the change is live but could not be written to appsettings.json. */
+  persisted: boolean;
+  persistError: string | null;
 }
 
 /**
@@ -425,13 +449,27 @@ async function patch<T>(path: string, body: unknown): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+/**
+ * Pulls the API's own `{ error }` out of a failed response. A bare status line is useless for
+ * validation failures — "400 Bad Request" instead of which topic filter was rejected and why.
+ */
+async function errorFrom(res: Response): Promise<Error> {
+  try {
+    const body = await res.json();
+    if (body && typeof body.error === 'string' && body.error) return new Error(body.error);
+  } catch {
+    /* not JSON, or already consumed — fall through to the status line */
+  }
+  return new Error(`${res.status} ${res.statusText}`);
+}
+
 async function put<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method:  'PUT',
     headers: requestHeaders(true),
     body:    JSON.stringify(body)
   });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) throw await errorFrom(res);
   return res.json() as Promise<T>;
 }
 
@@ -507,6 +545,9 @@ export const api = {
   },
   mcp:      () => get<McpStatus>('/mcp'),
   channels: () => get<ChannelsStatus>('/channels'),
+  setChannelSubscriptions: (id: string, subscribe: string) =>
+    put<ChannelSubscriptionResult>(
+      `/channels/${encodeURIComponent(id)}/subscriptions`, { subscribe }),
   pendingNotifications: (conversationId: string) =>
     get<PendingNotificationsResponse>(`/chat/pending/${encodeURIComponent(conversationId)}`),
   todos: (conversationId: string) =>

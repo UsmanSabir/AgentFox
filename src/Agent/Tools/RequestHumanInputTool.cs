@@ -2,6 +2,7 @@ using AgentFox.Agents;
 using AgentFox.Channels;
 using AgentFox.Helpers;
 using AgentFox.Hitl;
+using AgentFox.Plugins.Channels;
 using AgentFox.Plugins.Interfaces;
 using AgentFox.Sessions;
 using Microsoft.Extensions.Logging;
@@ -186,7 +187,8 @@ public class RequestHumanInputTool : BaseTool
             try
             {
                 deliveredTo = await _channelManager.BroadcastAsync(
-                    $"{message}\n\n_Reply with_ `/hitl reply {pending.QuestionId} <your answer>`");
+                    $"{message}\n\n_Reply with_ `/hitl reply {pending.QuestionId} <your answer>`",
+                    NotificationTopics.HitlInput);
             }
             catch (Exception ex)
             {

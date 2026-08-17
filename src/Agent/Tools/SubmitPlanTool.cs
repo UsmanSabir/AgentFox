@@ -121,7 +121,7 @@ public class SubmitPlanTool : BaseTool
             new("❌ Reject", $"/reject {approvalId}")
         };
         var deliveredTo = _channelManager != null
-            ? await _channelManager.BroadcastActionableAsync(msg, actions)
+            ? await _channelManager.BroadcastActionableAsync(msg, actions, NotificationTopics.HitlPlan)
             : 0;
 
         // Gated: submit_plan runs on whichever lane the turn is on, so this banner is routinely

@@ -28,8 +28,15 @@ public class ChannelManager
     public IReadOnlyDictionary<string, Channel> Channels => _channels;
     public ChannelMessageGateway? Gateway => _gateway;
 
+    /// <summary>
+    /// Resolves by channel id first, then display name, then type. Id comes first because it is the
+    /// only one guaranteed unique — two Telegram bots share a name and a type, and a caller that
+    /// knows the id means that specific channel.
+    /// </summary>
     public Channel? GetChannelByName(string name) =>
         _channels.Values.FirstOrDefault(c =>
+            c.ChannelId.Equals(name, StringComparison.OrdinalIgnoreCase))
+        ?? _channels.Values.FirstOrDefault(c =>
             c.Name.Equals(name, StringComparison.OrdinalIgnoreCase) ||
             c.Type.Equals(name, StringComparison.OrdinalIgnoreCase));
 
@@ -79,6 +86,27 @@ public class ChannelManager
 
     public void AddChannel(Channel channel)
     {
+        // Providers mint their own ids, and several are not unique per instance: Telegram hardcodes
+        // "telegram", so a second bot used to replace the first in this dictionary — registered,
+        // connected, polling, and unreachable by every send. Suffixing keeps both addressable, and
+        // the warning says which entry needs an explicit Name in config.
+        if (string.IsNullOrWhiteSpace(channel.ChannelId))
+            channel.ChannelId = channel.Type;
+
+        if (_channels.ContainsKey(channel.ChannelId))
+        {
+            var baseId = channel.ChannelId;
+            var suffix = 2;
+            while (_channels.ContainsKey($"{baseId}#{suffix}"))
+                suffix++;
+
+            channel.ChannelId = $"{baseId}#{suffix}";
+            _logger?.LogWarning(
+                "AddChannel: id '{BaseId}' is already registered; this channel is now '{ChannelId}'. "
+                + "Give it a \"Name\" in config to pin a stable id for subscriptions.",
+                baseId, channel.ChannelId);
+        }
+
         _channels[channel.ChannelId] = channel;
         channel.OnMessageReceived += async (_, msg) => await HandleMessage(channel, msg);
     }
@@ -119,16 +147,67 @@ public class ChannelManager
     }
 
     /// <summary>
-    /// Sends the same message to every connected channel — used for HITL approval
-    /// notifications so any configured surface (not just the originating one) can act on
-    /// them. Mirrors <c>NotifyUserTool</c>'s broadcast pattern. Per-channel failures are
-    /// logged and swallowed so one broken channel cannot suppress the notification on the
-    /// others. Returns the number of channels the message was actually sent to.
+    /// The single place a topic turns into a recipient list. Every fan-out in the process goes
+    /// through here, so the delivery policy lives in one readable block instead of being restated
+    /// at each call site.
+    ///
+    /// <para>Three cases, in order:</para>
+    /// <list type="number">
+    ///   <item><b>No topic</b> — an unaddressed notification, which is what every caller predating
+    ///         subscriptions sends. Reaches every connected channel, unchanged.</item>
+    ///   <item><b>Matched</b> — the channels whose subscriptions cover the topic.</item>
+    ///   <item><b>Matched nothing</b> — normally an empty list, and the caller's zero return is the
+    ///         signal. For a <see cref="NotificationTopics.IsMandatory"/> topic it falls back to
+    ///         every connected channel: those are questions whose answer the agent is blocked on,
+    ///         and a misconfigured filter must not be able to deadlock a turn.</item>
+    /// </list>
     /// </summary>
-    public async Task<int> BroadcastAsync(string message)
+    public IReadOnlyList<Channel> ResolveRecipients(string? topic)
+    {
+        var connected = _channels.Values.Where(c => c.IsConnected).ToList();
+
+        if (string.IsNullOrWhiteSpace(topic) || connected.Count == 0)
+            return connected;
+
+        var matched = connected.Where(c => c.Subscriptions.Matches(topic)).ToList();
+        if (matched.Count > 0)
+            return matched;
+
+        if (NotificationTopics.IsMandatory(topic))
+        {
+            _logger?.LogWarning(
+                "No channel subscribes to '{Topic}', which cannot go undelivered — falling back to "
+                + "all {Count} connected channel(s). Add it to a channel's subscriptions to silence this.",
+                topic, connected.Count);
+            return connected;
+        }
+
+        // Worth a warning rather than a debug line: this is the failure mode of subject routing.
+        // Nothing throws, nothing retries, the message is simply gone — and a filter one character
+        // off from the topic looks correct in config for as long as nobody reads the logs.
+        _logger?.LogWarning(
+            "Notification on '{Topic}' matched none of the {Count} connected channel(s) and was dropped. "
+            + "Check the subscription filters against the published topic.",
+            topic, connected.Count);
+
+        return matched;
+    }
+
+    /// <summary>
+    /// Sends the same message to every channel subscribed to <paramref name="topic"/> — used for
+    /// HITL approval notifications so any configured surface (not just the originating one) can act
+    /// on them. Mirrors <c>NotifyUserTool</c>'s broadcast pattern. Per-channel failures are logged
+    /// and swallowed so one broken channel cannot suppress the notification on the others. Returns
+    /// the number of channels the message was actually sent to.
+    /// </summary>
+    /// <param name="topic">
+    /// Dot-separated subject, e.g. <c>trading.order.accepted</c>. Null or blank delivers to every
+    /// connected channel regardless of subscription.
+    /// </param>
+    public async Task<int> BroadcastAsync(string message, string? topic = null)
     {
         var sent = 0;
-        foreach (var channel in _channels.Values.Where(c => c.IsConnected))
+        foreach (var channel in ResolveRecipients(topic))
         {
             try
             {
@@ -148,10 +227,13 @@ public class ChannelManager
     /// (Discord buttons, Telegram inline keyboards) a chance to render <paramref name="actions"/>
     /// as one-click controls instead of requiring the user to type a command back.
     /// </summary>
-    public async Task<int> BroadcastActionableAsync(string message, IReadOnlyList<ChannelAction> actions)
+    public async Task<int> BroadcastActionableAsync(
+        string message,
+        IReadOnlyList<ChannelAction> actions,
+        string? topic = null)
     {
         var sent = 0;
-        foreach (var channel in _channels.Values.Where(c => c.IsConnected))
+        foreach (var channel in ResolveRecipients(topic))
         {
             try
             {

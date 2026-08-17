@@ -10,6 +10,17 @@ public abstract class Channel
     public string ChannelId { get; set; } = string.Empty;
     public bool IsConnected { get; protected set; }
 
+    /// <summary>
+    /// The topics this channel receives notifications for. Defaults to the catch-all, so a channel
+    /// nobody configured behaves exactly as it did before subscriptions existed.
+    /// <para>
+    /// Set by the host from config or <c>manage_channel</c>; providers never need to touch it.
+    /// Replaced wholesale rather than mutated — <c>ChannelManager</c> reads it from the fan-out
+    /// while the config surface may be rewriting it.
+    /// </para>
+    /// </summary>
+    public TopicSubscription Subscriptions { get; set; } = TopicSubscription.All;
+
     public abstract Task<bool> ConnectAsync();
 
     public abstract Task DisconnectAsync();

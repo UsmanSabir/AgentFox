@@ -586,7 +586,7 @@ public sealed class ProtectiveStopWorker : BackgroundService
 
         if (!_alerted.Add($"{stop.StopId}:{reasonKey}")) return;
 
-        try { await _notifier.NotifyAsync(message); }
+        try { await _notifier.NotifyAsync(message, TradingTopics.Stop(reasonKey)); }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "[ProtectiveStops] Could not deliver the alert for {StopId}.", stop.StopId);

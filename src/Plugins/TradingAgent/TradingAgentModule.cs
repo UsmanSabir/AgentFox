@@ -127,6 +127,12 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
 
     public void RegisterServices(IServiceCollection services, IConfiguration config)
     {
+        // Before anything else: the notify_user tool and the channels UI both enumerate the topic
+        // registry to show operators what can be subscribed to, and both are built during host
+        // startup. Declared later, this plugin's subjects would be missing from the list an
+        // operator writes their subscriptions against.
+        TradingTopics.RegisterAll();
+
         services.Configure<TradingAgentOptions>(
             config.GetSection($"Plugins:{TradingAgentOptions.SectionName}"));
 

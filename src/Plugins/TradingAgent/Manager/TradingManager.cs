@@ -220,14 +220,16 @@ public sealed class TradingManager
         {
             // Not cancelled with the caller's token: the orders are already at the broker, so the
             // user needs to hear about them even if the originating request was abandoned.
+            var topic = TradingTopics.Order(state);
+
             var sent = await _notifier
-                .NotifyAsync(BuildExecutionMessage(result, state))
+                .NotifyAsync(BuildExecutionMessage(result, state), topic)
                 .WaitAsync(NotifyTimeout);
 
             if (sent == 0)
                 _logger.LogWarning(
-                    "[TradingManager] Execution {ExecutionId} ({State}) reached no channels.",
-                    result.ExecutionId, state);
+                    "[TradingManager] Execution {ExecutionId} ({State}) reached no channels on '{Topic}'.",
+                    result.ExecutionId, state, topic);
         }
         catch (Exception ex)
         {
