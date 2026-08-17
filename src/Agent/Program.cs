@@ -337,6 +337,9 @@ class Program
         builder.Services.AddSingleton<IChannelProvider, DiscordChannelProvider>();
         builder.Services.AddSingleton<IChannelProvider, TeamsChannelProvider>();
         builder.Services.AddSingleton<IChannelProvider, WhatsAppChannelProvider>();
+        // Credential-free channel that records instead of sending — the way to verify a topic
+        // subscription actually matches without standing up a real transport.
+        builder.Services.AddSingleton<IChannelProvider, DummyChannelProvider>();
         builder.Services.AddSingleton<ChannelProviderCatalog>();
         // One writer for the Channels array: manage_channel and the web UI's subscription editor
         // both mutate it, and two independent read-modify-write cycles lose entries.

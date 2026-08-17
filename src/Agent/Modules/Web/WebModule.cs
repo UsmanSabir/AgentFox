@@ -1062,7 +1062,11 @@ public class WebModule : IAppModule
                 isConnected   = ch.IsConnected,
                 status        = ch.IsConnected ? "connected" : "disconnected",
                 subscriptions = ch.Subscriptions.Filters,
-                receivesAll   = ch.Subscriptions.IsCatchAll
+                receivesAll   = ch.Subscriptions.IsCatchAll,
+
+                // Lets the UI offer an outbox view only where there is one to show.
+                recordsMessages = ch is IInspectableChannel,
+                receivedCount   = (ch as IInspectableChannel)?.RecentMessages.Count ?? 0
             });
 
             return Results.Ok(new
@@ -1081,6 +1085,57 @@ public class WebModule : IAppModule
                     mandatory   = t.Mandatory
                 })
             });
+        });
+
+        // GET /channels/{id}/messages — what a recording channel actually received.
+        // Only channels implementing IInspectableChannel (the dummy test channel) have an outbox;
+        // a real transport hands the message to Telegram or Discord and keeps nothing. This is the
+        // read side of verifying a subscription: cause the event, then check what arrived here.
+        endpoints.MapGet("/channels/{id}/messages", (
+            string id,
+            ChannelManagerHolder channelHolder) =>
+        {
+            var manager = channelHolder.Manager;
+            if (manager == null)
+                return Results.Json(new { error = "Channel manager is not ready yet." },
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+
+            var channel = manager.GetChannelByName(id);
+            if (channel == null)
+                return Results.NotFound(new { error = $"Channel '{id}' is not registered." });
+
+            if (channel is not IInspectableChannel inspectable)
+                return Results.BadRequest(new
+                {
+                    error = $"Channel '{channel.ChannelId}' ({channel.Type}) does not record messages. " +
+                            "Add a 'dummy' channel to inspect delivery."
+                });
+
+            return Results.Ok(new
+            {
+                id       = channel.ChannelId,
+                messages = inspectable.RecentMessages.Select(m => new
+                {
+                    sequence = m.Sequence,
+                    at       = m.At,
+                    targetId = m.TargetId,
+                    content  = m.Content,
+                    actions  = m.Actions
+                })
+            });
+        });
+
+        // DELETE /channels/{id}/messages — reset the outbox between checks.
+        endpoints.MapDelete("/channels/{id}/messages", (
+            string id,
+            ChannelManagerHolder channelHolder) =>
+        {
+            var channel = channelHolder.Manager?.GetChannelByName(id);
+            if (channel is not IInspectableChannel inspectable)
+                return Results.NotFound(new { error = $"No recording channel '{id}'." });
+
+            inspectable.ClearOutbox();
+            return Results.Ok(new { id, cleared = true });
         });
 
         // PUT /channels/{id}/subscriptions — repoint one channel's topic filters.

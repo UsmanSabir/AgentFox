@@ -5,7 +5,12 @@
     MessageSquare, Send, Hash, Phone, Mail,
     Smartphone, Wifi, Rss, Globe, Bot, Users
   } from 'lucide-svelte';
-  import { api, type ChannelInfo, type ChannelsStatus } from '$lib/api';
+  import {
+    api,
+    type ChannelInfo,
+    type ChannelsStatus,
+    type ChannelOutboxEntry
+  } from '$lib/api';
 
   let status: ChannelsStatus | null = null;
   let loading = true;
@@ -75,6 +80,40 @@
   function onKeydown(event: KeyboardEvent, ch: ChannelInfo) {
     if (event.key === 'Enter') { event.preventDefault(); save(ch); }
     else if (event.key === 'Escape') { event.preventDefault(); cancelEdit(); }
+  }
+
+  // ── Test-channel outbox ──────────────────────────────────────────────────
+  // Only 'dummy' channels record what they were asked to deliver. Reading it back is how you
+  // confirm a subscription filter actually matched, rather than inferring it from silence.
+  let outboxId: string | null = null;
+  let outbox: ChannelOutboxEntry[] = [];
+  let outboxError = '';
+
+  async function toggleOutbox(ch: ChannelInfo) {
+    if (outboxId === ch.id) { outboxId = null; outbox = []; return; }
+    outboxId = ch.id;
+    await loadOutbox(ch.id);
+  }
+
+  async function loadOutbox(id: string) {
+    outboxError = '';
+    try { outbox = (await api.channelMessages(id)).messages; }
+    catch (e: unknown) { outboxError = e instanceof Error ? e.message : String(e); }
+  }
+
+  async function clearOutbox(id: string) {
+    try {
+      await api.clearChannelMessages(id);
+      outbox = [];
+      await load();
+    } catch (e: unknown) {
+      outboxError = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  function shortTime(iso: string) {
+    const d = new Date(iso);
+    return isNaN(d.getTime()) ? iso : d.toLocaleTimeString();
   }
 
   // Icon map keyed by stable backend channel type id.
@@ -318,6 +357,46 @@
                   {/if}
                 </div>
               {/if}
+
+              <!-- Test-channel outbox -->
+              {#if ch.recordsMessages}
+                <div class="outbox">
+                  <div class="outbox-head">
+                    <button class="link-btn" on:click={() => toggleOutbox(ch)}>
+                      {outboxId === ch.id ? 'Hide' : 'Show'} received ({ch.receivedCount})
+                    </button>
+                    {#if outboxId === ch.id}
+                      <button class="link-btn" on:click={() => loadOutbox(ch.id)}>Refresh</button>
+                      <button class="link-btn" on:click={() => clearOutbox(ch.id)}>Clear</button>
+                    {/if}
+                  </div>
+
+                  {#if outboxId === ch.id}
+                    {#if outboxError}
+                      <p class="editor-error">{outboxError}</p>
+                    {:else if outbox.length === 0}
+                      <p class="editor-hint">
+                        Nothing recorded. If you expected something, the filters above did not match
+                        the topic it was published on.
+                      </p>
+                    {:else}
+                      <ul class="msg-list">
+                        {#each outbox as msg (msg.sequence)}
+                          <li class="msg">
+                            <span class="msg-time mono">{shortTime(msg.at)}</span>
+                            <span class="msg-body">
+                              {msg.content}
+                              {#if msg.actions.length > 0}
+                                <span class="msg-actions">[{msg.actions.join('] [')}]</span>
+                              {/if}
+                            </span>
+                          </li>
+                        {/each}
+                      </ul>
+                    {/if}
+                  {/if}
+                </div>
+              {/if}
             </div>
           </div>
         </div>
@@ -445,6 +524,17 @@
   .pick         { font-family: var(--font-mono, monospace); font-size: 0.6875rem; background: var(--surface-2); border: 1px solid var(--border); color: var(--text-3); padding: 0.1em 0.4em; border-radius: 4px; cursor: pointer; }
   .pick:hover   { color: var(--text); }
   .pick-on      { background: rgba(52,211,153,0.12); border-color: rgba(52,211,153,0.35); color: #34d399; }
+
+  /* Test-channel outbox */
+  .outbox       { display: flex; flex-direction: column; gap: 0.375rem; padding-top: 0.5rem; border-top: 1px solid var(--border); }
+  .outbox-head  { display: flex; gap: 0.75rem; }
+  .link-btn     { background: none; border: none; padding: 0; color: var(--text-3); font-size: 0.75rem; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+  .link-btn:hover { color: var(--text); }
+  .msg-list     { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.25rem; max-height: 180px; overflow-y: auto; }
+  .msg          { display: flex; gap: 0.5rem; font-size: 0.75rem; line-height: 1.5; }
+  .msg-time     { color: var(--text-3); flex-shrink: 0; font-size: 0.6875rem; }
+  .msg-body     { color: var(--text-2); word-break: break-word; }
+  .msg-actions  { color: var(--text-3); }
 
   .warn-banner  { display: flex; align-items: center; gap: 0.5rem; background: rgba(251,191,36,0.1); border: 1px solid rgba(251,191,36,0.3); color: #fbbf24; padding: 0.625rem 0.875rem; border-radius: var(--radius-sm); font-size: 0.8125rem; }
   .warn-banner span { flex: 1; }

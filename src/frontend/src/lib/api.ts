@@ -324,6 +324,19 @@ export interface ChannelInfo {
   subscriptions: string[];
   /** True when `subscriptions` is the plain catch-all and nothing is filtered out. */
   receivesAll: boolean;
+  /** True for test channels that record deliveries instead of sending them. */
+  recordsMessages: boolean;
+  /** How many recorded messages are currently retained. */
+  receivedCount: number;
+}
+
+/** One delivery recorded by a channel that records instead of sending. */
+export interface ChannelOutboxEntry {
+  sequence: number;
+  at: string;
+  targetId: string;
+  content: string;
+  actions: string[];
 }
 
 /** A subject the backend publishes notifications on. */
@@ -548,6 +561,11 @@ export const api = {
   setChannelSubscriptions: (id: string, subscribe: string) =>
     put<ChannelSubscriptionResult>(
       `/channels/${encodeURIComponent(id)}/subscriptions`, { subscribe }),
+  channelMessages: (id: string) =>
+    get<{ id: string; messages: ChannelOutboxEntry[] }>(
+      `/channels/${encodeURIComponent(id)}/messages`),
+  clearChannelMessages: (id: string) =>
+    del<{ id: string; cleared: boolean }>(`/channels/${encodeURIComponent(id)}/messages`),
   pendingNotifications: (conversationId: string) =>
     get<PendingNotificationsResponse>(`/chat/pending/${encodeURIComponent(conversationId)}`),
   todos: (conversationId: string) =>

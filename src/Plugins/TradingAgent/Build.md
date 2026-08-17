@@ -12,7 +12,7 @@ npm run build
 
 Pop-Location
 
- cd .\src\frontend\
+ Push-Location .\src\frontend\
  npm run build
 
 Pop-Location
