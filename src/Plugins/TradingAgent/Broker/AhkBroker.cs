@@ -8,6 +8,7 @@ using Microsoft.Extensions.Logging;
 using PuppeteerSharp;
 using TradingAgent.Config;
 using TradingAgent.Models;
+using TradingAgent.Observability;
 using TradingAgent.Watchlist;
 
 namespace TradingAgent.Broker;
@@ -34,19 +35,36 @@ public sealed class AhkBroker : IAsyncDisposable
     private readonly ILogger<AhkBroker> _logger;
     private readonly string _workspaceRoot;
 
+    /// <summary>
+    /// Live view for the UI's activity panel. Optional so the opt-in browser integration tests can
+    /// build a broker with three arguments, as they always have.
+    /// </summary>
+    private readonly TradingActivityLog? _activity;
+
     // Serializes every browser interaction. The host can process channel messages concurrently,
     // but there is a single shared _page — concurrent orders would interleave field-fills and
     // submits and corrupt each other. All public entry points take this gate.
     private readonly SemaphoreSlim _gate = new(1, 1);
 
+    /// <summary>
+    /// Outstanding <see cref="LeaseSession"/> holders. While this is above zero the on-demand
+    /// lifecycle does not close the browser between operations — see <see cref="LeaseSession"/>.
+    /// </summary>
+    private int _sessionLeases;
+
     private IBrowser? _browser;
     private IPage? _page;
     private bool _initialized;
 
-    public AhkBroker(IRuntimePluginOptions<AhkConfig> config, IConfiguration configuration, ILogger<AhkBroker> logger)
+    public AhkBroker(
+        IRuntimePluginOptions<AhkConfig> config,
+        IConfiguration configuration,
+        ILogger<AhkBroker> logger,
+        TradingActivityLog? activity = null)
     {
         _config = config;
         _logger = logger;
+        _activity = activity;
         _workspaceRoot = ComputeWorkspaceRoot(configuration);
     }
 
@@ -200,6 +218,10 @@ public sealed class AhkBroker : IAsyncDisposable
         _logger.LogInformation(
             "[AhkBroker] Browser session ready. Headless={Headless} Profile={Dir}",
             cfg.Headless, sessionDir);
+        // Recorded because a browser window appearing is the most visible thing this system does, and
+        // the panel is where the user should be able to see WHY it just appeared.
+        _activity?.Info("Broker", "Browser session opened",
+            cfg.Headless ? "Headless." : "A visible Chromium window belongs to the broker.");
     }
 
     private bool IsHealthy() =>
@@ -244,6 +266,8 @@ public sealed class AhkBroker : IAsyncDisposable
         var browser = _browser;
         _browser = null;
         if (browser is null) return;
+
+        _activity?.Info("Broker", "Browser session closed");
 
         var process = browser.Process;
         try { await browser.CloseAsync(); } catch { /* best effort */ }
@@ -383,8 +407,22 @@ public sealed class AhkBroker : IAsyncDisposable
                 var groupResults = new List<OrderResult>(group.Count);
                 foreach (var signal in group)
                 {
+                    _activity?.Info("Orders",
+                        $"Submitting {signal.Action} {signal.Quantity?.ToString() ?? "default qty"} "
+                        + $"{signal.Symbol} ({signal.OrderType})",
+                        signal.EntryPrice is { } entry ? $"At {entry:0.##}." : null);
+
                     var result = await DispatchOrderAsync(signal);
                     groupResults.Add(result);
+
+                    _activity?.Record(
+                        result.Success ? ActivityLevel.Info : ActivityLevel.Error,
+                        "Orders",
+                        result.Success
+                            ? $"{signal.Action} {signal.Symbol} accepted by the broker"
+                            : $"{signal.Action} {signal.Symbol} was NOT placed",
+                        result.Message);
+
                     if (!result.Success) break; // dependent within a group
                 }
                 output.Add(groupResults);
@@ -394,12 +432,88 @@ public sealed class AhkBroker : IAsyncDisposable
         }
         finally
         {
-            // Close the browser once the whole batch is done (on-demand lifecycle). The next call
+            // Close the browser once the whole batch is done (on-demand lifecycle) — unless a caller
+            // holds a session lease, in which case the teardown belongs to them. The next call
             // relaunches and the persisted profile usually keeps us logged in. Disable via
             // CloseBrowserAfterOrder.
-            if (_config.Current.CloseBrowserAfterOrder)
-                await TeardownAsync();
+            await CloseAfterOperationAsync();
 
+            _gate.Release();
+        }
+    }
+
+    // ── Session lease ─────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Holds one browser session open across SEVERAL broker calls.
+    ///
+    /// <para>
+    /// <b>Why.</b> With <see cref="AhkConfig.CloseBrowserAfterOrder"/> (the default) every public
+    /// operation tears the browser down when it returns, so a caller that needs two readings — the
+    /// protective-stop pass reads holdings and then the outstanding book; a backstop checks the book
+    /// and then submits — paid for two Chromium launches, two logins and two window flashes to do
+    /// one job. That is what "the browser opens twice per order" was.
+    /// </para>
+    ///
+    /// <para>
+    /// This is NOT a lock and grants no exclusivity: each operation still takes the gate on its own,
+    /// so an order arriving mid-lease is serialised exactly as before. All the lease does is defer
+    /// the teardown until the last holder releases it.
+    /// </para>
+    /// </summary>
+    public BrokerSessionLease LeaseSession() => new(this);
+
+    /// <summary>See <see cref="LeaseSession"/>. Disposing the last lease closes the browser.</summary>
+    public sealed class BrokerSessionLease : IAsyncDisposable
+    {
+        private readonly AhkBroker _broker;
+        private int _disposed;
+
+        internal BrokerSessionLease(AhkBroker broker)
+        {
+            _broker = broker;
+            Interlocked.Increment(ref broker._sessionLeases);
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+            if (Interlocked.Decrement(ref _broker._sessionLeases) == 0)
+                await _broker.CloseIfIdleAsync();
+        }
+    }
+
+    /// <summary>
+    /// Applies the on-demand lifecycle at the end of an operation. ASSUMES the gate is held. A live
+    /// lease defers the teardown to whoever releases it last, so the session survives the gap
+    /// between two calls that belong to the same piece of work.
+    /// </summary>
+    private async Task CloseAfterOperationAsync()
+    {
+        if (!_config.Current.CloseBrowserAfterOrder) return;
+        if (Volatile.Read(ref _sessionLeases) > 0) return;
+        await TeardownAsync();
+    }
+
+    /// <summary>Closes the browser once the last lease is released, taking the gate to do it.</summary>
+    private async Task CloseIfIdleAsync()
+    {
+        if (!_config.Current.CloseBrowserAfterOrder) return;
+
+        await _gate.WaitAsync();
+        try
+        {
+            // Re-checked under the gate: a new lease may have been taken while we waited, and closing
+            // the browser out from under it would defeat the whole point.
+            if (Volatile.Read(ref _sessionLeases) == 0)
+                await TeardownAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[AhkBroker] Could not close the browser after the last session lease.");
+        }
+        finally
+        {
             _gate.Release();
         }
     }
@@ -525,6 +639,7 @@ public sealed class AhkBroker : IAsyncDisposable
         using var screen = EnterTradingScreen();
         try
         {
+            _activity?.Info("Broker", $"Reading live prices for {symbols.Count} symbol(s)");
             await PrepareSessionWithRetryAsync();
             await OpenOrderDialogAsync("buy");
 
@@ -540,8 +655,7 @@ public sealed class AhkBroker : IAsyncDisposable
         }
         finally
         {
-            if (_config.Current.CloseBrowserAfterOrder)
-                await TeardownAsync();
+            await CloseAfterOperationAsync();
             _gate.Release();
         }
     }
@@ -604,14 +718,20 @@ public sealed class AhkBroker : IAsyncDisposable
         using var screen = EnterTradingScreen();
         try
         {
+            _activity?.Info("Broker", "Reading the portfolio (holdings and available cash)");
             await PrepareSessionWithRetryAsync();
             await NavigateToPortfolioViewAsync();
-            return await ExtractPortfolioAsync();
+            var snapshot = await ExtractPortfolioAsync();
+            _activity?.Record(
+                snapshot.Warnings.Count == 0 ? ActivityLevel.Info : ActivityLevel.Warn,
+                "Broker",
+                $"Portfolio read: {snapshot.Holdings.Count} holding(s)",
+                snapshot.Warnings.Count == 0 ? null : string.Join(" ", snapshot.Warnings));
+            return snapshot;
         }
         finally
         {
-            if (_config.Current.CloseBrowserAfterOrder)
-                await TeardownAsync();
+            await CloseAfterOperationAsync();
             _gate.Release();
         }
     }
@@ -1382,7 +1502,10 @@ public sealed class AhkBroker : IAsyncDisposable
                     throw new InvalidOperationException("Browser unavailable after launch.");
 
                 if (!await IsLoggedInAsync())
+                {
+                    _activity?.Info("Broker", "Logging in to the broker portal");
                     await LoginAsync();
+                }
 
                 return; // ready
             }
@@ -1391,6 +1514,9 @@ public sealed class AhkBroker : IAsyncDisposable
                 _logger.LogWarning(ex,
                     "[AhkBroker] Session not ready (attempt {Attempt}/{Max}) — restarting browser and retrying.",
                     attempt, maxAttempts);
+                _activity?.Warn("Broker",
+                    $"Broker session not ready (attempt {attempt}/{maxAttempts}) — restarting the browser",
+                    ex.Message);
             }
         }
     }
@@ -2114,13 +2240,18 @@ public sealed class AhkBroker : IAsyncDisposable
         using var screen = EnterTradingScreen();
         try
         {
+            _activity?.Info("Broker",
+                symbol is { Length: > 0 }
+                    ? $"Reading the outstanding order book for {symbol.Trim().ToUpperInvariant()}"
+                    : "Reading the outstanding order book");
             await PrepareSessionWithRetryAsync();
-            return await ReadOutstandingOrdersAsync(symbol?.Trim().ToUpperInvariant());
+            var resting = await ReadOutstandingOrdersAsync(symbol?.Trim().ToUpperInvariant());
+            _activity?.Info("Broker", $"Order book read: {resting.Count} order(s) resting");
+            return resting;
         }
         finally
         {
-            if (_config.Current.CloseBrowserAfterOrder)
-                await TeardownAsync();
+            await CloseAfterOperationAsync();
             _gate.Release();
         }
     }

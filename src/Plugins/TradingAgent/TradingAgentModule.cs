@@ -19,6 +19,7 @@ using TradingAgent.Config;
 using TradingAgent.Feed;
 using TradingAgent.Manager;
 using TradingAgent.Market;
+using TradingAgent.Observability;
 using TradingAgent.Persistence;
 using TradingAgent.Research;
 using TradingAgent.Risk;
@@ -214,6 +215,9 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         services.AddSingleton<PendingTakeProfitStore>();
         services.AddSingleton<CandleBackfillRunner>();
         services.AddSingleton<AlertBroadcaster>();
+        // What the agent has been DOING, for the dashboard's activity panel. A live view only — it
+        // self-prunes and is deliberately not persisted; the ledger is the durable record.
+        services.AddSingleton<TradingActivityLog>();
         // Registered as a singleton AND as the hosted service, so the API can read its live status and
         // trigger a pass on the same instance the timer drives.
         services.AddSingleton<WatchlistMonitorWorker>();
@@ -762,6 +766,49 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         // dead session and a quiet market all look like "no quotes" — so this is the surface that
         // tells them apart without reading Debug logs.
         trading.MapGet("/feed/status", (AhkFeedWorker feed) => Results.Ok(feed.GetStatus()));
+
+        // What the agent is doing right now, and what it just did.
+        //
+        // The status endpoints above each answer for ONE subsystem and answer in state ("healthy",
+        // "12 symbols"). This answers in events, across all of them, in order — which is the only
+        // form that says whether the thing that just happened on screen (a browser window opening,
+        // an order not appearing) was this system's doing and why.
+        //
+        // The counts always describe the whole retained window regardless of `limit`, so a collapsed
+        // panel can show an issue badge while asking for a single entry. `afterSeq` is offered for a
+        // caller that only wants what is new — but note the log folds a repeated activity into its
+        // existing entry, so a live view should read the whole window rather than merge deltas.
+        trading.MapGet("/activity", (
+            TradingActivityLog activity,
+            AhkBroker broker,
+            AhkFeedWorker feed,
+            WatchlistMonitorWorker monitor,
+            IMarketCalendar calendar,
+            long? afterSeq,
+            int? limit) =>
+        {
+            var (warnings, errors) = activity.IssueCounts();
+            var market = calendar.GetStatus();
+
+            return Results.Ok(new
+            {
+                lastSeq = activity.LastSeq,
+                warnings,
+                errors,
+                retentionMinutes = (int)TradingActivityLog.Retention.TotalMinutes,
+                now = new
+                {
+                    // The single most useful "right now" fact: whether a browser window on screen is
+                    // this system driving the portal.
+                    browserBusy  = broker.BrowserHoldsTradingScreen,
+                    marketOpen   = market.IsOpen,
+                    marketReason = market.Reason,
+                    feedHealthy  = feed.GetStatus().Healthy,
+                    monitorLastPassUtc = monitor.Status.LastPassUtc
+                },
+                activities = activity.Snapshot(afterSeq ?? 0, limit ?? TradingActivityLog.Capacity)
+            });
+        });
 
         // Run a pass now rather than waiting for the next tick. Analyst-level because it costs a
         // portal request and can raise alerts.

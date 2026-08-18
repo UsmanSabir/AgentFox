@@ -529,6 +529,49 @@ export interface ArmOrderDialogContext {
   limitPrice?: number | null;
   sourceAlertId?: string | null;
   context?: string | null;
+
+  // Protective stop pre-fill. Only meaningful on a BUY — the dialog clears it otherwise — and only
+  // set by a caller that already knows the level: the chart's plan carries the entry and the stop
+  // that invalidates it as one thought, so arming them separately loses the connection between them.
+  attachStop?: boolean;
+  stopTrigger?: number | null;
+  stopLimit?: number | null;
+  stopRecurring?: boolean;
+}
+
+/** One thing the trading agent did, as recorded by TradingActivityLog. */
+export interface TradingActivity {
+  seq: number;
+  /** When it first happened. */
+  utc: string;
+  /** When it last happened — later than `utc` only for a collapsed repeat. */
+  lastUtc: string;
+  /** Further occurrences folded into this entry. 0 for something that happened once. */
+  repeats: number;
+  /** Which part of the agent: Broker, Orders, Stops, Armed, Monitor, Feed. */
+  source: string;
+  level: 'info' | 'warn' | 'error';
+  message: string;
+  detail: string | null;
+}
+
+/**
+ * The activity feed plus the "right now" facts that no single entry can carry — chiefly whether a
+ * browser window currently on screen belongs to this system.
+ */
+export interface TradingActivityFeed {
+  lastSeq: number;
+  warnings: number;
+  errors: number;
+  retentionMinutes: number;
+  now: {
+    browserBusy: boolean;
+    marketOpen: boolean;
+    marketReason: string;
+    feedHealthy: boolean;
+    monitorLastPassUtc: string | null;
+  };
+  activities: TradingActivity[];
 }
 
 export interface MonitorStatus {
@@ -698,6 +741,17 @@ export const trading = {
     status: () => get<MonitorStatus>('/trading/monitor/status'),
     run:    () => post<MonitorStatus>('/trading/monitor/run')
   },
+
+  /**
+   * Recent activity, newest first.
+   *
+   * Always the whole retained window rather than an incremental fetch: the server collapses a
+   * repeated activity into the existing entry, so a client holding its own copy would go on showing
+   * a count that had since moved. The window is small and self-pruning, which is what makes reading
+   * all of it the cheaper option.
+   */
+  activity: (limit?: number) =>
+    get<TradingActivityFeed>('/trading/activity' + (limit ? `?limit=${limit}` : '')),
 
   armed: {
     list: (all = false) => get<ArmedOrdersResponse>(`/trading/armed-orders?all=${all}`),

@@ -6,6 +6,7 @@ using TradingAgent.Config;
 using TradingAgent.Manager;
 using TradingAgent.Market;
 using TradingAgent.Models;
+using TradingAgent.Observability;
 using TradingAgent.Persistence;
 using TradingAgent.Research;
 
@@ -48,6 +49,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService
     private readonly TradingAgent.Broker.AhkBroker _broker;
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly ILogger<WatchlistMonitorWorker> _logger;
+    private readonly TradingActivityLog? _activity;
 
     private readonly object _statusLock = new();
     private MonitorStatus _status;
@@ -64,8 +66,10 @@ public sealed class WatchlistMonitorWorker : BackgroundService
         TradingAgent.Manager.TradingManager manager,
         TradingAgent.Broker.AhkBroker broker,
         IOptions<TradingAgentOptions> options,
-        ILogger<WatchlistMonitorWorker> logger)
+        ILogger<WatchlistMonitorWorker> logger,
+        TradingActivityLog? activity = null)
     {
+        _activity = activity;
         _universe = universe;
         _history = history;
         _dataClient = dataClient;
@@ -278,6 +282,15 @@ public sealed class WatchlistMonitorWorker : BackgroundService
                 suppressed, options.MaxAlertsPerPass);
 
         var elapsed = DateTime.UtcNow - started;
+
+        // Only reported when the pass DID something. A line every 30 seconds saying "0 alerts" would
+        // push everything that matters off the panel within a couple of minutes.
+        if (raised.Count > 0 || suppressed > 0)
+            _activity?.Record(
+                suppressed > 0 ? ActivityLevel.Warn : ActivityLevel.Info, "Monitor",
+                $"Monitoring pass raised {raised.Count} alert(s) across {analyzed} symbol(s)",
+                suppressed > 0 ? $"{suppressed} suppressed by the per-pass cap." : null);
+
         SetStatus(_ => new MonitorStatus
         {
             Enabled        = true,
@@ -365,6 +378,12 @@ public sealed class WatchlistMonitorWorker : BackgroundService
             if (!ArmedOrderEvaluator.ShouldFire(order, price, alerts, now, out var why))
                 continue;
 
+            // One browser session for this order's whole fire path. A backstop reads the outstanding
+            // book and then submits, and without this the broker's on-demand lifecycle closes the
+            // browser between the two — launching, logging in and tearing down Chromium twice to
+            // place one order.
+            await using var session = _broker.LeaseSession();
+
             // A backstop is not an ordinary armed order: it exists to cover the window where the
             // native stop does not, and must stand down the moment that stop is resting. Skipping
             // this check is exactly how "native plus a local backstop" becomes two orders selling
@@ -375,6 +394,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService
                 _logger.LogInformation(
                     "[ArmedOrders] {ArmedId} ({Symbol}) met its trigger but stood down: {Why}",
                     order.ArmedId, order.Symbol, standDown);
+                _activity?.Info("Armed", $"{order.Symbol}: local backstop stood down", standDown);
                 continue;
             }
 
@@ -385,6 +405,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService
 
             _logger.LogWarning("[ArmedOrders] {ArmedId} ({Symbol}) triggered: {Why}",
                 order.ArmedId, order.Symbol, why);
+            _activity?.Info("Armed", $"{order.Symbol}: armed {order.Action} triggered", why);
 
             try
             {
@@ -409,6 +430,8 @@ public sealed class WatchlistMonitorWorker : BackgroundService
                     _logger.LogWarning(
                         "[ArmedOrders] {ArmedId} met its trigger but was NOT sent: {Reason} "
                         + "(it remains armed).", order.ArmedId, approvalReason);
+                    _activity?.Warn("Armed",
+                        $"{order.Symbol}: triggered but not sent — it stays armed", approvalReason);
                     continue;
                 }
 
@@ -426,6 +449,12 @@ public sealed class WatchlistMonitorWorker : BackgroundService
                 _logger.LogWarning(
                     "[ArmedOrders] {ArmedId} {Outcome}: {Reason}",
                     order.ArmedId, result.Executed ? "FIRED" : "refused", result.Reason);
+                _activity?.Record(
+                    result.Executed ? ActivityLevel.Info : ActivityLevel.Warn, "Armed",
+                    result.Executed
+                        ? $"{order.Symbol}: armed {order.Action} fired"
+                        : $"{order.Symbol}: armed {order.Action} refused",
+                    result.Reason);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -435,6 +464,9 @@ public sealed class WatchlistMonitorWorker : BackgroundService
                     order.ArmedId, "firing", "failed",
                     $"Submission threw: {ex.Message}. Verify manually before re-arming.", ct: ct);
                 _logger.LogError(ex, "[ArmedOrders] {ArmedId} submission failed.", order.ArmedId);
+                _activity?.Error("Armed",
+                    $"{order.Symbol}: submission threw — verify at the broker before re-arming",
+                    ex.Message);
             }
         }
     }

@@ -8,6 +8,7 @@ using TradingAgent.Config;
 using TradingAgent.Manager;
 using TradingAgent.Market;
 using TradingAgent.Models;
+using TradingAgent.Observability;
 using TradingAgent.Persistence;
 using TradingAgent.Watchlist;
 
@@ -43,6 +44,7 @@ public sealed class ProtectiveStopWorker : BackgroundService
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly ILogger<ProtectiveStopWorker> _logger;
     private readonly IUserNotifier? _notifier;
+    private readonly TradingActivityLog? _activity;
 
     /// <summary>
     /// Alerts already sent, keyed by stop and reason, so a condition that persists across passes is
@@ -76,8 +78,10 @@ public sealed class ProtectiveStopWorker : BackgroundService
         TradingPolicyProvider policy,
         IOptions<TradingAgentOptions> options,
         ILogger<ProtectiveStopWorker> logger,
+        TradingActivityLog? activity = null,
         IUserNotifier? notifier = null)
     {
+        _activity  = activity;
         _notifier  = notifier;
         _scopes    = scopes;
         _broker    = broker;
@@ -178,9 +182,14 @@ public sealed class ProtectiveStopWorker : BackgroundService
             if (held is not { } quantity) return;
 
             if (await repository.RecordProtectiveStopBaselineAsync(stopId, (int)Math.Floor(quantity)))
+            {
                 _logger.LogInformation(
                     "[ProtectiveStops] {StopId} ({Symbol}): baseline holding recorded as {Qty}.",
                     stopId, stop.Symbol, (int)Math.Floor(quantity));
+                _activity?.Info("Stops",
+                    $"{stop.Symbol}: pre-entry holding recorded as {(int)Math.Floor(quantity)}",
+                    "This is what the fill will be measured against.");
+            }
         }
         finally
         {
@@ -222,6 +231,14 @@ public sealed class ProtectiveStopWorker : BackgroundService
         // within the normal interval — is soon enough, and it runs on real prices.
         var market = _calendar.GetStatus();
         if (!market.IsOpen) return;
+
+        // ONE browser session for the whole pass. Both reads and any stop this pass places drive the
+        // same portal, and the broker's on-demand lifecycle would otherwise launch, log in and close
+        // Chromium separately for each of them — the visible symptom being a browser window that pops
+        // up two or three times every few minutes.
+        await using var session = _broker.LeaseSession();
+
+        _activity?.Info("Stops", $"Checking {stops.Count} protective stop(s)");
 
         // One holdings read and one book read serve every stop in the pass. Reading per-stop would
         // multiply the most expensive thing this worker does by the number of positions held.
@@ -318,6 +335,9 @@ public sealed class ProtectiveStopWorker : BackgroundService
                 _logger.LogWarning(
                     "[ProtectiveStops] {StopId} ({Symbol}) ACTIVE on a confirmed fill of {Qty}. {Why}",
                     stop.StopId, stop.Symbol, verdict.Quantity, verdict.Reason);
+                _activity?.Info("Stops",
+                    $"{stop.Symbol}: entry filled ({verdict.Quantity}) — the stop is now active",
+                    verdict.Reason);
                 await ArmBackstopAsync(repository, stop with
                 {
                     State = "active",
@@ -437,6 +457,9 @@ public sealed class ProtectiveStopWorker : BackgroundService
                 "[ProtectiveStops] {StopId} ({Symbol}) needs a stop placed but was NOT authorised: "
                 + "{Reason}. The position is UNPROTECTED at the broker.",
                 stop.StopId, stop.Symbol, approval.Reason);
+            _activity?.Error("Stops",
+                $"{stop.Symbol}: stop not authorised, so nothing is resting at the broker",
+                approval.Reason);
 
             await AlertOnceAsync(stop, "unauthorised", today,
                 $"🛡️ **Stop NOT placed — {stop.Symbol} is unprotected**\n"
@@ -458,6 +481,9 @@ public sealed class ProtectiveStopWorker : BackgroundService
                 + "trigger {Trigger} limit {Limit}. {Why}",
                 stop.StopId, decision.Quantity, stop.Symbol, stop.StopTrigger, stop.StopLimit,
                 decision.Reason);
+            _activity?.Info("Stops",
+                $"{stop.Symbol}: stop placed at the broker — SELL {decision.Quantity:N0} "
+                + $"trigger {stop.StopTrigger:0.##} limit {stop.StopLimit:0.##}");
             return;
         }
 
@@ -467,6 +493,9 @@ public sealed class ProtectiveStopWorker : BackgroundService
             "[ProtectiveStops] {StopId} ({Symbol}): the native stop was NOT placed — {Reason}. "
             + "The position is protected only by the local backstop until this succeeds.",
             stop.StopId, stop.Symbol, order?.Message ?? result.Reason);
+        _activity?.Error("Stops",
+            $"{stop.Symbol}: the stop was NOT placed — the position is unprotected at the broker",
+            order?.Message ?? result.Reason);
 
         await AlertOnceAsync(stop, "placement-failed", today,
             $"🛡️ **Stop rejected by the broker — {stop.Symbol}**\n"
@@ -536,6 +565,7 @@ public sealed class ProtectiveStopWorker : BackgroundService
 
         _logger.LogWarning("[ProtectiveStops] {StopId} ({Symbol}) closed: {Reason}",
             stop.StopId, stop.Symbol, reason);
+        _activity?.Warn("Stops", $"{stop.Symbol}: protection ended", reason);
     }
 
     /// <summary>
@@ -553,6 +583,7 @@ public sealed class ProtectiveStopWorker : BackgroundService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "[ProtectiveStops] Holdings could not be read this pass.");
+            _activity?.Warn("Stops", "Holdings could not be read this pass", ex.Message);
             return null;
         }
     }
@@ -563,6 +594,7 @@ public sealed class ProtectiveStopWorker : BackgroundService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "[ProtectiveStops] The outstanding book could not be read this pass.");
+            _activity?.Warn("Stops", "The outstanding order book could not be read this pass", ex.Message);
             return null;
         }
     }
