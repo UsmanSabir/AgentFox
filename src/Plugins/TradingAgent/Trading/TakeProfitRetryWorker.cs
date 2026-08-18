@@ -21,6 +21,7 @@ public sealed class TakeProfitRetryWorker : BackgroundService
     private readonly PendingTakeProfitStore _store;
     private readonly TradingAgent.Manager.TradingManager _manager;
     private readonly IMarketCalendar _calendar;
+    private readonly TradingAgent.Market.OrderWindow _orderWindow;
     private readonly TradingPolicyProvider _policyProvider;
     private readonly IOptions<TradingAgentOptions> _opts;
     private readonly ILogger<TakeProfitRetryWorker> _logger;
@@ -29,6 +30,7 @@ public sealed class TakeProfitRetryWorker : BackgroundService
         PendingTakeProfitStore store,
         TradingAgent.Manager.TradingManager manager,
         IMarketCalendar calendar,
+        TradingAgent.Market.OrderWindow orderWindow,
         TradingPolicyProvider policyProvider,
         IOptions<TradingAgentOptions> opts,
         ILogger<TakeProfitRetryWorker> logger)
@@ -36,6 +38,7 @@ public sealed class TakeProfitRetryWorker : BackgroundService
         _store  = store;
         _manager = manager;
         _calendar = calendar;
+        _orderWindow = orderWindow;
         _policyProvider = policyProvider;
         _opts   = opts;
         _logger = logger;
@@ -66,9 +69,12 @@ public sealed class TakeProfitRetryWorker : BackgroundService
             {
                 if (_store.Count == 0) continue;
 
-                // Only spin up the browser when the market is open — a sell can't fill (or even be
-                // placed) otherwise, and we don't want attempts to expire against a closed market.
-                if (!_calendar.GetStatus().IsOpen) continue;
+                // Only spin up the browser when the venue is accepting orders. This deliberately
+                // includes the pre-open OHO state: a take-profit sell placed then cannot fill until
+                // the open, but it holds its place in the queue from the first match — which is the
+                // whole point of retrying it promptly. It still excludes a genuinely closed market,
+                // where the portal would silently discard the order.
+                if (!_orderWindow.Evaluate().Allowed) continue;
 
                 // Background order submission is autonomous by definition. ApprovalRequired mode
                 // must not be bypassed by a hosted worker.

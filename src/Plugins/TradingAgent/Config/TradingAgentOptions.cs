@@ -39,6 +39,22 @@ public class TradingAgentOptions
     public bool AutoBuyWithoutEntryPrice { get; set; } = false;
 
     /// <summary>
+    /// Refuse an order that supplies no <c>quantity</c>, instead of sizing it from
+    /// <c>Ahk.PerStockBudgetPkr</c>. Default false, which keeps budget sizing — a tip naming a stock
+    /// but no share count should still be actionable.
+    /// </summary>
+    /// <remarks>
+    /// Turn this ON whenever the caller is expected to state sizes explicitly — live testing, or any
+    /// setup driven by a small local model. Observed on 2026-08-18: a model told to place 10 shares
+    /// omitted the argument entirely, and budget sizing produced 75 shares (48,750 PKR). Nothing was
+    /// violated — that sat inside <c>MaxOrderValuePkr</c> — which is the point: when quantity is
+    /// absent the effective ceiling is the BUDGET, not whatever the requester had in mind. With this
+    /// enabled the order is refused and the sizing that would have happened is reported, so the
+    /// omission surfaces as an error rather than as a much larger position.
+    /// </remarks>
+    public bool RequireExplicitQuantity { get; set; } = false;
+
+    /// <summary>
     /// When a paired take-profit SELL can't be placed immediately (its BUY limit hasn't filled yet, so the
     /// account shows no shares — "insufficient exposure"), persist it and retry in the background until the
     /// broker accepts it. Default true. Only transient failures are queued; a permanent rejection is not.

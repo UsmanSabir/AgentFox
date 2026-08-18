@@ -211,8 +211,15 @@ public sealed class ProtectiveStopWorker : BackgroundService
         var stops = await repository.GetProtectiveStopsAsync(openOnly: true, ct);
         if (stops.Count == 0) return;
 
-        // Nothing here can be acted on with the market shut: a native stop cannot be placed, and a
-        // holdings read would only re-observe yesterday's close.
+        // Deliberately the CALENDAR here, not OrderWindow — unlike order placement and the take-profit
+        // retry, which now also run during the pre-open OHO state.
+        //
+        // Two reasons this worker must not follow them. First, it evaluates TRIGGERS against live
+        // prices, and pre-open there are none: the feed republishes reference data, so a stop would be
+        // judged against a stale number and could fire spuriously or fail to fire. Second, it does not
+        // need to: OHO accepts orders but performs no matching, so no position can be filled before
+        // the open and therefore none can need protecting during it. The first pass after the bell —
+        // within the normal interval — is soon enough, and it runs on real prices.
         var market = _calendar.GetStatus();
         if (!market.IsOpen) return;
 

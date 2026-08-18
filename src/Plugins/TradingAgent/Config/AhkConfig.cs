@@ -93,12 +93,19 @@ public class AhkConfig
     /// book before reporting the cancellation as unconfirmed. Default 30s.
     ///
     /// <para>
-    /// Measured, not guessed. An 8s window was tried first and proved too short: a live cancel during
-    /// the pre-open <c>OHO</c> state was reported unconfirmed at 8s, and the order had in fact left
-    /// the book by the next check. The portal returns no success indicator at all — its own UI fires
-    /// the cancel and closes the dialog without reading the response — so the order book is the only
-    /// evidence, and this is how long it is given to reflect reality. Exceeding it is reported
-    /// honestly as unconfirmed rather than assumed either way.
+    /// Generous headroom rather than a measured requirement. Measured live, a cancel confirms on the
+    /// first verification poll — about 2.1s end to end. An earlier 8s window did once report a cancel
+    /// as unconfirmed, but that was the broker having blocked account access mid-test, not latency;
+    /// the reasoning that produced a 30s default was therefore wrong even though the value is
+    /// harmless. It stays because the cost of waiting is nothing (the loop exits as soon as the order
+    /// is gone) while the cost of giving up too early is telling a user an order is still live when
+    /// it is not.
+    /// </para>
+    ///
+    /// <para>
+    /// The portal returns no success indicator at all — its own UI fires the cancel and closes the
+    /// dialog without reading the response — so the order book is the only evidence. Exceeding this
+    /// window is reported honestly as unconfirmed rather than assumed either way.
     /// </para>
     /// </summary>
     public int CancelVerifyTimeoutMs { get; set; } = 30_000;

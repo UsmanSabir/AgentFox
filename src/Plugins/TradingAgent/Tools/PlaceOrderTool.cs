@@ -183,10 +183,28 @@ public sealed class PlaceOrderTool : BaseTool
 
             quantity  = sized.Value;
             autoSized = true;
-            _logger.LogInformation(
-                "[PlaceOrder] Auto-sized {Symbol}: {Qty} share(s) @ {Price} ≈ {Value:N0} PKR " +
-                "from budget {Budget:N0} PKR (buffer {Buffer}%).",
+
+            // WARNING, not information. Auto-sizing is a legitimate feature — a tip that names a stock
+            // but no share count should still be actionable — but it is also what happens when a
+            // CALLER MEANT to pass a quantity and did not. Observed live on 2026-08-18: a model
+            // instructed to place 10 shares omitted the argument, and the budget sized the order to 75
+            // shares (48,750 PKR). That was within MaxOrderValuePkr and so entirely permitted, which
+            // is exactly why it needs to be loud: the configured ceiling is PerStockBudgetPkr, not
+            // whatever the requester had in mind.
+            _logger.LogWarning(
+                "[PlaceOrder] NO QUANTITY SUPPLIED for {Symbol} — auto-sized from the per-stock budget "
+                + "to {Qty} share(s) @ {Price} ≈ {Value:N0} PKR (budget {Budget:N0} PKR, buffer {Buffer}%). "
+                + "If a specific quantity was intended, it was NOT honoured.",
                 symbol, quantity, price, quantity * price!.Value, ahk.PerStockBudgetPkr, ahk.BudgetBufferPercent);
+
+            if (opts.RequireExplicitQuantity)
+            {
+                return ToolResult.Fail(
+                    $"No 'quantity' was supplied for {symbol}, and TradingAgent.RequireExplicitQuantity "
+                    + $"is enabled. Budget sizing would have placed {quantity} share(s) @ "
+                    + $"{price!.Value:F2} ≈ {quantity * price!.Value:N0} PKR. Re-issue the order with an "
+                    + "explicit 'quantity' — do not assume the size above was intended.");
+            }
         }
 
         // ── 3. Order value cap ────────────────────────────────────────────────
@@ -341,6 +359,12 @@ public sealed class PlaceOrderTool : BaseTool
             requested_price            = price,
             price_adjustment           = result.PriceAdjustment,
             auto_sized                 = autoSized,
+            // Surfaced in the RESULT, not just the log. A caller that meant to specify a size needs
+            // to see, in the answer it acts on, that the size it got was chosen by the budget.
+            auto_sized_warning         = autoSized
+                ? $"No quantity was supplied, so this order was sized from the per-stock budget: "
+                  + $"{quantity} share(s). Verify this is the intended size."
+                : null,
             entry_resolved_from_market = resolvedFromMarket,
             message           = result.Message,
             screenshot_before = result.ScreenshotBefore,

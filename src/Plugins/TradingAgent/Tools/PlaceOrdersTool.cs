@@ -323,7 +323,22 @@ public sealed class PlaceOrdersTool : BaseTool
             var sized = PositionSizer.ComputeQuantity(ahk.PerStockBudgetPkr, price!.Value, ahk.BudgetBufferPercent);
             if (sized is null)
                 return new(null, $"Per-stock budget {ahk.PerStockBudgetPkr:N0} PKR (less {ahk.BudgetBufferPercent}% buffer) is too small to buy one share at {price!.Value:F2} PKR.", false, resolvedFromMarket);
+
+            // Same guard as the single-order tool: with no quantity the ceiling is the BUDGET, not
+            // whatever the caller intended, so an omission can quietly become a much larger position.
+            if (_agentOptions.Value.RequireExplicitQuantity)
+                return new(null,
+                    $"No quantity supplied, and TradingAgent.RequireExplicitQuantity is enabled. Budget "
+                    + $"sizing would have placed {sized.Value} share(s) @ {price!.Value:F2} "
+                    + $"≈ {sized.Value * price!.Value:N0} PKR. Re-issue with an explicit quantity.",
+                    false, resolvedFromMarket);
+
             qty = sized.Value;
+            _logger.LogWarning(
+                "[PlaceOrders] NO QUANTITY SUPPLIED for {Symbol} — auto-sized from the per-stock budget "
+                + "to {Qty} share(s) @ {Price} ≈ {Value:N0} PKR. If a specific quantity was intended, "
+                + "it was NOT honoured.",
+                o.Symbol, qty, price, qty * price!.Value);
         }
 
         if (isMarket)
