@@ -1,6 +1,8 @@
 using System.Text.Json;
 using AgentFox.Plugins.Interfaces;
 using Microsoft.Extensions.Logging;
+using AgentFox.Plugins;
+using TradingAgent.Config;
 using TradingAgent.Feed;
 
 namespace TradingAgent.Tools;
@@ -33,22 +35,29 @@ public sealed class CancelOrderTool : BaseTool
         PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
     };
 
-    /// <summary>
-    /// How long to wait for a cancelled order to leave the book. The portal processes a cancel
-    /// asynchronously against the exchange, so an immediate re-read routinely still shows it.
-    /// </summary>
-    private static readonly TimeSpan VerifyTimeout = TimeSpan.FromSeconds(8);
-
     private static readonly TimeSpan VerifyPollInterval = TimeSpan.FromMilliseconds(750);
 
     private readonly AhkPortalClient _portal;
+    private readonly IRuntimePluginOptions<AhkConfig> _config;
     private readonly ILogger<CancelOrderTool> _logger;
 
-    public CancelOrderTool(AhkPortalClient portal, ILogger<CancelOrderTool> logger)
+    public CancelOrderTool(
+        AhkPortalClient portal,
+        IRuntimePluginOptions<AhkConfig> config,
+        ILogger<CancelOrderTool> logger)
     {
         _portal = portal;
+        _config = config;
         _logger = logger;
     }
+
+    /// <summary>
+    /// How long to wait for a cancelled order to leave the book. The portal processes a cancel
+    /// asynchronously against the exchange, so an immediate re-read routinely still shows it — and in
+    /// the pre-open state it can take appreciably longer. See <see cref="AhkConfig.CancelVerifyTimeoutMs"/>.
+    /// </summary>
+    private TimeSpan VerifyTimeout =>
+        TimeSpan.FromMilliseconds(Math.Max(2_000, _config.Current.CancelVerifyTimeoutMs));
 
     public override string Name => "cancel_order";
 

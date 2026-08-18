@@ -344,3 +344,168 @@ The substance of A5 is now covered without the agent: the cancel selection rules
 filter disambiguating BUY vs the portal's `SEL`, unknown order number refused while listing what
 actually exists, empty book, and exact order number winning over an ambiguous symbol. What remains
 untested is the agent wiring around them, not the safety logic.
+
+---
+
+## Phase A COMPLETE — 2026-08-18 07:44–07:47 PKT
+
+LM Studio was reachable at `http://192.168.100.50:1234/v1` (not the earlier addresses), model
+`qwen2.5-14b-instruct`. Every Phase A check passed.
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| A1 session from plain HttpClient | **PASS** | `Direct API session established for account CC45698` |
+| A2 subscription | **PASS** | `Subscribed 30 symbol(s) across 4 page(s)` |
+| A3 feed responds | **PASS** | 30 subscribed / 30 fresh, `marketStatus: OHO`, updating every poll |
+| A4 order book read | **PASS** | tool returned `count: 0` in **46 ms** |
+| A5 cancel refuses cleanly | **PASS** | `"The account has no working orders. Nothing to cancel."` in 44 ms, no exception |
+| A6 subscription-clobber fix | **PASS** | see below |
+| Quotes reach consumers | **PASS** | live bar for today via `/api/trading/candles` |
+| Watchlist add/remove sync | **PASS** | 30↔31 within ~6s, with book eviction |
+
+A6 produced exactly the sequence the fix was written for:
+
+```
+07:46:48 [AhkBroker] Portfolio read: balance=78141.00 holdings=10 warnings=0
+07:46:49 [AhkFeed] Re-subscribing because the browser released the trading screen
+                   and its page load will have overwritten the subscription.
+07:46:49 [AhkFeed] Subscribed 30 symbol(s) across 4 page(s).
+```
+
+Verify tool results from the **audit trail**, not the model's prose:
+`bin/.../sessions/specialist/trading-agent/*.md` records every `[tool_call]` and `[tool_result]`
+verbatim. In A4 the model narrated its answer in Thai and read like a hallucination, but the audit
+record showed the tool genuinely ran and returned `count: 0`. Prose is not evidence.
+
+### A fifth defect, found here
+
+The two new tools were registered by the plugin but **not exposed to the specialist agent**.
+`BuildSpecialistToolNames` is a hand-maintained allow-list and I had not added them, so the agent
+answered "I don't have that tool" while the plugin reported 15 registered. Added — with the note that
+an agent able to place an order but not cancel one is the wrong half of the pair to expose.
+
+### Account state for Phase B (read 07:46 PKT)
+
+Cash **78,141.00 PKR**; 10 holdings; **MARI: 75 shares** @ avg 646.12, last 679.56, P/L +2,508.
+
+Both legs are therefore viable, and both worst cases are benign:
+- **BUY 10 MARI @ 650** = 6,500 PKR — well inside cash and the 50,000 order cap. If it filled, it
+  would buy below the last traded price.
+- **SELL 10 MARI @ 710** — covered by the 75 held, so it will rest rather than being rejected. If it
+  filled, it would sell 10 of 75 at a profit against the 646.12 average.
+
+---
+
+## Order-cancel round-trip: attempted 07:58 PKT, BLOCKED until the open
+
+Asked to run a place→cancel test pre-open. It cannot be done, and the reason is worth recording.
+
+`place_order` (BUY MARI 10 @ 650 LIMIT, confidence HIGH) returned:
+
+```json
+{"skipped": true, "reason": "PSX regular market is closed. Next session opens at 09:32 PKT."}
+```
+
+The market-calendar gate refuses before anything reaches the broker, so no order rests and the cancel
+path cannot be exercised. This is the correct behaviour and a *better* guard than the portal's own,
+which returns HTTP 200 with a green success alert while placing nothing. The full round-trip is now
+the first item in `phase-b-runbook.md`.
+
+### The attempt found a sixth defect — in the operator procedure, not the code
+
+Given the explicit instruction *"quantity=10"*, `qwen2.5-14b-instruct` **omitted `quantity` entirely**.
+`place_order` fell back to auto-sizing from `PerStockBudgetPkr` and tried to place **75 shares for
+48,750 PKR** — 7.5× the intended order. It was caught only because a temporary
+`Plugins__Ahk__MaxOrderValuePkr=7500` guardrail had been set for the run:
+
+```
+Order value 48,750 PKR exceeds limit of 7,500 PKR.
+```
+
+A second attempt with the requirement restated did pass `quantity: 10` correctly. The lesson is not
+"prompt harder" — it is that **the model cannot be trusted to pass exact order parameters**, so any
+live order test must constrain both the explicit-quantity path (`MaxOrderValuePkr`) and the auto-size
+path (`PerStockBudgetPkr`), and must verify the actual `[tool_call]` arguments in the audit trail
+after every placement. Both are mandatory steps in the runbook.
+
+Worth considering separately: `place_order` silently auto-sizing to 75 shares when `quantity` is
+omitted is generous behaviour for a caller that may be a small local model. Requiring an explicit
+quantity above some value, or logging loudly when auto-sizing produces an order many times the
+requested size, would be a cheap safety improvement.
+
+---
+
+## The market-calendar gate was wrong, and OHO proves it — 2026-08-18 08:18 PKT
+
+Challenged on why an order could not be placed if the broker accepts it. The challenge was correct.
+
+### Evidence that OHO accepts orders
+
+The portal's own `site.js` renders market states like this:
+
+```js
+if (state == "OHO")        result = '<lable class="text-success">OHO</lable>';    // GREEN
+else if (state == "Close") result = '<lable style="color:#ff0000">Closed</lable>';
+else if (state == "OPN")   result = '<lable class="text-success">Open</lable>';   // GREEN
+else if (state == "CLO")   result = '<lable style="color:#ff0000">Closed</lable>';
+```
+
+OHO is styled as a success state alongside Open, and **nothing in `site.js` disables the order form
+based on market state**. Then confirmed empirically: an order placed during OHO was accepted and
+**verified in the account's own outstanding log**.
+
+### Why the gate existed, and what was wrong with it
+
+`if (!market.IsOpen) reject` arrived in the initial commit with **no comment and no recorded
+rationale**, and the README simply repeats "market open" as one of the risk-engine checks. So there
+was no stated reason to weigh — only an inherited assumption.
+
+The defensible purpose is real, though: this portal returns HTTP 200 with a green success alert while
+placing **nothing** when the market is genuinely shut (`AhkConfig.VerifyOrderInBook`), so submitting
+into a closed market loses orders silently. The gate should not be deleted.
+
+The mistake was conflating two different states: *genuinely shut* versus *accepting orders into the
+queue but not yet matching*. OHO is the second kind, and blocking it forfeited queue priority at the
+open — exactly when an overnight signal wants to act.
+
+### The fix
+
+`Market/OrderWindow.cs` decides whether the **venue** is accepting orders:
+
+1. Prefer the broker's own reported market state (`GetFeed.marketStatus`), which knows about halts,
+   extended sessions and unscheduled closures in a way a hardcoded 09:32–15:30 schedule cannot.
+2. Allow the states in `Ahk.OrderAcceptingMarketStates` — empty means the defaults `OPEN`/`OPN`/`OHO`
+   (empty rather than pre-populated, because ConfigurationBinder appends; same trap as `AhkFeed.Pages`).
+3. Fall back to the calendar when the broker has reported nothing — feed disabled, or not yet polled.
+4. `Ahk.TrustBrokerMarketState = false` restores calendar-only gating.
+
+The execution audit record now stores which authority allowed the order (`broker` / `calendar`) and
+what it said, so "why was this accepted at 09:05" is answerable afterwards. Covered by
+`OrderWindowTests` — including the direction that protects money: a broker-reported halt blocks the
+order even while the local calendar thinks the market is open.
+
+### The live round-trip
+
+```
+place_order BUY MARI 10 @ 650  ->  order_id 6427, verified in the outstanding log
+list_outstanding_orders        ->  6427 resting (plus 6298 SEL SELECT, pre-existing, not ours)
+cancel_order order_no=6427     ->  cancelled:false verified:false  (still there at 8s)
+list_outstanding_orders x2     ->  count: 0
+```
+
+**Cancel works; the 8s verification window was too short.** In OHO the cancel took longer than 8s and
+had completed by the next check. `Ahk.CancelVerifyTimeoutMs` now defaults to 30s and is configurable.
+
+**`verified: false` did precisely its job.** It refused to claim success on an unconfirmed cancel and
+told the operator to re-check rather than blindly retry. Trusting the portal's HTTP 200 would have
+reported a successful cancellation of an order that was still live — the exact failure the design
+anticipated.
+
+### Unexplained, and flagged rather than rationalised
+
+Order **6298** (SEL SELECT 50 @ 32.50, pre-existing, placed before this session) also disappeared from
+the outstanding book between two reads. This process issued **exactly one** cancel — the log records
+`[CancelOrder] Cancelling #6427 BUY 10 MARI @ 650.00` and nothing else — and `CancelOrderAsync` posts a
+single `orignalorderno`, so it cannot have cancelled 6298. It may have been cancelled elsewhere,
+filled, expired, or flushed at a pre-open state transition. **Worth confirming in the portal's
+Activity Log**, because a pre-existing order vanishing is material regardless of cause.

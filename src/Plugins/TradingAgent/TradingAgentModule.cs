@@ -151,6 +151,9 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         services.AddSingleton<IBrokerAdapter>(sp => sp.GetRequiredService<AhkBrowserBrokerAdapter>());
         services.AddSingleton<IBrokerStateReader>(sp => sp.GetRequiredService<AhkBrowserBrokerAdapter>());
         services.AddSingleton<IMarketCalendar, PsxMarketCalendar>();
+        // Decides whether the VENUE is accepting orders, preferring the broker's own reported state
+        // over the local calendar so the pre-open (OHO) order window is not silently forfeited.
+        services.AddSingleton<OrderWindow>();
         services.AddSingleton<PsxDataClient>();
 
         // ── Live quotes ───────────────────────────────────────────────────────
@@ -166,6 +169,8 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             TradingPluginConfigDefinitionProvider.BrokerPluginName);
 
         services.AddSingleton<AhkPortalClient>();
+        // Same instance behind the narrow interface the order gate consumes.
+        services.AddSingleton<IBrokerMarketState>(sp => sp.GetRequiredService<AhkPortalClient>());
         services.AddSingleton<AhkQuoteBook>();
         services.AddSingleton<AhkFeedWorker>();
         services.AddHostedService(sp => sp.GetRequiredService<AhkFeedWorker>());
@@ -1658,6 +1663,7 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                 loggers.CreateLogger<ListOutstandingOrdersTool>()),
             new CancelOrderTool(
                 _services!.GetRequiredService<AhkPortalClient>(),
+                _services!.GetRequiredService<IRuntimePluginOptions<AhkConfig>>(),
                 loggers.CreateLogger<CancelOrderTool>()),
         };
 

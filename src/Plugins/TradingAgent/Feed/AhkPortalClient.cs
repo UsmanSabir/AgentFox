@@ -28,7 +28,21 @@ namespace TradingAgent.Feed;
 /// report a problem rather than propagate one.
 /// </para>
 /// </summary>
-public sealed class AhkPortalClient : IDisposable
+/// <summary>
+/// The venue's own view of whether it is trading. Narrow on purpose: the order gate needs exactly
+/// this one fact, and depending on the whole portal client would make the gate untestable and would
+/// couple order policy to an HTTP client.
+/// </summary>
+public interface IBrokerMarketState
+{
+    /// <summary>
+    /// Latest market status the broker reported ("OPEN", "CLOSED", "OHO", …), or null when it has
+    /// not reported one — the feed being switched off, or not yet having polled.
+    /// </summary>
+    string? LastMarketStatus { get; }
+}
+
+public sealed class AhkPortalClient : IBrokerMarketState, IDisposable
 {
     private static readonly JsonSerializerOptions Json = new()
     {

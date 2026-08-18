@@ -48,6 +48,61 @@ public class AhkConfig
     /// read from the dialog, the price is left as-is. Set false to always submit the exact requested price.
     /// </summary>
     public bool ClampPriceToBand { get; set; } = true;
+    /// <summary>
+    /// Market states, as reported by the BROKER's own feed, in which an order may be submitted.
+    ///
+    /// <para>
+    /// <c>OHO</c> is included deliberately. It is PSX's pre-open order-handling state: the broker
+    /// accepts the order and it becomes live at the open, which is when queue priority is worth
+    /// having and when an overnight signal most wants to act. The portal renders OHO in the same
+    /// green "success" style as OPEN and never disables its order form for it. Gating orders on the
+    /// regular matching session alone — the original behaviour — silently forfeited that window.
+    /// </para>
+    ///
+    /// <para>
+    /// Both <c>OPEN</c> and <c>OPN</c> appear because the portal uses two vocabularies:
+    /// <c>GetFeed.marketStatus</c> says <c>OPEN</c>/<c>CLOSED</c>/<c>OHO</c>, while
+    /// <c>GetMarketStates[].state</c> says <c>OPN</c>/<c>CLO</c>/<c>OHO</c>/<c>Close</c>.
+    /// </para>
+    ///
+    /// <para>
+    /// Left EMPTY on purpose, meaning "use the built-in defaults" (see
+    /// <see cref="Market.OrderWindow.DefaultAcceptingStates"/>). A pre-populated collection property
+    /// is a trap here: .NET's ConfigurationBinder APPENDS to one rather than replacing it, so three
+    /// defaults plus three values in appsettings bind to six. To turn broker-state gating off
+    /// entirely, set <see cref="TrustBrokerMarketState"/> to false rather than emptying this.
+    /// </para>
+    /// </summary>
+    public List<string> OrderAcceptingMarketStates { get; set; } = [];
+
+    /// <summary>
+    /// Prefer the broker's reported market state over the local trading calendar when deciding
+    /// whether an order may be submitted (default true).
+    ///
+    /// <para>
+    /// The venue's own state is authoritative in a way a hardcoded 09:32–15:30 schedule cannot be: it
+    /// reflects halts, extended sessions and unscheduled closures as they happen. The calendar
+    /// remains the fallback whenever the broker has not reported a state — the feed being switched
+    /// off, or not yet polled. Set false to gate purely on the calendar.
+    /// </para>
+    /// </summary>
+    public bool TrustBrokerMarketState { get; set; } = true;
+
+    /// <summary>
+    /// How long <c>cancel_order</c> waits for a cancelled order to actually leave the outstanding
+    /// book before reporting the cancellation as unconfirmed. Default 30s.
+    ///
+    /// <para>
+    /// Measured, not guessed. An 8s window was tried first and proved too short: a live cancel during
+    /// the pre-open <c>OHO</c> state was reported unconfirmed at 8s, and the order had in fact left
+    /// the book by the next check. The portal returns no success indicator at all — its own UI fires
+    /// the cancel and closes the dialog without reading the response — so the order book is the only
+    /// evidence, and this is how long it is given to reflect reality. Exceeding it is reported
+    /// honestly as unconfirmed rather than assumed either way.
+    /// </para>
+    /// </summary>
+    public int CancelVerifyTimeoutMs { get; set; } = 30_000;
+
     public string SessionDir { get; set; } = "session_ahk";
     public string LogDir { get; set; } = "logs/trading";
 

@@ -177,7 +177,8 @@ public sealed class TradingManagerSafetyTests
                 options, new ConfigurationBuilder().Build(), NullLogger<SqliteTradingRepository>.Instance);
             var broker = new RecordingBroker();
             var manager = new TradingAgent.Manager.TradingManager(
-                broker, repository, new AlwaysOpenCalendar(), policy,
+                broker, repository, new AlwaysOpenCalendar(),
+                TradingTestFactory.CalendarOnlyWindow(new AlwaysOpenCalendar()), policy,
                 new TradingRiskEngine(Options.Create(new AhkConfig()), options),
                 new TradingReconciliationState(), new ApprovalIntentRegistry(), options,
                 NullLogger<TradingAgent.Manager.TradingManager>.Instance);
@@ -306,6 +307,7 @@ public sealed class TradingManagerSafetyTests
             var intentRegistry = new ApprovalIntentRegistry();
             var manager = new TradingAgent.Manager.TradingManager(
                 broker, repository, new AlwaysOpenCalendar(),
+                TradingTestFactory.CalendarOnlyWindow(new AlwaysOpenCalendar()),
                 policyProvider,
                 new TradingRiskEngine(Options.Create(new AhkConfig()), options),
                 new TradingReconciliationState(), intentRegistry, options,
