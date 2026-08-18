@@ -7,14 +7,14 @@ namespace TradingAgent.Tools;
 
 /// <summary>
 /// Read-only account snapshot for the agent: available cash plus every current holding with
-/// share count, cost basis, and live market value. Backed by a real portal scrape
-/// (<see cref="AhkBroker.GetPortfolioAsync"/>) — the agent is told to NEVER invent balances,
+/// share count, cost basis, and live market value. Backed by real broker data via
+/// <see cref="PortfolioReader"/> — the agent is told to NEVER invent balances,
 /// and this tool is how it gets the real numbers. Any extraction gap is surfaced in
 /// <c>warnings</c> so the agent reports "unknown" rather than a guess.
 /// </summary>
 public sealed class GetPortfolioTool : BaseTool
 {
-    private readonly AhkBroker _broker;
+    private readonly PortfolioReader _portfolio;
     private readonly ILogger<GetPortfolioTool> _logger;
 
     private static readonly JsonSerializerOptions _snakeOptions = new()
@@ -22,9 +22,9 @@ public sealed class GetPortfolioTool : BaseTool
         PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
     };
 
-    public GetPortfolioTool(AhkBroker broker, ILogger<GetPortfolioTool> logger)
+    public GetPortfolioTool(PortfolioReader portfolio, ILogger<GetPortfolioTool> logger)
     {
-        _broker = broker;
+        _portfolio = portfolio;
         _logger = logger;
     }
 
@@ -34,9 +34,8 @@ public sealed class GetPortfolioTool : BaseTool
         "Read the REAL account state from the broker portal: available cash balance (PKR) and all " +
         "currently held stocks with number of shares, average buy price, invested amount, current " +
         "price, current value, and profit/loss. Use this before sizing or recommending any trade, " +
-        "and whenever the user asks about their balance, holdings, or portfolio. Opens a browser " +
-        "session, so it takes several seconds. Values missing from the portal are null — report " +
-        "them as unknown, never estimate them.";
+        "and whenever the user asks about their balance, holdings, or portfolio. Values missing " +
+        "from the portal are null — report them as unknown, never estimate them.";
 
     public override Dictionary<string, ToolParameter> Parameters => new();
 
@@ -44,7 +43,7 @@ public sealed class GetPortfolioTool : BaseTool
     {
         try
         {
-            var snapshot = await _broker.GetPortfolioAsync();
+            var snapshot = await _portfolio.GetPortfolioAsync();
 
             return ToolResult.Ok(JsonSerializer.Serialize(new
             {

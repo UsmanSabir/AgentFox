@@ -170,6 +170,10 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             TradingPluginConfigDefinitionProvider.BrokerPluginName);
 
         services.AddSingleton<AhkPortalClient>();
+        // Portfolio reads prefer the portal's JSON API and fall back to the browser scrape. Declared
+        // here rather than inside AhkBroker because AhkPortalClient depends on the broker for session
+        // cookies, so a broker calling the portal client back would be a cycle. See PortfolioReader.
+        services.AddSingleton<PortfolioReader>();
         // Same instance behind the narrow interface the order gate consumes.
         services.AddSingleton<IBrokerMarketState>(sp => sp.GetRequiredService<AhkPortalClient>());
         services.AddSingleton<AhkQuoteBook>();
@@ -1678,7 +1682,7 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             new CreateTradeProposalTool(repository, policy),
             new GetTradingStatusTool(repository, policy, calendar, reconciliation),
             new GetPortfolioTool(
-                _services!.GetRequiredService<AhkBroker>(),
+                _services!.GetRequiredService<PortfolioReader>(),
                 loggers.CreateLogger<GetPortfolioTool>()),
             new ResearchStockTool(
                 _services!.GetRequiredService<PsxDataClient>(),

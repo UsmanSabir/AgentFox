@@ -37,6 +37,7 @@ public sealed class ProtectiveStopWorker : BackgroundService
 {
     private readonly IServiceScopeFactory _scopes;
     private readonly AhkBroker _broker;
+    private readonly PortfolioReader _portfolio;
     private readonly TradingManager _manager;
     private readonly ApprovalGate _approvals;
     private readonly IMarketCalendar _calendar;
@@ -72,6 +73,7 @@ public sealed class ProtectiveStopWorker : BackgroundService
     public ProtectiveStopWorker(
         IServiceScopeFactory scopes,
         AhkBroker broker,
+        PortfolioReader portfolio,
         TradingManager manager,
         ApprovalGate approvals,
         IMarketCalendar calendar,
@@ -85,6 +87,7 @@ public sealed class ProtectiveStopWorker : BackgroundService
         _notifier  = notifier;
         _scopes    = scopes;
         _broker    = broker;
+        _portfolio = portfolio;
         _manager   = manager;
         _approvals = approvals;
         _calendar  = calendar;
@@ -576,7 +579,7 @@ public sealed class ProtectiveStopWorker : BackgroundService
     {
         try
         {
-            var snapshot = await _broker.GetPortfolioAsync();
+            var snapshot = await _portfolio.GetPortfolioAsync();
             return snapshot.Holdings.ToDictionary(
                 h => h.Symbol, h => h.Quantity, StringComparer.OrdinalIgnoreCase);
         }

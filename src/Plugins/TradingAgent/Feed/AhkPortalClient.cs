@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Text.Json;
 using AgentFox.Plugins;
@@ -85,6 +86,25 @@ public sealed class AhkPortalClient : IBrokerMarketState, IDisposable
     /// <summary>Latest <c>marketStatus</c> string seen on a feed response ("OPEN", "CLOSED", "OHO", …).</summary>
     public string? LastMarketStatus { get; private set; }
 
+    /// <summary>
+    /// Whether an authenticated HTTP session already exists, WITHOUT establishing one.
+    ///
+    /// <para>
+    /// This is the guard for passive, periodic readers. <see cref="EnsureSessionAsync"/> harvests its
+    /// cookies from the browser broker, and that harvest calls the broker's session preparation —
+    /// which launches Chromium and performs a full portal LOGIN when no session is live. A caller on
+    /// a timer that ignored this would therefore turn a dead session into a login attempt on every
+    /// tick: at the reconciliation worker's 60-second cadence that is sixty logins an hour, against a
+    /// broker that has already withdrawn access once for far less (see docs/phase-b-runbook.md §0).
+    /// </para>
+    ///
+    /// <para>
+    /// So: anything user-initiated may call <see cref="EnsureSessionAsync"/> and pay for a login;
+    /// anything on a timer must check this first and report "no session" rather than create one.
+    /// </para>
+    /// </summary>
+    public bool HasSession => _sessionReady && _http is not null;
+
     // ── Session ───────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -139,6 +159,17 @@ public sealed class AhkPortalClient : IBrokerMarketState, IDisposable
             {
                 CookieContainer = jar,
                 UseCookies = true,
+                // Authenticate to an authenticating corporate proxy with the process's own Windows
+                // identity, which is what the browser alongside us already does.
+                //
+                // Without this, every call on a network with a system proxy fails at the tunnel with
+                // 407 before it ever reaches the portal — and the symptom is maximally misleading:
+                // the session is reported as ESTABLISHED (cookies harvested from Chromium succeeded,
+                // that part never touches the proxy), and only the subsequent requests fail, so the
+                // feed looks like a broker that has gone quiet rather than a proxy that said no.
+                // Observed on a NETSOL workstation on 2026-08-18, where the bypass list covers many
+                // hosts but not the broker's. Null credentials are harmless where no proxy exists.
+                DefaultProxyCredentials = CredentialCache.DefaultCredentials,
                 // The portal 302s to the login page when a session dies. Following that redirect
                 // would turn "session expired" into a 200 full of HTML, which parses as no data and
                 // looks exactly like a quiet market. Seeing the 302 is how expiry is detected.
@@ -328,6 +359,132 @@ public sealed class AhkPortalClient : IBrokerMarketState, IDisposable
         var content = new FormUrlEncodedContent([new KeyValuePair<string, string>("orignalorderno", orderNo)]);
         var body = await PostAsync("Home/CancelOrder", content, ct);
         return body is not null;
+    }
+
+    // ── Account state ─────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Establishes the session and returns the account code the account-scoped endpoints require.
+    /// Returns null when either step fails; the caller must treat that as "unknown", never as empty.
+    /// </summary>
+    private async Task<string?> ResolveAccountAsync(CancellationToken ct)
+    {
+        if (!await EnsureSessionAsync(ct)) return null;
+
+        var account = AccountCode;
+        if (!string.IsNullOrWhiteSpace(account)) return account;
+
+        _logger.LogWarning("[AhkPortal] Session established but no account code was returned.");
+        return null;
+    }
+
+    /// <summary>
+    /// Available cash, in PKR, from <c>GET /Home/GetAccountBalance?account=…</c>. Returns null when
+    /// the balance could not be read — which a caller must report as unknown rather than as zero.
+    ///
+    /// <para>
+    /// The portal answers with a JSON <b>string</b> holding the number (<c>"78141.0"</c>), not a JSON
+    /// number, which is why this parses rather than deserialising to <c>decimal</c>. Its own UI does
+    /// <c>Number(res)</c> for the same reason.
+    /// </para>
+    /// </summary>
+    public async Task<decimal?> GetAccountBalanceAsync(CancellationToken ct = default)
+    {
+        var account = await ResolveAccountAsync(ct);
+        if (account is null) return null;
+
+        var body = await GetAsync($"Home/GetAccountBalance?account={Uri.EscapeDataString(account)}", ct);
+        if (string.IsNullOrWhiteSpace(body)) return null;
+
+        var value = ParseBalance(body);
+        if (value is not null) return value;
+
+        _logger.LogWarning("[AhkPortal] GetAccountBalance returned an unparseable value: {Body}",
+            body.Length > 120 ? body[..120] : body);
+        return null;
+    }
+
+    /// <summary>
+    /// Parses the balance payload. Split out from the call so it can be exercised against captured
+    /// responses without a live session — it is the one piece of this file with a format quirk worth
+    /// pinning down, and getting it wrong yields a plausible-looking wrong number rather than an error.
+    ///
+    /// <para>
+    /// Handles the quoted form the portal actually sends (<c>"78141.0"</c>), a bare number should it
+    /// ever send one, and thousands separators. Invariant culture is forced: under a comma-decimal
+    /// locale, stripping separators first and then parsing "78141.0" leniently is how a balance
+    /// silently becomes 781410.
+    /// </para>
+    /// </summary>
+    internal static decimal? ParseBalance(string? body)
+    {
+        if (string.IsNullOrWhiteSpace(body)) return null;
+
+        var raw = body.Trim().Trim('"').Trim().Replace(",", "");
+        if (raw.Length == 0) return null;
+
+        return decimal.TryParse(
+            raw,
+            NumberStyles.Float | NumberStyles.AllowLeadingSign,
+            CultureInfo.InvariantCulture,
+            out var value)
+            ? value
+            : null;
+    }
+
+    /// <summary>
+    /// The account's holdings, from <c>GET /Home/GetCollaterals?account=…</c>. Null means the read
+    /// failed; an empty list means the account genuinely holds nothing. Keeping those apart matters
+    /// for exactly the reason spelled out on <see cref="OrderBookRead"/>.
+    /// </summary>
+    public async Task<IReadOnlyList<AhkCollateralHolding>?> GetCollateralsAsync(CancellationToken ct = default)
+    {
+        var account = await ResolveAccountAsync(ct);
+        if (account is null) return null;
+
+        var body = await GetAsync($"Home/GetCollaterals?account={Uri.EscapeDataString(account)}", ct);
+        if (body is null) return null;
+
+        return Deserialize<List<AhkCollateralHolding>>(body, "GetCollaterals");
+    }
+
+    /// <summary>
+    /// Today's order-lifecycle events from <c>GET /Home/GetActivityLog</c>. Null means the read
+    /// failed. <paramref name="orderType"/> is the portal's vocabulary — <c>ALL</c>, <c>BUY</c>
+    /// or <c>SEL</c>.
+    /// </summary>
+    public async Task<IReadOnlyList<AhkActivityLogEntry>?> GetActivityLogAsync(
+        string symbol = "", string orderType = "ALL", CancellationToken ct = default)
+    {
+        var account = await ResolveAccountAsync(ct);
+        if (account is null) return null;
+
+        var body = await GetAsync(
+            $"Home/GetActivityLog?symbol={Uri.EscapeDataString(symbol)}" +
+            $"&type={Uri.EscapeDataString(orderType)}" +
+            $"&account={Uri.EscapeDataString(account)}", ct);
+        if (body is null) return null;
+
+        return Deserialize<List<AhkActivityLogEntry>>(body, "GetActivityLog");
+    }
+
+    /// <summary>
+    /// Today's executions from <c>GET /Home/GetTradeLog</c>. Null means the read failed; empty means
+    /// nothing filled today. The populated shape is unverified — see <see cref="AhkTradeLogEntry"/>.
+    /// </summary>
+    public async Task<IReadOnlyList<AhkTradeLogEntry>?> GetTradeLogAsync(
+        string symbol = "", string orderType = "ALL", CancellationToken ct = default)
+    {
+        var account = await ResolveAccountAsync(ct);
+        if (account is null) return null;
+
+        var body = await GetAsync(
+            $"Home/GetTradeLog?symbol={Uri.EscapeDataString(symbol)}" +
+            $"&type={Uri.EscapeDataString(orderType)}" +
+            $"&account={Uri.EscapeDataString(account)}", ct);
+        if (body is null) return null;
+
+        return Deserialize<List<AhkTradeLogEntry>>(body, "GetTradeLog");
     }
 
     // ── Transport ─────────────────────────────────────────────────────────────
