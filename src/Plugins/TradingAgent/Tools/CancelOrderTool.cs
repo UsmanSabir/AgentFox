@@ -36,11 +36,11 @@ public sealed class CancelOrderTool : BaseTool
     };
 
     /// <summary>
-    /// Gap between order-book reads while verifying a cancel. 2s rather than sub-second on purpose:
-    /// a cancel round-trips to the exchange and will not clear in milliseconds, so faster polling
-    /// buys nothing and only multiplies requests against the broker — at 750ms a single 30s
-    /// verification was 40 reads. The loop exits the moment the order is gone, so the common case is
-    /// one or two.
+    /// Gap between order-book reads while verifying a cancel. Kept at second-scale rather than
+    /// sub-second: a cancel round-trips to the exchange, so faster polling buys nothing and only
+    /// multiplies requests against the broker. The loop exits the moment the order is gone, and
+    /// measured live a cancel confirms on the FIRST poll (~2.1s end to end), so the usual cost is a
+    /// single extra read.
     /// </summary>
     private static readonly TimeSpan VerifyPollInterval = TimeSpan.FromSeconds(1);
 

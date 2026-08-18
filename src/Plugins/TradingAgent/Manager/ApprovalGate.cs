@@ -29,6 +29,7 @@ public sealed class ApprovalGate
     private readonly ApprovalIntentRegistry _intents;
     private readonly TradingPolicyProvider _policy;
     private readonly IMarketCalendar _calendar;
+    private readonly TradingAgent.Market.OrderWindow _orderWindow;
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly ILogger<ApprovalGate> _logger;
 
@@ -42,12 +43,14 @@ public sealed class ApprovalGate
         ApprovalIntentRegistry intents,
         TradingPolicyProvider policy,
         IMarketCalendar calendar,
+        TradingAgent.Market.OrderWindow orderWindow,
         IOptions<TradingAgentOptions> options,
         ILogger<ApprovalGate> logger)
     {
         _intents = intents;
         _policy = policy;
         _calendar = calendar;
+        _orderWindow = orderWindow;
         _options = options;
         _logger = logger;
         _sessionDate = PsxTime.Today();
@@ -216,9 +219,14 @@ public sealed class ApprovalGate
         var caps = approval.Auto;
         RollSessionIfNeeded();
 
-        if (caps.RequireMarketOpen && !_calendar.GetStatus().IsOpen)
+        // Asks the same question the order gate asks, so auto-approval and execution cannot disagree.
+        // Gating on the regular session alone would deny auto-approval during the pre-open OHO state
+        // that TradingManager is willing to submit into — approving nothing that could then be placed.
+        if (caps.RequireMarketOpen)
         {
-            return ApprovalDecision.Denied("Auto-approval requires an open market.");
+            var window = _orderWindow.Evaluate();
+            if (!window.Allowed)
+                return ApprovalDecision.Denied($"Auto-approval requires a market accepting orders: {window.Reason}");
         }
 
         var orders = groups.SelectMany(g => g).ToList();

@@ -88,27 +88,25 @@ that answers on **your** machine and use it.
 
 ## 2. Guardrails — mandatory, and here is why
 
-The model **cannot be trusted to pass exact order parameters.** On the first live attempt, given the
-explicit instruction *"quantity=10"*, `qwen2.5-14b-instruct` **omitted `quantity` entirely**.
-`place_order` then auto-sized from `PerStockBudgetPkr` and tried to place **75 shares for 48,750 PKR**
-— 7.5× the intended order. It was stopped only by the value cap:
+The model **cannot be trusted to pass exact order parameters.** Given the explicit instruction
+*"quantity=10"*, `qwen2.5-14b-instruct` **omitted `quantity` entirely**. `place_order` then auto-sized
+from `PerStockBudgetPkr` and tried to place **75 shares for 48,750 PKR** — 7.5× the intended order,
+and entirely *within* policy, because with no quantity the effective ceiling is the budget rather than
+whatever the requester had in mind.
 
-```
-Order value 48,750 PKR exceeds limit of 7,500 PKR.
-```
-
-So constrain **both** paths — the explicit-quantity path and the auto-size path — with environment
-variables, which override every config file and vanish when the process exits:
+Three settings close that, all as environment variables (they override every config file and vanish
+when the process exits):
 
 | Variable | Value | Purpose |
 | --- | --- | --- |
-| `Plugins__Ahk__MaxOrderValuePkr` | `7500` | Hard ceiling. Rejects anything above ~10 shares at these prices. |
-| `Plugins__Ahk__PerStockBudgetPkr` | `6600` | Caps the auto-size path at ~9 shares if `quantity` is omitted again. |
+| `Plugins__TradingAgent__RequireExplicitQuantity` | `true` | **The direct fix.** Refuses any order that omits `quantity`, reporting the size budget-sizing *would* have used. Prefer this over relying on the caps below. |
+| `Plugins__Ahk__MaxOrderValuePkr` | `7500` | Hard ceiling — rejects anything above ~10 shares at these prices. |
+| `Plugins__Ahk__PerStockBudgetPkr` | `6600` | Backstop: if auto-sizing is ever reached, it lands at ~9 shares. |
 
-Verify each order's **actual** arguments in the audit trail (§6) rather than trusting the model's
-prose. Do this after **every** placement.
+Auto-sizing now also logs at **WARNING** and returns an `auto_sized_warning` field in the tool result,
+so an omission is visible in the answer the caller acts on rather than only in the log.
 
----
+Still verify each order's **actual** arguments in the audit trail (§6) after **every** placement.
 
 ## 3. Start the host
 
@@ -118,6 +116,7 @@ cd <repo>/src
 Modules="web,trading-agent" \
 Logging__MinLevel="Information" \
 Plugins__AhkFeed__Enabled="true" \
+Plugins__TradingAgent__RequireExplicitQuantity="true" \
 Plugins__Ahk__MaxOrderValuePkr="7500" \
 Plugins__Ahk__PerStockBudgetPkr="6600" \
 LLM__BaseUrl="http://192.168.100.50:1234/v1" \
@@ -131,6 +130,9 @@ Notes:
 - Logs go to **`src/logs/agentfox.log`**, not stdout. Stdout only shows the startup banner.
 - Leave `OnlyDuringMarketHours` at its default (`true`) — during market hours it polls normally.
 - A visible Chrome window will open (`Headless: false`). That is expected. **Do not interact with it.**
+- **Start the host ONCE.** Repeated restarts each perform a full broker login, and ~15 logins in two
+  hours is the suspected cause of the 2026-08-18 access block. Change settings with environment
+  variables on the next start, not by restarting mid-session.
 
 Watch for:
 ```
