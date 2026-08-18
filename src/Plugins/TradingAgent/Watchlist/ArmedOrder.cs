@@ -90,6 +90,14 @@ public sealed record ArmedOrder
         OrderType  = OrderType,
         EntryPrice = Price,
         LimitPrice = LimitPrice,
+        // Carried through deliberately: without it the risk engine has to infer the trigger's
+        // direction from the side, which is wrong for a dip-buy and a sell-into-strength alike.
+        FiresOnRisingPrice = TriggerKind switch
+        {
+            ArmedTriggerKind.PriceAbove => true,
+            ArmedTriggerKind.PriceBelow => false,
+            _                           => null
+        },
         RawMessage = $"armed:{ArmedId}"
     };
 }

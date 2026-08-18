@@ -17,7 +17,7 @@
     trading, CHART_INTERVALS,
     type ArmOrderDialogContext, type ChartData, type ChartInterval, type StockAssessment
   } from './api';
-  import { LineChart, AlertTriangle, Eye, RefreshCw, Brain, Maximize2, Minimize2, Activity } from 'lucide-svelte';
+  import { LineChart, AlertTriangle, Eye, RefreshCw, Brain, Maximize2, Minimize2, Activity, Crosshair } from 'lucide-svelte';
   import AssessmentCard from './AssessmentCard.svelte';
 
   export let symbol: string | null = null;
@@ -60,8 +60,9 @@
    * Asks the parent to open the arming dialog, pre-filled from the clicked level.
    *
    * The direction is inferred from which side the level sits on: a support is where a protective SELL
-   * stop belongs, a resistance is where a BUY breakout does. Both remain editable in the dialog — the
-   * pre-fill saves typing, it does not decide the trade.
+   * belongs, a resistance is where a BUY breakout does. The TYPE is always Limit — the order kind is a
+   * decision about how to fill, not about which level was clicked. Both remain editable in the dialog:
+   * the pre-fill saves typing, it does not decide the trade.
    */
   function armAtLevel(level: ChartData['levels']['supports'][number], side: 'support' | 'resistance') {
     if (!symbol || !data) return;
@@ -71,13 +72,50 @@
       triggerKind: isSupport ? 'PriceBelow' : 'PriceAbove',
       triggerPrice: level.price,
       action: isSupport ? 'SELL' : 'BUY',
-      orderType: 'STOPLOSS',
+      orderType: 'LIMIT',
       price: level.price,
       context:
         `${symbol} last ${data.snapshot.close} · ${side} ${level.price} `
         + `(${level.touches} touch${level.touches === 1 ? '' : 'es'}`
         + `${level.weeklyConfirmed ? ', weekly-confirmed' : ', no weekly confirmation'}) `
-        + `· ${isSupport ? 'a SELL stop fires if price falls to it' : 'a BUY fires if price rises to it'}.`
+        + `· ${isSupport ? 'a SELL fires if price falls to it' : 'a BUY fires if price rises to it'}.`
+    });
+  }
+
+  /**
+   * Arms the deterministic plan as one order: the BUY at its entry, with its stop attached.
+   *
+   * The plan is buy-side by construction (it is anchored on the nearest support, with the stop an ATR
+   * multiple below it and the target at resistance), so the side is not a guess. The trigger is always
+   * "price falls to", because an entry resting AT a support is reached from above — and when price has
+   * already passed the level the plan sets entry to the last close, where a falls-to trigger fires on
+   * the next evaluation rather than waiting for a dip that already happened.
+   *
+   * What this saves is not typing. Entry and stop are one decision — the level that would prove the
+   * idea wrong is what makes the entry worth taking — and arming them from two separate clicks is how
+   * an entry ends up in the market with the stop still in someone's head.
+   */
+  function armPlan() {
+    if (!symbol || !data?.plan.entry) return;
+    const plan = data.plan;
+
+    dispatch('arm', {
+      symbol,
+      triggerKind: 'PriceBelow',
+      triggerPrice: plan.entry,
+      action: 'BUY',
+      orderType: 'LIMIT',
+      price: plan.entry,
+      // Only when the plan actually produced one. Forcing the checkbox on with no level would put the
+      // dialog's generic 2%-under guess where a computed stop appears to be.
+      attachStop: plan.stop != null,
+      stopTrigger: plan.stop,
+      context:
+        `${symbol} last ${data.snapshot.close} · plan entry ${plan.entry}, stop ${plan.stop ?? '—'}, `
+        + `target ${plan.target ?? '—'}`
+        + (plan.rewardRisk ? ` (R:R ${plan.rewardRisk})` : '')
+        + `. ${plan.entryWeeklyConfirmed ? 'The entry level is weekly-confirmed.' : 'The entry level has no weekly confirmation.'}`
+        + ' The plan is level arithmetic, not a recommendation — check the read below it before sizing.'
     });
   }
 
@@ -549,6 +587,16 @@
             {:else}
               <span class="chip warn">no weekly confirmation</span>
             {/if}
+            <button
+              class="arm-plan"
+              on:click={armPlan}
+              title="Arm a BUY at {data.plan.entry}{data.plan.stop != null
+                ? `, protected by a stop at ${data.plan.stop}`
+                : ''}"
+            >
+              <Crosshair size={12} />
+              arm{data.plan.stop != null ? ' with stop' : ''}
+            </button>
           </div>
         {/if}
 
@@ -573,7 +621,7 @@
             {#each data.levels.supports.slice(0, 3) as level}
               <button
                 class="level armable"
-                title="Arm a SELL stop below {level.price}"
+                title="Arm a SELL at {level.price}"
                 on:click={() => armAtLevel(level, 'support')}
               >
                 {level.price}
@@ -670,6 +718,13 @@
   .plan { display:flex; align-items:center; gap:.5rem; flex-wrap:wrap; font-size:.72rem; color:var(--text-2); }
   .plan b { color:var(--text); }
   .plan .rr { color:var(--primary); font-weight:600; }
+  .arm-plan {
+    display:inline-flex; align-items:center; gap:.25rem;
+    background:none; border:1px solid color-mix(in srgb, var(--primary) 40%, transparent);
+    border-radius:999px; color:var(--primary); cursor:pointer;
+    font:inherit; font-size:.68rem; padding:.1rem .45rem;
+  }
+  .arm-plan:hover { background:color-mix(in srgb, var(--primary) 15%, transparent); }
 
   .chip { display:inline-flex; align-items:center; gap:.2rem; font-size:.63rem; padding:.1rem .4rem; border-radius:999px; border:1px solid var(--border-md); color:var(--text-3); }
   .chip.ok { color:var(--success); border-color:color-mix(in srgb, var(--success) 35%, transparent); }

@@ -19,6 +19,7 @@ using TradingAgent.Config;
 using TradingAgent.Feed;
 using TradingAgent.Manager;
 using TradingAgent.Market;
+using TradingAgent.Observability;
 using TradingAgent.Persistence;
 using TradingAgent.Research;
 using TradingAgent.Risk;
@@ -169,6 +170,10 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             TradingPluginConfigDefinitionProvider.BrokerPluginName);
 
         services.AddSingleton<AhkPortalClient>();
+        // Portfolio reads prefer the portal's JSON API and fall back to the browser scrape. Declared
+        // here rather than inside AhkBroker because AhkPortalClient depends on the broker for session
+        // cookies, so a broker calling the portal client back would be a cycle. See PortfolioReader.
+        services.AddSingleton<PortfolioReader>();
         // Same instance behind the narrow interface the order gate consumes.
         services.AddSingleton<IBrokerMarketState>(sp => sp.GetRequiredService<AhkPortalClient>());
         services.AddSingleton<AhkQuoteBook>();
@@ -214,6 +219,9 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         services.AddSingleton<PendingTakeProfitStore>();
         services.AddSingleton<CandleBackfillRunner>();
         services.AddSingleton<AlertBroadcaster>();
+        // What the agent has been DOING, for the dashboard's activity panel. A live view only — it
+        // self-prunes and is deliberately not persisted; the ledger is the durable record.
+        services.AddSingleton<TradingActivityLog>();
         // Registered as a singleton AND as the hosted service, so the API can read its live status and
         // trigger a pass on the same instance the timer drives.
         services.AddSingleton<WatchlistMonitorWorker>();
@@ -465,6 +473,33 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                     error = "not_tradable",
                     message = $"'{symbol}' is not in AllowedSymbols, so an order for it would be refused "
                             + "by the risk engine. Arming one would be protection in name only."
+                });
+
+            // Same reasoning as the tradability check above, applied to the stop's own geometry: an
+            // armed stop whose limit sits on the wrong side of its trigger is refused by the risk
+            // engine at fire time, which is the one moment it was supposed to work. Checking it here
+            // means the order is either armed and fillable, or never armed at all.
+            //
+            // The direction comes from the TRIGGER, not the side — a BUY armed to fire on a falling
+            // price wants its limit BELOW the trigger, and judging it by the side alone is what
+            // refused a legitimate FFC dip-buy live on 2026-08-18. See StopLimitRule.
+            var stopProblem = StopLimitRule.Validate(
+                action,
+                (body.OrderType ?? "LIMIT").Trim().ToUpperInvariant(),
+                kind switch
+                {
+                    ArmedTriggerKind.PriceAbove => true,
+                    ArmedTriggerKind.PriceBelow => false,
+                    _                           => (bool?)null
+                },
+                body.Price,
+                body.LimitPrice);
+
+            if (stopProblem is not null)
+                return Results.BadRequest(new
+                {
+                    error = "invalid_stop_limit",
+                    message = $"This order would be refused when it fired: {stopProblem}"
                 });
 
             var order = new ArmedOrder
@@ -762,6 +797,49 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         // dead session and a quiet market all look like "no quotes" — so this is the surface that
         // tells them apart without reading Debug logs.
         trading.MapGet("/feed/status", (AhkFeedWorker feed) => Results.Ok(feed.GetStatus()));
+
+        // What the agent is doing right now, and what it just did.
+        //
+        // The status endpoints above each answer for ONE subsystem and answer in state ("healthy",
+        // "12 symbols"). This answers in events, across all of them, in order — which is the only
+        // form that says whether the thing that just happened on screen (a browser window opening,
+        // an order not appearing) was this system's doing and why.
+        //
+        // The counts always describe the whole retained window regardless of `limit`, so a collapsed
+        // panel can show an issue badge while asking for a single entry. `afterSeq` is offered for a
+        // caller that only wants what is new — but note the log folds a repeated activity into its
+        // existing entry, so a live view should read the whole window rather than merge deltas.
+        trading.MapGet("/activity", (
+            TradingActivityLog activity,
+            AhkBroker broker,
+            AhkFeedWorker feed,
+            WatchlistMonitorWorker monitor,
+            IMarketCalendar calendar,
+            long? afterSeq,
+            int? limit) =>
+        {
+            var (warnings, errors) = activity.IssueCounts();
+            var market = calendar.GetStatus();
+
+            return Results.Ok(new
+            {
+                lastSeq = activity.LastSeq,
+                warnings,
+                errors,
+                retentionMinutes = (int)TradingActivityLog.Retention.TotalMinutes,
+                now = new
+                {
+                    // The single most useful "right now" fact: whether a browser window on screen is
+                    // this system driving the portal.
+                    browserBusy  = broker.BrowserHoldsTradingScreen,
+                    marketOpen   = market.IsOpen,
+                    marketReason = market.Reason,
+                    feedHealthy  = feed.GetStatus().Healthy,
+                    monitorLastPassUtc = monitor.Status.LastPassUtc
+                },
+                activities = activity.Snapshot(afterSeq ?? 0, limit ?? TradingActivityLog.Capacity)
+            });
+        });
 
         // Run a pass now rather than waiting for the next tick. Analyst-level because it costs a
         // portal request and can raise alerts.
@@ -1631,7 +1709,7 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             new CreateTradeProposalTool(repository, policy),
             new GetTradingStatusTool(repository, policy, calendar, reconciliation),
             new GetPortfolioTool(
-                _services!.GetRequiredService<AhkBroker>(),
+                _services!.GetRequiredService<PortfolioReader>(),
                 loggers.CreateLogger<GetPortfolioTool>()),
             new ResearchStockTool(
                 _services!.GetRequiredService<PsxDataClient>(),

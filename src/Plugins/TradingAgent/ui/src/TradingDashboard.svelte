@@ -11,6 +11,7 @@
   import AlertsPanel from './AlertsPanel.svelte';
   import ArmedOrdersPanel from './ArmedOrdersPanel.svelte';
   import ArmOrderDialog from './ArmOrderDialog.svelte';
+  import ActivityPanel from './ActivityPanel.svelte';
 
   /**
    * Non-null while the arming dialog is open. Both entry points — a chart level and an alert — raise the
@@ -249,6 +250,10 @@
         on:arm={(e) => armContext = e.detail}
       />
     </div>
+
+    <!-- Directly under the status grid: this answers "what is it doing", which is the question the
+         metrics above raise and none of them answers. Collapsed, so it costs a row of chips. -->
+    <ActivityPanel />
 
     <div class="alerts-row">
       <ArmedOrdersPanel bind:this={armedPanel} refreshTick={marketTick} />

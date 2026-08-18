@@ -15,7 +15,13 @@
   export let triggerPrice: number | null = null;
   export let triggerAlertKind: string | null = null;
   export let action: 'BUY' | 'SELL' = 'SELL';
-  export let orderType = 'STOPLOSS';
+  /**
+   * Limit for both sides by default. A pre-filled STOPLOSS made the type depend on where the dialog
+   * was opened from, so the same click produced a different order kind on a chart level than on an
+   * alert — and the stop variant needs a second price that is easy to leave at its guessed default.
+   * Limit is the type that carries exactly what the user typed.
+   */
+  export let orderType = 'LIMIT';
   export let price: number | null = null;
   export let limitPrice: number | null = null;
   export let sourceAlertId: string | null = null;
@@ -37,10 +43,13 @@
   let dialogElement: HTMLDivElement;
 
   // ── Attached protective stop (BUY only) ──────────────────────────────────
-  let attachStop = false;
-  let stopTrigger: number | null = null;
-  let stopLimit: number | null = null;
-  let stopRecurring = true;
+  // Exported so a caller with a stop already in hand — the chart's plan gives an entry AND the level
+  // that invalidates it — can arm both in one click instead of leaving the user to retype a number
+  // that was already on screen. Left at these defaults, the dialog behaves exactly as before.
+  export let attachStop = false;
+  export let stopTrigger: number | null = null;
+  export let stopLimit: number | null = null;
+  export let stopRecurring = true;
 
   onMount(() => dialogElement.focus());
 

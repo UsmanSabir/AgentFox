@@ -163,3 +163,143 @@ public readonly record struct AhkSymbolKey(string Market, string Symbol)
 
     public override string ToString() => $"{Market}:{Symbol}";
 }
+
+/// <summary>
+/// One holding from <c>GET /Home/GetCollaterals?account=…</c> — the account's custody position,
+/// and the endpoint that fills the portal's own <c>#collateralstable</c>.
+///
+/// <para>
+/// This is the JSON replacement for the Exposure-dialog scrape in <c>AhkBroker.GetPortfolioAsync</c>.
+/// Two neighbouring endpoints are deliberately NOT used for holdings, because a live capture on
+/// 2026-08-18 showed what they actually are: <c>GetJSPorfolioDetails</c> returned <c>[]</c> on an
+/// account holding eight positions (it is the intraday-trading view, empty when nothing traded that
+/// day), and <c>GetExposureData</c> returns three pre-rendered HTML table fragments joined by
+/// <c>'|'</c> — cash/collateral totals only, no per-symbol rows, and HTML rather than JSON.
+/// <c>GetCollaterals</c> is the only one of the three that answers "what do I own".
+/// </para>
+/// </summary>
+public sealed class AhkCollateralHolding
+{
+    [JsonPropertyName("symbol")]        public string? Symbol { get; set; }
+    [JsonPropertyName("market")]        public string? Market { get; set; }
+
+    /// <summary>Shares held. The portal's own column heading for this is "Quantity".</summary>
+    [JsonPropertyName("quantityTotal")] public decimal? QuantityTotal { get; set; }
+
+    /// <summary>Weighted average cost of the position.</summary>
+    [JsonPropertyName("avgRateBuy")]    public decimal? AvgRateBuy { get; set; }
+
+    [JsonPropertyName("avgRateSell")]   public decimal? AvgRateSell { get; set; }
+
+    /// <summary>Mark-to-market price — the current valuation price, not necessarily the last trade.</summary>
+    [JsonPropertyName("mtmPrice")]      public decimal? MtmPrice { get; set; }
+
+    /// <summary>
+    /// Market value. Verified against all eight live rows on 2026-08-18: this is exactly
+    /// <see cref="MtmPrice"/> × <see cref="QuantityTotal"/>, so it is taken as reported rather
+    /// than recomputed.
+    /// </summary>
+    [JsonPropertyName("amount")]        public decimal? Amount { get; set; }
+
+    /// <summary>
+    /// Unrealised P/L on the open position. Verified against all eight live rows as exactly
+    /// (<see cref="MtmPrice"/> − <see cref="AvgRateBuy"/>) × <see cref="QuantityTotal"/>. The name is
+    /// the portal's — it means "not yet settled", not "not yet calculated".
+    /// </summary>
+    [JsonPropertyName("unsettled")]     public decimal? Unsettled { get; set; }
+
+    /// <summary>Realised P/L already settled. Distinct from <see cref="Unsettled"/>.</summary>
+    [JsonPropertyName("plSettled")]     public decimal? PlSettled { get; set; }
+
+    /// <summary>Quantity already sold but not yet settled out of the position.</summary>
+    [JsonPropertyName("sold")]          public decimal? Sold { get; set; }
+
+    /// <summary>Quantity committed to resting sell orders.</summary>
+    [JsonPropertyName("pendingSell")]   public decimal? PendingSell { get; set; }
+
+    /// <summary>Haircut percentage applied when the holding is counted as collateral.</summary>
+    [JsonPropertyName("haircutPer")]    public decimal? HaircutPer { get; set; }
+
+    /// <summary>Per-share value after the haircut.</summary>
+    [JsonPropertyName("margVal")]       public decimal? MargVal { get; set; }
+}
+
+/// <summary>
+/// One order-lifecycle event from <c>GET /Home/GetActivityLog?symbol=&amp;type=&amp;account=</c>.
+///
+/// <para>
+/// This is the audit trail of what happened to an order, and together with
+/// <see cref="AhkOutstandingOrder"/> it is what gives <c>IBrokerStateReader</c> something real to
+/// reconcile against. Several events share one <see cref="OrderNo"/> — a live capture on 2026-08-18
+/// showed order 6427 appearing twice, once as <c>PEN</c> and later as <c>CLX</c>.
+/// </para>
+/// </summary>
+public sealed class AhkActivityLogEntry
+{
+    [JsonPropertyName("orderNo")]     public string? OrderNo { get; set; }
+    [JsonPropertyName("hOrderNo")]    public string? HOrderNo { get; set; }
+
+    /// <summary>Ticker. Called "scrip" here, as in the outstanding book.</summary>
+    [JsonPropertyName("scrip")]       public string? Scrip { get; set; }
+
+    [JsonPropertyName("market")]      public string? Market { get; set; }
+
+    /// <summary><c>BUY</c> or <c>SEL</c>.</summary>
+    [JsonPropertyName("type")]        public string? Type { get; set; }
+
+    /// <summary>
+    /// The event: <c>PEN</c> (pending — accepted and resting) and <c>CLX</c> (cancelled) are the two
+    /// confirmed live. Treat any unrecognised value as "something happened", never as a fill —
+    /// fills are read from <see cref="AhkTradeLogEntry"/>, where a filled quantity is unambiguous.
+    /// </summary>
+    [JsonPropertyName("action")]      public string? Action { get; set; }
+
+    [JsonPropertyName("price")]       public decimal? Price { get; set; }
+
+    /// <summary>Quantity for this event. Zero on the cancellation events observed.</summary>
+    [JsonPropertyName("value")]       public decimal? Value { get; set; }
+
+    /// <summary>Quantity filled. Zero on every event observed live — no fills occurred that session.</summary>
+    [JsonPropertyName("fillVolume")]  public decimal? FillVolume { get; set; }
+
+    [JsonPropertyName("totalVolume")] public decimal? TotalVolume { get; set; }
+    [JsonPropertyName("totalValue")]  public decimal? TotalValue { get; set; }
+    [JsonPropertyName("remaining")]   public decimal? Remaining { get; set; }
+
+    /// <summary>Time of day, <c>HH:mm:ss</c>. The portal sends no date — these are today's events.</summary>
+    [JsonPropertyName("time")]        public string? Time { get; set; }
+
+    /// <summary>Observed null on every live row; the account code is on <see cref="Trader"/> instead.</summary>
+    [JsonPropertyName("account")]     public string? Account { get; set; }
+
+    [JsonPropertyName("trader")]      public string? Trader { get; set; }
+    [JsonPropertyName("flag")]        public string? Flag { get; set; }
+}
+
+/// <summary>
+/// One execution from <c>GET /Home/GetTradeLog?symbol=&amp;type=&amp;account=</c> — the fills log.
+///
+/// <para>
+/// Field names are taken from the portal's own destructuring in <c>site.js</c>; the shape could not
+/// be confirmed against data, because the account had no fills on the capture day and the endpoint
+/// returned <c>[]</c>. Every field is therefore nullable and no consumer may assume one is present.
+/// It has no <c>action</c> — a row here IS an execution, which is why fills are read from this
+/// endpoint rather than inferred from <see cref="AhkActivityLogEntry"/>.
+/// </para>
+/// </summary>
+public sealed class AhkTradeLogEntry
+{
+    [JsonPropertyName("orderNo")]     public string? OrderNo { get; set; }
+    [JsonPropertyName("scrip")]       public string? Scrip { get; set; }
+    [JsonPropertyName("market")]      public string? Market { get; set; }
+    [JsonPropertyName("type")]        public string? Type { get; set; }
+    [JsonPropertyName("price")]       public decimal? Price { get; set; }
+    [JsonPropertyName("value")]       public decimal? Value { get; set; }
+    [JsonPropertyName("fillVolume")]  public decimal? FillVolume { get; set; }
+    [JsonPropertyName("totalVolume")] public decimal? TotalVolume { get; set; }
+    [JsonPropertyName("totalValue")]  public decimal? TotalValue { get; set; }
+    [JsonPropertyName("remaining")]   public decimal? Remaining { get; set; }
+    [JsonPropertyName("time")]        public string? Time { get; set; }
+    [JsonPropertyName("account")]     public string? Account { get; set; }
+    [JsonPropertyName("trader")]      public string? Trader { get; set; }
+}

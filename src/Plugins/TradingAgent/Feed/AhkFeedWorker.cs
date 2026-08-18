@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging;
 using TradingAgent.Broker;
 using TradingAgent.Config;
 using TradingAgent.Market;
+using TradingAgent.Observability;
 using TradingAgent.Watchlist;
 
 namespace TradingAgent.Feed;
@@ -44,6 +45,7 @@ public sealed class AhkFeedWorker : BackgroundService
     private readonly IRuntimePluginOptions<AhkFeedConfig> _config;
     private readonly IRuntimePluginOptions<AhkConfig> _brokerConfig;
     private readonly ILogger<AhkFeedWorker> _logger;
+    private readonly TradingActivityLog? _activity;
 
     private DateTime _lastReloginUtc = DateTime.MinValue;
     private DateTime _lastSubscribeUtc = DateTime.MinValue;
@@ -73,8 +75,10 @@ public sealed class AhkFeedWorker : BackgroundService
         IMarketCalendar calendar,
         IRuntimePluginOptions<AhkFeedConfig> config,
         IRuntimePluginOptions<AhkConfig> brokerConfig,
-        ILogger<AhkFeedWorker> logger)
+        ILogger<AhkFeedWorker> logger,
+        TradingActivityLog? activity = null)
     {
+        _activity = activity;
         _portal = portal;
         _book = book;
         _broker = broker;
@@ -258,9 +262,14 @@ public sealed class AhkFeedWorker : BackgroundService
                 "[AhkFeed] Could not establish a broker session (attempt {Count}); next attempt in {Backoff}. "
                 + "Quotes fall back to the PSX market watch until then.",
                 _sessionFailures, backoff);
+            _activity?.Warn("Feed",
+                $"Could not establish a broker session for the live feed (attempt {_sessionFailures})",
+                $"Retrying in {backoff.TotalSeconds:F0}s. Quotes come from the PSX market watch until then.");
             return;
         }
 
+        if (_sessionFailures > 0)
+            _activity?.Info("Feed", "Live quote feed session established");
         _sessionFailures = 0;
 
         // Keep the session alive. The portal's UI does this about once a minute; letting it lapse
@@ -323,6 +332,7 @@ public sealed class AhkFeedWorker : BackgroundService
         if (_subscribed.Count == 0 && _lastSubscribeUtc == DateTime.MinValue) return;
 
         _logger.LogInformation("[AhkFeed] Re-subscribing because {Reason}.", reason);
+        _activity?.Info("Feed", "Re-subscribing the live quote feed", reason);
         _subscribed = [];
         _lastSubscribeUtc = DateTime.MinValue;
     }

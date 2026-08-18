@@ -68,3 +68,7 @@ appsettings.*.json
 .pnpm-store/
 *.env
 *.env.local
+
+# Local release packaging output (pack-local.ps1). Mirrors the CI staging layout.
+dist/
+staging/

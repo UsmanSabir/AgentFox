@@ -7,6 +7,7 @@ using TradingAgent.Broker;
 using TradingAgent.Config;
 using TradingAgent.Market;
 using TradingAgent.Models;
+using TradingAgent.Observability;
 using TradingAgent.Persistence;
 using TradingAgent.Risk;
 using TradingAgent.Reconciliation;
@@ -32,6 +33,7 @@ public sealed class TradingManager
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly ILogger<TradingManager> _logger;
     private readonly IUserNotifier? _notifier;
+    private readonly TradingActivityLog? _activity;
 
     /// <summary>How long an execution alert may take to reach the channels before it is abandoned.</summary>
     private static readonly TimeSpan NotifyTimeout = TimeSpan.FromSeconds(20);
@@ -51,8 +53,10 @@ public sealed class TradingManager
         ApprovalIntentRegistry intentRegistry,
         IOptions<TradingAgentOptions> options,
         ILogger<TradingManager> logger,
+        TradingActivityLog? activity = null,
         IUserNotifier? notifier = null)
     {
+        _activity = activity;
         _notifier = notifier;
         _broker = broker;
         _repository = repository;
@@ -69,6 +73,17 @@ public sealed class TradingManager
     public Task<IReadOnlyDictionary<string, decimal?>> GetMarketPricesAsync(IReadOnlyList<string> symbols) =>
         _broker.GetMarketPricesAsync(symbols);
 
+    /// <summary>
+    /// A refusal, recorded on the way out. Every gate in <see cref="ExecuteGroupsAsync"/> returns
+    /// through here so the activity panel can answer "why did nothing happen" — which, for a system
+    /// whose safe behaviour is to decline, is the question asked most often.
+    /// </summary>
+    private TradingExecutionResult Reject(string policyVersion, string reason)
+    {
+        _activity?.Warn("Orders", "Execution refused", reason);
+        return TradingExecutionResult.Rejected(policyVersion, reason);
+    }
+
     public async Task<TradingExecutionResult> ExecuteGroupsAsync(
         IReadOnlyList<IReadOnlyList<TradingSignal>> groups,
         string? sourceMessage,
@@ -77,24 +92,24 @@ public sealed class TradingManager
     {
         var policy = _policyProvider.Current();
         if (!policy.AutoExecute)
-            return TradingExecutionResult.Rejected(policy.Version, "AutoExecute is disabled.");
+            return Reject(policy.Version, "AutoExecute is disabled.");
 
         var mode = policy.ExecutionMode.Trim().ToUpperInvariant();
         if (mode == "DISABLED")
-            return TradingExecutionResult.Rejected(policy.Version, "Trading execution mode is Disabled.");
+            return Reject(policy.Version, "Trading execution mode is Disabled.");
 
         if (groups.Count == 0 || groups.All(g => g.Count == 0))
-            return TradingExecutionResult.Rejected(policy.Version, "No orders were supplied.");
+            return Reject(policy.Version, "No orders were supplied.");
 
         var risk = _riskEngine.Validate(groups, policy.KillSwitch);
         if (!risk.Allowed)
-            return TradingExecutionResult.Rejected(policy.Version,
+            return Reject(policy.Version,
                 "Pre-trade risk validation failed: " + string.Join(" ", risk.Violations));
 
         if (mode == "APPROVALREQUIRED")
         {
             if (authorization?.Method != "host-tool-gate")
-                return TradingExecutionResult.Rejected(policy.Version,
+                return Reject(policy.Version,
                     "ApprovalRequired mode needs an authorization from the host tool-approval gate.");
 
             var intentFailure = ValidateApprovalIntent(
@@ -102,7 +117,7 @@ public sealed class TradingManager
             if (intentFailure is not null)
             {
                 _logger.LogWarning("[TradingManager] Approval intent rejected: {Reason}", intentFailure);
-                return TradingExecutionResult.Rejected(policy.Version, intentFailure);
+                return Reject(policy.Version, intentFailure);
             }
         }
 
@@ -113,7 +128,7 @@ public sealed class TradingManager
             var maxAge = TimeSpan.FromSeconds(Math.Max(10, _options.Value.ReconciliationMaxAgeSeconds));
             if (!reconciliation.Supported || !reconciliation.Healthy
                 || DateTime.UtcNow - reconciliation.CheckedUtc > maxAge)
-                return TradingExecutionResult.Rejected(policy.Version,
+                return Reject(policy.Version,
                     "Broker reconciliation is not healthy: " + reconciliation.Reason);
         }
 
@@ -126,7 +141,7 @@ public sealed class TradingManager
             _logger.LogInformation(
                 "[TradingManager] Order rejected by the {Source} order window: {Reason}",
                 window.Source, window.Reason);
-            return TradingExecutionResult.Rejected(policy.Version, window.Reason);
+            return Reject(policy.Version, window.Reason);
         }
 
         var requestJson = JsonSerializer.Serialize(groups, Json);

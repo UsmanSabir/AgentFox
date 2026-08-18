@@ -91,6 +91,17 @@ public static class HttpResilienceFactory
                 PooledConnectionLifetime = TimeSpan.FromMinutes(2),
                 KeepAlivePingDelay = TimeSpan.FromSeconds(30),
                 KeepAlivePingTimeout = TimeSpan.FromSeconds(10),
+                // Authenticate to an authenticating corporate proxy using the process's own Windows
+                // identity, the way every browser on such a network already does.
+                //
+                // .NET picks up the system proxy automatically but sends no credentials for it, so on
+                // a network with one every outbound call dies at the CONNECT tunnel with 407 — long
+                // before it reaches the host it was aimed at. The symptom is a plugin that looks
+                // simply broken: on a NETSOL workstation on 2026-08-18 this silently emptied PSX
+                // candle history, one "market day could not be loaded" warning per day requested,
+                // with nothing pointing at a proxy. Harmless where no proxy exists, and ignored by a
+                // proxy that wants no authentication.
+                DefaultProxyCredentials = CredentialCache.DefaultCredentials,
             }
         };
 

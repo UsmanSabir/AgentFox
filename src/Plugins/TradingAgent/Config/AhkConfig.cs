@@ -48,6 +48,20 @@ public class AhkConfig
     /// read from the dialog, the price is left as-is. Set false to always submit the exact requested price.
     /// </summary>
     public bool ClampPriceToBand { get; set; } = true;
+
+    /// <summary>
+    /// Read the portfolio through the portal's JSON API (<c>GetCollaterals</c> + <c>GetAccountBalance</c>)
+    /// instead of driving the browser through the Exposure dialog. Default true.
+    ///
+    /// <para>
+    /// The browser path costs a page load, a modal, a tab dance and a heuristic table scrape, and it
+    /// holds the broker's single-page gate for the whole of it — which also makes the live feed yield.
+    /// The API path is two HTTP GETs and takes no gate. Falling back is automatic: if the API read
+    /// fails for any reason the browser scrape still runs, so switching this off is only needed to
+    /// force the old path for cross-checking.
+    /// </para>
+    /// </summary>
+    public bool PreferDirectApiForPortfolio { get; set; } = true;
     /// <summary>
     /// Market states, as reported by the BROKER's own feed, in which an order may be submitted.
     ///
