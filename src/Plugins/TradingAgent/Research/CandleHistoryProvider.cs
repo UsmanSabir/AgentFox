@@ -23,6 +23,7 @@ namespace TradingAgent.Research;
 public sealed class CandleHistoryProvider
 {
     private readonly PsxDataClient _dataClient;
+    private readonly CompositeLiveQuoteSource _quotes;
     private readonly ITradingRepository _repository;
     private readonly MonitoredUniverse _universe;
     private readonly IOptions<TradingAgentOptions> _options;
@@ -30,12 +31,14 @@ public sealed class CandleHistoryProvider
 
     public CandleHistoryProvider(
         PsxDataClient dataClient,
+        CompositeLiveQuoteSource quotes,
         ITradingRepository repository,
         MonitoredUniverse universe,
         IOptions<TradingAgentOptions> options,
         ILogger<CandleHistoryProvider> logger)
     {
         _dataClient = dataClient;
+        _quotes = quotes;
         _repository = repository;
         _universe = universe;
         _options = options;
@@ -109,8 +112,12 @@ public sealed class CandleHistoryProvider
         }
 
         // ── Live bar ──────────────────────────────────────────────────────────
+        // Deliberately NOT portal?.Live: that field only ever holds the PSX market watch, so
+        // preferring it whenever a portal fetch happened would silently bypass the broker feed on
+        // the common path. The composite is asked every time — its PSX source reads the same cached
+        // snapshot the portal fetch already populated, so this costs no additional request.
         var live = includeLive
-            ? portal?.Live ?? await GetLiveSafeAsync(warnings, ct)
+            ? await GetLiveSafeAsync(warnings, ct)
             : new Dictionary<string, PsxLiveQuote>();
 
         var today = PsxTime.Today();
@@ -210,12 +217,18 @@ public sealed class CandleHistoryProvider
     {
         try
         {
-            return await _dataClient.GetMarketWatchAsync(ct);
+            // Goes through the composite rather than PsxDataClient directly, so the broker's live
+            // feed tops up the forming candle when it is running and the PSX market watch covers the
+            // rest. The snapshot's own warnings are surfaced: a forming bar built from a degraded
+            // source is still usable, but the caller has to be able to say so.
+            var snapshot = await _quotes.GetQuotesAsync(ct);
+            warnings.AddRange(snapshot.Warnings);
+            return snapshot.Quotes;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogWarning(ex, "[CandleHistory] Live market watch unavailable.");
-            warnings.Add($"Live market watch unavailable ({ex.Message}); analysis uses settled closes only.");
+            _logger.LogWarning(ex, "[CandleHistory] Live quotes unavailable.");
+            warnings.Add($"Live quotes unavailable ({ex.Message}); analysis uses settled closes only.");
             return new Dictionary<string, PsxLiveQuote>();
         }
     }

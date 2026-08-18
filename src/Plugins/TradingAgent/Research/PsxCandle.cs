@@ -68,6 +68,43 @@ public sealed record PsxLiveQuote
     public DateTime RetrievedAtUtc { get; init; } = DateTime.UtcNow;
 
     /// <summary>
+    /// Which feed this came from — see <see cref="ILiveQuoteSource.Name"/> ("psx", "ahk"). Carried
+    /// per quote rather than per snapshot because a snapshot can be merged from more than one source
+    /// (the broker feed covers a subscribed subset, PSX covers the rest), and "how old and how
+    /// trustworthy is this number" is then a per-symbol question.
+    /// </summary>
+    public string Source { get; init; } = "psx";
+
+    // ── Depth (broker feed only) ──────────────────────────────────────────────
+    // The PSX data portal publishes no order book at all, so these are null on any PSX-sourced
+    // quote. They are the substantive gain from the broker feed: a limit price set against a real
+    // best bid/ask is priced to actually fill, where one set against the last trade is a guess.
+
+    /// <summary>Best bid, and the size resting at it.</summary>
+    public decimal? BestBid { get; init; }
+    public long? BestBidSize { get; init; }
+
+    /// <summary>Best ask, and the size resting at it.</summary>
+    public decimal? BestAsk { get; init; }
+    public long? BestAskSize { get; init; }
+
+    /// <summary>Session VWAP as published by the feed.</summary>
+    public decimal? AveragePrice { get; init; }
+
+    /// <summary>Number of trades so far this session.</summary>
+    public long? TradeCount { get; init; }
+
+    /// <summary>Last trade time exactly as the feed formatted it; not parsed, only displayed.</summary>
+    public string? LastTradeTime { get; init; }
+
+    /// <summary>Board state as published by the broker feed.</summary>
+    public string? BoardState { get; init; }
+
+    /// <summary>Best ask minus best bid, when both sides are quoted.</summary>
+    public decimal? Spread =>
+        BestBid is { } bid && BestAsk is { } ask && ask >= bid ? ask - bid : null;
+
+    /// <summary>
     /// Projects the quote onto a forming daily candle for <paramref name="date"/>, or null when the
     /// symbol has not traded (no last price, or a degenerate all-zero row).
     /// </summary>

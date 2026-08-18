@@ -4,7 +4,15 @@ public class AhkConfig
 {
     public const string SectionName = "Ahk";
 
-    public string PortalUrl { get; set; } = "https://www.ahktrading.com";
+    /// <summary>
+    /// The broker portal's base URL. This default is the LIVE one and must stay correct on its own:
+    /// the previous default (<c>www.ahktrading.com</c>) no longer belongs to the broker and now
+    /// redirects to an unrelated parked domain, so any deployment that did not override it in
+    /// appsettings was pointing the login flow at a stranger's site. A wrong value here fails as a
+    /// login-page-not-found rather than as anything that names the URL, so it is worth keeping this
+    /// in step with <c>Plugins:Ahk:PortalUrl</c> in appsettings.json.
+    /// </summary>
+    public string PortalUrl { get; set; } = "https://web.ahletrade.com/";
     public string Username { get; set; } = "";
     public string Password { get; set; } = "";
     public string TradingPin { get; set; } = "";

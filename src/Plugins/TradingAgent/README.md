@@ -396,7 +396,7 @@ Add the following sections to `appsettings.json`.
     }
   },
   "Ahk": {
-    "PortalUrl":        "https://www.ahktrading.com",
+    "PortalUrl":        "https://web.ahletrade.com/",
     "Username":         "YOUR_USERNAME",
     "Password":         "YOUR_PASSWORD",
     "TradingPin":       "YOUR_PIN",

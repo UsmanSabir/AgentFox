@@ -16,6 +16,7 @@ using TradingAgent.Analysis;
 using TradingAgent.Broker;
 using TradingAgent.Models;
 using TradingAgent.Config;
+using TradingAgent.Feed;
 using TradingAgent.Manager;
 using TradingAgent.Market;
 using TradingAgent.Persistence;
@@ -52,7 +53,7 @@ namespace TradingAgent;
 ///     "DuplicateWindowMinutes": 60
 ///   },
 ///   "Ahk": {
-///     "PortalUrl":        "https://www.ahktrading.com",
+///     "PortalUrl":        "https://web.ahletrade.com/",
 ///     "Username":         "",
 ///     "Password":         "",
 ///     "TradingPin":       "",
@@ -151,6 +152,28 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         services.AddSingleton<IBrokerStateReader>(sp => sp.GetRequiredService<AhkBrowserBrokerAdapter>());
         services.AddSingleton<IMarketCalendar, PsxMarketCalendar>();
         services.AddSingleton<PsxDataClient>();
+
+        // ── Live quotes ───────────────────────────────────────────────────────
+        // Prices reach the plugin through ILiveQuoteSource rather than PsxDataClient directly, so the
+        // broker's own feed can be preferred without any consumer knowing it exists. REGISTRATION
+        // ORDER IS PRIORITY ORDER: the broker feed is consulted first and the PSX market watch fills
+        // whatever it does not cover (see CompositeLiveQuoteSource for why this is a merge and not a
+        // failover). Both are always registered; AhkQuoteSource reports itself disabled when the feed
+        // is switched off, which is the default.
+        services.Configure<AhkFeedConfig>(
+            config.GetSection($"Plugins:{AhkFeedConfig.SectionName}"));
+        services.AddRuntimePluginOptions<AhkFeedConfig>(
+            TradingPluginConfigDefinitionProvider.BrokerPluginName);
+
+        services.AddSingleton<AhkPortalClient>();
+        services.AddSingleton<AhkQuoteBook>();
+        services.AddSingleton<AhkFeedWorker>();
+        services.AddHostedService(sp => sp.GetRequiredService<AhkFeedWorker>());
+
+        services.AddSingleton<ILiveQuoteSource, AhkQuoteSource>();
+        services.AddSingleton<ILiveQuoteSource, PsxMarketWatchQuoteSource>();
+        services.AddSingleton<CompositeLiveQuoteSource>();
+
         // Splits the one symbol list that used to do two jobs: what may be WATCHED (editable) from
         // what may be TRADED (configuration only). Registered before its consumers for clarity.
         services.AddSingleton<MonitoredUniverse>();
@@ -730,6 +753,11 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                 liveSubscribers = broadcaster.SubscriberCount
             }));
 
+        // Live broker-feed health. Every failure mode of the feed is silent — a lost subscription, a
+        // dead session and a quiet market all look like "no quotes" — so this is the surface that
+        // tells them apart without reading Debug logs.
+        trading.MapGet("/feed/status", (AhkFeedWorker feed) => Results.Ok(feed.GetStatus()));
+
         // Run a pass now rather than waiting for the next tick. Analyst-level because it costs a
         // portal request and can raise alerts.
         trading.MapPost("/monitor/run", async (
@@ -1277,6 +1305,10 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             {
                 try
                 {
+                    // Validated against the PSX market watch specifically, NOT the composite. The
+                    // broker feed only carries what has been subscribed and has ticked, so a symbol
+                    // absent from it is routine — using it here would reject valid tickers. PSX
+                    // covers the whole market, which is exactly what a typo check needs.
                     var quotes = await dataClient.GetMarketWatchAsync(ct);
                     if (quotes.Count > 0 && !quotes.ContainsKey(symbol))
                     {
@@ -1618,6 +1650,15 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             new ManageCandleArchiveTool(
                 _services!.GetRequiredService<CandleBackfillRunner>(),
                 loggers.CreateLogger<ManageCandleArchiveTool>()),
+            // Order-book read and cancel, over the portal's JSON API rather than the browser. Both
+            // are registered unconditionally: cancelling is risk-REDUCING, so unlike placement it is
+            // not gated behind AutoExecute or the kill switch (see CancelOrderTool).
+            new ListOutstandingOrdersTool(
+                _services!.GetRequiredService<AhkPortalClient>(),
+                loggers.CreateLogger<ListOutstandingOrdersTool>()),
+            new CancelOrderTool(
+                _services!.GetRequiredService<AhkPortalClient>(),
+                loggers.CreateLogger<CancelOrderTool>()),
         };
 
         if (agentOptions.Value.ResearchWebEnabled && webSearchProvider is not null)
@@ -1939,7 +1980,10 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             "parse_signal", "check_market", "log_signal", "create_trade_proposal",
             "get_trading_status", "get_portfolio", "research_stock", "research_index",
             "scan_watchlist", "analyze_candles", "manage_candle_archive",
-            "place_order", "place_orders"
+            "place_order", "place_orders",
+            // Reading the order book and cancelling belong with placing: an agent that can put an
+            // order on the market and cannot take it off is the wrong half of the pair to expose.
+            "list_outstanding_orders", "cancel_order"
         };
         if (researchWebEnabled && webSearchProvider is not null)
             names.Add("research_web");
