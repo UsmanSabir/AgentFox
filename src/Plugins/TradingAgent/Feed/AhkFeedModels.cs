@@ -127,6 +127,32 @@ public sealed class AhkOutstandingOrder
         (string.IsNullOrWhiteSpace(Time) ? "" : $" ({Time})");
 }
 
+/// <summary>
+/// The outcome of reading the outstanding order book — deliberately distinguishing "the account has
+/// no working orders" from "the book could not be read".
+///
+/// <para>
+/// Those two were previously the same value (an empty list), and that conflation is dangerous rather
+/// than merely untidy. It was hit for real on 2026-08-18: the broker blocked account access mid-test,
+/// <c>GetOutstanding</c> began returning an empty array, and everything downstream read that as "no
+/// orders". A cancel was reported as verified-complete on that basis while the order was still live,
+/// and a resting order was believed cancelled when it had not been. An unreadable book must fail
+/// loudly; it must never look like an empty one.
+/// </para>
+/// </summary>
+public readonly record struct OrderBookRead(
+    bool Ok, IReadOnlyList<AhkOutstandingOrder> Orders, string? Error)
+{
+    public static OrderBookRead Success(IReadOnlyList<AhkOutstandingOrder> orders) =>
+        new(true, orders, null);
+
+    public static OrderBookRead Failed(string error) =>
+        new(false, [], error);
+
+    /// <summary>True only when the book was genuinely read AND genuinely empty.</summary>
+    public bool IsConfirmedEmpty => Ok && Orders.Count == 0;
+}
+
 /// <summary>Identity of a tradable line on the portal. A symbol trades on more than one board.</summary>
 public readonly record struct AhkSymbolKey(string Market, string Symbol)
 {

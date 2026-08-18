@@ -35,7 +35,14 @@ public sealed class CancelOrderTool : BaseTool
         PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
     };
 
-    private static readonly TimeSpan VerifyPollInterval = TimeSpan.FromMilliseconds(750);
+    /// <summary>
+    /// Gap between order-book reads while verifying a cancel. 2s rather than sub-second on purpose:
+    /// a cancel round-trips to the exchange and will not clear in milliseconds, so faster polling
+    /// buys nothing and only multiplies requests against the broker — at 750ms a single 30s
+    /// verification was 40 reads. The loop exits the moment the order is gone, so the common case is
+    /// one or two.
+    /// </summary>
+    private static readonly TimeSpan VerifyPollInterval = TimeSpan.FromSeconds(1);
 
     private readonly AhkPortalClient _portal;
     private readonly IRuntimePluginOptions<AhkConfig> _config;
@@ -114,9 +121,17 @@ public sealed class CancelOrderTool : BaseTool
 
         try
         {
-            var book = await _portal.GetOutstandingAsync(symbol, symbol.Length > 0 ? side : AhkOrderSide.All);
+            var read = await _portal.GetOutstandingAsync(symbol, symbol.Length > 0 ? side : AhkOrderSide.All);
+            if (!read.Ok)
+            {
+                // Refuse rather than proceed. Without a readable book there is no way to identify the
+                // right order, and no way to verify the outcome afterwards.
+                return ToolResult.Fail(
+                    $"{read.Error} Nothing was cancelled. Do not assume anything about the account's " +
+                    "orders until the book can be read again.");
+            }
 
-            var target = CancelTargetResolver.Resolve(book, orderNo, symbol, side);
+            var target = CancelTargetResolver.Resolve(read.Orders, orderNo, symbol, side);
             if (target.Error is { } error) return ToolResult.Fail(error);
 
             var order = target.Order!;
@@ -186,6 +201,17 @@ public sealed class CancelOrderTool : BaseTool
     /// rather than a fixed sleep, because the cancel round-trips to the exchange and its latency is
     /// not something this code gets to assume.
     /// </summary>
+    /// <summary>
+    /// Polls the outstanding book until the order demonstrably disappears, or the timeout expires.
+    ///
+    /// <para>
+    /// A read that FAILS is never treated as "gone". That distinction is the whole point: when the
+    /// broker blocked account access mid-test on 2026-08-18, the book came back empty, and an earlier
+    /// version of this method read that as confirmation and reported the cancel verified-complete
+    /// while the order was still live. "I cannot see the book" and "the order is not in the book" are
+    /// opposite conclusions, and only one of them justifies telling a user their order is gone.
+    /// </para>
+    /// </summary>
     private async Task<bool> WaitUntilGoneAsync(string orderNo)
     {
         var deadline = DateTime.UtcNow + VerifyTimeout;
@@ -194,8 +220,17 @@ public sealed class CancelOrderTool : BaseTool
         {
             await Task.Delay(VerifyPollInterval);
 
-            var book = await _portal.GetOutstandingAsync();
-            if (!book.Any(o => string.Equals(o.OrderNo?.Trim(), orderNo, StringComparison.OrdinalIgnoreCase)))
+            var read = await _portal.GetOutstandingAsync();
+            if (!read.Ok)
+            {
+                _logger.LogWarning(
+                    "[CancelOrder] Could not read the order book while verifying {OrderNo}: {Error}",
+                    orderNo, read.Error);
+                continue; // keep trying; never conclude "gone" from a failed read
+            }
+
+            if (!read.Orders.Any(o =>
+                    string.Equals(o.OrderNo?.Trim(), orderNo, StringComparison.OrdinalIgnoreCase)))
                 return true;
         }
         while (DateTime.UtcNow < deadline);

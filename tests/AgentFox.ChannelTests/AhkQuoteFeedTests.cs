@@ -429,6 +429,36 @@ public sealed class AhkQuoteFeedTests
         Assert.AreEqual("SYM101", dropped[0]);
     }
 
+    // ── Unreadable order book ─────────────────────────────────────────────────
+
+    [TestMethod]
+    public void AFailedRead_IsNotAnEmptyBook()
+    {
+        // The distinction that matters. On 2026-08-18 the broker blocked account access mid-test and
+        // GetOutstanding started returning nothing; everything downstream read that as "no orders",
+        // and a cancel was reported verified-complete while the order was still live.
+        var failed = OrderBookRead.Failed("access blocked");
+        var empty = OrderBookRead.Success([]);
+
+        Assert.IsFalse(failed.Ok);
+        Assert.IsFalse(failed.IsConfirmedEmpty,
+            "An unreadable book must never satisfy 'the account has no orders'.");
+
+        Assert.IsTrue(empty.Ok);
+        Assert.IsTrue(empty.IsConfirmedEmpty,
+            "A genuine read returning nothing IS a confirmed-empty book.");
+    }
+
+    [TestMethod]
+    public void FailedRead_CarriesAReasonAndNoOrders()
+    {
+        var failed = OrderBookRead.Failed("the session may have expired");
+
+        Assert.AreEqual(0, failed.Orders.Count);
+        Assert.IsNotNull(failed.Error);
+        StringAssert.Contains(failed.Error, "expired");
+    }
+
     // ── Cancel target selection ───────────────────────────────────────────────
 
     [TestMethod]

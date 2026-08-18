@@ -63,7 +63,17 @@ public sealed class ListOutstandingOrdersTool : BaseTool
 
         try
         {
-            var orders = await _portal.GetOutstandingAsync(symbol, side);
+            var read = await _portal.GetOutstandingAsync(symbol, side);
+            if (!read.Ok)
+            {
+                // Reporting "0 orders" here would be a lie with consequences: an operator told the
+                // account is flat may leave a live order running, or place a duplicate.
+                return ToolResult.Fail(
+                    $"{read.Error} Do NOT tell the user they have no working orders — the book could " +
+                    "not be read. Check the broker portal directly.");
+            }
+
+            var orders = read.Orders;
 
             return ToolResult.Ok(JsonSerializer.Serialize(new
             {

@@ -9,36 +9,40 @@ thousand rupees, and the guardrails in §2 are not optional.
 
 ---
 
-## 0. Order cancel: ALREADY TESTED, 2026-08-18 08:18 PKT (pre-open, OHO)
+## 0. Status — what is already proven
 
-The place→cancel round-trip has been run live and **passed**. Superseded reasoning is recorded in
-`ahk-live-test-plan.md`; the short version:
+Access was blocked by the broker on 2026-08-18 mid-test and has since been **restored**. Suspected
+rate limiting; the leading contributor was **~15 browser logins in about two hours** from repeated
+host restarts, not the feed poll (which matches the portal's own 1–2s cadence).
 
-The order gate used to test only the regular matching session, so it refused everything pre-open.
-That was wrong — PSX's **`OHO` state accepts orders**, which queue and go live at the open. The gate
-now prefers the broker's own reported state (see `OrderWindow`), and with that fix:
+**Keep it that way:** start the host once and leave it running. The `session_ahk` profile persists a
+logged-in session so restarts usually skip the login; deleting it or changing credentials forces a
+fresh login every time. For order-only work, run with `Plugins__AhkFeed__Enabled=false` — the whole
+place/read/cancel/verify cycle then costs about **7 requests**.
 
-```
-place_order BUY MARI 10 @ 650  ->  order_id 6427,
-    "Order verified in the outstanding log (order no 6427)."
-list_outstanding_orders        ->  6427 resting, BUY MARI 650.00 x10
-cancel_order order_no=6427     ->  cancelled:false verified:false  (unconfirmed at 8s)
-list_outstanding_orders        ->  count: 0   <- the cancel HAD taken effect, just slower
-```
+### Already confirmed live (pre-open, `OHO`)
 
-Two things learned, both now fixed:
+| | Status |
+| --- | --- |
+| Order **placement** | **CONFIRMED** — order 6427, verified in the account's outstanding log |
+| Order **book read** | **CONFIRMED** |
+| Order **cancellation** | **CONFIRMED** — 2 orders cancelled, `verified:true`, ~2.1s each |
+| Feed, watchlist sync, quotes to consumers | **CONFIRMED** (see `ahk-live-test-plan.md`) |
 
-1. **OHO accepts order entry but processes cancels slowly.** The 8s verification window was too
-   short; the order had gone by the next check. `Ahk.CancelVerifyTimeoutMs` now defaults to **30s**.
-2. **`verified: false` did exactly its job.** It refused to claim success on an unconfirmed cancel and
-   told the operator to re-check rather than blindly retry. Had it trusted the portal's HTTP 200 it
-   would have reported a successful cancellation of an order that was still live. Trust this field.
+PSX's `OHO` pre-open state accepts orders, which queue for the open — the order gate now prefers the
+broker's own reported state rather than a hardcoded 09:32–15:30 clock (`OrderWindow`).
 
-So B2/B3 below are now a **regression check**, not a first run. They are still worth running during
-the open session, because cancel timing under live matching may differ from OHO.
+So **B2/B3 below are a regression check, not a first run.** They remain worth doing during an open
+session, because behaviour under live matching may differ from OHO.
 
-PSX sessions: **Mon–Thu 09:32–15:30 PKT**, **Fri 09:17–12:00 and 14:32–16:30**. Start at **09:47 or
-later** so there is real trade flow rather than the opening auction.
+### One thing to watch for
+
+If `list_outstanding_orders` ever **fails** rather than returning `count: 0`, that is the safety fix
+working: the book could not be read. Previously that condition looked identical to a flat account, and
+it caused a cancel to be reported `verified: true` while the order was still live. Never treat a
+failed read as "no orders".
+
+PSX sessions: **Mon–Thu 09:32–15:30 PKT**, **Fri 09:17–12:00 and 14:32–16:30**.
 
 ## 1. Prerequisites
 

@@ -266,14 +266,26 @@ public sealed class AhkPortalClient : IBrokerMarketState, IDisposable
     /// <paramref name="orderType"/> is the portal's own vocabulary — <c>ALL</c>, <c>BUY</c> or
     /// <c>SEL</c> (three letters, not "SELL").
     /// </summary>
-    public async Task<IReadOnlyList<AhkOutstandingOrder>> GetOutstandingAsync(
+    public async Task<OrderBookRead> GetOutstandingAsync(
         string symbol = "", string orderType = "ALL", CancellationToken ct = default)
     {
+        // Establish the session FIRST. AccountCode comes from the login cookies, so reading it before
+        // a session exists always yields null — which made the order tools depend on the feed worker
+        // having run first, and fail outright whenever the feed was switched off. Every other call
+        // here gets its session lazily inside SendAsync; this one needs it a step earlier because it
+        // must put the account code into the query string.
+        if (!await EnsureSessionAsync(ct))
+        {
+            return OrderBookRead.Failed(
+                "Could not establish a broker session, so the outstanding order book could not be read.");
+        }
+
         var account = AccountCode;
         if (string.IsNullOrWhiteSpace(account))
         {
-            _logger.LogWarning("[AhkPortal] No account code available; cannot read the outstanding book.");
-            return [];
+            _logger.LogWarning("[AhkPortal] Session established but no account code was returned.");
+            return OrderBookRead.Failed(
+                "The broker session carries no account code, so the outstanding order book could not be read.");
         }
 
         var query = $"Home/GetOutstanding?symbol={Uri.EscapeDataString(symbol)}" +
@@ -281,7 +293,22 @@ public sealed class AhkPortalClient : IBrokerMarketState, IDisposable
                     $"&account={Uri.EscapeDataString(account)}";
 
         var body = await GetAsync(query, ct);
-        return Deserialize<List<AhkOutstandingOrder>>(body, "GetOutstanding") ?? [];
+        if (body is null)
+        {
+            // Null means the call did not complete: expired session, redirect to login, HTTP error,
+            // or access withdrawn by the broker. Returning an empty list here would be indistinguishable
+            // from "no working orders" — see OrderBookRead for what that cost when it happened.
+            return OrderBookRead.Failed(
+                "The broker did not return the outstanding order book (the session may have expired " +
+                "or account access may be blocked). The account's real orders are UNKNOWN.");
+        }
+
+        var parsed = Deserialize<List<AhkOutstandingOrder>>(body, "GetOutstanding");
+        return parsed is null
+            ? OrderBookRead.Failed(
+                "The broker's outstanding-order response could not be parsed. The account's real " +
+                "orders are UNKNOWN.")
+            : OrderBookRead.Success(parsed);
     }
 
     /// <summary>

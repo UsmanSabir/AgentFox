@@ -484,28 +484,117 @@ what it said, so "why was this accepted at 09:05" is answerable afterwards. Cove
 `OrderWindowTests` — including the direction that protects money: a broker-reported halt blocks the
 order even while the local calendar thinks the market is open.
 
-### The live round-trip
+### The live round-trip — PLACEMENT confirmed, CANCELLATION still unverified
 
 ```
-place_order BUY MARI 10 @ 650  ->  order_id 6427, verified in the outstanding log
-list_outstanding_orders        ->  6427 resting (plus 6298 SEL SELECT, pre-existing, not ours)
+place_order BUY MARI 10 @ 650  ->  order_id 6427, verified in the outstanding log   [CONFIRMED]
+list_outstanding_orders        ->  6427 resting, plus 6298 SEL SELECT (also a test order)
 cancel_order order_no=6427     ->  cancelled:false verified:false  (still there at 8s)
-list_outstanding_orders x2     ->  count: 0
+list_outstanding_orders x2     ->  count: 0                        [NOT what it looked like]
 ```
 
-**Cancel works; the 8s verification window was too short.** In OHO the cancel took longer than 8s and
-had completed by the next check. `Ahk.CancelVerifyTimeoutMs` now defaults to 30s and is configurable.
+**Order PLACEMENT during OHO is confirmed.** The order was accepted and verified in the account's own
+outstanding log. That result stands.
 
-**`verified: false` did precisely its job.** It refused to claim success on an unconfirmed cancel and
-told the operator to re-check rather than blindly retry. Trusting the portal's HTTP 200 would have
-reported a successful cancellation of an order that was still live — the exact failure the design
-anticipated.
+**Order CANCELLATION is NOT confirmed, and the earlier conclusion here was wrong.** The `count: 0`
+reads were first interpreted as "the cancel took effect, just slower than the 8s window". They were
+not. The broker **blocked account access** at around that moment, and `GetOutstanding` began
+returning an empty array because the read was failing — not because the book was empty. Whether
+order 6427 was ever cancelled is unknown from this evidence.
 
-### Unexplained, and flagged rather than rationalised
+The cancel flow therefore remains **untested end to end** and is still the first item in
+`phase-b-runbook.md`.
 
-Order **6298** (SEL SELECT 50 @ 32.50, pre-existing, placed before this session) also disappeared from
-the outstanding book between two reads. This process issued **exactly one** cancel — the log records
-`[CancelOrder] Cancelling #6427 BUY 10 MARI @ 650.00` and nothing else — and `CancelOrderAsync` posts a
-single `orignalorderno`, so it cannot have cancelled 6298. It may have been cancelled elsewhere,
-filled, expired, or flushed at a pre-open state transition. **Worth confirming in the portal's
-Activity Log**, because a pre-existing order vanishing is material regardless of cause.
+### The misreading exposed a real defect, now fixed
+
+`GetOutstandingAsync` returned an empty list both for "no working orders" and for "the read failed" —
+session expired, redirect to login, HTTP error, access withdrawn. Everything downstream believed the
+former. Consequences:
+
+- `WaitUntilGoneAsync` saw an empty book and returned true, so `cancel_order` would report
+  **`cancelled: true, verified: true`** for an order that might still be live. Under exactly the
+  access block that occurred, the tool would have falsely confirmed a cancellation. This is the
+  precise failure the verify-against-the-book design exists to prevent, defeated by an ambiguous
+  return value one layer down.
+- `list_outstanding_orders` would report `count: 0`, telling an operator the account is flat when it
+  may not be — inviting a duplicate order or an abandoned live one.
+
+Fixed with `OrderBookRead(Ok, Orders, Error)`:
+
+- a failed read is never "gone" — `WaitUntilGoneAsync` keeps polling and never concludes from it;
+- `cancel_order` refuses outright when the book cannot be read, cancelling nothing;
+- `list_outstanding_orders` reports the failure and explicitly instructs against saying "no orders".
+
+Covered by tests. The general lesson is one this codebase already states elsewhere and this violated:
+**an unavailable answer must not be encoded as an empty one.**
+
+### Account access blocked by the broker
+
+The broker blocked account access during the test. Cause not yet established — the operator is
+checking. Rate limiting is the leading hypothesis, and this session's usage is a plausible trigger:
+
+- **15 logins** in roughly two hours. Each host restart performs a full browser login, and the host
+  was restarted ~10 times while iterating on config and fixes. This is the most likely cause and the
+  easiest to avoid.
+- The 2s feed poll matches the portal's own client cadence (1–2s), so it is unlikely to be the
+  trigger on its own — but it ran alongside everything else.
+- Order placement and cancellation were a handful of calls; not plausibly a factor.
+
+**Mitigations to apply before resuming** (see the runbook): do not restart the host repeatedly against
+a live account; keep one session and reuse it. The session profile persists in `session_ahk`, so a
+restart usually skips the full login — but a deleted profile or a changed credential forces a fresh
+one each time. Consider a minimum interval between login attempts in `AhkBroker`.
+
+**All access to the broker was stopped once the block was reported**, and verified stopped: no
+AgentFox process, and no Chrome running against the `session_ahk` profile.
+
+---
+
+## CANCEL FLOW CONFIRMED — 2026-08-18 08:41 PKT (pre-open, OHO)
+
+Access restored. Re-ran with the feed **disabled** so the only broker traffic was the cancel path
+itself: **1 login + 4 tool calls ≈ 7 requests total.**
+
+```
+list_outstanding_orders   -> count 2:  6298 SEL SELECT 32.50 x50,  6427 BUY MARI 650.00 x10
+cancel_order 6427         -> cancelled:true verified:true   (2.16s)
+cancel_order 6298         -> cancelled:true verified:true   (2.13s)
+list_outstanding_orders   -> count 0   (success:true — a genuine read, not a failed one)
+```
+
+Log evidence:
+```
+[CancelOrder] Cancelling #6427 BUY 10 MARI @ 650.00  ->  Confirmed: order 6427 left the book.
+[CancelOrder] Cancelling #6298 SEL 50 SELECT @ 32.50 ->  Confirmed: order 6298 left the book.
+```
+
+**The whole flow now has live confirmation:** place (order 6427, verified in the outstanding log),
+read, cancel, and verify — including a second order the agent had never placed itself.
+
+### What the earlier "failure" actually was
+
+Both orders were still resting when access came back, which proves **6427 was never cancelled** by the
+earlier attempt. The `cancelled:false verified:false` and the subsequent `count: 0` were entirely the
+access block. Two corrections to what was written before:
+
+- Cancellation is **not** slow. It completes in about **2 seconds**, one verification poll. The
+  earlier 8s "timeout" was the block, not latency. The 30s default is now generous headroom rather
+  than a necessity, and is left as-is.
+- `count: 0` never meant the book was empty. It meant the read was failing — see below.
+
+### A third defect, found by this run
+
+The first attempt after restore failed with *"No broker session is established"*. `GetOutstandingAsync`
+read `AccountCode` — which is populated from the login cookies — **before** anything established a
+session. It had only ever worked because the feed worker happened to run first and populate it; with
+the feed off, the order tools could not work at all. Now the session is established first.
+
+Worth noting how this surfaced: the tool **failed loudly** instead of reporting `count: 0`. Before the
+`OrderBookRead` fix, this exact condition would have said "the account has no working orders" — with
+two live orders resting.
+
+### Confirmed traffic profile for the cancel path
+
+One login, one book read, one POST per cancel, one verification poll per cancel (2s interval), one
+final read. Nothing polls in the background when `AhkFeed:Enabled=false`. This is the shape to use
+for order operations against a rate-sensitive account.
