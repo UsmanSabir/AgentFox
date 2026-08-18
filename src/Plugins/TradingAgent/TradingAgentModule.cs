@@ -475,6 +475,33 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                             + "by the risk engine. Arming one would be protection in name only."
                 });
 
+            // Same reasoning as the tradability check above, applied to the stop's own geometry: an
+            // armed stop whose limit sits on the wrong side of its trigger is refused by the risk
+            // engine at fire time, which is the one moment it was supposed to work. Checking it here
+            // means the order is either armed and fillable, or never armed at all.
+            //
+            // The direction comes from the TRIGGER, not the side — a BUY armed to fire on a falling
+            // price wants its limit BELOW the trigger, and judging it by the side alone is what
+            // refused a legitimate FFC dip-buy live on 2026-08-18. See StopLimitRule.
+            var stopProblem = StopLimitRule.Validate(
+                action,
+                (body.OrderType ?? "LIMIT").Trim().ToUpperInvariant(),
+                kind switch
+                {
+                    ArmedTriggerKind.PriceAbove => true,
+                    ArmedTriggerKind.PriceBelow => false,
+                    _                           => (bool?)null
+                },
+                body.Price,
+                body.LimitPrice);
+
+            if (stopProblem is not null)
+                return Results.BadRequest(new
+                {
+                    error = "invalid_stop_limit",
+                    message = $"This order would be refused when it fired: {stopProblem}"
+                });
+
             var order = new ArmedOrder
             {
                 ArmedId          = Guid.NewGuid().ToString("N"),

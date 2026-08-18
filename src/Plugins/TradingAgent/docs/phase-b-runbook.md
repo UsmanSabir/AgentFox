@@ -15,9 +15,18 @@ Access was blocked by the broker on 2026-08-18 mid-test and has since been **res
 rate limiting; the leading contributor was **~15 browser logins in about two hours** from repeated
 host restarts, not the feed poll (which matches the portal's own 1–2s cadence).
 
-**Keep it that way:** start the host once and leave it running. The `session_ahk` profile persists a
-logged-in session so restarts usually skip the login; deleting it or changing credentials forces a
-fresh login every time. The feed is now **on by default**; for order-only work set
+**Keep it that way:** start the host once and leave it running.
+
+> **Correction (verified 2026-08-18):** an earlier version of this runbook said the `session_ahk`
+> profile "persists a logged-in session so restarts usually skip the login". **It does not.** A restart
+> three minutes after a successful login logged in again from the preserved profile. The reason is
+> structural: the portal's `.AspNetCore.Session` cookie is a *session* cookie with no expiry, and
+> Chrome never writes those to disk — so no amount of profile preservation can carry the login across
+> a browser restart. Worse, one session establishment was observed costing **two** login attempts
+> (`PrepareSessionWithRetryAsync` retrying with a different positional subset), so budget 1–2 logins
+> per restart. Restart discipline is therefore the whole mitigation, not the profile. Deleting the
+> profile or changing credentials still forces a login, so keep it anyway — it just is not what
+> protects you here. The feed is now **on by default**; for order-only work set
 `Plugins__AhkFeed__Enabled=false`, and the whole place/read/cancel/verify cycle then costs about
 **7 requests** with nothing polling in the background.
 

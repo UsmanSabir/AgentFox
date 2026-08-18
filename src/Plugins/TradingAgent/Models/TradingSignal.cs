@@ -26,6 +26,20 @@ public class TradingSignal
     /// fast move that triggered it.
     /// </summary>
     public decimal? LimitPrice { get; set; }
+
+    /// <summary>
+    /// For a stop order that came from an armed trigger: whether that trigger fires as the price
+    /// RISES (true) or FALLS (false). Null when the order was submitted directly and has no trigger
+    /// of its own.
+    ///
+    /// <para>
+    /// This exists because the trigger's direction is what decides whether a stop's limit is fillable,
+    /// and the direction used to be lost in the projection from armed order to signal — leaving the
+    /// risk engine to guess it from the side and refuse legitimate orders. See
+    /// <c>TradingAgent.Risk.StopLimitRule</c>.
+    /// </para>
+    /// </summary>
+    public bool? FiresOnRisingPrice { get; set; }
     public string Confidence { get; set; } = "NONE";    // HIGH, MEDIUM, LOW, NONE
     public string ConfidenceReason { get; set; } = "";
     public string RawMessage { get; set; } = "";

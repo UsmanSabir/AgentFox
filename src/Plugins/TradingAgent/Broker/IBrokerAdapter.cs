@@ -121,8 +121,12 @@ public sealed class AhkBrowserBrokerAdapter : IBrokerAdapter, IBrokerStateReader
                 quantity = h.QuantityTotal,
                 average_price = h.AvgRateBuy,
                 market_price = h.MtmPrice,
-                market_value = h.Amount,
-                unrealised_pl = h.Unsettled
+                // Rounded for the same reason PortfolioReader rounds: the portal computes these in
+                // binary floating point, so a real position reported a market value of
+                // 50049.00000000001. This JSON is read by operators and by the agent, and a total
+                // carrying eleven decimal places reads as a broken number.
+                market_value = Money(h.Amount),
+                unrealised_pl = Money(h.Unsettled)
             }).ToArray()
         });
 
@@ -147,6 +151,10 @@ public sealed class AhkBrowserBrokerAdapter : IBrokerAdapter, IBrokerStateReader
             CheckedUtc: checkedUtc,
             DetailsJson: details);
     }
+
+    /// <summary>Rounds a PKR amount to paisa, preserving null as unknown.</summary>
+    private static decimal? Money(decimal? value) =>
+        value is null ? null : Math.Round(value.Value, 2, MidpointRounding.AwayFromZero);
 
     private static BrokerReconciliationSnapshot SessionLost(DateTime checkedUtc) =>
         new(Supported: true,

@@ -52,8 +52,33 @@ $out = Join-Path $OutputRoot $Rid
 
 function Step($msg) { Write-Host "`n=== $msg ===" -ForegroundColor Cyan }
 
-Step "Cleaning $out"
-if (Test-Path $out) { Remove-Item $out -Recurse -Force }
+# Refuse to touch the output while something is using it, rather than deleting half of it and
+# failing on the first locked file. A partial clean is worse than no clean: it took out the logs
+# and the persisted browser profile on 2026-08-18 while leaving the folder looking packed.
+$running = @(Get-Process AgentFox -ErrorAction SilentlyContinue)
+if ($running.Count) {
+    $pids = $running.Id -join ', '
+    throw "AgentFox is running (PID $pids). Stop it before packing - packing over a live install " +
+          "deletes its logs and forces a fresh broker login on the next start."
+}
+$brokerChrome = @(Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" -ErrorAction SilentlyContinue |
+                  Where-Object { $_.CommandLine -like '*session_ahk*' })
+if ($brokerChrome.Count) {
+    $cpids = $brokerChrome.ProcessId -join ', '
+    throw "The broker's Chrome is still open (PID $cpids) and holds the session profile. Close it first."
+}
+
+# Runtime state the packed folder ACCUMULATES and must survive a repack. session_ahk is the
+# persisted logged-in broker session: deleting it forces a full portal login on the next start,
+# and repeated logins are what got account access withdrawn once already (phase-b-runbook.md §0).
+$preserve = @('session_ahk', 'logs', 'data', 'sessions', 'appsettings.user.json', 'cron.md')
+
+Step "Cleaning $out (preserving: $($preserve -join ', '))"
+if (Test-Path $out) {
+    Get-ChildItem $out -Force |
+        Where-Object { $preserve -notcontains $_.Name } |
+        Remove-Item -Recurse -Force
+} 
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 
 if (-not $SkipUi) {
@@ -102,8 +127,11 @@ foreach ($p in $plugins) {
 
 if ($WithUserConfig) {
     $src = "$PSScriptRoot\src\Agent\bin\Debug\net10.0\appsettings.user.json"
-    if (Test-Path $src) {
-        Copy-Item $src (Join-Path $out 'appsettings.user.json') -Force
+    $dest = Join-Path $out 'appsettings.user.json'
+    if (Test-Path $dest) {
+        Step 'appsettings.user.json already present in the packed folder - left untouched'
+    } elseif (Test-Path $src) {
+        Copy-Item $src $dest -Force
         Step 'Copied appsettings.user.json (contains credentials - do not share this folder)'
     } else {
         Write-Warning "-WithUserConfig was passed but $src does not exist; packed build has no user config."

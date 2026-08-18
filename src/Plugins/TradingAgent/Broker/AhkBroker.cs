@@ -1351,6 +1351,29 @@ public sealed class AhkBroker : IAsyncDisposable
         return values.Count == 0 ? null : values.Sum();
     }
 
+    /// <summary>
+    /// Saves the page behind an unrecognised order popup, so its markup can be read later and the
+    /// classifier taught to recognise it. Best-effort: a failed dump must never change an order's
+    /// verdict.
+    /// </summary>
+    private async Task DumpOrderPopupAsync()
+    {
+        try
+        {
+            var tag = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
+            await ScreenshotAsync($"orderpopup_{tag}");
+            var html = await _page!.EvaluateFunctionAsync<string>(
+                "() => (document.querySelector('.swal-modal') || document.body).outerHTML");
+            var path = Path.Combine(ResolvePath(_config.Current.LogDir), $"orderpopup_{tag}.html");
+            await File.WriteAllTextAsync(path, html);
+            _logger.LogWarning("[AhkBroker] Dumped the unrecognised order popup to {Path}", path);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[AhkBroker] Could not dump the unrecognised order popup.");
+        }
+    }
+
     private async Task DumpPortfolioPageAsync(string tag)
     {
         try
@@ -2811,25 +2834,49 @@ public sealed class AhkBroker : IAsyncDisposable
                 let kind = 'POPUP';
                 if (pop.querySelector('.swal-icon--error, .swal-icon--warning')) kind = 'ERROR';
                 else if (pop.querySelector('.swal-icon--success'))              kind = 'OK';
-                return kind + '::' + msg;
+                // Every class on every icon element, so an unrecognised popup can be identified
+                // from the log instead of needing to be reproduced against a live market.
+                const icons = Array.from(pop.querySelectorAll('[class*=swal-icon]'))
+                    .map(e => e.className).join(' ') || '(none)';
+                return kind + '::' + icons + '::' + msg;
             }") ?? "";
         }
         catch { return null; }
 
-        var sep = raw.IndexOf("::", StringComparison.Ordinal);
-        if (sep < 0) return null;
+        var parts = raw.Split("::", 3);
+        if (parts.Length < 3) return null;
 
-        var kind = raw[..sep];
-        var msg  = raw[(sep + 2)..].Trim();
+        var kind  = parts[0];
+        var icons = parts[1].Trim();
+        var msg   = parts[2].Trim();
         if (msg.Length > 200) msg = msg[..200];
 
-        return kind switch
+        if (kind == "OK")
         {
-            "OK"    => new OrderOutcome(true,  $"Order confirmed: {msg}",
-                                        _orderIdRegex.Match(msg) is { Success: true } m ? m.Groups[1].Value : null),
-            "ERROR" => new OrderOutcome(false, $"Order rejected: {msg}", null),
-            _       => new OrderOutcome(false, $"Order returned an unclassified popup: {msg}", null),
-        };
+            return new OrderOutcome(true, $"Order confirmed: {msg}",
+                _orderIdRegex.Match(msg) is { Success: true } m ? m.Groups[1].Value : null);
+        }
+
+        if (kind == "ERROR")
+            return new OrderOutcome(false, $"Order rejected: {msg}", null);
+
+        // Unclassified: a popup appeared but carried no icon this code recognises.
+        //
+        // The verdict stays NOT-PLACED, and deliberately so even when the text says "success".
+        // VerifyOrderInBook documents the portal returning a green success alert while placing
+        // nothing at all, so believing the words would be exactly the false positive that costs
+        // money; the outstanding book remains the only evidence. What was missing was any way to
+        // find out WHAT the popup was — the message alone ("success") does not say why it went
+        // unrecognised. Dumping the icon classes and the page makes the next occurrence diagnosable
+        // instead of requiring it to be reproduced against a live market.
+        _logger.LogWarning(
+            "[AhkBroker] Unclassified order popup. icons=[{Icons}] text=[{Message}]. Treating the "
+            + "order as NOT placed; the outstanding book is the deciding evidence.", icons, msg);
+        _activity?.Warn("Orders", "Unrecognised order popup", $"icons=[{icons}] text=[{msg}]");
+        await DumpOrderPopupAsync();
+
+        return new OrderOutcome(false,
+            $"Order returned an unclassified popup (icons: {icons}): {msg}", null);
     }
 
     /// <summary>
