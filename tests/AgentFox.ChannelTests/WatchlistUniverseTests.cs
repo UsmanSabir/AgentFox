@@ -455,5 +455,24 @@ public sealed class WatchlistUniverseTests
             string id, string expected, string next, string? reason = null,
             string? executionId = null, CancellationToken ct = default) =>
             throw new NotSupportedException();
+        public Task<string> SaveProtectiveStopAsync(
+            ProtectiveStop stop, CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<IReadOnlyList<ProtectiveStop>> GetProtectiveStopsAsync(
+            bool openOnly = true, CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<bool> TrySetProtectiveStopStateAsync(
+            string id, string expected, string next, string? reason = null,
+            CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<bool> RecordProtectiveStopFillAsync(
+            string id, int qty, string reason, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<bool> RecordProtectiveStopPlacementAsync(
+            string id, DateOnly session, int qty, string? orderNo, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<bool> RecordProtectiveStopBaselineAsync(
+            string id, int baseline, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<bool> SetProtectiveStopBackstopAsync(
+            string id, string? backstopArmedId, CancellationToken ct = default) =>
+            throw new NotSupportedException();
     }
 }

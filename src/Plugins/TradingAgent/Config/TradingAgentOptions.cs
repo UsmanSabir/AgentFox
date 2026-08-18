@@ -49,6 +49,18 @@ public class TradingAgentOptions
     public int TakeProfitRetryIntervalMinutes { get; set; } = 10;
 
     /// <summary>
+    /// Minutes between protective-stop passes — confirming entry fills and re-placing native stops
+    /// (only while the market is open, and only while a stop is open). Default 3, clamped to 1..60.
+    ///
+    /// <para>
+    /// Each pass reads holdings and the outstanding book, both of which drive the real browser and
+    /// serialise against order submission, so this is deliberately slower than the monitor's cadence.
+    /// Lowering it makes fills confirm sooner at the cost of delaying orders behind page scrapes.
+    /// </para>
+    /// </summary>
+    public int ProtectiveStopPollMinutes { get; set; } = 3;
+
+    /// <summary>
     /// Seconds an approval intent stays valid between validation and broker submission
     /// (ApprovalRequired mode). Expired intents are rejected and need re-approval. Default 120,
     /// floored at 10.
@@ -107,6 +119,22 @@ public class TradingAgentOptions
 
     public int ReconciliationIntervalSeconds { get; set; } = 60;
     public int ReconciliationMaxAgeSeconds { get; set; } = 180;
+
+    // ── Execution alerts ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Broadcast an alert to every connected messaging channel whenever an execution completes —
+    /// accepted, failed, or unknown. Covers every path into the broker (manual tool calls, armed
+    /// orders, take-profit retries, protective stops), because they all run through
+    /// <c>TradingManager.ExecuteGroupsAsync</c>. Default true.
+    /// </summary>
+    public bool NotifyOnExecution { get; set; } = true;
+
+    /// <summary>
+    /// Include Paper/Shadow executions in those alerts. Default false: in those modes nothing
+    /// reaches the broker, and alerting on every simulated fill trains you to ignore the channel.
+    /// </summary>
+    public bool NotifyOnSimulatedExecution { get; set; } = false;
 
     // ── Stock research (research_stock tool) ──────────────────────────────────
 

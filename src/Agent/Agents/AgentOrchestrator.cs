@@ -56,6 +56,7 @@ public sealed class AgentOrchestrator : IHostedService
     private readonly PendingNotificationStore _pendingNotifications;
     private readonly ConversationEventBus _conversationEvents;
     private readonly ChannelProviderCatalog _channelProviderCatalog;
+    private readonly ChannelConfigStore _channelConfigStore;
     private readonly IEnumerable<IAppModule> _modules;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<AgentOrchestrator> _logger;
@@ -99,6 +100,7 @@ public sealed class AgentOrchestrator : IHostedService
         ChannelManagerHolder channelManagerHolder,
         SchedulingHolder schedulingHolder,
         ChannelProviderCatalog channelProviderCatalog,
+        ChannelConfigStore channelConfigStore,
         SpecialistAgentRegistry specialistAgents,
         ExperienceLearningService experienceLearning,
         IEnumerable<IAppModule> modules,
@@ -132,6 +134,7 @@ public sealed class AgentOrchestrator : IHostedService
         _channelManagerHolder = channelManagerHolder;
         _schedulingHolder     = schedulingHolder;
         _channelProviderCatalog = channelProviderCatalog;
+        _channelConfigStore   = channelConfigStore;
         _modules              = modules;
         _loggerFactory        = loggerFactory;
         _logger               = logger;
@@ -246,7 +249,7 @@ public sealed class AgentOrchestrator : IHostedService
                 _toolRegistry.Register(new ManageChannelTool(
                     _channelManager,
                     _channelProviderCatalog,
-                    appConfigPath,
+                    _channelConfigStore,
                     _loggerFactory.CreateLogger<ManageChannelTool>()));
                 _toolRegistry.Register(new NotifyUserTool(
                     _channelManager,
@@ -493,7 +496,8 @@ public sealed class AgentOrchestrator : IHostedService
                     new("❌ Reject", $"/reject {approvalId}")
                 };
                 var deliveredTo = _channelManager != null
-                    ? await _channelManager.BroadcastActionableAsync(msg, actions)
+                    ? await _channelManager.BroadcastActionableAsync(
+                        msg, actions, NotificationTopics.HitlApproval)
                     : 0;
 
                 // Console fallback — always prints; it's one more parallel notification
@@ -1121,8 +1125,17 @@ public sealed class AgentOrchestrator : IHostedService
             var (ch, error) = _channelProviderCatalog.Create(type, config);
             if (ch != null)
             {
+                // An explicit Name pins the id, which is what subscriptions are stored against.
+                // Without it the provider's own id stands, and AddChannel de-duplicates.
+                if (!string.IsNullOrWhiteSpace(entry.Name))
+                    ch.ChannelId = entry.Name!;
+
+                ch.Subscriptions = ResolveSubscriptions(entry, label);
+
                 manager.AddChannel(ch);
-                _logger.LogInformation("Channel '{Label}' registered.", label);
+                _logger.LogInformation(
+                    "Channel '{Label}' registered as '{ChannelId}', subscribed to {Subscriptions}.",
+                    label, ch.ChannelId, ch.Subscriptions);
             }
             else
             {
@@ -1134,6 +1147,27 @@ public sealed class AgentOrchestrator : IHostedService
 
         _logger.LogInformation("Connecting {Count} channel(s)...", manager.Channels.Count);
         await manager.ConnectAllAsync();
+    }
+
+    /// <summary>
+    /// Reads a channel's topic filters from config, logging anything unparseable. A rejected filter
+    /// is dropped rather than fatal, and an entry whose filters are all rejected falls back to the
+    /// catch-all: a typo should make a channel noisier than intended, never silent.
+    /// </summary>
+    private TopicSubscription ResolveSubscriptions(ChannelConfigurationEntry entry, string label)
+    {
+        if (TopicSubscription.TryParse(entry.SubscribeSpec, out var subscription, out var errors))
+            return subscription;
+
+        foreach (var error in errors)
+            _logger.LogWarning("Channel '{Label}': ignoring subscription filter — {Error}", label, error);
+
+        if (subscription.IsCatchAll && !string.IsNullOrWhiteSpace(entry.SubscribeSpec))
+            _logger.LogWarning(
+                "Channel '{Label}': no usable filter in \"{Spec}\" — falling back to the catch-all '{CatchAll}'.",
+                label, entry.SubscribeSpec, TopicFilter.CatchAll);
+
+        return subscription;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1156,9 +1190,8 @@ public sealed class AgentOrchestrator : IHostedService
                 var expired = _pendingNotifications.DrainExpired();
                 if (expired.Count == 0) continue;
 
-                var connectedChannels = _channelManager?.Channels.Values
-                    .Where(c => c.IsConnected)
-                    .ToList();
+                var connectedChannels = _channelManager?
+                    .ResolveRecipients(NotificationTopics.AgentSubAgentExpired);
 
                 foreach (var (convId, notifications) in expired)
                 {

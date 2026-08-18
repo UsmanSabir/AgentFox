@@ -1,6 +1,6 @@
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using AgentFox.Channels;
+using AgentFox.Plugins.Channels;
 using AgentFox.Plugins.Interfaces;
 using Microsoft.Extensions.Logging;
 
@@ -21,20 +21,18 @@ public class ManageChannelTool : BaseTool
 {
     private readonly ChannelManager _channelManager;
     private readonly ChannelProviderCatalog _channelProviderCatalog;
-    private readonly string _configFilePath;
+    private readonly ChannelConfigStore _configStore;
     private readonly ILogger? _logger;
-
-    private static readonly JsonSerializerOptions _jsonWriteOpts = new() { WriteIndented = true };
 
     public ManageChannelTool(
         ChannelManager channelManager,
         ChannelProviderCatalog channelProviderCatalog,
-        string configFilePath,
+        ChannelConfigStore configStore,
         ILogger? logger = null)
     {
         _channelManager = channelManager;
         _channelProviderCatalog = channelProviderCatalog;
-        _configFilePath = configFilePath;
+        _configStore = configStore;
         _logger = logger;
     }
 
@@ -52,11 +50,13 @@ public class ManageChannelTool : BaseTool
             });
 
             return
-                "Add or remove a messaging channel at runtime without restarting. " +
-                "Changes are persisted to appsettings.json and take effect immediately. " +
+                "Add or remove a messaging channel at runtime, or change which notification topics " +
+                "a channel receives. Changes are persisted to appsettings.json and take effect " +
+                "immediately. " +
                 $"Supported types: {string.Join(", ", _channelProviderCatalog.SupportedTypes)}. " +
                 "For 'add': provide channel_type and config_json. " +
                 "For 'remove': provide channel_name (for example 'telegram'). " +
+                "For 'subscribe': provide channel_name and subscribe. " +
                 "Config shapes by provider: " +
                 string.Join("; ", parts);
         }
@@ -67,9 +67,11 @@ public class ManageChannelTool : BaseTool
         ["action"] = new()
         {
             Type = "string",
-            Description = "'add' to add a new channel, 'remove' to remove an existing one.",
+            Description =
+                "'add' to add a new channel, 'remove' to remove an existing one, " +
+                "'subscribe' to change which topics an existing channel receives.",
             Required = true,
-            EnumValues = ["add", "remove"]
+            EnumValues = ["add", "remove", "subscribe"]
         },
         ["channel_type"] = new()
         {
@@ -81,16 +83,46 @@ public class ManageChannelTool : BaseTool
         ["channel_name"] = new()
         {
             Type = "string",
-            Description = "Name or type of the channel to remove. Required for 'remove'.",
+            Description =
+                "Id, name or type of the channel. Required for 'remove' and 'subscribe'.",
             Required = false
         },
         ["config_json"] = new()
         {
             Type = "string",
-            Description = "JSON object with channel-specific config fields. Required for 'add'.",
+            Description =
+                "JSON object with channel-specific config fields. Required for 'add'. " +
+                "May include \"Name\" to pin a stable id — needed when more than one channel of " +
+                "the same type exists.",
+            Required = false
+        },
+        ["subscribe"] = new()
+        {
+            Type = "string",
+            Description = SubscribeParameterDescription,
             Required = false
         }
     };
+
+    /// <summary>
+    /// Shared by 'add' and 'subscribe'. Spells out the wildcard rules because getting them wrong is
+    /// silent: a filter that matches nothing looks identical in config to one that matches
+    /// everything, and the only symptom is notifications that never arrive.
+    /// </summary>
+    private static string SubscribeParameterDescription
+    {
+        get
+        {
+            var known = NotificationTopics.Known.Select(t => t.Name).ToList();
+
+            return
+                "Comma-separated topic filters this channel receives, e.g. \"trading.order.>, hitl.>\". " +
+                "'*' matches exactly one segment (trading.* matches trading.order but not " +
+                "trading.order.accepted); '>' matches one or more trailing segments and must come " +
+                "last (trading.> matches both). Omit, or use \">\", for everything. " +
+                (known.Count > 0 ? $"Topics currently published: {string.Join(", ", known)}." : string.Empty);
+        }
+    }
 
     protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
     {
@@ -100,8 +132,50 @@ public class ManageChannelTool : BaseTool
         {
             "add" => await AddChannelAsync(arguments),
             "remove" => await RemoveChannelAsync(arguments),
-            _ => ToolResult.Fail("action must be 'add' or 'remove'")
+            "subscribe" => SubscribeChannel(arguments),
+            _ => ToolResult.Fail("action must be 'add', 'remove' or 'subscribe'")
         };
+    }
+
+    /// <summary>
+    /// Repoints an existing channel's subscriptions. Applied live first, then persisted — the
+    /// running channel is what actually routes, and a config file the process has not re-read
+    /// changes nothing until restart.
+    /// </summary>
+    private ToolResult SubscribeChannel(Dictionary<string, object?> arguments)
+    {
+        var channelName = arguments.GetValueOrDefault("channel_name")?.ToString();
+        if (string.IsNullOrWhiteSpace(channelName))
+            return ToolResult.Fail("channel_name is required for 'subscribe'");
+
+        var channel = _channelManager.GetChannelByName(channelName);
+        if (channel == null)
+        {
+            var registered = string.Join(", ", _channelManager.Channels.Values.Select(c => c.ChannelId));
+            return ToolResult.Fail(
+                $"Channel '{channelName}' is not registered. " +
+                $"Registered: {(registered.Length > 0 ? registered : "none")}");
+        }
+
+        var spec = arguments.GetValueOrDefault("subscribe")?.ToString();
+        if (!TopicSubscription.TryParse(spec, out var subscription, out var errors))
+            return ToolResult.Fail(
+                $"Invalid subscription: {string.Join(" ", errors)} Nothing was changed.");
+
+        var previous = channel.Subscriptions;
+        channel.Subscriptions = subscription;
+
+        var persistError = _configStore.SetSubscription(channel, subscription);
+        if (persistError != null)
+            _logger?.LogWarning(
+                "manage_channel subscribe: applied but could not save config - {Error}", persistError);
+
+        var saveNote = persistError == null
+            ? "saved to appsettings.json"
+            : $"NOT saved to appsettings.json ({persistError}) — it will revert on restart";
+
+        return ToolResult.Ok(
+            $"Channel '{channel.ChannelId}' now receives: {subscription} (was: {previous}). {saveNote}.");
     }
 
     private async Task<ToolResult> AddChannelAsync(Dictionary<string, object?> arguments)
@@ -125,15 +199,51 @@ public class ManageChannelTool : BaseTool
             return ToolResult.Fail($"config_json is not valid JSON: {ex.Message}");
         }
 
-        if (_channelManager.Channels.Values.Any(c => c.Type.Equals(channelType, StringComparison.OrdinalIgnoreCase)))
+        // A subscription spec may arrive either as its own argument or inside config_json; the
+        // argument wins. Folding it into config is what gets it persisted, since the whole config
+        // dictionary is written back to the appsettings entry.
+        var subscribeArg = arguments.GetValueOrDefault("subscribe")?.ToString();
+        if (!string.IsNullOrWhiteSpace(subscribeArg))
+            config[ChannelConfigurationEntry.SubscribeKey] = subscribeArg.Trim();
+
+        config.TryGetValue(ChannelConfigurationEntry.SubscribeKey, out var subscribeSpec);
+        if (!TopicSubscription.TryParse(subscribeSpec, out var subscription, out var subscribeErrors))
+            return ToolResult.Fail(
+                $"Invalid subscription: {string.Join(" ", subscribeErrors)} Nothing was added.");
+
+        // Name is the stable id subscriptions hang off. Two channels of the same type are a normal
+        // setup once topics exist — one Telegram chat for order flow, another for everything else —
+        // so the old blanket "one per type" rule is now a name collision check.
+        var requestedName = config.TryGetValue(ChannelConfigurationEntry.NameKey, out var nameValue)
+                            && !string.IsNullOrWhiteSpace(nameValue)
+            ? nameValue.Trim()
+            : null;
+
+        if (requestedName != null &&
+            _channelManager.Channels.Values.Any(c => c.ChannelId.Equals(requestedName, StringComparison.OrdinalIgnoreCase)))
         {
             return ToolResult.Fail(
-                $"A '{channelType}' channel is already registered. Remove it first with action='remove'.");
+                $"A channel named '{requestedName}' is already registered. Pick another Name, or " +
+                "remove that one first with action='remove'.");
+        }
+
+        if (requestedName == null &&
+            _channelManager.Channels.Values.Any(c => c.Type.Equals(channelType, StringComparison.OrdinalIgnoreCase)))
+        {
+            return ToolResult.Fail(
+                $"A '{channelType}' channel is already registered. To run a second one, include a " +
+                "\"Name\" in config_json so each has a stable id. Otherwise remove the existing one " +
+                "with action='remove'.");
         }
 
         var (channel, factoryError) = _channelProviderCatalog.Create(channelType, config);
         if (channel == null)
             return ToolResult.Fail(factoryError ?? "Failed to create channel");
+
+        if (requestedName != null)
+            channel.ChannelId = requestedName;
+
+        channel.Subscriptions = subscription;
 
         var connected = await _channelManager.AddAndConnectAsync(channel);
         if (!connected)
@@ -143,7 +253,7 @@ public class ManageChannelTool : BaseTool
                 "Check that credentials are valid and the service is reachable.");
         }
 
-        var persistError = PersistChannelAdd(channelType, config);
+        var persistError = _configStore.Add(channelType, config);
         if (persistError != null)
             _logger?.LogWarning("manage_channel add: connected but could not save config - {Error}", persistError);
 
@@ -152,8 +262,8 @@ public class ManageChannelTool : BaseTool
             : $"NOT saved to appsettings.json ({persistError})";
 
         return ToolResult.Ok(
-            $"Channel '{channel.Name}' added and connected. Config {saveNote}. " +
-            "send_to_channel now includes this channel.");
+            $"Channel '{channel.Name}' added and connected as '{channel.ChannelId}', receiving: " +
+            $"{channel.Subscriptions}. Config {saveNote}. send_to_channel now includes this channel.");
     }
 
     private async Task<ToolResult> RemoveChannelAsync(Dictionary<string, object?> arguments)
@@ -174,7 +284,7 @@ public class ManageChannelTool : BaseTool
 
         await _channelManager.RemoveChannelAsync(channel.ChannelId);
 
-        var persistError = PersistChannelRemove(channel.Type);
+        var persistError = _configStore.Remove(channel);
         if (persistError != null)
             _logger?.LogWarning("manage_channel remove: disconnected but could not update config - {Error}", persistError);
 
@@ -185,79 +295,4 @@ public class ManageChannelTool : BaseTool
         return ToolResult.Ok($"Channel '{channel.Type}' disconnected and {saveNote}.");
     }
 
-    private string? PersistChannelAdd(string channelType, Dictionary<string, string> config)
-    {
-        try
-        {
-            var root = ReadRoot();
-            if (root == null)
-                return "Cannot read appsettings.json";
-
-            var channels = ChannelConfiguration.GetOrNormalizeCanonicalArray(root);
-            var entry = new JsonObject
-            {
-                ["Type"] = channelType,
-                ["Enabled"] = true
-            };
-
-            foreach (var (k, v) in config)
-                entry[k] = v;
-
-            channels.Add(entry);
-            WriteRoot(root);
-            return null;
-        }
-        catch (Exception ex)
-        {
-            return ex.Message;
-        }
-    }
-
-    private string? PersistChannelRemove(string channelType)
-    {
-        try
-        {
-            var root = ReadRoot();
-            if (root == null)
-                return "Cannot read appsettings.json";
-
-            var channels = ChannelConfiguration.GetOrNormalizeCanonicalArray(root);
-            JsonNode? toRemove = null;
-            foreach (var node in channels)
-            {
-                if (node is not JsonObject channel)
-                    continue;
-
-                var type = channel["Type"]?.GetValue<string>();
-                if (type != null && type.Equals(channelType, StringComparison.OrdinalIgnoreCase))
-                {
-                    toRemove = node;
-                    break;
-                }
-            }
-
-            if (toRemove != null)
-            {
-                channels.Remove(toRemove);
-                WriteRoot(root);
-            }
-
-            return null;
-        }
-        catch (Exception ex)
-        {
-            return ex.Message;
-        }
-    }
-
-    private JsonObject? ReadRoot()
-    {
-        var json = File.ReadAllText(_configFilePath);
-        return JsonNode.Parse(json) as JsonObject;
-    }
-
-    private void WriteRoot(JsonObject root)
-    {
-        File.WriteAllText(_configFilePath, root.ToJsonString(_jsonWriteOpts));
-    }
 }

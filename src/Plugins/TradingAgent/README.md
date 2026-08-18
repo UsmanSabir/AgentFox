@@ -283,13 +283,19 @@ close, which the UI labels rather than hiding.
 ## Confidence assessment (LLM, on demand)
 
 The numbers stay deterministic; the model only **judges** them. `StockAssessmentService` owns the one
-confidence rubric — `research_stock` and both `/assess` endpoints share it, so a verdict means the
-same thing wherever it appears.
+confidence rubric — `research_stock` and the assessment endpoints share it, so a verdict means the
+same thing wherever it appears. The UI uses background jobs because a local model may take minutes:
+disconnecting or refreshing the browser does not cancel generation already in progress.
 
 ```
-POST /api/trading/assess              { symbol, interval?, context? }   → TradingAnalyst
-POST /api/trading/alerts/{id}/assess                                    → TradingAnalyst
+POST /api/trading/assessment-jobs              { symbol, interval?, context? }   → 202 + jobId
+POST /api/trading/alerts/{id}/assessment-jobs                             → 202 + jobId
+GET  /api/trading/assessment-jobs/{jobId}                                 → status/result
 ```
+
+The older synchronous `/assess` routes remain available for compatibility, but interactive callers
+should use jobs. Jobs are serialized to avoid competing local-model generations, identical active
+submissions share one job, and terminal statuses remain queryable for 15 minutes.
 
 Evidence is the same read the chart draws (`CandleAnalysisService`: levels, indicators, weekly
 structure) plus the portal quote, listing status and news. The reply is structured:
@@ -321,6 +327,9 @@ the audit trail.
 | Verb | Route | Role |
 | --- | --- | --- |
 | GET | `/api/trading/alerts?symbol=&state=&limit=` | ManagementViewer |
+| POST | `/api/trading/alerts/{id}/assessment-jobs` — queue LLM confidence for an alert | TradingAnalyst |
+| POST | `/api/trading/assessment-jobs` — queue LLM confidence for a symbol | TradingAnalyst |
+| GET | `/api/trading/assessment-jobs/{jobId}` — poll queued/running/result state | TradingAnalyst |
 | POST | `/api/trading/alerts/{id}/assess` — LLM confidence for that alert | TradingAnalyst |
 | POST | `/api/trading/assess` — LLM confidence for a symbol | TradingAnalyst |
 | GET | `/api/trading/alerts/stream` — SSE, live push | ManagementViewer |

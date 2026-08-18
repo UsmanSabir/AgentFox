@@ -976,10 +976,40 @@ public sealed class SqliteTradingRepository : ITradingRepository
                     execution_id  TEXT NULL,
                     state_reason  TEXT NULL,
                     note          TEXT NULL,
-                    source_alert  TEXT NULL
+                    source_alert  TEXT NULL,
+                    protective_stop_id TEXT NULL
                 );
                 CREATE INDEX IF NOT EXISTS ix_armed_orders_state
                     ON armed_orders(state, symbol);
+                -- A standing intent to keep a position protected, NOT a queued order. The venue clears
+                -- outstanding orders at the close, so the durable thing has to be the intent and the
+                -- native day order is re-derived from it each session.
+                CREATE TABLE IF NOT EXISTS protective_stops (
+                    stop_id           TEXT PRIMARY KEY,
+                    symbol            TEXT NOT NULL,
+                    parent_armed_id   TEXT NULL,
+                    stop_trigger      TEXT NOT NULL,
+                    stop_limit        TEXT NOT NULL,
+                    desired_qty       INTEGER NOT NULL DEFAULT 0,
+                    recurring         INTEGER NOT NULL DEFAULT 1,
+                    state             TEXT NOT NULL DEFAULT 'pending_fill',
+                    -- NULL means "never captured", which is not zero: a stop with no baseline cannot
+                    -- measure a fill and refuses to activate rather than sizing a sell off a guess.
+                    baseline_qty      INTEGER NULL,
+                    placed_qty        INTEGER NOT NULL DEFAULT 0,
+                    last_placed_date  TEXT NULL,
+                    last_order_no     TEXT NULL,
+                    backstop_armed_id TEXT NULL,
+                    created_utc       TEXT NOT NULL,
+                    fill_confirmed_utc TEXT NULL,
+                    closed_utc        TEXT NULL,
+                    state_reason      TEXT NULL,
+                    note              TEXT NULL
+                );
+                CREATE INDEX IF NOT EXISTS ix_protective_stops_state
+                    ON protective_stops(state, symbol);
+                CREATE INDEX IF NOT EXISTS ix_protective_stops_parent
+                    ON protective_stops(parent_armed_id);
                 CREATE INDEX IF NOT EXISTS ix_watchlist_alerts_raised
                     ON watchlist_alerts(raised_utc DESC);
                 CREATE INDEX IF NOT EXISTS ix_watchlist_alerts_dedupe
@@ -1014,6 +1044,8 @@ public sealed class SqliteTradingRepository : ITradingRepository
             await AddColumnIfMissingAsync(connection, "trade_proposals", "terminal_utc", "TEXT NULL", ct);
             await AddColumnIfMissingAsync(
                 connection, "daily_bar_coverage", "market_closed", "INTEGER NOT NULL DEFAULT 0", ct);
+            await AddColumnIfMissingAsync(
+                connection, "armed_orders", "protective_stop_id", "TEXT NULL", ct);
             await SeedPerSymbolCoverageAsync(connection, ct);
 
             _initialized = true;
@@ -1452,9 +1484,10 @@ public sealed class SqliteTradingRepository : ITradingRepository
         command.CommandText = """
             INSERT INTO armed_orders
                 (armed_id, symbol, trigger_kind, trigger_price, trigger_alert, action, quantity,
-                 order_type, price, limit_price, state, armed_utc, expires_utc, note, source_alert)
+                 order_type, price, limit_price, state, armed_utc, expires_utc, note, source_alert,
+                 protective_stop_id)
             VALUES ($id, $symbol, $kind, $tprice, $talert, $action, $qty,
-                    $otype, $price, $limit, $state, $armed, $expires, $note, $alert)
+                    $otype, $price, $limit, $state, $armed, $expires, $note, $alert, $stop)
             """;
         command.Parameters.AddWithValue("$id", order.ArmedId);
         command.Parameters.AddWithValue("$symbol", order.Symbol);
@@ -1473,6 +1506,7 @@ public sealed class SqliteTradingRepository : ITradingRepository
             order.ExpiresUtc?.ToString("O") ?? (object)DBNull.Value);
         command.Parameters.AddWithValue("$note", order.Note ?? (object)DBNull.Value);
         command.Parameters.AddWithValue("$alert", order.SourceAlertId ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$stop", order.ProtectiveStopId ?? (object)DBNull.Value);
         await command.ExecuteNonQueryAsync(ct);
         return order.ArmedId;
     }
@@ -1486,7 +1520,7 @@ public sealed class SqliteTradingRepository : ITradingRepository
         command.CommandText = $"""
             SELECT armed_id, symbol, trigger_kind, trigger_price, trigger_alert, action, quantity,
                    order_type, price, limit_price, state, armed_utc, expires_utc, fired_utc,
-                   execution_id, state_reason, note, source_alert
+                   execution_id, state_reason, note, source_alert, protective_stop_id
             FROM armed_orders
             {(armedOnly ? "WHERE state = 'armed'" : "")}
             ORDER BY armed_utc DESC
@@ -1550,7 +1584,206 @@ public sealed class SqliteTradingRepository : ITradingRepository
         ExecutionId      = reader.IsDBNull(14) ? null : reader.GetString(14),
         StateReason      = reader.IsDBNull(15) ? null : reader.GetString(15),
         Note             = reader.IsDBNull(16) ? null : reader.GetString(16),
-        SourceAlertId    = reader.IsDBNull(17) ? null : reader.GetString(17)
+        SourceAlertId    = reader.IsDBNull(17) ? null : reader.GetString(17),
+        ProtectiveStopId = reader.IsDBNull(18) ? null : reader.GetString(18)
+    };
+
+    // ── Protective stops ──────────────────────────────────────────────────────
+
+    public async Task<string> SaveProtectiveStopAsync(
+        ProtectiveStop stop, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO protective_stops
+                (stop_id, symbol, parent_armed_id, stop_trigger, stop_limit, desired_qty, recurring,
+                 state, baseline_qty, placed_qty, backstop_armed_id, created_utc, state_reason, note)
+            VALUES ($id, $symbol, $parent, $trigger, $limit, $desired, $recurring,
+                    $state, $baseline, $placed, $backstop, $created, $reason, $note)
+            """;
+        command.Parameters.AddWithValue("$id", stop.StopId);
+        command.Parameters.AddWithValue("$symbol", stop.Symbol);
+        command.Parameters.AddWithValue("$parent", stop.ParentArmedId ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$trigger", Money(stop.StopTrigger));
+        command.Parameters.AddWithValue("$limit", Money(stop.StopLimit));
+        command.Parameters.AddWithValue("$desired", stop.DesiredQuantity);
+        command.Parameters.AddWithValue("$recurring", stop.Recurring ? 1 : 0);
+        command.Parameters.AddWithValue("$state", stop.State);
+        command.Parameters.AddWithValue("$baseline",
+            stop.BaselineQuantity is { } baseline ? baseline : (object)DBNull.Value);
+        command.Parameters.AddWithValue("$placed", stop.PlacedQuantity);
+        command.Parameters.AddWithValue("$backstop", stop.LocalBackstopArmedId ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$created", stop.CreatedUtc.ToString("O"));
+        command.Parameters.AddWithValue("$reason", stop.StateReason ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$note", stop.Note ?? (object)DBNull.Value);
+        await command.ExecuteNonQueryAsync(ct);
+        return stop.StopId;
+    }
+
+    public async Task<IReadOnlyList<ProtectiveStop>> GetProtectiveStopsAsync(
+        bool openOnly = true, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = $"""
+            SELECT stop_id, symbol, parent_armed_id, stop_trigger, stop_limit, desired_qty, recurring,
+                   state, baseline_qty, placed_qty, last_placed_date, last_order_no, backstop_armed_id,
+                   created_utc, fill_confirmed_utc, closed_utc, state_reason, note
+            FROM protective_stops
+            {(openOnly ? "WHERE state <> 'closed'" : "")}
+            ORDER BY created_utc DESC
+            """;
+
+        var stops = new List<ProtectiveStop>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct)) stops.Add(ReadProtectiveStop(reader));
+        return stops;
+    }
+
+    public async Task<bool> TrySetProtectiveStopStateAsync(
+        string stopId,
+        string expectedState,
+        string newState,
+        string? reason = null,
+        CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+
+        // Compare-and-set for the same reason the armed orders use one: two passes overlapping must
+        // not both conclude they are the one promoting this stop.
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE protective_stops
+               SET state = $new,
+                   state_reason = COALESCE($reason, state_reason),
+                   closed_utc = CASE WHEN $new = 'closed' THEN $now ELSE closed_utc END
+             WHERE stop_id = $id AND state = $expected
+            """;
+        command.Parameters.AddWithValue("$id", stopId);
+        command.Parameters.AddWithValue("$expected", expectedState);
+        command.Parameters.AddWithValue("$new", newState);
+        command.Parameters.AddWithValue("$reason", reason ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("O"));
+        return await command.ExecuteNonQueryAsync(ct) == 1;
+    }
+
+    /// <summary>
+    /// Promotes a stop on confirmed shares. The quantity is RAISED, never lowered: a later pass
+    /// seeing a smaller delta must not shrink protection that a bigger fill already established.
+    /// </summary>
+    public async Task<bool> RecordProtectiveStopFillAsync(
+        string stopId, int confirmedQuantity, string reason, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE protective_stops
+               SET state = 'active',
+                   desired_qty = MAX(desired_qty, $qty),
+                   state_reason = $reason,
+                   fill_confirmed_utc = COALESCE(fill_confirmed_utc, $now)
+             WHERE stop_id = $id AND state IN ('pending_fill', 'active')
+            """;
+        command.Parameters.AddWithValue("$id", stopId);
+        command.Parameters.AddWithValue("$qty", confirmedQuantity);
+        command.Parameters.AddWithValue("$reason", reason);
+        command.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("O"));
+        return await command.ExecuteNonQueryAsync(ct) == 1;
+    }
+
+    /// <summary>
+    /// Records a native placement. Coverage ACCUMULATES within a session and resets when the session
+    /// rolls, mirroring the venue: yesterday's resting order was cleared at the close and protects
+    /// nothing today, so carrying its quantity forward would report protection that does not exist.
+    /// </summary>
+    public async Task<bool> RecordProtectiveStopPlacementAsync(
+        string stopId,
+        DateOnly sessionDate,
+        int placedQuantity,
+        string? orderNo,
+        CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        var date = sessionDate.ToString("yyyy-MM-dd");
+        command.CommandText = """
+            UPDATE protective_stops
+               SET placed_qty = CASE WHEN last_placed_date = $date
+                                     THEN placed_qty + $qty
+                                     ELSE $qty END,
+                   last_placed_date = $date,
+                   last_order_no = COALESCE($orderNo, last_order_no)
+             WHERE stop_id = $id AND state = 'active'
+            """;
+        command.Parameters.AddWithValue("$id", stopId);
+        command.Parameters.AddWithValue("$date", date);
+        command.Parameters.AddWithValue("$qty", placedQuantity);
+        command.Parameters.AddWithValue("$orderNo", orderNo ?? (object)DBNull.Value);
+        return await command.ExecuteNonQueryAsync(ct) == 1;
+    }
+
+    /// <summary>
+    /// Refreshes the pre-entry holding a fill will later be measured against. Only meaningful while
+    /// the entry has not gone in yet, which is why it is confined to <c>pending_fill</c>: overwriting
+    /// it afterwards would erase the very number that proves a fill happened.
+    /// </summary>
+    public async Task<bool> RecordProtectiveStopBaselineAsync(
+        string stopId, int baselineQuantity, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE protective_stops
+               SET baseline_qty = $qty
+             WHERE stop_id = $id AND state = 'pending_fill'
+            """;
+        command.Parameters.AddWithValue("$id", stopId);
+        command.Parameters.AddWithValue("$qty", baselineQuantity);
+        return await command.ExecuteNonQueryAsync(ct) == 1;
+    }
+
+    public async Task<bool> SetProtectiveStopBackstopAsync(
+        string stopId, string? backstopArmedId, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText =
+            "UPDATE protective_stops SET backstop_armed_id = $backstop WHERE stop_id = $id";
+        command.Parameters.AddWithValue("$id", stopId);
+        command.Parameters.AddWithValue("$backstop", backstopArmedId ?? (object)DBNull.Value);
+        return await command.ExecuteNonQueryAsync(ct) == 1;
+    }
+
+    private static ProtectiveStop ReadProtectiveStop(Microsoft.Data.Sqlite.SqliteDataReader reader) => new()
+    {
+        StopId               = reader.GetString(0),
+        Symbol               = reader.GetString(1),
+        ParentArmedId        = reader.IsDBNull(2) ? null : reader.GetString(2),
+        StopTrigger          = ParseDecimal(reader, 3) ?? 0m,
+        StopLimit            = ParseDecimal(reader, 4) ?? 0m,
+        DesiredQuantity      = reader.GetInt32(5),
+        Recurring            = reader.GetInt32(6) != 0,
+        State                = reader.GetString(7),
+        BaselineQuantity     = reader.IsDBNull(8) ? null : reader.GetInt32(8),
+        PlacedQuantity       = reader.GetInt32(9),
+        LastPlacedSessionDate = reader.IsDBNull(10)
+                                   ? null
+                                   : DateOnly.ParseExact(reader.GetString(10), "yyyy-MM-dd", CultureInfo.InvariantCulture),
+        LastOrderNo          = reader.IsDBNull(11) ? null : reader.GetString(11),
+        LocalBackstopArmedId = reader.IsDBNull(12) ? null : reader.GetString(12),
+        CreatedUtc           = ParseUtc(reader.GetString(13)),
+        FillConfirmedUtc     = reader.IsDBNull(14) ? null : ParseUtc(reader.GetString(14)),
+        ClosedUtc            = reader.IsDBNull(15) ? null : ParseUtc(reader.GetString(15)),
+        StateReason          = reader.IsDBNull(16) ? null : reader.GetString(16),
+        Note                 = reader.IsDBNull(17) ? null : reader.GetString(17)
     };
 
     private static object Money(decimal? value) => value is null

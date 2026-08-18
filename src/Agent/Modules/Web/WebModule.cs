@@ -1,8 +1,10 @@
+using AgentFox.Channels;
 using AgentFox.Helpers;
 using AgentFox.Hitl;
 using AgentFox.LLM;
 using AgentFox.MCP;
 using AgentFox.Memory;
+using AgentFox.Plugins.Channels;
 using AgentFox.Plugins.Models;
 using AgentFox.Planning;
 using AgentFox.Sessions;
@@ -1054,11 +1056,17 @@ public class WebModule : IAppModule
 
             var channels = manager.Channels.Values.Select(ch => new
             {
-                id          = ch.ChannelId,
-                name        = ch.Name,
-                type        = ch.Type,
-                isConnected = ch.IsConnected,
-                status      = ch.IsConnected ? "connected" : "disconnected"
+                id            = ch.ChannelId,
+                name          = ch.Name,
+                type          = ch.Type,
+                isConnected   = ch.IsConnected,
+                status        = ch.IsConnected ? "connected" : "disconnected",
+                subscriptions = ch.Subscriptions.Filters,
+                receivesAll   = ch.Subscriptions.IsCatchAll,
+
+                // Lets the UI offer an outbox view only where there is one to show.
+                recordsMessages = ch is IInspectableChannel,
+                receivedCount   = (ch as IInspectableChannel)?.RecentMessages.Count ?? 0
             });
 
             return Results.Ok(new
@@ -1066,7 +1074,106 @@ public class WebModule : IAppModule
                 ready    = true,
                 channels,
                 total     = manager.Channels.Count,
-                connected = manager.Channels.Values.Count(c => c.IsConnected)
+                connected = manager.Channels.Values.Count(c => c.IsConnected),
+
+                // The published topics, so the UI can show what is subscribable rather than making
+                // operators guess a subject and find out from the absence of messages.
+                topics = NotificationTopics.Known.Select(t => new
+                {
+                    name        = t.Name,
+                    description = t.Description,
+                    mandatory   = t.Mandatory
+                })
+            });
+        });
+
+        // GET /channels/{id}/messages — what a recording channel actually received.
+        // Only channels implementing IInspectableChannel (the dummy test channel) have an outbox;
+        // a real transport hands the message to Telegram or Discord and keeps nothing. This is the
+        // read side of verifying a subscription: cause the event, then check what arrived here.
+        endpoints.MapGet("/channels/{id}/messages", (
+            string id,
+            ChannelManagerHolder channelHolder) =>
+        {
+            var manager = channelHolder.Manager;
+            if (manager == null)
+                return Results.Json(new { error = "Channel manager is not ready yet." },
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+
+            var channel = manager.GetChannelByName(id);
+            if (channel == null)
+                return Results.NotFound(new { error = $"Channel '{id}' is not registered." });
+
+            if (channel is not IInspectableChannel inspectable)
+                return Results.BadRequest(new
+                {
+                    error = $"Channel '{channel.ChannelId}' ({channel.Type}) does not record messages. " +
+                            "Add a 'dummy' channel to inspect delivery."
+                });
+
+            return Results.Ok(new
+            {
+                id       = channel.ChannelId,
+                messages = inspectable.RecentMessages.Select(m => new
+                {
+                    sequence = m.Sequence,
+                    at       = m.At,
+                    targetId = m.TargetId,
+                    content  = m.Content,
+                    actions  = m.Actions
+                })
+            });
+        });
+
+        // DELETE /channels/{id}/messages — reset the outbox between checks.
+        endpoints.MapDelete("/channels/{id}/messages", (
+            string id,
+            ChannelManagerHolder channelHolder) =>
+        {
+            var channel = channelHolder.Manager?.GetChannelByName(id);
+            if (channel is not IInspectableChannel inspectable)
+                return Results.NotFound(new { error = $"No recording channel '{id}'." });
+
+            inspectable.ClearOutbox();
+            return Results.Ok(new { id, cleared = true });
+        });
+
+        // PUT /channels/{id}/subscriptions — repoint one channel's topic filters.
+        // The live channel is updated first and the config file second: routing reads the live
+        // object, so a save that fails costs the setting at next restart, not the change itself.
+        // That is reported back rather than swallowed, since "it worked but won't survive a
+        // restart" is the one outcome an operator has to act on.
+        endpoints.MapPut("/channels/{id}/subscriptions", (
+            string id,
+            ChannelSubscriptionRequest? body,
+            ChannelManagerHolder channelHolder,
+            ChannelConfigStore configStore) =>
+        {
+            var manager = channelHolder.Manager;
+            if (manager == null)
+                return Results.Json(new { error = "Channel manager is not ready yet." },
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+
+            var channel = manager.GetChannelByName(id);
+            if (channel == null)
+                return Results.NotFound(new { error = $"Channel '{id}' is not registered." });
+
+            if (!TopicSubscription.TryParse(body?.Subscribe, out var subscription, out var errors))
+                return Results.BadRequest(new { error = string.Join(" ", errors) });
+
+            var previous = channel.Subscriptions.ToString();
+            channel.Subscriptions = subscription;
+
+            var persistError = configStore.SetSubscription(channel, subscription);
+
+            return Results.Ok(new
+            {
+                id            = channel.ChannelId,
+                subscriptions = subscription.Filters,
+                receivesAll   = subscription.IsCatchAll,
+                previous,
+                persisted     = persistError == null,
+                persistError
             });
         });
 
@@ -1510,6 +1617,12 @@ public class WebModule : IAppModule
 
 /// <summary>Optional feedback/reason accompanying a HITL /hitl/{id}/approve|reject call.</summary>
 public record HitlDecisionRequest(string? Message);
+
+/// <summary>
+/// Body of <c>PUT /channels/{id}/subscriptions</c>. <paramref name="Subscribe"/> is the same
+/// comma-separated filter spec used in appsettings; null or blank means the catch-all.
+/// </summary>
+public record ChannelSubscriptionRequest(string? Subscribe);
 
 public record HeartbeatRequest(
     string Name,

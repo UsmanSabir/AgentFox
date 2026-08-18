@@ -68,6 +68,18 @@ public sealed record ArmedOrder
     /// <summary>Alert this was armed from, when it came from an alert card.</summary>
     public string? SourceAlertId { get; init; }
 
+    /// <summary>
+    /// Set when this order is the local backstop for a <see cref="ProtectiveStop"/>.
+    ///
+    /// <para>
+    /// A backstop is not an ordinary armed order: it must stand down while the native stop it backs
+    /// is resting at the broker, or the two of them sell the same position twice. The monitor checks
+    /// the outstanding book before firing anything carrying this id — see
+    /// <see cref="ProtectiveStopDecisions.BackstopShouldStandDown"/>.
+    /// </para>
+    /// </summary>
+    public string? ProtectiveStopId { get; init; }
+
     /// <summary>Projects the armed order onto the signal the trading manager executes.</summary>
     public TradingSignal ToSignal() => new()
     {

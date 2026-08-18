@@ -12,6 +12,12 @@ npm run build
 
 Pop-Location
 
+ Push-Location .\src\frontend\
+ npm run build
+
+Pop-Location
+
+
 # Builds the host and TradingAgent.dll.
 # The plugin project copies its output into the host's plugins folder.
 dotnet build .\src\AgentFox.sln -c Debug

@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Text;
 using AgentFox.Agents;
 using AgentFox.Channels;
+using AgentFox.Plugins.Channels;
 using AgentFox.Plugins.Interfaces;
 using AgentFox.Sessions;
 using Microsoft.Extensions.Logging;
@@ -78,7 +79,7 @@ public class NotifyUserTool : BaseTool
                 : "none - use manage_channel to add one";
 
             return
-                "Send a notification or message to the user via all connected channels at once. " +
+                "Send a notification or message to the user via the connected channels. " +
                 $"Active channels: {channelList}. " +
                 "Use this for alerts, cron job results, status updates, summaries, or any message " +
                 "intended for the user. Send each update ONCE — the same content is not delivered " +
@@ -86,15 +87,42 @@ public class NotifyUserTool : BaseTool
         }
     }
 
-    public override Dictionary<string, ToolParameter> Parameters { get; } = new()
+    public override Dictionary<string, ToolParameter> Parameters
     {
-        ["message"] = new()
+        get
         {
-            Type = "string",
-            Description = "The message to deliver to the user. Markdown is supported on Telegram and Discord.",
-            Required = true
+            // Computed per access, like the description: the registry grows as plugins declare
+            // their topics, and a stale enum here is how the model ends up publishing to a subject
+            // nothing subscribes to.
+            var topics = NotificationTopics.Known
+                .Select(t => t.Name)
+                .OrderBy(x => x, StringComparer.Ordinal)
+                .ToList();
+
+            return new()
+            {
+                ["message"] = new()
+                {
+                    Type = "string",
+                    Description = "The message to deliver to the user. Markdown is supported on Telegram and Discord.",
+                    Required = true
+                },
+                ["topic"] = new()
+                {
+                    Type = "string",
+                    Description =
+                        "Optional subject that decides which channels receive this. Leave empty for " +
+                        $"the default '{NotificationTopics.AgentNotify}', which is right for almost " +
+                        "everything. Only set it to route a message to the channels watching a " +
+                        "specific subject, and only to a topic listed here — an unlisted topic that " +
+                        "nobody subscribes to is silently dropped. " +
+                        (topics.Count > 0 ? $"Known topics: {string.Join(", ", topics)}." : string.Empty),
+                    Required = false,
+                    EnumValues = topics.Count > 0 ? topics : null
+                }
+            };
         }
-    };
+    }
 
     protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
     {
@@ -137,12 +165,29 @@ public class NotifyUserTool : BaseTool
                 + "send genuinely new information, say what changed and send only that.");
         }
 
-        var channels = _channelManager.Channels.Values
-            .Where(c => c.IsConnected)
-            .ToList();
+        // ── Route by topic ───────────────────────────────────────────────────
+        var topic = arguments.GetValueOrDefault("topic")?.ToString();
+        topic = string.IsNullOrWhiteSpace(topic)
+            ? NotificationTopics.AgentNotify
+            : TopicFilter.Normalize(topic);
 
-        if (channels.Count == 0)
+        if (!TopicFilter.IsValidTopic(topic, out var topicError))
+            return ToolResult.Fail(
+                $"{topicError} Omit 'topic' to use the default '{NotificationTopics.AgentNotify}'.");
+
+        if (_channelManager.Channels.Values.All(c => !c.IsConnected))
             return ToolResult.Fail("No channels are connected. Use manage_channel to add a channel.");
+
+        var channels = _channelManager.ResolveRecipients(topic);
+
+        // Distinguished from "no channels at all" above: the channels exist and are up, they just
+        // do not listen on this subject. Telling the model to retry would be wrong — nothing about
+        // a resend changes the routing — so this reads as a configuration fact, not a failure.
+        if (channels.Count == 0)
+            return ToolResult.Fail(
+                $"No connected channel subscribes to '{topic}', so nothing was sent. Either send on " +
+                $"'{NotificationTopics.AgentNotify}' instead, or ask the user to subscribe a channel " +
+                $"to '{topic}'. Do not retry this message unchanged.");
 
         var sent = new List<string>();
         var failed = new List<string>();

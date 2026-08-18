@@ -1,0 +1,364 @@
+namespace TradingAgent.Watchlist;
+
+/// <summary>
+/// A standing intent to keep a position protected at a level — not a queued order.
+///
+/// <para>
+/// The distinction is forced by the venue. PSX clears outstanding orders at the close, so a native
+/// stop placed today does not exist tomorrow while the risk plainly does. A one-shot child order
+/// would therefore protect the position for exactly one session and then quietly stop, which is the
+/// worst kind of failure: protection that reads as present and is not. So the durable thing is the
+/// <i>intent</i>, and a native day order is re-materialised from it every session until the position
+/// is gone.
+/// </para>
+///
+/// <para>
+/// <b>It never exists before the shares do.</b> A stop is created in <c>pending_fill</c> and only
+/// becomes <c>active</c> once an increase in holdings proves the entry actually executed. Selling
+/// stock you do not own is a rejection at best and a short at worst, and neither is protection.
+/// </para>
+/// </summary>
+public sealed record ProtectiveStop
+{
+    public required string StopId { get; init; }
+    public required string Symbol { get; init; }
+
+    /// <summary>The armed entry this protects, when it came from one. Null for a bare holding.</summary>
+    public string? ParentArmedId { get; init; }
+
+    /// <summary>Price at which the stop triggers.</summary>
+    public required decimal StopTrigger { get; init; }
+
+    /// <summary>Limit the triggered stop goes in at — at or below the trigger, or it cannot fill.</summary>
+    public required decimal StopLimit { get; init; }
+
+    /// <summary>
+    /// Shares to protect. Zero until a fill confirms, then the confirmed quantity — raised as further
+    /// fills land, so a partially-filled entry is protected for what is actually owned rather than
+    /// left bare until the rest arrives.
+    /// </summary>
+    public int DesiredQuantity { get; init; }
+
+    /// <summary>
+    /// Re-place the native stop every session. On by default: a stop that survives one day and then
+    /// silently lapses is the failure this whole type exists to prevent. Off makes it a single-session
+    /// stop, which is a deliberate choice rather than an accident.
+    /// </summary>
+    public bool Recurring { get; init; } = true;
+
+    /// <summary><c>pending_fill</c> | <c>active</c> | <c>closed</c>.</summary>
+    public string State { get; init; } = "pending_fill";
+
+    /// <summary>
+    /// Holding quantity before the entry went in — the datum the fill is measured against.
+    ///
+    /// <para>
+    /// Null means it was never captured, and that is <b>not</b> the same as zero. Defaulting it to
+    /// zero would read an existing 100-share holding as a 100-share fill and place a stop for stock
+    /// this entry never bought. A stop with no baseline therefore refuses to activate and says so,
+    /// which is a visible gap rather than a wrong order.
+    /// </para>
+    /// </summary>
+    public int? BaselineQuantity { get; init; }
+
+    /// <summary>
+    /// Shares covered by native placements made <i>during</i>
+    /// <see cref="LastPlacedSessionDate"/> — a running total for that session, not the size of the
+    /// last order. A top-up adds to it, because with no cancel at this broker the only way to raise
+    /// coverage is to rest a second order for the shortfall alongside the first.
+    /// </summary>
+    public int PlacedQuantity { get; init; }
+
+    /// <summary>Session the native stop was last placed for. The primary guard against a double-place.</summary>
+    public DateOnly? LastPlacedSessionDate { get; init; }
+
+    /// <summary>Exchange order number of the last placement, when the portal gave one.</summary>
+    public string? LastOrderNo { get; init; }
+
+    /// <summary>
+    /// The locally-armed SELL that covers the gaps the native stop cannot — before the first
+    /// placement, and between sessions. Conditional, never parallel: see
+    /// <see cref="ProtectiveStopDecisions.BackstopShouldStandDown"/>.
+    /// </summary>
+    public string? LocalBackstopArmedId { get; init; }
+
+    public DateTime CreatedUtc { get; init; } = DateTime.UtcNow;
+    public DateTime? FillConfirmedUtc { get; init; }
+    public DateTime? ClosedUtc { get; init; }
+
+    /// <summary>Why it is in its current state. Every terminal state must be explicable.</summary>
+    public string? StateReason { get; init; }
+
+    public string? Note { get; init; }
+}
+
+/// <summary>One row read from the broker's outstanding (resting) order book.</summary>
+/// <param name="Quantity">Remaining quantity, when the grid exposed it.</param>
+/// <param name="Price">Order price, when the grid exposed it. Null means the column was not found —
+/// which is <i>unknown</i>, never zero.</param>
+public sealed record RestingOrder(
+    string Symbol,
+    string? Side,
+    string? OrderType,
+    int? Quantity,
+    decimal? Price,
+    string? OrderNo,
+    string Row);
+
+/// <summary>What the holdings say about an entry that was submitted.</summary>
+public enum FillOutcome
+{
+    /// <summary>Holdings could not be read. Not evidence of anything — explicitly not "did not fill".</summary>
+    Unknown,
+
+    /// <summary>
+    /// No baseline holding was ever captured, so a delta cannot be computed at all. Needs a person:
+    /// the stop stays dormant rather than guessing a size.
+    /// </summary>
+    NoBaseline,
+
+    /// <summary>The entry is still resting and holdings have not moved.</summary>
+    StillWaiting,
+
+    /// <summary>Holdings rose. The shares are real.</summary>
+    Filled,
+
+    /// <summary>The entry left the book without holdings moving — it never filled.</summary>
+    NeverFilled,
+
+    /// <summary>The watch ran out of time without resolving either way.</summary>
+    TimedOut
+}
+
+/// <param name="Quantity">Shares confirmed by the holdings delta; meaningful only for <see cref="FillOutcome.Filled"/>.</param>
+public sealed record FillVerdict(FillOutcome Outcome, int Quantity, string Reason);
+
+/// <summary>What the recurring pass should do with one stop this session.</summary>
+public enum PlacementAction { Skip, Place, Close }
+
+public sealed record PlacementDecision(PlacementAction Action, int Quantity, string Reason);
+
+/// <summary>
+/// The rules that decide whether shares exist and whether a native stop should go in. Pure, because
+/// every one of them is a rule you would otherwise only discover was wrong by looking at a filled
+/// order you did not intend.
+/// </summary>
+public static class ProtectiveStopDecisions
+{
+    /// <summary>
+    /// A placed price is compared to the requested trigger with a tolerance, because the portal
+    /// re-clamps every order into that day's price band — the resting order's price is routinely a
+    /// little off the one asked for, and an exact match would conclude "not mine" and place a second.
+    /// </summary>
+    private const decimal PriceMatchTolerance = 0.02m;   // 2%
+
+    /// <summary>
+    /// Reads the holdings delta for an entry that has been submitted.
+    ///
+    /// <para>
+    /// <paramref name="heldNow"/> is nullable on purpose and null means <b>unknown</b>. Treating an
+    /// unreadable holdings grid as zero would conclude the entry never filled and close a stop that
+    /// is protecting a real position — the exact inversion that must never happen, so it gets its own
+    /// outcome instead of a default.
+    /// </para>
+    /// </summary>
+    public static FillVerdict EvaluateFill(
+        ProtectiveStop stop,
+        decimal? heldNow,
+        bool entryStillResting,
+        bool deadlinePassed)
+    {
+        if (stop.BaselineQuantity is not { } baseline)
+            return new FillVerdict(FillOutcome.NoBaseline, 0,
+                "No holding was recorded before the entry went in, so a fill cannot be measured. "
+                + "Place the stop manually, or disarm it.");
+
+        if (heldNow is not { } held)
+            return new FillVerdict(FillOutcome.Unknown, 0,
+                "Holdings could not be read this pass; the fill is undetermined.");
+
+        var delta = (int)Math.Floor(held) - baseline;
+
+        if (delta > 0)
+            return new FillVerdict(FillOutcome.Filled, delta,
+                $"Holding rose from {baseline} to {held} — {delta} share(s) filled.");
+
+        if (delta < 0)
+            // The position shrank while waiting on an entry. Something outside this system sold, so
+            // the size this stop was sized against no longer exists and guessing a new one would be
+            // inventing protection.
+            return new FillVerdict(FillOutcome.NeverFilled, 0,
+                $"Holding FELL from {baseline} to {held} while awaiting the entry — "
+                + "the position was changed elsewhere.");
+
+        if (!entryStillResting)
+            return new FillVerdict(FillOutcome.NeverFilled, 0,
+                "The entry is no longer in the outstanding book and holdings did not change — "
+                + "it expired or was cancelled without filling.");
+
+        return deadlinePassed
+            ? new FillVerdict(FillOutcome.TimedOut, 0,
+                "The entry is still resting, but the watch window has closed.")
+            : new FillVerdict(FillOutcome.StillWaiting, 0,
+                "The entry is still resting and holdings have not moved.");
+    }
+
+    /// <summary>
+    /// Decides whether to place the native stop for <paramref name="today"/>.
+    ///
+    /// <para>
+    /// <b>The bias is to do nothing.</b> Every ambiguous reading returns <see cref="PlacementAction.Skip"/>,
+    /// because the two mistakes are not symmetric: a stop that failed to go in is visible in the
+    /// panel and can be placed by hand, whereas a duplicate stop sells the position twice — and with
+    /// no cancel available at this broker, the second sale cannot be called back.
+    /// </para>
+    /// </summary>
+    public static PlacementDecision DecidePlacement(
+        ProtectiveStop stop,
+        decimal? heldQuantity,
+        DateOnly today,
+        IReadOnlyList<RestingOrder> resting)
+    {
+        if (stop.State != "active")
+            return new PlacementDecision(PlacementAction.Skip, 0, $"Not active (state: {stop.State}).");
+
+        if (heldQuantity is not { } held)
+            return new PlacementDecision(PlacementAction.Skip, 0,
+                "Holdings could not be read; refusing to place a stop against an unknown position.");
+
+        if (held <= 0)
+            return new PlacementDecision(PlacementAction.Close, 0,
+                "The position is gone — the stop executed, or it was sold elsewhere. Nothing left to protect.");
+
+        // Never offer more shares than are actually held, whatever the intent says.
+        var quantity = Math.Min(stop.DesiredQuantity, (int)Math.Floor(held));
+        if (quantity <= 0)
+            return new PlacementDecision(PlacementAction.Skip, 0,
+                "Nothing confirmed to protect yet.");
+
+        // Coverage only carries within a session: the venue clears outstanding orders overnight, so
+        // yesterday's placement protects nothing today.
+        var coveredThisSession = stop.LastPlacedSessionDate == today ? stop.PlacedQuantity : 0;
+        var shortfall = quantity - coveredThisSession;
+
+        if (shortfall <= 0)
+            return new PlacementDecision(PlacementAction.Skip, 0,
+                $"Already placed for {today:yyyy-MM-dd}, covering {coveredThisSession} share(s).");
+
+        var match = FindOwnResting(stop, resting);
+        if (match.Ambiguous)
+            return new PlacementDecision(PlacementAction.Skip, 0,
+                $"An order for {stop.Symbol} is resting but could not be identified "
+                + $"({match.Reason}). Not placing a second one.");
+
+        if (match.Order is { } mine && coveredThisSession == 0)
+            // Something is resting at this level that this system did not place today — a manual
+            // stop, or one of ours from a placement that was never recorded. Either way the position
+            // is protected at the level asked for, and adding a second order to an unknown one is how
+            // a holding gets sold twice with no way to call it back.
+            return new PlacementDecision(PlacementAction.Skip, 0,
+                $"A stop for {stop.Symbol} is already resting"
+                + (mine.OrderNo is not null ? $" (order no {mine.OrderNo})" : "")
+                + ", and this system did not place it this session. Leaving it alone.");
+
+        return new PlacementDecision(PlacementAction.Place, shortfall,
+            coveredThisSession > 0
+                ? $"Holding grew to {quantity}; topping up by {shortfall} share(s) on top of the "
+                  + $"{coveredThisSession} already resting."
+                : stop.LastPlacedSessionDate is null
+                    ? $"No stop is resting for {stop.Symbol}; placing for {shortfall} share(s)."
+                    : $"Session rolled over (last placed {stop.LastPlacedSessionDate:yyyy-MM-dd}); "
+                      + $"re-placing for {shortfall} share(s).");
+    }
+
+    /// <summary>
+    /// Whether the local backstop must stand down because the native stop is already resting.
+    ///
+    /// <para>
+    /// This is what keeps "native plus a local backstop" from being two stops that both fire. The
+    /// backstop's job is to cover the window where the native order does not exist — before the first
+    /// placement, and between sessions — not to run alongside it. An unreadable book counts as
+    /// "stand down", since firing on an unknown is how a position gets sold twice.
+    /// </para>
+    /// </summary>
+    public static bool BackstopShouldStandDown(
+        ProtectiveStop stop,
+        IReadOnlyList<RestingOrder>? resting,
+        out string reason)
+    {
+        if (resting is null)
+        {
+            reason = "The outstanding book could not be read, so a resting native stop cannot be "
+                   + "ruled out. Standing down rather than risk selling the position twice.";
+            return true;
+        }
+
+        var match = FindOwnResting(stop, resting);
+        if (match.Order is { } mine)
+        {
+            reason = $"A native stop for {stop.Symbol} is resting"
+                   + (mine.OrderNo is not null ? $" (order no {mine.OrderNo})" : "")
+                   + " and will fire on its own.";
+            return true;
+        }
+
+        if (match.Ambiguous)
+        {
+            reason = $"An unidentifiable order for {stop.Symbol} is resting ({match.Reason}). "
+                   + "Standing down rather than risk selling the position twice.";
+            return true;
+        }
+
+        reason = $"No native stop is resting for {stop.Symbol}; the backstop is the only protection.";
+        return false;
+    }
+
+    /// <summary>
+    /// Finds this stop's own resting order among the book rows.
+    ///
+    /// <para>
+    /// Order number is the exact key and is used first — it identifies a placement made earlier in the
+    /// same session, which is how a mid-day restart avoids placing a second stop. Across sessions the
+    /// number is gone with the order, so the fallback is the price: a protective stop sits near its
+    /// trigger, whereas a resting take-profit SELL sits well above it. That difference is what stops
+    /// an unrelated take-profit limit from blocking this stop forever — which a naive
+    /// "any resting SELL means protected" test would do.
+    /// </para>
+    /// </summary>
+    private static (RestingOrder? Order, bool Ambiguous, string Reason) FindOwnResting(
+        ProtectiveStop stop,
+        IReadOnlyList<RestingOrder> resting)
+    {
+        var forSymbol = resting
+            .Where(r => r.Symbol.Equals(stop.Symbol, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        if (forSymbol.Count == 0) return (null, false, "nothing resting");
+
+        if (stop.LastOrderNo is { Length: > 0 } known)
+        {
+            var byNumber = forSymbol.FirstOrDefault(r => string.Equals(
+                r.OrderNo?.Trim(), known.Trim(), StringComparison.OrdinalIgnoreCase));
+            if (byNumber is not null) return (byNumber, false, "matched by order number");
+        }
+
+        foreach (var row in forSymbol)
+        {
+            // A row we can positively attribute to the other side of the book is not ours, and must
+            // not make us stand down.
+            if (row.Side is { Length: > 0 } side
+                && side.Contains("BUY", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            if (row.Price is not { } price || price <= 0)
+                return (null, true, "a resting row for this symbol has no readable price");
+
+            var drift = Math.Abs(price - stop.StopTrigger) / stop.StopTrigger;
+            if (drift <= PriceMatchTolerance) return (row, false, "matched by price");
+        }
+
+        // Rows exist for the symbol but none look like this stop — a take-profit limit sitting well
+        // above, most likely. That is not ambiguity, it is a different order.
+        return (null, false, "resting orders for this symbol are priced away from the stop");
+    }
+}

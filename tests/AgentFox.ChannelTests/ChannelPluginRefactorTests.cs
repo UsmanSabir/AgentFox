@@ -93,7 +93,7 @@ public class ChannelPluginRefactorTests
             var tool = new ManageChannelTool(
                 new ChannelManager(() => (FoxAgent?)null),
                 catalog,
-                tempConfig,
+                new ChannelConfigStore(tempConfig),
                 NullLogger<ManageChannelTool>.Instance);
 
             var channelTypeParam = tool.Parameters["channel_type"];

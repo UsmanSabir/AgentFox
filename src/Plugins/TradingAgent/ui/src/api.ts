@@ -39,11 +39,9 @@ function headers(json = false): Record<string, string> {
 // to recover short of a page refresh. A hard timeout turns that into an ordinary rejected promise.
 const REQUEST_TIMEOUT_MS = 20_000;
 
-// Model-backed endpoints get their own ceiling. 20s is a sane bound for CRUD against the local
-// database, but an assessment is a full LLM round-trip over a large evidence bundle — against a
-// local model that routinely takes minutes. Aborting at 20s killed the socket mid-generation, which
-// surfaced as a TaskCanceledException from the OpenAI pipeline and threw away work already paid for.
-const MODEL_TIMEOUT_MS = 180_000;
+// Candle reads may top up an incomplete archive from the PSX portal. That path has a 25s upstream
+// attempt budget, so it cannot share the 20s CRUD ceiling without the browser giving up first.
+const CANDLE_TIMEOUT_MS = 60_000;
 
 function withTimeout(timeoutMs = REQUEST_TIMEOUT_MS): { signal: AbortSignal; cancel: () => void } {
   const controller = new AbortController();
@@ -382,6 +380,30 @@ export interface StockAssessment {
   fromCache: boolean;
 }
 
+interface AssessmentJobSubmission {
+  jobId: string;
+  state: 'queued' | 'running' | 'succeeded' | 'failed';
+  reused: boolean;
+}
+
+interface AssessmentJob<T> {
+  jobId: string;
+  state: 'queued' | 'running' | 'succeeded' | 'failed';
+  result: T | null;
+  error: string | null;
+}
+
+/** Polls short status requests; the model keeps running even if this page is refreshed or closed. */
+async function waitForAssessment<T>(jobId: string): Promise<T> {
+  for (;;) {
+    const job = await get<AssessmentJob<T>>(
+      `/trading/assessment-jobs/${encodeURIComponent(jobId)}`);
+    if (job.state === 'succeeded' && job.result) return job.result;
+    if (job.state === 'failed') throw new Error(job.error ?? 'Assessment failed.');
+    await new Promise(resolve => setTimeout(resolve, 1_000));
+  }
+}
+
 /** Trigger kinds an armed order can wait on. */
 export const TRIGGER_KINDS = ['PriceBelow', 'PriceAbove', 'Event'] as const;
 export type TriggerKind = (typeof TRIGGER_KINDS)[number];
@@ -415,10 +437,45 @@ export interface ArmedOrder {
   stateReason: string | null;
   note: string | null;
   sourceAlertId: string | null;
+  /** Set when this order is the local backstop for a protective stop, not an ordinary trigger. */
+  protectiveStopId: string | null;
+}
+
+/**
+ * A standing intent to keep a position protected — not a queued order.
+ *
+ * The venue clears outstanding orders at the close, so a native stop placed today does not exist
+ * tomorrow. The durable thing is the intent, and a native day order is re-placed from it each
+ * session while `recurring` holds.
+ */
+export interface ProtectiveStop {
+  stopId: string;
+  symbol: string;
+  parentArmedId: string | null;
+  stopTrigger: number;
+  stopLimit: number;
+  desiredQuantity: number;
+  recurring: boolean;
+  state: 'pending_fill' | 'active' | 'closed' | string;
+  /** Holding before the entry went in. `null` means never captured — which is not zero. */
+  baselineQuantity: number | null;
+  placedQuantity: number;
+  lastPlacedSessionDate: string | null;
+  lastOrderNo: string | null;
+  localBackstopArmedId: string | null;
+  createdUtc: string;
+  fillConfirmedUtc: string | null;
+  closedUtc: string | null;
+  stateReason: string | null;
+  note: string | null;
+  /** Whether a native stop is resting at the broker right now — the only protection that survives
+   *  AgentFox being down. */
+  restingToday: boolean;
 }
 
 export interface ArmedOrdersResponse {
   orders: ArmedOrder[];
+  protectiveStops: ProtectiveStop[];
   approval: {
     mode: string;
     armedUntilUtc: string | null;
@@ -443,6 +500,18 @@ export interface ArmOrderRequest {
   expiresInDays?: number;
   note?: string;
   sourceAlertId?: string | null;
+  /** BUY only. Arms a protective stop that stays dormant until the entry is confirmed filled. */
+  attachStop?: AttachStopRequest | null;
+}
+
+/** A protective stop to attach to a BUY entry. Sized at fill time, not here. */
+export interface AttachStopRequest {
+  stopTrigger: number;
+  /** Defaults server-side to just below the trigger; a limit AT the trigger routinely misses. */
+  stopLimit?: number | null;
+  quantity?: number | null;
+  /** Re-place the native stop each session. Off means it lapses after one day. */
+  recurring: boolean;
 }
 
 /**
@@ -534,7 +603,7 @@ export const trading = {
   candles: (symbol: string, interval: ChartInterval = '1D', bars?: number) => {
     const query = new URLSearchParams({ symbol, interval });
     if (bars) query.set('bars', String(bars));
-    return get<ChartData>(`/trading/candles?${query}`);
+    return get<ChartData>(`/trading/candles?${query}`, CANDLE_TIMEOUT_MS);
   },
 
   alerts: {
@@ -644,11 +713,34 @@ export const trading = {
         order: ArmedOrder;
         willFireUnattended: boolean;
         note: string;
+        attachedStop: {
+          stopId: string;
+          stopTrigger: number;
+          stopLimit: number;
+          recurring: boolean;
+          state: string;
+          note: string;
+        } | null;
       }>('/trading/armed-orders', request),
 
     disarm: (armedId: string) =>
       del<{ armedId: string; state: string }>(
         `/trading/armed-orders/${encodeURIComponent(armedId)}`)
+  },
+
+  stops: {
+    /**
+     * Stops managing the intent. It does NOT retract an order already resting at the broker — that
+     * is impossible from here — so the reply says whether one is still live and needs cancelling in
+     * the portal by hand.
+     */
+    disarm: (stopId: string) =>
+      del<{
+        stopId: string;
+        state: string;
+        brokerOrderStillResting: boolean;
+        message: string;
+      }>(`/trading/protective-stops/${encodeURIComponent(stopId)}`)
   },
 
   approval: {
@@ -670,12 +762,18 @@ export const trading = {
    * one. Repeat calls for the same symbol+level+session are served from the server-side cache.
    */
   assess: {
-    symbol: (symbol: string, interval = '1D', context?: string) =>
-      post<{ symbol: string; assessment: StockAssessment; evidence: unknown }>(
-        '/trading/assess', { symbol, interval, context }, MODEL_TIMEOUT_MS),
-    alert: (alertId: string) =>
-      post<{ alertId: string; symbol: string; kind: string; assessment: StockAssessment }>(
-        `/trading/alerts/${alertId}/assess`, undefined, MODEL_TIMEOUT_MS)
+    symbol: async (symbol: string, interval = '1D', context?: string) => {
+      const job = await post<AssessmentJobSubmission>(
+        '/trading/assessment-jobs', { symbol, interval, context });
+      return waitForAssessment<{ symbol: string; assessment: StockAssessment; evidence: unknown }>(job.jobId);
+    },
+    alert: async (alertId: string) => {
+      const job = await post<AssessmentJobSubmission>(
+        `/trading/alerts/${alertId}/assessment-jobs`);
+      return waitForAssessment<{
+        alertId: string; symbol: string; kind: string; assessment: StockAssessment
+      }>(job.jobId);
+    }
   },
 
   watchlist: {

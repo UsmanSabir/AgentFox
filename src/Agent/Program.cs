@@ -337,7 +337,14 @@ class Program
         builder.Services.AddSingleton<IChannelProvider, DiscordChannelProvider>();
         builder.Services.AddSingleton<IChannelProvider, TeamsChannelProvider>();
         builder.Services.AddSingleton<IChannelProvider, WhatsAppChannelProvider>();
+        // Credential-free channel that records instead of sending — the way to verify a topic
+        // subscription actually matches without standing up a real transport.
+        builder.Services.AddSingleton<IChannelProvider, DummyChannelProvider>();
         builder.Services.AddSingleton<ChannelProviderCatalog>();
+        // One writer for the Channels array: manage_channel and the web UI's subscription editor
+        // both mutate it, and two independent read-modify-write cycles lose entries.
+        builder.Services.AddSingleton(_ => new AgentFox.Channels.ChannelConfigStore(
+            AgentFox.Helpers.AppSettingsHelper.ResolveAppSettingsPath()));
 
         // LLM
         builder.Services.AddSingleton(_ => LLMFactory.CreateFromConfiguration(configuration));
@@ -410,6 +417,10 @@ class Program
         builder.Services.AddSingleton<AgentFox.Harness.HarnessAgentFactory>();
         builder.Services.AddSingleton<FoxAgentHolder>();
         builder.Services.AddSingleton<ChannelManagerHolder>();
+        // Shared seam that lets plugins broadcast to the user's channels from background code.
+        // ChannelManager itself is host-assembly-only and unreachable from a PluginLoadContext.
+        builder.Services.AddSingleton<AgentFox.Plugins.Interfaces.IUserNotifier,
+            AgentFox.Channels.ChannelUserNotifier>();
         builder.Services.AddSingleton<SchedulingHolder>();
         builder.Services.AddSingleton<AgentFox.Plugins.Interfaces.IAgentService, FoxAgentService>();
 

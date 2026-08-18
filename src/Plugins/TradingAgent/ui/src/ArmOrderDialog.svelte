@@ -29,8 +29,18 @@
   let note = '';
   let busy = false;
   let error: string | null = null;
-  let result: { willFireUnattended: boolean; note: string } | null = null;
+  let result: {
+    willFireUnattended: boolean;
+    note: string;
+    attachedStop: { stopTrigger: number; stopLimit: number; recurring: boolean; note: string } | null;
+  } | null = null;
   let dialogElement: HTMLDivElement;
+
+  // ── Attached protective stop (BUY only) ──────────────────────────────────
+  let attachStop = false;
+  let stopTrigger: number | null = null;
+  let stopLimit: number | null = null;
+  let stopRecurring = true;
 
   onMount(() => dialogElement.focus());
 
@@ -53,6 +63,37 @@
 
   $: estimatedValue = (quantity ?? 0) * (price ?? triggerPrice ?? 0);
 
+  // A stop only makes sense on a BUY — it protects the position this entry creates.
+  $: canAttachStop = action === 'BUY';
+  $: if (!canAttachStop) attachStop = false;
+
+  $: entryPrice = price ?? triggerPrice ?? null;
+
+  // Default the stop 2% under the entry, and its limit 1% under the trigger. Both are starting
+  // points to edit, not recommendations — the level worth stopping at is a judgement about the
+  // chart, which this dialog does not have.
+  $: if (attachStop && stopTrigger == null && entryPrice != null) {
+    stopTrigger = Number((entryPrice * 0.98).toFixed(2));
+  }
+  $: if (attachStop && stopTrigger != null && stopLimit == null) {
+    stopLimit = Number((stopTrigger * 0.99).toFixed(2));
+  }
+
+  $: stopRisk = attachStop && entryPrice != null && stopTrigger != null && quantity
+    ? (entryPrice - stopTrigger) * quantity
+    : null;
+
+  $: stopError =
+    !attachStop ? null
+    : stopTrigger == null || stopTrigger <= 0 ? 'Enter a stop trigger price.'
+    : entryPrice != null && stopTrigger >= entryPrice
+      ? `A stop at ${stopTrigger} sits at or above the entry (${entryPrice}), so it would trigger `
+        + 'immediately rather than protect anything.'
+    : stopLimit != null && stopLimit > stopTrigger
+      ? `The stop limit (${stopLimit}) must be at or below the trigger (${stopTrigger}), or it `
+        + 'cannot fill once triggered.'
+    : null;
+
   async function submit() {
     if (busy) return;
     error = null;
@@ -60,6 +101,7 @@
     if (!quantity || quantity <= 0) { error = 'Quantity must be a positive number.'; return; }
     if (isEvent && !triggerAlertKind) { error = 'Choose the event to trigger on.'; return; }
     if (!isEvent && !(triggerPrice && triggerPrice > 0)) { error = 'Enter a trigger price.'; return; }
+    if (stopError) { error = stopError; return; }
 
     const request: ArmOrderRequest = {
       symbol, action, quantity, triggerKind,
@@ -70,7 +112,10 @@
       limitPrice: isStop ? limitPrice : null,
       expiresInDays,
       note: note.trim() || undefined,
-      sourceAlertId
+      sourceAlertId,
+      attachStop: attachStop && stopTrigger
+        ? { stopTrigger, stopLimit, recurring: stopRecurring }
+        : null
     };
 
     busy = true;
@@ -78,7 +123,11 @@
       const created = await trading.armed.arm(request);
       // Held on screen rather than closed immediately: whether this will fire unattended is the single
       // most important thing to read, and closing the dialog would hide it.
-      result = { willFireUnattended: created.willFireUnattended, note: created.note };
+      result = {
+        willFireUnattended: created.willFireUnattended,
+        note: created.note,
+        attachedStop: created.attachedStop
+      };
       dispatch('armed');
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -115,6 +164,12 @@
         {/if}
         <p>{result.note}</p>
       </div>
+      {#if result.attachedStop}
+        <div class="outcome">
+          <b>Stop attached at {result.attachedStop.stopTrigger} (limit {result.attachedStop.stopLimit})</b>
+          <p>{result.attachedStop.note}</p>
+        </div>
+      {/if}
       <div class="actions">
         <button class="btn btn-primary" on:click={() => dispatch('close')}>Done</button>
       </div>
@@ -190,6 +245,55 @@
         </label>
       </div>
 
+      {#if canAttachStop}
+        <!-- The stop is deliberately part of arming the entry rather than a separate action: the
+             moment you decide a size is the moment you know what losing on it costs. -->
+        <div class="attach" class:on={attachStop}>
+          <label class="check">
+            <input type="checkbox" bind:checked={attachStop} />
+            <span>Protect this with a stop once it fills</span>
+          </label>
+
+          {#if attachStop}
+            <div class="grid">
+              <label>
+                <span>Stop trigger</span>
+                <input type="number" step="0.01" bind:value={stopTrigger} />
+              </label>
+              <label>
+                <span>Stop limit</span>
+                <input type="number" step="0.01" bind:value={stopLimit} />
+              </label>
+            </div>
+
+            <label class="check">
+              <input type="checkbox" bind:checked={stopRecurring} />
+              <span>Re-place it every session</span>
+            </label>
+
+            {#if stopRisk != null && stopRisk > 0}
+              <p class="estimate">
+                Risk if the stop fills <b>{Math.round(stopRisk).toLocaleString()} PKR</b>
+              </p>
+            {/if}
+
+            <p class="stop-note">
+              The stop stays dormant until your holdings actually rise, which is how the fill is
+              confirmed — nothing is sold on the assumption that the entry went through.
+              {#if stopRecurring}
+                It is then re-placed at the broker each session, because outstanding orders are
+                cleared at the close.
+              {:else}
+                <b>It is placed once.</b> Outstanding orders are cleared at the close, so the position
+                stops being protected the next day.
+              {/if}
+            </p>
+
+            {#if stopError}<p class="error">{stopError}</p>{/if}
+          {/if}
+        </div>
+      {/if}
+
       <label class="full">
         <span>Note (optional)</span>
         <input type="text" bind:value={note} placeholder="why this level" maxlength="120" />
@@ -249,6 +353,17 @@
 
   .estimate { margin: 0; color: var(--text-2); font-size: .74rem; }
   .estimate b { color: var(--text); }
+
+  .attach {
+    border: 1px solid var(--border-md); border-radius: var(--radius-sm);
+    padding: .6rem .7rem; display: flex; flex-direction: column; gap: .55rem;
+  }
+  .attach.on { border-left: 3px solid var(--success); }
+  .check { flex-direction: row; align-items: center; gap: .45rem; cursor: pointer; }
+  .check input { width: auto; }
+  .check span { color: var(--text); font-size: .78rem; text-transform: none; letter-spacing: normal; }
+  .stop-note { margin: 0; color: var(--text-3); font-size: .7rem; line-height: 1.55; }
+  .stop-note b { color: var(--warning); }
   .caveat { margin: 0; color: var(--warning); font-size: .68rem; display: flex; gap: .35rem;
             align-items: flex-start; line-height: 1.5; }
   .error { margin: 0; color: var(--danger); font-size: .75rem; }
