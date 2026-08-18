@@ -371,6 +371,7 @@ public sealed class AhkBroker : IAsyncDisposable
         var output = new List<IReadOnlyList<OrderResult>>(groups.Count);
 
         await _gate.WaitAsync();
+        using var screen = EnterTradingScreen();
         try
         {
             // Readiness — launch + login — is safe to retry, so a dead/locked/stray browser is restarted
@@ -403,6 +404,109 @@ public sealed class AhkBroker : IAsyncDisposable
         }
     }
 
+    // ── Session sharing (direct JSON API) ─────────────────────────────────────
+
+    /// <summary>
+    /// Number of in-flight operations actually driving the portal's trading screen. Incremented only
+    /// by the operations that navigate the UI, never merely by having a browser open.
+    /// </summary>
+    private int _tradingScreenHolders;
+
+    /// <summary>
+    /// True while an operation is actively driving the portal's trading screen, where the portal's
+    /// own <c>site.js</c> is polling <c>/Home/GetFeed</c> on a 1–2s timer.
+    ///
+    /// <para>
+    /// This exists for one reason: <c>GetFeed</c> is plausibly a drain-once queue (see
+    /// <c>docs/ahk-feed-api.md</c> — it could not be confirmed either way with the market closed).
+    /// If it is, then two pollers on the SAME session split the stream between them and each sees
+    /// roughly half the ticks, with no error anywhere to say so. The direct feed poller reads this
+    /// and yields while the browser holds the screen, so the two never compete.
+    /// </para>
+    ///
+    /// <para>
+    /// It is a COUNTER of active operations, not "is a browser alive". That distinction was learned
+    /// by running it: defined as <c>_initialized &amp;&amp; _page is not null</c>, the flag latched
+    /// true the moment any browser existed — including one left alive by a failed login or by
+    /// <c>CloseBrowserAfterOrder = false</c> — and the feed worker then yielded to a browser that was
+    /// doing nothing, forever, polling not once more for the rest of the session. The only symptom
+    /// was silence at Debug level.
+    /// </para>
+    /// </summary>
+    public bool BrowserHoldsTradingScreen => Volatile.Read(ref _tradingScreenHolders) > 0;
+
+    /// <summary>
+    /// Marks the trading screen as in use for the lifetime of the returned scope. Callers that
+    /// navigate the portal UI wrap their work in this; <see cref="GetSessionCookiesAsync"/>
+    /// deliberately does not, because harvesting cookies never leaves a page on the trading screen.
+    /// </summary>
+    private TradingScreenScope EnterTradingScreen() => new(this);
+
+    private readonly struct TradingScreenScope : IDisposable
+    {
+        private readonly AhkBroker _broker;
+
+        public TradingScreenScope(AhkBroker broker)
+        {
+            _broker = broker;
+            Interlocked.Increment(ref broker._tradingScreenHolders);
+        }
+
+        public void Dispose() => Interlocked.Decrement(ref _broker._tradingScreenHolders);
+    }
+
+    /// <summary>
+    /// Hands out the authenticated session cookies from the live browser session, for callers that
+    /// talk to the portal's JSON API directly instead of driving the DOM.
+    ///
+    /// <para>
+    /// Reusing the browser's login rather than reimplementing it over HTTP is deliberate. The portal
+    /// authenticates with twelve positional single-character password boxes of which only a random
+    /// subset is enabled per attempt (see <see cref="LoginAsync"/>); that logic is already written,
+    /// already handles the portal's slow async render, and already persists its profile. A second
+    /// implementation of it would be a second thing to keep correct against the same fragile page.
+    /// </para>
+    ///
+    /// <para>
+    /// Returns an empty list rather than throwing when no session can be established, because every
+    /// caller of this is a fail-soft data path that must degrade to its fallback source, not break.
+    /// </para>
+    /// </summary>
+    public async Task<IReadOnlyList<(string Name, string Value, string Domain)>> GetSessionCookiesAsync(
+        CancellationToken ct = default)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            await PrepareSessionWithRetryAsync();
+
+            var cookies = await _page!.GetCookiesAsync();
+            var harvested = cookies
+                .Where(c => !string.IsNullOrWhiteSpace(c.Name))
+                .Select(c => (c.Name, c.Value ?? "", c.Domain ?? ""))
+                .ToList();
+
+            _logger.LogInformation(
+                "[AhkBroker] Handed {Count} session cookie(s) to the direct portal API client.",
+                harvested.Count);
+
+            return harvested;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "[AhkBroker] Could not harvest session cookies for the direct portal API.");
+            return [];
+        }
+        finally
+        {
+            // Deliberately NOT tearing the browser down on CloseBrowserAfterOrder here. The cookies
+            // just handed out are only valid while the portal considers the session alive, and the
+            // caller is about to start using them; closing the browser is the caller's cue that the
+            // session is theirs to keep warm via /Home/Relogin.
+            _gate.Release();
+        }
+    }
+
     // ── Live price lookup ───────────────────────────────────────────────────────
 
     /// <summary>
@@ -418,6 +522,7 @@ public sealed class AhkBroker : IAsyncDisposable
         if (symbols.Count == 0) return prices;
 
         await _gate.WaitAsync();
+        using var screen = EnterTradingScreen();
         try
         {
             await PrepareSessionWithRetryAsync();
@@ -496,6 +601,7 @@ public sealed class AhkBroker : IAsyncDisposable
     public async Task<PortfolioSnapshot> GetPortfolioAsync()
     {
         await _gate.WaitAsync();
+        using var screen = EnterTradingScreen();
         try
         {
             await PrepareSessionWithRetryAsync();
@@ -2005,6 +2111,7 @@ public sealed class AhkBroker : IAsyncDisposable
     public async Task<IReadOnlyList<RestingOrder>> GetOutstandingOrdersAsync(string? symbol = null)
     {
         await _gate.WaitAsync();
+        using var screen = EnterTradingScreen();
         try
         {
             await PrepareSessionWithRetryAsync();

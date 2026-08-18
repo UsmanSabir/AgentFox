@@ -24,6 +24,7 @@ public sealed class TradingManager
     private readonly IBrokerAdapter _broker;
     private readonly ITradingRepository _repository;
     private readonly IMarketCalendar _calendar;
+    private readonly TradingAgent.Market.OrderWindow _orderWindow;
     private readonly TradingPolicyProvider _policyProvider;
     private readonly ITradingRiskEngine _riskEngine;
     private readonly TradingReconciliationState _reconciliation;
@@ -43,6 +44,7 @@ public sealed class TradingManager
         IBrokerAdapter broker,
         ITradingRepository repository,
         IMarketCalendar calendar,
+        TradingAgent.Market.OrderWindow orderWindow,
         TradingPolicyProvider policyProvider,
         ITradingRiskEngine riskEngine,
         TradingReconciliationState reconciliation,
@@ -55,6 +57,7 @@ public sealed class TradingManager
         _broker = broker;
         _repository = repository;
         _calendar = calendar;
+        _orderWindow = orderWindow;
         _policyProvider = policyProvider;
         _riskEngine = riskEngine;
         _reconciliation = reconciliation;
@@ -114,9 +117,17 @@ public sealed class TradingManager
                     "Broker reconciliation is not healthy: " + reconciliation.Reason);
         }
 
-        var market = _calendar.GetStatus();
-        if (!market.IsOpen)
-            return TradingExecutionResult.Rejected(policy.Version, market.Reason);
+        // Whether the VENUE is accepting orders — not merely whether the regular matching session is
+        // running. PSX's pre-open OHO state accepts orders that go live at the open, and gating on
+        // the calendar alone silently forfeited that window. See OrderWindow for the full reasoning.
+        var window = _orderWindow.Evaluate();
+        if (!window.Allowed)
+        {
+            _logger.LogInformation(
+                "[TradingManager] Order rejected by the {Source} order window: {Reason}",
+                window.Source, window.Reason);
+            return TradingExecutionResult.Rejected(policy.Version, window.Reason);
+        }
 
         var requestJson = JsonSerializer.Serialize(groups, Json);
         var idempotencyKey = BuildIdempotencyKey(sourceMessage, requestJson, policy.Version);
@@ -139,8 +150,13 @@ public sealed class TradingManager
             JsonSerializer.Serialize(new
             {
                 policy.Version,
-                market.PktNow,
-                market.ScheduleSource,
+                PktNow = TradingAgent.Market.PsxTime.Now(),
+                // Which authority allowed this order through ("broker" or "calendar") and what it
+                // said. The gate can now pass on a state the calendar alone would have refused —
+                // pre-open OHO — so an audit record that omitted this could not answer "why was this
+                // order accepted at 09:05" after the fact.
+                OrderWindowSource = window.Source,
+                OrderWindowReason = window.Reason,
                 authorization
             }, Json), ct);
 

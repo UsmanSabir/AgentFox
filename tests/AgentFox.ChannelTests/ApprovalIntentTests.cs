@@ -165,7 +165,8 @@ public sealed class ApprovalIntentTests
             var broker = new RecordingBroker();
             var registry = new ApprovalIntentRegistry();
             var manager = new TradingAgent.Manager.TradingManager(
-                broker, repository, new AlwaysOpenCalendar(), policyProvider,
+                broker, repository, new AlwaysOpenCalendar(),
+                TradingTestFactory.CalendarOnlyWindow(new AlwaysOpenCalendar()), policyProvider,
                 new TradingRiskEngine(Options.Create(new AhkConfig()), options),
                 new TradingReconciliationState(), registry, options,
                 NullLogger<TradingAgent.Manager.TradingManager>.Instance);

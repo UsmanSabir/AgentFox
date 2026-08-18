@@ -39,6 +39,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService
     private readonly MonitoredUniverse _universe;
     private readonly CandleHistoryProvider _history;
     private readonly PsxDataClient _dataClient;
+    private readonly CompositeLiveQuoteSource _quotes;
     private readonly ITradingRepository _repository;
     private readonly IMarketCalendar _calendar;
     private readonly AlertBroadcaster _broadcaster;
@@ -55,6 +56,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService
         MonitoredUniverse universe,
         CandleHistoryProvider history,
         PsxDataClient dataClient,
+        CompositeLiveQuoteSource quotes,
         ITradingRepository repository,
         IMarketCalendar calendar,
         AlertBroadcaster broadcaster,
@@ -67,6 +69,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService
         _universe = universe;
         _history = history;
         _dataClient = dataClient;
+        _quotes = quotes;
         _repository = repository;
         _calendar = calendar;
         _broadcaster = broadcaster;
@@ -498,7 +501,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService
             IReadOnlyDictionary<string, PsxLiveQuote> live = new Dictionary<string, PsxLiveQuote>();
             if (drift > 0)
             {
-                try { live = await _dataClient.GetMarketWatchAsync(ct); }
+                try { live = (await _quotes.GetQuotesAsync(ct)).Quotes; }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     // Without prices only the TTL rule can be applied — which is the safe subset, so
