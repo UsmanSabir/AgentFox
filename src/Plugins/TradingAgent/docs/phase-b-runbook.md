@@ -17,8 +17,9 @@ host restarts, not the feed poll (which matches the portal's own 1–2s cadence)
 
 **Keep it that way:** start the host once and leave it running. The `session_ahk` profile persists a
 logged-in session so restarts usually skip the login; deleting it or changing credentials forces a
-fresh login every time. For order-only work, run with `Plugins__AhkFeed__Enabled=false` — the whole
-place/read/cancel/verify cycle then costs about **7 requests**.
+fresh login every time. The feed is now **on by default**; for order-only work set
+`Plugins__AhkFeed__Enabled=false`, and the whole place/read/cancel/verify cycle then costs about
+**7 requests** with nothing polling in the background.
 
 ### Already confirmed live (pre-open, `OHO`)
 
@@ -127,6 +128,9 @@ dotnet run --project Agent/
 Notes:
 - `Modules="web,trading-agent"` drops the `cli` module, which otherwise wants an interactive stdin.
 - `Logging__MinLevel="Information"` is required or the `[AhkFeed]` / `[AhkPortal]` lines are invisible.
+- `Plugins__AhkFeed__Enabled="true"` is now the DEFAULT and is listed only for explicitness. The feed
+  also refuses to start at all when `Plugins:Ahk:Username`/`Password` are empty, rather than looping
+  on failed logins.
 - Logs go to **`src/logs/agentfox.log`**, not stdout. Stdout only shows the startup banner.
 - Leave `OnlyDuringMarketHours` at its default (`true`) — during market hours it polls normally.
 - A visible Chrome window will open (`Headless: false`). That is expected. **Do not interact with it.**

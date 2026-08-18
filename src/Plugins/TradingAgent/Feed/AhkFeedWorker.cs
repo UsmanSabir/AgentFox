@@ -42,6 +42,7 @@ public sealed class AhkFeedWorker : BackgroundService
     private readonly MonitoredUniverse _universe;
     private readonly IMarketCalendar _calendar;
     private readonly IRuntimePluginOptions<AhkFeedConfig> _config;
+    private readonly IRuntimePluginOptions<AhkConfig> _brokerConfig;
     private readonly ILogger<AhkFeedWorker> _logger;
 
     private DateTime _lastReloginUtc = DateTime.MinValue;
@@ -71,6 +72,7 @@ public sealed class AhkFeedWorker : BackgroundService
         MonitoredUniverse universe,
         IMarketCalendar calendar,
         IRuntimePluginOptions<AhkFeedConfig> config,
+        IRuntimePluginOptions<AhkConfig> brokerConfig,
         ILogger<AhkFeedWorker> logger)
     {
         _portal = portal;
@@ -79,6 +81,7 @@ public sealed class AhkFeedWorker : BackgroundService
         _universe = universe;
         _calendar = calendar;
         _config = config;
+        _brokerConfig = brokerConfig;
         _logger = logger;
     }
 
@@ -140,6 +143,19 @@ public sealed class AhkFeedWorker : BackgroundService
         {
             _logger.LogInformation(
                 "[AhkFeed] Disabled (Plugins:AhkFeed:Enabled = false); prices come from the PSX market watch.");
+            return;
+        }
+
+        // Credentials are checked BEFORE anything else, because the feed is now enabled by default.
+        // Without them every pass would launch Chromium, fail the positional-password login and back
+        // off — up to six browser launches an hour, against a broker, for a deployment that simply has
+        // not been configured yet. Refusing to start is both cheaper and clearer than retrying.
+        var broker = _brokerConfig.Current;
+        if (string.IsNullOrWhiteSpace(broker.Username) || string.IsNullOrWhiteSpace(broker.Password))
+        {
+            _logger.LogInformation(
+                "[AhkFeed] No broker credentials configured (Plugins:Ahk:Username/Password), so the "
+                + "live quote feed will not start. Prices come from the PSX market watch.");
             return;
         }
 
