@@ -407,6 +407,7 @@ Implemented, building clean with 14 new tests (517 total, 0 failing).
 | `Feed/AhkPortalClient.GetAnalyticsUrlAsync` | hop ①, on the class that owns the broker session |
 | `AhlAnalytics/AhlAnalyticsModels.cs` | typed DTOs; every two-letter key mapped once via `[JsonPropertyName]` |
 | `AhlAnalytics/AhlAnalyticsClient.cs` | handshake, token cache, rate limiter, snapshot cache, typed calls |
+| `AhlAnalytics/AhlCandleSource.cs` | daily bars as `PsxCandle`, preferred over the PSX scrape |
 | `AhlAnalytics/AhlMovers.cs` | the screens — pure computation over a snapshot, no I/O |
 | `Tools/MarketMoversTool.cs` | `market_movers` agent tool |
 | `Tools/StockDossierTool.cs` | `stock_dossier` agent tool, dimension-addressable |
@@ -424,6 +425,20 @@ before. The client retries twice on the same token first, and only the third att
 **Indicators are computed locally, not taken from `/api/v3/indicators`.** The two disagree
 materially and the portal's own UI ignores that endpoint. `PreferPortalIndicators` exists but
 defaults false.
+
+**Candle reads never trigger the SSO handshake.** `AhlCandleSource.ReadyWithoutHandshake` gates on a
+token being *already held*, not merely on `Enabled`. Hop ① runs against the broker session and
+restoring a dead one can launch a browser, and a candle read happens on every scan — so it falls back
+to PSX rather than becoming the thing that logs in. Once an agent- or user-initiated call
+(`market_movers`, `stock_dossier`) has obtained a token, candle reads start using it.
+
+`CandleHistoryProvider` therefore resolves per symbol: AHL when a token is held and it returns usable
+depth, otherwise the existing archive/PSX path. An AHL series is used **whole** — never concatenated
+with archived PSX bars, since the two sit on different price scales either side of any corporate
+action — and AHL bars are **never written to `daily_bars`**, which holds raw exchange data and is what
+reconciliation reads. `CandleHistory.Sources` reports the choice per symbol, and the mix is posted to
+the trading activity log (visible in the dashboard's activity panel) whenever it changes, so a
+fallback to PSX is visible rather than silent.
 
 **Nothing runs on a timer.** Every read is user- or agent-initiated, so the plugin never turns a dead
 broker session into a login on a schedule. The dashboard polls the plugin's own endpoint, which is

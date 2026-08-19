@@ -1,6 +1,8 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using TradingAgent.AhlAnalytics;
 using TradingAgent.Config;
+using TradingAgent.Observability;
 using TradingAgent.Market;
 using TradingAgent.Persistence;
 using TradingAgent.Watchlist;
@@ -26,14 +28,26 @@ public sealed class CandleHistoryProvider
     private readonly CompositeLiveQuoteSource _quotes;
     private readonly ITradingRepository _repository;
     private readonly MonitoredUniverse _universe;
+    private readonly AhlCandleSource _ahl;
+    private readonly TradingActivityLog _activity;
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly ILogger<CandleHistoryProvider> _logger;
+
+    /// <summary>
+    /// Last source mix announced to the activity log. The log collapses identical consecutive lines,
+    /// but a scan runs every few minutes and would still repost the same line indefinitely, so the
+    /// announcement is suppressed until the mix actually changes — which is the only moment an
+    /// operator needs to see it.
+    /// </summary>
+    private string? _lastAnnouncedSourceMix;
 
     public CandleHistoryProvider(
         PsxDataClient dataClient,
         CompositeLiveQuoteSource quotes,
         ITradingRepository repository,
         MonitoredUniverse universe,
+        AhlCandleSource ahl,
+        TradingActivityLog activity,
         IOptions<TradingAgentOptions> options,
         ILogger<CandleHistoryProvider> logger)
     {
@@ -41,6 +55,8 @@ public sealed class CandleHistoryProvider
         _quotes = quotes;
         _repository = repository;
         _universe = universe;
+        _ahl = ahl;
+        _activity = activity;
         _options = options;
         _logger = logger;
     }
@@ -64,10 +80,38 @@ public sealed class CandleHistoryProvider
         var allowed = (await _universe.ForArchiveAsync(ct))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
+        // Which source actually served each symbol, reported back on CandleHistory and summarised to
+        // the activity log. Not cosmetic: AHL bars are corporate-action ADJUSTED and PSX bars are raw,
+        // so a consumer comparing a level against a fill has to know which it is holding.
+        var sources = new Dictionary<string, CandleSource>(StringComparer.OrdinalIgnoreCase);
+
+        // ── AHL analytics first, when it is already usable ────────────────────
+        // Gated on ReadyWithoutHandshake, NOT merely on Enabled: the SSO handshake runs against the
+        // broker session and restoring a dead one can launch a browser and log in. A candle read
+        // happens on every scan, so it must never be what triggers a login — it quietly uses PSX
+        // instead until an agent- or user-initiated call has obtained a token.
+        var fromAhl = new Dictionary<string, IReadOnlyList<PsxCandle>>(StringComparer.OrdinalIgnoreCase);
+        if (_ahl.ReadyWithoutHandshake)
+        {
+            foreach (var symbol in symbols.Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                var bars = await _ahl.GetDailyAsync(symbol, sessions, ct);
+                // Require a usable depth before displacing the PSX path, so a symbol the portal
+                // barely covers does not end up with a shorter series than PSX would have given.
+                if (bars.Count >= Math.Min(sessions, 20))
+                {
+                    fromAhl[symbol] = bars;
+                    sources[symbol] = CandleSource.AhlAnalytics;
+                }
+            }
+        }
+
         var fromArchive = new List<string>();
         var fromPortal = new List<string>();
         foreach (var symbol in symbols)
         {
+            // Symbols AHL already covered need neither the archive read nor a portal fetch.
+            if (fromAhl.ContainsKey(symbol)) continue;
             (allowed.Contains(symbol) ? fromArchive : fromPortal).Add(symbol);
         }
 
@@ -125,12 +169,29 @@ public sealed class CandleHistoryProvider
 
         foreach (var symbol in symbols.Distinct(StringComparer.OrdinalIgnoreCase))
         {
-            // Prefer whichever source gave the deeper history; the portal path is capped at the
-            // configured lookback, the archive is not.
             var bars = new List<PsxCandle>();
-            var fromDb = archived.GetValueOrDefault(symbol) ?? [];
-            var fromWeb = portal?.Series.GetValueOrDefault(symbol) ?? [];
-            bars.AddRange(fromDb.Count >= fromWeb.Count ? fromDb : fromWeb);
+
+            if (fromAhl.TryGetValue(symbol, out var ahlBars))
+            {
+                // Used WHOLE and never combined with archived PSX bars. The two are on different price
+                // scales either side of any corporate action, so a merged series would carry a
+                // silent scale change at whatever date the join happened to fall on.
+                bars.AddRange(ahlBars);
+            }
+            else
+            {
+                // Prefer whichever source gave the deeper history; the portal path is capped at the
+                // configured lookback, the archive is not.
+                var fromDb = archived.GetValueOrDefault(symbol) ?? [];
+                var fromWeb = portal?.Series.GetValueOrDefault(symbol) ?? [];
+                bars.AddRange(fromDb.Count >= fromWeb.Count ? fromDb : fromWeb);
+                if (bars.Count > 0)
+                {
+                    sources[symbol] = fromDb.Count >= fromWeb.Count
+                        ? CandleSource.LocalArchive
+                        : CandleSource.PsxPortal;
+                }
+            }
 
             if (bars.Count == 0)
             {
@@ -154,15 +215,63 @@ public sealed class CandleHistoryProvider
             .OrderBy(d => d)
             .ToList();
 
+        AnnounceSources(sources);
+
         return new CandleHistory
         {
             Series         = series,
             Live           = live,
             Sessions       = covered,
+            Sources        = sources,
             RetrievedAtUtc = DateTime.UtcNow,
             Warnings       = warnings
         };
     }
+
+    /// <summary>
+    /// Posts the source mix to the activity log, once per change.
+    ///
+    /// <para>
+    /// Which source served the candles is an operational fact worth surfacing rather than inferring:
+    /// AHL bars are corporate-action adjusted and PSX bars are raw, so the answer changes how a level
+    /// or an indicator should be read. It also makes the fallback visible — if the analytics portal
+    /// stops being reachable, the line changes to PSX and says so, instead of the system quietly
+    /// serving a different kind of price.
+    /// </para>
+    /// </summary>
+    private void AnnounceSources(Dictionary<string, CandleSource> sources)
+    {
+        if (sources.Count == 0) return;
+
+        var counts = sources.Values
+            .GroupBy(v => v)
+            .OrderByDescending(g => g.Count())
+            .ToList();
+
+        var mix = string.Join(", ", counts.Select(g => $"{Describe(g.Key)} {g.Count()}"));
+        if (mix == _lastAnnouncedSourceMix) return;
+        _lastAnnouncedSourceMix = mix;
+
+        var primary = counts[0].Key;
+        var detail = primary == CandleSource.AhlAnalytics
+            ? "AHL bars are corporate-action ADJUSTED — correct for indicators and levels, but they " +
+              "do not reconcile against fill prices. PSX remains the source of record for money."
+            : _ahl.Enabled
+                ? "The AHL analytics portal is enabled but has no session yet, so candles come from " +
+                  "PSX (raw, as-traded prices)."
+                : "The AHL analytics portal is disabled; candles come from PSX (raw, as-traded prices).";
+
+        _activity.Info("Candles", $"Daily candle source: {mix}", detail);
+        _logger.LogInformation("[CandleHistory] Source mix: {Mix}", mix);
+    }
+
+    private static string Describe(CandleSource source) => source switch
+    {
+        CandleSource.AhlAnalytics => "AHL analytics",
+        CandleSource.LocalArchive => "local archive (PSX)",
+        CandleSource.PsxPortal    => "PSX portal",
+        _                          => "unknown"
+    };
 
     /// <summary>
     /// Weekly candles for one symbol, resampled from its daily history. Exact rather than

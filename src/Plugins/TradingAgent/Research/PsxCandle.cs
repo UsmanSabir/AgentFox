@@ -148,8 +148,40 @@ public sealed record CandleHistory
     /// <summary>Completed sessions covered, oldest first.</summary>
     public IReadOnlyList<DateOnly> Sessions { get; init; } = [];
 
+    /// <summary>
+    /// Which source served each symbol's bars.
+    ///
+    /// <para>
+    /// Reported rather than left implicit because the sources are not interchangeable:
+    /// <see cref="CandleSource.AhlAnalytics"/> bars are corporate-action ADJUSTED, while the PSX-derived
+    /// ones are raw as-traded prices. A consumer comparing a computed level against a fill price has to
+    /// know which it is holding, and only this field can tell it.
+    /// </para>
+    /// </summary>
+    public IReadOnlyDictionary<string, CandleSource> Sources { get; init; }
+        = new Dictionary<string, CandleSource>();
+
     public DateTime RetrievedAtUtc { get; init; } = DateTime.UtcNow;
 
     /// <summary>Non-fatal problems (a date that could not be fetched, a symbol with no rows).</summary>
     public IReadOnlyList<string> Warnings { get; init; } = [];
+}
+
+/// <summary>
+/// Where a symbol's candle history came from. The distinction is material, not bookkeeping: the AHL
+/// analytics portal serves corporate-action ADJUSTED prices and volumes, whereas both PSX-derived
+/// sources serve raw as-traded values. Adjusted bars are the correct input for indicators and levels
+/// (a raw series has an artificial cliff on every split date) and the WRONG input for anything
+/// reconciling against a fill.
+/// </summary>
+public enum CandleSource
+{
+    /// <summary>The local <c>daily_bars</c> archive — raw PSX data.</summary>
+    LocalArchive,
+
+    /// <summary>Fetched from the PSX data portal this call — raw as-traded prices.</summary>
+    PsxPortal,
+
+    /// <summary>The AHL analytics portal — five years per request, corporate-action adjusted.</summary>
+    AhlAnalytics
 }

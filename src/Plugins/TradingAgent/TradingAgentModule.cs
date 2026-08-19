@@ -185,6 +185,10 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         services.AddRuntimePluginOptions<AhlAnalyticsConfig>(
             TradingPluginConfigDefinitionProvider.BrokerPluginName);
         services.AddSingleton<AhlAnalyticsClient>();
+        // Candle history prefers this over the PSX scrape when a token is already held — one request
+        // for five years instead of ~1235, and an ADJUSTED series, which is the correct input for
+        // indicators. It never triggers the SSO handshake itself; see AhlCandleSource.
+        services.AddSingleton<AhlCandleSource>();
 
         services.AddSingleton<PortfolioReader>();
         // Same instance behind the narrow interface the order gate consumes.
