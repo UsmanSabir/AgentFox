@@ -15,6 +15,11 @@ export const sidebarCollapsed = writable(false);
 export type UiMode = 'simple' | 'advanced';
 export const uiMode = writable<UiMode>('advanced');
 
+// Dark remains the compatibility default. The root layout restores the persisted choice before
+// exposing it to plugin frames, so host chrome and plugin content switch as one surface.
+export type UiTheme = 'dark' | 'light';
+export const uiTheme = writable<UiTheme>('dark');
+
 // ── Active conversation ID ────────────────────────────────────────────────
 export const activeConversationId = writable<string | undefined>(undefined);
 export const activeAgentId = writable('main');

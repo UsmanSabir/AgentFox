@@ -5,6 +5,17 @@
 		<link rel="icon" href="%sveltekit.assets%/favicon.svg" type="image/svg+xml" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<meta name="theme-color" content="#0c0d10" />
+		<script>
+			// Apply before Svelte mounts so a saved light preference never flashes the dark canvas.
+			try {
+				const theme = localStorage.getItem('agentfox.theme') === 'light' ? 'light' : 'dark';
+				document.documentElement.dataset.theme = theme;
+				document.querySelector('meta[name="theme-color"]')
+					?.setAttribute('content', theme === 'light' ? '#f5f6f8' : '#0c0d10');
+			} catch {
+				document.documentElement.dataset.theme = 'dark';
+			}
+		</script>
 		%sveltekit.head%
 	</head>
 	<body data-sveltekit-preload-data="hover" class="bg-bg text-text">

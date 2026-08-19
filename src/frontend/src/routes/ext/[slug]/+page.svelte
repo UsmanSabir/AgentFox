@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { page } from '$app/stores';
+  import { uiTheme, type UiTheme } from '$lib/stores';
   import { api, getManagementApiKey, type PluginUiPageInfo } from '$lib/api';
 
   // Generic host for a plugin-supplied UI. This file is the ONLY thing the host app knows about
@@ -26,17 +27,21 @@
     }
   });
 
-  function handoff() {
+  function handoff(theme: UiTheme = $uiTheme) {
     frame?.contentWindow?.postMessage(
       {
         type:   'agentfox:context',
         apiKey: getManagementApiKey(),
-        theme:  document.documentElement.dataset.theme ?? 'dark',
+        theme,
         base:   '/api'
       },
       window.location.origin
     );
   }
+
+  // The frame may already be open when the header toggle changes. Re-send the host context so plugin
+  // pages switch in place instead of waiting for their next navigation or reload.
+  $: if (frame) handoff($uiTheme);
 </script>
 
 <svelte:head><title>{current?.title ?? 'Plugin'} · AgentFox</title></svelte:head>
@@ -55,7 +60,7 @@
     bind:this={frame}
     src={current.entry}
     title={current.title}
-    on:load={handoff}
+    on:load={() => handoff()}
   ></iframe>
 {/if}
 

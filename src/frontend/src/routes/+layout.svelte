@@ -1,11 +1,14 @@
 <script lang="ts">
   import '../app.css';
   import Sidebar from '$lib/components/Sidebar.svelte';
-  import { sidebarCollapsed, agentStatus, resetChat, uiMode, type UiMode } from '$lib/stores';
+  import {
+    sidebarCollapsed, agentStatus, resetChat, uiMode, uiTheme,
+    type UiMode, type UiTheme
+  } from '$lib/stores';
   import { api } from '$lib/api';
   import { onMount } from 'svelte';
   import { page } from '$app/stores';
-  import { MessageSquare, Zap } from 'lucide-svelte';
+  import { MessageSquare, Zap, Sun, Moon } from 'lucide-svelte';
   import { goto } from '$app/navigation';
 
   function startNewChat(event: MouseEvent) {
@@ -15,6 +18,7 @@
   }
 
   const UI_MODE_KEY = 'agentfox.uiMode';
+  const UI_THEME_KEY = 'agentfox.theme';
 
   function selectMode(mode: UiMode) {
     uiMode.set(mode);
@@ -22,8 +26,25 @@
     if (mode === 'simple' && $page.url.pathname !== '/chat') goto('/chat');
   }
 
+  function applyTheme(theme: UiTheme, persist = true) {
+    uiTheme.set(theme);
+    document.documentElement.dataset.theme = theme;
+    document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')
+      ?.setAttribute('content', theme === 'light' ? '#f5f6f8' : '#0c0d10');
+    if (persist) localStorage.setItem(UI_THEME_KEY, theme);
+  }
+
+  function toggleTheme() {
+    applyTheme($uiTheme === 'light' ? 'dark' : 'light');
+  }
+
   // Restore the display preference and poll agent status every 5 s.
   onMount(() => {
+    // app.html applies the saved value before first paint; mirror it into the shared store so open
+    // plugin frames receive the same theme and future changes propagate without a reload.
+    const initialTheme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+    applyTheme(initialTheme, false);
+
     // Start narrow screens on the compact rail. Users can still open the sidebar as a drawer, while
     // the page retains enough width for plugin dashboards and chat content.
     if (window.matchMedia('(max-width: 760px)').matches) sidebarCollapsed.set(true);
@@ -92,6 +113,15 @@
         {/if}
       </div>
       <div class="header-right">
+        <button
+          class="theme-toggle"
+          on:click={toggleTheme}
+          aria-label={$uiTheme === 'light' ? 'Use dark theme' : 'Use light theme'}
+          title={$uiTheme === 'light' ? 'Use dark theme' : 'Use light theme'}
+        >
+          {#if $uiTheme === 'light'}<Moon size={16} />{:else}<Sun size={16} />{/if}
+        </button>
+
         <!-- Quick chat shortcut -->
         <a href="/chat" class="chat-shortcut" title="Start a new chat" on:click={startNewChat}>
           <MessageSquare size={16} />
@@ -173,6 +203,23 @@
     color: var(--text);
   }
 
+  .theme-toggle {
+    width: 32px;
+    height: 32px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    border: 1px solid var(--border-md);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    color: var(--text-2);
+    cursor: pointer;
+    transition: color .15s, background .15s, border-color .15s;
+  }
+  .theme-toggle:hover { color:var(--primary); background:var(--surface-3); border-color:var(--border-high); }
+  .theme-toggle:focus-visible { outline:2px solid var(--primary); outline-offset:2px; }
+
   .simple-brand {
     display: flex;
     align-items: center;
@@ -219,7 +266,7 @@
     font-weight: 500;
     transition: background 0.15s;
   }
-  .chat-shortcut:hover { background: rgba(129,140,248,0.2); }
+  .chat-shortcut:hover { background: var(--primary-glow); }
 
   /* Status pill */
   .status-pill {

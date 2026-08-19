@@ -16,6 +16,7 @@ window.addEventListener('message', (event) => {
   if (typeof data.apiKey === 'string') setInjectedApiKey(data.apiKey);
   if (data.theme === 'light' || data.theme === 'dark') {
     document.documentElement.dataset.theme = data.theme;
+    window.dispatchEvent(new CustomEvent('agentfox:themechange', { detail: data.theme }));
   }
 });
 
