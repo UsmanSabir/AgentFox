@@ -353,6 +353,15 @@ public sealed class WatchlistUniverseTests
     /// <summary>Repository whose watchlist reads always fail, for the degradation test.</summary>
     private sealed class ThrowingRepository : ITradingRepository
     {
+        public Task RecordBrokerOrdersAsync(
+            string executionId,
+            IReadOnlyList<TradingAgent.Models.OrderResult> orders,
+            CancellationToken ct = default) => throw new NotSupportedException();
+
+        public Task<int> RecordFillsAsync(
+            IReadOnlyList<TradingAgent.Reconciliation.BrokerFill> fills,
+            CancellationToken ct = default) => throw new NotSupportedException();
+
         public Task<WatchlistSnapshot> GetWatchlistAsync(CancellationToken ct = default) =>
             throw new InvalidOperationException("database unavailable");
 

@@ -245,6 +245,16 @@ public sealed class ProtectiveStopWorker : BackgroundService
 
         // One holdings read and one book read serve every stop in the pass. Reading per-stop would
         // multiply the most expensive thing this worker does by the number of positions held.
+        //
+        // The book read is also what makes overnight correctness work, and the reason is not obvious:
+        // PSX orders are DAY orders, and the broker cancels every resting order at the close — confirmed
+        // live on 2026-08-19, where a protective sell that had rested since 10:00 was gone minutes after
+        // the bell along with the whole book. So a stop this worker placed yesterday does not exist today,
+        // whatever the ledger remembers about placing it. Nothing here needs to special-case that as long
+        // as the decision is driven by what is ACTUALLY resting rather than by what was recorded: the
+        // first pass after the open sees an unprotected position and places the stop again. Anything that
+        // starts trusting the stored state instead would leave positions unprotected every morning while
+        // reporting them protected.
         var holdings = await ReadHoldingsAsync();
         var resting  = await ReadRestingAsync();
         var today    = DateOnly.FromDateTime(market.PktNow);

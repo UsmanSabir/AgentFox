@@ -248,9 +248,18 @@ public sealed class AhkActivityLogEntry
     [JsonPropertyName("type")]        public string? Type { get; set; }
 
     /// <summary>
-    /// The event: <c>PEN</c> (pending — accepted and resting) and <c>CLX</c> (cancelled) are the two
-    /// confirmed live. Treat any unrecognised value as "something happened", never as a fill —
-    /// fills are read from <see cref="AhkTradeLogEntry"/>, where a filled quantity is unambiguous.
+    /// The event. Confirmed against the live portal on 2026-08-19: <c>QUE</c> queued, <c>APT</c> accepted
+    /// (a stop order awaiting its trigger), <c>REJ</c> rejected by the exchange, <c>CLX</c> cancelled;
+    /// <c>PEN</c> was seen in an earlier session. This is the ONLY place an order's verdict appears — the
+    /// <c>PlaceOrder</c> response is byte-identical for a queued and a rejected order.
+    ///
+    /// <para>
+    /// Treat any unrecognised value as "something happened", never as a fill. And note the trap this
+    /// comment previously walked into: <see cref="FillVolume"/> is NOT a fill indicator here. A REJ row
+    /// arrived with <c>fillVolume 1</c>, <c>price 0</c> and <c>totalValue 0</c> — a full quantity on an
+    /// order that never traded. A fill needs a positive quantity AND a real price AND an action that is
+    /// not REJ or CLX.
+    /// </para>
     /// </summary>
     [JsonPropertyName("action")]      public string? Action { get; set; }
 

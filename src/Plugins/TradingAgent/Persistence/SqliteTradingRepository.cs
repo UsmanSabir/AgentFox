@@ -250,6 +250,133 @@ public sealed class SqliteTradingRepository : ITradingRepository
         await command.ExecuteNonQueryAsync(ct);
     }
 
+    /// <summary>
+    /// Upserts one <c>broker_orders</c> row per attempt. Keyed on <c>client_order_id</c>
+    /// (<c>{executionId}:{index}</c>) rather than the exchange number, because the exchange number is
+    /// exactly what may be missing — and a re-record of the same attempt must update that attempt, not
+    /// create a second row for it.
+    ///
+    /// <para>
+    /// An attempt with no exchange number is stored with a <c>pending:</c> broker_order_id. The column is
+    /// the table's primary key and cannot be null, and inventing a random id would make the row
+    /// indistinguishable from a real order number to every later reader. The prefix says plainly that the
+    /// broker never gave us one, and the row is still there to be found.
+    /// </para>
+    /// </summary>
+    public async Task RecordBrokerOrdersAsync(
+        string executionId,
+        IReadOnlyList<TradingAgent.Models.OrderResult> orders,
+        CancellationToken ct = default)
+    {
+        if (orders.Count == 0) return;
+
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+
+        var now = DateTime.UtcNow.ToString("O");
+        for (var i = 0; i < orders.Count; i++)
+        {
+            var order = orders[i];
+            var clientOrderId = $"{executionId}:{i}";
+            var brokerOrderId = string.IsNullOrWhiteSpace(order.OrderId)
+                ? $"pending:{clientOrderId}"
+                : order.OrderId!.Trim();
+
+            var command = connection.CreateCommand();
+            command.Transaction = (Microsoft.Data.Sqlite.SqliteTransaction)transaction;
+            command.CommandText = """
+                INSERT INTO broker_orders
+                    (broker_order_id, execution_id, client_order_id, state, order_json, created_utc, updated_utc)
+                VALUES ($brokerId, $executionId, $clientId, $state, $json, $now, $now)
+                ON CONFLICT(client_order_id) DO UPDATE SET
+                    broker_order_id = excluded.broker_order_id,
+                    state           = excluded.state,
+                    order_json      = excluded.order_json,
+                    updated_utc     = excluded.updated_utc
+                """;
+            command.Parameters.AddWithValue("$brokerId", brokerOrderId);
+            command.Parameters.AddWithValue("$executionId", executionId);
+            command.Parameters.AddWithValue("$clientId", clientOrderId);
+            command.Parameters.AddWithValue("$state", order.Success ? "accepted" : "failed");
+            command.Parameters.AddWithValue("$json", JsonSerializer.Serialize(order));
+            command.Parameters.AddWithValue("$now", now);
+            await command.ExecuteNonQueryAsync(ct);
+        }
+
+        await transaction.CommitAsync(ct);
+    }
+
+    /// <summary>
+    /// Records fills, skipping any already stored. The fill id is derived from the order number, the
+    /// timestamp and the quantity, which is what makes a re-read of the same activity log a no-op:
+    /// reconciliation sees today's whole log every minute, so an append-only insert would multiply every
+    /// fill by the number of passes remaining in the day.
+    ///
+    /// <para>
+    /// A fill whose order this system never placed — a manual order in the portal — is recorded too, and
+    /// that needs a parent row because <c>fills.broker_order_id</c> is a foreign key and
+    /// <c>PRAGMA foreign_keys</c> is ON. It gets an <c>external:</c> execution id, so a position that
+    /// moved for reasons outside this system is visible rather than silently dropped by a constraint.
+    /// </para>
+    /// </summary>
+    public async Task<int> RecordFillsAsync(
+        IReadOnlyList<TradingAgent.Reconciliation.BrokerFill> fills,
+        CancellationToken ct = default)
+    {
+        if (fills.Count == 0) return 0;
+
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+
+        var inserted = 0;
+        var now = DateTime.UtcNow.ToString("O");
+
+        foreach (var fill in fills)
+        {
+            var orderNo = fill.OrderNo.Trim();
+            if (orderNo.Length == 0) continue;
+
+            // Parent row for an order we did not place, so the foreign key holds. INSERT OR IGNORE, so an
+            // order this system DID place keeps the row (and the state) it already has.
+            var parent = connection.CreateCommand();
+            parent.Transaction = (Microsoft.Data.Sqlite.SqliteTransaction)transaction;
+            parent.CommandText = """
+                INSERT OR IGNORE INTO trading_executions
+                    (execution_id, idempotency_key, state, request_json, policy_version, created_utc, updated_utc)
+                VALUES ($externalId, $externalId, 'external', '{}', 'external', $now, $now);
+
+                INSERT OR IGNORE INTO broker_orders
+                    (broker_order_id, execution_id, client_order_id, state, order_json, created_utc, updated_utc)
+                VALUES ($orderNo, $externalId, $clientId, 'external', $json, $now, $now);
+                """;
+            parent.Parameters.AddWithValue("$externalId", $"external:{orderNo}");
+            parent.Parameters.AddWithValue("$orderNo", orderNo);
+            parent.Parameters.AddWithValue("$clientId", $"external:{orderNo}");
+            parent.Parameters.AddWithValue("$json", JsonSerializer.Serialize(fill));
+            parent.Parameters.AddWithValue("$now", now);
+            await parent.ExecuteNonQueryAsync(ct);
+
+            var command = connection.CreateCommand();
+            command.Transaction = (Microsoft.Data.Sqlite.SqliteTransaction)transaction;
+            command.CommandText = """
+                INSERT OR IGNORE INTO fills (fill_id, broker_order_id, quantity, price, filled_utc)
+                VALUES ($fillId, $orderNo, $quantity, $price, $filledUtc)
+                """;
+            command.Parameters.AddWithValue("$fillId",
+                $"{orderNo}:{fill.FilledUtc:yyyyMMddTHHmmss}:{fill.Quantity}");
+            command.Parameters.AddWithValue("$orderNo", orderNo);
+            command.Parameters.AddWithValue("$quantity", fill.Quantity);
+            command.Parameters.AddWithValue("$price", fill.Price.ToString(CultureInfo.InvariantCulture));
+            command.Parameters.AddWithValue("$filledUtc", fill.FilledUtc.ToString("O"));
+            inserted += await command.ExecuteNonQueryAsync(ct);
+        }
+
+        await transaction.CommitAsync(ct);
+        return inserted;
+    }
+
     public async Task CompleteExecutionAsync(
         string executionId,
         string state,
@@ -836,6 +963,10 @@ public sealed class SqliteTradingRepository : ITradingRepository
                     filled_utc TEXT NOT NULL,
                     FOREIGN KEY (broker_order_id) REFERENCES broker_orders(broker_order_id)
                 );
+                CREATE INDEX IF NOT EXISTS ix_broker_orders_execution
+                    ON broker_orders(execution_id);
+                CREATE INDEX IF NOT EXISTS ix_fills_order
+                    ON fills(broker_order_id);
                 CREATE TABLE IF NOT EXISTS positions (
                     account_id TEXT NOT NULL,
                     symbol TEXT NOT NULL,
