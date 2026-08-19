@@ -1,0 +1,473 @@
+# The AHL Analytics portal (`data.arifhabibltd.com`)
+
+Captured live on 2026-08-19 via Chrome DevTools against a logged-in broker session, market
+**closed** (`st: "SUS"`, last update 15:50). Everything below was verified by replaying the calls
+from the page context; nothing here is inferred from reading JS alone unless said so.
+
+The portal is a Laravel app ("Capital Stake" white-labelled for Arif Habib Limited). It is a
+**separate product from the trading terminal** with its own auth, its own data, and its own
+websocket. It is a research/analytics source, not an execution surface.
+
+No tokens or session values from the capture are reproduced in this document — they are
+per-session and one of them is valid for a year. Re-derive them with the handshake below.
+
+## The authentication chain
+
+Three hops. The only secret needed is the broker portal session the plugin already holds.
+
+```
+①  GET https://web.ahletrade.com/Home/GetAnalyticsURL
+    Cookie: .AspNetCore.Session=…; trader=<client-code>; HouseName=AHL
+    X-Requested-With: XMLHttpRequest
+    → 200, body is a JSON *string*:
+      "http://data.arifhabibltd.com/dashboard?token=<laravel-encrypted-blob>"
+
+②  GET <that url>                                    (307 → https, then 200 text/html)
+    → sets  laravel_session  +  XSRF-TOKEN  cookies
+    → HTML <head> carries the two values everything else needs:
+         <meta name="csrf-token"    content="…40 chars…">
+         <meta name="access-token"  content="<RS256 JWT>">
+
+③  All /api/** calls:   Authorization: Bearer <access-token>
+                        X-Requested-With: XMLHttpRequest
+    /api/market-stream/token and other POSTs also want:
+                        X-CSRF-TOKEN: <csrf-token>   + the laravel_session cookie
+```
+
+The `token=` blob in ① is Laravel `Crypt::encryptString` output — base64 of
+`{"iv":…,"value":…,"mac":…,"tag":""}`. It decrypts server-side to the trader identity and maps to
+portal user `sub: 1130`.
+
+Three properties of this chain matter for implementation:
+
+**The SSO blob is replayable.** Re-fetching `/dashboard?token=<same blob>` returns 200 with the
+**same** `access-token` in the meta tag. It is not single-use and not nonce-bound, so a captured
+URL keeps working.
+
+**The Bearer token is long-lived.** Its `exp` sits ~365 days out (`iat` 2026-08-19 →
+`exp` 2027-08-17), `aud: "4"`, `scopes: []` — a Laravel Passport personal access token, not a
+short session token. So the handshake is a once-a-year event, not a per-request one; cache the
+token and only re-run ①–② on a 401.
+
+**Hop ② needs no JavaScript.** The Bearer token is in a `<meta>` tag in the server-rendered HTML,
+so one regex over the response body replaces a browser. The entire chain is `HttpClient`-able —
+this is *not* another Puppeteer dependency.
+
+Two caveats seen during the capture:
+- ① returns an `http://` URL that 307s to `https://`. Follow redirects, or rewrite the scheme
+  before the request — don't send the trader-identifying blob over cleartext.
+- A burst of ~25 `/api/v3` calls in a few seconds started returning `{"message":"Unauthenticated."}`
+  (not 429) until the page was reloaded. Responses carry `X-RateLimit-Limit: 60`. **A 401 here
+  means "slow down", not "token dead"** — retry with backoff before re-running the handshake, or a
+  transient throttle will burn a fresh login every time.
+
+## Market depth: what is actually available
+
+**There is no L2 / order-book depth on this portal.** This is the one thing worth being blunt
+about, because the MBO/MBP ladders visible in the trading terminal make it look like there should be.
+
+- Every REST probe for a book — `/depth/{sym}`, `/orderbook/{sym}`, `/book/{sym}`, `/mbp/{sym}`,
+  `/quote/{sym}` — returns `500 Server Error`. The `?path=` proxy is a **whitelist**, and only
+  `/req`, `/daily/{sym}`, `/intraday/{sym}/{1D,2D,5D}` are on it.
+- The websocket tick payload carries exactly four book fields: `bp`, `bv`, `ap`, `av` — **best bid
+  and best ask with sizes. L1 only.**
+- The stream token's scopes are `["market:read", "market:announcements"]`. There is no depth scope
+  to ask for.
+
+The MBO/MBP ladders in the terminal are fed by the broker's own feed (`web.ahletrade.com`), which
+is what `AhkFeedWorker` / `AhkQuoteBook` already talk to. **Depth stays where it is.** This portal
+adds nothing to that path, and any plan that routes depth through here is built on a wrong premise.
+
+What it *does* add is breadth: 857 equities of history, ratios, and precomputed indicators in a
+handful of calls.
+
+## The live websocket
+
+```
+POST /api/market-stream/token        (laravel_session cookie + X-CSRF-TOKEN, empty body)
+→ { token, url: "wss://market.capitalstake.com/stream/secure?token=…",
+    expires_in: 3600, claims: { scope: ["market:read","market:announcements"], sub: "1130" } }
+```
+
+**Server-push firehose — there is no subscribe protocol.** The client sends nothing; sending
+`{action:"subscribe",…}` is ignored. Every message is `{ t: <type>, d: <payload> }`:
+
+| `t` | payload |
+| --- | --- |
+| `tick` | `{s: symbol, m: "REG"\|"IDX", st: "OPN", t: unixSec, o, h, l, c, v, val, ch, pch, ldcp, bp, bv, ap, av, lt: {t, v: price, x: volume}}` |
+| `announcement` | corporate announcement, `is_update` flag |
+| `signal` | published to a `SIGNALS` topic; no sample captured (market closed) |
+
+Field mapping is taken from the portal's own `formatTick`, so it is the vendor's own naming.
+Note `lt` is confusingly ordered: `parseLt` maps `lt.v → price` and `lt.x → volume`.
+
+The portal's client filters client-side on `st === "OPN"`, same-day `t`, and
+`m ∈ {IDX, REG}` — so a consumer must expect stale and off-market frames to arrive and drop them
+itself. Token TTL is 3600s and the client refreshes 60s early; the socket survives the refresh by
+reconnecting with a new token.
+
+**The socket was silent for a 9s hold with the market closed** — no heartbeat, no snapshot on
+connect. It could not be confirmed to carry live ticks in this capture, and that verification has
+to happen during market hours before anything depends on it.
+
+## REST surface
+
+Authoritative list — extracted from the portal's `script.js` and then each one replayed.
+
+### `POST /api/v3/market?path=/req` — body `item=market`
+
+**The single highest-value call on the portal.** One request, ~1.1 MB, the entire market:
+
+```
+{ st: "SUS", lu: "2026-08-19 15:50:00",
+  eq:  { <857 symbols> }, in: { <18 indices> },
+  fut: { <308 futures> },  odl: { <9 ETFs/odd-lot> } }
+```
+
+An equity record (`eq.LUCK`, all fields observed):
+
+| group | fields |
+| --- | --- |
+| identity | `nm` name, `sc` sector code, `ty`, `st` state, `d` last tick time |
+| OHLC | `o h l c v` , `ldcp`/`ldcv` last-day close/volume, `ch` `pch`, `avg`, `tr` trade count |
+| **L1 book** | `bidp bidv askp askv` — **all 0 when closed**; only populated intraday |
+| **circuit** | `uc` upper cap, `lc` lower lock, `var` %band, `hc` haircut |
+| ranges | `h52` `l52` |
+| **float** | `sh` shares out, `ff` free float |
+| **technicals** | `rsi`, `std`, `pp:{pp,r1,r2,r3,s1,s2,s3}` pivots, `bt:{1m,3m,6m,1y}` **beta** |
+| fundamentals | `eps` `dps`, `pm` net margin %, `di` div yield %, `pr` (unresolved — see below), `sa` sales, `pat`, `as` assets, `sg3y` `scagr5y` `pcagr5y` `eg3y` growth |
+| price history | `p1w p1m p3m p6m p1y pytd pfy p5y` |
+| volume history | `vw vm v3m v6m vy vytd vfy`, averages `vaw va10d vam va3m va6m vay vaytd v30a` |
+| **corp actions** | `xb` ex-bonus, `xd` ex-div, `xr` ex-right, `sd` |
+| membership | `li: ["KSE100","KMI30",…]` — index membership per symbol |
+
+Index records (`in.KSE100`) add `val` turnover, `cw cm c3m c6m cy cytd c5y` historic closes, and
+`v5a v10a v30a v90a v180a` average volumes. Futures (`fut`) add `fut:{dd, dm, ltd, sm, cm}`
+delivery/maturity/last-trade dates and `eq` the underlying — a ready-made futures→spot mapping.
+
+#### Decoding the two-letter keys
+
+The portal ships its own key map (`cs.market.Mappings`), reproduced here because the field names
+are otherwise unguessable:
+
+```
+st→status  lu→last_update  d→date  sc→sector  nm→name  ds→description  ty→type
+o→open  h→high  l→low  c→close  v→volume  ch→change  pch→percent_change
+l52→low_52  h52→high_52  ldcp/ldcv/ldci→last-day close/volume/index
+sh→shares  ff→free_float  sa→sales  as→assets  eps→eps  li→listed_in  pp→pivot_points
+p1w/p1m/p3m/p6m/p1y→price N ago
+```
+
+Its own map is **incomplete and in one place wrong**, so three fields were resolved by comparing
+`/req` against `company-statement` for LUCK:
+
+| key | value (LUCK) | actually is |
+| --- | --- | --- |
+| `pm` | 34.1539 | **net profit margin, ×100** (`npm` = 0.34153…). The vendor map omits it. |
+| `di` | 1.0649 | **dividend yield, ×100** (`div_yield` = 0.010649…). |
+| `pr` | 15.7084 | **unresolved.** The vendor map labels it `profit_margin`, which it is not. It is not `pe_ratio` (14.75), nor `close/eps` (13.74), nor `pb_ratio`/`ps_ratio`. Implies an EPS of 27.83 on an unknown basis. |
+
+`pm` and `di` are percent-scaled while the `company-statement` equivalents are fractions — mixing
+the two silently produces a 100× error. **Do not use `pr`**; take P/E from `pe_ratio` in
+`company-statement`, which reconciles.
+
+Sector codes (`sc`) are the PSX scheme: `0801` Automobile Assembler, `0804` Cement, `0805`
+Chemical, `0807` Commercial Banks, `0809` Fertilizer, `0812` Insurance, `0813` Inv. Banks/Securities,
+`0818` Miscellaneous, `0820` O&G Exploration, `0821` O&G Marketing, `0823` Pharmaceuticals,
+`0824` Power Gen & Distribution, `0825` Refinery, `0826` Sugar, `0828` Technology & Communication,
+`0829`–`0831` Textile (Composite/Spinning/Weaving), `0832` Tobacco, `0833` Transport, `0836` REIT,
+`0837` ETF, `0838` Property. Full table (0801–0838) is in the bundle's `sectors` object.
+
+### Market movers — derived client-side, not an endpoint
+
+The dashboard's **Market Performance** widget (Leaders / Gainers / Losers) has **no backing API**.
+It is computed in the browser from the `/req` snapshot, and the logic is worth copying verbatim
+because of the filter in front of it:
+
+```js
+fresh   = filter(data.eq, v => v.d.substr(0,10) === data.lu.substr(0,10))  // traded TODAY only
+gainers = fresh.sort((a,b) => b.pch - a.pch).slice(0,5)
+losers  = fresh.sort((a,b) => a.pch - b.pch).slice(0,5)
+leaders = fresh.sort((a,b) => b.v   - a.v  ).slice(0,5)   // "Leaders" = most active by volume
+```
+
+**That date filter is the whole trick.** The `eq` map contains every listed symbol including ones
+that have not traded in months (e.g. `786R` carries a `d` of 2026-01-02 with a live-looking
+`pch: -6.44%`). Ranking without comparing each row's `d` against the market's `lu` puts long-dead
+symbols at the top of a "today's biggest movers" list. A gainers screen is one sort — the filter is
+the part that makes it correct.
+
+Since this is pure client-side derivation over a snapshot the plugin can already fetch, **the
+plugin can produce the same movers lists, and better ones**, with no extra API surface: top movers
+by `pch`, most active by `v`, unusual volume via `v / va10d`, gap-ups from `o` vs `ldcp`, movers
+restricted to KSE100 members via `li`, or sector rotation by aggregating `pch` over `sc`. None of
+these need a request the plugin isn't already making.
+
+### Charts
+
+| endpoint | returns |
+| --- | --- |
+| `GET /api/v3/market?path=/daily/{sym}` | **1235 daily bars ≈ 5 years**, one JSON call |
+| `GET /api/v3/market?path=/intraday/{sym}/{1D\|2D\|5D}` | **1-minute bars**; 365 / 727 / 1812 rows |
+
+**Indices work in both**, with the index symbol in place of the equity: `/daily/KSE100` → 1241 bars
+back to 2021-08-20, `/intraday/KSE100/5D` → 1881 one-minute bars. So index overlays and
+relative-strength-vs-KSE100 come from the same two calls, no separate index API.
+
+Row shape `{date, open, high, low, close, volume, shares, value}`. Three gotchas:
+- **Newest-first.** `data[0]` is today; `data[last]` is the oldest.
+- `shares` and `value` are **always 0**. Don't build turnover on them.
+- **Daily closes are corporate-action adjusted** and the `?adj=false` the JS hints at is
+  *ignored* — LUCK's 2021 close comes back as `162.09221369698164`. `from`, `limit`, and any other
+  query param are ignored too; the windows are fixed. Fractional-paisa closes are the adjustment
+  fingerprint, and they will not reconcile against a broker fill price.
+- Only `1D`, `2D`, `5D` exist. `10D`/`1W`/`1M`/`3M`/`6M`/`1Y`/`MAX` all 500.
+
+#### Compared against the PSX source the plugin already uses
+
+Measured on 2026-08-19 by fetching LUCK from both sources for the same dates.
+`PsxDataClient.Candles` POSTs a date to `dps.psx.com.pk/historical` and parses the returned HTML
+table; the analytics portal serves `/daily/LUCK` as JSON.
+
+| | PSX (`dps.psx.com.pk/historical`) | AHL (`/daily/{sym}`) |
+| --- | --- | --- |
+| Request unit | one POST **per date**, whole market | one GET **per symbol**, whole history |
+| 5 years of one symbol | **~1235 POSTs** + HTML parse | **1 request** |
+| Format | HTML table scrape | JSON |
+| Prices | **raw, as traded** | **corporate-action adjusted** |
+| Volume | as traded | **also adjusted** (scaled by the action) |
+| Extra fields | `LDCP`, change, change % | none (`shares`/`value` always 0) |
+| Intraday | no native path | **native 1-minute, up to 5 days** |
+| History depth | deeper, but with holes | 5 years, continuous |
+
+The measured divergence, and why it decides the split of responsibilities:
+
+| date | PSX close | AHL close | ratio | PSX volume | AHL volume | ratio |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2026-08-18 | 439.30 | 439.30 | 1.0000 | 1,250,095 | 1,250,095 | 1.00 |
+| 2025-08-19 | 425.98 | 422.41 | 0.9916 | 3,914,791 | 3,914,791 | 1.00 |
+| 2024-08-19 | 853.02 | 166.29 | 0.1949 | 40,874 | 204,370 | **5.00** |
+| 2021-08-20 | 859.90 | 162.09 | 0.1885 | 924,995 | 4,624,975 | **5.00** |
+
+The exactly-5.00 volume ratios pin the mechanism: LUCK had a 5:1 action between Aug 2024 and Aug
+2025, and AHL back-adjusts every prior bar — price ÷5, volume ×5. The 0.9916 in 2025 is subsequent
+dividend adjustment. Today's bar is identical in both, so **recent data agrees exactly** and only
+history diverges.
+
+**Neither source is simply better; they answer different questions, and both should be kept.**
+
+- **AHL is the right source for charts, indicators and levels.** One request instead of 1235 is the
+  headline, and native 1-minute intraday is a capability the PSX path does not have at all. But the
+  deeper reason is the adjustment: a *raw* series contains an artificial −80% cliff on the split
+  date, and RSI, MACD, ATR and every swing-pivot level computed across that cliff are garbage. The
+  adjusted series is the correct input for technical analysis, not merely the cheaper one.
+- **PSX remains the source of record for anything touching money.** Adjusted prices do not
+  reconcile against a fill, and adjusted volumes are not the shares that changed hands. A stop
+  computed off AHL's 166.29 for a position actually bought near 853 would be catastrophically wrong.
+  Reconciliation, realised P&L, and audit keep using PSX.
+
+So the integration is additive: `AhlCandleSource` alongside the PSX one, each tagged with its
+source, and a hard rule that adjusted and raw series are never concatenated. Both agree on the
+current session, which is what makes them safe to diff as a staleness check.
+
+One incidental finding: PSX returned an empty table for 2023-08-18 while AHL had a bar for it.
+Whether that is a portal gap or a settlement-calendar quirk was not chased, but it means the PSX
+archive can have holes that the AHL series fills — another reason to keep both rather than migrate.
+
+### `GET /api/v3/indicators` — precomputed, whole market
+
+529 symbols × 11 indicator families in one call:
+`sma(25/50/100/200)`, `bb(20,2)` → `[upper, mid, lower]`, `volt(10)`, `rsi(14)`,
+`stoch(9,6,3)` → `[%K, %D]`, `macd(12,26,9)` → `[macd, signal, hist]`, `roc(9)`, `cci(14)`.
+
+Daily-resolution latest values only — no history, no intraday.
+
+### `GET /api/v3/company-statement?symbol={sym}&interval={annual|quarterly}&type={…}`
+
+`type` ∈ `fundamentals | income | balance | other | profile | shareholders`.
+
+Statements return `{periods[], fields[{label, key, unit, description, latex, values[]}]}` —
+`values[i]` aligns to `periods[i]`. Quarterly periods are labelled `{year, quarter, period_end}`;
+annual `fundamentals` gives **TTM + 18 fiscal years**.
+
+`type=fundamentals` is 41 ratio series — and each carries **`sector_stats: {key, min, max,
+median}`**, so a symbol can be ranked against its sector without pulling peers:
+
+`gpm opm pbtm npm ooi roce roe roa dps div_yield div_cover retention shares payout s_ps mp_ps
+eps bkv pe_ratio pb_ratio ps_ratio na_ps cap_emp eq_mul eta ltde ltsa lta solr intc cash_ps
+cur_ratio qu_ratio wc_rs rec_days inv_days pay_days wc_days tat fat invt`
+
+`type=profile` gives sector, description, employees, `year_end` (**fiscal year end — needed to read
+quarterly results correctly**), `par_value`, capacity/utilisation, auditors, registrar, website,
+`status`. A few `income` rows have `key: null` (e.g. "Distribution costs") — key on `label` as a
+fallback or those rows silently vanish.
+
+### Announcements, payouts, news, research
+
+| endpoint | returns |
+| --- | --- |
+| `GET /api/v3/payouts/announcement-break-down/{sym}` | **265 rows for AKGL** — full payout history: `dividend`, `bonus`, `rightPrice`, `exDate`, `book_closure_date_from/to`, plus parsed `unconsolidatedSales/Pat/QuarterEps`, `periodEndDate`, `quarter`, and the PSX PDF link |
+| `GET /announcements/{sym}?rangeFrom=&rangeTo=&type=ALL` | per-symbol announcements, same shape |
+| `GET /api/v1/announcements/board-meeting` | **market-wide upcoming board meetings** — `details` packs `datetime`, `location`, `periodEndDate`, `agenda` |
+| `GET /api/v1/announcements/financial-result` | market-wide results as they post; `details` packs sales/PAT/EPS |
+| `POST /api/v3/news/{sym\|GENERIC}` | Business Recorder headlines + summary + link; cursor-paginated (`next`, `total`) |
+| `GET /client-research-v2/data/list?count=&offset=&symbol=` | **AHL's own analyst notes** — title, full body (`dsc`), analyst + category ids. Real sell-side research, e.g. *"AHL Alert – LUCK Highest Ever EPS in FY26 of PKR 60.78/share"* |
+| `GET /insider-transaction/api?sort=desc[&symbol={sym}]` | **insider trades** — `{date, type: buy\|sell, symbol, name, description: "Executive"\|"Senior Management"\|…, price, shares, share_type, market, notice_id, notice_date}`. 50/page market-wide; `&symbol=` filters (LUCK → 23 rows). Note `date` (dealt) vs `notice_date` (disclosed) differ by days — **key off `notice_date` for anything time-sensitive**, since that is when the information became public. |
+| `GET /insider-transaction/api/stats?freq=daily&sort=asc&from=&to=` | aggregate buy/sell counts per period — `{date_from, date_to, buy, sell}` |
+| `GET /persons/organization?code={sym}` | management roster with designations and tenure |
+| `GET /api/v3/economy-data` | macro series — GDP, etc., `{indicator, period, current, previous}` |
+| `POST /api/v3/currency-rates` | FX |
+
+**Empty for this account** (verified, not assumed): `/api/v3/settlement/{sym}` and
+`/api/v3/portfolio-investments?type={foreign|local}` (FIPI/LIPI flows) both return
+`{"response":"success","message":"No data found","data":null}` for every period value tried. The
+FIPI/LIPI foreign-flow dataset — which would be genuinely valuable on PSX — is **not provisioned**.
+`/api/v3/payouts/industry-average` 404s.
+
+## What this changes for the plugin
+
+Measured against what `TradingAgent` does today.
+
+### 1. Candle history — replaces an HTML scrape
+
+`PsxDataClient.Candles` POSTs a form to `dps.psx.com.pk/historical` and parses HTML, one symbol at
+a time. `/daily/{sym}` returns 5 years of JSON in one call, and `/intraday/{sym}/5D` gives
+1-minute bars the PSX scrape has no equivalent for. This feeds `CandleHistoryProvider`,
+`CandleResampler`, and `AnalyzeCandlesTool` directly, and it is the change that most improves the
+charts in `ui/`.
+
+The adjustment caveat above is a real constraint, not a footnote: **adjusted history must not be
+mixed with broker fill prices** in the same series, or a stop computed off it will sit at the wrong
+level after any bonus issue. Keep the source tagged on the candle.
+
+### 2. `?path=/req` replaces per-symbol polling for screening
+
+`ScanWatchlistTool` and `StockAssessmentService` currently walk symbols individually. One `/req`
+call covers 857 equities with RSI, pivots, beta, 52-week range, free float, circuit caps, average
+volumes over seven windows, and index membership. A whole-market screen becomes one request
+instead of N — and `va10d`/`v30a` give the liquidity filter that position sizing needs.
+
+`sh`/`ff` (shares out / free float) also enable a check the plugin cannot currently make: whether
+an intended order size is sane relative to the symbol's actual tradeable float.
+
+### 3. Market movers / daily-trader screens — free, off the same snapshot
+
+The dashboard's Leaders/Gainers/Losers is the single most directly useful thing here for a
+day-trading loop, and it costs **nothing extra**: it is five lines of LINQ over the `/req` snapshot
+already fetched for §2. Reimplement it with the today-only `d == lu` filter described above, then
+extend past what the portal shows:
+
+- **Unusual volume** — `v / va10d`, the strongest intraday-continuation screen available in the
+  snapshot, and something the portal itself doesn't display.
+- **Gap detection** — `o` vs `ldcp`.
+- **Movers within a tradable universe** — filter by `li` containing `KSE100`, or by `ff`/`va10d`
+  above a liquidity floor, so the list isn't topped by illiquid names the agent shouldn't touch.
+- **Near-circuit warnings** — `c` against `uc`/`lc`. A symbol pinned at its upper cap cannot be
+  bought higher, which changes the order decision, not just the display.
+- **Sector rotation** — aggregate `pch` by `sc`.
+
+This belongs in `ScanWatchlistTool` (or a new `market_movers` tool) and in the `ui/` dashboard.
+
+### 4. Fundamentals + sector percentiles — new capability
+
+There is no fundamentals path in the plugin at all today. `company-statement` with its
+`sector_stats` gives `research_stock` a real valuation view (P/E, P/B, ROE, leverage, working-capital
+days) *and* the sector median to judge it against.
+
+### 5. Event risk — the highest-value addition for safety
+
+`/api/v1/announcements/board-meeting` and the `xd`/`xb`/`xr` flags plus `exDate` /
+`book_closure_date_from` from the payouts feed let the agent know **before** it trades that a symbol
+goes ex-dividend tomorrow or has results due. Given that PSX day orders are cancelled at market
+close and protective stops don't survive overnight (see `ahk-direct-api-migration.md`), holding
+through an unknown event is exactly the exposure worth avoiding. This deserves a hard pre-trade
+gate in `Safety/`, not just a note in a report.
+
+### 6. Cross-check, not replacement, for the live feed
+
+`AhkQuoteBook` stays the execution-path quote source: it is the broker's own feed, it has the
+MBO/MBP depth, and it is what fills reconcile against. The portal's `bp/bv/ap/av` and `/req`
+snapshot are useful as an **independent** second opinion — a stale-feed detector — which is worth
+having given the feed re-subscription problems already documented. Two sources disagreeing is a
+signal; one source silently going stale is the failure mode that has already cost sessions here.
+
+### 7. Analyst research as agent context
+
+`client-research-v2` is AHL's own sell-side notes in full text. That is a qualitative input
+`ResearchStockTool` currently has to go to the open web for, and it is the broker's actual house
+view on symbols this account can trade.
+
+## What was built
+
+Implemented, building clean with 14 new tests (517 total, 0 failing).
+
+| file | role |
+| --- | --- |
+| `Config/AhlAnalyticsConfig.cs` | `Plugins:AhlAnalytics`, `Enabled` defaulting **false** |
+| `Feed/AhkPortalClient.GetAnalyticsUrlAsync` | hop ①, on the class that owns the broker session |
+| `AhlAnalytics/AhlAnalyticsModels.cs` | typed DTOs; every two-letter key mapped once via `[JsonPropertyName]` |
+| `AhlAnalytics/AhlAnalyticsClient.cs` | handshake, token cache, rate limiter, snapshot cache, typed calls |
+| `AhlAnalytics/AhlMovers.cs` | the screens — pure computation over a snapshot, no I/O |
+| `Tools/MarketMoversTool.cs` | `market_movers` agent tool |
+| `Tools/StockDossierTool.cs` | `stock_dossier` agent tool, dimension-addressable |
+| `ui/src/MoversPanel.svelte` | dashboard panel; `GET /trading/movers`, `/trading/movers/sectors` |
+| `tests/…/AhlMoversTests.cs` | 14 tests, weighted on the freshness filter |
+
+Three decisions worth recording, because each was made against a live-capture finding:
+
+**The 401 handler backs off before it re-authenticates.** This portal returns
+`401 Unauthenticated` for rate-limiting rather than 429, while the token stays valid. Treating 401 as
+"token dead" would re-run the handshake on every throttle — and hop ① can launch Chromium to restore
+a dead broker session, so that is a *login per throttle* against a broker that has withdrawn access
+before. The client retries twice on the same token first, and only the third attempt re-handshakes.
+
+**Indicators are computed locally, not taken from `/api/v3/indicators`.** The two disagree
+materially and the portal's own UI ignores that endpoint. `PreferPortalIndicators` exists but
+defaults false.
+
+**Nothing runs on a timer.** Every read is user- or agent-initiated, so the plugin never turns a dead
+broker session into a login on a schedule. The dashboard polls the plugin's own endpoint, which is
+served from the cached snapshot.
+
+### The agent-facing surface
+
+`market_movers` — nine screens (`gainers`, `losers`, `most_active`, `most_valuable`,
+`unusual_volume`, `gap_up`, `gap_down`, `near_upper_cap`, `near_lower_lock`), filterable by index,
+sector, and turnover/volume/price floors, plus session breadth and sector rotation. All from one
+cached snapshot, so screen count does not multiply upstream traffic.
+
+`stock_dossier` — one symbol, addressed by dimension so a caller pays only for what it asks:
+`quote`, `technicals`, `levels` cost nothing beyond the shared snapshot; `fundamentals`, `valuation`,
+`income`, `balance`, `profile`, `events`, `payouts`, `insiders`, `news`, `research` cost one to two
+calls each. This is the read surface a future autopilot is expected to sit on, which is why each
+dimension states its units, carries sector medians next to the values they contextualise, and reports
+the two data hazards (adjusted prices, unconsolidated-only statements) inline rather than leaving
+them to be rediscovered.
+
+Deliberately out of scope: anything on the order path. This portal is read-only research, and
+`web.ahletrade.com` remains the only execution surface.
+
+## Pages not yet captured
+
+The portal nav exposes more than the dashboard and company pages this capture covered. Each is a
+page whose XHRs would need the same treatment; listed so the next pass doesn't have to rediscover
+them:
+
+`/screener` (Advanced Screener — likely the highest value of these, a server-side filter over the
+whole market), `/sectors/overview`, `/indices`, `/map` (Market Map / heatmap),
+`/pivot-points`, `/historical-data`, `/advance-charting`, `/announcement-calendar?type={FR|BRM|EOGM|PYT}`
+(the calendar behind the per-type announcement feeds), `/client-research/v2` (PDF research library).
+
+`/portfolio-investments` (FIPI/LIPI) and Settlement Analysis are also in the nav but their APIs
+return no data for this account, so their pages will be empty regardless.
+
+## Verification still owed
+
+This capture ran with the market closed. Before anything depends on the live parts:
+
+1. **Confirm the websocket actually delivers ticks during market hours** — it was silent here, and
+   a firehose that turns out to be idle would quietly starve whatever consumes it.
+2. **Confirm `bidp/bidv/askp/askv` populate intraday** in `/req` — all zero in this capture, which
+   is consistent with "closed" but not proof.
+3. Re-check the 60/min rate limit under a realistic screening load before pointing
+   `ScanWatchlistTool` at it.

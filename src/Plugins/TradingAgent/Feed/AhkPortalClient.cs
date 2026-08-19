@@ -654,6 +654,64 @@ public sealed class AhkPortalClient : IBrokerMarketState, IDisposable
         return Deserialize<List<AhkTradeLogEntry>>(body, "GetTradeLog");
     }
 
+    /// <summary>
+    /// Hop ① of the AHL Analytics SSO handshake: asks the trading portal for a pre-signed URL into
+    /// the research portal (<c>data.arifhabibltd.com</c>) and returns it.
+    ///
+    /// <para>
+    /// The portal's own "AHL Analytics" button does exactly this — <c>OpenAnalytics()</c> GETs this
+    /// endpoint and <c>window.open</c>s the answer. The body is a JSON <b>string</b> (quoted), not an
+    /// object, and it carries a Laravel-encrypted blob identifying the trader. Two properties matter
+    /// to callers: the URL is returned with an <c>http://</c> scheme that redirects to https, and the
+    /// blob is REPLAYABLE — refetching the same URL yields the same downstream token — so it may be
+    /// cached rather than re-minted per request.
+    /// </para>
+    ///
+    /// <para>
+    /// Lives here rather than in the analytics client because it is a <c>/Home/*</c> endpoint on the
+    /// broker's session, and this class is the one thing that owns that session.
+    /// </para>
+    /// </summary>
+    /// <returns>The absolute analytics URL, or null when the session is unavailable or the portal
+    /// answered with something other than a URL.</returns>
+    public async Task<string?> GetAnalyticsUrlAsync(CancellationToken ct = default)
+    {
+        var body = await GetAsync("Home/GetAnalyticsURL", ct);
+        if (string.IsNullOrWhiteSpace(body)) return null;
+
+        // The response is a bare JSON string. Deserialize rather than trimming quotes by hand so an
+        // escaped character in the token does not survive into the URL.
+        string? url;
+        try
+        {
+            url = JsonSerializer.Deserialize<string>(body, Json);
+        }
+        catch (JsonException)
+        {
+            // A dead session serves the login page with HTTP 200 here, same as everywhere else.
+            if (body.Contains("<html", StringComparison.OrdinalIgnoreCase))
+                InvalidateSession("GetAnalyticsURL answered with the login page instead of a URL.");
+            else
+                _logger.LogWarning("[AhkPortal] GetAnalyticsURL returned unparseable body: {Snippet}",
+                    body.Length > 160 ? body[..160] : body);
+            return null;
+        }
+
+        if (string.IsNullOrWhiteSpace(url) ||
+            !Uri.TryCreate(url, UriKind.Absolute, out var parsed))
+        {
+            _logger.LogWarning("[AhkPortal] GetAnalyticsURL returned no usable URL.");
+            return null;
+        }
+
+        // Force https. The portal hands out http:// and relies on a 307, which would put the
+        // trader-identifying blob on the wire in cleartext for one hop.
+        if (parsed.Scheme == Uri.UriSchemeHttp)
+            parsed = new UriBuilder(parsed) { Scheme = Uri.UriSchemeHttps, Port = -1 }.Uri;
+
+        return parsed.ToString();
+    }
+
     // ── Transport ─────────────────────────────────────────────────────────────
 
     private Task<string?> GetAsync(string path, CancellationToken ct) =>

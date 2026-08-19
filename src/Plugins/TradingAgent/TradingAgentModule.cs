@@ -12,6 +12,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System.Globalization;
 using System.Text.Json;
+using TradingAgent.AhlAnalytics;
 using TradingAgent.Analysis;
 using TradingAgent.Broker;
 using TradingAgent.Models;
@@ -173,6 +174,18 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         // Portfolio reads prefer the portal's JSON API and fall back to the browser scrape. Declared
         // here rather than inside AhkBroker because AhkPortalClient depends on the broker for session
         // cookies, so a broker calling the portal client back would be a cycle. See PortfolioReader.
+        // ── AHL Analytics research portal ─────────────────────────────────────
+        // A SEPARATE product from the trading terminal, reached by an SSO handshake through the
+        // broker session (AhkPortalClient.GetAnalyticsUrlAsync). Read-only research: whole-market
+        // snapshots, five years of candles, fundamentals with sector medians, event calendars. It
+        // carries NO order path and no L2 depth, so it never enters the execution path — depth and
+        // fills stay with the broker feed. Off by default; see docs/ahl-analytics-api.md.
+        services.Configure<AhlAnalyticsConfig>(
+            config.GetSection($"Plugins:{AhlAnalyticsConfig.SectionName}"));
+        services.AddRuntimePluginOptions<AhlAnalyticsConfig>(
+            TradingPluginConfigDefinitionProvider.BrokerPluginName);
+        services.AddSingleton<AhlAnalyticsClient>();
+
         services.AddSingleton<PortfolioReader>();
         // Same instance behind the narrow interface the order gate consumes.
         services.AddSingleton<IBrokerMarketState>(sp => sp.GetRequiredService<AhkPortalClient>());
@@ -797,6 +810,64 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         // dead session and a quiet market all look like "no quotes" — so this is the surface that
         // tells them apart without reading Debug logs.
         trading.MapGet("/feed/status", (AhkFeedWorker feed) => Results.Ok(feed.GetStatus()));
+
+        // ── Market movers (AHL analytics) ──────────────────────────────────────
+        // One snapshot fetch backs every screen, so the dashboard can poll a few of these without
+        // multiplying upstream traffic — AhlAnalyticsClient caches the snapshot for its configured TTL.
+        trading.MapGet("/movers", async (
+            AhlAnalyticsClient analytics,
+            string? screen,
+            string? index,
+            string? sectorCode,
+            int? limit,
+            decimal? minTurnover,
+            decimal? minPrice,
+            CancellationToken ct) =>
+        {
+            if (!analytics.Enabled)
+                return Results.Ok(new { enabled = false, rows = Array.Empty<object>() });
+
+            var parsed = AhlMovers.ParseScreen(screen ?? "gainers");
+            if (parsed is null)
+                return Results.BadRequest(new { error = $"Unknown screen '{screen}'.", valid = AhlMovers.ScreenNames });
+
+            var snapshot = await analytics.GetMarketSnapshotAsync(ct: ct);
+            if (snapshot is null)
+                return Results.Ok(new { enabled = true, available = false, rows = Array.Empty<object>() });
+
+            var filter = new AhlMovers.Filter(index, sectorCode, minTurnover, null, minPrice);
+            return Results.Ok(new
+            {
+                enabled = true,
+                available = true,
+                screen = parsed.Value.ToString(),
+                marketState = snapshot.MarketState,
+                asOf = snapshot.LastUpdate,
+                breadth = AhlMovers.MarketBreadth(snapshot),
+                rows = AhlMovers.Run(snapshot, parsed.Value, limit ?? 15, filter)
+            });
+        });
+
+        // Sector rotation for the same session, from the same cached snapshot.
+        trading.MapGet("/movers/sectors", async (
+            AhlAnalyticsClient analytics, string? index, CancellationToken ct) =>
+        {
+            if (!analytics.Enabled)
+                return Results.Ok(new { enabled = false, sectors = Array.Empty<object>() });
+
+            var snapshot = await analytics.GetMarketSnapshotAsync(ct: ct);
+            if (snapshot is null)
+                return Results.Ok(new { enabled = true, available = false, sectors = Array.Empty<object>() });
+
+            return Results.Ok(new
+            {
+                enabled = true,
+                available = true,
+                marketState = snapshot.MarketState,
+                asOf = snapshot.LastUpdate,
+                sectors = AhlMovers.SectorRotation(snapshot, new AhlMovers.Filter(index))
+            });
+        });
 
         // What the agent is doing right now, and what it just did.
         //
@@ -1774,6 +1845,16 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                 _services!.GetRequiredService<AhkPortalClient>(),
                 _services!.GetRequiredService<IRuntimePluginOptions<AhkConfig>>(),
                 loggers.CreateLogger<CancelOrderTool>()),
+            // Analytics-portal reads. Registered unconditionally so the agent can explain that the
+            // portal is switched off rather than silently lacking the capability — both tools check
+            // AhlAnalyticsClient.Enabled and say so.
+            new MarketMoversTool(
+                _services!.GetRequiredService<AhlAnalyticsClient>(),
+                loggers.CreateLogger<MarketMoversTool>()),
+            new StockDossierTool(
+                _services!.GetRequiredService<AhlAnalyticsClient>(),
+                _services!.GetRequiredService<IRuntimePluginOptions<AhlAnalyticsConfig>>(),
+                loggers.CreateLogger<StockDossierTool>()),
         };
 
         if (agentOptions.Value.ResearchWebEnabled && webSearchProvider is not null)

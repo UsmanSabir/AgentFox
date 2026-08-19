@@ -602,6 +602,113 @@ export interface WatchlistResponse {
   maxSymbols: number;
 }
 
+
+// ── Market movers (AHL analytics portal) ──────────────────────────────────
+// Every field here is computed server-side by AhlMovers from one shared market snapshot, so the
+// panel renders numbers rather than deriving them — the agent tool and this UI therefore always
+// agree. `enabled` false means the portal is switched off in config; `available` false means it is
+// on but the SSO handshake could not reach it (usually no broker session).
+
+export const MOVER_SCREENS = [
+  'gainers', 'losers', 'most_active', 'most_valuable', 'unusual_volume',
+  'gap_up', 'gap_down', 'near_upper_cap', 'near_lower_lock'
+] as const;
+export type MoverScreen = typeof MOVER_SCREENS[number];
+
+/** Human labels, kept next to the values so the picker and the heading cannot drift apart. */
+export const MOVER_SCREEN_LABELS: Record<MoverScreen, string> = {
+  gainers:         'Gainers',
+  losers:          'Losers',
+  most_active:     'Most Active',
+  most_valuable:   'By Value',
+  unusual_volume:  'Unusual Volume',
+  gap_up:          'Gap Up',
+  gap_down:        'Gap Down',
+  near_upper_cap:  'At Upper Cap',
+  near_lower_lock: 'At Lower Lock'
+};
+
+export interface MoverRow {
+  symbol: string;
+  name?: string | null;
+  sectorCode?: string | null;
+  sector?: string | null;
+  price?: number | null;
+  change?: number | null;
+  changePercent?: number | null;
+  volume?: number | null;
+  turnoverPkr?: number | null;
+  /** Today's volume as a multiple of its own 10-day average. > 2 is genuinely unusual. */
+  volumeVsAvg10Day?: number | null;
+  gapPercent?: number | null;
+  rsi?: number | null;
+  distanceToUpperCapPercent?: number | null;
+  distanceToLowerLockPercent?: number | null;
+  /** No headroom left in the day's band — an order beyond the cap is refused outright. */
+  atUpperCap: boolean;
+  atLowerLock: boolean;
+  freeFloat?: number | null;
+  dividendYieldPercent?: number | null;
+  indices?: string[] | null;
+  /** A price drop on an ex-dividend day is mechanical, not a move. Shown so it is not misread. */
+  exDividend: boolean;
+  exBonus: boolean;
+  exRights: boolean;
+  lastTickAt?: string | null;
+}
+
+export interface MarketBreadth {
+  marketState?: string | null;
+  lastUpdate?: string | null;
+  /** Symbols that traded in the latest session, of totalListed. The rest are excluded from ranking. */
+  tradedToday: number;
+  totalListed: number;
+  advancing: number;
+  declining: number;
+  unchanged: number;
+  atUpperCap: number;
+  atLowerLock: number;
+  totalTurnoverPkr: number;
+  advancingTurnoverPkr: number;
+}
+
+export interface MoversResponse {
+  enabled: boolean;
+  available?: boolean;
+  screen?: string;
+  marketState?: string | null;
+  asOf?: string | null;
+  breadth?: MarketBreadth | null;
+  rows: MoverRow[];
+}
+
+export interface SectorMove {
+  sectorCode: string;
+  sectorName?: string | null;
+  symbols: number;
+  medianChangePercent: number;
+  totalTurnoverPkr: number;
+  advancing: number;
+  declining: number;
+}
+
+export interface SectorsResponse {
+  enabled: boolean;
+  available?: boolean;
+  marketState?: string | null;
+  asOf?: string | null;
+  sectors: SectorMove[];
+}
+
+export interface MoversQuery {
+  screen?: MoverScreen;
+  index?: string;
+  sectorCode?: string;
+  limit?: number;
+  minTurnover?: number;
+  minPrice?: number;
+}
+
 // ── Endpoints ─────────────────────────────────────────────────────────────
 
 export const trading = {
@@ -850,5 +957,20 @@ export const trading = {
     reorder: (symbols: string[]) =>
       post<{ reordered: boolean; symbols: number }>('/trading/watchlist/reorder', { symbols }),
     reset:  ()               => post<{ symbols: number }>('/trading/watchlist/reset')
+  },
+
+  movers: {
+    list: (q: MoversQuery = {}) => {
+      const p = new URLSearchParams();
+      if (q.screen)      p.set('screen', q.screen);
+      if (q.index)       p.set('index', q.index);
+      if (q.sectorCode)  p.set('sectorCode', q.sectorCode);
+      if (q.limit)       p.set('limit', String(q.limit));
+      if (q.minTurnover) p.set('minTurnover', String(q.minTurnover));
+      if (q.minPrice)    p.set('minPrice', String(q.minPrice));
+      return get<MoversResponse>(`/trading/movers?${p}`);
+    },
+    sectors: (index?: string) =>
+      get<SectorsResponse>(`/trading/movers/sectors${index ? `?index=${encodeURIComponent(index)}` : ''}`)
   }
 };
