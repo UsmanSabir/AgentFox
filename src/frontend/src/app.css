@@ -2,6 +2,7 @@
 
 /* ── Design tokens ─────────────────────────────────────────────────────── */
 :root {
+  color-scheme: dark;
   --bg:          #0c0d10;
   --surface:     #141519;
   --surface-2:   #1c1d23;
@@ -13,6 +14,8 @@
   --primary:     #818cf8;   /* indigo-400  */
   --primary-dim: rgba(129, 140, 248, 0.12);
   --primary-glow:rgba(129, 140, 248, 0.25);
+  --primary-hover:#9199f9;
+  --on-primary:  #0c0d10;
   --accent:      #a78bfa;   /* violet-400  */
 
   --success:     #34d399;
@@ -24,12 +27,45 @@
   --text-2:      #9ea3b5;
   --text-3:      #5f6377;
 
+  --scrollbar:       rgba(255,255,255,0.12);
+  --scrollbar-hover: rgba(255,255,255,0.22);
+
   --radius:      10px;
   --radius-sm:   6px;
   --radius-lg:   16px;
 
   --sidebar-w:   240px;
   --header-h:    52px;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+  --bg:          #f5f6f8;
+  --surface:     #ffffff;
+  --surface-2:   #eef0f4;
+  --surface-3:   #e2e5eb;
+  --border:      rgba(15, 23, 42, 0.08);
+  --border-md:   rgba(15, 23, 42, 0.13);
+  --border-high: rgba(15, 23, 42, 0.20);
+
+  --primary:     #4f46e5;
+  --primary-dim: rgba(79, 70, 229, 0.10);
+  --primary-glow:rgba(79, 70, 229, 0.20);
+  --primary-hover:#4338ca;
+  --on-primary:  #ffffff;
+  --accent:      #7c3aed;
+
+  --success:     #047857;
+  --warning:     #a16207;
+  --danger:      #dc2626;
+  --info:        #2563eb;
+
+  --text:        #18202f;
+  --text-2:      #4b5565;
+  --text-3:      #7a8496;
+
+  --scrollbar:       rgba(15,23,42,0.18);
+  --scrollbar-hover: rgba(15,23,42,0.30);
 }
 
 /* ── Tailwind theme extensions ─────────────────────────────────────────── */
@@ -66,8 +102,8 @@ html, body {
 /* ── Scrollbar ─────────────────────────────────────────────────────────── */
 ::-webkit-scrollbar        { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track  { background: transparent; }
-::-webkit-scrollbar-thumb  { background: rgba(255,255,255,0.12); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.22); }
+::-webkit-scrollbar-thumb  { background: var(--scrollbar); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-hover); }
 
 /* ── Shared component classes ─────────────────────────────────────────── */
 .card {
@@ -101,9 +137,9 @@ html, body {
 
 .btn-primary {
   background: var(--primary);
-  color: #0c0d10;
+  color: var(--on-primary);
 }
-.btn-primary:hover { background: #9199f9; }
+.btn-primary:hover { background: var(--primary-hover); }
 
 .btn-ghost {
   background: transparent;

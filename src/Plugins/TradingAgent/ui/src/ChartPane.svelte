@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, tick, createEventDispatcher } from 'svelte';
+  import { onMount, onDestroy, tick, createEventDispatcher } from 'svelte';
   import {
     createChart,
     CandlestickSeries,
@@ -476,6 +476,14 @@
   // The container only exists once a symbol is selected, so rendering waits for the element rather
   // than the fetch.
   $: if (container && data && !chart) render(data);
+
+  onMount(() => {
+    // Most of the plugin follows CSS variables automatically. The canvas resolves those variables to
+    // concrete colors when it is built, so rebuild it when the host changes theme.
+    const handleThemeChange = () => rebuild();
+    window.addEventListener('agentfox:themechange', handleThemeChange);
+    return () => window.removeEventListener('agentfox:themechange', handleThemeChange);
+  });
 
   onDestroy(() => {
     resizeObserver?.disconnect();

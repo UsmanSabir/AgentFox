@@ -9,6 +9,7 @@
 
 /* ── Design tokens (dark, the host's default) ───────────────────────────── */
 :root {
+  color-scheme: dark;
   --bg:          #0c0d10;
   --surface:     #141519;
   --surface-2:   #1c1d23;
@@ -19,6 +20,8 @@
 
   --primary:     #818cf8;
   --primary-dim: rgba(129, 140, 248, 0.12);
+  --primary-hover:#9199f9;
+  --on-primary:  #0c0d10;
   --accent:      #a78bfa;
 
   --success:     #34d399;
@@ -37,6 +40,7 @@
 
 /* Light theme, applied when the host tells us it is in light mode. */
 :root[data-theme='light'] {
+  color-scheme: light;
   --bg:          #f7f8fa;
   --surface:     #ffffff;
   --surface-2:   #f1f2f6;
@@ -47,10 +51,14 @@
 
   --primary:     #4f46e5;
   --primary-dim: rgba(79, 70, 229, 0.10);
+  --primary-hover:#4338ca;
+  --on-primary:  #ffffff;
+  --accent:      #7c3aed;
 
   --success:     #059669;
   --warning:     #b45309;
   --danger:      #dc2626;
+  --info:        #2563eb;
 
   --text:        #1f2430;
   --text-2:      #4b5162;
@@ -87,7 +95,7 @@ html, body {
   white-space: nowrap;
 }
 
-.btn-primary { background: var(--primary); color: #0c0d10; }
+.btn-primary { background: var(--primary); color: var(--on-primary); }
 .btn-primary:hover { filter: brightness(1.08); }
 
 .btn-ghost {

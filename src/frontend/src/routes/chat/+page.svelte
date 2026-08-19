@@ -2181,14 +2181,14 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
     background: var(--primary);
     border: none;
     cursor: pointer;
-    color: #0c0d10;
+    color: var(--on-primary);
     display: flex;
     align-items: center;
     justify-content: center;
     transition: background 0.15s, opacity 0.15s;
     flex-shrink: 0;
   }
-  .send-btn:hover:not(:disabled) { background: #9199f9; }
+  .send-btn:hover:not(:disabled) { background: var(--primary-hover); }
   .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
   .stop-btn {
