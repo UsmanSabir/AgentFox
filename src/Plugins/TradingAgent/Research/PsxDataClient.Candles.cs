@@ -484,6 +484,7 @@ public sealed partial class PsxDataClient
             result[symbol] = new PsxLiveQuote
             {
                 Symbol         = symbol,
+                CompanyName    = row.GetValueOrDefault("companyName"),
                 Sector         = row.GetValueOrDefault("sector"),
                 PreviousClose  = Number(row, "ldcp"),
                 Open           = Number(row, "open"),
@@ -510,6 +511,8 @@ public sealed partial class PsxDataClient
         new(@"data-name=""(?<name>[^""]+)""", RegexOptions.Compiled);
     private static readonly Regex CellValueRegex =
         new(@"data-(?:value|order)=""(?<value>[^""]*)""", RegexOptions.Compiled);
+    private static readonly Regex CompanyTitleRegex =
+        new(@"data-title=""(?<value>[^""]+)""", RegexOptions.Compiled | RegexOptions.IgnoreCase);
     private static readonly Regex TagRegex =
         new(@"<[^>]+>", RegexOptions.Compiled);
 
@@ -558,6 +561,14 @@ public sealed partial class PsxDataClient
                     : CellText(cell.Groups["body"].Value);
 
                 row[name] = value.Trim();
+
+                // The symbol cell's machine value is the ticker, while the nested link carries the
+                // human issuer name. Preserve both instead of making the UI maintain a stale symbol map.
+                if (name.Equals("symbol", StringComparison.OrdinalIgnoreCase)
+                    && CompanyTitleRegex.Match(cell.Groups["body"].Value) is { Success: true } title)
+                {
+                    row["companyName"] = WebUtility.HtmlDecode(title.Groups["value"].Value).Trim();
+                }
             }
 
             if (row.Count > 0) rows.Add(row);

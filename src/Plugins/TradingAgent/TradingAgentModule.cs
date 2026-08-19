@@ -1308,6 +1308,7 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         trading.MapGet("/watchlist", async (
             MonitoredUniverse universe,
             ITradingRepository repository,
+            PsxDataClient dataClient,
             IOptions<TradingAgentOptions> options,
             CancellationToken ct) =>
         {
@@ -1317,6 +1318,14 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             var symbols = snapshot.Entries.Select(e => e.Symbol).ToList();
             var barCounts = await repository.GetDailyBarCountsAsync(symbols, ct);
             var openAlerts = await repository.GetOpenAlertCountsAsync(ct);
+            IReadOnlyDictionary<string, PsxLiveQuote> marketWatch;
+            try { marketWatch = await dataClient.GetMarketWatchAsync(ct); }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // Company names are presentation metadata. A portal outage must not take down the
+                // user's watchlist, chart access, or trading controls.
+                marketWatch = new Dictionary<string, PsxLiveQuote>(StringComparer.OrdinalIgnoreCase);
+            }
 
             // Reported per symbol because a freshly added symbol has no deep history until a backfill
             // reaches it, and without it there is no weekly confirmation to quote. The threshold is
@@ -1328,8 +1337,11 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                 entries = snapshot.Entries.Select(e => new
                 {
                     symbol = e.Symbol,
+                    companyName = marketWatch.GetValueOrDefault(e.Symbol)?.CompanyName,
                     addedUtc = e.AddedUtc,
                     source = e.Source,
+                    sortOrder = e.SortOrder,
+                    pinned = e.Pinned,
                     alertsEnabled = e.AlertsEnabled,
                     notes = e.Notes,
                     tradable = tradable.Contains(e.Symbol),
@@ -1455,11 +1467,30 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         {
             var normalized = symbol.Trim().ToUpperInvariant();
             var updated = await repository.UpdateWatchlistSymbolAsync(
-                normalized, body.AlertsEnabled, body.Notes, ct);
+                normalized, body.AlertsEnabled, body.Notes, body.Pinned, ct);
             universe.Invalidate();
             return updated
                 ? Results.Ok(new { symbol = normalized, updated })
                 : Results.NotFound(new { symbol = normalized, updated });
+        }).RequireAuthorization("TradingAnalyst");
+
+        trading.MapPost("/watchlist/reorder", async (
+            WatchlistReorderRequest body,
+            MonitoredUniverse universe,
+            ITradingRepository repository,
+            CancellationToken ct) =>
+        {
+            var reordered = body.Symbols is { Count: > 0 }
+                && await repository.ReorderWatchlistAsync(body.Symbols, ct);
+            if (!reordered)
+                return Results.BadRequest(new
+                {
+                    error = "invalid_watchlist_order",
+                    message = "The submitted order must contain every watched symbol exactly once. Refresh and try again."
+                });
+
+            universe.Invalidate();
+            return Results.Ok(new { reordered = true, symbols = body.Symbols!.Count });
         }).RequireAuthorization("TradingAnalyst");
 
         trading.MapPost("/watchlist/reset", async (
@@ -2124,7 +2155,12 @@ public sealed record AttachStopRequest(
 public sealed record ArmApprovalRequest(int? Minutes = null);
 
 /// <summary>Per-symbol watchlist fields the user controls. Null means "leave unchanged".</summary>
-public sealed record WatchlistUpdateRequest(bool? AlertsEnabled = null, string? Notes = null);
+public sealed record WatchlistUpdateRequest(
+    bool? AlertsEnabled = null,
+    string? Notes = null,
+    bool? Pinned = null);
+
+public sealed record WatchlistReorderRequest(IReadOnlyList<string>? Symbols);
 
 /// <summary>Optional depth override for a manually triggered backfill; null uses the configured years.</summary>
 /// <summary>

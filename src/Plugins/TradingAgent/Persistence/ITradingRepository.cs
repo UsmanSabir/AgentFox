@@ -246,6 +246,12 @@ public interface ITradingRepository
         string symbol,
         bool? alertsEnabled,
         string? notes,
+        bool? pinned = null,
+        CancellationToken ct = default);
+
+    /// <summary>Persists the complete display order after a drag operation.</summary>
+    Task<bool> ReorderWatchlistAsync(
+        IReadOnlyList<string> symbols,
         CancellationToken ct = default);
 
     /// <summary>
@@ -408,6 +414,7 @@ public sealed record WatchlistEntry(
     DateTime AddedUtc,
     string Source,
     int SortOrder,
+    bool Pinned,
     bool AlertsEnabled,
     string? Notes);
 

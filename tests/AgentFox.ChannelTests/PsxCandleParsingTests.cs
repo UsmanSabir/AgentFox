@@ -202,6 +202,7 @@ public sealed class PsxCandleParsingTests
         var quotes = PsxDataClient.ParseMarketWatchTable(MarketWatchFragment, new DateTime(2026, 8, 11, 9, 0, 0, DateTimeKind.Utc));
 
         Assert.IsTrue(quotes.TryGetValue("OGDC", out var ogdc));
+        Assert.AreEqual("Oil & Gas Development Company Limited", ogdc!.CompanyName);
         Assert.AreEqual("0820", ogdc!.Sector);
         Assert.AreEqual(323.78m, ogdc.PreviousClose);
         Assert.AreEqual(322.99m, ogdc.Open);

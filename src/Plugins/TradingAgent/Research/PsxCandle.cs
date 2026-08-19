@@ -57,6 +57,8 @@ public sealed record PsxTick(DateTime TimeUtc, decimal Price, long Quantity);
 public sealed record PsxLiveQuote
 {
     public string Symbol { get; init; } = "";
+    /// <summary>Issuer name published on the PSX market-watch symbol link.</summary>
+    public string? CompanyName { get; init; }
     public string? Sector { get; init; }
     public decimal? PreviousClose { get; init; }
     public decimal? Open { get; init; }

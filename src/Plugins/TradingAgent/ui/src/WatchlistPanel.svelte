@@ -1,10 +1,17 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { trading, type WatchlistEntry, type WatchlistResponse, type CandleArchiveStatus } from './api';
-  import { Plus, RotateCcw, Trash2, Bell, BellOff, Eye, AlertTriangle, Clock, Search, Download } from 'lucide-svelte';
+  import {
+    Plus, RotateCcw, Trash2, Bell, BellOff, Eye, AlertTriangle, Clock, Search,
+    Download, Pin, PinOff, GripVertical, PanelLeftClose, PanelLeftOpen
+  } from 'lucide-svelte';
 
   /** Selected symbol, so the chart pane (Phase 2) can follow the list. */
   export let selected: string | null = null;
+  /** Human issuer name for the selected ticker; bound to the chart heading by the dashboard. */
+  export let selectedCompany: string | null = null;
+  /** Collapses the panel horizontally so the chart receives most of the workspace width. */
+  export let compact = false;
 
   let data: WatchlistResponse | null = null;
   /**
@@ -22,6 +29,74 @@
   let search = '';
   /** When active, show only symbols that currently have one or more unacknowledged alerts. */
   let alertsOnly = false;
+  let draggedSymbol: string | null = null;
+  let dragOverSymbol: string | null = null;
+
+  function toggleCompact() {
+    compact = !compact;
+    localStorage.setItem('trading-watchlist-density', compact ? 'compact' : 'comfortable');
+  }
+
+  async function togglePin(entry: WatchlistEntry) {
+    if (busy) return;
+    busy = true;
+    try {
+      await trading.watchlist.update(entry.symbol, { pinned: !entry.pinned });
+      await load();
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  function startDrag(event: DragEvent, entry: WatchlistEntry) {
+    if (search.trim() || alertsOnly) {
+      event.preventDefault();
+      return;
+    }
+    draggedSymbol = entry.symbol;
+    event.dataTransfer?.setData('text/plain', entry.symbol);
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+  }
+
+  function dragOver(event: DragEvent, entry: WatchlistEntry) {
+    if (!draggedSymbol || draggedSymbol === entry.symbol) return;
+    const source = data?.entries.find(item => item.symbol === draggedSymbol);
+    // Pinned and regular symbols are intentionally separate lanes. Crossing the boundary would make
+    // a drop appear to work and then jump back to the pin-defined order after the next refresh.
+    if (!source || source.pinned !== entry.pinned) return;
+    event.preventDefault();
+    dragOverSymbol = entry.symbol;
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+  }
+
+  async function dropOn(event: DragEvent, target: WatchlistEntry) {
+    event.preventDefault();
+    const sourceSymbol = draggedSymbol;
+    draggedSymbol = null;
+    dragOverSymbol = null;
+    if (!data || !sourceSymbol || sourceSymbol === target.symbol) return;
+
+    const source = data.entries.find(item => item.symbol === sourceSymbol);
+    if (!source || source.pinned !== target.pinned) return;
+
+    const before = data.entries;
+    const reordered = [...before];
+    const from = reordered.findIndex(item => item.symbol === sourceSymbol);
+    const to = reordered.findIndex(item => item.symbol === target.symbol);
+    if (from < 0 || to < 0) return;
+    const [moved] = reordered.splice(from, 1);
+    reordered.splice(to, 0, moved);
+    data = { ...data, entries: reordered };
+
+    try {
+      await trading.watchlist.reorder(reordered.map(item => item.symbol));
+    } catch (e) {
+      data = { ...data, entries: before };
+      error = e instanceof Error ? e.message : String(e);
+    }
+  }
 
   async function load() {
     loading = true;
@@ -178,18 +253,22 @@
     await loadArchive();
   }
 
-  onMount(load);
+  onMount(() => {
+    compact = localStorage.getItem('trading-watchlist-density') === 'compact';
+    load();
+  });
 
   $: gapBySymbol = new Map(
     (archive?.symbolsShortOfWeekly ?? []).map(gap => [gap.symbol, gap]));
   $: openAlertCount = (data?.entries ?? []).reduce((total, entry) => total + entry.openAlerts, 0);
+  $: selectedCompany = data?.entries.find(entry => entry.symbol === selected)?.companyName ?? null;
   $: filteredEntries = (data?.entries ?? []).filter(entry =>
     (!alertsOnly || entry.openAlerts > 0) &&
-    entry.symbol.toLowerCase().includes(search.trim().toLowerCase())
+    `${entry.symbol} ${entry.companyName ?? ''}`.toLowerCase().includes(search.trim().toLowerCase())
   );
 </script>
 
-<section class="watchlist">
+<section class="watchlist" class:compact>
   <header>
     <div class="head-copy">
       <b>
@@ -204,9 +283,19 @@
         {:else}Symbols monitored for trend, support, and resistance{/if}
       </span>
     </div>
-    <button class="btn btn-ghost" on:click={reset} disabled={busy || loading} title="Reset to the configured allowed-symbols list">
-      <RotateCcw size={13} /> Reset
-    </button>
+    <div class="header-actions">
+      <button
+        class="icon density"
+        class:active={compact}
+        on:click={toggleCompact}
+        aria-pressed={compact}
+        aria-label={compact ? 'Expand watchlist' : 'Collapse watchlist to a narrow rail'}
+        title={compact ? 'Expand watchlist' : 'Collapse watchlist to give the chart more space'}
+      >{#if compact}<PanelLeftOpen size={14} />{:else}<PanelLeftClose size={14} />{/if}</button>
+      <button class="btn btn-ghost" on:click={reset} disabled={busy || loading} title="Reset to the configured allowed-symbols list">
+        <RotateCcw size={13} /> Reset
+      </button>
+    </div>
   </header>
 
   <form class="add-row" on:submit|preventDefault={add}>
@@ -276,9 +365,30 @@
     {:else}
     <ul class="rows">
       {#each filteredEntries as entry (entry.symbol)}
-        <li class:selected={selected === entry.symbol} class:muted={!entry.alertsEnabled}>
-          <button class="pick" on:click={() => selected = entry.symbol}>
-            <span class="symbol">{entry.symbol}</span>
+        <li
+          class:selected={selected === entry.symbol}
+          class:muted={!entry.alertsEnabled}
+          class:pinned={entry.pinned}
+          class:drag-over={dragOverSymbol === entry.symbol}
+          class:dragging={draggedSymbol === entry.symbol}
+          draggable={!search.trim() && !alertsOnly}
+          on:dragstart={(event) => startDrag(event, entry)}
+          on:dragover={(event) => dragOver(event, entry)}
+          on:drop={(event) => dropOn(event, entry)}
+          on:dragend={() => { draggedSymbol = null; dragOverSymbol = null; }}
+        >
+          <span class="drag-handle" title={search.trim() || alertsOnly ? 'Clear filters to reorder' : 'Drag to reorder'}>
+            <GripVertical size={13} />
+          </span>
+          <button
+            class="pick"
+            title={entry.companyName ? `${entry.symbol} — ${entry.companyName}` : entry.symbol}
+            on:click={() => selected = entry.symbol}
+          >
+            <span class="identity">
+              <span class="symbol">{entry.symbol}</span>
+              {#if entry.companyName}<span class="company">{entry.companyName}</span>{/if}
+            </span>
             <span class="tags">
               {#if entry.openAlerts > 0}
                 <span class="tag alert" title="{entry.openAlerts} unacknowledged alert(s)">
@@ -301,6 +411,16 @@
             </span>
           </button>
           <div class="row-actions">
+            <button
+              class="icon pin"
+              class:active={entry.pinned}
+              title={entry.pinned ? 'Unpin from the top' : 'Pin to the top'}
+              aria-label={entry.pinned ? `Unpin ${entry.symbol}` : `Pin ${entry.symbol}`}
+              on:click={() => togglePin(entry)}
+              disabled={busy}
+            >
+              {#if entry.pinned}<PinOff size={13} />{:else}<Pin size={13} />{/if}
+            </button>
             {#if !entry.hasWeeklyHistory}
               <button
                 class="icon"
@@ -343,6 +463,7 @@
     gap: .7rem;
   }
   header { display:flex; justify-content:space-between; align-items:flex-start; gap:1rem; }
+  .header-actions { display:flex; align-items:center; gap:.35rem; }
   .head-copy { display:flex; flex-direction:column; gap:.2rem; }
   .head-copy b { color:var(--text); font-size:.9rem; }
   .head-copy span { color:var(--text-3); font-size:.72rem; }
@@ -350,6 +471,7 @@
     color:var(--danger); font-size:.72rem; font-weight:700; margin-left:.15rem;
   }
   header .btn { display:flex; align-items:center; gap:.35rem; white-space:nowrap; }
+  .density.active { color:var(--primary); background:var(--primary-dim); }
 
   .add-row { display:flex; gap:.5rem; }
   .symbol-input {
@@ -399,17 +521,26 @@
   .rows li {
     display:flex; align-items:center; gap:.4rem;
     border-radius:var(--radius-sm); padding:.1rem .25rem .1rem .1rem;
+    border:1px solid transparent;
   }
   .rows li:hover { background:var(--surface-2); }
   .rows li.selected { background:var(--primary-dim); }
+  .rows li.pinned { border-color:color-mix(in srgb, var(--primary) 20%, transparent); }
+  .rows li.drag-over { border-color:var(--primary); background:var(--primary-dim); }
+  .rows li.dragging { opacity:.45; }
   .rows li.muted .symbol { color:var(--text-3); }
+
+  .drag-handle { color:var(--text-3); display:flex; cursor:grab; opacity:.55; }
+  .drag-handle:active { cursor:grabbing; }
 
   .pick {
     flex:1; display:flex; align-items:center; gap:.5rem; flex-wrap:wrap;
     background:none; border:0; cursor:pointer; padding:.4rem .5rem; text-align:left;
     font:inherit; color:var(--text);
   }
+  .identity { display:flex; min-width:0; flex-direction:column; gap:.08rem; }
   .symbol { font-weight:600; font-size:.8rem; font-family:ui-monospace, monospace; }
+  .company { color:var(--text-3); font-size:.64rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:180px; }
   .tags { display:flex; gap:.3rem; flex-wrap:wrap; }
   .tag {
     display:inline-flex; align-items:center; gap:.2rem;
@@ -430,7 +561,33 @@
   }
   .icon:hover { background:var(--surface-3); color:var(--text); }
   .icon.danger:hover { color:var(--danger); }
+  .icon.pin.active { color:var(--primary); }
   .icon:disabled { opacity:.5; cursor:wait; }
+
+  /* Compact mode is a narrow rail, not merely shorter rows. Editing/search controls remain one click
+     away in the expanded view while selection, pinning, alerts, and drag sorting stay visible. */
+  .watchlist.compact { gap:.45rem; padding:.6rem .4rem; }
+  .watchlist.compact header { align-items:center; gap:.25rem; }
+  .watchlist.compact .head-copy { min-width:0; flex:1; }
+  .watchlist.compact .head-copy > b { font-size:.72rem; white-space:nowrap; overflow:hidden; }
+  .watchlist.compact .head-copy > span,
+  .watchlist.compact header .btn,
+  .watchlist.compact .add-row,
+  .watchlist.compact .filter-row,
+  .watchlist.compact .note { display:none; }
+  .watchlist.compact .header-actions { flex:0 0 auto; }
+  .watchlist.compact .rows { gap:0; }
+  .watchlist.compact .rows li { gap:.15rem; padding:0 .1rem 0 0; }
+  .watchlist.compact .drag-handle { flex:0 0 auto; }
+  .watchlist.compact .pick { min-width:0; padding:.34rem .1rem; gap:.2rem; }
+  .watchlist.compact .identity { min-width:0; }
+  .watchlist.compact .symbol { font-size:.72rem; }
+  .watchlist.compact .company { display:none; }
+  .watchlist.compact .tags .tag:not(.alert),
+  .watchlist.compact .row-actions .icon:not(.pin) { display:none; }
+  .watchlist.compact .tag.alert { padding:.08rem .2rem; font-size:.58rem; }
+  .watchlist.compact .row-actions { flex:0 0 auto; }
+  .watchlist.compact .row-actions .icon { padding:.2rem; }
 
   /* In the stacked mobile layout the chart no longer establishes this panel's height. */
   @media (max-width: 820px) {
