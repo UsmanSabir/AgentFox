@@ -45,7 +45,7 @@ public sealed class CandleAnalysisService
 
     /// <summary>
     /// Analyzes <paramref name="symbol"/> at <paramref name="intervalMinutes"/>
-    /// (<see cref="PsxCandle.DailyIntervalMinutes"/> or an intraday width).
+    /// (monthly, weekly, daily, or an intraday width).
     /// </summary>
     /// <exception cref="CandleAnalysisException">
     /// No usable candles exist. Thrown rather than returned as an empty result because every caller
@@ -65,10 +65,17 @@ public sealed class CandleAnalysisService
         var lookback = Math.Clamp(lookbackBars ?? scan.LookbackDays, 5, 5000);
         var technicalOptions = TechnicalOptions.From(scan);
 
-        // Weekly structure needs a far deeper window than the daily read, so ask for whichever is
-        // larger. The archive serves it locally; only missing dates reach the portal.
+        // Higher-timeframe requests count bars, not daily sessions. Ask the archive for enough daily
+        // constituents to fill that request, with headroom for holidays; it returns all it has when
+        // the requested history predates the archive.
         var weeklySessions = Math.Clamp(scan.WeeklyLookbackWeeks, 12, 600) * 6;
-        var sessionsWanted = Math.Max(lookback, weeklySessions);
+        var requestedSessions = intervalMinutes switch
+        {
+            >= CandleInterval.Monthly => Math.Clamp(lookback * 23, 5, 5000),
+            >= CandleInterval.Weekly => Math.Clamp(lookback * 6, 5, 5000),
+            _ => lookback
+        };
+        var sessionsWanted = Math.Max(requestedSessions, weeklySessions);
 
         var historyTask = _history.GetDailyAsync([symbol], sessionsWanted, includeLive, ct);
         var quoteTask = _dataClient.GetQuoteSummaryAsync(symbol, ct);
@@ -96,17 +103,30 @@ public sealed class CandleAnalysisService
 
         var sourceUrls = _dataClient.CandleSourceUrls().ToList();
 
+        var weeklyCandles = CandleResampler.ToWeekly(fullDaily);
+
         if (intervalMinutes >= PsxCandle.DailyIntervalMinutes)
         {
+            var requestedCandles = intervalMinutes switch
+            {
+                >= CandleInterval.Monthly => CandleResampler.ToMonthly(fullDaily).TakeLast(lookback).ToList(),
+                >= CandleInterval.Weekly => weeklyCandles.TakeLast(lookback).ToList(),
+                _ => dailyCandles
+            };
+            var snapshot = intervalMinutes == PsxCandle.DailyIntervalMinutes
+                ? daily
+                : TechnicalAnalyzer.Analyze(
+                    symbol, requestedCandles, technicalOptions, quote.High52Week, quote.Low52Week);
+
             return new CandleAnalysis
             {
                 Symbol            = symbol,
-                IntervalMinutes   = PsxCandle.DailyIntervalMinutes,
-                Candles           = dailyCandles,
-                Snapshot          = daily,
+                IntervalMinutes   = intervalMinutes,
+                Candles           = requestedCandles,
+                Snapshot          = snapshot,
                 Daily             = daily,
                 Multi             = multi,
-                WeeklyCandles     = CandleResampler.ToWeekly(fullDaily),
+                WeeklyCandles     = weeklyCandles,
                 SessionsAvailable = fullDaily.Count,
                 Quote             = quote,
                 RetrievedAtUtc    = history.RetrievedAtUtc,
@@ -131,7 +151,7 @@ public sealed class CandleAnalysisService
             Snapshot          = TechnicalAnalyzer.Analyze(symbol, intraday, technicalOptions),
             Daily             = daily,
             Multi             = multi,
-            WeeklyCandles     = CandleResampler.ToWeekly(fullDaily),
+            WeeklyCandles     = weeklyCandles,
             SessionsAvailable = fullDaily.Count,
             Quote             = quote,
             RetrievedAtUtc    = DateTime.UtcNow,
@@ -210,7 +230,7 @@ public sealed record CandleAnalysis
 
     public required int IntervalMinutes { get; init; }
 
-    /// <summary>Human label for <see cref="IntervalMinutes"/>: <c>1D</c>, <c>60m</c>, …</summary>
+    /// <summary>Human label for <see cref="IntervalMinutes"/>: <c>1M</c>, <c>1W</c>, <c>1D</c>, …</summary>
     public string Interval => PsxDataClient.IntervalLabel(IntervalMinutes);
 
     /// <summary>The bars the snapshot was computed from, oldest first.</summary>

@@ -1135,7 +1135,7 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                 {
                     error = "unsupported_interval",
                     message = $"Interval '{interval}' is not supported. Use "
-                            + $"{string.Join(", ", PsxDataClient.SupportedIntervals.Keys)}."
+                            + "1M, 1W, 1D, 60m, 30m, 15m, or 5m."
                 });
 
             try

@@ -106,7 +106,7 @@ Then build the plugin. At startup the module contributes the page via
 The page shows the watchlist beside a **chart pane**: candlesticks with a direction-tinted volume
 overlay, SMA20/50, an RSI sub-pane with the *configured* oversold/overbought bands (not the textbook
 30/70), horizontal support/resistance lines whose width encodes touch count and whose style shows
-weekly confirmation, entry/stop/target markers, and an interval switcher (1D / 60m / 30m / 15m / 5m).
+weekly confirmation, entry/stop/target markers, and an interval switcher (1M / 1W / 1D / 60m / 30m / 15m / 5m).
 
 ### Making room
 
@@ -846,7 +846,7 @@ rather than from whatever the model recalls about the market:
 | Tool | Use |
 |---|---|
 | `scan_watchlist` | Rank the whole watchlist: which symbols are at support (buy) and which are pressing resistance (sell). Call this for "what should I buy today", "recommend a stock", or a daily scan. |
-| `analyze_candles` | One symbol in depth: levels, indicators, and a suggested entry/stop/target. `interval` selects `1D` (default) or intraday `60m`/`30m`/`15m`/`5m`. |
+| `analyze_candles` | One symbol in depth: levels, indicators, and a suggested entry/stop/target. `interval` selects monthly `1M`, weekly `1W`, daily `1D` (default), or intraday `60m`/`30m`/`15m`/`5m`. |
 
 `research_stock` also carries a `technical` section now, so a tip's stated entry is judged against
 real support and resistance rather than only the 52-week range.

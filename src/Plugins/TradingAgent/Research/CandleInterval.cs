@@ -9,10 +9,14 @@ public static class CandleInterval
 {
     public const int Daily = PsxCandle.DailyIntervalMinutes;
     public const int Weekly = 7 * PsxCandle.DailyIntervalMinutes;
+    // A calendar month has no fixed duration. This value is an interval identifier; monthly
+    // resampling still groups by the actual year/month rather than by 30-day windows.
+    public const int Monthly = 30 * PsxCandle.DailyIntervalMinutes;
 
-    /// <summary>Canonical label: <c>1W</c>, <c>1D</c>, or <c>15m</c>.</summary>
+    /// <summary>Canonical label: <c>1M</c>, <c>1W</c>, <c>1D</c>, or <c>15m</c>.</summary>
     public static string Label(int minutes) => minutes switch
     {
+        >= Monthly => "1M",
         >= Weekly => "1W",
         >= Daily => "1D",
         _ => $"{minutes}m"
@@ -21,6 +25,7 @@ public static class CandleInterval
     /// <summary>Noun for one bar, used in composed level names ("20-week low").</summary>
     public static string Unit(int minutes) => minutes switch
     {
+        >= Monthly => "month",
         >= Weekly => "week",
         >= Daily => "day",
         _ => "bar"
@@ -29,6 +34,7 @@ public static class CandleInterval
     /// <summary>Noun for a period in running prose ("3 consecutive down sessions").</summary>
     public static string Period(int minutes) => minutes switch
     {
+        >= Monthly => "month",
         >= Weekly => "week",
         >= Daily => "session",
         _ => "bar"

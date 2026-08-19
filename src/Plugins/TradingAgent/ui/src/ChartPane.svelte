@@ -168,6 +168,8 @@
   let rsiOversold = 35;
   let rsiOverbought = 70;
 
+  const isIntraday = (value: ChartInterval | string) => value.endsWith('m');
+
   // Read the host theme's tokens rather than hardcoding colors, so the chart follows the app in both
   // light and dark. Falls back to the dark palette if a token is missing.
   function token(name: string, fallback: string): string {
@@ -193,7 +195,7 @@
       // rightOffset keeps a few bars of empty space so the entry/stop/target markers on the LAST bar
       // are not clipped by the price axis.
       timeScale: {
-        borderColor: grid, timeVisible: interval !== '1D', secondsVisible: false, rightOffset: 6
+        borderColor: grid, timeVisible: isIntraday(interval), secondsVisible: false, rightOffset: 6
       },
       crosshair: { mode: 0 },
       autoSize: false,
@@ -264,7 +266,7 @@
     if (!chart) buildChart(container);
     if (!chart || !candleSeries || !volumeSeries || !sma20Series || !sma50Series) return;
 
-    chart.applyOptions({ timeScale: { timeVisible: d.interval !== '1D', secondsVisible: false } });
+    chart.applyOptions({ timeScale: { timeVisible: isIntraday(d.interval), secondsVisible: false } });
 
     const up = token('--success', '#34d399');
     const down = token('--danger', '#f87171');

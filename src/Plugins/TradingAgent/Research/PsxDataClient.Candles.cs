@@ -331,10 +331,16 @@ public sealed partial class PsxDataClient
         return bars;
     }
 
-    /// <summary>Intraday bar widths the tools accept, mapped from their request labels.</summary>
+    /// <summary>Bar widths the tools accept, mapped from their request labels.</summary>
     public static readonly IReadOnlyDictionary<string, int> SupportedIntervals =
         new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
         {
+            ["1mo"] = CandleInterval.Monthly,
+            ["month"] = CandleInterval.Monthly,
+            ["monthly"] = CandleInterval.Monthly,
+            ["1w"] = CandleInterval.Weekly,
+            ["week"] = CandleInterval.Weekly,
+            ["weekly"] = CandleInterval.Weekly,
             ["1d"] = PsxCandle.DailyIntervalMinutes,
             ["1day"] = PsxCandle.DailyIntervalMinutes,
             ["daily"] = PsxCandle.DailyIntervalMinutes,
@@ -346,14 +352,19 @@ public sealed partial class PsxDataClient
         };
 
     /// <summary>Resolves an interval label to a bar width, or null when it is not supported.</summary>
-    public static int? ResolveInterval(string? label) =>
-        string.IsNullOrWhiteSpace(label) ? PsxCandle.DailyIntervalMinutes
-            : SupportedIntervals.TryGetValue(label.Trim(), out var minutes) ? minutes
-            : null;
+    public static int? ResolveInterval(string? label)
+    {
+        if (string.IsNullOrWhiteSpace(label)) return PsxCandle.DailyIntervalMinutes;
+
+        // Preserve the conventional distinction between 1M (month) and 1m (one minute). One-minute
+        // bars are not supported, so silently interpreting a lowercase request as monthly is unsafe.
+        var value = label.Trim();
+        if (value == "1M") return CandleInterval.Monthly;
+        return SupportedIntervals.TryGetValue(value, out var minutes) ? minutes : null;
+    }
 
     /// <summary>Canonical label for a bar width, for output and archive keys.</summary>
-    public static string IntervalLabel(int intervalMinutes) =>
-        intervalMinutes >= PsxCandle.DailyIntervalMinutes ? "1D" : $"{intervalMinutes}m";
+    public static string IntervalLabel(int intervalMinutes) => CandleInterval.Label(intervalMinutes);
 
     // ── Fetching ──────────────────────────────────────────────────────────────
 

@@ -140,12 +140,17 @@ public sealed class PsxIntradayAggregationTests
     {
         Assert.AreEqual(PsxCandle.DailyIntervalMinutes, PsxDataClient.ResolveInterval(null));
         Assert.AreEqual(PsxCandle.DailyIntervalMinutes, PsxDataClient.ResolveInterval("1D"));
+        Assert.AreEqual(CandleInterval.Weekly, PsxDataClient.ResolveInterval("1W"));
+        Assert.AreEqual(CandleInterval.Monthly, PsxDataClient.ResolveInterval("1M"));
+        Assert.AreEqual(CandleInterval.Monthly, PsxDataClient.ResolveInterval("monthly"));
+        Assert.AreEqual("1M", PsxDataClient.IntervalLabel(CandleInterval.Monthly));
+        Assert.AreEqual("1W", PsxDataClient.IntervalLabel(CandleInterval.Weekly));
         Assert.AreEqual(60, PsxDataClient.ResolveInterval("60m"));
         Assert.AreEqual(60, PsxDataClient.ResolveInterval("1h"));
         Assert.AreEqual(15, PsxDataClient.ResolveInterval("15M"));
         Assert.AreEqual(5, PsxDataClient.ResolveInterval("5m"));
         Assert.IsNull(PsxDataClient.ResolveInterval("7m"), "An unsupported width must be rejected, not rounded.");
-        Assert.IsNull(PsxDataClient.ResolveInterval("1w"));
+        Assert.IsNull(PsxDataClient.ResolveInterval("1m"), "Lowercase 1m must not be mistaken for a month.");
     }
 
     [TestMethod]

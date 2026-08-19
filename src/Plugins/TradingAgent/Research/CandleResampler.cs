@@ -6,10 +6,10 @@ namespace TradingAgent.Research;
 /// Rolls daily candles up into higher timeframes. Pure and deterministic, so the rollup is
 /// unit-tested rather than trusted.
 ///
-/// Weekly bars are EXACT rather than approximated: because the daily bars carry true high and low
-/// (from the exchange's per-date market summary), a week's high is genuinely the highest price traded
-/// that week. Resampling from closing prices — the only thing the portal's long JSON series offers —
-/// would silently drop every wick and shift support/resistance inward.
+/// Weekly and monthly bars are EXACT rather than approximated: because the daily bars carry true high
+/// and low (from the exchange's per-date market summary), a period's high is genuinely the highest
+/// price traded in it. Resampling from closing prices — the only thing the portal's long JSON series
+/// offers — would silently drop every wick and shift support/resistance inward.
 /// </summary>
 public static class CandleResampler
 {
@@ -54,6 +54,46 @@ public static class CandleResampler
         }
 
         return weeks;
+    }
+
+    /// <summary>
+    /// Groups daily bars into calendar months, oldest first. The bar is anchored to the first of the
+    /// month but dated by its last trading session, matching the weekly representation.
+    /// </summary>
+    public static IReadOnlyList<PsxCandle> ToMonthly(IReadOnlyList<PsxCandle> dailyBars, DateOnly? asOf = null)
+    {
+        if (dailyBars is null || dailyBars.Count == 0) return [];
+
+        var today = asOf ?? DateOnly.FromDateTime(Market.PsxTime.Now());
+        var currentMonth = (today.Year, today.Month);
+        var months = new List<PsxCandle>();
+
+        foreach (var group in dailyBars
+            .Where(b => !b.IsIntraday)
+            .GroupBy(b => (b.Date.Year, b.Date.Month))
+            .OrderBy(g => g.Key.Year).ThenBy(g => g.Key.Month))
+        {
+            var ordered = group.OrderBy(b => b.Date).ToList();
+            var first = ordered[0];
+            var last = ordered[^1];
+
+            months.Add(new PsxCandle
+            {
+                Symbol          = last.Symbol,
+                Date            = last.Date,
+                BucketStartUtc  = new DateTime(group.Key.Year, group.Key.Month, 1, 0, 0, 0, DateTimeKind.Utc),
+                IntervalMinutes = CandleInterval.Monthly,
+                Open            = first.Open,
+                High            = ordered.Max(b => b.High),
+                Low             = ordered.Min(b => b.Low),
+                Close           = last.Close,
+                PreviousClose   = first.PreviousClose,
+                Volume          = ordered.Sum(b => b.Volume),
+                IsLive          = group.Key == currentMonth || ordered.Any(b => b.IsLive)
+            });
+        }
+
+        return months;
     }
 
     private static (int Year, int Week) IsoWeekKey(DateOnly date)

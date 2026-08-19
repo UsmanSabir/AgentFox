@@ -341,7 +341,7 @@ export interface ChartData {
   warnings: string[];
 }
 
-export const CHART_INTERVALS = ['1D', '60m', '30m', '15m', '5m'] as const;
+export const CHART_INTERVALS = ['1M', '1W', '1D', '60m', '30m', '15m', '5m'] as const;
 export type ChartInterval = (typeof CHART_INTERVALS)[number];
 
 /** An alert the monitor raised. Every kind is a transition, not a standing condition. */
