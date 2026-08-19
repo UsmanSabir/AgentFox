@@ -16,6 +16,7 @@
   import ArmedOrdersPanel from './ArmedOrdersPanel.svelte';
   import ArmOrderDialog from './ArmOrderDialog.svelte';
   import ActivityPanel from './ActivityPanel.svelte';
+  import MoversPanel from './MoversPanel.svelte';
 
   /**
    * Non-null while the arming dialog is open. Both entry points — a chart level and an alert — raise the
@@ -301,6 +302,16 @@
     <!-- Directly under the status grid: this answers "what is it doing", which is the question the
          metrics above raise and none of them answers. Collapsed, so it costs a row of chips. -->
     <ActivityPanel />
+
+    <div class="section-heading compact">
+      <div><span class="eyebrow">Market</span><h2>Today&#39;s movers</h2></div>
+      <p>Whole-market screens from the AHL analytics snapshot. Click a row to chart it.</p>
+    </div>
+
+    <!-- Placed above the automation section because it is the "what should I be looking at" step
+         that precedes reviewing triggers. Selecting a row drives the same selectedSymbol the
+         watchlist and chart already share, so the screen feeds the chart without extra wiring. -->
+    <MoversPanel bind:selected={selectedSymbol} />
 
     <div class="section-heading compact">
       <div><span class="eyebrow">Automation</span><h2>Orders &amp; signals</h2></div>

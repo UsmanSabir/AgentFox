@@ -60,7 +60,7 @@ public sealed record TechnicalSnapshot
     /// <summary>Start of the last bar for an intraday series; null for a daily series.</summary>
     public DateTime? AsOfUtc { get; init; }
 
-    /// <summary>Bar width of the analyzed series: <c>1D</c>, <c>60m</c>, <c>15m</c>, <c>5m</c>.</summary>
+    /// <summary>Bar width of the analyzed series: <c>1M</c>, <c>1W</c>, <c>1D</c>, or intraday.</summary>
     public string Interval { get; init; } = "1D";
 
     /// <summary>True when the last bar is still forming rather than settled.</summary>

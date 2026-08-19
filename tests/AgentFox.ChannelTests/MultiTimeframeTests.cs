@@ -106,6 +106,44 @@ public sealed class MultiTimeframeTests
     }
 
     [TestMethod]
+    public void ToMonthly_GroupsCalendarMonthsAndKeepsTrueExtremes()
+    {
+        var bars = new List<PsxCandle>
+        {
+            Daily(new DateOnly(2026, 1, 2), 100m, 110m, 95m, 104m, 10),
+            Daily(new DateOnly(2026, 1, 30), 104m, 108m, 90m, 101m, 20),
+            Daily(new DateOnly(2026, 2, 2), 101m, 115m, 99m, 112m, 30),
+            Daily(new DateOnly(2026, 2, 27), 112m, 114m, 98m, 109m, 40)
+        };
+
+        var monthly = CandleResampler.ToMonthly(bars, new DateOnly(2026, 4, 1));
+
+        Assert.AreEqual(2, monthly.Count);
+        Assert.AreEqual(CandleInterval.Monthly, monthly[0].IntervalMinutes);
+        Assert.AreEqual(new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc), monthly[0].BucketStartUtc);
+        Assert.AreEqual(new DateOnly(2026, 1, 30), monthly[0].Date);
+        Assert.AreEqual(100m, monthly[0].Open);
+        Assert.AreEqual(101m, monthly[0].Close);
+        Assert.AreEqual(110m, monthly[0].High);
+        Assert.AreEqual(90m, monthly[0].Low);
+        Assert.AreEqual(30L, monthly[0].Volume);
+    }
+
+    [TestMethod]
+    public void ToMonthly_MarksCurrentMonthLiveAndHandlesEmptyInput()
+    {
+        Assert.AreEqual(0, CandleResampler.ToMonthly([]).Count);
+
+        var asOf = new DateOnly(2026, 2, 18);
+        var monthly = CandleResampler.ToMonthly(
+            [Daily(new DateOnly(2026, 1, 30), 100m, 101m, 99m, 100m),
+             Daily(new DateOnly(2026, 2, 17), 100m, 102m, 98m, 101m)], asOf);
+
+        Assert.IsFalse(monthly[0].IsLive);
+        Assert.IsTrue(monthly[1].IsLive);
+    }
+
+    [TestMethod]
     public void Analyze_WeeklyBreakdown_IsFlaggedEvenWhenDailyLooksLikeSupport()
     {
         // A relentless multi-month decline: on the weekly chart this is a breakdown. Any daily bounce

@@ -53,7 +53,8 @@ public sealed class AnalyzeCandlesTool : BaseTool
     public override string Description =>
         "Read a PSX stock's candles (OHLC) and return its support/resistance levels, range position, " +
         "SMA20/50, RSI14, ATR14, volume vs average, and a suggested entry/stop/target with reward:risk. " +
-        "A daily call (interval 1D, the default) ALSO returns the WEEKLY read plus the levels both " +
+        "Daily, weekly (1W), and monthly (1M) candles are supported. A daily call (1D, the default) " +
+        "ALSO returns the WEEKLY read plus the levels both " +
         "timeframes confirm and whether they agree — weekly structure is what makes a level reliable. " +
         "Set interval to 60m/30m/15m/5m for intraday entry timing; an intraday call returns the daily " +
         "levels as context. Also flags a BREAKDOWN — price at the bottom of its range because it is " +
@@ -70,7 +71,8 @@ public sealed class AnalyzeCandlesTool : BaseTool
         ["lookback_days"] = new()
         {
             Type = "integer",
-            Description = "Trading sessions of candle history to analyze (5-250). Defaults to the " +
+            Description = "Bars of the selected candle interval to analyze. The legacy parameter " +
+                          "name means daily sessions for the default 1D interval. Defaults to the " +
                           "configured scan lookback.",
             Required = false
         },
@@ -84,11 +86,12 @@ public sealed class AnalyzeCandlesTool : BaseTool
         ["interval"] = new()
         {
             Type = "string",
-            Description = "Candle width: '1D' (default, daily) or intraday '60m', '30m', '15m', '5m'. " +
+            Description = "Candle width: '1M' (monthly), '1W' (weekly), '1D' (default, daily), or " +
+                          "intraday '60m', '30m', '15m', '5m'. " +
                           "Intraday uses the current session's full tick tape plus any archived earlier " +
                           "sessions, and returns the daily levels alongside as context. PSX publishes no " +
                           "historical intraday, so intraday history only covers sessions already archived.",
-            EnumValues = ["1D", "60m", "30m", "15m", "5m"],
+            EnumValues = ["1M", "1W", "1D", "60m", "30m", "15m", "5m"],
             Required = false
         }
     };
@@ -118,11 +121,11 @@ public sealed class AnalyzeCandlesTool : BaseTool
         var interval = PsxDataClient.ResolveInterval(intervalLabel);
         if (interval is null)
             return ToolResult.Fail(
-                $"Interval '{intervalLabel}' is not supported. Use 1D, 60m, 30m, 15m, or 5m.");
+                $"Interval '{intervalLabel}' is not supported. Use 1M, 1W, 1D, 60m, 30m, 15m, or 5m.");
 
         try
         {
-            _logger.LogInformation("[AnalyzeCandles] {Symbol} at {Interval} over {Days} sessions…",
+            _logger.LogInformation("[AnalyzeCandles] {Symbol} at {Interval} over {Bars} bars…",
                 symbol, PsxDataClient.IntervalLabel(interval.Value), lookback);
 
             // Loading and analysis live in CandleAnalysisService so the chart endpoint draws the very
@@ -141,16 +144,16 @@ public sealed class AnalyzeCandlesTool : BaseTool
                     scope.Add(url, $"PSX candles: {symbol}", "PSX Data Portal");
             }
 
-            // ── Daily + weekly ────────────────────────────────────────────────
+            // ── Daily and higher timeframes + weekly context ─────────────────
             if (interval.Value >= PsxCandle.DailyIntervalMinutes)
             {
                 return ToolResult.Ok(JsonSerializer.Serialize(new
                 {
                     symbol,
-                    interval = "1D",
-                    sessions_analyzed = analysis.Candles.Count,
+                    interval = analysis.Interval,
+                    bars_analyzed = analysis.Candles.Count,
                     sessions_available = analysis.SessionsAvailable,
-                    snapshot = daily,
+                    snapshot = analysis.Snapshot,
                     // Weekly is the structural timeframe: a daily level the weekly chart also
                     // recognises is structure, one it does not is often just a recent swing.
                     weekly = multi.Weekly,
