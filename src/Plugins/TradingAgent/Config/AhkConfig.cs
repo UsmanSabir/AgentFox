@@ -158,6 +158,28 @@ public class AhkConfig
     /// <summary>How long to wait for a submitted order to appear in the order book. Default 8s.</summary>
     public int OrderBookVerifyTimeoutMs { get; set; } = 8_000;
 
+    /// <summary>
+    /// Records the RAW request and response of the portal's own <c>POST /Home/PlaceOrder</c> and
+    /// <c>POST /Home/CancelOrder</c> calls to <c>{LogDir}/order_api_capture.log</c> while the browser
+    /// path drives them. Pure observation: it changes nothing about how an order is placed.
+    ///
+    /// <para>
+    /// <b>Why this is on by default.</b> Moving placement off the browser is blocked on one unknown —
+    /// what the portal actually ANSWERS. Its own UI throws the answer away (<c>site.js</c> shows a
+    /// hardcoded "Your buy order has been sent." on the buy side and never reads <c>res</c>), so
+    /// neither the DOM path nor any amount of reading <c>site.js</c> can reveal it, and the only place
+    /// it exists is on the wire of a real submission. Capturing it here means the evidence comes from
+    /// an order the agent was going to place anyway, instead of from a test order placed with real
+    /// money to see what happens. See <c>docs/ahk-direct-api-migration.md</c>.
+    /// </para>
+    ///
+    /// <para>
+    /// The <c>PIN</c> form field is redacted before anything is written. Nothing else in the payload is
+    /// a secret — it is the order the user asked for.
+    /// </para>
+    /// </summary>
+    public bool CaptureOrderApiTraffic { get; set; } = true;
+
     /// <summary>Tab that reveals resting orders.</summary>
     public string OutstandingLogTabSelector { get; set; } = "a[href='#out_log']";
 
@@ -231,11 +253,44 @@ public class AhkConfig
     public int PageReadyTimeoutMs { get; set; } = 15_000;
 
     /// <summary>
+    /// How long to wait, after the credentials are submitted, for the portal to actually land on the
+    /// trading screen. Default 60s.
+    ///
+    /// <para>
+    /// This is not the same wait as <see cref="PageReadyTimeoutMs"/>, which decides whether a freshly
+    /// loaded portal is showing the login form or an already-authenticated session. This one covers the
+    /// gap AFTER a successful credential submission, and it is long because the portal really does take
+    /// that long: it was hardcoded to 15s, and the resulting failure was maximally misleading — the login
+    /// had SUCCEEDED, the dumped page still showed the login form because navigation had not finished,
+    /// and the broker reported "login could not be confirmed" and retried, spending a second real login
+    /// attempt against a broker that withdraws access after roughly fifteen in two hours. A slow portal
+    /// must cost patience, not login attempts.
+    /// </para>
+    /// </summary>
+    public int LoginVerifyTimeoutMs { get; set; } = 60_000;
+
+    /// <summary>
     /// Launch the browser only when an order is placed and close it once the order finishes (default
     /// true). The persisted profile keeps the session authenticated, so the next order re-launches and
     /// usually skips the full login. Set false to keep one long-lived browser session across orders.
     /// </summary>
     public bool CloseBrowserAfterOrder { get; set; } = true;
+
+    /// <summary>
+    /// After handing session cookies to the direct JSON API, navigate the browser to
+    /// <c>about:blank</c> instead of leaving it parked on the portal's trading screen. Default true.
+    ///
+    /// <para>
+    /// The cookie harvest deliberately keeps the browser alive (the direct API's session depends on the
+    /// portal still considering it live), which means that with the live feed enabled the browser sits
+    /// on the trading screen for the whole run. That page's own <c>site.js</c> keeps polling
+    /// <c>/Home/GetFeed</c> and keeps re-subscribing an empty <c>Page1</c> — competing with our own
+    /// poller on the same session, invisibly, because <c>BrowserHoldsTradingScreen</c> only counts our
+    /// in-flight operations and an idle window is not one. Parking the page keeps the warm session and
+    /// removes the competition. See <c>AhkBroker.ParkPageAsync</c>.
+    /// </para>
+    /// </summary>
+    public bool ParkPageAfterCookieHarvest { get; set; } = true;
 
     // ── Order form selectors ────────────────────────────────────────────────────
     // The buy/sell field ids (#buysymbol, #buyvolume, …) are stable on the AHK portal and used

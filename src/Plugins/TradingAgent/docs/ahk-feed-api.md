@@ -102,6 +102,13 @@ mechanism behind the familiar "the watch list is empty again after login". `AhkF
 by re-subscribing the moment the browser releases the trading screen, with a silence watchdog as a
 backstop — see `FeedSubscriptionGuard`.
 
+Two further cases, both found on 2026-08-19 and both fixed. An **idle** window on the trading screen is
+invisible to that handling — `BrowserHoldsTradingScreen` counts in-flight operations, not loaded pages —
+so it polls `GetFeed` against our own session for as long as it is open; `Ahk.ParkPageAfterCookieHarvest`
+navigates to `about:blank` after the cookie harvest to stop it. And a **re-established** session starts
+with no subscription at all while `_subscribed` still names the previous one's symbols, so the worker
+skipped re-subscribing as "unchanged"; `AhkPortalClient.SessionEpoch` now forces one on the next pass.
+
 ## Other endpoints of interest
 
 `GET /Home/GetUpperLowerCap` returns `[{symbol, market, upperCap, lowerLock}]` for the **whole

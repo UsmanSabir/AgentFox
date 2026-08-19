@@ -227,6 +227,12 @@ public sealed class TradingManager
         await _repository.CompleteExecutionAsync(result.ExecutionId, state, json, ct);
         await _repository.AppendEventAsync(result.ExecutionId, state, json, ct);
 
+        // One row per order attempt, keyed by the exchange's order number. The blob above is the full
+        // story; this is the part that has to be findable by order number rather than by grep.
+        var placed = result.Groups.SelectMany(g => g).ToList();
+        if (placed.Count > 0)
+            await _repository.RecordBrokerOrdersAsync(result.ExecutionId, placed, ct);
+
         // Deliberately after the ledger writes: the durable record is the source of truth, and a
         // channel outage must never cost us an execution record. Every path into the broker funnels
         // through here, so this one call covers manual orders, armed orders, take-profit retries

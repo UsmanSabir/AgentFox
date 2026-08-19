@@ -48,6 +48,17 @@ public sealed class AhkFeedWorker : BackgroundService
     private readonly TradingActivityLog? _activity;
 
     private DateTime _lastReloginUtc = DateTime.MinValue;
+
+    /// <summary>Last <see cref="AhkPortalClient.SessionEpoch"/> this worker has subscribed against.</summary>
+    private int _seenSessionEpoch;
+
+    /// <summary>
+    /// Symbols the most recent non-empty poll actually carried. Kept for one reason: when the silence
+    /// watchdog fires, "the feed returned nothing" is the symptom and this is the evidence. Without it the
+    /// only recoverable fact is that a re-subscribe happened, which is what made the same message repeat
+    /// for an hour on 2026-08-19 while telling nobody whether the subscription was the problem.
+    /// </summary>
+    private IReadOnlyList<string> _lastFeedSymbols = [];
     private DateTime _lastSubscribeUtc = DateTime.MinValue;
     private DateOnly _bookSession;
     private IReadOnlyList<string> _subscribed = [];
@@ -134,6 +145,7 @@ public sealed class AhkFeedWorker : BackgroundService
                                      ? Math.Round((now - last).TotalSeconds, 1)
                                      : null,
             SilentPolls        = _subscriptionGuard.SilentPolls,
+            LastFeedSymbols    = _lastFeedSymbols.Count,
             ConsecutiveFailures = _consecutiveFailures,
             SessionFailures    = _sessionFailures,
             BrowserHoldsScreen = _broker.BrowserHoldsTradingScreen,
@@ -272,6 +284,22 @@ public sealed class AhkFeedWorker : BackgroundService
             _activity?.Info("Feed", "Live quote feed session established");
         _sessionFailures = 0;
 
+        // Subscriptions live on the SESSION, so a re-established one starts with none — while
+        // _subscribed still names the symbols the previous session was carrying. Believing that cache
+        // is a subscription costs a full watchdog window (thirty quiet polls of an open market) before
+        // anything recovers, because an unsubscribed GetFeed and a market where nothing trades are the
+        // same empty 200. Comparing the epoch turns that into a re-subscribe on the very next pass.
+        if (_portal.SessionEpoch != _seenSessionEpoch)
+        {
+            var previous = _seenSessionEpoch;
+            _seenSessionEpoch = _portal.SessionEpoch;
+
+            // Not on the FIRST session: there is no subscription to have lost yet, and ForceResubscribe
+            // would only log a confusing recovery for an ordinary startup.
+            if (previous != 0)
+                ForceResubscribe("the portal session was re-established, and subscriptions do not survive it");
+        }
+
         // Keep the session alive. The portal's UI does this about once a minute; letting it lapse
         // turns every subsequent call into a redirect to the login page.
         if (DateTime.UtcNow - _lastReloginUtc > TimeSpan.FromSeconds(Math.Max(15, cfg.ReloginSeconds)))
@@ -295,6 +323,14 @@ public sealed class AhkFeedWorker : BackgroundService
 
         _consecutiveFailures = 0;
 
+        var returned = (response.Feed ?? [])
+            .Select(q => q.Symbol?.Trim().ToUpperInvariant())
+            .Where(sym => !string.IsNullOrEmpty(sym))
+            .Select(sym => sym!)
+            .Distinct()
+            .ToList();
+        if (returned.Count > 0) _lastFeedSymbols = returned;
+
         var applied = _book.Apply(response.Feed ?? [], DateTime.UtcNow);
         if (applied > 0)
         {
@@ -308,9 +344,21 @@ public sealed class AhkFeedWorker : BackgroundService
                 hasSubscription: _subscribed.Count > 0,
                 silentPollThreshold: cfg.ResubscribeAfterSilentPolls))
         {
+            // The diff, not just the fact. A subscription of 30 symbols that returns 30 and then stops is a
+            // different failure from one that never returned a given symbol at all, and the two need
+            // different fixes — one is the session, the other is the watchlist.
+            var missing = _subscribed
+                .Where(sym => !_lastFeedSymbols.Contains(sym, StringComparer.OrdinalIgnoreCase))
+                .ToList();
+
             ForceResubscribe(
                 $"the feed returned nothing for {Math.Max(5, cfg.ResubscribeAfterSilentPolls)} " +
-                "consecutive polls while the market is open");
+                $"consecutive polls while the market is open (subscribed {_subscribed.Count}; " +
+                $"last non-empty poll carried {_lastFeedSymbols.Count}" +
+                (missing.Count == 0
+                    ? ", all of them"
+                    : $"; never seen: {string.Join(", ", missing.Take(8))}" +
+                      (missing.Count > 8 ? $" and {missing.Count - 8} more" : "")) + ")");
         }
     }
 
@@ -471,6 +519,12 @@ public sealed record AhkFeedStatus
 
     /// <summary>Symbols currently subscribed on the portal.</summary>
     public int SubscribedSymbols { get; init; }
+
+    /// <summary>
+    /// Symbols the last non-empty poll carried. Compared against <see cref="SubscribedSymbols"/> this is
+    /// the fastest read on whether a quiet feed is unsubscribed or simply quiet.
+    /// </summary>
+    public int LastFeedSymbols { get; init; }
 
     /// <summary>Symbols the book holds at all, regardless of age.</summary>
     public int BookSymbols { get; init; }

@@ -105,6 +105,20 @@ public sealed class AhkPortalClient : IBrokerMarketState, IDisposable
     /// </summary>
     public bool HasSession => _sessionReady && _http is not null;
 
+    /// <summary>
+    /// Increments every time a session is established, so callers can tell a NEW session from the one
+    /// they were using.
+    ///
+    /// <para>
+    /// This exists because subscriptions live on the session: a re-established session starts with
+    /// none, and the feed worker's cached "these symbols are subscribed" is then a belief about a
+    /// session that no longer exists. Nothing reports that — <c>GetFeed</c> answers 200 with an empty
+    /// array whether nothing traded or nothing is subscribed — so without this the recovery is the
+    /// silence watchdog, which by design costs thirty quiet polls of an open market first.
+    /// </para>
+    /// </summary>
+    public int SessionEpoch { get; private set; }
+
     // ── Session ───────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -191,9 +205,10 @@ public sealed class AhkPortalClient : IBrokerMarketState, IDisposable
                 : null;
 
             _sessionReady = true;
+            SessionEpoch++;
             _logger.LogInformation(
-                "[AhkPortal] Direct API session established for account {Account}.",
-                AccountCode ?? "(unknown)");
+                "[AhkPortal] Direct API session established for account {Account} (session #{Epoch}).",
+                AccountCode ?? "(unknown)", SessionEpoch);
             return true;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -353,6 +368,138 @@ public sealed class AhkPortalClient : IBrokerMarketState, IDisposable
     /// <c>TradingAgent.Tools.CancelOrderTool</c>.
     /// </para>
     /// </summary>
+    // ── Order placement ───────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Submits one order over the portal's JSON API and reports what can actually be known about it.
+    ///
+    /// <para>
+    /// <b>Everything here is shaped by what a live capture on 2026-08-19 showed</b> (see
+    /// <c>docs/ahk-direct-api-migration.md</c>), because none of it is guessable:
+    /// </para>
+    /// <list type="bullet">
+    /// <item>An order that QUEUED and an order the exchange REJECTED return byte-identical responses —
+    /// <c>200</c> with <c>"Order has been sent to Trade Server."</c>. The body is a transmission receipt.
+    /// Reading it as a verdict is the mistake the portal's own UI makes.</item>
+    /// <item>An <b>empty</b> body is different, and it means the endpoint refused the request outright:
+    /// nothing in the order book, and no activity row at all. That is what a bad <c>OrderType</c> string
+    /// produces — <c>"Stop Loss"</c> with a space vanished silently, <c>"StopLoss"</c> worked.</item>
+    /// <item>The verdict lives in <c>GetActivityLog</c>'s <c>action</c> against the order number:
+    /// <c>QUE</c> queued, <c>APT</c> accepted, <c>REJ</c> rejected, <c>CLX</c> cancelled. A rejected
+    /// order still gets an order number, so absence from the outstanding book is not proof of anything on
+    /// its own.</item>
+    /// </list>
+    ///
+    /// <para>
+    /// So this never returns a bare bool. <see cref="PlaceOrderApiResult.Submitted"/> answers "did the
+    /// endpoint accept the request", which is all the response can support, and
+    /// <see cref="PlaceOrderApiResult.Action"/> carries the exchange's verdict when the activity log has
+    /// caught up. A caller must treat <c>Submitted = true</c> with a null action as UNKNOWN and reconcile,
+    /// never as either outcome.
+    /// </para>
+    /// </summary>
+    public async Task<PlaceOrderApiResult> PlaceOrderAsync(
+        PlaceOrderApiRequest request, CancellationToken ct = default)
+    {
+        var account = await ResolveAccountAsync(ct);
+        if (account is null)
+            return new PlaceOrderApiResult(false, null, null, null,
+                "No broker session, so the order was never sent.");
+
+        // Order numbers already on record for this symbol BEFORE submitting. The activity log gives no
+        // way to ask "which row is mine", so the discriminator is "a number that was not there before" —
+        // the same technique the live capture harness uses, and the only one that survives a second
+        // identical order later in the day.
+        var before = await ActivityOrderNumbersAsync(account, request.Symbol, ct);
+
+        var fields = new List<KeyValuePair<string, string>>
+        {
+            new("Account",    account),
+            new("BuySell",    request.Side),
+            new("Market",     request.Market),
+            new("OrderType",  request.OrderType),
+            new("Volume",     request.Volume.ToString(CultureInfo.InvariantCulture)),
+            new("Script",     request.Symbol.Trim().ToUpperInvariant()),
+            new("Exchange",   "KSE"),
+            new("Price",      request.Price.ToString("F2", CultureInfo.InvariantCulture)),
+            new("PIN",        request.Pin),
+            new("LimitPrice", request.LimitPrice?.ToString("F2", CultureInfo.InvariantCulture) ?? "")
+        };
+
+        var body = await PostAsync("Home/PlaceOrder", new FormUrlEncodedContent(fields), ct);
+        if (body is null)
+            return new PlaceOrderApiResult(false, null, null, null,
+                "The PlaceOrder call itself failed, so the order was not submitted.");
+
+        // Empty body = the endpoint refused it. Reported as NOT submitted, which is safe in the one
+        // direction that matters: it never invites a caller to go hunting for an order that never existed.
+        if (string.IsNullOrWhiteSpace(body.Trim().Trim('"')))
+            return new PlaceOrderApiResult(false, body, null, null,
+                "The portal answered with an empty body, which is how it refuses a request outright — "
+              + "most often a field it would not accept (OrderType is the usual culprit). Nothing was placed.");
+
+        var (orderNo, action) = await AwaitOrderVerdictAsync(account, request.Symbol, before, ct);
+
+        return new PlaceOrderApiResult(
+            Submitted: true,
+            RawBody: body,
+            OrderNo: orderNo,
+            Action: action,
+            Message: action switch
+            {
+                null      => $"Submitted ({body.Trim('"')}) but no activity row appeared yet, so the "
+                           + "outcome is UNKNOWN and must be reconciled.",
+                "REJ"     => $"The exchange REJECTED the order (order no {orderNo}).",
+                "CLX"     => $"The order was cancelled (order no {orderNo}).",
+                _         => $"The order is live at the exchange as '{action}' (order no {orderNo})."
+            });
+    }
+
+    /// <summary>
+    /// Waits briefly for the submitted order to appear in the activity log and returns its number and
+    /// action. Bounded and fail-soft: an order whose row has not arrived is UNKNOWN, and saying so is
+    /// more useful than blocking a trading loop or inventing a verdict.
+    /// </summary>
+    private async Task<(string? OrderNo, string? Action)> AwaitOrderVerdictAsync(
+        string account, string symbol, ISet<string> before, CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(8);
+        while (DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(1_000, ct);
+
+            var rows = await GetActivityLogAsync(symbol, "ALL", ct);
+            var mine = rows?
+                .Where(r => !string.IsNullOrWhiteSpace(r.OrderNo)
+                         && !before.Contains(r.OrderNo!.Trim())
+                         && string.Equals(r.Scrip?.Trim(), symbol.Trim(), StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            if (mine is { Count: > 0 })
+            {
+                // Newest row wins: an order can be QUE first and CLX or REJ afterwards, and the latest
+                // action is the one that describes where it stands now.
+                var latest = mine.OrderByDescending(r => r.Time ?? "").First();
+                return (latest.OrderNo?.Trim(), latest.Action?.Trim().ToUpperInvariant());
+            }
+        }
+
+        return (null, null);
+    }
+
+    /// <summary>Order numbers the activity log already holds for a symbol, used as the "before" baseline.</summary>
+    private async Task<ISet<string>> ActivityOrderNumbersAsync(
+        string account, string symbol, CancellationToken ct)
+    {
+        var rows = await GetActivityLogAsync(symbol, "ALL", ct);
+        return rows?
+            .Where(r => !string.IsNullOrWhiteSpace(r.OrderNo)
+                     && string.Equals(r.Scrip?.Trim(), symbol.Trim(), StringComparison.OrdinalIgnoreCase))
+            .Select(r => r.OrderNo!.Trim())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase)
+            ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    }
+
     public async Task<bool> CancelOrderAsync(string orderNo, CancellationToken ct = default)
     {
         // "orignalorderno" is the portal's spelling of the field. Correcting it silently no-ops.
@@ -582,3 +729,70 @@ public sealed class AhkPortalClient : IBrokerMarketState, IDisposable
         _sessionGate.Dispose();
     }
 }
+
+/// <summary>
+/// One order as the portal's <c>PlaceOrder</c> endpoint wants it. Field names and encodings are the
+/// portal's, not ours — see <see cref="AhkPortalClient.PlaceOrderAsync"/> for why each is what it is.
+/// </summary>
+/// <param name="Side">
+/// <c>"BUY"</c>, <c>"SEL"</c> or <c>"SHS"</c>. Not <c>"SELL"</c> — the portal is asymmetric here, and
+/// <see cref="AhkOrderTypes"/> exists so no caller has to remember that.
+/// </param>
+/// <param name="OrderType">Use <see cref="AhkOrderTypes"/>; a wrong string is silently discarded.</param>
+/// <param name="Price">The limit price, or the TRIGGER price for a stop order.</param>
+/// <param name="LimitPrice">The limit for a stop order. Null (sent as empty) for every other type.</param>
+public sealed record PlaceOrderApiRequest(
+    string Side,
+    string Symbol,
+    string Market,
+    string OrderType,
+    int Volume,
+    decimal Price,
+    decimal? LimitPrice,
+    string Pin);
+
+/// <summary>
+/// What is actually knowable about a submitted order. <paramref name="Submitted"/> is about the REQUEST
+/// (did the endpoint accept it), <paramref name="Action"/> about the ORDER (what the exchange did with
+/// it). Submitted with a null action is UNKNOWN, and must be reconciled rather than assumed either way.
+/// </summary>
+public sealed record PlaceOrderApiResult(
+    bool Submitted,
+    string? RawBody,
+    string? OrderNo,
+    string? Action,
+    string Message)
+{
+    /// <summary>Actions that mean the order is live at the exchange. Confirmed live: QUE, APT.</summary>
+    public bool IsLive => Action is "QUE" or "APT";
+
+    /// <summary>Actions that mean the order is definitively not working. Confirmed live: REJ, CLX.</summary>
+    public bool IsDead => Action is "REJ" or "CLX";
+}
+
+/// <summary>
+/// The exact <c>OrderType</c> strings the endpoint accepts, all confirmed against the live portal.
+///
+/// <para>
+/// This is a named constant rather than a literal at each call site because the failure mode is invisible:
+/// a wrong string returns HTTP 200 with an empty body, no order, and no activity row. <c>"Stop Loss"</c>
+/// — the label the portal shows its own users, and what its <c>site.js</c> sends on the SELL side — is one
+/// of the wrong ones. <c>"StopLoss"</c>, the underlying option VALUE, is what works.
+/// </para>
+/// </summary>
+public static class AhkOrderTypes
+{
+    /// <summary>Confirmed accepted on both BUY and SELL.</summary>
+    public const string Limit = "Limit";
+
+    /// <summary>Confirmed accepted as a SELL stop (trigger in Price, limit in LimitPrice).</summary>
+    public const string StopLoss = "StopLoss";
+
+    /// <summary>
+    /// NOT VERIFIED against the live portal. Left here named so a caller reaching for it finds this
+    /// sentence first: capture one before trusting it, because the way this endpoint says no is to say
+    /// nothing at all.
+    /// </summary>
+    public const string MarketUnverified = "Market";
+}
+

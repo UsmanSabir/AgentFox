@@ -78,6 +78,30 @@ public interface ITradingRepository
         string resultJson,
         CancellationToken ct = default);
 
+    /// <summary>
+    /// Records one row per broker order attempt, keyed by the EXCHANGE's order number when there is one.
+    ///
+    /// <para>
+    /// Before this existed the order number lived only inside <c>trading_executions.result_json</c>, so
+    /// "what happened to order 0010TJZJC700RH12" could be answered by grep and by nothing else — and the
+    /// <c>broker_orders</c> table designed for exactly this had been created and never written. Every
+    /// attempt gets a row, including failures: an attempt whose outcome is unknown is the most important
+    /// one to have recorded, and it is the one a JSON blob search is least likely to surface.
+    /// </para>
+    /// </summary>
+    Task RecordBrokerOrdersAsync(
+        string executionId,
+        IReadOnlyList<TradingAgent.Models.OrderResult> orders,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Records fills the broker reported, idempotently — reconciliation re-reads the same activity log
+    /// every minute, so the same fill arrives repeatedly and must not accumulate duplicate rows.
+    /// </summary>
+    Task<int> RecordFillsAsync(
+        IReadOnlyList<TradingAgent.Reconciliation.BrokerFill> fills,
+        CancellationToken ct = default);
+
     Task AppendEventAsync(
         string executionId,
         string eventType,

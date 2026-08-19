@@ -1,3 +1,5 @@
+using System.Globalization;
+using TradingAgent.Market;
 using System.Text.Json;
 using TradingAgent.Feed;
 using TradingAgent.Models;
@@ -90,10 +92,36 @@ public sealed class AhkBrowserBrokerAdapter : IBrokerAdapter, IBrokerStateReader
         if (holdings is null) failures.Add("the account's holdings could not be read");
         if (balance is null) failures.Add("the available cash balance could not be read");
 
-        // Fills come from the activity log's own fillVolume rather than being inferred from an
-        // action code: the codes seen live were PEN and CLX, and an unrecognised future code must
-        // never be guessed into meaning "filled".
-        var fills = activity?.Where(a => a.FillVolume is > 0).ToList() ?? [];
+        // Fills need BOTH a positive fillVolume and evidence that something actually traded, because
+        // fillVolume alone lies. Captured live on 2026-08-19: an order rejected for an out-of-band price
+        // came back as action "REJ" with fillVolume 1, price 0 and totalValue 0 — so the original rule
+        // (fillVolume > 0) counted a rejected order as a completed fill of the whole quantity. That is the
+        // worst direction for this particular error to run in: reconciliation would report a position the
+        // account does not hold, and the protective-stop path would then try to protect it.
+        //
+        // The guard stays conservative about UNKNOWN codes, which was the right instinct in the original:
+        // an unrecognised action is not assumed to be a fill or a non-fill, it is judged on whether a real
+        // price came with it. Only the two codes now confirmed to be non-fills are excluded by name.
+        var fills = activity?
+            .Where(a => a.FillVolume is > 0
+                     && a.Price is > 0
+                     && !IsNonFillAction(a.Action))
+            .ToList() ?? [];
+
+        // Mapped once, here, so the ledger rows and the details blob cannot disagree about what filled.
+        // The activity log carries a local wall-clock time only ("12:18:13"), so the DATE comes from the
+        // session being read; stamping UtcNow instead would be wrong by up to a whole reconciliation
+        // interval, and these timestamps get compared against bar times.
+        var structuredFills = fills
+            .Where(f => !string.IsNullOrWhiteSpace(f.OrderNo))
+            .Select(f => new BrokerFill(
+                f.OrderNo!.Trim(),
+                f.Scrip?.Trim().ToUpperInvariant() ?? "",
+                f.Type?.Trim(),
+                (int)Math.Round(f.FillVolume ?? 0m),
+                f.Price ?? 0m,
+                ParseActivityTimeUtc(f.Time, checkedUtc)))
+            .ToList();
 
         var details = JsonSerializer.Serialize(new
         {
@@ -135,12 +163,16 @@ public sealed class AhkBrowserBrokerAdapter : IBrokerAdapter, IBrokerStateReader
             // Supported stays TRUE: the capability exists, this pass just could not complete it.
             // Reporting it as unsupported would say the API does not exist, and an operator reading
             // that would go looking for a missing feature instead of a session or connectivity fault.
+            // Fills still travel on an INCOMPLETE snapshot: a fill that was read is a fact whether or
+            // not the balance came back, and dropping it here would lose a real execution because an
+            // unrelated endpoint failed.
             return new BrokerReconciliationSnapshot(
                 Supported: true,
                 Healthy: false,
                 Reason: "Broker state is incomplete: " + string.Join("; ", failures) + ".",
                 CheckedUtc: checkedUtc,
-                DetailsJson: details);
+                DetailsJson: details)
+            { Fills = structuredFills };
         }
 
         return new BrokerReconciliationSnapshot(
@@ -149,7 +181,8 @@ public sealed class AhkBrowserBrokerAdapter : IBrokerAdapter, IBrokerStateReader
             Reason: $"Read {outstanding.Orders.Count} resting order(s), {fills.Count} fill(s) today, " +
                     $"{holdings!.Count} holding(s) and the cash balance from the broker.",
             CheckedUtc: checkedUtc,
-            DetailsJson: details);
+            DetailsJson: details)
+        { Fills = structuredFills };
     }
 
     /// <summary>Rounds a PKR amount to paisa, preserving null as unknown.</summary>
@@ -162,4 +195,30 @@ public sealed class AhkBrowserBrokerAdapter : IBrokerAdapter, IBrokerStateReader
             Reason: "The broker session expired while the account's state was being read, so the " +
                     "snapshot is incomplete. It will be retaken once a session is live again.",
             CheckedUtc: checkedUtc);
+
+    /// <summary>
+    /// Action codes the portal's activity log uses for events that did NOT trade. Confirmed live:
+    /// <c>QUE</c> queued, <c>REJ</c> rejected, <c>CLX</c> cancelled. Only REJ and CLX are listed because
+    /// they are the two that arrive carrying a non-zero <c>fillVolume</c> — QUE reports zero and is
+    /// excluded by the volume test on its own.
+    /// </summary>
+    private static bool IsNonFillAction(string? action) =>
+        action is not null
+        && (action.Equals("REJ", StringComparison.OrdinalIgnoreCase)
+         || action.Equals("CLX", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// Turns the activity log's local wall-clock time ("12:18:13") into UTC, on the PSX trading day the
+    /// snapshot was taken. Falls back to the snapshot time when the field is missing or unparseable —
+    /// never to a default date, which would silently file a real fill under the year 1.
+    /// </summary>
+    private static DateTime ParseActivityTimeUtc(string? time, DateTime fallbackUtc)
+    {
+        if (string.IsNullOrWhiteSpace(time)
+            || !TimeSpan.TryParse(time.Trim(), CultureInfo.InvariantCulture, out var parsed))
+            return fallbackUtc;
+
+        var local = PsxTime.Today().ToDateTime(TimeOnly.FromTimeSpan(parsed));
+        return TimeZoneInfo.ConvertTimeToUtc(local, PsxTime.Zone);
+    }
 }

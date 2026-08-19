@@ -212,6 +212,7 @@ public sealed class AhkBroker : IAsyncDisposable
 
         var pages = await _browser.PagesAsync();
         _page = pages.Length > 0 ? pages[0] : await _browser.NewPageAsync();
+        AttachOrderApiCapture(_page);
 
         WritePidFile(sessionDir, _browser.Process?.Id);
         _initialized = true;
@@ -442,6 +443,160 @@ public sealed class AhkBroker : IAsyncDisposable
         }
     }
 
+    // ── Order API capture ─────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The portal endpoints whose raw traffic is worth recording. Deliberately just the two that place
+    /// and pull orders: the trading screen also polls <c>GetFeed</c> every second or two, and recording
+    /// that would bury the two events a year of debugging actually needs in a megabyte an hour.
+    /// </summary>
+    private static readonly string[] _capturedEndpoints = ["/Home/PlaceOrder", "/Home/CancelOrder"];
+
+    /// <summary>0 until the order form's option lists have been recorded for this browser session.</summary>
+    private int _loggedOrderFormOptions;
+
+    /// <summary>
+    /// Records what the portal's own <c>PlaceOrder</c> / <c>CancelOrder</c> calls send and what they
+    /// answer, for every order the browser path places. See
+    /// <see cref="AhkConfig.CaptureOrderApiTraffic"/> for why this exists — in short, the response body
+    /// is the one piece of the direct-API migration that cannot be learned by reading anything, because
+    /// the portal's own UI discards it, and this is how it gets learned without placing a test order.
+    ///
+    /// <para>
+    /// Attached per page, so it re-attaches on every relaunch of the on-demand lifecycle. Both handlers
+    /// swallow everything: a diagnostic able to fault the page's event loop would be able to break an
+    /// order it was only supposed to watch.
+    /// </para>
+    /// </summary>
+    private void AttachOrderApiCapture(IPage page)
+    {
+        if (!_config.Current.CaptureOrderApiTraffic) return;
+
+        _loggedOrderFormOptions = 0;
+
+        page.Request += (_, e) =>
+        {
+            try
+            {
+                if (!IsCapturedEndpoint(e.Request.Url)) return;
+                WriteOrderApiCapture(
+                    $"REQUEST  {e.Request.Method} {e.Request.Url}\n"
+                  + $"  payload: {RedactPin(e.Request.PostData)}");
+            }
+            catch { /* a capture must never disturb the page */ }
+        };
+
+        page.Response += async (_, e) =>
+        {
+            try
+            {
+                if (!IsCapturedEndpoint(e.Response.Url)) return;
+
+                // Read verbatim, and record the LENGTH separately. The known failure mode here is an
+                // empty 200 — an off-hours submission places nothing and says nothing — and "" is
+                // indistinguishable from "we could not read it" in a log line without the length.
+                string body;
+                try { body = await e.Response.TextAsync() ?? ""; }
+                catch (Exception ex) { body = $"<could not be read: {ex.Message}>"; }
+
+                var contentType = e.Response.Headers.TryGetValue("content-type", out var ct) ? ct : "(none)";
+
+                WriteOrderApiCapture(
+                    $"RESPONSE {(int)e.Response.Status} {e.Response.Url}\n"
+                  + $"  request payload: {RedactPin(e.Response.Request?.PostData)}\n"
+                  + $"  content-type: {contentType}\n"
+                  + $"  body length: {body.Length}\n"
+                  + $"  body: {Truncate(body, 4_000)}");
+            }
+            catch { /* see above */ }
+        };
+    }
+
+    private static bool IsCapturedEndpoint(string? url) =>
+        url is not null && _capturedEndpoints.Any(e => url.Contains(e, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// Removes the trading PIN from a captured form payload. Everything else in it is the order the user
+    /// asked for and is already in the logs; the PIN is the one field that must never be.
+    /// </summary>
+    private static string RedactPin(string? postData)
+    {
+        if (string.IsNullOrEmpty(postData)) return "(none)";
+
+        // Form-urlencoded, so the PIN is one &-delimited pair. Matched case-insensitively because the
+        // field is "PIN" on this endpoint and could be "pin" on the next, and a redaction that depends
+        // on the portal's capitalisation is a redaction that silently stops working.
+        return Regex.Replace(postData, @"(?i)\b(pin)=[^&]*", "$1=***");
+    }
+
+    private static string Truncate(string value, int max) =>
+        value.Length <= max ? value : value[..max] + $"… (+{value.Length - max} more)";
+
+    /// <summary>
+    /// Appends one capture entry to <c>{LogDir}/order_api_capture.log</c> and mirrors it to the log. The
+    /// file exists because this evidence gets read weeks later, by someone diffing what the browser sent
+    /// against what a direct call sends — which is not a thing to go hunting for in a rolled-over
+    /// application log.
+    /// </summary>
+    private void WriteOrderApiCapture(string entry)
+    {
+        _logger.LogInformation("[AhkBroker] Order API capture:\n{Entry}", entry);
+
+        try
+        {
+            var dir = ResolvePath(_config.Current.LogDir);
+            Directory.CreateDirectory(dir);
+            File.AppendAllText(
+                Path.Combine(dir, "order_api_capture.log"),
+                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] {entry}{Environment.NewLine}{Environment.NewLine}");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "[AhkBroker] Could not append to the order API capture file.");
+        }
+    }
+
+    /// <summary>
+    /// Records the option lists of the order dialog's selects, once per browser session.
+    ///
+    /// <para>
+    /// This closes the one gap in the captured <c>PlaceOrder</c> payload that stays invisible until an
+    /// order is actually placed: <c>site.js</c> sends the selected order type's <c>value</c> on the BUY
+    /// side but its <c>text</c> on the SELL side, and the two are not necessarily the same string. A
+    /// direct caller that sends the text where the server wants the value gets what this portal always
+    /// gives — HTTP 200 and no order. Both are recorded so the mapping is written from evidence.
+    /// </para>
+    /// </summary>
+    private async Task LogOrderFormOptionsAsync(string side)
+    {
+        if (!_config.Current.CaptureOrderApiTraffic) return;
+        if (Interlocked.Exchange(ref _loggedOrderFormOptions, 1) != 0) return;
+
+        try
+        {
+            var json = await _page!.EvaluateFunctionAsync<string>(
+                @"() => {
+                    const ids = ['buyordertype','sellordertype','buytradetype','selltradetype',
+                                 'buymarket','sellmarket','buyaccount','sellaccount'];
+                    const out = {};
+                    for (const id of ids) {
+                        const el = document.getElementById(id);
+                        if (!el) { out[id] = null; continue; }
+                        const opts = el.options ? [...el.options] : [...el.querySelectorAll('option')];
+                        out[id] = opts.map(o => ({ value: o.value, text: (o.text || '').trim(),
+                                                   selected: !!o.selected }));
+                    }
+                    return JSON.stringify(out);
+                }");
+
+            WriteOrderApiCapture($"ORDER FORM OPTIONS (read from the {side.ToUpperInvariant()} dialog)\n  {json}");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "[AhkBroker] Could not read the order form's select options.");
+        }
+    }
+
     // ── Session lease ─────────────────────────────────────────────────────────
 
     /// <summary>
@@ -617,7 +772,54 @@ public sealed class AhkBroker : IAsyncDisposable
             // just handed out are only valid while the portal considers the session alive, and the
             // caller is about to start using them; closing the browser is the caller's cue that the
             // session is theirs to keep warm via /Home/Relogin.
+            //
+            // The page it is left ON, however, matters — see ParkPageAsync.
+            await ParkPageAsync();
+
             _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Navigates the browser off the portal's trading screen, to <c>about:blank</c>, while leaving the
+    /// browser and its authenticated profile alone. ASSUMES the gate is held.
+    ///
+    /// <para>
+    /// <b>Why an idle page is not harmless.</b> The trading screen's own <c>site.js</c> polls
+    /// <c>/Home/GetFeed</c> on a 1–2s timer for as long as it is loaded, and re-subscribes
+    /// <c>Page1</c> from its own (almost always empty) market-watch table on every load. Both of those
+    /// fight <see cref="Feed.AhkFeedWorker"/> for the same server-side session, and
+    /// <see cref="BrowserHoldsTradingScreen"/> cannot see it happening: that flag counts our own
+    /// in-flight operations, by design, so a window merely sitting on the screen registers as idle
+    /// while its JavaScript keeps draining the feed. The observed symptom is a feed that re-subscribes
+    /// every thirty silent polls, forever, with the market open and nothing wrong upstream.
+    /// </para>
+    ///
+    /// <para>
+    /// This is the fix for the specific case the harvest creates: <see cref="GetSessionCookiesAsync"/>
+    /// deliberately leaves the browser alive, so with the feed enabled the login lands on the trading
+    /// screen and stays there for the life of the process. Parking the page keeps the warm session —
+    /// no relaunch, no second login — and takes the competing poller out of it. The next operation
+    /// finds no login form on <c>about:blank</c>, navigates back to the portal, and skips credentials
+    /// because the profile is still authenticated.
+    /// </para>
+    /// </summary>
+    private async Task ParkPageAsync()
+    {
+        if (!_config.Current.ParkPageAfterCookieHarvest) return;
+        if (_page is null || _page.IsClosed) return;
+
+        try
+        {
+            await _page.GoToAsync("about:blank");
+            _logger.LogInformation(
+                "[AhkBroker] Parked the browser on about:blank so the portal's own feed poller stops "
+                + "competing with the direct quote feed.");
+        }
+        catch (Exception ex)
+        {
+            // Failing to park costs feed contention, not correctness — never an order.
+            _logger.LogDebug(ex, "[AhkBroker] Could not park the browser page.");
         }
     }
 
@@ -1776,7 +1978,7 @@ public sealed class AhkBroker : IAsyncDisposable
         try
         {
             await _page!.WaitForSelectorAsync(cfg.LoggedInSelector,
-                new WaitForSelectorOptions { Timeout = 15_000 });
+                new WaitForSelectorOptions { Timeout = Math.Max(15_000, cfg.LoginVerifyTimeoutMs) });
         }
         catch (Exception)
         {
@@ -2504,6 +2706,11 @@ public sealed class AhkBroker : IAsyncDisposable
                 // The modal fades in; give it a beat to reach its final position so the field clicks
                 // below land on the field rather than on whatever was under the moving element.
                 await Task.Delay(250);
+
+                // Once per session, record the dialog's select options — the BUY/SELL order-type
+                // value-vs-text asymmetry documented in LogOrderFormOptionsAsync is invisible anywhere
+                // else, and this is the only moment the selects exist in the DOM.
+                await LogOrderFormOptionsAsync(side);
                 return;
             }
 

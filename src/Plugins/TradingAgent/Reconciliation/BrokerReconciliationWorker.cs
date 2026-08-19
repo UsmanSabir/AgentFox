@@ -54,6 +54,17 @@ public sealed class BrokerReconciliationWorker : BackgroundService
 
             _state.Update(snapshot);
             await _repository.RecordReconciliationAsync(snapshot, stoppingToken);
+
+            // Fills become rows. Idempotent by design: this log is re-read every pass, so the same fill
+            // arrives again on every one of them for the rest of the trading day.
+            if (snapshot.Fills.Count > 0)
+            {
+                var stored = await _repository.RecordFillsAsync(snapshot.Fills, stoppingToken);
+                if (stored > 0)
+                    _logger.LogInformation(
+                        "[BrokerReconciliation] Recorded {Stored} new fill(s) of {Seen} reported.",
+                        stored, snapshot.Fills.Count);
+            }
             if (!snapshot.Healthy)
                 _logger.LogWarning("[Reconciliation] Unhealthy: {Reason}", snapshot.Reason);
 
