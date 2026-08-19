@@ -180,6 +180,27 @@ public class AhkConfig
     /// </summary>
     public bool CaptureOrderApiTraffic { get; set; } = true;
 
+    /// <summary>
+    /// Submit orders over the portal's JSON API instead of driving the order dialog. Default FALSE.
+    ///
+    /// <para>
+    /// <b>Why it defaults off.</b> The API path is faster, takes no browser gate, and reads a verdict the
+    /// DOM path cannot see — but it is the newer of two ways to spend real money, and the older one has
+    /// months of live incidents behind its confirmation logic. Switch it on deliberately, per deployment,
+    /// once its ledger rows have been watched for a session.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>The fallback is asymmetric on purpose.</b> A failed API submission falls back to the browser
+    /// ONLY when the portal proved nothing was placed (an empty response body — see
+    /// <c>AhkPortalClient.PlaceOrderAsync</c>). When the outcome is merely unknown, there is no fallback
+    /// and the order is reported unconfirmed: this broker has no amend endpoint, so a retry against an
+    /// order that did land is a duplicate position that can only be unwound by selling. "We are not sure"
+    /// must never become "so try again".
+    /// </para>
+    /// </summary>
+    public bool PreferDirectApiForPlacement { get; set; } = false;
+
     /// <summary>Tab that reveals resting orders.</summary>
     public string OutstandingLogTabSelector { get; set; } = "a[href='#out_log']";
 

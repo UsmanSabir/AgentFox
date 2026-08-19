@@ -268,10 +268,17 @@ This adds the one distinction the earlier captures missed: **an empty body means
 request outright** — no order, no order number, no activity row. So the response does carry exactly one
 bit of real information, and it is not the one the portal's UI reads:
 
-| response | meaning |
+| response body | meaning |
 | --- | --- |
-| empty (`""`) | refused before submission. A field it would not accept — `OrderType` is the usual one. |
-| `"Order has been sent to Trade Server."` | transmitted. Says nothing about the outcome; read `GetActivityLog.action`. |
+| empty (`""`) | refused because of a FIELD it would not accept — `OrderType` is the usual one. The only refusal worth retrying through the browser, whose dialog builds the request from the portal's own selects. |
+| anything else that is not the acknowledgement, e.g. `"Market is closed\r\n"` | refused, with the portal's own reason. Surface it verbatim; retrying through the browser gets the same answer. |
+| `"Order has been sent to Trade Server."` | transmitted. Says nothing about the outcome — read `GetActivityLog.action`. |
+
+The acknowledgement is **whitelisted** rather than the refusals blacklisted, and that is deliberate: the
+set of things this endpoint says when it refuses is open-ended and was learned one surprise at a time.
+Treating "not a known refusal" as submitted would turn every future refusal message into a phantom order
+in the ledger.
+
 
 Which retires the "the response is useless" conclusion above in one direction only: it can prove
 *nothing was placed*, and it can never prove anything was. `AhkOrderTypes` exists so no caller has to
@@ -282,10 +289,17 @@ that its `orderNo` is the short house-style number (`0611XK66`) rather than the 
 limit orders — so any code matching order numbers must not assume a format. `APT` joins the confirmed
 action codes: `QUE` queued, `APT` accepted (a stop awaiting its trigger), `REJ` rejected, `CLX` cancelled.
 
-**The order book empties at the close.** Within seconds of the market closing, `GetOutstanding` returned
-`[]` — the test stop order and a genuine protective sell that had rested since 10:00 both gone. PSX orders
-are day orders and the portal purges them. Two consequences: order-book verification only means anything
-during a session, and any protective stop this system relies on has to be re-placed each trading day.
+**Price bands are republished for the next session before the current day is over.** SYS read
+`upperCap 141.65` at midday and `136.79` after the close on the same date — the second is the NEXT
+session's band, computed off the day's close. So a band fetched before the bell and used after it is the
+wrong band, and the fetch belongs inside the order pass rather than cached across one.
+
+**Day orders are cancelled at the close, and the book empties with them.** The stop order above was
+placed while the market was open and was cancelled by the closing bell, not purged mid-session; minutes
+later `GetOutstanding` returned `[]`, taking with it a genuine protective sell that had rested since 10:00.
+PSX orders are day orders. Two consequences: order-book verification only means anything during a session,
+and every protective stop this system relies on has to be re-placed each trading day — an overnight stop
+does not exist, whatever the ledger remembers about placing it.
 
 **Still uncaptured:** `Market` orders on either side — deliberately deferred, and `AhkOrderTypes.MarketUnverified`
 is named to say so at the call site. Also a rejection for a reason other than price (insufficient funds, an

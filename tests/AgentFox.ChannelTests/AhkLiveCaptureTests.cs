@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Net;
 using System.Text.Json;
 using AgentFox.Plugins;
@@ -6,6 +7,8 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using TradingAgent.Broker;
 using TradingAgent.Config;
+using TradingAgent.Feed;
+using TradingAgent.Models;
 
 namespace AgentFox.ChannelTests;
 
@@ -434,6 +437,104 @@ public sealed class AhkLiveCaptureTests
                 if (orderNo is { Length: > 0 } && (symbols is null || (symbol is not null && symbols.Contains(symbol))))
                     yield return orderNo;
             }
+        }
+    }
+
+    /// <summary>
+    /// Drives a complete order cycle through the PRODUCTION code path — `AhkBrowserBrokerAdapter` with
+    /// `PreferDirectApiForPlacement` on — and then cancels whatever it placed.
+    ///
+    /// <para>
+    /// The distinction from <see cref="Place_Capture_And_Cancel_Orders"/> matters: that one posts raw HTTP
+    /// to learn what the portal does, this one exercises the code that will actually be trading. It covers
+    /// the routing decision, the band clamp (the server does not enforce the band, so this path owns it),
+    /// the verdict read from the activity log, and the browser fallback when the API refuses.
+    /// </para>
+    ///
+    /// <para>
+    /// Safe to run with the market CLOSED, which is the point: an off-hours submission places nothing, so
+    /// the whole path can be exercised for real without a trade. Expect the API to refuse and the fallback
+    /// to engage — that is a pass, not a failure, and the report says which happened.
+    /// </para>
+    /// </summary>
+    [TestMethod]
+    [TestCategory("External")]
+    [TestCategory("AhkLiveOrders")]
+    public async Task FullCycle_ThroughProductionAdapter()
+    {
+        var (config, hostConfig) = LoadLiveConfig();
+
+        var spec = Environment.GetEnvironmentVariable("AHK_LIVE_CYCLE");
+        if (string.IsNullOrWhiteSpace(spec))
+            Assert.Inconclusive("Set AHK_LIVE_CYCLE to one order, e.g. {\"side\":\"SEL\",\"symbol\":\"SYS\",\"volume\":1,\"price\":\"141.65\"}");
+
+        var order = JsonSerializer.Deserialize<OrderSpec>(spec!,
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true })!;
+
+        config.PreferDirectApiForPlacement = true;
+        var options = new FixedRuntimeOptions(config);
+
+        await using var broker = new AhkBroker(options, hostConfig, NullLogger<AhkBroker>.Instance);
+        using var portal = new AhkPortalClient(broker, options, NullLogger<AhkPortalClient>.Instance);
+
+        // The adapter deliberately refuses to CREATE a session (a periodic caller that logs in would burn a
+        // login per pass), so the session is established here, which is the user-initiated path.
+        // One HttpClient for the read-backs, from the same browser session the portal client will harvest.
+        using var http = await OpenSessionAsync(broker);
+        Assert.IsTrue(await portal.EnsureSessionAsync(), "no broker session, so nothing can be exercised");
+        Report("SESSION", $"account={portal.AccountCode} hasSession={portal.HasSession}");
+
+        var adapter = new AhkBrowserBrokerAdapter(
+            broker, portal, options, NullLogger<AhkBrowserBrokerAdapter>.Instance);
+
+        var signal = new TradingSignal
+        {
+            IsSignal = true,
+            Action = order.Side.StartsWith("B", StringComparison.OrdinalIgnoreCase) ? "BUY" : "SELL",
+            Symbol = order.Symbol,
+            Quantity = order.Volume,
+            OrderType = string.Equals(order.OrderType, "StopLoss", StringComparison.OrdinalIgnoreCase)
+                ? "STOPLOSS" : "LIMIT",
+            EntryPrice = decimal.Parse(order.Price ?? "0", CultureInfo.InvariantCulture),
+            LimitPrice = order.LimitPrice is null
+                ? null : decimal.Parse(order.LimitPrice, CultureInfo.InvariantCulture)
+        };
+
+        Report("SIGNAL", $"{signal.Action} {signal.Symbol} x{signal.Quantity} @ {signal.EntryPrice} "
+                       + $"type={signal.OrderType} limit={signal.LimitPrice?.ToString() ?? "(none)"}");
+
+        var results = (await adapter.PlaceOrderGroupsAsync(
+                new List<IReadOnlyList<TradingSignal>> { new List<TradingSignal> { signal } }.AsReadOnly()))
+            .SelectMany(g => g).ToList();
+
+        Assert.AreEqual(1, results.Count, "one signal must produce exactly one result");
+        var result = results[0];
+
+        Report("ORDER RESULT",
+            $"success={result.Success}\norderId={result.OrderId ?? "(none)"}\n"
+          + $"requested={result.RequestedPrice} submitted={result.SubmittedPrice}\n"
+          + $"adjustment={result.PriceAdjustment ?? "(none)"}\nmessage={result.Message}");
+
+        try
+        {
+            Report("OUTSTANDING after", await GetAsync(http, $"Home/GetOutstanding?account={portal.AccountCode}"));
+        }
+        catch (Exception ex) { Report("OUTSTANDING after", $"(not read: {ex.Message})"); }
+
+        // Whatever landed comes straight back off. Production cancel path, so the cycle is closed by the
+        // same code that will close it in service.
+        if (!string.IsNullOrWhiteSpace(result.OrderId))
+        {
+            var cancelled = await portal.CancelOrderAsync(result.OrderId!);
+            Report("CANCEL", $"orderNo={result.OrderId} accepted={cancelled}");
+
+            await Task.Delay(3_000);
+            Report("OUTSTANDING after cancel",
+                await GetAsync(http, $"Home/GetOutstanding?account={portal.AccountCode}"));
+        }
+        else
+        {
+            Report("CANCEL", "nothing to cancel — no order number came back, so nothing was placed.");
         }
     }
 

@@ -1,4 +1,8 @@
 using System.Globalization;
+using AgentFox.Plugins;
+using Microsoft.Extensions.Logging;
+using TradingAgent.Config;
+using TradingAgent.Observability;
 using TradingAgent.Market;
 using System.Text.Json;
 using TradingAgent.Feed;
@@ -19,19 +23,227 @@ public sealed class AhkBrowserBrokerAdapter : IBrokerAdapter, IBrokerStateReader
 {
     private readonly AhkBroker _broker;
     private readonly AhkPortalClient _portal;
+    private readonly IRuntimePluginOptions<AhkConfig> _config;
+    private readonly ILogger<AhkBrowserBrokerAdapter> _logger;
+    private readonly TradingActivityLog? _activity;
 
-    public AhkBrowserBrokerAdapter(AhkBroker broker, AhkPortalClient portal)
+    public AhkBrowserBrokerAdapter(
+        AhkBroker broker,
+        AhkPortalClient portal,
+        IRuntimePluginOptions<AhkConfig> config,
+        ILogger<AhkBrowserBrokerAdapter> logger,
+        TradingActivityLog? activity = null)
     {
         _broker = broker;
         _portal = portal;
+        _config = config;
+        _logger = logger;
+        _activity = activity;
     }
 
     public Task<IReadOnlyDictionary<string, decimal?>> GetMarketPricesAsync(IReadOnlyList<string> symbols) =>
         _broker.GetMarketPricesAsync(symbols);
 
-    public Task<IReadOnlyList<IReadOnlyList<OrderResult>>> PlaceOrderGroupsAsync(
-        IReadOnlyList<IReadOnlyList<TradingSignal>> groups) =>
-        _broker.PlaceOrderGroupsAsync(groups);
+    /// <summary>
+    /// Places every group, over the JSON API when <see cref="AhkConfig.PreferDirectApiForPlacement"/> is on
+    /// and a session exists, and through the browser otherwise.
+    ///
+    /// <para>
+    /// Group semantics are the broker's and are preserved exactly: orders inside a group are DEPENDENT, so
+    /// the first failure stops the rest of that group while later groups still run. Getting this wrong
+    /// would be silent — a protective stop whose entry failed would go out on its own.
+    /// </para>
+    /// </summary>
+    public async Task<IReadOnlyList<IReadOnlyList<OrderResult>>> PlaceOrderGroupsAsync(
+        IReadOnlyList<IReadOnlyList<TradingSignal>> groups)
+    {
+        if (!_config.Current.PreferDirectApiForPlacement)
+            return await _broker.PlaceOrderGroupsAsync(groups);
+
+        // A periodic caller must never establish a session (a login per pass gets an account locked), so
+        // the API path is taken only when one already exists. No session means the browser path, which
+        // owns logging in.
+        if (!_portal.HasSession)
+        {
+            _logger.LogInformation(
+                "[BrokerAdapter] Direct API placement is enabled but no session is live; using the browser.");
+            return await _broker.PlaceOrderGroupsAsync(groups);
+        }
+
+        // One band read for the whole batch. The server does NOT enforce the price band — an out-of-band
+        // order is accepted by the endpoint and rejected by the exchange seconds later (captured live) —
+        // so on this path the band is entirely ours to police.
+        var bands = await _portal.GetPriceBandsAsync();
+
+        var output = new List<IReadOnlyList<OrderResult>>();
+        foreach (var group in groups)
+        {
+            var results = new List<OrderResult>();
+            foreach (var signal in group)
+            {
+                var result = await PlaceOneAsync(signal, bands);
+                results.Add(result);
+                if (!result.Success) break; // dependent within a group, as on the browser path
+            }
+            output.Add(results);
+        }
+
+        return output;
+    }
+
+    /// <summary>
+    /// Submits one signal over the JSON API, falling back to the browser only when the portal proved
+    /// nothing was placed. See <see cref="AhkConfig.PreferDirectApiForPlacement"/> for why that condition
+    /// and no other.
+    /// </summary>
+    private async Task<OrderResult> PlaceOneAsync(
+        TradingSignal signal, IReadOnlyList<AhkPriceBand> bands)
+    {
+        var cfg = _config.Current;
+        var symbol = signal.Symbol.Trim().ToUpperInvariant();
+        var qty = signal.Quantity ?? cfg.DefaultQty;
+        var isBuy = signal.Action.Equals("BUY", StringComparison.OrdinalIgnoreCase);
+        var isStop = signal.OrderType.Equals("STOPLOSS", StringComparison.OrdinalIgnoreCase);
+        var isMarket = signal.OrderType.Equals("MARKET", StringComparison.OrdinalIgnoreCase);
+
+        // Market orders have never been captured on this endpoint, and the way it refuses a field it does
+        // not like is to answer 200 with an empty body and place nothing. Routing one here would look like
+        // a placed order to any reader who trusts the response. The browser path knows how to do it.
+        if (isMarket)
+        {
+            _logger.LogInformation(
+                "[BrokerAdapter] {Symbol} is a MARKET order, which is not verified on the JSON API; "
+                + "using the browser for this one.", symbol);
+            return await PlaceViaBrowserAsync(signal);
+        }
+
+        if (signal.EntryPrice is not > 0m)
+        {
+            _logger.LogInformation(
+                "[BrokerAdapter] {Symbol} carries no price, so the browser path resolves it.", symbol);
+            return await PlaceViaBrowserAsync(signal);
+        }
+
+        var band = bands.FirstOrDefault(b =>
+            string.Equals(b.Symbol?.Trim(), symbol, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(b.Market?.Trim(), "REG", StringComparison.OrdinalIgnoreCase));
+
+        // No band means no safe price. The portal's own dialog is worse than useless here — its band
+        // lookup leaves the previous symbol's values in place on a miss, so it validates against the wrong
+        // numbers — and a direct caller has nothing to validate against at all.
+        if (band is null)
+        {
+            _logger.LogWarning(
+                "[BrokerAdapter] No REG price band for {Symbol}; the JSON API cannot price it safely. "
+                + "Using the browser.", symbol);
+            return await PlaceViaBrowserAsync(signal);
+        }
+
+        var (price, adjustment) = ClampToBand(signal.EntryPrice!.Value, band);
+
+        decimal? limitPrice = null;
+        if (isStop)
+        {
+            var raw = signal.LimitPrice
+                ?? decimal.Round(price * (1m - Math.Clamp(cfg.StopLimitSlippagePercent, 0m, 20m) / 100m), 2);
+            (limitPrice, _) = ClampToBand(raw, band);
+        }
+
+        var request = new PlaceOrderApiRequest(
+            Side: isBuy ? "BUY" : "SEL",
+            Symbol: symbol,
+            Market: "REG",
+            // AhkOrderTypes, never a literal: "Stop Loss" (the portal's own label) is discarded silently
+            // and "StopLoss" is accepted.
+            OrderType: isStop ? AhkOrderTypes.StopLoss : AhkOrderTypes.Limit,
+            Volume: qty,
+            Price: price,
+            LimitPrice: limitPrice,
+            Pin: cfg.TradingPin);
+
+        var api = await _portal.PlaceOrderAsync(request);
+
+        if (!api.Submitted)
+        {
+            // Proven not placed either way, so a retry cannot duplicate anything. But only an ENCODING
+            // refusal is worth retrying: the dialog builds its request from the portal's own selects, so it
+            // can succeed where a hand-built field failed. A refusal the portal explained ("Market is
+            // closed") will be refused identically through the dialog, and retrying it only launches a
+            // browser to be told no a second time.
+            if (!api.RefusedByFieldEncoding)
+            {
+                _logger.LogWarning("[BrokerAdapter] The portal refused {Action} {Symbol}: {Message}",
+                    signal.Action, symbol, api.Message);
+                _activity?.Warn("Orders", $"The broker refused {signal.Action} {symbol}", api.Message);
+
+                return new OrderResult
+                {
+                    Success = false,
+                    Action = isBuy ? "BUY" : "SELL",
+                    Symbol = symbol,
+                    Quantity = qty,
+                    Message = api.Message,
+                    RequestedPrice = signal.EntryPrice,
+                    SubmittedPrice = price,
+                    PriceAdjustment = adjustment
+                };
+            }
+
+            _logger.LogWarning(
+                "[BrokerAdapter] The JSON API would not accept the fields for {Action} {Symbol}: {Message} "
+                + "Falling back to the browser.", signal.Action, symbol, api.Message);
+            _activity?.Warn("Orders",
+                $"Direct API refused {signal.Action} {symbol}; retrying through the browser", api.Message);
+            return await PlaceViaBrowserAsync(signal);
+        }
+
+        var success = api.IsLive;
+        return new OrderResult
+        {
+            // Unknown counts as NOT success: an unconfirmed order must not be reported as placed, and the
+            // reconciliation pass exists to settle it.
+            Success = success,
+            OrderId = api.OrderNo,
+            Action = isBuy ? "BUY" : "SELL",
+            Symbol = symbol,
+            Quantity = qty,
+            Message = api.Message + (adjustment is null ? "" : " " + adjustment),
+            RequestedPrice = signal.EntryPrice,
+            SubmittedPrice = price,
+            PriceAdjustment = adjustment
+        };
+    }
+
+    private async Task<OrderResult> PlaceViaBrowserAsync(TradingSignal signal)
+    {
+        var groups = new List<IReadOnlyList<TradingSignal>> { new List<TradingSignal> { signal } };
+        var results = await _broker.PlaceOrderGroupsAsync(groups);
+        return results.SelectMany(g => g).FirstOrDefault()
+            ?? new OrderResult
+            {
+                Success = false,
+                Action = signal.Action,
+                Symbol = signal.Symbol,
+                Message = "The browser path returned no result for this order."
+            };
+    }
+
+    /// <summary>
+    /// Clamps a price into the day's band, returning the note to record when it moved. PSX rejects
+    /// anything outside the band, and on the JSON path nothing else is checking.
+    /// </summary>
+    private static (decimal Price, string? Adjustment) ClampToBand(decimal price, AhkPriceBand band)
+    {
+        if (band.UpperCap is > 0m && price > band.UpperCap)
+            return (band.UpperCap.Value,
+                $"Limit clamped down from {price:F2} to the day's Upper Cap {band.UpperCap:F2}.");
+
+        if (band.LowerLock is > 0m && price < band.LowerLock)
+            return (band.LowerLock.Value,
+                $"Limit clamped up from {price:F2} to the day's Lower Lock {band.LowerLock:F2}.");
+
+        return (price, null);
+    }
 
     /// <summary>
     /// Reads the broker's own view of the account: resting orders, today's order events, holdings and

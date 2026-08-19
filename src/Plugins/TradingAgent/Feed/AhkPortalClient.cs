@@ -279,6 +279,16 @@ public sealed class AhkPortalClient : IBrokerMarketState, IDisposable
         fields.Add(new("pagenum", pageNum));
 
         var body = await PostAsync("Home/SendSubscriptionofSymbols", new FormUrlEncodedContent(fields), ct);
+
+        // An empty body here means SUCCESS — the exact opposite of what it means on PlaceOrder, where it is
+        // how the endpoint refuses. Confirmed live on 2026-08-19: a subscription of 30 symbols answered 200
+        // with zero bytes and every one of the 30 then streamed. So this really is "did the call complete",
+        // and it must not be "hardened" by treating an empty body as failure — that would turn every
+        // successful subscription into a retry loop.
+        //
+        // What it genuinely cannot tell is whether the portal HONOURED the subscription. The only proof of
+        // that is quotes arriving, which is why AhkFeedWorker compares what it subscribed against what the
+        // feed returns rather than trusting this bool.
         return body is not null;
     }
 
@@ -431,12 +441,22 @@ public sealed class AhkPortalClient : IBrokerMarketState, IDisposable
             return new PlaceOrderApiResult(false, null, null, null,
                 "The PlaceOrder call itself failed, so the order was not submitted.");
 
-        // Empty body = the endpoint refused it. Reported as NOT submitted, which is safe in the one
-        // direction that matters: it never invites a caller to go hunting for an order that never existed.
-        if (string.IsNullOrWhiteSpace(body.Trim().Trim('"')))
+        // The acknowledgement is WHITELISTED rather than failures blacklisted, because the set of things
+        // this endpoint says when it refuses is open-ended and was discovered one surprise at a time: an
+        // empty body for a field it would not accept, and "Market is closed" off-hours. Treating
+        // "not a known refusal" as submitted would mean every future refusal message becomes a phantom
+        // order in the ledger. Only one string means the order reached the trade server.
+        var said = body.Trim().Trim('"').Trim();
+
+        if (said.Length == 0)
             return new PlaceOrderApiResult(false, body, null, null,
-                "The portal answered with an empty body, which is how it refuses a request outright — "
-              + "most often a field it would not accept (OrderType is the usual culprit). Nothing was placed.");
+                "The portal answered with an empty body, which is how it refuses a request whose FIELDS it "
+              + "will not accept — OrderType is the usual culprit. Nothing was placed.")
+            { RefusedByFieldEncoding = true };
+
+        if (!said.Contains("sent to trade server", StringComparison.OrdinalIgnoreCase))
+            return new PlaceOrderApiResult(false, body, null, null,
+                $"The portal refused the order and said so: \"{said}\". Nothing was placed.");
 
         var (orderNo, action) = await AwaitOrderVerdictAsync(account, request.Symbol, before, ct);
 
@@ -768,6 +788,20 @@ public sealed record PlaceOrderApiResult(
 
     /// <summary>Actions that mean the order is definitively not working. Confirmed live: REJ, CLX.</summary>
     public bool IsDead => Action is "REJ" or "CLX";
+
+    /// <summary>
+    /// True when the endpoint refused the request with an EMPTY body, which is what it does when a field
+    /// is encoded in a way it will not take.
+    ///
+    /// <para>
+    /// This is the only refusal worth retrying through the browser, and that is the whole reason it is a
+    /// separate flag rather than folded into <see cref="Submitted"/>. The order dialog builds the same
+    /// request from the portal's own selects, so it does not get the encoding wrong — whereas a refusal the
+    /// portal EXPLAINS ("Market is closed") will be refused identically no matter which path asks, and
+    /// retrying it just launches a browser to be told no twice.
+    /// </para>
+    /// </summary>
+    public bool RefusedByFieldEncoding { get; init; }
 }
 
 /// <summary>
