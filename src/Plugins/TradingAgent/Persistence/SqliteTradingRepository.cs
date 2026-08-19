@@ -1044,6 +1044,7 @@ public sealed class SqliteTradingRepository : ITradingRepository
                     added_utc      TEXT NOT NULL,
                     source         TEXT NOT NULL,   -- 'seed' | 'user'
                     sort_order     INTEGER NOT NULL DEFAULT 0,
+                    pinned         INTEGER NOT NULL DEFAULT 0,
                     alerts_enabled INTEGER NOT NULL DEFAULT 1,
                     notes          TEXT NULL
                 );
@@ -1177,6 +1178,8 @@ public sealed class SqliteTradingRepository : ITradingRepository
                 connection, "daily_bar_coverage", "market_closed", "INTEGER NOT NULL DEFAULT 0", ct);
             await AddColumnIfMissingAsync(
                 connection, "armed_orders", "protective_stop_id", "TEXT NULL", ct);
+            await AddColumnIfMissingAsync(
+                connection, "watchlist", "pinned", "INTEGER NOT NULL DEFAULT 0", ct);
             await SeedPerSymbolCoverageAsync(connection, ct);
 
             _initialized = true;
@@ -1202,9 +1205,9 @@ public sealed class SqliteTradingRepository : ITradingRepository
         var entries = new List<WatchlistEntry>();
         var read = connection.CreateCommand();
         read.CommandText = """
-            SELECT symbol, added_utc, source, sort_order, alerts_enabled, notes
+            SELECT symbol, added_utc, source, sort_order, pinned, alerts_enabled, notes
             FROM watchlist
-            ORDER BY sort_order, symbol
+            ORDER BY pinned DESC, sort_order, symbol
             """;
         await using (var reader = await read.ExecuteReaderAsync(ct))
         {
@@ -1216,7 +1219,8 @@ public sealed class SqliteTradingRepository : ITradingRepository
                     reader.GetString(2),
                     reader.GetInt32(3),
                     reader.GetInt64(4) != 0,
-                    reader.IsDBNull(5) ? null : reader.GetString(5)));
+                    reader.GetInt64(5) != 0,
+                    reader.IsDBNull(6) ? null : reader.GetString(6)));
             }
         }
 
@@ -1298,9 +1302,10 @@ public sealed class SqliteTradingRepository : ITradingRepository
     }
 
     public async Task<bool> UpdateWatchlistSymbolAsync(
-        string symbol, bool? alertsEnabled, string? notes, CancellationToken ct = default)
+        string symbol, bool? alertsEnabled, string? notes, bool? pinned = null,
+        CancellationToken ct = default)
     {
-        if (alertsEnabled is null && notes is null) return true;
+        if (alertsEnabled is null && notes is null && pinned is null) return true;
 
         await EnsureInitializedAsync(ct);
         await using var connection = await OpenAsync(ct);
@@ -1310,14 +1315,57 @@ public sealed class SqliteTradingRepository : ITradingRepository
         command.CommandText = """
             UPDATE watchlist
                SET alerts_enabled = COALESCE($alerts, alerts_enabled),
-                   notes          = COALESCE($notes, notes)
+                   notes          = COALESCE($notes, notes),
+                   pinned         = COALESCE($pinned, pinned)
              WHERE symbol = $symbol
             """;
         command.Parameters.AddWithValue("$symbol", symbol);
         command.Parameters.AddWithValue("$alerts",
             alertsEnabled is null ? DBNull.Value : alertsEnabled.Value ? 1 : 0);
         command.Parameters.AddWithValue("$notes", notes ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$pinned",
+            pinned is null ? DBNull.Value : pinned.Value ? 1 : 0);
         return await command.ExecuteNonQueryAsync(ct) == 1;
+    }
+
+    public async Task<bool> ReorderWatchlistAsync(
+        IReadOnlyList<string> symbols, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+
+        var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var read = connection.CreateCommand();
+        read.Transaction = (SqliteTransaction)transaction;
+        read.CommandText = "SELECT symbol FROM watchlist";
+        await using (var reader = await read.ExecuteReaderAsync(ct))
+            while (await reader.ReadAsync(ct)) existing.Add(reader.GetString(0));
+
+        var requested = symbols
+            .Select(s => s.Trim().ToUpperInvariant())
+            .Where(s => s.Length > 0)
+            .ToList();
+        if (requested.Count != existing.Count
+            || requested.Distinct(StringComparer.OrdinalIgnoreCase).Count() != requested.Count
+            || requested.Any(s => !existing.Contains(s)))
+        {
+            await transaction.RollbackAsync(ct);
+            return false;
+        }
+
+        for (var i = 0; i < requested.Count; i++)
+        {
+            var update = connection.CreateCommand();
+            update.Transaction = (SqliteTransaction)transaction;
+            update.CommandText = "UPDATE watchlist SET sort_order = $order WHERE symbol = $symbol";
+            update.Parameters.AddWithValue("$order", i);
+            update.Parameters.AddWithValue("$symbol", requested[i]);
+            await update.ExecuteNonQueryAsync(ct);
+        }
+
+        await transaction.CommitAsync(ct);
+        return true;
     }
 
     public async Task<int> ResetWatchlistAsync(

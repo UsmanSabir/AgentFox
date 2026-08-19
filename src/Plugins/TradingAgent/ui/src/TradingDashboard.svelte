@@ -27,6 +27,8 @@
 
   /** Symbol the watchlist has selected; drives the chart pane. */
   let selectedSymbol: string | null = null;
+  let selectedCompany: string | null = null;
+  let watchlistCompact = false;
 
   /** Full-width chart mode, toggled from the chart's own header. */
   let chartExpanded = false;
@@ -279,10 +281,16 @@
 
     <!-- Watchlist beside the archive: the two are related — the archive is what gives the watched
          symbols their weekly levels — and the panel owns its own loading and refresh. -->
-    <div class="watch-row" class:expanded={chartExpanded}>
-      <WatchlistPanel bind:this={watchlistPanel} bind:selected={selectedSymbol} />
+    <div class="watch-row" class:expanded={chartExpanded} class:watchlist-compact={watchlistCompact}>
+      <WatchlistPanel
+        bind:this={watchlistPanel}
+        bind:selected={selectedSymbol}
+        bind:selectedCompany
+        bind:compact={watchlistCompact}
+      />
       <ChartPane
         symbol={selectedSymbol}
+        companyName={selectedCompany}
         bind:expanded={chartExpanded}
         refreshTick={marketTick}
         marketOpen={status.market.isOpen}
@@ -542,9 +550,11 @@
   /* minmax(0,1fr) not 1fr: the chart column must be allowed to shrink, or the canvas keeps its
      widest measured size and pushes the grid wider on every re-render. */
   .watch-row { display:grid; grid-template-columns:minmax(260px,320px) minmax(0,1fr); gap:.75rem; margin-bottom:.75rem; align-items:stretch; }
+  .watch-row.watchlist-compact:not(.expanded) { grid-template-columns:minmax(100px,116px) minmax(0,1fr); }
   .alerts-row { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:.75rem; margin-bottom:1.25rem; align-items:start; }
   @media (max-width: 900px) {
     .watch-row, .alerts-row { grid-template-columns:minmax(0,1fr); }
+    .watch-row.watchlist-compact:not(.expanded) { grid-template-columns:minmax(0,1fr); }
   }
 
   /* Expanded: the chart takes the full width and the watchlist STACKS BENEATH it rather than being

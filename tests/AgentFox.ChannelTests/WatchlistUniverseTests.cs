@@ -131,15 +131,41 @@ public sealed class WatchlistUniverseTests
             "A duplicate add must report false rather than creating a second row.");
 
         await env.Repository.UpdateWatchlistSymbolAsync("OGDC", alertsEnabled: false, notes: "watching");
+        await env.Repository.UpdateWatchlistSymbolAsync("OGDC", alertsEnabled: null, notes: null, pinned: true);
         // Patching one field must not blank the other.
         await env.Repository.UpdateWatchlistSymbolAsync("OGDC", alertsEnabled: null, notes: "still watching");
 
         var entry = (await env.Repository.GetWatchlistAsync()).Entries.Single();
         Assert.IsFalse(entry.AlertsEnabled);
+        Assert.IsTrue(entry.Pinned);
         Assert.AreEqual("still watching", entry.Notes);
 
         Assert.IsFalse(await env.Repository.UpdateWatchlistSymbolAsync("NOPE", true, null));
         Assert.IsFalse(await env.Repository.RemoveWatchlistSymbolAsync("NOPE"));
+    }
+
+    [TestMethod]
+    public async Task ReorderAndPin_AreDurableAndPinnedSymbolsStayFirst()
+    {
+        using var env = TestEnv.Create(["OGDC", "LUCK", "HBL"]);
+        await env.Universe.SeedIfNeededAsync();
+
+        Assert.IsTrue(await env.Repository.ReorderWatchlistAsync(["HBL", "OGDC", "LUCK"]));
+        Assert.IsTrue(await env.Repository.UpdateWatchlistSymbolAsync(
+            "LUCK", alertsEnabled: null, notes: null, pinned: true));
+
+        var pinned = await env.Repository.GetWatchlistAsync();
+        CollectionAssert.AreEqual(
+            new[] { "LUCK", "HBL", "OGDC" }, pinned.Entries.Select(e => e.Symbol).ToArray());
+
+        Assert.IsTrue(await env.Repository.UpdateWatchlistSymbolAsync(
+            "LUCK", alertsEnabled: null, notes: null, pinned: false));
+        var unpinned = await env.Repository.GetWatchlistAsync();
+        CollectionAssert.AreEqual(
+            new[] { "HBL", "OGDC", "LUCK" }, unpinned.Entries.Select(e => e.Symbol).ToArray());
+
+        Assert.IsFalse(await env.Repository.ReorderWatchlistAsync(["HBL", "OGDC"]),
+            "A stale partial order must not silently drop or reshuffle unseen symbols.");
     }
 
     [TestMethod]
@@ -420,7 +446,10 @@ public sealed class WatchlistUniverseTests
         public Task<bool> RemoveWatchlistSymbolAsync(string s, CancellationToken ct = default) =>
             throw new NotSupportedException();
         public Task<bool> UpdateWatchlistSymbolAsync(
-            string s, bool? a, string? n, CancellationToken ct = default) => throw new NotSupportedException();
+            string s, bool? a, string? n, bool? p = null, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<bool> ReorderWatchlistAsync(
+            IReadOnlyList<string> symbols, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<int> ResetWatchlistAsync(
             IReadOnlyList<string> seed, string hash, CancellationToken ct = default) =>
             throw new NotSupportedException();

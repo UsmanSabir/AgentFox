@@ -233,8 +233,11 @@ export interface ReconciliationRun {
  */
 export interface WatchlistEntry {
   symbol: string;
+  companyName?: string | null;
   addedUtc: string;
   source: 'seed' | 'user' | string;
+  sortOrder: number;
+  pinned: boolean;
   alertsEnabled: boolean;
   notes?: string | null;
   tradable: boolean;
@@ -841,9 +844,11 @@ export const trading = {
                                 }>('/trading/watchlist', { symbol }),
     remove: (symbol: string) =>
       del<{ symbol: string; removed: boolean }>(`/trading/watchlist/${encodeURIComponent(symbol)}`),
-    update: (symbol: string, changes: { alertsEnabled?: boolean; notes?: string }) =>
+    update: (symbol: string, changes: { alertsEnabled?: boolean; notes?: string; pinned?: boolean }) =>
       patch<{ symbol: string; updated: boolean }>(
         `/trading/watchlist/${encodeURIComponent(symbol)}`, changes),
+    reorder: (symbols: string[]) =>
+      post<{ reordered: boolean; symbols: number }>('/trading/watchlist/reorder', { symbols }),
     reset:  ()               => post<{ symbols: number }>('/trading/watchlist/reset')
   }
 };

@@ -17,10 +17,14 @@
     trading, CHART_INTERVALS,
     type ArmOrderDialogContext, type ChartData, type ChartInterval, type StockAssessment
   } from './api';
-  import { LineChart, AlertTriangle, Eye, RefreshCw, Brain, Maximize2, Minimize2, Activity, Crosshair } from 'lucide-svelte';
+  import {
+    LineChart, AlertTriangle, Eye, RefreshCw, Brain, Maximize2, Minimize2,
+    Activity, Crosshair, BarChart3
+  } from 'lucide-svelte';
   import AssessmentCard from './AssessmentCard.svelte';
 
   export let symbol: string | null = null;
+  export let companyName: string | null = null;
 
   /** Raised when the user clicks a level to arm an order at it; the dashboard opens the dialog. */
   const dispatch = createEventDispatcher<{ arm: ArmOrderDialogContext }>();
@@ -43,10 +47,13 @@
    *   all → the nearest three each side   key → weekly-confirmed only   off → clean price action
    * The full list is always in the legend below the chart, so nothing is actually hidden from view.
    */
-  let levelMode: 'all' | 'key' | 'off' = 'all';
+  // Weekly-confirmed structure is the readable default. All nearby levels remain one click away and
+  // are always listed below, but no longer cover the price axis on first render.
+  let levelMode: 'all' | 'key' | 'off' = 'key';
 
   /** RSI in its own pane costs ~90px of candles; worth reclaiming when the pane is small. */
   let showRsi = true;
+  let showVolume = true;
 
   const LEVEL_MODES = ['all', 'key', 'off'] as const;
 
@@ -59,10 +66,9 @@
   /**
    * Asks the parent to open the arming dialog, pre-filled from the clicked level.
    *
-   * The direction is inferred from which side the level sits on: a support is where a protective SELL
-   * belongs, a resistance is where a BUY breakout does. The TYPE is always Limit — the order kind is a
-   * decision about how to fill, not about which level was clicked. Both remain editable in the dialog:
-   * the pre-fill saves typing, it does not decide the trade.
+   * The default is the conventional level trade: buy a pullback at support, sell a rally at resistance.
+   * These are entries, not protective-stop shortcuts; stop protection belongs to the plan action below.
+   * Both direction and trigger remain editable in the dialog.
    */
   function armAtLevel(level: ChartData['levels']['supports'][number], side: 'support' | 'resistance') {
     if (!symbol || !data) return;
@@ -71,14 +77,14 @@
       symbol,
       triggerKind: isSupport ? 'PriceBelow' : 'PriceAbove',
       triggerPrice: level.price,
-      action: isSupport ? 'SELL' : 'BUY',
+      action: isSupport ? 'BUY' : 'SELL',
       orderType: 'LIMIT',
       price: level.price,
       context:
         `${symbol} last ${data.snapshot.close} · ${side} ${level.price} `
         + `(${level.touches} touch${level.touches === 1 ? '' : 'es'}`
         + `${level.weeklyConfirmed ? ', weekly-confirmed' : ', no weekly confirmation'}) `
-        + `· ${isSupport ? 'a SELL fires if price falls to it' : 'a BUY fires if price rises to it'}.`
+        + `· ${isSupport ? 'a BUY fires if price falls to support' : 'a SELL fires if price rises to resistance'}.`
     });
   }
 
@@ -209,7 +215,8 @@
     volumeSeries = chart.addSeries(HistogramSeries, {
       priceScaleId: 'volume',
       priceFormat: { type: 'volume' },
-      color: token('--text-3', '#5f6377')
+      color: token('--text-3', '#5f6377'),
+      visible: showVolume
     });
     chart.priceScale('volume').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
 
@@ -285,7 +292,15 @@
 
     drawLevels(d);
     drawPlanMarkers(d);
-    chart.timeScale().fitContent();
+    // Logical range ignores weekends and archive gaps, so the latest candles use the available width
+    // instead of being compressed into the right half of the plot by calendar time.
+    if (d.candles.length > 0) {
+      const visibleBars = expanded ? 110 : 72;
+      chart.timeScale().setVisibleLogicalRange({
+        from: Math.max(-1, d.candles.length - visibleBars),
+        to: d.candles.length + 4
+      });
+    }
   }
 
   /**
@@ -347,6 +362,11 @@
   function toggleRsi() {
     showRsi = !showRsi;
     rebuild();
+  }
+
+  function toggleVolume() {
+    showVolume = !showVolume;
+    volumeSeries?.applyOptions({ visible: showVolume });
   }
 
   function toggleExpand() {
@@ -472,7 +492,10 @@
     <div class="title">
       <LineChart size={16} />
       <div>
-        <b>{symbol ?? 'Chart'}</b>
+        <div class="instrument">
+          <b>{symbol ?? 'Chart'}</b>
+          {#if companyName}<strong>{companyName}</strong>{/if}
+        </div>
         {#if data}
           <span>
             {data.snapshot.close} · {pct(data.snapshot.dayChangePercent)} ·
@@ -513,6 +536,10 @@
         <button class:muted={!showRsi} on:click={toggleRsi} disabled={!symbol}
           title={showRsi ? 'Hide the RSI pane and give the height back to the candles' : 'Show the RSI pane'}>
           <Activity size={11} /> RSI
+        </button>
+        <button class:muted={!showVolume} on:click={toggleVolume} disabled={!symbol}
+          title={showVolume ? 'Hide volume bars for a cleaner price chart' : 'Show volume bars'}>
+          <BarChart3 size={11} /> Volume
         </button>
       </div>
 
@@ -600,18 +627,17 @@
           </div>
         {/if}
 
-        <!-- Levels are buttons: clicking one arms an order at it, pre-filled with the direction that
-             makes sense for that side (sell below a support, buy above a resistance). -->
+        <!-- Defaults follow the ordinary level trade: sell at resistance, buy at support. -->
         <div class="levels">
           <div>
             <b>Resistance <em class="hint">click to arm</em></b>
             {#each data.levels.resistances.slice(0, 3) as level}
               <button
                 class="level armable"
-                title="Arm a BUY breakout above {level.price}"
+                title="Arm a SELL when price rises to resistance at {level.price}"
                 on:click={() => armAtLevel(level, 'resistance')}
               >
-                {level.price}
+                <span class="action sell">SELL</span> {level.price}
                 <em>{pct(level.distancePercent)} · ×{level.touches}{level.weeklyConfirmed ? ' · weekly ✓' : ''}</em>
               </button>
             {:else}<span class="level muted">none above price</span>{/each}
@@ -621,10 +647,10 @@
             {#each data.levels.supports.slice(0, 3) as level}
               <button
                 class="level armable"
-                title="Arm a SELL at {level.price}"
+                title="Arm a BUY when price falls to support at {level.price}"
                 on:click={() => armAtLevel(level, 'support')}
               >
-                {level.price}
+                <span class="action buy">BUY</span> {level.price}
                 <em>−{level.distancePercent ?? '—'}% · ×{level.touches}{level.weeklyConfirmed ? ' · weekly ✓' : ''}</em>
               </button>
             {:else}<span class="level muted">none below price</span>{/each}
@@ -657,7 +683,9 @@
   header { display:flex; justify-content:space-between; align-items:flex-start; gap:1rem; flex-wrap:wrap; }
   .title { display:flex; gap:.6rem; align-items:flex-start; color:var(--primary); min-width:0; }
   .title div { display:flex; flex-direction:column; gap:.2rem; min-width:0; }
+  .title .instrument { flex-direction:row; align-items:baseline; gap:.45rem; flex-wrap:wrap; }
   .title b { color:var(--text); font-size:.9rem; font-family:ui-monospace, monospace; }
+  .title strong { color:var(--text-2); font-size:.72rem; font-weight:500; }
   .title span { color:var(--text-3); font-size:.72rem; }
   .title em { color:var(--warning); font-style:normal; }
 
@@ -678,11 +706,11 @@
 
   /* The price action, volume, and RSI share this canvas. Give them enough vertical separation for
      level labels and recent candles to remain legible on ordinary desktop screens. */
-  .plot { width:100%; height:520px; min-width:0; }
+  .plot { width:100%; height:580px; min-width:0; }
   /* A fixed height rather than a vh clamp: this renders inside an iframe whose viewport is shorter
      than the browser window, so a vh-based value collapsed back to its minimum and the expand button
      gained width but almost no height. The page scrolls, so a definite 680px is the honest choice. */
-  .plot.tall { height:680px; }
+  .plot.tall { height:740px; }
   .plot.loading { opacity:.5; }
 
   .view-controls { display:flex; gap:.25rem; }
@@ -742,6 +770,9 @@
     font-family:ui-monospace, monospace; color:var(--text); width:fit-content;
   }
   button.level.armable:hover { background:var(--surface-3); color:var(--primary); }
+  .action { display:inline-flex; min-width:2.1rem; font-size:.58rem; font-weight:700; letter-spacing:.04em; }
+  .action.buy { color:var(--success); }
+  .action.sell { color:var(--danger); }
   .level em { color:var(--text-3); font-style:normal; font-size:.66rem; font-family:inherit; }
   .level.muted { color:var(--text-3); }
 
