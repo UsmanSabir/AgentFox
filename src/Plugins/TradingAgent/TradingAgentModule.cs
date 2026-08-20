@@ -194,6 +194,10 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         // Same instance behind the narrow interface the order gate consumes.
         services.AddSingleton<IBrokerMarketState>(sp => sp.GetRequiredService<AhkPortalClient>());
         services.AddSingleton<AhkQuoteBook>();
+        // Market depth (MBP/MBO). Rides on the same GetFeed response the quote feed already polls, so
+        // it adds no traffic; the subscription is per symbol and off by default. See AhkDepthBook for
+        // why the payload is kept raw rather than modelled.
+        services.AddSingleton<AhkDepthBook>();
         services.AddSingleton<AhkFeedWorker>();
         services.AddHostedService(sp => sp.GetRequiredService<AhkFeedWorker>());
 
@@ -814,6 +818,29 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         // dead session and a quiet market all look like "no quotes" — so this is the surface that
         // tells them apart without reading Debug logs.
         trading.MapGet("/feed/status", (AhkFeedWorker feed) => Results.Ok(feed.GetStatus()));
+
+        // Depth for the currently followed symbol. GET only — changing the subscription is an action
+        // and belongs to the tool, not to a page poll.
+        trading.MapGet("/feed/depth", (AhkDepthBook depth, AhkFeedWorker feed, string? symbol) =>
+        {
+            var target = (symbol ?? depth.SubscribedSymbol)?.Trim().ToUpperInvariant();
+            if (target is null) return Results.Ok(new { subscribed = (string?)null, rows = 0 });
+
+            var entry = depth.Get("REG", target);
+            return Results.Ok(new
+            {
+                symbol = target,
+                subscribed = depth.SubscribedSymbol,
+                marketStatus = feed.MarketStatus,
+                byPriceRows = entry?.ByPrice.Count ?? 0,
+                byOrderRows = entry?.ByOrder.Count ?? 0,
+                byPrice = entry?.ByPrice.Select(r => r.ToString()),
+                byOrder = entry?.ByOrder.Select(r => r.ToString()),
+                observedByPriceFields = depth.ObservedMbpKeys,
+                observedByOrderFields = depth.ObservedMboKeys,
+                totalRowsEverSeen = depth.RowsSeen
+            });
+        });
 
         // ── Market movers (AHL analytics) ──────────────────────────────────────
         // One snapshot fetch backs every screen, so the dashboard can poll a few of these without
@@ -1885,6 +1912,13 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                 _services!.GetRequiredService<AhlAnalyticsClient>(),
                 _services!.GetRequiredService<IRuntimePluginOptions<AhlAnalyticsConfig>>(),
                 loggers.CreateLogger<StockDossierTool>()),
+            // Order-book depth from the broker feed — the only depth source there is. Registered
+            // unconditionally so the agent is told the feed or depth is switched off rather than
+            // silently lacking the capability.
+            new MarketDepthTool(
+                _services!.GetRequiredService<AhkFeedWorker>(),
+                _services!.GetRequiredService<AhkDepthBook>(),
+                loggers.CreateLogger<MarketDepthTool>()),
         };
 
         if (agentOptions.Value.ResearchWebEnabled && webSearchProvider is not null)

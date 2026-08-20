@@ -293,6 +293,43 @@ public sealed class AhkPortalClient : IBrokerMarketState, IDisposable
     }
 
     /// <summary>
+    /// Subscribes one symbol for market depth, on a page slot reserved for it.
+    ///
+    /// <para>
+    /// Two feed types exist and both are requested: <c>MBP-FEED</c> (market by price — the aggregated
+    /// ladder) and <c>MBO-FEED</c> (market by order — individual orders). The rows then arrive in the
+    /// <c>mbpFeed</c> / <c>mboFeed</c> arrays of the ordinary <c>GetFeed</c> response, so depth costs no
+    /// extra polling.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>The caller must have already checked that <paramref name="page"/> is not a quote-feed page.</b>
+    /// A subscription replaces the slot's contents for every feed type, and the portal reports nothing
+    /// when a page is emptied — see <c>AhkFeedConfig.DepthPage</c>.
+    /// </para>
+    /// </summary>
+    public async Task<bool> SubscribeDepthAsync(
+        string page, string market, string symbol, CancellationToken ct = default)
+    {
+        var key = new[] { new AhkSymbolKey(market, symbol) };
+
+        // Both feeds, same slot. Sent sequentially rather than concurrently: they share a session and a
+        // page slot, and the portal's ordering behaviour when two subscriptions for one slot are in
+        // flight together is unknown.
+        var byPrice = await SubscribeAsync(page, key, "MBP-FEED", ct);
+        var byOrder = await SubscribeAsync(page, key, "MBO-FEED", ct);
+
+        if (!byPrice || !byOrder)
+        {
+            _logger.LogWarning(
+                "[AhkPortal] Depth subscription for {Symbol} on {Page} partially failed " +
+                "(MBP {ByPrice}, MBO {ByOrder}).", symbol, page, byPrice, byOrder);
+        }
+
+        return byPrice || byOrder;
+    }
+
+    /// <summary>
     /// One poll of the live feed. Returns null when the call failed or the session died; an empty
     /// <see cref="AhkFeedResponse.Feed"/> is a normal, successful "nothing changed".
     /// </summary>

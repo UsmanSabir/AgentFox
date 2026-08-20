@@ -39,6 +39,7 @@ public sealed class AhkFeedWorker : BackgroundService
 
     private readonly AhkPortalClient _portal;
     private readonly AhkQuoteBook _book;
+    private readonly AhkDepthBook _depth;
     private readonly AhkBroker _broker;
     private readonly MonitoredUniverse _universe;
     private readonly IMarketCalendar _calendar;
@@ -81,6 +82,7 @@ public sealed class AhkFeedWorker : BackgroundService
     public AhkFeedWorker(
         AhkPortalClient portal,
         AhkQuoteBook book,
+        AhkDepthBook depth,
         AhkBroker broker,
         MonitoredUniverse universe,
         IMarketCalendar calendar,
@@ -92,6 +94,7 @@ public sealed class AhkFeedWorker : BackgroundService
         _activity = activity;
         _portal = portal;
         _book = book;
+        _depth = depth;
         _broker = broker;
         _universe = universe;
         _calendar = calendar;
@@ -332,6 +335,15 @@ public sealed class AhkFeedWorker : BackgroundService
         if (returned.Count > 0) _lastFeedSymbols = returned;
 
         var applied = _book.Apply(response.Feed ?? [], DateTime.UtcNow);
+
+        // Depth rides along on the same response, so ingesting it costs nothing per poll. It is only
+        // ever non-empty while a depth subscription is active.
+        if (response.MbpFeed is { Count: > 0 } || response.MboFeed is { Count: > 0 })
+        {
+            var cfgNow = _config.Current;
+            var mkt = string.IsNullOrWhiteSpace(cfgNow.Market) ? "REG" : cfgNow.Market.Trim().ToUpperInvariant();
+            _depth.Ingest(response.MbpFeed, response.MboFeed, mkt, _depth.SubscribedSymbol);
+        }
         if (applied > 0)
         {
             _logger.LogDebug("[AhkFeed] Applied {Applied} quote update(s); book holds {Count} symbol(s).",
@@ -503,6 +515,64 @@ public sealed class AhkFeedWorker : BackgroundService
         _lastSubscribeUtc = DateTime.MinValue;
         _subscriptionGuard.Reset();
     }
+    // ── Market depth ──────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Points the depth subscription at one symbol, replacing whatever it was following.
+    ///
+    /// <para>
+    /// One symbol at a time, matching the portal: its own UI has a single MBO panel and a single MBP
+    /// panel. Passing null clears the focus but leaves the slot as the portal last set it — there is no
+    /// unsubscribe verb, and re-subscribing an empty page for a depth feed was never tested, so the
+    /// honest behaviour is to stop reading rather than to send an untested call.
+    /// </para>
+    ///
+    /// <para>
+    /// Refuses when the configured depth page overlaps a quote-feed page, because a subscription
+    /// replaces a slot for every feed type and the portal reports nothing when a page is emptied — the
+    /// only symptom would be quotes silently stopping for those symbols.
+    /// </para>
+    /// </summary>
+    /// <returns>Null on success, or the reason it was refused.</returns>
+    public async Task<string?> FocusDepthAsync(string? symbol, CancellationToken ct = default)
+    {
+        var cfg = _config.Current;
+        if (!cfg.Enabled) return "The broker feed is disabled, so depth cannot be subscribed.";
+        if (!cfg.DepthEnabled) return "Market depth is disabled (AhkFeed:DepthEnabled).";
+
+        if (symbol is null)
+        {
+            _depth.SubscribedSymbol = null;
+            return null;
+        }
+
+        symbol = symbol.Trim().ToUpperInvariant();
+
+        var page = cfg.DepthPage?.Trim();
+        if (string.IsNullOrEmpty(page)) return "AhkFeed:DepthPage is not configured.";
+
+        var quotePages = FeedPagePlanner.NormalizePages(cfg.Pages);
+        if (quotePages.Contains(page, StringComparer.OrdinalIgnoreCase))
+        {
+            // Fail closed. Overlapping would evict that page's quote symbols with no error anywhere.
+            return $"DepthPage '{page}' is also a quote-feed page ({string.Join(", ", quotePages)}). " +
+                   "Subscribing depth there would silently stop quotes for those symbols. " +
+                   "Use a page outside the quote set, or shrink AhkFeed:Pages.";
+        }
+
+        if (!_portal.HasSession)
+            return "No broker session is available; depth needs a live session.";
+
+        var market = string.IsNullOrWhiteSpace(cfg.Market) ? "REG" : cfg.Market.Trim().ToUpperInvariant();
+        if (!await _portal.SubscribeDepthAsync(page, market, symbol, ct))
+            return $"The portal refused the depth subscription for {symbol}.";
+
+        _depth.SubscribedSymbol = symbol;
+        _activity?.Info("Feed", $"Market depth following {symbol}",
+            $"MBP and MBO on {page}; rows arrive on the existing feed poll.");
+        return null;
+    }
+
 }
 
 /// <summary>Operator-facing snapshot of <see cref="AhkFeedWorker"/>; see its GetStatus remarks.</summary>

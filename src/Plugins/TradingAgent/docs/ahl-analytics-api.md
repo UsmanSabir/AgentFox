@@ -115,9 +115,44 @@ about, because the MBO/MBP ladders visible in the trading terminal make it look 
 - The stream token's scopes are `["market:read", "market:announcements"]`. There is no depth scope
   to ask for.
 
-The MBO/MBP ladders in the terminal are fed by the broker's own feed (`web.ahletrade.com`), which
-is what `AhkFeedWorker` / `AhkQuoteBook` already talk to. **Depth stays where it is.** This portal
-adds nothing to that path, and any plan that routes depth through here is built on a wrong premise.
+The MBO/MBP ladders in the terminal are fed by the broker's own feed (`web.ahletrade.com`).
+**Depth stays there.** This portal adds nothing to that path, and any plan that routes depth through
+here is built on a wrong premise.
+
+**Correction, 2026-08-20.** An earlier version of this section said the broker feed "is what
+`AhkFeedWorker` / `AhkQuoteBook` already talk to", which was true of quotes and wrongly implied depth
+came with them. It did not: the plugin collected **no depth at all, by any means**. The only
+subscription ever sent was `feedtype=MKT-FEED`, and although `AhkFeedResponse` declared `mboFeed` and
+`mbpFeed`, they were typed `List<object>` with **zero consumers anywhere in the codebase** — so the
+arrays were always empty and nothing could have read them if they were not.
+
+Depth is now collected, on the broker feed:
+
+- `POST /Home/SendSubscriptionofSymbols` with `feedtype=MBP-FEED` or `MBO-FEED` and a single symbol.
+  MBP is the ladder aggregated per price level; MBO lists individual orders. Both are requested.
+- Rows then arrive in the `mbpFeed` / `mboFeed` arrays of the ordinary `GET /Home/GetFeed` response, so
+  depth adds **no polling** once subscribed.
+- `AhkDepthBook` stores them, `get_market_depth` and `GET /trading/feed/depth` read them, and
+  `AhkFeed:DepthEnabled` gates it (off by default).
+
+Two properties of this are deliberate and worth not undoing.
+
+**The payload is kept raw.** The depth rows' field names have never been captured — nothing had ever
+subscribed, so the arrays were always empty. A typed ladder would mean guessing those names, and a
+wrong guess deserialises to a book full of nulls that reads as *thin liquidity* rather than as a
+parsing failure. That is an error that changes a sizing decision, so the rows pass through as
+received and the observed field names are reported alongside them (`observed_by_price_fields`,
+`observed_by_order_fields`). Those are the artefact that lets a typed model be written from real data
+— fill them in from a live session, then model it.
+
+**`pagenum` is one namespace shared by every feed type, and a subscription REPLACES the slot.** So
+subscribing depth on a page the quote feed uses evicts that page's quote symbols, and the portal
+reports nothing at all: `GetFeed` answers 200 with an empty array whether nothing traded or nothing is
+subscribed. The only symptom would be quotes silently stopping for fifty symbols. `DepthPage` must
+therefore not appear in `Pages`, and the subscription is **refused outright** on overlap rather than
+trusting configuration to be careful. The default quote pages are Page1–Page4, so `DepthPage` defaults
+to `Page5` — which is **unverified**: whether the portal accepts a fifth slot was never tested, and if
+it does not, the honest fix is to shrink `Pages` rather than to overlap.
 
 What it *does* add is breadth: 857 equities of history, ratios, and precomputed indicators in a
 handful of calls.
@@ -531,3 +566,11 @@ This capture ran with the market closed. Before anything depends on the live par
    2026-08-20 the whole integration is dark behind it — no token means no snapshot, no movers, and
    candles fall back to PSX. Everything downstream was verified working the day before, so this is an
    availability question, not a correctness one.
+5. **The depth payload shape.** `AhkFeed:DepthEnabled` plus `get_market_depth` on a live session during
+   market hours will populate `observed_by_price_fields` / `observed_by_order_fields`. Until those are
+   known, depth is collected and readable but not modelled, and no strategy should consume it.
+6. **Whether the portal accepts `Page5`.** If the depth subscription is refused there, a quote page has
+   to be given up instead — never shared.
+7. The CSRF fix on the analytics POSTs is still **unverified end to end**. It is right in principle (the
+   browser captures always carried the header, and GETs were unaffected), but hop ① was down when it
+   was written, so no live POST has exercised it.
