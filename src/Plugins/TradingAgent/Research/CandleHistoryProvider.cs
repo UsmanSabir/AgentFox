@@ -215,7 +215,7 @@ public sealed class CandleHistoryProvider
             .OrderBy(d => d)
             .ToList();
 
-        AnnounceSources(sources);
+        AnnounceSources(sources, live);
 
         return new CandleHistory
         {
@@ -239,7 +239,9 @@ public sealed class CandleHistoryProvider
     /// serving a different kind of price.
     /// </para>
     /// </summary>
-    private void AnnounceSources(Dictionary<string, CandleSource> sources)
+    private void AnnounceSources(
+        Dictionary<string, CandleSource> sources,
+        IReadOnlyDictionary<string, PsxLiveQuote> live)
     {
         if (sources.Count == 0) return;
 
@@ -249,20 +251,34 @@ public sealed class CandleHistoryProvider
             .ToList();
 
         var mix = string.Join(", ", counts.Select(g => $"{Describe(g.Key)} {g.Count()}"));
-        if (mix == _lastAnnouncedSourceMix) return;
-        _lastAnnouncedSourceMix = mix;
+        var liveMix = live.Count == 0
+            ? "none"
+            : string.Join(", ", live.Values
+                .GroupBy(q => q.Source, StringComparer.OrdinalIgnoreCase)
+                .OrderByDescending(g => g.Count())
+                .Select(g => $"{DescribeLive(g.Key)} {g.Count()}"));
+        var announcementKey = $"history:{mix}|live:{liveMix}";
+        if (announcementKey == _lastAnnouncedSourceMix) return;
+        _lastAnnouncedSourceMix = announcementKey;
 
         var primary = counts[0].Key;
-        var detail = primary == CandleSource.AhlAnalytics
+        var historyDetail = primary == CandleSource.AhlAnalytics
             ? "AHL bars are corporate-action ADJUSTED — correct for indicators and levels, but they " +
               "do not reconcile against fill prices. PSX remains the source of record for money."
             : _ahl.Enabled
-                ? "The AHL analytics portal is enabled but has no session yet, so candles come from " +
-                  "PSX (raw, as-traded prices)."
-                : "The AHL analytics portal is disabled; candles come from PSX (raw, as-traded prices).";
+                ? "Settled history currently comes from PSX (raw, as-traded prices) because the " +
+                  "separate AHL analytics session is not ready."
+                : "Settled history comes from PSX (raw, as-traded prices); AHL analytics is disabled.";
 
-        _activity.Info("Candles", $"Daily candle source: {mix}", detail);
-        _logger.LogInformation("[CandleHistory] Source mix: {Mix}", mix);
+        var liveDetail = live.Count == 0
+            ? "No fresh live quote was available to top up the forming bar."
+            : $"The forming bar is topped up separately from {liveMix}; AHK is preferred and PSX " +
+              "fills only symbols the broker feed does not cover.";
+
+        _activity.Info("Candles", $"Daily historical candle source: {mix}",
+            $"{historyDetail} {liveDetail}");
+        _logger.LogInformation("[CandleHistory] Historical source: {History}; live top-up: {Live}",
+            mix, liveMix);
     }
 
     private static string Describe(CandleSource source) => source switch
@@ -271,6 +287,13 @@ public sealed class CandleHistoryProvider
         CandleSource.LocalArchive => "local archive (PSX)",
         CandleSource.PsxPortal    => "PSX portal",
         _                          => "unknown"
+    };
+
+    private static string DescribeLive(string source) => source.ToLowerInvariant() switch
+    {
+        "ahk" => "AHK live feed",
+        "psx" => "PSX market watch",
+        _     => source
     };
 
     /// <summary>

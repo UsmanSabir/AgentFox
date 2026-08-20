@@ -9,7 +9,7 @@ namespace AgentFox.ChannelTests;
 public class TradingAgentModuleTests
 {
     [TestMethod]
-    public void BuildSpecialistToolNames_ExposesExecutionTools()
+    public void BuildSpecialistToolNames_ExposesTradingAndDiscoveryTools()
     {
         var method = typeof(TradingAgentModule).GetMethod(
             "BuildSpecialistToolNames",
@@ -21,6 +21,9 @@ public class TradingAgentModuleTests
 
         CollectionAssert.Contains(names.ToList(), "place_order");
         CollectionAssert.Contains(names.ToList(), "place_orders");
+        CollectionAssert.Contains(names.ToList(), "market_movers");
+        CollectionAssert.Contains(names.ToList(), "stock_dossier");
+        CollectionAssert.Contains(names.ToList(), "get_market_depth");
     }
 
     [TestMethod]

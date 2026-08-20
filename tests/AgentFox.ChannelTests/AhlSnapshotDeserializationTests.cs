@@ -30,6 +30,21 @@ public sealed class AhlSnapshotDeserializationTests
         NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowReadingFromString
     };
 
+    [TestMethod]
+    [DataRow("false")]
+    [DataRow("[]")]
+    [DataRow("\"-\"")]
+    public void OptionalBeta_NonObjectShape_DoesNotDiscardSnapshot(string betaJson)
+    {
+        var json = "{\"data\":{\"eq\":{\"ADOS\":{\"s\":\"ADOS\",\"bt\":" + betaJson + "}}}}";
+
+        var snapshot = JsonSerializer.Deserialize<AhlMarketSnapshot>(json, Options);
+
+        Assert.IsNotNull(snapshot?.Data?.Equities);
+        Assert.IsTrue(snapshot.Data.Equities.TryGetValue("ADOS", out var equity));
+        Assert.IsNull(equity.Beta);
+    }
+
     // Trimmed from the live payload. Values are verbatim.
     private const string Fixture = """
     {"status":"ok","message":"","count":0,"data":{

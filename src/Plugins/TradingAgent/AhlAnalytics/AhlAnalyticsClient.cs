@@ -138,6 +138,14 @@ public sealed class AhlAnalyticsClient : IDisposable
     private readonly Queue<DateTimeOffset> _recent = new();
     private readonly object _rateLock = new();
 
+    /// <summary>
+    /// Daily history is immutable for the duration of a trading session. Cache it per symbol so a
+    /// 31-symbol monitor does not spend 31 of the portal's 40 request slots every two minutes and
+    /// starve the market-snapshot POST. Per-symbol gates also collapse concurrent cold reads.
+    /// Empty/failing responses are never cached, so recovery is immediate.
+    /// </summary>
+    private readonly AhlDailyCandleCache _dailyCandleCache = new();
+
     public AhlAnalyticsClient(
         AhkPortalClient portal,
         IRuntimePluginOptions<AhlAnalyticsConfig> config,
@@ -484,12 +492,10 @@ public sealed class AhlAnalyticsClient : IDisposable
     /// </para>
     /// </summary>
     /// <param name="allowHandshake">
-    /// Whether this caller may pay for the SSO handshake. <b>Dashboard and other polled callers must
-    /// pass false.</b> Hop ① runs against the broker session, so a handshake can launch a browser and
-    /// log in; a caller on a timer that allowed it would generate a login per poll whenever the
-    /// handshake is failing, which is the incident this parameter exists to prevent. Agent- and
-    /// user-initiated calls pass true, because a person asked for the data and one login is a
-    /// reasonable price.
+    /// Whether this caller may perform the SSO handshake. Passive callers may pass true only after
+    /// <see cref="AhkPortalClient.HasSession"/> proves the broker session is already live; in that
+    /// case hop ① is a cheap authenticated GET and cannot launch a browser login. Cold passive
+    /// callers still pass false. Agent- and user-initiated calls may pass true unconditionally.
     /// </param>
     public async Task<AhlSnapshotData?> GetMarketSnapshotAsync(
         bool forceRefresh = false, bool allowHandshake = true, CancellationToken ct = default)
@@ -506,8 +512,8 @@ public sealed class AhlAnalyticsClient : IDisposable
         if (!allowHandshake && !HasToken)
         {
             LastError ??= _handshakeError
-                ?? "No analytics session yet. This view will not start one; run market_movers or " +
-                   "stock_dossier from chat to establish it.";
+                ?? "Waiting for an existing broker session before establishing the separate AHL " +
+                   "analytics session. This view will never launch a broker login.";
             return _snapshot;
         }
 
@@ -560,9 +566,21 @@ public sealed class AhlAnalyticsClient : IDisposable
     public async Task<IReadOnlyList<AhlCandle>> GetDailyCandlesAsync(
         string symbol, CancellationToken ct = default)
     {
-        var response = await GetJsonAsync<AhlCandleResponse>(
-            $"api/v3/market?path=/daily/{Uri.EscapeDataString(symbol)}", ct);
-        return Reverse(response?.Data);
+        var normalized = symbol.Trim().ToUpperInvariant();
+        var ttl = TimeSpan.FromMinutes(Math.Max(1, Config.DailyCandleCacheMinutes));
+        return await _dailyCandleCache.GetAsync(normalized, ttl, async token =>
+        {
+            // Snapshot requests own this gate from before the SSO handshake until the market POST
+            // completes. Candle reads never create that handshake themselves, so once a cold
+            // snapshot publishes the token they pause here instead of racing 30+ GETs into the
+            // shared rate limiter ahead of the POST that makes the dashboard usable.
+            await _snapshotGate.WaitAsync(token);
+            _snapshotGate.Release();
+
+            var response = await GetJsonAsync<AhlCandleResponse>(
+                $"api/v3/market?path=/daily/{Uri.EscapeDataString(normalized)}", token);
+            return Reverse(response?.Data);
+        }, ct);
     }
 
     /// <summary>

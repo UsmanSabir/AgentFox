@@ -63,6 +63,8 @@ public sealed class AhkFeedWorker : BackgroundService
     private DateTime _lastSubscribeUtc = DateTime.MinValue;
     private DateOnly _bookSession;
     private IReadOnlyList<string> _subscribed = [];
+    private bool _resubscribePending;
+    private string? _resubscribeReason;
     private int _consecutiveFailures;
     private DateTime? _lastSeenOpenPkt;
 
@@ -393,6 +395,8 @@ public sealed class AhkFeedWorker : BackgroundService
 
         _logger.LogInformation("[AhkFeed] Re-subscribing because {Reason}.", reason);
         _activity?.Info("Feed", "Re-subscribing the live quote feed", reason);
+        _resubscribePending = true;
+        _resubscribeReason = reason;
         _subscribed = [];
         _lastSubscribeUtc = DateTime.MinValue;
     }
@@ -442,12 +446,25 @@ public sealed class AhkFeedWorker : BackgroundService
             if (!await _portal.SubscribeAsync(page, slice, "MKT-FEED", ct))
             {
                 _logger.LogWarning("[AhkFeed] Subscription for {Page} failed; retrying next pass.", page);
+                if (_resubscribePending)
+                {
+                    _activity?.Warn("Feed", "Live quote feed re-subscription failed",
+                        $"{page} was refused; retrying next pass. Trigger: {_resubscribeReason}");
+                }
                 return;
             }
         }
 
         _subscribed = symbols;
         _lastSubscribeUtc = DateTime.UtcNow;
+
+        if (_resubscribePending)
+        {
+            _activity?.Info("Feed", "Live quote feed re-subscribed",
+                $"{symbols.Count} symbol(s) across {pages.Count} page(s). Trigger: {_resubscribeReason}");
+            _resubscribePending = false;
+            _resubscribeReason = null;
+        }
 
         // Evict anything the portal will no longer send. A symbol dropped from the watchlist stops
         // arriving but its last quote would otherwise stay servable for the whole freshness window.

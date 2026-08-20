@@ -105,9 +105,9 @@ public sealed class AhkFeedConfig
     ///
     /// <para>
     /// The default quote pages are Page1–Page4 (4 x 50 = 200 symbols), so a depth page has to come from
-    /// outside that set, or one of them has to be given up. Page5 is the default here and is UNVERIFIED
-    /// — whether the portal accepts a fifth slot was never tested, and if it does not, the honest fix
-    /// is to shrink <see cref="Pages"/> rather than to overlap.
+    /// outside that set, or one of them has to be given up. Page5 is the verified default: on
+    /// 2026-08-20 the running plugin focused PPL there and received 10 MBP plus 10 MBO rows while all
+    /// 30 quote symbols on Page1 remained fresh.
     /// </para>
     /// </summary>
     public string DepthPage { get; set; } = "Page5";
