@@ -59,6 +59,17 @@ public sealed class AhlAnalyticsClient : IDisposable
         """<meta\s+name=["']access-token["']\s+content=["']([^"']+)["']""",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+    /// <summary>
+    /// The CSRF token from the same landing page. Required on POSTs: the portal's `/api/v3` routes
+    /// accept the session cookie as well as the Bearer token, which means Laravel's CSRF middleware
+    /// applies to them, and a POST without this header is rejected (419) even with a perfectly valid
+    /// token. GETs are unaffected — which is exactly the shape of the bug this fixes, where candle
+    /// reads worked while the market snapshot did not.
+    /// </summary>
+    private static readonly Regex CsrfTokenMeta = new(
+        """<meta\s+name=["']csrf-token["']\s+content=["']([^"']+)["']""",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
     private readonly AhkPortalClient _portal;
     private readonly IRuntimePluginOptions<AhlAnalyticsConfig> _config;
     private readonly ILogger<AhlAnalyticsClient> _logger;
@@ -71,7 +82,16 @@ public sealed class AhlAnalyticsClient : IDisposable
     private readonly HttpClient _http;
 
     private string? _bearer;
+    private string? _csrf;
     private DateTimeOffset _bearerObtainedAt;
+
+    /// <summary>
+    /// Why the last call failed, in the caller's words rather than the log's. Surfaced through the
+    /// management API and the tools so a failure reports its actual status code instead of a guess:
+    /// "the portal could not be reached" is indistinguishable between no session, a throttle, and a
+    /// rejected POST, and those need different responses.
+    /// </summary>
+    public string? LastError { get; private set; }
 
     private AhlSnapshotData? _snapshot;
     private DateTimeOffset _snapshotAt;
@@ -183,6 +203,14 @@ public sealed class AhlAnalyticsClient : IDisposable
             }
 
             _bearer = match.Groups[1].Value;
+            _csrf = CsrfTokenMeta.Match(html.Length > 16_384 ? html[..16_384] : html) is { Success: true } c
+                ? c.Groups[1].Value
+                : null;
+            if (_csrf is null)
+            {
+                _logger.LogWarning("[AhlAnalytics] No csrf-token meta tag on the SSO page; " +
+                                   "POST endpoints (market snapshot, news) will likely be refused.");
+            }
             _bearerObtainedAt = DateTimeOffset.UtcNow;
             _logger.LogInformation("[AhlAnalytics] Obtained an analytics API token via SSO.");
             return _bearer;
@@ -230,8 +258,14 @@ public sealed class AhlAnalyticsClient : IDisposable
     /// <summary>
     /// Sends one API request, handling the throttle-as-401 behaviour described on the class.
     /// </summary>
+    /// <param name="contentFactory">
+    /// Builds the request body, called once PER ATTEMPT. It has to be a factory rather than an
+    /// instance: an <see cref="HttpContent"/> cannot be sent twice, and disposing the request disposes
+    /// its content, so a retry that reused one would throw instead of retrying. That turned every
+    /// retryable POST failure into a permanent one.
+    /// </param>
     private async Task<string?> SendAsync(
-        HttpMethod method, string path, HttpContent? content, CancellationToken ct)
+        HttpMethod method, string path, Func<HttpContent>? contentFactory, CancellationToken ct)
     {
         if (!Enabled) return null;
 
@@ -244,7 +278,19 @@ public sealed class AhlAnalyticsClient : IDisposable
 
             using var request = new HttpRequestMessage(method, new Uri(BaseUri, path.TrimStart('/')));
             request.Headers.TryAddWithoutValidation("Authorization", "Bearer " + token);
-            if (content is not null) request.Content = content;
+
+            // CSRF on anything that is not a GET. The portal's /api routes accept the session cookie
+            // alongside the Bearer token, so Laravel's CSRF middleware applies and a POST without this
+            // is refused (419) despite a valid token. Both header spellings are sent because Laravel
+            // accepts either, and which one a deployment honours is not worth discovering in
+            // production.
+            if (method != HttpMethod.Get && _csrf is not null)
+            {
+                request.Headers.TryAddWithoutValidation("X-CSRF-TOKEN", _csrf);
+                request.Headers.TryAddWithoutValidation("X-XSRF-TOKEN", _csrf);
+            }
+
+            if (contentFactory is not null) request.Content = contentFactory();
 
             try
             {
@@ -264,10 +310,23 @@ public sealed class AhlAnalyticsClient : IDisposable
                     continue;
                 }
 
+                // 419 Page Expired is Laravel's CSRF rejection. The token itself is fine; the CSRF
+                // value is stale or was never captured, and both are cured by re-running the
+                // handshake — so unlike a 401 this SHOULD re-handshake rather than back off.
+                if ((int)response.StatusCode == 419)
+                {
+                    LastError = "The portal rejected the request as CSRF-expired (419). " +
+                                "Re-running the SSO handshake to obtain a fresh CSRF token.";
+                    _logger.LogWarning("[AhlAnalytics] {Path} answered 419 (CSRF); re-handshaking.", path);
+                    if (attempt < 2) { await EnsureTokenAsync(force: true, ct); continue; }
+                    return null;
+                }
+
                 if (response.StatusCode == HttpStatusCode.Forbidden)
                 {
                     // A real permission boundary — e.g. /analyst-opinion/target, which this account
                     // is not entitled to. Retrying cannot help, so do not.
+                    LastError = $"{path} is not permitted for this account (403).";
                     _logger.LogInformation(
                         "[AhlAnalytics] {Path} is not permitted for this account (403).", path);
                     return null;
@@ -275,23 +334,49 @@ public sealed class AhlAnalyticsClient : IDisposable
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    _logger.LogWarning("[AhlAnalytics] {Method} {Path} returned {Status}.",
-                        method, path, (int)response.StatusCode);
+                    // Include a body snippet: the portal explains itself in the body far more often
+                    // than the status code alone does, and without this a failure is only ever
+                    // reportable as "could not be reached".
+                    var body = await SafeSnippetAsync(response, ct);
+                    LastError = $"{method} {path} returned {(int)response.StatusCode}" +
+                                (body is null ? "." : $": {body}");
+                    _logger.LogWarning("[AhlAnalytics] {Method} {Path} returned {Status}. {Body}",
+                        method, path, (int)response.StatusCode, body);
                     return null;
                 }
 
+                LastError = null;
                 return await response.Content.ReadAsStringAsync(ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception ex)
             {
+                LastError = $"{method} {path} failed: {ex.Message}";
                 _logger.LogWarning(ex, "[AhlAnalytics] {Method} {Path} failed.", method, path);
                 return null;
             }
         }
 
+        LastError ??= $"{path} still failing after retries.";
         _logger.LogWarning("[AhlAnalytics] {Path} still failing after retries.", path);
         return null;
+    }
+
+    /// <summary>A short, log-safe excerpt of a response body; null when it cannot be read.</summary>
+    private static async Task<string?> SafeSnippetAsync(
+        HttpResponseMessage response, CancellationToken ct)
+    {
+        try
+        {
+            var body = await response.Content.ReadAsStringAsync(ct);
+            if (string.IsNullOrWhiteSpace(body)) return null;
+            body = body.Replace('\n', ' ').Replace('\r', ' ').Trim();
+            return body.Length > 200 ? body[..200] + "\u2026" : body;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private async Task<T?> GetJsonAsync<T>(string path, CancellationToken ct) where T : class
@@ -301,9 +386,9 @@ public sealed class AhlAnalyticsClient : IDisposable
     }
 
     private async Task<T?> PostJsonAsync<T>(
-        string path, HttpContent? content, CancellationToken ct) where T : class
+        string path, Func<HttpContent>? contentFactory, CancellationToken ct) where T : class
     {
-        var body = await SendAsync(HttpMethod.Post, path, content, ct);
+        var body = await SendAsync(HttpMethod.Post, path, contentFactory, ct);
         return Deserialize<T>(body, path);
     }
 
@@ -349,15 +434,16 @@ public sealed class AhlAnalyticsClient : IDisposable
                 return _snapshot;
 
             // The endpoint is a POST with a form body; `item=market` is the only value the portal's
-            // own UI ever sends.
-            using var form = new FormUrlEncodedContent(
-                new Dictionary<string, string> { ["item"] = "market" });
-
+            // own UI ever sends. Built per attempt — see SendAsync's contentFactory.
             var response = await PostJsonAsync<AhlMarketSnapshot>(
-                "api/v3/market?path=/req", form, ct);
+                "api/v3/market?path=/req",
+                () => new FormUrlEncodedContent(
+                    new Dictionary<string, string> { ["item"] = "market" }),
+                ct);
 
             if (response?.Data?.Equities is null or { Count: 0 })
             {
+                LastError ??= "The market snapshot returned no equities.";
                 _logger.LogWarning("[AhlAnalytics] Market snapshot came back without equities.");
                 return _snapshot; // keep serving the previous one rather than dropping to nothing
             }

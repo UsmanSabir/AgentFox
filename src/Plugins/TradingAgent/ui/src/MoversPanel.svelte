@@ -150,10 +150,20 @@
       <code>true</code> to use market-wide screens.
     </p>
   {:else if data && data.available === false}
+    <!-- Say which of the two very different causes it is. A held token means the handshake already
+         succeeded, so blaming a missing broker session would send the operator to the wrong place. -->
     <p class="notice">
-      <AlertTriangle size={14} /> The analytics portal could not be reached. This usually means no
-      broker session is available for the SSO handshake.
+      <AlertTriangle size={14} />
+      {#if data.hasToken}
+        The portal is authenticated but the market snapshot was refused.
+      {:else}
+        No portal session yet — the SSO handshake needs a live broker session. Running
+        <code>market_movers</code> or <code>stock_dossier</code> from chat will establish one.
+      {/if}
     </p>
+    {#if data.error}
+      <p class="error-detail">{data.error}</p>
+    {/if}
   {:else}
     <div class="controls">
       <div class="screens">
@@ -320,6 +330,10 @@
     color: var(--text-2); margin: .8rem 0 0;
   }
   .error { color: #dc2626; }
+  .error-detail {
+    font-size: .72rem; color: var(--text-2); margin: .3rem 0 0;
+    font-family: ui-monospace, monospace; word-break: break-word;
+  }
   code { font-size: .74rem; background: var(--surface-2, #ffffff10); padding: .05rem .25rem; border-radius: 3px; }
 
   @media (max-width: 720px) {

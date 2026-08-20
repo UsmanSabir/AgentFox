@@ -837,7 +837,19 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
 
             var snapshot = await analytics.GetMarketSnapshotAsync(ct: ct);
             if (snapshot is null)
-                return Results.Ok(new { enabled = true, available = false, rows = Array.Empty<object>() });
+            {
+                // Report WHY. "Could not be reached" covers no-session, a throttle and a rejected
+                // POST, and those need different responses from the operator — hasToken alone
+                // distinguishes the first from the rest.
+                return Results.Ok(new
+                {
+                    enabled = true,
+                    available = false,
+                    hasToken = analytics.HasToken,
+                    error = analytics.LastError,
+                    rows = Array.Empty<object>()
+                });
+            }
 
             var filter = new AhlMovers.Filter(index, sectorCode, minTurnover, null, minPrice);
             return Results.Ok(new
@@ -861,7 +873,14 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
 
             var snapshot = await analytics.GetMarketSnapshotAsync(ct: ct);
             if (snapshot is null)
-                return Results.Ok(new { enabled = true, available = false, sectors = Array.Empty<object>() });
+                return Results.Ok(new
+                {
+                    enabled = true,
+                    available = false,
+                    hasToken = analytics.HasToken,
+                    error = analytics.LastError,
+                    sectors = Array.Empty<object>()
+                });
 
             return Results.Ok(new
             {
