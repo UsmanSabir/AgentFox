@@ -832,12 +832,16 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                 symbol = target,
                 subscribed = depth.SubscribedSymbol,
                 marketStatus = feed.MarketStatus,
-                byPriceRows = entry?.ByPrice.Count ?? 0,
-                byOrderRows = entry?.ByOrder.Count ?? 0,
-                byPrice = entry?.ByPrice.Select(r => r.ToString()),
-                byOrder = entry?.ByOrder.Select(r => r.ToString()),
-                observedByPriceFields = depth.ObservedMbpKeys,
-                observedByOrderFields = depth.ObservedMboKeys,
+                bestBid = entry?.BestBid,
+                bestAsk = entry?.BestAsk,
+                spread = entry?.Spread,
+                totalBidVolume = entry?.TotalBidVolume,
+                totalAskVolume = entry?.TotalAskVolume,
+                imbalance = entry?.Imbalance,
+                levels = entry?.Levels,
+                orders = entry?.Orders,
+                levelsAtUtc = entry?.LevelsAtUtc,
+                ordersAtUtc = entry?.OrdersAtUtc,
                 totalRowsEverSeen = depth.RowsSeen
             });
         });

@@ -7,113 +7,160 @@ namespace AgentFox.ChannelTests;
 /// The market-depth store behind <c>get_market_depth</c>.
 ///
 /// <para>
-/// The portal's depth payload had never been captured when this was written — nothing had ever
-/// subscribed to MBP-FEED or MBO-FEED — so the store deliberately keeps rows raw and records the field
-/// names it sees. These tests pin the two properties that make that approach safe: an unknown shape is
-/// carried through rather than dropped, and MBP is never merged with MBO, since a price level and an
-/// individual order are different quantities and conflating them would misstate liquidity.
+/// The shape under test is real: captured live on 2026-08-20 from PPL with the market open. Three
+/// quirks of how the portal publishes depth are what these tests pin, because each one produces a
+/// plausible-looking wrong answer if mishandled — a book that blinks out, a best ask of zero, or a
+/// bid paired with the wrong quantity.
 /// </para>
 /// </summary>
 [TestClass]
 public sealed class AhkDepthBookTests
 {
-    private static List<JsonElement> Rows(string json) =>
-        JsonDocument.Parse(json).RootElement.EnumerateArray().ToList();
+    private static readonly JsonSerializerOptions Options = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowReadingFromString
+    };
+
+    /// <summary>Verbatim from the live capture: two real levels, then the zero-filled tail.</summary>
+    private const string MbpJson = """
+    [{"orders":3,"volume":5510,"price":238.52,"sOrders":1,"sVolume":82,"sPrice":238.7},
+     {"orders":1,"volume":7689,"price":238.5,"sOrders":1,"sVolume":500,"sPrice":238.88},
+     {"orders":0,"volume":0,"price":0,"sOrders":0,"sVolume":0,"sPrice":0}]
+    """;
+
+    private const string MboJson = """
+    [{"price":238.52,"volume":10,"flag":"dc","orderNo":null,"sPrice":238.7,"sVolume":82,"sFlag":"dc","sOrderNo":null},
+     {"price":0,"volume":0,"flag":null,"orderNo":null,"sPrice":0,"sVolume":0,"sFlag":null,"sOrderNo":null}]
+    """;
+
+    private static List<AhkDepthLevelRow> Levels(string json = MbpJson) =>
+        JsonSerializer.Deserialize<List<AhkDepthLevelRow>>(json, Options)!;
+
+    private static List<AhkDepthOrderRow> Orders(string json = MboJson) =>
+        JsonSerializer.Deserialize<List<AhkDepthOrderRow>>(json, Options)!;
 
     [TestMethod]
-    public void UnknownRowShape_IsCarriedThroughRatherThanDropped()
+    public void LiveRowShape_BindsBothLaddersFromOneRow()
     {
-        // Field names here are invented precisely because the real ones are unknown: the store must not
-        // depend on them. A store that only kept recognised fields would silently return an empty book
-        // the first time the portal's spelling differed from a guess.
+        // Each row carries BOTH sides: unprefixed is the bid, s-prefixed the ask. Getting this wrong
+        // pairs every bid price with the ask's quantity, which reads as a plausible book.
+        var level = Levels()[0];
+
+        Assert.AreEqual(238.52m, level.BidPrice);
+        Assert.AreEqual(5510L, level.BidVolume);
+        Assert.AreEqual(3, level.BidOrders);
+        Assert.AreEqual(238.7m, level.AskPrice);
+        Assert.AreEqual(82L, level.AskVolume);
+        Assert.AreEqual(1, level.AskOrders);
+    }
+
+    [TestMethod]
+    public void ZeroPaddedRows_AreDropped()
+    {
+        // The array is fixed length with a zero tail. Keeping the padding makes "best ask" resolve to
+        // 0 and inflates total depth with nothing.
         var book = new AhkDepthBook();
-        book.Ingest(
-            Rows("""[{"someUnknownPrice":101.5,"someUnknownQty":400}]"""),
-            null, "REG", "PPL");
+        book.Ingest(Levels(), Orders(), "REG", "PPL");
+
+        var entry = book.Get("REG", "PPL")!;
+        Assert.AreEqual(2, entry.Levels.Count, "the zero row must not survive");
+        Assert.AreEqual(1, entry.Orders.Count);
+        Assert.AreEqual(3, book.RowsSeen, "padding must not be counted either");
+    }
+
+    [TestMethod]
+    public void EmptyPayload_MeansUnchanged_NotAnEmptyBook()
+    {
+        // Most polls carry empty arrays because the portal republishes only on change. Clearing on
+        // those would make the book blink out several times a second.
+        var book = new AhkDepthBook();
+        book.Ingest(Levels(), Orders(), "REG", "PPL");
+        book.Ingest([], [], "REG", "PPL");
+        book.Ingest(null, null, "REG", "PPL");
 
         var entry = book.Get("REG", "PPL");
-        Assert.IsNotNull(entry);
-        Assert.AreEqual(1, entry.ByPrice.Count);
-        StringAssert.Contains(entry.ByPrice[0].ToString(), "101.5");
+        Assert.IsNotNull(entry, "the last known ladder must be retained");
+        Assert.AreEqual(2, entry.Levels.Count);
     }
 
     [TestMethod]
-    public void ObservedFieldNames_AreRecordedSoAShapeCanBeLearned()
+    public void OneSideArriving_DoesNotClearTheOther()
     {
-        // This is the artefact that lets a typed model be written from production data instead of
-        // guessed, so it has to survive.
         var book = new AhkDepthBook();
-        book.Ingest(
-            Rows("""[{"price":10,"qty":5}]"""),
-            Rows("""[{"orderId":"X1","price":10}]"""),
-            "REG", "PPL");
+        book.Ingest(Levels(), Orders(), "REG", "PPL");
+        book.Ingest(Levels(), null, "REG", "PPL");
 
-        CollectionAssert.AreEquivalent(new[] { "price", "qty" }, book.ObservedMbpKeys.ToList());
-        CollectionAssert.AreEquivalent(new[] { "orderId", "price" }, book.ObservedMboKeys.ToList());
+        Assert.AreEqual(1, book.Get("REG", "PPL")!.Orders.Count,
+            "an MBP-only update must not erase the order side");
     }
 
     [TestMethod]
-    public void ByPriceAndByOrder_AreKeptSeparate()
+    public void DerivedScalars_ComeFromTheTouchAndIgnorePadding()
     {
         var book = new AhkDepthBook();
-        book.Ingest(
-            Rows("""[{"price":10,"qty":100},{"price":9,"qty":50}]"""),
-            Rows("""[{"orderId":"A"},{"orderId":"B"},{"orderId":"C"}]"""),
-            "REG", "PPL");
-
+        book.Ingest(Levels(), Orders(), "REG", "PPL");
         var entry = book.Get("REG", "PPL")!;
-        Assert.AreEqual(2, entry.ByPrice.Count, "two price levels");
-        Assert.AreEqual(3, entry.ByOrder.Count, "three individual orders");
-        Assert.AreEqual(5, book.RowsSeen);
+
+        Assert.AreEqual(238.52m, entry.BestBid);
+        Assert.AreEqual(238.7m, entry.BestAsk);
+        Assert.AreEqual(5510L, entry.BidVolumeAtTouch);
+        Assert.AreEqual(82L, entry.AskVolumeAtTouch);
+        Assert.AreEqual(0.18m, entry.Spread);
+
+        // 5510 + 7689 bid against 82 + 500 ask — a heavily bid book.
+        Assert.AreEqual(13199L, entry.TotalBidVolume);
+        Assert.AreEqual(582L, entry.TotalAskVolume);
+        Assert.AreEqual(0.9155m, entry.Imbalance);
     }
 
     [TestMethod]
-    public void EachFeedUpdatesIndependently_WithoutClearingTheOther()
+    public void OneSidedBook_HasNoSpreadRatherThanAFabricatedOne()
     {
-        // MBP and MBO arrive in the same response but not necessarily in the same poll, so an update to
-        // one must not erase the other — otherwise the ladder blinks out whenever only orders changed.
-        var book = new AhkDepthBook();
-        book.Ingest(Rows("""[{"price":10}]"""), Rows("""[{"orderId":"A"}]"""), "REG", "PPL");
-        book.Ingest(Rows("""[{"price":11}]"""), null, "REG", "PPL");
-
-        var entry = book.Get("REG", "PPL")!;
-        StringAssert.Contains(entry.ByPrice[0].ToString(), "11");
-        Assert.AreEqual(1, entry.ByOrder.Count, "the order side must survive an MBP-only update");
-    }
-
-    [TestMethod]
-    public void RowsCarryingTheirOwnSymbol_AreGroupedByIt()
-    {
-        // The fallback exists because the portal follows one symbol at a time, but if rows do identify
-        // themselves they must be trusted over the fallback.
+        // A bid with nothing offered is normal, especially at a circuit cap. Reporting a spread
+        // against a zero ask would invent a number.
         var book = new AhkDepthBook();
         book.Ingest(
-            Rows("""[{"symbol":"OGDC","price":1},{"symbol":"PPL","price":2}]"""),
+            Levels("""[{"orders":1,"volume":100,"price":50,"sOrders":0,"sVolume":0,"sPrice":0}]"""),
+            null, "REG", "XYZ");
+
+        var entry = book.Get("REG", "XYZ")!;
+        Assert.AreEqual(50m, entry.BestBid);
+        Assert.IsNull(entry.BestAsk);
+        Assert.IsNull(entry.Spread);
+        Assert.AreEqual(1m, entry.Imbalance, "all bid");
+    }
+
+    [TestMethod]
+    public void RowsWithoutASymbol_AreAttributedToTheSubscription()
+    {
+        // The payload carries no symbol field at all, which is why the subscribed symbol is
+        // authoritative. Ingesting with no symbol must store nothing rather than guess.
+        var book = new AhkDepthBook();
+        book.Ingest(Levels(), Orders(), "REG", null);
+
+        Assert.AreEqual(0, book.All().Count);
+        Assert.AreEqual(0, book.RowsSeen);
+    }
+
+    [TestMethod]
+    public void AllPaddingPayload_StoresNothing()
+    {
+        var book = new AhkDepthBook();
+        book.Ingest(
+            Levels("""[{"orders":0,"volume":0,"price":0,"sOrders":0,"sVolume":0,"sPrice":0}]"""),
             null, "REG", "PPL");
 
-        Assert.IsNotNull(book.Get("REG", "OGDC"));
-        Assert.IsNotNull(book.Get("REG", "PPL"));
-    }
-
-    [TestMethod]
-    public void EmptyAndNullPayloads_AreHarmless()
-    {
-        var book = new AhkDepthBook();
-        book.Ingest(null, null, "REG", "PPL");
-        book.Ingest([], [], "REG", "PPL");
-
         Assert.IsNull(book.Get("REG", "PPL"));
-        Assert.AreEqual(0, book.RowsSeen);
-        Assert.AreEqual(0, book.All().Count);
     }
 
     [TestMethod]
     public void Clear_DropsBothTheBookAndTheSubscription()
     {
-        // Depth is session-scoped: a new broker session starts with no subscription, so a stale
-        // "following PPL" would claim a subscription that no longer exists.
+        // Depth is session-scoped: a new session carries no subscription, so a retained
+        // "following PPL" would claim one that no longer exists.
         var book = new AhkDepthBook { SubscribedSymbol = "PPL" };
-        book.Ingest(Rows("""[{"price":10}]"""), null, "REG", "PPL");
+        book.Ingest(Levels(), Orders(), "REG", "PPL");
 
         book.Clear();
 

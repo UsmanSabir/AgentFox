@@ -13,13 +13,11 @@ public sealed class AhkFeedResponse
 {
     [JsonPropertyName("feed")]          public List<AhkFeedQuote>? Feed { get; set; }
     [JsonPropertyName("exchangeStats")] public List<object>? ExchangeStats { get; set; }
-    // Market depth. JsonElement rather than object because these arrive only when a MBO-FEED or
-    // MBP-FEED subscription is active, and their element shape had never been captured — deserialising
-    // to `object` produced values nothing could read, which is why these sat unused. Keeping the raw
-    // element preserves the payload for AhkDepthBook to record and expose, so a typed model can be
-    // written from observed data instead of guessed field names.
-    [JsonPropertyName("mboFeed")]       public List<JsonElement>? MboFeed { get; set; }
-    [JsonPropertyName("mbpFeed")]       public List<JsonElement>? MbpFeed { get; set; }
+    // Market depth, typed from a live capture on 2026-08-20 (PPL, market open). Both arrays are
+    // published only when the book CHANGES and are fixed-length with a zero-filled tail, so an empty
+    // array means "unchanged" and zero rows are padding — see AhkDepthBook, which owns both rules.
+    [JsonPropertyName("mboFeed")]       public List<AhkDepthOrderRow>? MboFeed { get; set; }
+    [JsonPropertyName("mbpFeed")]       public List<AhkDepthLevelRow>? MbpFeed { get; set; }
     [JsonPropertyName("marketStatus")]  public string? MarketStatus { get; set; }
 }
 

@@ -1,29 +1,71 @@
 using System.Collections.Concurrent;
-using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace TradingAgent.Feed;
 
 /// <summary>
-/// Holds the most recent market-depth payload per symbol, as published in the
-/// <c>mboFeed</c> / <c>mbpFeed</c> arrays of <c>GET /Home/GetFeed</c>.
+/// One price level of the aggregated book (MBP — market by price), as the portal publishes it.
 ///
 /// <para>
-/// <b>Why the payload is kept raw.</b> The portal's depth arrays had never been captured when this was
-/// written — nothing in the plugin had ever subscribed to <c>MBP-FEED</c> or <c>MBO-FEED</c>, so the
-/// arrays were always empty and their element shape is unknown. Writing a typed model now would be
-/// guessing at field names, and a wrong guess deserialises to a ladder full of nulls that looks like a
-/// quiet book rather than a parsing failure. So the raw <see cref="JsonElement"/> is preserved, the
-/// observed keys are recorded, and a typed model can be added from real data once
-/// <see cref="ObservedMbpKeys"/> and <see cref="ObservedMboKeys"/> report what the portal actually
-/// sends. Depth is a decision input; inventing its schema is not acceptable.
+/// <b>Each row carries BOTH sides.</b> The unprefixed fields are the BID ladder and the
+/// <c>s</c>-prefixed ones the ASK ladder, zipped together by index: row 0 is the best bid beside the
+/// best ask, row 1 the second level of each, and so on. It is not a flat list of levels with a side
+/// marker, so the two sides must be unzipped before either can be read as a ladder — treating a row
+/// as a single side would pair every bid with the wrong quantity.
 /// </para>
+/// </summary>
+public sealed class AhkDepthLevelRow
+{
+    [JsonPropertyName("orders")]  public int? BidOrders { get; set; }
+    [JsonPropertyName("volume")]  public long? BidVolume { get; set; }
+    [JsonPropertyName("price")]   public decimal? BidPrice { get; set; }
+    [JsonPropertyName("sOrders")] public int? AskOrders { get; set; }
+    [JsonPropertyName("sVolume")] public long? AskVolume { get; set; }
+    [JsonPropertyName("sPrice")]  public decimal? AskPrice { get; set; }
+}
+
+/// <summary>One resting order of the un-aggregated book (MBO — market by order). Same paired layout.</summary>
+public sealed class AhkDepthOrderRow
+{
+    [JsonPropertyName("price")]     public decimal? BidPrice { get; set; }
+    [JsonPropertyName("volume")]    public long? BidVolume { get; set; }
+    [JsonPropertyName("flag")]      public string? BidFlag { get; set; }
+    /// <summary>Always null in captures — the exchange does not disclose counterparty order numbers.</summary>
+    [JsonPropertyName("orderNo")]   public string? BidOrderNo { get; set; }
+    [JsonPropertyName("sPrice")]    public decimal? AskPrice { get; set; }
+    [JsonPropertyName("sVolume")]   public long? AskVolume { get; set; }
+    [JsonPropertyName("sFlag")]     public string? AskFlag { get; set; }
+    [JsonPropertyName("sOrderNo")]  public string? AskOrderNo { get; set; }
+}
+
+/// <summary>
+/// Holds the most recent market-depth ladder per symbol, from the <c>mbpFeed</c> / <c>mboFeed</c>
+/// arrays of <c>GET /Home/GetFeed</c>.
 ///
 /// <para>
-/// <b>MBO versus MBP.</b> MBP (market by price) aggregates resting quantity per price level — the
-/// ladder a trader reads. MBO (market by order) lists individual orders. Both are captured, kept
-/// separate, and never merged, because a level count and an order count are different quantities and
-/// conflating them would misstate available liquidity.
+/// Three properties of the portal's publishing shaped this class, all established from a live capture
+/// on 2026-08-20 with the market open (PPL on Page5):
 /// </para>
+///
+/// <list type="number">
+/// <item>
+/// <b>Depth is published only when it CHANGES, as a full replacement.</b> Most polls carry empty
+/// arrays. So an empty array means "nothing changed", never "the book is empty", and the last known
+/// ladder has to be retained — a consumer that cleared on every empty poll would see the book blink
+/// out several times a second.
+/// </item>
+/// <item>
+/// <b>The array is fixed-length and zero-padded.</b> Thirteen rows arrive whether or not there are
+/// thirteen levels, with unused rows all zeros. Those are dropped on ingest: a zero price is not a
+/// real level, and leaving them in makes "lowest ask" resolve to 0 and inflates total depth with
+/// nothing. This is the same "zero means unknown" rule the quote path already applies.
+/// </item>
+/// <item>
+/// <b>Rows carry no symbol.</b> The portal follows one depth symbol at a time, so rows are attributed
+/// to whichever symbol is currently subscribed. That is why <see cref="SubscribedSymbol"/> is
+/// authoritative rather than decorative.
+/// </item>
+/// </list>
 /// </summary>
 public sealed class AhkDepthBook
 {
@@ -31,119 +73,109 @@ public sealed class AhkDepthBook
     public sealed record DepthEntry(
         string Market,
         string Symbol,
-        /// <summary>Raw <c>mbpFeed</c> rows for this symbol, exactly as published.</summary>
-        IReadOnlyList<JsonElement> ByPrice,
-        /// <summary>Raw <c>mboFeed</c> rows for this symbol, exactly as published.</summary>
-        IReadOnlyList<JsonElement> ByOrder,
-        DateTime? ByPriceAtUtc,
-        DateTime? ByOrderAtUtc);
+        /// <summary>Aggregated levels, padding removed, best first.</summary>
+        IReadOnlyList<AhkDepthLevelRow> Levels,
+        /// <summary>Individual resting orders, padding removed.</summary>
+        IReadOnlyList<AhkDepthOrderRow> Orders,
+        DateTime? LevelsAtUtc,
+        DateTime? OrdersAtUtc)
+    {
+        /// <summary>Best bid — the first level with a real price.</summary>
+        public decimal? BestBid => Levels.FirstOrDefault(l => l.BidPrice is > 0)?.BidPrice;
+        public decimal? BestAsk => Levels.FirstOrDefault(l => l.AskPrice is > 0)?.AskPrice;
+
+        public long? BidVolumeAtTouch => Levels.FirstOrDefault(l => l.BidPrice is > 0)?.BidVolume;
+        public long? AskVolumeAtTouch => Levels.FirstOrDefault(l => l.AskPrice is > 0)?.AskVolume;
+
+        /// <summary>Ask minus bid, or null when either side is empty (a one-sided book is normal).</summary>
+        public decimal? Spread =>
+            BestBid is { } bid && BestAsk is { } ask ? ask - bid : null;
+
+        /// <summary>Total resting quantity per side across the visible ladder.</summary>
+        public long TotalBidVolume => Levels.Where(l => l.BidPrice is > 0).Sum(l => l.BidVolume ?? 0);
+        public long TotalAskVolume => Levels.Where(l => l.AskPrice is > 0).Sum(l => l.AskVolume ?? 0);
+
+        /// <summary>
+        /// Book imbalance, −1 (all offered) to +1 (all bid). The single most useful scalar from depth:
+        /// it says which side is heavier without needing the whole ladder. Null when the book is empty.
+        /// </summary>
+        public decimal? Imbalance
+        {
+            get
+            {
+                var total = TotalBidVolume + TotalAskVolume;
+                return total == 0 ? null
+                    : Math.Round((decimal)(TotalBidVolume - TotalAskVolume) / total, 4);
+            }
+        }
+    }
 
     private readonly ConcurrentDictionary<string, DepthEntry> _entries = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>
-    /// Field names seen on <c>mbpFeed</c> rows. Populated on first arrival and exposed so the shape can
-    /// be read off a running system rather than reverse-engineered again — this is the artefact that
-    /// lets a typed model replace the raw one.
-    /// </summary>
-    public IReadOnlyCollection<string> ObservedMbpKeys => _mbpKeys.Keys.ToList();
-    public IReadOnlyCollection<string> ObservedMboKeys => _mboKeys.Keys.ToList();
-
-    private readonly ConcurrentDictionary<string, byte> _mbpKeys = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, byte> _mboKeys = new(StringComparer.Ordinal);
-
-    /// <summary>Symbol currently subscribed for depth, or null. See <see cref="AhkFeedWorker"/> for why
-    /// this is a single symbol rather than a set.</summary>
+    /// <summary>Symbol currently subscribed for depth, or null. One at a time, matching the portal.</summary>
     public string? SubscribedSymbol { get; set; }
 
-    /// <summary>Total depth rows ever ingested, so "subscribed but silent" is distinguishable from
-    /// "never subscribed".</summary>
+    /// <summary>Real (non-padding) depth rows ever ingested, so "subscribed but silent" is
+    /// distinguishable from "never subscribed".</summary>
     public long RowsSeen { get; private set; }
 
     private static string Key(string market, string symbol) => $"{market}:{symbol}";
 
     /// <summary>
-    /// Ingests the depth arrays from one feed poll. Rows are grouped by their own symbol field when one
-    /// can be found, and otherwise attributed to <paramref name="fallbackSymbol"/> — the portal only
-    /// ever has one depth subscription active, so a row without an identifiable symbol still belongs to
-    /// a known instrument rather than nowhere.
+    /// Ingests one poll's depth arrays. Empty arrays are ignored rather than treated as an empty book —
+    /// see the class remarks. Each non-empty array fully replaces that side's previous contents.
     /// </summary>
     public void Ingest(
-        IReadOnlyList<JsonElement>? mbpRows,
-        IReadOnlyList<JsonElement>? mboRows,
+        IReadOnlyList<AhkDepthLevelRow>? levels,
+        IReadOnlyList<AhkDepthOrderRow>? orders,
         string market,
-        string? fallbackSymbol)
+        string? symbol)
     {
+        symbol = symbol?.Trim().ToUpperInvariant();
+        if (string.IsNullOrEmpty(symbol)) return;
+
+        // Drop the zero-filled tail. A row with no price on either side is padding, not a level.
+        var realLevels = levels?
+            .Where(l => l.BidPrice is > 0 || l.AskPrice is > 0)
+            .ToList();
+        var realOrders = orders?
+            .Where(o => o.BidPrice is > 0 || o.AskPrice is > 0)
+            .ToList();
+
+        if (realLevels is null or { Count: 0 } && realOrders is null or { Count: 0 }) return;
+
         var now = DateTime.UtcNow;
-        RecordKeys(mbpRows, _mbpKeys);
-        RecordKeys(mboRows, _mboKeys);
+        var key = Key(market, symbol);
+        RowsSeen += (realLevels?.Count ?? 0) + (realOrders?.Count ?? 0);
 
-        foreach (var (rows, isByPrice) in new[] { (mbpRows, true), (mboRows, false) })
-        {
-            if (rows is null or { Count: 0 }) continue;
-            RowsSeen += rows.Count;
-
-            foreach (var group in rows.GroupBy(r => SymbolOf(r) ?? fallbackSymbol))
+        _entries.AddOrUpdate(key,
+            _ => new DepthEntry(
+                market, symbol,
+                realLevels ?? [], realOrders ?? [],
+                realLevels is { Count: > 0 } ? now : null,
+                realOrders is { Count: > 0 } ? now : null),
+            (_, existing) => existing with
             {
-                if (group.Key is null) continue;
-                var list = group.ToList();
-                var key = Key(market, group.Key);
-
-                _entries.AddOrUpdate(key,
-                    _ => new DepthEntry(
-                        market, group.Key,
-                        isByPrice ? list : [],
-                        isByPrice ? [] : list,
-                        isByPrice ? now : null,
-                        isByPrice ? null : now),
-                    (_, existing) => isByPrice
-                        ? existing with { ByPrice = list, ByPriceAtUtc = now }
-                        : existing with { ByOrder = list, ByOrderAtUtc = now });
-            }
-        }
+                // Only replace a side that actually arrived; the two do not always publish together,
+                // and clearing the other would make the ladder flicker.
+                Levels       = realLevels is { Count: > 0 } ? realLevels : existing.Levels,
+                Orders       = realOrders is { Count: > 0 } ? realOrders : existing.Orders,
+                LevelsAtUtc  = realLevels is { Count: > 0 } ? now : existing.LevelsAtUtc,
+                OrdersAtUtc  = realOrders is { Count: > 0 } ? now : existing.OrdersAtUtc
+            });
     }
 
     /// <summary>Latest depth for one symbol, or null when none has arrived.</summary>
     public DepthEntry? Get(string market, string symbol) =>
         _entries.TryGetValue(Key(market, symbol), out var entry) ? entry : null;
 
-    /// <summary>Everything held, for diagnostics.</summary>
     public IReadOnlyList<DepthEntry> All() => _entries.Values.ToList();
 
-    /// <summary>Drops everything — used when the session is replaced, since depth is session-scoped.</summary>
+    /// <summary>Drops everything. Depth is session-scoped: a new session carries no subscription, so a
+    /// retained "following PPL" would claim one that no longer exists.</summary>
     public void Clear()
     {
         _entries.Clear();
         SubscribedSymbol = null;
-    }
-
-    /// <summary>
-    /// Best-effort symbol extraction. Tries the spellings the portal uses elsewhere in the same
-    /// response (<c>symbol</c>, <c>sym</c>, <c>scrip</c>) rather than inventing new ones. Returning
-    /// null is expected and handled, not an error.
-    /// </summary>
-    private static string? SymbolOf(JsonElement row)
-    {
-        if (row.ValueKind != JsonValueKind.Object) return null;
-
-        foreach (var name in new[] { "symbol", "sym", "scrip", "Symbol" })
-        {
-            if (row.TryGetProperty(name, out var value) &&
-                value.ValueKind == JsonValueKind.String)
-            {
-                var text = value.GetString();
-                if (!string.IsNullOrWhiteSpace(text)) return text.Trim().ToUpperInvariant();
-            }
-        }
-        return null;
-    }
-
-    private static void RecordKeys(IReadOnlyList<JsonElement>? rows, ConcurrentDictionary<string, byte> sink)
-    {
-        if (rows is null) return;
-        foreach (var row in rows)
-        {
-            if (row.ValueKind != JsonValueKind.Object) continue;
-            foreach (var property in row.EnumerateObject()) sink.TryAdd(property.Name, 0);
-        }
     }
 }

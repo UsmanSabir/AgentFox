@@ -60,11 +60,21 @@ public sealed class AhlAnalyticsClient : IDisposable
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     /// <summary>
-    /// The CSRF token from the same landing page. Required on POSTs: the portal's `/api/v3` routes
-    /// accept the session cookie as well as the Bearer token, which means Laravel's CSRF middleware
-    /// applies to them, and a POST without this header is rejected (419) even with a perfectly valid
-    /// token. GETs are unaffected — which is exactly the shape of the bug this fixes, where candle
-    /// reads worked while the market snapshot did not.
+    /// The CSRF token from the same landing page, sent on non-GET requests.
+    ///
+    /// <para>
+    /// <b>It is not actually required.</b> Verified live on 2026-08-20: the market-snapshot POST
+    /// answers 200 with or without the header. An earlier version of this comment claimed a POST
+    /// without it was rejected with 419, and that was wrong — the CSRF theory was a guess made while
+    /// the broker's SSO endpoint was down and no live POST could be tried.
+    /// </para>
+    ///
+    /// <para>
+    /// What the same test DID establish is the real dependency: the portal's <c>laravel_session</c>
+    /// cookie is required for every <c>/api/v3</c> call, GET and POST alike. Bearer alone answers
+    /// <c>401 Unauthenticated</c> — see the cookie container in the constructor. The header is still
+    /// sent because it is free, harmless, and matches what the portal's own page does.
+    /// </para>
     /// </summary>
     private static readonly Regex CsrfTokenMeta = new(
         """<meta\s+name=["']csrf-token["']\s+content=["']([^"']+)["']""",
@@ -139,6 +149,14 @@ public sealed class AhlAnalyticsClient : IDisposable
 
         _http = new HttpClient(new SocketsHttpHandler
         {
+            // EXPLICIT cookie jar. The portal requires its laravel_session cookie on every /api/v3
+            // call — Bearer alone answers 401 Unauthenticated (verified 2026-08-20, GET and POST
+            // alike) — and that cookie is set by the SSO landing page during the handshake. Relying
+            // on UseCookies defaulting to true would leave the entire integration resting on a
+            // handler default, and the failure if it ever changed would present as "the token stopped
+            // working" rather than "cookies were dropped".
+            CookieContainer = new CookieContainer(),
+            UseCookies = true,
             // Same corporate-proxy reason as AhkPortalClient: without this, every call on a network
             // with an authenticating proxy dies at the tunnel with 407 before reaching the portal,
             // and the symptom is misleading — the handshake's broker hop succeeds (it uses a
@@ -328,11 +346,9 @@ public sealed class AhlAnalyticsClient : IDisposable
             using var request = new HttpRequestMessage(method, new Uri(BaseUri, path.TrimStart('/')));
             request.Headers.TryAddWithoutValidation("Authorization", "Bearer " + token);
 
-            // CSRF on anything that is not a GET. The portal's /api routes accept the session cookie
-            // alongside the Bearer token, so Laravel's CSRF middleware applies and a POST without this
-            // is refused (419) despite a valid token. Both header spellings are sent because Laravel
-            // accepts either, and which one a deployment honours is not worth discovering in
-            // production.
+            // CSRF on anything that is not a GET. Not required — the POST succeeds without it — but
+            // free to send, and it matches what the portal's own page does, so a future deployment
+            // that starts enforcing it will not break us.
             if (method != HttpMethod.Get && _csrf is not null)
             {
                 request.Headers.TryAddWithoutValidation("X-CSRF-TOKEN", _csrf);

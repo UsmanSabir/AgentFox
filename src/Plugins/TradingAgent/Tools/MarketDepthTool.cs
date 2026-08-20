@@ -17,11 +17,11 @@ namespace TradingAgent.Tools;
 /// </para>
 ///
 /// <para>
-/// <b>Rows are returned raw, on purpose.</b> The portal's depth payload had never been captured when
-/// this was written, so its field names are unknown. Presenting a typed ladder would mean guessing
-/// them, and a wrong guess yields a book full of nulls that reads as thin liquidity rather than as a
-/// parsing failure — the kind of error that changes a sizing decision. So the rows are passed through
-/// as received, together with the field names observed, and a typed model can follow from real data.
+/// The ladder is returned in decision-ready form: best bid and ask with the quantity at the touch,
+/// the spread, total resting volume each side, and the book imbalance. Two publishing quirks are
+/// handled before the caller sees anything — the portal pads its arrays with zero rows, and it
+/// republishes only when the book changes — so an empty poll never reads as an empty book and a
+/// padding row never reads as a price of zero.
 /// </para>
 /// </summary>
 public sealed class MarketDepthTool : BaseTool
@@ -103,26 +103,41 @@ public sealed class MarketDepthTool : BaseTool
             symbol = target,
             subscribed_symbol = _depth.SubscribedSymbol,
             market_status = _feed.MarketStatus,
-            by_price_rows = entry?.ByPrice.Count ?? 0,
-            by_order_rows = entry?.ByOrder.Count ?? 0,
-            by_price_at_utc = entry?.ByPriceAtUtc,
-            by_order_at_utc = entry?.ByOrderAtUtc,
-            // Raw, as received. See the class remarks for why this is not a typed ladder.
-            by_price = entry?.ByPrice.Select(r => r.ToString()),
-            by_order = entry?.ByOrder.Select(r => r.ToString()),
-            // The field names seen so far — the artefact that lets a typed model be written from real
-            // data rather than guessed.
-            observed_by_price_fields = _depth.ObservedMbpKeys,
-            observed_by_order_fields = _depth.ObservedMboKeys,
+            level_count = entry?.Levels.Count ?? 0,
+            order_count = entry?.Orders.Count ?? 0,
+            // The scalars a decision actually turns on, ahead of the ladder itself.
+            best_bid = entry?.BestBid,
+            best_ask = entry?.BestAsk,
+            bid_volume_at_touch = entry?.BidVolumeAtTouch,
+            ask_volume_at_touch = entry?.AskVolumeAtTouch,
+            spread = entry?.Spread,
+            total_bid_volume = entry?.TotalBidVolume,
+            total_ask_volume = entry?.TotalAskVolume,
+            // -1 = all offered, +1 = all bid. The most useful single number from depth.
+            imbalance = entry?.Imbalance,
+            levels_at_utc = entry?.LevelsAtUtc,
+            orders_at_utc = entry?.OrdersAtUtc,
+            // Each row pairs the two ladders by index: bid_* is the bid side, ask_* the ask side.
+            levels = entry?.Levels.Select(l => new
+            {
+                bid_orders = l.BidOrders, bid_volume = l.BidVolume, bid_price = l.BidPrice,
+                ask_price = l.AskPrice, ask_volume = l.AskVolume, ask_orders = l.AskOrders
+            }),
+            orders = entry?.Orders.Select(o => new
+            {
+                bid_price = o.BidPrice, bid_volume = o.BidVolume, bid_flag = o.BidFlag,
+                ask_price = o.AskPrice, ask_volume = o.AskVolume, ask_flag = o.AskFlag
+            }),
             total_rows_ever_seen = _depth.RowsSeen,
             note = entry is null
                 ? "Nothing has arrived yet. Depth only streams while the market is open and needs a " +
-                  "live broker session; a fresh subscription also needs a feed poll or two."
+                  "live broker session. The portal republishes the book only when it CHANGES, so a " +
+                  "fresh subscription can wait several polls on a quiet symbol."
                 : null
         };
 
-        _logger.LogDebug("[MarketDepth] {Symbol}: {ByPrice} MBP / {ByOrder} MBO rows.",
-            target, payload.by_price_rows, payload.by_order_rows);
+        _logger.LogDebug("[MarketDepth] {Symbol}: {Levels} levels / {Orders} orders, spread {Spread}.",
+            target, payload.level_count, payload.order_count, payload.spread);
 
         return ToolResult.Ok(JsonSerializer.Serialize(payload, JsonOptions));
     }

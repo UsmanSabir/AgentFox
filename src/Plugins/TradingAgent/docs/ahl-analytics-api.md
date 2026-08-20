@@ -29,10 +29,18 @@ Three hops. The only secret needed is the broker portal session the plugin alrea
          <meta name="access-token"  content="<RS256 JWT>">
 
 ③  All /api/** calls:   Authorization: Bearer <access-token>
+                        Cookie: laravel_session=…     ← REQUIRED, see below
                         X-Requested-With: XMLHttpRequest
-    /api/market-stream/token and other POSTs also want:
-                        X-CSRF-TOKEN: <csrf-token>   + the laravel_session cookie
 ```
+
+**The Bearer token alone is not enough.** Verified 2026-08-20: every `/api/v3` call — GET and POST
+alike — answers `401 Unauthenticated` without the `laravel_session` cookie that hop ② sets. The token
+authorises, the session cookie authenticates, and both are needed. An HTTP client must therefore keep
+a cookie jar across the handshake and the calls that follow, and `AhlAnalyticsClient` now declares one
+explicitly rather than relying on `SocketsHttpHandler.UseCookies` defaulting to true.
+
+`X-CSRF-TOKEN` is **not** required — the snapshot POST returns 200 with or without it. It is sent
+anyway because it is free and matches the portal's own page.
 
 The `token=` blob in ① is Laravel `Crypt::encryptString` output — base64 of
 `{"iv":…,"value":…,"mac":…,"tag":""}`. It decrypts server-side to the trader identity and maps to
@@ -135,15 +143,42 @@ Depth is now collected, on the broker feed:
 - `AhkDepthBook` stores them, `get_market_depth` and `GET /trading/feed/depth` read them, and
   `AhkFeed:DepthEnabled` gates it (off by default).
 
-Two properties of this are deliberate and worth not undoing.
+### The depth payload, captured 2026-08-20 (PPL, market open)
 
-**The payload is kept raw.** The depth rows' field names have never been captured — nothing had ever
-subscribed, so the arrays were always empty. A typed ladder would mean guessing those names, and a
-wrong guess deserialises to a book full of nulls that reads as *thin liquidity* rather than as a
-parsing failure. That is an error that changes a sizing decision, so the rows pass through as
-received and the observed field names are reported alongside them (`observed_by_price_fields`,
-`observed_by_order_fields`). Those are the artefact that lets a typed model be written from real data
-— fill them in from a live session, then model it.
+```
+mbpFeed[i] = {"orders":3, "volume":5510, "price":238.52,     ← BID side
+              "sOrders":1, "sVolume":82,  "sPrice":238.7}    ← ASK side
+
+mboFeed[i] = {"price":238.52,"volume":10,"flag":"dc","orderNo":null,
+              "sPrice":238.7,"sVolume":82,"sFlag":"dc","sOrderNo":null}
+```
+
+Four properties, each of which produces a plausible-looking wrong answer if mishandled:
+
+**Every row carries BOTH sides.** Unprefixed fields are the bid ladder, `s`-prefixed the ask, zipped
+by index — row 0 is the best bid beside the best ask. It is *not* a flat list of levels with a side
+marker, so reading a row as one side pairs each bid price with the opposing quantity, and the result
+looks like a perfectly ordinary book.
+
+**The arrays are fixed-length and zero-padded.** Thirteen MBP rows arrive whether or not thirteen
+levels exist, with unused rows all zeros. Padding must be dropped or "best ask" resolves to 0 and
+total depth is inflated with nothing — the same "zero means unknown, never a real price" rule the
+quote path already applies.
+
+**Depth is published only when the book CHANGES, as a full replacement.** Most polls carry empty
+arrays; over fourteen consecutive polls of PPL, one carried data. So an empty array means "unchanged",
+never "the book is empty", and the last known ladder has to be retained or it blinks out constantly.
+
+**Rows carry no symbol at all.** The portal follows one depth symbol at a time, so rows are attributed
+to whichever symbol is subscribed — which is why that field is authoritative rather than decorative.
+
+`AhkDepthBook` owns all four rules and derives what a decision actually needs: best bid/ask with the
+quantity at the touch, spread, total resting volume per side, and book imbalance (−1 all offered to +1
+all bid). A one-sided book yields a null spread rather than a fabricated one, since a bid with nothing
+offered is normal at a circuit cap.
+
+`Page5` is **confirmed accepted** — both `MBP-FEED` and `MBO-FEED` subscriptions answered 200 there
+while the quote feed held Page1–Page4, so the depth slot genuinely sits outside the quote set.
 
 **`pagenum` is one namespace shared by every feed type, and a subscription REPLACES the slot.** So
 subscribing depth on a page the quote feed uses evicts that page's quote symbols, and the portal
@@ -552,25 +587,41 @@ whole market), `/sectors/overview`, `/indices`, `/map` (Market Map / heatmap),
 `/portfolio-investments` (FIPI/LIPI) and Settlement Analysis are also in the nav but their APIs
 return no data for this account, so their pages will be empty regardless.
 
+## Verified 2026-08-20, market open
+
+Settled against a live open session (`st: "OPN"`), so these are no longer assumptions:
+
+- **The L1 book populates intraday.** LUCK returned `bidp 439.60 × 26` / `askp 439.61 × 239`, and 507
+  of 857 equities carried a non-zero bid or ask. The all-zero capture on 2026-08-19 was purely the
+  market being closed.
+- **`laravel_session` is required, CSRF is not.** See the auth chain above. The earlier claim that a
+  POST without `X-CSRF-TOKEN` is rejected with 419 was **wrong** — a guess made while the SSO endpoint
+  was down and no live POST could be tried. It has been corrected in the code comments too.
+- **The snapshot model parses the real payload.** `AhlSnapshotDeserializationTests` runs against a
+  trimmed verbatim copy of a live response, including the awkward parts: a string market state beside
+  an integer per-symbol state, `pch` as a fraction against percent-scaled `pm`/`di`, the nested
+  `pp`/`bt` objects whose keys are not valid identifiers, a populated book, and odd-lot rows with null
+  nested objects. This test exists because a parse failure and an outage are indistinguishable from
+  the outside — both surface as "portal unavailable".
+- **Hop ① recovered.** `GET /Home/GetAnalyticsURL` returns the SSO URL again. Its 500 on 2026-08-20
+  was a transient broker-side outage, which is what the cooldown and the no-handshake-on-poll rules
+  were built for.
+
 ## Verification still owed
 
-This capture ran with the market closed. Before anything depends on the live parts:
-
-1. **Confirm the websocket actually delivers ticks during market hours** — it was silent here, and
-   a firehose that turns out to be idle would quietly starve whatever consumes it.
-2. **Confirm `bidp/bidv/askp/askv` populate intraday** in `/req` — all zero in this capture, which
-   is consistent with "closed" but not proof.
-3. Re-check the 60/min rate limit under a realistic screening load before pointing
-   `ScanWatchlistTool` at it.
+1. **Confirm the websocket actually delivers ticks during market hours** — it was silent in the closed
+   capture, and a firehose that turns out to be idle would quietly starve whatever consumes it. Not
+   retried while open.
+2. Re-check the 60/min rate limit under a realistic screening load before pointing
+   `ScanWatchlistTool` at it. There is a concrete interaction to measure: a 31-symbol candle scan is
+   31 GETs, against a self-imposed 40/min limiter, so a scan can leave almost no budget for the
+   snapshot POST that the movers screens need. Per-symbol daily-candle caching is the obvious fix —
+   daily bars change once a day — and it is not yet implemented.
 4. Whether `GET /Home/GetAnalyticsURL` recovers, and whether it is worth asking AHL why it 500s. As of
    2026-08-20 the whole integration is dark behind it — no token means no snapshot, no movers, and
    candles fall back to PSX. Everything downstream was verified working the day before, so this is an
    availability question, not a correctness one.
-5. **The depth payload shape.** `AhkFeed:DepthEnabled` plus `get_market_depth` on a live session during
-   market hours will populate `observed_by_price_fields` / `observed_by_order_fields`. Until those are
-   known, depth is collected and readable but not modelled, and no strategy should consume it.
-6. **Whether the portal accepts `Page5`.** If the depth subscription is refused there, a quote page has
-   to be given up instead — never shared.
-7. The CSRF fix on the analytics POSTs is still **unverified end to end**. It is right in principle (the
-   browser captures always carried the header, and GETs were unaffected), but hop ① was down when it
-   was written, so no live POST has exercised it.
+3. **Depth end to end through the plugin.** The payload shape, the subscription, and `Page5` are all
+   verified against the portal directly, and the model is unit-tested against the captured rows — but
+   the plugin's own path (`AhkFeed:DepthEnabled` → `FocusDepthAsync` → `get_market_depth`) has not yet
+   been exercised on a running host.
