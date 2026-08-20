@@ -510,18 +510,21 @@ view on symbols this account can trade.
 
 ## What was built
 
-Implemented, building clean with 14 new tests (517 total, 0 failing).
+Implemented and live-verified. The current full suite is 541 tests: 535 passed and 6 opt-in live
+broker/order tests were skipped, with 0 failures.
 
 | file | role |
 | --- | --- |
 | `Config/AhlAnalyticsConfig.cs` | `Plugins:AhlAnalytics`, `Enabled` defaulting **false** |
 | `Feed/AhkPortalClient.GetAnalyticsUrlAsync` | hop ①, on the class that owns the broker session |
 | `AhlAnalytics/AhlAnalyticsModels.cs` | typed DTOs; every two-letter key mapped once via `[JsonPropertyName]` |
-| `AhlAnalytics/AhlAnalyticsClient.cs` | handshake, token cache, rate limiter, snapshot cache, typed calls |
+| `AhlAnalytics/AhlAnalyticsClient.cs` | handshake, token cache, rate limiter, snapshot and per-symbol daily-candle caches, typed calls |
+| `AhlAnalytics/AhlDailyCandleCache.cs` | case-insensitive, per-symbol single-flight daily-series cache; empty responses are retried |
 | `AhlAnalytics/AhlCandleSource.cs` | daily bars as `PsxCandle`, preferred over the PSX scrape |
 | `AhlAnalytics/AhlMovers.cs` | the screens — pure computation over a snapshot, no I/O |
 | `Tools/MarketMoversTool.cs` | `market_movers` agent tool |
 | `Tools/StockDossierTool.cs` | `stock_dossier` agent tool, dimension-addressable |
+| `Tools/MarketDepthTool.cs` | broker Page5 MBP/MBO focus path; shared by chat and the authenticated diagnostic action |
 | `ui/src/MoversPanel.svelte` | dashboard panel; `GET /trading/movers`, `/trading/movers/sectors` |
 | `tests/…/AhlMoversTests.cs` | 14 tests, weighted on the freshness filter |
 
@@ -551,9 +554,10 @@ reconciliation reads. `CandleHistory.Sources` reports the choice per symbol, and
 the trading activity log (visible in the dashboard's activity panel) whenever it changes, so a
 fallback to PSX is visible rather than silent.
 
-**Nothing runs on a timer.** Every read is user- or agent-initiated, so the plugin never turns a dead
-broker session into a login on a schedule. The dashboard polls the plugin's own endpoint, which is
-served from the cached snapshot.
+**No AHL handshake creates a broker session on a timer.** An explicit agent-tool call may establish
+one. The dashboard is passive: while the broker is disconnected it only reports that it is waiting;
+after the AHK feed already has a session, it may perform the cheap authenticated SSO GET and populate
+the separate AHL session. Snapshot and candle caches keep subsequent polls local.
 
 ### The agent-facing surface
 
@@ -606,22 +610,21 @@ Settled against a live open session (`st: "OPN"`), so these are no longer assump
 - **Hop ① recovered.** `GET /Home/GetAnalyticsURL` returns the SSO URL again. Its 500 on 2026-08-20
   was a transient broker-side outage, which is what the cooldown and the no-handshake-on-poll rules
   were built for.
+- **The running dashboard establishes AHL from an existing AHK session.** With 30/30 AHK quote
+  symbols fresh, the passive movers request completed the separate SSO hop without another broker
+  login and returned a live 489-symbol market snapshot. A current payload also exposed `bt: false`
+  for symbols without beta history; the beta converter now treats non-object optional beta values as
+  missing instead of discarding the entire snapshot.
+- **The plugin depth path is now verified end to end.** With `AhkFeed:DepthEnabled=true`, the
+  `get_market_depth` tool called `FocusDepthAsync("PPL")`, subscribed Page5, and returned 10 MBP plus
+  10 MBO rows (best bid 237.63, best ask 238.17) while all 30 quote symbols stayed fresh.
+- **Daily candle calls are cached per symbol.** The default 720-minute cache is case-insensitive,
+  single-flight for concurrent cold reads, and does not cache empty/failing responses. A 31-symbol
+  scan now costs 31 AHL GETs only on the first cold pass; routine two-minute scans reuse the series,
+  leaving the shared limiter available for the market snapshot POST.
 
 ## Verification still owed
 
 1. **Confirm the websocket actually delivers ticks during market hours** — it was silent in the closed
    capture, and a firehose that turns out to be idle would quietly starve whatever consumes it. Not
    retried while open.
-2. Re-check the 60/min rate limit under a realistic screening load before pointing
-   `ScanWatchlistTool` at it. There is a concrete interaction to measure: a 31-symbol candle scan is
-   31 GETs, against a self-imposed 40/min limiter, so a scan can leave almost no budget for the
-   snapshot POST that the movers screens need. Per-symbol daily-candle caching is the obvious fix —
-   daily bars change once a day — and it is not yet implemented.
-4. Whether `GET /Home/GetAnalyticsURL` recovers, and whether it is worth asking AHL why it 500s. As of
-   2026-08-20 the whole integration is dark behind it — no token means no snapshot, no movers, and
-   candles fall back to PSX. Everything downstream was verified working the day before, so this is an
-   availability question, not a correctness one.
-3. **Depth end to end through the plugin.** The payload shape, the subscription, and `Page5` are all
-   verified against the portal directly, and the model is unit-tested against the captured rows — but
-   the plugin's own path (`AhkFeed:DepthEnabled` → `FocusDepthAsync` → `get_market_depth`) has not yet
-   been exercised on a running host.

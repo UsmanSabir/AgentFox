@@ -21,10 +21,10 @@ public sealed class AhlAnalyticsConfig
     /// (<c>PreferDirectApiForPlacement</c>, the feed before it was verified).
     ///
     /// <para>
-    /// Enabling it has one side effect worth stating: the SSO handshake needs a live broker session,
-    /// so the first call on a cold session goes through <c>AhkPortalClient.EnsureSessionAsync</c> and
-    /// can therefore trigger a browser LOGIN. That is why nothing here runs on a timer — every read
-    /// is user- or agent-initiated, and the token it obtains is then good for months.
+    /// Enabling it has one side effect worth stating: the SSO handshake needs a live broker session.
+    /// An explicit agent-tool call may establish that broker session and can therefore trigger a
+    /// browser login. Passive dashboard polling never does: it only performs the cheap SSO hop after
+    /// the broker feed already owns a session. The token it obtains is then good for months.
     /// </para>
     /// </summary>
     public bool Enabled { get; set; }
@@ -47,6 +47,15 @@ public sealed class AhlAnalyticsConfig
     /// </para>
     /// </summary>
     public int SnapshotCacheSeconds { get; set; } = 60;
+
+    /// <summary>
+    /// How long one symbol's daily candle series is reused before another portal GET is allowed.
+    /// Daily bars change once per session, while a monitoring pass may request the same 30+ symbols
+    /// every two minutes. Without this cache those routine reads consume most of the shared
+    /// per-minute allowance and can hold the much more valuable whole-market snapshot behind the
+    /// rate limiter.
+    /// </summary>
+    public int DailyCandleCacheMinutes { get; set; } = 720;
 
     /// <summary>
     /// How long the portal's Bearer token is trusted before the SSO handshake is repeated.

@@ -199,6 +199,7 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         // why the payload is kept raw rather than modelled.
         services.AddSingleton<AhkDepthBook>();
         services.AddSingleton<AhkFeedWorker>();
+        services.AddSingleton<MarketDepthTool>();
         services.AddHostedService(sp => sp.GetRequiredService<AhkFeedWorker>());
 
         services.AddSingleton<ILiveQuoteSource, AhkQuoteSource>();
@@ -819,8 +820,9 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         // tells them apart without reading Debug logs.
         trading.MapGet("/feed/status", (AhkFeedWorker feed) => Results.Ok(feed.GetStatus()));
 
-        // Depth for the currently followed symbol. GET only — changing the subscription is an action
-        // and belongs to the tool, not to a page poll.
+        // Depth for the currently followed symbol. GET never changes the subscription. The explicit
+        // POST below delegates to the same get_market_depth tool used by chat, which keeps one
+        // subscription/action path and gives operators a deterministic diagnostic surface.
         trading.MapGet("/feed/depth", (AhkDepthBook depth, AhkFeedWorker feed, string? symbol) =>
         {
             var target = (symbol ?? depth.SubscribedSymbol)?.Trim().ToUpperInvariant();
@@ -846,11 +848,28 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             });
         });
 
+        trading.MapPost("/feed/depth/focus", async (
+            MarketDepthTool tool,
+            string symbol,
+            int? waitSeconds) =>
+        {
+            var result = await tool.ExecuteAsync(new Dictionary<string, object?>
+            {
+                ["symbol"] = symbol,
+                ["wait_seconds"] = waitSeconds ?? 6
+            });
+
+            return result.Success
+                ? Results.Content(result.Output, "application/json")
+                : Results.BadRequest(new { error = result.Error ?? result.Output });
+        }).RequireAuthorization("TradingAnalyst");
+
         // ── Market movers (AHL analytics) ──────────────────────────────────────
         // One snapshot fetch backs every screen, so the dashboard can poll a few of these without
         // multiplying upstream traffic — AhlAnalyticsClient caches the snapshot for its configured TTL.
         trading.MapGet("/movers", async (
             AhlAnalyticsClient analytics,
+            AhkPortalClient brokerPortal,
             string? screen,
             string? index,
             string? sectorCode,
@@ -866,12 +885,11 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             if (parsed is null)
                 return Results.BadRequest(new { error = $"Unknown screen '{screen}'.", valid = AhlMovers.ScreenNames });
 
-            // allowHandshake:false — this is a POLLED endpoint. The handshake's first hop runs against
-            // the broker session, so permitting it here would generate a broker LOGIN per dashboard
-            // poll whenever the handshake is failing, which is the exact incident shape that cost
-            // account access on 2026-08-18. The panel serves whatever an existing token can produce
-            // and otherwise explains itself.
-            var snapshot = await analytics.GetMarketSnapshotAsync(allowHandshake: false, ct: ct);
+            // A passive dashboard must never CREATE a broker session. Once AhkFeed already has one,
+            // however, the SSO hop is just an authenticated GET and cannot cost another login. This
+            // closes the gap where the screen claimed "no portal session" beside a healthy live feed.
+            var snapshot = await analytics.GetMarketSnapshotAsync(
+                allowHandshake: brokerPortal.HasSession, ct: ct);
             if (snapshot is null)
             {
                 // Report WHY. "Could not be reached" covers no-session, a throttle and a rejected
@@ -882,6 +900,7 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                     enabled = true,
                     available = false,
                     hasToken = analytics.HasToken,
+                    brokerSessionAvailable = brokerPortal.HasSession,
                     handshakeCoolingDown = analytics.HandshakeInCooldown,
                     error = analytics.LastError,
                     rows = Array.Empty<object>()
@@ -903,18 +922,23 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
 
         // Sector rotation for the same session, from the same cached snapshot.
         trading.MapGet("/movers/sectors", async (
-            AhlAnalyticsClient analytics, string? index, CancellationToken ct) =>
+            AhlAnalyticsClient analytics,
+            AhkPortalClient brokerPortal,
+            string? index,
+            CancellationToken ct) =>
         {
             if (!analytics.Enabled)
                 return Results.Ok(new { enabled = false, sectors = Array.Empty<object>() });
 
-            var snapshot = await analytics.GetMarketSnapshotAsync(allowHandshake: false, ct: ct);
+            var snapshot = await analytics.GetMarketSnapshotAsync(
+                allowHandshake: brokerPortal.HasSession, ct: ct);
             if (snapshot is null)
                 return Results.Ok(new
                 {
                     enabled = true,
                     available = false,
                     hasToken = analytics.HasToken,
+                    brokerSessionAvailable = brokerPortal.HasSession,
                     handshakeCoolingDown = analytics.HandshakeInCooldown,
                     error = analytics.LastError,
                     sectors = Array.Empty<object>()
@@ -1919,10 +1943,7 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             // Order-book depth from the broker feed — the only depth source there is. Registered
             // unconditionally so the agent is told the feed or depth is switched off rather than
             // silently lacking the capability.
-            new MarketDepthTool(
-                _services!.GetRequiredService<AhkFeedWorker>(),
-                _services!.GetRequiredService<AhkDepthBook>(),
-                loggers.CreateLogger<MarketDepthTool>()),
+            _services!.GetRequiredService<MarketDepthTool>(),
         };
 
         if (agentOptions.Value.ResearchWebEnabled && webSearchProvider is not null)
@@ -1934,9 +1955,17 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         }
 
         var ownToolNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // These read-only discovery tools are advertised from the dashboard's ordinary chat link,
+        // so they must exist in the primary registry as well as the isolated specialist. Execution
+        // and order-management tools stay specialist-only.
+        var primaryReadTools = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "market_movers", "stock_dossier", "get_market_depth"
+        };
         foreach (var tool in tradingTools)
         {
             context.RegisterAgentTool("trading-agent", tool);
+            if (primaryReadTools.Contains(tool.Name)) context.RegisterTool(tool);
             ownToolNames.Add(tool.Name);
         }
 

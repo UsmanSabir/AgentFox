@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace TradingAgent.AhlAnalytics;
@@ -99,7 +101,11 @@ public sealed class AhlEquity
     [JsonPropertyName("rsi")] public decimal? Rsi { get; set; }
     [JsonPropertyName("std")] public decimal? StdDev { get; set; }
     [JsonPropertyName("pp")]  public AhlPivotPoints? PivotPoints { get; set; }
-    [JsonPropertyName("bt")]  public AhlBeta? Beta { get; set; }
+    // The portal normally sends an object, but currently sends `false` for a few symbols (for
+    // example ADOS). A missing optional beta must not make the entire market snapshot unreadable.
+    [JsonPropertyName("bt")]
+    [JsonConverter(typeof(AhlBetaConverter))]
+    public AhlBeta? Beta { get; set; }
 
     // ── fundamentals ──────────────────────────────────────────────────────────
     [JsonPropertyName("eps")] public decimal? Eps { get; set; }
@@ -166,6 +172,41 @@ public sealed class AhlBeta
     [JsonPropertyName("3m")] public decimal? ThreeMonth { get; set; }
     [JsonPropertyName("6m")] public decimal? SixMonth { get; set; }
     [JsonPropertyName("1y")] public decimal? OneYear { get; set; }
+}
+
+internal sealed class AhlBetaConverter : JsonConverter<AhlBeta?>
+{
+    public override AhlBeta? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType != JsonTokenType.StartObject)
+        {
+            using var ignored = JsonDocument.ParseValue(ref reader);
+            return null;
+        }
+
+        using var document = JsonDocument.ParseValue(ref reader);
+        var root = document.RootElement;
+        return new AhlBeta
+        {
+            OneMonth = ReadDecimal(root, "1m"),
+            ThreeMonth = ReadDecimal(root, "3m"),
+            SixMonth = ReadDecimal(root, "6m"),
+            OneYear = ReadDecimal(root, "1y")
+        };
+    }
+
+    public override void Write(Utf8JsonWriter writer, AhlBeta? value, JsonSerializerOptions options) =>
+        JsonSerializer.Serialize(writer, value, options);
+
+    private static decimal? ReadDecimal(JsonElement root, string name)
+    {
+        if (!root.TryGetProperty(name, out var value)) return null;
+        if (value.ValueKind == JsonValueKind.Number && value.TryGetDecimal(out var number)) return number;
+        return value.ValueKind == JsonValueKind.String &&
+               decimal.TryParse(value.GetString(), NumberStyles.Number, CultureInfo.InvariantCulture, out number)
+            ? number
+            : null;
+    }
 }
 
 public sealed class AhlIndex

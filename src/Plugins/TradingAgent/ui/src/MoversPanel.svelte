@@ -161,9 +161,9 @@
         not retry it on a timer — the handshake needs a broker session, so retrying could cost a
         broker login each time.
       {:else}
-        No portal session yet. This panel will not start one, because the handshake needs a broker
-        session and could cost a login. Run <code>market_movers</code> or <code>stock_dossier</code>
-        from chat to establish it.
+        Waiting for the live broker session. Once AHK is connected, this panel establishes the
+        separate AHL analytics session without launching another broker login. You can also run
+        <code>market_movers</code> or <code>stock_dossier</code> from chat explicitly.
       {/if}
     </p>
     {#if data.error}
