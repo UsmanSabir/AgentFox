@@ -96,6 +96,34 @@ public sealed class AhlAnalyticsClient : IDisposable
     private AhlSnapshotData? _snapshot;
     private DateTimeOffset _snapshotAt;
 
+    /// <summary>
+    /// When the last handshake attempt failed, and the reason.
+    ///
+    /// <para>
+    /// This is a circuit breaker, and it exists because of a specific incident shape. Hop ① runs
+    /// against the broker session, so restoring a dead one launches a browser and LOGS IN. On
+    /// 2026-08-20 the broker's <c>GetAnalyticsURL</c> endpoint began answering 500 while everything
+    /// else was healthy — a fault no retry can fix. Without a cooldown, every caller that wants a
+    /// snapshot re-attempts the handshake, and each attempt can cost a login; a dashboard polling on a
+    /// timer then becomes a login generator against an account the broker has already blocked once for
+    /// exactly that (see docs/phase-b-runbook.md). Failing fast for a few minutes is strictly better
+    /// than rediscovering a permanent outage every thirty seconds.
+    /// </para>
+    /// </summary>
+    private DateTimeOffset _handshakeFailedAt;
+    private string? _handshakeError;
+
+    /// <summary>How long to stop attempting the handshake after a failure.</summary>
+    private static readonly TimeSpan HandshakeCooldown = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// Whether the handshake is currently in cooldown after a failure, and therefore whether a caller
+    /// asking for fresh data will be refused without any network traffic.
+    /// </summary>
+    public bool HandshakeInCooldown =>
+        _handshakeError is not null &&
+        DateTimeOffset.UtcNow - _handshakeFailedAt < HandshakeCooldown;
+
     /// <summary>Timestamps of recent requests, for the client-side rate limiter.</summary>
     private readonly Queue<DateTimeOffset> _recent = new();
     private readonly object _rateLock = new();
@@ -157,19 +185,27 @@ public sealed class AhlAnalyticsClient : IDisposable
         if (!Enabled) return null;
         if (!force && HasToken) return _bearer;
 
+        // Fail fast while a previous failure is still cooling down, WITHOUT touching the network — see
+        // the field's remarks for why this is a safety property and not an optimisation.
+        if (HandshakeInCooldown)
+        {
+            LastError = _handshakeError;
+            return null;
+        }
+
         await _authGate.WaitAsync(ct);
         try
         {
             // Another caller may have completed the handshake while we waited on the gate.
             if (!force && HasToken) return _bearer;
+            if (HandshakeInCooldown) { LastError = _handshakeError; return null; }
 
             // Hop ①: the broker portal mints the SSO URL. This is the only hop needing the broker
             // session, and the only one that can cost a login.
-            var ssoUrl = await _portal.GetAnalyticsUrlAsync(ct);
+            var (ssoUrl, hopOneError) = await _portal.GetAnalyticsUrlAsync(ct);
             if (ssoUrl is null)
             {
-                _logger.LogWarning("[AhlAnalytics] Could not obtain the analytics SSO URL " +
-                                   "(no broker session, or the portal refused).");
+                RecordHandshakeFailure(hopOneError ?? "Could not obtain the analytics SSO URL.");
                 return null;
             }
 
@@ -180,8 +216,8 @@ public sealed class AhlAnalyticsClient : IDisposable
                 using var response = await _http.GetAsync(ssoUrl, ct);
                 if (!response.IsSuccessStatusCode)
                 {
-                    _logger.LogWarning("[AhlAnalytics] SSO landing page answered {Status}.",
-                        (int)response.StatusCode);
+                    RecordHandshakeFailure(
+                        $"The analytics SSO landing page answered {(int)response.StatusCode}.");
                     return null;
                 }
                 html = await response.Content.ReadAsStringAsync(ct);
@@ -189,16 +225,16 @@ public sealed class AhlAnalyticsClient : IDisposable
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "[AhlAnalytics] SSO landing page request failed.");
+                RecordHandshakeFailure($"The analytics SSO landing page request failed: {ex.Message}");
                 return null;
             }
 
             var match = AccessTokenMeta.Match(html.Length > 16_384 ? html[..16_384] : html);
             if (!match.Success)
             {
-                _logger.LogWarning(
-                    "[AhlAnalytics] SSO landing page carried no access-token meta tag " +
-                    "({Length} bytes). The portal's login markup may have changed.", html.Length);
+                RecordHandshakeFailure(
+                    $"The analytics SSO page carried no access-token meta tag ({html.Length} bytes); " +
+                    "the portal's markup may have changed.");
                 return null;
             }
 
@@ -212,6 +248,8 @@ public sealed class AhlAnalyticsClient : IDisposable
                                    "POST endpoints (market snapshot, news) will likely be refused.");
             }
             _bearerObtainedAt = DateTimeOffset.UtcNow;
+            _handshakeError = null;
+            LastError = null;
             _logger.LogInformation("[AhlAnalytics] Obtained an analytics API token via SSO.");
             return _bearer;
         }
@@ -219,6 +257,17 @@ public sealed class AhlAnalyticsClient : IDisposable
         {
             _authGate.Release();
         }
+    }
+
+    /// <summary>Opens the cooldown and records the reason for callers to report.</summary>
+    private void RecordHandshakeFailure(string reason)
+    {
+        _handshakeFailedAt = DateTimeOffset.UtcNow;
+        _handshakeError = reason;
+        LastError = reason;
+        _logger.LogWarning(
+            "[AhlAnalytics] Handshake failed, not retrying for {Minutes} minutes: {Reason}",
+            HandshakeCooldown.TotalMinutes, reason);
     }
 
     // ── transport ─────────────────────────────────────────────────────────────
@@ -418,14 +467,33 @@ public sealed class AhlAnalyticsClient : IDisposable
     /// from it — gainers, unusual volume, sector rotation — is a sort over this object, not more I/O.
     /// </para>
     /// </summary>
+    /// <param name="allowHandshake">
+    /// Whether this caller may pay for the SSO handshake. <b>Dashboard and other polled callers must
+    /// pass false.</b> Hop ① runs against the broker session, so a handshake can launch a browser and
+    /// log in; a caller on a timer that allowed it would generate a login per poll whenever the
+    /// handshake is failing, which is the incident this parameter exists to prevent. Agent- and
+    /// user-initiated calls pass true, because a person asked for the data and one login is a
+    /// reasonable price.
+    /// </param>
     public async Task<AhlSnapshotData?> GetMarketSnapshotAsync(
-        bool forceRefresh = false, CancellationToken ct = default)
+        bool forceRefresh = false, bool allowHandshake = true, CancellationToken ct = default)
     {
         if (!Enabled) return null;
 
         var ttl = TimeSpan.FromSeconds(Math.Max(5, Config.SnapshotCacheSeconds));
         if (!forceRefresh && _snapshot is not null && DateTimeOffset.UtcNow - _snapshotAt < ttl)
             return _snapshot;
+
+        // A polled caller may only ever serve what a token already reachable can produce. Without a
+        // token it returns the cached snapshot if one exists, and otherwise nothing at all — never a
+        // handshake.
+        if (!allowHandshake && !HasToken)
+        {
+            LastError ??= _handshakeError
+                ?? "No analytics session yet. This view will not start one; run market_movers or " +
+                   "stock_dossier from chat to establish it.";
+            return _snapshot;
+        }
 
         await _snapshotGate.WaitAsync(ct);
         try

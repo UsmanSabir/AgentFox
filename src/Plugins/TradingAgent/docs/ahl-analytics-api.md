@@ -61,6 +61,47 @@ Two caveats seen during the capture:
   means "slow down", not "token dead"** — retry with backoff before re-running the handshake, or a
   transient throttle will burn a fresh login every time.
 
+## Hop ① is a single point of failure, and it has already failed
+
+Observed 2026-08-20, roughly a day after the capture: `GET /Home/GetAnalyticsURL` on the **broker**
+portal began answering **500 with an empty body** and stayed that way across repeated attempts.
+Everything about the diagnosis is worth recording, because the symptom pointed away from the cause.
+
+What was true at the same moment, on a session logged in seconds earlier:
+
+| call | result |
+| --- | --- |
+| `GET /Home/GetAnalyticsURL` | **500, empty body** (also 500 as `GetAnalyticsUrl`; 404 for POST, so GET is the right verb) |
+| `GET /Home/GetUpperLowerCap` | 200, 100 KB |
+| `GET /Home/GetClientInfo` | 200 |
+| `GET /Home/GetCollaterals` | 200 |
+| `GET /Home/GetOutstanding` | 200 |
+
+So the broker session was entirely healthy and only this one endpoint was broken. **The portal's own
+"AHL Analytics" button is equally broken**: clicking `#AHLAnalytics` produced the same 500, and
+because `OpenAnalytics()` only does `console.log(err)` in its error branch, `window.open` is never
+called and the button silently does nothing. That is the check to run before suspecting local code —
+if the button does nothing, hop ① is down and nothing downstream can work.
+
+Two consequences were designed in rather than discovered later:
+
+**A failed handshake now opens a five-minute cooldown.** Hop ① runs against the broker session, so
+restoring a dead one launches a browser and logs in. Without a cooldown, every caller wanting fresh
+data re-attempts a handshake that cannot succeed, and each attempt can cost a login — against an
+account the broker blocked once already for roughly fifteen logins in two hours. Failing fast for a
+few minutes beats rediscovering a permanent outage every thirty seconds.
+
+**Polled callers may never trigger the handshake at all.** `GetMarketSnapshotAsync` takes
+`allowHandshake`, and both dashboard endpoints pass `false`. The movers panel had been calling it
+with the default `true` on a 30-second timer, which turned a broken upstream into a login generator —
+visible in the activity log as `Browser session opened` / `Logging in to the broker portal` firing the
+moment the dashboard loaded. Agent- and user-initiated calls still pass `true`, because a person asked
+for the data and one login is a fair price; a timer never asked for anything.
+
+The panel now distinguishes three states — portal disabled, no session yet (and it says it will not
+start one), handshake cooling down — and prints the upstream status and body snippet rather than
+guessing at a cause.
+
 ## Market depth: what is actually available
 
 **There is no L2 / order-book depth on this portal.** This is the one thing worth being blunt
@@ -486,3 +527,7 @@ This capture ran with the market closed. Before anything depends on the live par
    is consistent with "closed" but not proof.
 3. Re-check the 60/min rate limit under a realistic screening load before pointing
    `ScanWatchlistTool` at it.
+4. Whether `GET /Home/GetAnalyticsURL` recovers, and whether it is worth asking AHL why it 500s. As of
+   2026-08-20 the whole integration is dark behind it — no token means no snapshot, no movers, and
+   candles fall back to PSX. Everything downstream was verified working the day before, so this is an
+   availability question, not a correctness one.

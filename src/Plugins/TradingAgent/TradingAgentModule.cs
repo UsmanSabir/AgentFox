@@ -835,7 +835,12 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             if (parsed is null)
                 return Results.BadRequest(new { error = $"Unknown screen '{screen}'.", valid = AhlMovers.ScreenNames });
 
-            var snapshot = await analytics.GetMarketSnapshotAsync(ct: ct);
+            // allowHandshake:false — this is a POLLED endpoint. The handshake's first hop runs against
+            // the broker session, so permitting it here would generate a broker LOGIN per dashboard
+            // poll whenever the handshake is failing, which is the exact incident shape that cost
+            // account access on 2026-08-18. The panel serves whatever an existing token can produce
+            // and otherwise explains itself.
+            var snapshot = await analytics.GetMarketSnapshotAsync(allowHandshake: false, ct: ct);
             if (snapshot is null)
             {
                 // Report WHY. "Could not be reached" covers no-session, a throttle and a rejected
@@ -846,6 +851,7 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                     enabled = true,
                     available = false,
                     hasToken = analytics.HasToken,
+                    handshakeCoolingDown = analytics.HandshakeInCooldown,
                     error = analytics.LastError,
                     rows = Array.Empty<object>()
                 });
@@ -871,13 +877,14 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             if (!analytics.Enabled)
                 return Results.Ok(new { enabled = false, sectors = Array.Empty<object>() });
 
-            var snapshot = await analytics.GetMarketSnapshotAsync(ct: ct);
+            var snapshot = await analytics.GetMarketSnapshotAsync(allowHandshake: false, ct: ct);
             if (snapshot is null)
                 return Results.Ok(new
                 {
                     enabled = true,
                     available = false,
                     hasToken = analytics.HasToken,
+                    handshakeCoolingDown = analytics.HandshakeInCooldown,
                     error = analytics.LastError,
                     sectors = Array.Empty<object>()
                 });

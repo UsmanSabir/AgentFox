@@ -677,6 +677,8 @@ export interface MoversResponse {
   available?: boolean;
   /** True when a portal token is held — so an unavailable portal is NOT a missing broker session. */
   hasToken?: boolean;
+  /** True while a failed handshake is cooling down; retrying sooner would not help. */
+  handshakeCoolingDown?: boolean;
   /** The upstream status and body snippet, when the call failed. */
   error?: string | null;
   screen?: string;

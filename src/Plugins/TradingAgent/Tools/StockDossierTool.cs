@@ -136,8 +136,8 @@ public sealed class StockDossierTool : BaseTool
         if (snapshot?.Equities is null)
         {
             return ToolResult.Fail(
-                "Could not read the market snapshot from the analytics portal. This usually means no " +
-                "broker session is available for the SSO handshake.");
+                "Could not read the market snapshot from the analytics portal. " +
+                (_client.LastError ?? "No further detail was reported."));
         }
 
         if (!snapshot.Equities.TryGetValue(symbol, out var eq))

@@ -672,12 +672,30 @@ public sealed class AhkPortalClient : IBrokerMarketState, IDisposable
     /// broker's session, and this class is the one thing that owns that session.
     /// </para>
     /// </summary>
-    /// <returns>The absolute analytics URL, or null when the session is unavailable or the portal
-    /// answered with something other than a URL.</returns>
-    public async Task<string?> GetAnalyticsUrlAsync(CancellationToken ct = default)
+    /// <returns>
+    /// The absolute analytics URL, plus a diagnosis when it could not be obtained. The reason matters
+    /// to the caller: "no broker session" is actionable locally, whereas the portal answering 500 on
+    /// this endpoint is a BROKER-SIDE fault that no amount of retrying fixes — and telling those apart
+    /// is what stops a dashboard poll from retrying a permanent failure forever.
+    /// </returns>
+    public async Task<(string? Url, string? Error)> GetAnalyticsUrlAsync(CancellationToken ct = default)
     {
+        if (!HasSession && !await EnsureSessionAsync(ct))
+            return (null, "No broker session is available for the analytics SSO handshake.");
+
         var body = await GetAsync("Home/GetAnalyticsURL", ct);
-        if (string.IsNullOrWhiteSpace(body)) return null;
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            // Observed 2026-08-20: this endpoint answered 500 with an empty body on a healthy,
+            // freshly logged-in session while every other /Home/ endpoint returned normally, and the
+            // portal's OWN "AHL Analytics" button failed the same way (its handler logs the error and
+            // never calls window.open, so it silently does nothing). Treated as a broker-side outage.
+            return (null,
+                "The broker portal's GetAnalyticsURL endpoint returned no usable response. This is a " +
+                "broker-side fault, not a local one: the portal's own \"AHL Analytics\" button calls the " +
+                "same endpoint and fails identically when this happens. Retrying will not help until " +
+                "AHL restores it.");
+        }
 
         // The response is a bare JSON string. Deserialize rather than trimming quotes by hand so an
         // escaped character in the token does not survive into the URL.
@@ -690,18 +708,21 @@ public sealed class AhkPortalClient : IBrokerMarketState, IDisposable
         {
             // A dead session serves the login page with HTTP 200 here, same as everywhere else.
             if (body.Contains("<html", StringComparison.OrdinalIgnoreCase))
+            {
                 InvalidateSession("GetAnalyticsURL answered with the login page instead of a URL.");
-            else
-                _logger.LogWarning("[AhkPortal] GetAnalyticsURL returned unparseable body: {Snippet}",
-                    body.Length > 160 ? body[..160] : body);
-            return null;
+                return (null, "The broker session expired during the analytics handshake.");
+            }
+
+            _logger.LogWarning("[AhkPortal] GetAnalyticsURL returned unparseable body: {Snippet}",
+                body.Length > 160 ? body[..160] : body);
+            return (null, "The broker portal returned an unparseable analytics URL.");
         }
 
         if (string.IsNullOrWhiteSpace(url) ||
             !Uri.TryCreate(url, UriKind.Absolute, out var parsed))
         {
             _logger.LogWarning("[AhkPortal] GetAnalyticsURL returned no usable URL.");
-            return null;
+            return (null, "The broker portal returned no usable analytics URL.");
         }
 
         // Force https. The portal hands out http:// and relies on a 307, which would put the
@@ -709,7 +730,7 @@ public sealed class AhkPortalClient : IBrokerMarketState, IDisposable
         if (parsed.Scheme == Uri.UriSchemeHttp)
             parsed = new UriBuilder(parsed) { Scheme = Uri.UriSchemeHttps, Port = -1 }.Uri;
 
-        return parsed.ToString();
+        return (parsed.ToString(), null);
     }
 
     // ── Transport ─────────────────────────────────────────────────────────────
