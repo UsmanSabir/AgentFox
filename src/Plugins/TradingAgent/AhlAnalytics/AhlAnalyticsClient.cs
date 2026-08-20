@@ -570,6 +570,13 @@ public sealed class AhlAnalyticsClient : IDisposable
         var ttl = TimeSpan.FromMinutes(Math.Max(1, Config.DailyCandleCacheMinutes));
         return await _dailyCandleCache.GetAsync(normalized, ttl, async token =>
         {
+            // Snapshot requests own this gate from before the SSO handshake until the market POST
+            // completes. Candle reads never create that handshake themselves, so once a cold
+            // snapshot publishes the token they pause here instead of racing 30+ GETs into the
+            // shared rate limiter ahead of the POST that makes the dashboard usable.
+            await _snapshotGate.WaitAsync(token);
+            _snapshotGate.Release();
+
             var response = await GetJsonAsync<AhlCandleResponse>(
                 $"api/v3/market?path=/daily/{Uri.EscapeDataString(normalized)}", token);
             return Reverse(response?.Data);

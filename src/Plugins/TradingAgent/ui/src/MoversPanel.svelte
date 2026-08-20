@@ -25,7 +25,15 @@
   let sectors: SectorsResponse | null = null;
   let loading = true;
   let error: string | null = null;
-  let timer: ReturnType<typeof setInterval> | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let requestInFlight = false;
+  let reloadRequested = false;
+  let disposed = false;
+
+  const READY_REFRESH_MS = 30_000;
+  // The first movers request often races the broker's startup login. Retry the cheap local endpoint
+  // promptly while it is waiting; the backend still refuses to create a broker session itself.
+  const WAITING_FOR_BROKER_MS = 2_000;
 
   const INDEX_OPTIONS = [
     { value: 'KSE100',  label: 'KSE 100' },
@@ -36,6 +44,17 @@
   ];
 
   async function load() {
+    if (disposed) return;
+    if (requestInFlight) {
+      reloadRequested = true;
+      return;
+    }
+    requestInFlight = true;
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+
     try {
       const query = { screen, index: index || undefined, limit };
       const [movers, sectorData] = await Promise.all([
@@ -48,8 +67,32 @@
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
+      requestInFlight = false;
       loading = false;
+      if (reloadRequested) {
+        reloadRequested = false;
+        load();
+      } else {
+        scheduleNext();
+      }
     }
+  }
+
+  function scheduleNext() {
+    if (disposed) return;
+    if (timer) clearTimeout(timer);
+
+    const waitingForBroker = data?.available === false
+      && !data.hasToken
+      && !data.handshakeCoolingDown;
+    timer = setTimeout(() => {
+      timer = null;
+      if (typeof document !== 'undefined' && document.hidden) {
+        scheduleNext();
+        return;
+      }
+      load();
+    }, waitingForBroker ? WAITING_FOR_BROKER_MS : READY_REFRESH_MS);
   }
 
   function pick(newScreen: MoverScreen) {
@@ -61,15 +104,12 @@
 
   onMount(() => {
     load();
-    // The snapshot is cached server-side for its configured TTL, so polling faster than that would
-    // re-render identical data; 30s keeps the panel live without adding upstream traffic.
-    timer = setInterval(() => {
-      if (typeof document !== 'undefined' && document.hidden) return;
-      load();
-    }, 30_000);
   });
 
-  onDestroy(() => { if (timer) clearInterval(timer); });
+  onDestroy(() => {
+    disposed = true;
+    if (timer) clearTimeout(timer);
+  });
 
   function fmtPkr(value?: number | null): string {
     if (value == null) return '-';
@@ -161,9 +201,8 @@
         not retry it on a timer — the handshake needs a broker session, so retrying could cost a
         broker login each time.
       {:else}
-        Waiting for the live broker session. Once AHK is connected, this panel establishes the
-        separate AHL analytics session without launching another broker login. You can also run
-        <code>market_movers</code> or <code>stock_dossier</code> from chat explicitly.
+        Waiting for the live broker session. This panel starts automatically as soon as AHK connects,
+        then establishes the separate AHL analytics session without launching another broker login.
       {/if}
     </p>
     {#if data.error}

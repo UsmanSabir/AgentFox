@@ -621,7 +621,9 @@ Settled against a live open session (`st: "OPN"`), so these are no longer assump
 - **Daily candle calls are cached per symbol.** The default 720-minute cache is case-insensitive,
   single-flight for concurrent cold reads, and does not cache empty/failing responses. A 31-symbol
   scan now costs 31 AHL GETs only on the first cold pass; routine two-minute scans reuse the series,
-  leaving the shared limiter available for the market snapshot POST.
+  leaving the shared limiter available for the market snapshot POST. On a completely cold start,
+  candle loaders also wait behind the first whole-market snapshot, so token publication cannot let
+  31 GETs jump ahead of the POST that populates the movers dashboard.
 
 ## Verification still owed
 

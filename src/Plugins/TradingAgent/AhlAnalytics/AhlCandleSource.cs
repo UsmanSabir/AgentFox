@@ -57,9 +57,9 @@ public sealed class AhlCandleSource
     /// This distinction is the whole point of the flag. The handshake's first hop runs against the
     /// broker session, and restoring a dead one can launch a browser and log in. A candle read is a
     /// routine, frequently repeated operation, so it must never be the thing that triggers a login —
-    /// it falls back to PSX instead. The handshake happens on agent- or user-initiated calls
-    /// (<c>market_movers</c>, <c>stock_dossier</c>), and once a token is held this returns true and
-    /// candle reads start using it.
+    /// it falls back to PSX instead. The handshake happens on explicit agent/user tool calls, or by
+    /// the passive movers endpoint after the AHK feed already owns a broker session. Once a token is
+    /// held this returns true and candle reads start using it.
     /// </para>
     /// </summary>
     public bool ReadyWithoutHandshake => _client.Enabled && _client.HasToken;

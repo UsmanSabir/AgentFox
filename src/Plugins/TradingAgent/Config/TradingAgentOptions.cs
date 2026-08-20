@@ -339,10 +339,12 @@ public sealed class TradingMonitorOptions
 
     /// <summary>
     /// Seconds between passes while the market is open (clamped 30–3600). A pass costs ONE market-wide
-    /// request regardless of how many symbols are watched, so 120 s is cheap; the limit on going
-    /// faster is the portal's patience, not ours.
+    /// request regardless of how many symbols are watched, so running at the clamp floor is cheap; the
+    /// limit on going faster is the portal's patience, not ours. The one per-symbol cost in a pass —
+    /// AHL's daily candles — is cached for <see cref="AhlAnalyticsConfig.DailyCandleCacheMinutes"/>
+    /// (hours, not seconds), so quadrupling the pass rate does not quadruple that traffic either.
     /// </summary>
-    public int IntervalSeconds { get; set; } = 120;
+    public int IntervalSeconds { get; set; } = 30;
 
     /// <summary>
     /// Consecutive passes a condition must hold before it becomes an alert. 1 fires immediately and
