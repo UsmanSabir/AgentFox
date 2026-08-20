@@ -75,13 +75,33 @@
     }
   }
 
-  const describeTrigger = (o: ArmedOrder) =>
-    o.triggerKind === 'Event'
-      ? `${(o.triggerAlertKind ?? '').replace(/([a-z])([A-Z])/g, '$1 $2')}`
-      : `${o.triggerKind === 'PriceBelow' ? '≤' : '≥'} ${o.triggerPrice}`;
-
   const num = (v: number, digits = 2) =>
     v.toLocaleString(undefined, { maximumFractionDigits: digits });
+
+  /**
+   * What the trigger is waiting for.
+   *
+   * A percent trigger reports the level AND the move behind it, because the level alone is not the
+   * thing that was armed — it is a projection of a percentage off a reference, and for a trailing
+   * order that reference has since moved. Showing only the number would make a trailing stop
+   * indistinguishable from a fixed one on the row that is supposed to explain it.
+   */
+  const describeTrigger = (o: ArmedOrder) => {
+    if (o.triggerKind === 'Event')
+      return (o.triggerAlertKind ?? '').replace(/([a-z])([A-Z])/g, '$1 $2');
+
+    const drop = o.triggerKind === 'PercentDrop';
+    const comparator = drop || o.triggerKind === 'PriceBelow' ? '≤' : '≥';
+    const level = o.triggerPrice != null ? num(o.triggerPrice) : '—';
+
+    if (o.triggerKind !== 'PercentDrop' && o.triggerKind !== 'PercentRise')
+      return `${comparator} ${level}`;
+
+    const basis = o.referencePrice != null
+      ? ` ${drop ? 'below' : 'above'} ${o.trailing ? 'peak ' : ''}${num(o.referencePrice)}`
+      : '';
+    return `${comparator} ${level} — ${o.triggerPercent}%${basis}`;
+  };
 
   /**
    * The price the ORDER goes in at — which is not the trigger, and was previously not shown at all.
@@ -209,8 +229,9 @@
     <p class="line">Loading…</p>
   {:else if !entries.length && !stops.length}
     <p class="empty">
-      Nothing armed. Click a support or resistance level on the chart, or "arm on this event" on an
-      alert, to have an order wait for it.
+      Nothing armed. Use "sell if it drops" on the chart to protect a holding against a fall of a
+      given percent, click a support or resistance level for an exact price, or "arm on this event"
+      on an alert.
     </p>
   {:else}
     <ul class="list">
@@ -233,6 +254,7 @@
             </div>
             <div class="row-2">
               fires when {order.triggerKind === 'Event' ? 'event' : 'price'} {describeTrigger(order)}
+              {#if order.trailing}<span class="chip trail">trailing</span>{/if}
               {#if order.orderType === 'STOPLOSS' && order.limitPrice != null}
                 · stop limit {num(order.limitPrice)}
               {/if}
@@ -355,6 +377,7 @@
   .row-2 { color: var(--text-2); font-size: .71rem; }
   .chip { font-size: .6rem; padding: .05rem .35rem; border-radius: 999px;
           border: 1px solid var(--border-md); color: var(--text-3); }
+  .chip.trail { color: var(--primary); border-color: color-mix(in srgb, var(--primary) 40%, transparent); }
   .meta { color: var(--text-3); font-size: .65rem; }
   .note { margin: 0; color: var(--text-2); font-size: .71rem; }
   .reason { margin: 0; color: var(--warning); font-size: .69rem; line-height: 1.45; }

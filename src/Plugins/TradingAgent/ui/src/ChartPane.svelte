@@ -19,7 +19,7 @@
   } from './api';
   import {
     LineChart, AlertTriangle, Eye, RefreshCw, Brain, Maximize2, Minimize2,
-    Activity, Crosshair, BarChart3
+    Activity, Crosshair, BarChart3, TrendingDown
   } from 'lucide-svelte';
   import AssessmentCard from './AssessmentCard.svelte';
 
@@ -85,6 +85,36 @@
         + `(${level.touches} touch${level.touches === 1 ? '' : 'es'}`
         + `${level.weeklyConfirmed ? ', weekly-confirmed' : ', no weekly confirmation'}) `
         + `· ${isSupport ? 'a BUY fires if price falls to support' : 'a SELL fires if price rises to resistance'}.`
+    });
+  }
+
+  /**
+   * Arms a trailing SELL on a fall of `percent` from the current price.
+   *
+   * This is the one-click path for "get me out if it starts dropping", which needs no level reading at
+   * all: the reference is the price on screen, the trigger trails it upward, and the order goes in at
+   * market so a large fall still fills. Everything remains editable in the dialog — what these buttons
+   * remove is the need to know which number goes in which box, not the chance to change it.
+   */
+  function armPercentDrop(percent: number) {
+    if (!symbol || !data) return;
+    const last = data.snapshot.close;
+
+    dispatch('arm', {
+      symbol,
+      triggerKind: 'PercentDrop',
+      triggerPercent: percent,
+      referencePrice: last,
+      currentPrice: last,
+      trailing: true,
+      action: 'SELL',
+      // Market, deliberately. A limit does NOT trail with the trigger, so on a trailing stop it is
+      // the one combination that can trigger correctly and then fail to fill.
+      orderType: 'MARKET',
+      context:
+        `${symbol} last ${last} · sells if it falls ${percent}% from its highest point after arming `
+        + `(right now that is ${(Math.round(last * (1 - percent / 100) * 100) / 100)}). `
+        + 'The trigger follows the price up and never back down.'
     });
   }
 
@@ -637,6 +667,24 @@
           </div>
         {/if}
 
+        <!-- The no-chart-reading path. A support/resistance click needs you to have decided which
+             level matters; this only needs the size of fall you are unwilling to sit through, which
+             is a question anyone holding the stock can already answer. -->
+        <div class="drop-guard">
+          <b><TrendingDown size={12} /> Sell if it drops</b>
+          {#each [2, 3, 5, 10] as percent}
+            <button
+              class="drop-btn"
+              on:click={() => armPercentDrop(percent)}
+              title="Arm a trailing SELL that fires if {symbol} falls {percent}% from its highest point — at market, so it fills"
+            >
+              −{percent}%
+              <em>{(Math.round(data.snapshot.close * (1 - percent / 100) * 100) / 100)}</em>
+            </button>
+          {/each}
+          <span class="drop-hint">trailing · follows the price up</span>
+        </div>
+
         <!-- Defaults follow the ordinary level trade: sell at resistance, buy at support. -->
         <div class="levels">
           <div>
@@ -768,6 +816,22 @@
   .chip.ok { color:var(--success); border-color:color-mix(in srgb, var(--success) 35%, transparent); }
   .chip.warn { color:var(--warning); border-color:color-mix(in srgb, var(--warning) 35%, transparent); }
   .chip.monitor { color:var(--info); border-color:color-mix(in srgb, var(--info) 35%, transparent); }
+
+  .drop-guard { display:flex; align-items:center; gap:.35rem; flex-wrap:wrap; }
+  .drop-guard b {
+    color:var(--text-3); font-size:.65rem; text-transform:uppercase; letter-spacing:.04em;
+    display:inline-flex; align-items:center; gap:.25rem; margin-right:.15rem;
+  }
+  .drop-btn {
+    background:var(--surface-2); border:1px solid var(--border-md); border-radius:var(--radius-sm);
+    color:var(--danger); font:inherit; font-size:.72rem; font-weight:600; cursor:pointer;
+    padding:.22rem .45rem; display:inline-flex; align-items:baseline; gap:.3rem;
+    font-variant-numeric:tabular-nums;
+  }
+  .drop-btn:hover { border-color:var(--danger); background:var(--surface-3); }
+  .drop-btn em { color:var(--text-3); font-style:normal; font-weight:400; font-size:.66rem;
+                 font-family:ui-monospace, monospace; }
+  .drop-hint { color:var(--text-3); font-size:.62rem; }
 
   .levels { display:grid; grid-template-columns:1fr 1fr; gap:.5rem; }
   .levels > div { display:flex; flex-direction:column; gap:.2rem; }

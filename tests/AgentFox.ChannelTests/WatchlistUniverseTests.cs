@@ -493,6 +493,9 @@ public sealed class WatchlistUniverseTests
             string id, string expected, string next, string? reason = null,
             string? executionId = null, CancellationToken ct = default) =>
             throw new NotSupportedException();
+        public Task<bool> TrySetArmedOrderTrailAsync(
+            string id, decimal reference, decimal triggerPrice, bool ratchetUp,
+            CancellationToken ct = default) => throw new NotSupportedException();
         public Task<string> SaveProtectiveStopAsync(
             ProtectiveStop stop, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<IReadOnlyList<ProtectiveStop>> GetProtectiveStopsAsync(

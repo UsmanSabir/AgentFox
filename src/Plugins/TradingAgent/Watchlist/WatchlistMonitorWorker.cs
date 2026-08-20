@@ -376,7 +376,13 @@ public sealed class WatchlistMonitorWorker : BackgroundService
             var alerts = alertsBySymbol.GetValueOrDefault(order.Symbol, Array.Empty<AlertKind>());
 
             if (!ArmedOrderEvaluator.ShouldFire(order, price, alerts, now, out var why))
+            {
+                // Not firing — so this is the moment a trailing trigger follows the price. Done after
+                // the fire check so a fire never waits on a bookkeeping write, and only when the
+                // reference actually moves, which keeps a flat symbol from writing every 30 seconds.
+                await TrailAsync(order, price, ct);
                 continue;
+            }
 
             // One browser session for this order's whole fire path. A backstop reads the outstanding
             // book and then submits, and without this the broker's on-demand lifecycle closes the
@@ -468,6 +474,45 @@ public sealed class WatchlistMonitorWorker : BackgroundService
                     $"{order.Symbol}: submission threw — verify at the broker before re-arming",
                     ex.Message);
             }
+        }
+    }
+
+    /// <summary>
+    /// Moves a trailing percent trigger's reference to a new favourable extreme, if this pass produced
+    /// one.
+    ///
+    /// <para>
+    /// A failed write is logged and otherwise ignored on purpose. The reference only ever falls BEHIND
+    /// the price when a ratchet is missed, which leaves the trigger where it already was — a stop that
+    /// is momentarily wider than intended, never one that has moved closer to firing. Aborting the
+    /// pass over it would be strictly worse: every other armed order would stop being evaluated.
+    /// </para>
+    /// </summary>
+    private async Task TrailAsync(ArmedOrder order, decimal? price, CancellationToken ct)
+    {
+        if (ArmedOrderEvaluator.NextTrailReference(order, price) is not { } reference) return;
+        if (PercentTrigger.Level(order.TriggerKind, reference, order.TriggerPercent) is not { } level)
+            return;
+
+        var ratchetUp = order.TriggerKind == ArmedTriggerKind.PercentDrop;
+
+        try
+        {
+            if (!await _repository.TrySetArmedOrderTrailAsync(
+                    order.ArmedId, reference, level, ratchetUp, ct))
+                return;
+
+            _logger.LogInformation(
+                "[ArmedOrders] {ArmedId} ({Symbol}) trailed: reference {From} → {To}, "
+                + "trigger now {Level} ({Percent}% {Direction}).",
+                order.ArmedId, order.Symbol, order.ReferencePrice, reference, level,
+                order.TriggerPercent, ratchetUp ? "below" : "above");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex,
+                "[ArmedOrders] Could not trail {ArmedId} ({Symbol}); its trigger stays at {Level}.",
+                order.ArmedId, order.Symbol, order.EffectiveTriggerPrice);
         }
     }
 

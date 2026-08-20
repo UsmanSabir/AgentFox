@@ -16,7 +16,78 @@ public enum ArmedTriggerKind
     /// break, a trend flip. This is the kind the broker cannot express, and therefore the reason a
     /// locally-evaluated trigger exists at all.
     /// </summary>
-    Event
+    Event,
+
+    /// <summary>
+    /// Fire once the price has fallen <see cref="ArmedOrder.TriggerPercent"/>% below
+    /// <see cref="ArmedOrder.ReferencePrice"/>. "Get me out if it starts dropping", expressed as a
+    /// move rather than as a level — which is how a fall is actually reasoned about, and which does
+    /// not require the person arming it to know where support sits.
+    ///
+    /// <para>
+    /// With <see cref="ArmedOrder.Trailing"/> set the reference follows the highest price seen since
+    /// arming, so the level ratchets UP as the position gains and never down. That is a trailing stop,
+    /// and it is the case a fixed level genuinely cannot express.
+    /// </para>
+    /// </summary>
+    PercentDrop,
+
+    /// <summary>
+    /// The mirror of <see cref="PercentDrop"/>: fire once the price has risen
+    /// <see cref="ArmedOrder.TriggerPercent"/>% above the reference. Trailing follows the LOWEST price
+    /// seen, so a breakout entry chases a falling market down instead of expiring above it.
+    /// </summary>
+    PercentRise
+}
+
+/// <summary>
+/// The arithmetic behind the percent triggers, in one pure place.
+///
+/// <para>
+/// It lives here rather than inside the evaluator because three callers need the same answer: the
+/// evaluator (does it fire), the arm endpoint (what level am I committing to, and is it already
+/// breached), and the trail ratchet (where does the level move to). Three copies of
+/// <c>reference * (1 - percent/100)</c> is three chances for the level shown to the user to differ
+/// from the one that fires.
+/// </para>
+/// </summary>
+public static class PercentTrigger
+{
+    /// <summary>Largest move that can be armed as a percent trigger.</summary>
+    public const decimal MaxPercent = 50m;
+
+    public static bool IsPercent(ArmedTriggerKind kind) =>
+        kind is ArmedTriggerKind.PercentDrop or ArmedTriggerKind.PercentRise;
+
+    /// <summary>
+    /// Whether the trigger is reached by the price RISING. Null for an event trigger, which has no
+    /// direction. The risk engine needs this to judge a stop-limit's geometry — see StopLimitRule.
+    /// </summary>
+    public static bool? FiresOnRisingPrice(ArmedTriggerKind kind) => kind switch
+    {
+        ArmedTriggerKind.PriceAbove or ArmedTriggerKind.PercentRise => true,
+        ArmedTriggerKind.PriceBelow or ArmedTriggerKind.PercentDrop => false,
+        _                                                           => null
+    };
+
+    /// <summary>
+    /// The price level a percent trigger currently sits at, or null when the inputs cannot produce
+    /// one. Rounded to the 2 decimals PSX quotes in, so the level fires at the number the user was
+    /// shown rather than at an unrepresentable fraction of it.
+    /// </summary>
+    public static decimal? Level(ArmedTriggerKind kind, decimal? reference, decimal? percent)
+    {
+        if (!IsPercent(kind)) return null;
+        if (reference is not { } from || from <= 0) return null;
+        if (percent is not { } move || move <= 0 || move > MaxPercent) return null;
+
+        var factor = kind == ArmedTriggerKind.PercentDrop
+            ? 1m - move / 100m
+            : 1m + move / 100m;
+
+        var level = Math.Round(from * factor, 2, MidpointRounding.AwayFromZero);
+        return level > 0 ? level : null;
+    }
 }
 
 /// <summary>
@@ -36,11 +107,43 @@ public sealed record ArmedOrder
 
     public required ArmedTriggerKind TriggerKind { get; init; }
 
-    /// <summary>Level for a price trigger; null for an event trigger.</summary>
+    /// <summary>
+    /// Level for a price trigger; null for an event trigger.
+    ///
+    /// <para>
+    /// For a PERCENT trigger this is the level the percentage currently works out to — materialised
+    /// rather than left null so that everything already reading a trigger level (the panel, the
+    /// stop-limit check, the disarm confirmation) keeps showing a real number. It is derived state:
+    /// <see cref="ReferencePrice"/> and <see cref="TriggerPercent"/> are the truth, the evaluator
+    /// recomputes from them, and a trailing order rewrites this alongside the reference. A stale copy
+    /// therefore cannot fire an order early — it can only make a panel a pass out of date.
+    /// </para>
+    /// </summary>
     public decimal? TriggerPrice { get; init; }
 
     /// <summary>Alert kind for an event trigger; null for a price trigger.</summary>
     public AlertKind? TriggerAlertKind { get; init; }
+
+    /// <summary>Size of the move, in percent, for a percent trigger. Null for every other kind.</summary>
+    public decimal? TriggerPercent { get; init; }
+
+    /// <summary>
+    /// The price the percentage is measured FROM. Captured when the order is armed — normally the
+    /// price on screen at that moment — and rewritten by the ratchet while <see cref="Trailing"/>.
+    /// </summary>
+    public decimal? ReferencePrice { get; init; }
+
+    /// <summary>
+    /// The reference follows the price in the favourable direction instead of staying where it was
+    /// armed: the highest price seen for a drop trigger, the lowest for a rise trigger.
+    ///
+    /// <para>
+    /// The ratchet is one-way by construction, so a trailing stop can only ever move the level away
+    /// from a loss. A trail that could slip back down would quietly widen the risk the operator
+    /// signed up for, which is the one thing a stop must not do.
+    /// </para>
+    /// </summary>
+    public bool Trailing { get; init; }
 
     // ── The order to place when it fires ──────────────────────────────────────
     public required string Action { get; init; }        // BUY | SELL
@@ -80,6 +183,15 @@ public sealed record ArmedOrder
     /// </summary>
     public string? ProtectiveStopId { get; init; }
 
+    /// <summary>
+    /// The level this order fires at as of right now: recomputed for a percent trigger, the stored
+    /// level for a fixed one, null for an event.
+    /// </summary>
+    public decimal? EffectiveTriggerPrice =>
+        PercentTrigger.IsPercent(TriggerKind)
+            ? PercentTrigger.Level(TriggerKind, ReferencePrice, TriggerPercent)
+            : TriggerKind == ArmedTriggerKind.Event ? null : TriggerPrice;
+
     /// <summary>Projects the armed order onto the signal the trading manager executes.</summary>
     public TradingSignal ToSignal() => new()
     {
@@ -92,12 +204,7 @@ public sealed record ArmedOrder
         LimitPrice = LimitPrice,
         // Carried through deliberately: without it the risk engine has to infer the trigger's
         // direction from the side, which is wrong for a dip-buy and a sell-into-strength alike.
-        FiresOnRisingPrice = TriggerKind switch
-        {
-            ArmedTriggerKind.PriceAbove => true,
-            ArmedTriggerKind.PriceBelow => false,
-            _                           => null
-        },
+        FiresOnRisingPrice = PercentTrigger.FiresOnRisingPrice(TriggerKind),
         RawMessage = $"armed:{ArmedId}"
     };
 }
@@ -135,9 +242,22 @@ public static class ArmedOrderEvaluator
         {
             case ArmedTriggerKind.PriceBelow:
             case ArmedTriggerKind.PriceAbove:
-                if (order.TriggerPrice is not { } level || level <= 0)
+            case ArmedTriggerKind.PercentDrop:
+            case ArmedTriggerKind.PercentRise:
+                // A percent trigger's level is recomputed from the reference and the percentage every
+                // pass rather than read from the stored column. Those two are what the operator armed;
+                // the stored level is a projection of them, and trusting the projection is how a trail
+                // that failed to persist its last ratchet fires at yesterday's level.
+                var percent = PercentTrigger.IsPercent(order.TriggerKind);
+                var level = percent
+                    ? PercentTrigger.Level(order.TriggerKind, order.ReferencePrice, order.TriggerPercent)
+                    : order.TriggerPrice;
+
+                if (level is not { } trigger || trigger <= 0)
                 {
-                    reason = "Price trigger has no usable level.";
+                    reason = percent
+                        ? "Percent trigger has no usable reference price or percentage."
+                        : "Price trigger has no usable level.";
                     return false;
                 }
 
@@ -149,13 +269,18 @@ public static class ArmedOrderEvaluator
                     return false;
                 }
 
-                var hit = order.TriggerKind == ArmedTriggerKind.PriceBelow
-                    ? price <= level
-                    : price >= level;
+                var falling = PercentTrigger.FiresOnRisingPrice(order.TriggerKind) == false;
+                var hit = falling ? price <= trigger : price >= trigger;
+
+                var how = falling ? "at or below" : "at or above";
+                var basis = percent
+                    ? $" ({order.TriggerPercent}% {(falling ? "below" : "above")} "
+                      + $"{(order.Trailing ? "trailing reference " : "")}{order.ReferencePrice})"
+                    : "";
 
                 reason = hit
-                    ? $"Last {price} {(order.TriggerKind == ArmedTriggerKind.PriceBelow ? "at or below" : "at or above")} trigger {level}."
-                    : $"Last {price} has not reached trigger {level}.";
+                    ? $"Last {price} {how} trigger {trigger}{basis}."
+                    : $"Last {price} has not reached trigger {trigger}{basis}.";
                 return hit;
 
             case ArmedTriggerKind.Event:
@@ -175,5 +300,40 @@ public static class ArmedOrderEvaluator
                 reason = $"Unknown trigger kind {order.TriggerKind}.";
                 return false;
         }
+    }
+
+    /// <summary>
+    /// Where a trailing percent trigger's reference should move to, given this pass's price, or null
+    /// when it should stay put.
+    ///
+    /// <para>
+    /// Only ever returns a reference FURTHER in the favourable direction — higher for a drop trigger,
+    /// lower for a rise trigger — so the level it implies cannot loosen. The caller persists the
+    /// result under the same one-way guard, because two overlapping passes can otherwise write their
+    /// prices in the wrong order and undo a ratchet that already happened.
+    /// </para>
+    ///
+    /// <para>
+    /// Evaluate the FIRE condition before calling this. Ratcheting cannot cause a fire (a price making
+    /// a new extreme is by definition on the far side of the level), but doing the read-only question
+    /// first means a fire never waits on a bookkeeping write.
+    /// </para>
+    /// </summary>
+    public static decimal? NextTrailReference(ArmedOrder order, decimal? lastPrice)
+    {
+        if (!order.Trailing || order.State != "armed") return null;
+        if (!PercentTrigger.IsPercent(order.TriggerKind)) return null;
+        if (lastPrice is not { } price || price <= 0) return null;
+        if (order.TriggerPercent is not { } move || move <= 0) return null;
+
+        // A missing reference is adopted rather than ignored: an order armed while the feed was down
+        // has nothing to measure from, and the first real price is the best available anchor.
+        if (order.ReferencePrice is not { } reference || reference <= 0) return price;
+
+        var improved = order.TriggerKind == ArmedTriggerKind.PercentDrop
+            ? price > reference
+            : price < reference;
+
+        return improved ? price : null;
     }
 }
