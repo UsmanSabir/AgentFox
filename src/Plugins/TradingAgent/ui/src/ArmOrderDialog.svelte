@@ -1,7 +1,8 @@
 <script lang="ts">
   import { createEventDispatcher, onMount } from 'svelte';
   import {
-    trading, TRIGGER_KINDS, ALERT_KINDS,
+    trading, TRIGGER_KINDS, ALERT_KINDS, PERCENT_PRESETS,
+    isPercentTrigger, percentTriggerLevel,
     type ArmOrderRequest, type TriggerKind
   } from './api';
   import { Crosshair, X, AlertTriangle, Zap } from 'lucide-svelte';
@@ -15,6 +16,20 @@
   export let triggerPrice: number | null = null;
   export let triggerAlertKind: string | null = null;
   export let action: 'BUY' | 'SELL' = 'SELL';
+
+  // ── Percent trigger ("fire if it drops 3%") ──────────────────────────────
+  // The move, and the price it is measured from. `referencePrice` is pre-filled by the caller with
+  // whatever price it was showing, so the level quoted below is the level actually armed.
+  export let triggerPercent: number | null = null;
+  export let referencePrice: number | null = null;
+  /**
+   * Off by default, so the plain reading of "if it drops 3%" — 3% from today's price — is what an
+   * unattended default does. Callers that mean a trailing stop say so, and the checkbox explains the
+   * difference rather than assuming which one was wanted.
+   */
+  export let trailing = false;
+  /** Live price, for the already-passed warning only. Never submitted. */
+  export let currentPrice: number | null = null;
   /**
    * Limit for both sides by default. A pre-filled STOPLOSS made the type depend on where the dialog
    * was opened from, so the same click produced a different order kind on a chart level than on an
@@ -62,7 +77,30 @@
   }
 
   $: isEvent = triggerKind === 'Event';
+  $: isPercent = isPercentTrigger(triggerKind);
   $: isStop = orderType === 'STOPLOSS';
+  $: fallsToTrigger = triggerKind === 'PriceBelow' || triggerKind === 'PercentDrop';
+
+  // Picking the percent kind without a size of move would leave the level blank; 3% is a starting
+  // point to change, not a recommendation.
+  $: if (isPercent && triggerPercent == null) triggerPercent = 3;
+
+  /**
+   * The level the order fires at, whichever way it was specified. Everything downstream — the
+   * sentence, the estimate, the stop defaults, the already-passed check — reads this rather than
+   * branching on the trigger kind again.
+   */
+  $: level = isPercent
+    ? percentTriggerLevel(triggerKind, referencePrice, triggerPercent)
+    : triggerPrice;
+
+  /**
+   * The trigger has already been passed, so this would fire on the next monitoring pass rather than
+   * wait for anything. Worth saying out loud: it is occasionally what someone wants ("get me out, it
+   * is already falling") and much more often a number typed on the wrong side of the price.
+   */
+  $: alreadyPassed = !isEvent && level != null && currentPrice != null && currentPrice > 0
+    && (fallsToTrigger ? currentPrice <= level : currentPrice >= level);
 
   // A stop's limit defaults just past its trigger, mirroring the broker-side default: a stop limit set
   // exactly AT the trigger often misses the move that triggered it.
@@ -70,13 +108,20 @@
     limitPrice = Number((action === 'SELL' ? price * 0.99 : price * 1.01).toFixed(2));
   }
 
-  $: estimatedValue = (quantity ?? 0) * (price ?? triggerPrice ?? 0);
+  // A percent trigger has no level to type, so a LIMIT would otherwise go in with no price at all.
+  // Defaulted to the level, which is where the order was meant to sit. It does NOT follow a trailing
+  // reference afterwards — see the note the template shows when both are on.
+  $: if (isPercent && !isEvent && orderType !== 'MARKET' && price == null && level != null) {
+    price = level;
+  }
+
+  $: estimatedValue = (quantity ?? 0) * (price ?? level ?? 0);
 
   // A stop only makes sense on a BUY — it protects the position this entry creates.
   $: canAttachStop = action === 'BUY';
   $: if (!canAttachStop) attachStop = false;
 
-  $: entryPrice = price ?? triggerPrice ?? null;
+  $: entryPrice = price ?? level ?? null;
 
   // Default the stop 2% under the entry, and its limit 1% under the trigger. Both are starting
   // points to edit, not recommendations — the level worth stopping at is a judgement about the
@@ -103,21 +148,67 @@
         + 'cannot fill once triggered.'
     : null;
 
+  const money = (v: number) => v.toLocaleString(undefined, { maximumFractionDigits: 2 });
+
+  /**
+   * The whole order as one sentence, rebuilt as the form is edited.
+   *
+   * This is the part that makes the dialog usable without knowing the vocabulary. Every field above
+   * is a number in a box; this says what those numbers will actually do, in the order it happens —
+   * and it is the thing to read back before committing size to a level.
+   */
+  $: summary = (() => {
+    if (!quantity || quantity <= 0) return null;
+    const fill = orderType === 'MARKET'
+      ? 'at the best price available'
+      : price != null ? `at ${money(price)}` : 'with no price set';
+    const verb = action === 'SELL' ? 'Sells' : 'Buys';
+
+    if (isEvent) {
+      return triggerAlertKind
+        ? `${verb} ${quantity} ${symbol} ${fill} when ${symbol} raises `
+          + `"${triggerAlertKind.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase()}".`
+        : null;
+    }
+
+    if (level == null) return null;
+    const move = fallsToTrigger ? 'falls' : 'rises';
+
+    if (!isPercent) return `${verb} ${quantity} ${symbol} ${fill} if it ${move} to ${money(level)}.`;
+
+    const from = referencePrice != null ? money(referencePrice) : '—';
+    return `${verb} ${quantity} ${symbol} ${fill} if it ${move} ${triggerPercent}% `
+         + `from ${from} — that is ${money(level)}.`;
+  })();
+
   async function submit() {
     if (busy) return;
     error = null;
 
     if (!quantity || quantity <= 0) { error = 'Quantity must be a positive number.'; return; }
     if (isEvent && !triggerAlertKind) { error = 'Choose the event to trigger on.'; return; }
-    if (!isEvent && !(triggerPrice && triggerPrice > 0)) { error = 'Enter a trigger price.'; return; }
+    if (isPercent) {
+      if (!(triggerPercent && triggerPercent > 0 && triggerPercent <= 50)) {
+        error = 'Enter a move between 0 and 50%.'; return;
+      }
+      if (!(referencePrice && referencePrice > 0)) {
+        error = 'Enter the price to measure the move from.'; return;
+      }
+    } else if (!isEvent && !(triggerPrice && triggerPrice > 0)) {
+      error = 'Enter a trigger price.'; return;
+    }
     if (stopError) { error = stopError; return; }
 
     const request: ArmOrderRequest = {
       symbol, action, quantity, triggerKind,
-      triggerPrice: isEvent ? null : triggerPrice,
+      triggerPrice: isEvent || isPercent ? null : triggerPrice,
       triggerAlertKind: isEvent ? triggerAlertKind : null,
+      // Sent rather than left to the server to capture, so the level armed is the one quoted above.
+      triggerPercent: isPercent ? triggerPercent : null,
+      referencePrice: isPercent ? referencePrice : null,
+      trailing: isPercent && trailing,
       orderType,
-      price: price ?? triggerPrice,
+      price: orderType === 'MARKET' ? null : price ?? level,
       limitPrice: isStop ? limitPrice : null,
       expiresInDays,
       note: note.trim() || undefined,
@@ -183,22 +274,66 @@
         <button class="btn btn-primary" on:click={() => dispatch('close')}>Done</button>
       </div>
     {:else}
-      <div class="grid">
-        <label>
-          <span>Trigger</span>
+      <!-- WHEN it fires, on its own, above the order itself. The trigger is the decision; the order
+           is the consequence. Reading them the other way round is what made the percent triggers
+           look like an extra field on a form rather than a different question. -->
+      <div class="trigger-block">
+        <label class="full">
+          <span>Fire this order when…</span>
           <select bind:value={triggerKind}>
             {#each TRIGGER_KINDS as kind}
               <option value={kind}>
-                {kind === 'PriceBelow' ? 'Price falls to / below'
-                 : kind === 'PriceAbove' ? 'Price rises to / above'
-                 : 'An event fires'}
+                {kind === 'PercentDrop' ? 'the price drops by a % — from here, or from its peak'
+                 : kind === 'PercentRise' ? 'the price rises by a %'
+                 : kind === 'PriceBelow' ? 'the price falls to an exact level'
+                 : kind === 'PriceAbove' ? 'the price rises to an exact level'
+                 : 'something happens on the chart'}
               </option>
             {/each}
           </select>
         </label>
 
-        {#if isEvent}
-          <label>
+        {#if isPercent}
+          <div class="percent-row">
+            <div class="presets">
+              {#each PERCENT_PRESETS as preset}
+                <button
+                  type="button"
+                  class="chip-btn"
+                  class:on={triggerPercent === preset}
+                  on:click={() => triggerPercent = preset}
+                >{fallsToTrigger ? '−' : '+'}{preset}%</button>
+              {/each}
+            </div>
+            <label class="tight">
+              <span>or</span>
+              <input type="number" step="0.1" min="0.1" max="50" bind:value={triggerPercent} />
+            </label>
+            <label class="tight">
+              <span>measured from</span>
+              <input type="number" step="0.01" bind:value={referencePrice} />
+            </label>
+          </div>
+
+          <label class="check">
+            <input type="checkbox" bind:checked={trailing} />
+            <span>
+              Follow the price {fallsToTrigger ? 'up' : 'down'} as it moves
+              <em>({fallsToTrigger ? 'a trailing stop' : 'chases a falling market'})</em>
+            </span>
+          </label>
+          <p class="hint-note">
+            {#if trailing}
+              The {fallsToTrigger ? 'higher' : 'lower'} {symbol} goes, the {fallsToTrigger ? 'higher' : 'lower'}
+              this trigger goes with it — it never moves back, so the {triggerPercent}% is always
+              measured from the {fallsToTrigger ? 'best' : 'lowest'} price seen since you armed it.
+            {:else}
+              The {triggerPercent}% is measured from {referencePrice ?? '—'} and stays there, whatever
+              {symbol} does afterwards.
+            {/if}
+          </p>
+        {:else if isEvent}
+          <label class="full">
             <span>Event</span>
             <select bind:value={triggerAlertKind}>
               <option value={null}>— choose —</option>
@@ -208,12 +343,32 @@
             </select>
           </label>
         {:else}
-          <label>
+          <label class="full">
             <span>Trigger price</span>
             <input type="number" step="0.01" bind:value={triggerPrice} />
           </label>
         {/if}
 
+        {#if level != null}
+          <p class="level-line">
+            Fires at <b>{money(level)}</b>
+            {#if currentPrice != null && currentPrice > 0}
+              · {symbol} is {money(currentPrice)} now
+            {/if}
+          </p>
+        {/if}
+
+        {#if alreadyPassed}
+          <p class="error">
+            <AlertTriangle size={12} />
+            {symbol} is already {fallsToTrigger ? 'at or below' : 'at or above'} {money(level!)}, so
+            this would fire on the next check rather than wait for a move. Arm it only if that is
+            what you mean.
+          </p>
+        {/if}
+      </div>
+
+      <div class="grid">
         <label>
           <span>Side</span>
           <select bind:value={action}>
@@ -230,16 +385,18 @@
         <label>
           <span>Order type</span>
           <select bind:value={orderType}>
-            <option value="STOPLOSS">Stop Loss (trigger + limit)</option>
-            <option value="LIMIT">Limit</option>
-            <option value="MARKET">Market</option>
+            <option value="MARKET">Market — take the best price available</option>
+            <option value="LIMIT">Limit — no worse than a price I set</option>
+            <option value="STOPLOSS">Stop Loss — broker trigger + limit</option>
           </select>
         </label>
 
-        <label>
-          <span>{isStop ? 'Stop trigger' : 'Order price'}</span>
-          <input type="number" step="0.01" bind:value={price} />
-        </label>
+        {#if orderType !== 'MARKET'}
+          <label>
+            <span>{isStop ? 'Stop trigger' : 'Limit price'}</span>
+            <input type="number" step="0.01" bind:value={price} />
+          </label>
+        {/if}
 
         {#if isStop}
           <label>
@@ -253,6 +410,18 @@
           <input type="number" min="1" max="365" bind:value={expiresInDays} />
         </label>
       </div>
+
+      {#if isPercent && trailing && orderType !== 'MARKET'}
+        <!-- Said plainly because it is the one place the two features do not compose: the trigger
+             trails, the price on the order does not. Left unsaid, a trail that ran up 20% would fire
+             a limit priced for where the stock was when it was armed, and simply not fill. -->
+        <p class="hint-note warn">
+          <AlertTriangle size={12} />
+          Your {orderType === 'LIMIT' ? 'limit' : 'stop'} price stays at {price ?? '—'} even as the
+          trigger trails upward, so a large move could leave it too far away to fill. Market is the
+          safer pairing with a trailing trigger.
+        </p>
+      {/if}
 
       {#if canAttachStop}
         <!-- The stop is deliberately part of arming the entry rather than a separate action: the
@@ -307,6 +476,10 @@
         <span>Note (optional)</span>
         <input type="text" bind:value={note} placeholder="why this level" maxlength="120" />
       </label>
+
+      {#if summary}
+        <p class="summary">{summary}</p>
+      {/if}
 
       {#if estimatedValue > 0}
         <p class="estimate">Approximate order value <b>{estimatedValue.toLocaleString()} PKR</b></p>
@@ -363,6 +536,37 @@
   .estimate { margin: 0; color: var(--text-2); font-size: .74rem; }
   .estimate b { color: var(--text); }
 
+  /* The trigger gets its own framed block: it is a different question from the order, and the
+     percent controls need room to read as one row rather than as three unrelated fields. */
+  .trigger-block {
+    border: 1px solid var(--border-md); border-left: 3px solid var(--primary);
+    border-radius: var(--radius-sm); padding: .65rem .7rem;
+    display: flex; flex-direction: column; gap: .55rem;
+  }
+  .percent-row { display: flex; gap: .6rem; align-items: flex-end; flex-wrap: wrap; }
+  .presets { display: flex; gap: .3rem; }
+  .chip-btn {
+    background: var(--surface-2); border: 1px solid var(--border-md); border-radius: var(--radius-sm);
+    color: var(--text-2); font: inherit; font-size: .78rem; font-variant-numeric: tabular-nums;
+    padding: .4rem .55rem; cursor: pointer; white-space: nowrap;
+  }
+  .chip-btn:hover { color: var(--text); border-color: var(--primary); }
+  .chip-btn.on { background: var(--primary); border-color: var(--primary); color: #0c0d10; font-weight: 600; }
+  .tight { flex: 0 1 8rem; min-width: 6rem; }
+
+  .level-line { margin: 0; color: var(--text-2); font-size: .78rem; }
+  .level-line b { color: var(--text); font-family: ui-monospace, monospace; font-size: .86rem; }
+
+  .hint-note { margin: 0; color: var(--text-3); font-size: .7rem; line-height: 1.55; }
+  .hint-note.warn { color: var(--warning); display: flex; gap: .35rem; align-items: flex-start; }
+  .check em { color: var(--text-3); font-style: normal; font-size: .72rem; }
+
+  /* The whole order in one sentence, immediately above the button that commits it. */
+  .summary {
+    margin: 0; background: var(--surface-2); border-radius: var(--radius-sm);
+    padding: .55rem .65rem; color: var(--text); font-size: .8rem; line-height: 1.55;
+  }
+
   .attach {
     border: 1px solid var(--border-md); border-radius: var(--radius-sm);
     padding: .6rem .7rem; display: flex; flex-direction: column; gap: .55rem;
@@ -375,7 +579,8 @@
   .stop-note b { color: var(--warning); }
   .caveat { margin: 0; color: var(--warning); font-size: .68rem; display: flex; gap: .35rem;
             align-items: flex-start; line-height: 1.5; }
-  .error { margin: 0; color: var(--danger); font-size: .75rem; }
+  .error { margin: 0; color: var(--danger); font-size: .75rem; line-height: 1.5;
+           display: flex; gap: .35rem; align-items: flex-start; }
 
   .outcome {
     border: 1px solid var(--border-md); border-left-width: 3px; border-left-color: var(--text-3);

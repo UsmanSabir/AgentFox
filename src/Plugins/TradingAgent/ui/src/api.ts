@@ -407,9 +407,40 @@ async function waitForAssessment<T>(jobId: string): Promise<T> {
   }
 }
 
-/** Trigger kinds an armed order can wait on. */
-export const TRIGGER_KINDS = ['PriceBelow', 'PriceAbove', 'Event'] as const;
+/**
+ * Trigger kinds an armed order can wait on.
+ *
+ * The percent kinds lead because they are the ones that need no chart reading: "sell if it drops 3%"
+ * is a complete instruction, where "sell at 97.40" first requires knowing that 97.40 is the level
+ * that matters. The exact-level kinds stay for when it is.
+ */
+export const TRIGGER_KINDS = [
+  'PercentDrop', 'PercentRise', 'PriceBelow', 'PriceAbove', 'Event'
+] as const;
 export type TriggerKind = (typeof TRIGGER_KINDS)[number];
+
+/** Percent triggers measure a move; the others wait at a fixed level or on an event. */
+export const isPercentTrigger = (kind: TriggerKind | string) =>
+  kind === 'PercentDrop' || kind === 'PercentRise';
+
+/** Presets offered as one-click chips, so a size of move needs no typing. */
+export const PERCENT_PRESETS = [2, 3, 5, 10] as const;
+
+/**
+ * The level a percent trigger works out to. Mirrors the backend's PercentTrigger.Level, including its
+ * 2-decimal rounding — the dialog quotes this number to the operator, and a client that rounded
+ * differently would quote a level the server never armed.
+ */
+export function percentTriggerLevel(
+  kind: TriggerKind | string, reference: number | null, percent: number | null
+): number | null {
+  if (!isPercentTrigger(kind)) return null;
+  if (!reference || reference <= 0) return null;
+  if (!percent || percent <= 0 || percent > 50) return null;
+  const factor = kind === 'PercentDrop' ? 1 - percent / 100 : 1 + percent / 100;
+  const level = Math.round(reference * factor * 100) / 100;
+  return level > 0 ? level : null;
+}
 
 /** Alert kinds an Event trigger can key off — must match the backend's AlertKind enum. */
 export const ALERT_KINDS = [
@@ -425,8 +456,14 @@ export interface ArmedOrder {
   armedId: string;
   symbol: string;
   triggerKind: TriggerKind | string;
+  /** The level as it stands NOW — a trailing trigger's moves with the price. */
   triggerPrice: number | null;
   triggerAlertKind: string | null;
+  /** Percent triggers only: the size of the move, and the price it is measured from. */
+  triggerPercent: number | null;
+  referencePrice: number | null;
+  /** The reference follows the price in the favourable direction and never moves back. */
+  trailing: boolean;
   action: 'BUY' | 'SELL' | string;
   quantity: number;
   orderType: string;
@@ -505,6 +542,17 @@ export interface ArmOrderRequest {
   sourceAlertId?: string | null;
   /** BUY only. Arms a protective stop that stays dormant until the entry is confirmed filled. */
   attachStop?: AttachStopRequest | null;
+
+  // ── Percent triggers ─────────────────────────────────────────────────────
+  /** Size of the move. Required for PercentDrop / PercentRise, ignored otherwise. */
+  triggerPercent?: number | null;
+  /**
+   * The price the move is measured from. Sent explicitly so the level armed is the level the operator
+   * was quoted on screen; omitted, the server captures it from the live feed.
+   */
+  referencePrice?: number | null;
+  /** Trail the reference with the price — a drop trigger then behaves as a trailing stop. */
+  trailing?: boolean;
 }
 
 /** A protective stop to attach to a BUY entry. Sized at fill time, not here. */
@@ -532,6 +580,18 @@ export interface ArmOrderDialogContext {
   limitPrice?: number | null;
   sourceAlertId?: string | null;
   context?: string | null;
+
+  // Percent-trigger pre-fill. `referencePrice` is what the caller had on screen, so the level the
+  // dialog quotes is the one that gets armed rather than one re-derived a moment later.
+  triggerPercent?: number | null;
+  referencePrice?: number | null;
+  trailing?: boolean;
+  /**
+   * The live price, purely so the dialog can say whether the level it is about to arm has ALREADY
+   * been passed. Read-only context, never sent: it is not the same field as `referencePrice`, which
+   * the user may edit away from it.
+   */
+  currentPrice?: number | null;
 
   // Protective stop pre-fill. Only meaningful on a BUY — the dialog clears it otherwise — and only
   // set by a caller that already knows the level: the chart's plan carries the entry and the stop

@@ -347,6 +347,25 @@ public interface ITradingRepository
         string? executionId = null,
         CancellationToken ct = default);
 
+    /// <summary>
+    /// Ratchets a trailing percent trigger's reference price, and the level it projects to, in the
+    /// favourable direction only.
+    ///
+    /// <para>
+    /// <paramref name="ratchetUp"/> says which direction that is: up for a drop trigger (a trailing
+    /// stop follows the high), down for a rise trigger. The comparison is applied in the UPDATE
+    /// itself, so a pass carrying a staler price cannot loosen a trail another pass already
+    /// tightened. False means nothing was written — normally because the reference had already moved
+    /// further, which is not an error.
+    /// </para>
+    /// </summary>
+    Task<bool> TrySetArmedOrderTrailAsync(
+        string armedId,
+        decimal reference,
+        decimal triggerPrice,
+        bool ratchetUp,
+        CancellationToken ct = default);
+
     // ── Protective stops ──────────────────────────────────────────────────────
     // A standing intent to keep a position protected at a level. Durable and re-materialised as a
     // native day order each session, because this venue clears outstanding orders at the close — a

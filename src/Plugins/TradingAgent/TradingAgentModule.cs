@@ -373,8 +373,13 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                     o.ArmedId,
                     o.Symbol,
                     triggerKind = o.TriggerKind.ToString(),
-                    o.TriggerPrice,
+                    // The recomputed level, not the stored column: a trailing trigger's level moves,
+                    // and a panel showing where it WAS is the one thing worse than showing nothing.
+                    triggerPrice = o.EffectiveTriggerPrice,
                     triggerAlertKind = o.TriggerAlertKind?.ToString(),
+                    o.TriggerPercent,
+                    o.ReferencePrice,
+                    o.Trailing,
                     o.Action,
                     o.Quantity,
                     o.OrderType,
@@ -441,6 +446,7 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             MonitoredUniverse universe,
             ApprovalGate approvals,
             ProtectiveStopWorker protectiveStops,
+            CompositeLiveQuoteSource quotes,
             IOptions<TradingAgentOptions> options,
             ILogger<TradingAgentModule> logger,
             CancellationToken ct) =>
@@ -467,6 +473,11 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                 });
 
             AlertKind? alertKind = null;
+            decimal? triggerPercent = null;
+            decimal? referencePrice = null;
+            var trailing = false;
+            var triggerLevel = body.TriggerPrice;
+
             if (kind == ArmedTriggerKind.Event)
             {
                 if (!Enum.TryParse<AlertKind>(body.TriggerAlertKind, ignoreCase: true, out var parsed))
@@ -476,6 +487,60 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                         message = $"Event triggers need an alert kind: {string.Join(", ", Enum.GetNames<AlertKind>())}."
                     });
                 alertKind = parsed;
+                triggerLevel = null;
+            }
+            else if (PercentTrigger.IsPercent(kind))
+            {
+                // A percent trigger is "if it drops 3%", which needs a size of move and a price to
+                // measure it from. The level is DERIVED from those two and stored alongside them, so a
+                // reader that only knows about levels still sees a real number — see ArmedOrder.
+                if (body.TriggerPercent is not > 0 || body.TriggerPercent > PercentTrigger.MaxPercent)
+                    return Results.BadRequest(new
+                    {
+                        error = "invalid_trigger_percent",
+                        message = $"A percent trigger needs a move between 0 and {PercentTrigger.MaxPercent}%."
+                    });
+
+                triggerPercent = Math.Round(body.TriggerPercent.Value, 2, MidpointRounding.AwayFromZero);
+
+                // The caller normally sends the price it was showing the operator, so the level armed
+                // is exactly the level they were quoted. Capturing it here is the fallback for a
+                // scripted caller with no screen — one snapshot, and only on that path.
+                referencePrice = body.ReferencePrice is > 0 ? body.ReferencePrice : null;
+                if (referencePrice is null)
+                {
+                    try
+                    {
+                        var snapshot = await quotes.GetQuotesAsync(ct);
+                        if (snapshot.Quotes.TryGetValue(symbol, out var quote) && quote.Current is > 0)
+                            referencePrice = quote.Current;
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        logger.LogWarning(ex,
+                            "[ArmedOrders] Could not capture a reference price for {Symbol}.", symbol);
+                    }
+                }
+
+                if (referencePrice is not > 0)
+                    return Results.BadRequest(new
+                    {
+                        error = "no_reference_price",
+                        message = $"A percent trigger measures the move from a price, and no live price "
+                                + $"for '{symbol}' is available right now. Send referencePrice, or arm a "
+                                + "PriceBelow/PriceAbove trigger at an exact level instead."
+                    });
+
+                triggerLevel = PercentTrigger.Level(kind, referencePrice, triggerPercent);
+                if (triggerLevel is not > 0)
+                    return Results.BadRequest(new
+                    {
+                        error = "invalid_trigger_percent",
+                        message = $"{triggerPercent}% from {referencePrice} does not produce a usable "
+                                + "price level."
+                    });
+
+                trailing = body.Trailing;
             }
             else if (body.TriggerPrice is not > 0)
             {
@@ -508,12 +573,7 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             var stopProblem = StopLimitRule.Validate(
                 action,
                 (body.OrderType ?? "LIMIT").Trim().ToUpperInvariant(),
-                kind switch
-                {
-                    ArmedTriggerKind.PriceAbove => true,
-                    ArmedTriggerKind.PriceBelow => false,
-                    _                           => (bool?)null
-                },
+                PercentTrigger.FiresOnRisingPrice(kind),
                 body.Price,
                 body.LimitPrice);
 
@@ -529,8 +589,11 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                 ArmedId          = Guid.NewGuid().ToString("N"),
                 Symbol           = symbol,
                 TriggerKind      = kind,
-                TriggerPrice     = kind == ArmedTriggerKind.Event ? null : body.TriggerPrice,
+                TriggerPrice     = triggerLevel,
                 TriggerAlertKind = alertKind,
+                TriggerPercent   = triggerPercent,
+                ReferencePrice   = referencePrice,
+                Trailing         = trailing,
                 Action           = action,
                 Quantity         = body.Quantity!.Value,
                 OrderType        = (body.OrderType ?? "LIMIT").Trim().ToUpperInvariant(),
@@ -623,9 +686,15 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
 
             var unattended = approvals.DescribeUnattendedPolicy();
             logger.LogWarning(
-                "[ArmedOrders] Armed {ArmedId}: {Action} {Qty} {Symbol} on {Kind} {Level}. Approval mode {Mode}.",
+                "[ArmedOrders] Armed {ArmedId}: {Action} {Qty} {Symbol} on {Kind} {Level}{Basis}. "
+                + "Approval mode {Mode}.",
                 id, action, order.Quantity, symbol, kind,
-                order.TriggerPrice?.ToString() ?? alertKind?.ToString() ?? "", options.Value.Approval.Mode);
+                order.TriggerPrice?.ToString() ?? alertKind?.ToString() ?? "",
+                triggerPercent is null
+                    ? ""
+                    : $" ({triggerPercent}% from {referencePrice}"
+                      + (trailing ? ", trailing" : "") + ")",
+                options.Value.Approval.Mode);
 
             return Results.Ok(new
             {
@@ -637,6 +706,9 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                     triggerKind = order.TriggerKind.ToString(),
                     order.TriggerPrice,
                     triggerAlertKind = order.TriggerAlertKind?.ToString(),
+                    order.TriggerPercent,
+                    order.ReferencePrice,
+                    order.Trailing,
                     order.Action,
                     order.Quantity,
                     order.OrderType,
@@ -2303,6 +2375,17 @@ public sealed record AssessRequest(string? Symbol, string? Interval = null, stri
 public sealed record ProposalRejectRequest(string? Reason = null);
 
 /// <summary>An order to hold until a price level is reached or an alert kind fires.</summary>
+/// <param name="TriggerPercent">
+/// Size of the move, in percent, for a PercentDrop/PercentRise trigger. Ignored by every other kind.
+/// </param>
+/// <param name="ReferencePrice">
+/// The price a percent trigger measures its move from. Send the price the operator was looking at, so
+/// the level armed is the level they were quoted; omitted, it is captured from the live feed.
+/// </param>
+/// <param name="Trailing">
+/// Percent triggers only. The reference follows the price in the favourable direction — the high for a
+/// drop trigger, the low for a rise — making a drop trigger a trailing stop. Never moves back.
+/// </param>
 public sealed record ArmOrderRequest(
     string? Symbol,
     string? Action,
@@ -2317,7 +2400,10 @@ public sealed record ArmOrderRequest(
     int? ExpiresInDays = null,
     string? Note = null,
     string? SourceAlertId = null,
-    AttachStopRequest? AttachStop = null);
+    AttachStopRequest? AttachStop = null,
+    decimal? TriggerPercent = null,
+    decimal? ReferencePrice = null,
+    bool Trailing = false);
 
 /// <summary>
 /// A protective stop to attach to a BUY entry, armed only once the entry is confirmed filled.

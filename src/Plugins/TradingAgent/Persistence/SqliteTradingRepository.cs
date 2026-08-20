@@ -1109,7 +1109,13 @@ public sealed class SqliteTradingRepository : ITradingRepository
                     state_reason  TEXT NULL,
                     note          TEXT NULL,
                     source_alert  TEXT NULL,
-                    protective_stop_id TEXT NULL
+                    protective_stop_id TEXT NULL,
+                    -- Percent triggers ("fire if it drops 3%"). These two are the truth and
+                    -- trigger_price above is their projection; reference_price is rewritten in place
+                    -- by the trail ratchet while trailing is set.
+                    trigger_percent TEXT NULL,
+                    reference_price TEXT NULL,
+                    trailing        INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS ix_armed_orders_state
                     ON armed_orders(state, symbol);
@@ -1180,6 +1186,12 @@ public sealed class SqliteTradingRepository : ITradingRepository
                 connection, "armed_orders", "protective_stop_id", "TEXT NULL", ct);
             await AddColumnIfMissingAsync(
                 connection, "watchlist", "pinned", "INTEGER NOT NULL DEFAULT 0", ct);
+            await AddColumnIfMissingAsync(
+                connection, "armed_orders", "trigger_percent", "TEXT NULL", ct);
+            await AddColumnIfMissingAsync(
+                connection, "armed_orders", "reference_price", "TEXT NULL", ct);
+            await AddColumnIfMissingAsync(
+                connection, "armed_orders", "trailing", "INTEGER NOT NULL DEFAULT 0", ct);
             await SeedPerSymbolCoverageAsync(connection, ct);
 
             _initialized = true;
@@ -1664,9 +1676,10 @@ public sealed class SqliteTradingRepository : ITradingRepository
             INSERT INTO armed_orders
                 (armed_id, symbol, trigger_kind, trigger_price, trigger_alert, action, quantity,
                  order_type, price, limit_price, state, armed_utc, expires_utc, note, source_alert,
-                 protective_stop_id)
+                 protective_stop_id, trigger_percent, reference_price, trailing)
             VALUES ($id, $symbol, $kind, $tprice, $talert, $action, $qty,
-                    $otype, $price, $limit, $state, $armed, $expires, $note, $alert, $stop)
+                    $otype, $price, $limit, $state, $armed, $expires, $note, $alert, $stop,
+                    $tpercent, $reference, $trailing)
             """;
         command.Parameters.AddWithValue("$id", order.ArmedId);
         command.Parameters.AddWithValue("$symbol", order.Symbol);
@@ -1686,6 +1699,9 @@ public sealed class SqliteTradingRepository : ITradingRepository
         command.Parameters.AddWithValue("$note", order.Note ?? (object)DBNull.Value);
         command.Parameters.AddWithValue("$alert", order.SourceAlertId ?? (object)DBNull.Value);
         command.Parameters.AddWithValue("$stop", order.ProtectiveStopId ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$tpercent", Money(order.TriggerPercent));
+        command.Parameters.AddWithValue("$reference", Money(order.ReferencePrice));
+        command.Parameters.AddWithValue("$trailing", order.Trailing ? 1 : 0);
         await command.ExecuteNonQueryAsync(ct);
         return order.ArmedId;
     }
@@ -1699,7 +1715,8 @@ public sealed class SqliteTradingRepository : ITradingRepository
         command.CommandText = $"""
             SELECT armed_id, symbol, trigger_kind, trigger_price, trigger_alert, action, quantity,
                    order_type, price, limit_price, state, armed_utc, expires_utc, fired_utc,
-                   execution_id, state_reason, note, source_alert, protective_stop_id
+                   execution_id, state_reason, note, source_alert, protective_stop_id,
+                   trigger_percent, reference_price, trailing
             FROM armed_orders
             {(armedOnly ? "WHERE state = 'armed'" : "")}
             ORDER BY armed_utc DESC
@@ -1741,6 +1758,37 @@ public sealed class SqliteTradingRepository : ITradingRepository
         return await command.ExecuteNonQueryAsync(ct) == 1;
     }
 
+    public async Task<bool> TrySetArmedOrderTrailAsync(
+        string armedId,
+        decimal reference,
+        decimal triggerPrice,
+        bool ratchetUp,
+        CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+
+        // The one-way guard is IN the statement, not in the caller. Two overlapping passes can read
+        // different prices and write them in either order, and without the comparison here the later
+        // write simply wins — which would move a trailing stop's level back down and quietly widen
+        // the risk it was armed to cap. CAST because prices are stored as text.
+        var command = connection.CreateCommand();
+        command.CommandText = $"""
+            UPDATE armed_orders
+               SET reference_price = $reference,
+                   trigger_price   = $trigger
+             WHERE armed_id = $id
+               AND state    = 'armed'
+               AND trailing = 1
+               AND (reference_price IS NULL
+                    OR CAST(reference_price AS REAL) {(ratchetUp ? "<" : ">")} CAST($reference AS REAL))
+            """;
+        command.Parameters.AddWithValue("$id", armedId);
+        command.Parameters.AddWithValue("$reference", Money(reference));
+        command.Parameters.AddWithValue("$trigger", Money(triggerPrice));
+        return await command.ExecuteNonQueryAsync(ct) == 1;
+    }
+
     private static ArmedOrder ReadArmedOrder(Microsoft.Data.Sqlite.SqliteDataReader reader) => new()
     {
         ArmedId          = reader.GetString(0),
@@ -1764,7 +1812,10 @@ public sealed class SqliteTradingRepository : ITradingRepository
         StateReason      = reader.IsDBNull(15) ? null : reader.GetString(15),
         Note             = reader.IsDBNull(16) ? null : reader.GetString(16),
         SourceAlertId    = reader.IsDBNull(17) ? null : reader.GetString(17),
-        ProtectiveStopId = reader.IsDBNull(18) ? null : reader.GetString(18)
+        ProtectiveStopId = reader.IsDBNull(18) ? null : reader.GetString(18),
+        TriggerPercent   = ParseDecimal(reader, 19),
+        ReferencePrice   = ParseDecimal(reader, 20),
+        Trailing         = !reader.IsDBNull(21) && reader.GetInt64(21) != 0
     };
 
     // ── Protective stops ──────────────────────────────────────────────────────
