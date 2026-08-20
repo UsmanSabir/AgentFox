@@ -76,6 +76,42 @@ public sealed class AhkFeedConfig
     /// </summary>
     public List<string> Pages { get; set; } = [];
 
+    // ── Market depth (MBP / MBO) ──────────────────────────────────────────────
+
+    /// <summary>
+    /// Subscribe to market depth for one symbol at a time, in addition to the quote feed.
+    ///
+    /// <para>
+    /// Off by default and deliberately narrow. The portal's own UI shows depth for a single symbol —
+    /// one MBO panel and one MBP panel beside the market watch — so depth is requested per symbol, not
+    /// per watchlist. Enabling this adds one subscription call when the focused symbol changes and
+    /// costs nothing per poll, since the depth arrays ride along on the <c>GetFeed</c> response the
+    /// quote feed is already reading.
+    /// </para>
+    /// </summary>
+    public bool DepthEnabled { get; set; }
+
+    /// <summary>
+    /// The page slot used for the depth subscription. <b>It must not appear in <see cref="Pages"/>.</b>
+    ///
+    /// <para>
+    /// This is the sharp edge. <c>pagenum</c> is a single namespace shared by every feed type, and a
+    /// subscription REPLACES whatever the slot held. Sending a depth subscription for a page the quote
+    /// feed is using therefore evicts that page's market-feed symbols — and the portal reports nothing:
+    /// <c>GetFeed</c> answers 200 with an empty array whether nothing traded or nothing is subscribed,
+    /// so the only symptom is quotes quietly ceasing for a quarter of the universe. The subscription is
+    /// refused outright on overlap rather than trusting configuration to be careful.
+    /// </para>
+    ///
+    /// <para>
+    /// The default quote pages are Page1–Page4 (4 x 50 = 200 symbols), so a depth page has to come from
+    /// outside that set, or one of them has to be given up. Page5 is the default here and is UNVERIFIED
+    /// — whether the portal accepts a fifth slot was never tested, and if it does not, the honest fix
+    /// is to shrink <see cref="Pages"/> rather than to overlap.
+    /// </para>
+    /// </summary>
+    public string DepthPage { get; set; } = "Page5";
+
     /// <summary>
     /// The market board to subscribe on. <c>REG</c> is the regular board; <c>ODL</c> is odd-lot and
     /// carries different (thinner) prices, so mixing them would silently blend two order books.

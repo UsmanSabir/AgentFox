@@ -29,10 +29,18 @@ Three hops. The only secret needed is the broker portal session the plugin alrea
          <meta name="access-token"  content="<RS256 JWT>">
 
 ③  All /api/** calls:   Authorization: Bearer <access-token>
+                        Cookie: laravel_session=…     ← REQUIRED, see below
                         X-Requested-With: XMLHttpRequest
-    /api/market-stream/token and other POSTs also want:
-                        X-CSRF-TOKEN: <csrf-token>   + the laravel_session cookie
 ```
+
+**The Bearer token alone is not enough.** Verified 2026-08-20: every `/api/v3` call — GET and POST
+alike — answers `401 Unauthenticated` without the `laravel_session` cookie that hop ② sets. The token
+authorises, the session cookie authenticates, and both are needed. An HTTP client must therefore keep
+a cookie jar across the handshake and the calls that follow, and `AhlAnalyticsClient` now declares one
+explicitly rather than relying on `SocketsHttpHandler.UseCookies` defaulting to true.
+
+`X-CSRF-TOKEN` is **not** required — the snapshot POST returns 200 with or without it. It is sent
+anyway because it is free and matches the portal's own page.
 
 The `token=` blob in ① is Laravel `Crypt::encryptString` output — base64 of
 `{"iv":…,"value":…,"mac":…,"tag":""}`. It decrypts server-side to the trader identity and maps to
@@ -61,6 +69,47 @@ Two caveats seen during the capture:
   means "slow down", not "token dead"** — retry with backoff before re-running the handshake, or a
   transient throttle will burn a fresh login every time.
 
+## Hop ① is a single point of failure, and it has already failed
+
+Observed 2026-08-20, roughly a day after the capture: `GET /Home/GetAnalyticsURL` on the **broker**
+portal began answering **500 with an empty body** and stayed that way across repeated attempts.
+Everything about the diagnosis is worth recording, because the symptom pointed away from the cause.
+
+What was true at the same moment, on a session logged in seconds earlier:
+
+| call | result |
+| --- | --- |
+| `GET /Home/GetAnalyticsURL` | **500, empty body** (also 500 as `GetAnalyticsUrl`; 404 for POST, so GET is the right verb) |
+| `GET /Home/GetUpperLowerCap` | 200, 100 KB |
+| `GET /Home/GetClientInfo` | 200 |
+| `GET /Home/GetCollaterals` | 200 |
+| `GET /Home/GetOutstanding` | 200 |
+
+So the broker session was entirely healthy and only this one endpoint was broken. **The portal's own
+"AHL Analytics" button is equally broken**: clicking `#AHLAnalytics` produced the same 500, and
+because `OpenAnalytics()` only does `console.log(err)` in its error branch, `window.open` is never
+called and the button silently does nothing. That is the check to run before suspecting local code —
+if the button does nothing, hop ① is down and nothing downstream can work.
+
+Two consequences were designed in rather than discovered later:
+
+**A failed handshake now opens a five-minute cooldown.** Hop ① runs against the broker session, so
+restoring a dead one launches a browser and logs in. Without a cooldown, every caller wanting fresh
+data re-attempts a handshake that cannot succeed, and each attempt can cost a login — against an
+account the broker blocked once already for roughly fifteen logins in two hours. Failing fast for a
+few minutes beats rediscovering a permanent outage every thirty seconds.
+
+**Polled callers may never trigger the handshake at all.** `GetMarketSnapshotAsync` takes
+`allowHandshake`, and both dashboard endpoints pass `false`. The movers panel had been calling it
+with the default `true` on a 30-second timer, which turned a broken upstream into a login generator —
+visible in the activity log as `Browser session opened` / `Logging in to the broker portal` firing the
+moment the dashboard loaded. Agent- and user-initiated calls still pass `true`, because a person asked
+for the data and one login is a fair price; a timer never asked for anything.
+
+The panel now distinguishes three states — portal disabled, no session yet (and it says it will not
+start one), handshake cooling down — and prints the upstream status and body snippet rather than
+guessing at a cause.
+
 ## Market depth: what is actually available
 
 **There is no L2 / order-book depth on this portal.** This is the one thing worth being blunt
@@ -74,9 +123,71 @@ about, because the MBO/MBP ladders visible in the trading terminal make it look 
 - The stream token's scopes are `["market:read", "market:announcements"]`. There is no depth scope
   to ask for.
 
-The MBO/MBP ladders in the terminal are fed by the broker's own feed (`web.ahletrade.com`), which
-is what `AhkFeedWorker` / `AhkQuoteBook` already talk to. **Depth stays where it is.** This portal
-adds nothing to that path, and any plan that routes depth through here is built on a wrong premise.
+The MBO/MBP ladders in the terminal are fed by the broker's own feed (`web.ahletrade.com`).
+**Depth stays there.** This portal adds nothing to that path, and any plan that routes depth through
+here is built on a wrong premise.
+
+**Correction, 2026-08-20.** An earlier version of this section said the broker feed "is what
+`AhkFeedWorker` / `AhkQuoteBook` already talk to", which was true of quotes and wrongly implied depth
+came with them. It did not: the plugin collected **no depth at all, by any means**. The only
+subscription ever sent was `feedtype=MKT-FEED`, and although `AhkFeedResponse` declared `mboFeed` and
+`mbpFeed`, they were typed `List<object>` with **zero consumers anywhere in the codebase** — so the
+arrays were always empty and nothing could have read them if they were not.
+
+Depth is now collected, on the broker feed:
+
+- `POST /Home/SendSubscriptionofSymbols` with `feedtype=MBP-FEED` or `MBO-FEED` and a single symbol.
+  MBP is the ladder aggregated per price level; MBO lists individual orders. Both are requested.
+- Rows then arrive in the `mbpFeed` / `mboFeed` arrays of the ordinary `GET /Home/GetFeed` response, so
+  depth adds **no polling** once subscribed.
+- `AhkDepthBook` stores them, `get_market_depth` and `GET /trading/feed/depth` read them, and
+  `AhkFeed:DepthEnabled` gates it (off by default).
+
+### The depth payload, captured 2026-08-20 (PPL, market open)
+
+```
+mbpFeed[i] = {"orders":3, "volume":5510, "price":238.52,     ← BID side
+              "sOrders":1, "sVolume":82,  "sPrice":238.7}    ← ASK side
+
+mboFeed[i] = {"price":238.52,"volume":10,"flag":"dc","orderNo":null,
+              "sPrice":238.7,"sVolume":82,"sFlag":"dc","sOrderNo":null}
+```
+
+Four properties, each of which produces a plausible-looking wrong answer if mishandled:
+
+**Every row carries BOTH sides.** Unprefixed fields are the bid ladder, `s`-prefixed the ask, zipped
+by index — row 0 is the best bid beside the best ask. It is *not* a flat list of levels with a side
+marker, so reading a row as one side pairs each bid price with the opposing quantity, and the result
+looks like a perfectly ordinary book.
+
+**The arrays are fixed-length and zero-padded.** Thirteen MBP rows arrive whether or not thirteen
+levels exist, with unused rows all zeros. Padding must be dropped or "best ask" resolves to 0 and
+total depth is inflated with nothing — the same "zero means unknown, never a real price" rule the
+quote path already applies.
+
+**Depth is published only when the book CHANGES, as a full replacement.** Most polls carry empty
+arrays; over fourteen consecutive polls of PPL, one carried data. So an empty array means "unchanged",
+never "the book is empty", and the last known ladder has to be retained or it blinks out constantly.
+
+**Rows carry no symbol at all.** The portal follows one depth symbol at a time, so rows are attributed
+to whichever symbol is subscribed — which is why that field is authoritative rather than decorative.
+
+`AhkDepthBook` owns all four rules and derives what a decision actually needs: best bid/ask with the
+quantity at the touch, spread, total resting volume per side, and book imbalance (−1 all offered to +1
+all bid). A one-sided book yields a null spread rather than a fabricated one, since a bid with nothing
+offered is normal at a circuit cap.
+
+`Page5` is **confirmed accepted** — both `MBP-FEED` and `MBO-FEED` subscriptions answered 200 there
+while the quote feed held Page1–Page4, so the depth slot genuinely sits outside the quote set.
+
+**`pagenum` is one namespace shared by every feed type, and a subscription REPLACES the slot.** So
+subscribing depth on a page the quote feed uses evicts that page's quote symbols, and the portal
+reports nothing at all: `GetFeed` answers 200 with an empty array whether nothing traded or nothing is
+subscribed. The only symptom would be quotes silently stopping for fifty symbols. `DepthPage` must
+therefore not appear in `Pages`, and the subscription is **refused outright** on overlap rather than
+trusting configuration to be careful. The default quote pages are Page1–Page4, so `DepthPage` defaults
+to `Page5` — which is **unverified**: whether the portal accepts a fifth slot was never tested, and if
+it does not, the honest fix is to shrink `Pages` rather than to overlap.
 
 What it *does* add is breadth: 857 equities of history, ratios, and precomputed indicators in a
 handful of calls.
@@ -476,13 +587,41 @@ whole market), `/sectors/overview`, `/indices`, `/map` (Market Map / heatmap),
 `/portfolio-investments` (FIPI/LIPI) and Settlement Analysis are also in the nav but their APIs
 return no data for this account, so their pages will be empty regardless.
 
+## Verified 2026-08-20, market open
+
+Settled against a live open session (`st: "OPN"`), so these are no longer assumptions:
+
+- **The L1 book populates intraday.** LUCK returned `bidp 439.60 × 26` / `askp 439.61 × 239`, and 507
+  of 857 equities carried a non-zero bid or ask. The all-zero capture on 2026-08-19 was purely the
+  market being closed.
+- **`laravel_session` is required, CSRF is not.** See the auth chain above. The earlier claim that a
+  POST without `X-CSRF-TOKEN` is rejected with 419 was **wrong** — a guess made while the SSO endpoint
+  was down and no live POST could be tried. It has been corrected in the code comments too.
+- **The snapshot model parses the real payload.** `AhlSnapshotDeserializationTests` runs against a
+  trimmed verbatim copy of a live response, including the awkward parts: a string market state beside
+  an integer per-symbol state, `pch` as a fraction against percent-scaled `pm`/`di`, the nested
+  `pp`/`bt` objects whose keys are not valid identifiers, a populated book, and odd-lot rows with null
+  nested objects. This test exists because a parse failure and an outage are indistinguishable from
+  the outside — both surface as "portal unavailable".
+- **Hop ① recovered.** `GET /Home/GetAnalyticsURL` returns the SSO URL again. Its 500 on 2026-08-20
+  was a transient broker-side outage, which is what the cooldown and the no-handshake-on-poll rules
+  were built for.
+
 ## Verification still owed
 
-This capture ran with the market closed. Before anything depends on the live parts:
-
-1. **Confirm the websocket actually delivers ticks during market hours** — it was silent here, and
-   a firehose that turns out to be idle would quietly starve whatever consumes it.
-2. **Confirm `bidp/bidv/askp/askv` populate intraday** in `/req` — all zero in this capture, which
-   is consistent with "closed" but not proof.
-3. Re-check the 60/min rate limit under a realistic screening load before pointing
-   `ScanWatchlistTool` at it.
+1. **Confirm the websocket actually delivers ticks during market hours** — it was silent in the closed
+   capture, and a firehose that turns out to be idle would quietly starve whatever consumes it. Not
+   retried while open.
+2. Re-check the 60/min rate limit under a realistic screening load before pointing
+   `ScanWatchlistTool` at it. There is a concrete interaction to measure: a 31-symbol candle scan is
+   31 GETs, against a self-imposed 40/min limiter, so a scan can leave almost no budget for the
+   snapshot POST that the movers screens need. Per-symbol daily-candle caching is the obvious fix —
+   daily bars change once a day — and it is not yet implemented.
+4. Whether `GET /Home/GetAnalyticsURL` recovers, and whether it is worth asking AHL why it 500s. As of
+   2026-08-20 the whole integration is dark behind it — no token means no snapshot, no movers, and
+   candles fall back to PSX. Everything downstream was verified working the day before, so this is an
+   availability question, not a correctness one.
+3. **Depth end to end through the plugin.** The payload shape, the subscription, and `Page5` are all
+   verified against the portal directly, and the model is unit-tested against the captured rows — but
+   the plugin's own path (`AhkFeed:DepthEnabled` → `FocusDepthAsync` → `get_market_depth`) has not yet
+   been exercised on a running host.

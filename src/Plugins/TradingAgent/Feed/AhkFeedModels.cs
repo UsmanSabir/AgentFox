@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace TradingAgent.Feed;
@@ -12,8 +13,11 @@ public sealed class AhkFeedResponse
 {
     [JsonPropertyName("feed")]          public List<AhkFeedQuote>? Feed { get; set; }
     [JsonPropertyName("exchangeStats")] public List<object>? ExchangeStats { get; set; }
-    [JsonPropertyName("mboFeed")]       public List<object>? MboFeed { get; set; }
-    [JsonPropertyName("mbpFeed")]       public List<object>? MbpFeed { get; set; }
+    // Market depth, typed from a live capture on 2026-08-20 (PPL, market open). Both arrays are
+    // published only when the book CHANGES and are fixed-length with a zero-filled tail, so an empty
+    // array means "unchanged" and zero rows are padding — see AhkDepthBook, which owns both rules.
+    [JsonPropertyName("mboFeed")]       public List<AhkDepthOrderRow>? MboFeed { get; set; }
+    [JsonPropertyName("mbpFeed")]       public List<AhkDepthLevelRow>? MbpFeed { get; set; }
     [JsonPropertyName("marketStatus")]  public string? MarketStatus { get; set; }
 }
 

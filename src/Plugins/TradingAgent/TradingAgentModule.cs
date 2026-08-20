@@ -194,6 +194,10 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         // Same instance behind the narrow interface the order gate consumes.
         services.AddSingleton<IBrokerMarketState>(sp => sp.GetRequiredService<AhkPortalClient>());
         services.AddSingleton<AhkQuoteBook>();
+        // Market depth (MBP/MBO). Rides on the same GetFeed response the quote feed already polls, so
+        // it adds no traffic; the subscription is per symbol and off by default. See AhkDepthBook for
+        // why the payload is kept raw rather than modelled.
+        services.AddSingleton<AhkDepthBook>();
         services.AddSingleton<AhkFeedWorker>();
         services.AddHostedService(sp => sp.GetRequiredService<AhkFeedWorker>());
 
@@ -815,6 +819,33 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         // tells them apart without reading Debug logs.
         trading.MapGet("/feed/status", (AhkFeedWorker feed) => Results.Ok(feed.GetStatus()));
 
+        // Depth for the currently followed symbol. GET only — changing the subscription is an action
+        // and belongs to the tool, not to a page poll.
+        trading.MapGet("/feed/depth", (AhkDepthBook depth, AhkFeedWorker feed, string? symbol) =>
+        {
+            var target = (symbol ?? depth.SubscribedSymbol)?.Trim().ToUpperInvariant();
+            if (target is null) return Results.Ok(new { subscribed = (string?)null, rows = 0 });
+
+            var entry = depth.Get("REG", target);
+            return Results.Ok(new
+            {
+                symbol = target,
+                subscribed = depth.SubscribedSymbol,
+                marketStatus = feed.MarketStatus,
+                bestBid = entry?.BestBid,
+                bestAsk = entry?.BestAsk,
+                spread = entry?.Spread,
+                totalBidVolume = entry?.TotalBidVolume,
+                totalAskVolume = entry?.TotalAskVolume,
+                imbalance = entry?.Imbalance,
+                levels = entry?.Levels,
+                orders = entry?.Orders,
+                levelsAtUtc = entry?.LevelsAtUtc,
+                ordersAtUtc = entry?.OrdersAtUtc,
+                totalRowsEverSeen = depth.RowsSeen
+            });
+        });
+
         // ── Market movers (AHL analytics) ──────────────────────────────────────
         // One snapshot fetch backs every screen, so the dashboard can poll a few of these without
         // multiplying upstream traffic — AhlAnalyticsClient caches the snapshot for its configured TTL.
@@ -835,9 +866,27 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             if (parsed is null)
                 return Results.BadRequest(new { error = $"Unknown screen '{screen}'.", valid = AhlMovers.ScreenNames });
 
-            var snapshot = await analytics.GetMarketSnapshotAsync(ct: ct);
+            // allowHandshake:false — this is a POLLED endpoint. The handshake's first hop runs against
+            // the broker session, so permitting it here would generate a broker LOGIN per dashboard
+            // poll whenever the handshake is failing, which is the exact incident shape that cost
+            // account access on 2026-08-18. The panel serves whatever an existing token can produce
+            // and otherwise explains itself.
+            var snapshot = await analytics.GetMarketSnapshotAsync(allowHandshake: false, ct: ct);
             if (snapshot is null)
-                return Results.Ok(new { enabled = true, available = false, rows = Array.Empty<object>() });
+            {
+                // Report WHY. "Could not be reached" covers no-session, a throttle and a rejected
+                // POST, and those need different responses from the operator — hasToken alone
+                // distinguishes the first from the rest.
+                return Results.Ok(new
+                {
+                    enabled = true,
+                    available = false,
+                    hasToken = analytics.HasToken,
+                    handshakeCoolingDown = analytics.HandshakeInCooldown,
+                    error = analytics.LastError,
+                    rows = Array.Empty<object>()
+                });
+            }
 
             var filter = new AhlMovers.Filter(index, sectorCode, minTurnover, null, minPrice);
             return Results.Ok(new
@@ -859,9 +908,17 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             if (!analytics.Enabled)
                 return Results.Ok(new { enabled = false, sectors = Array.Empty<object>() });
 
-            var snapshot = await analytics.GetMarketSnapshotAsync(ct: ct);
+            var snapshot = await analytics.GetMarketSnapshotAsync(allowHandshake: false, ct: ct);
             if (snapshot is null)
-                return Results.Ok(new { enabled = true, available = false, sectors = Array.Empty<object>() });
+                return Results.Ok(new
+                {
+                    enabled = true,
+                    available = false,
+                    hasToken = analytics.HasToken,
+                    handshakeCoolingDown = analytics.HandshakeInCooldown,
+                    error = analytics.LastError,
+                    sectors = Array.Empty<object>()
+                });
 
             return Results.Ok(new
             {
@@ -1859,6 +1916,13 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                 _services!.GetRequiredService<AhlAnalyticsClient>(),
                 _services!.GetRequiredService<IRuntimePluginOptions<AhlAnalyticsConfig>>(),
                 loggers.CreateLogger<StockDossierTool>()),
+            // Order-book depth from the broker feed — the only depth source there is. Registered
+            // unconditionally so the agent is told the feed or depth is switched off rather than
+            // silently lacking the capability.
+            new MarketDepthTool(
+                _services!.GetRequiredService<AhkFeedWorker>(),
+                _services!.GetRequiredService<AhkDepthBook>(),
+                loggers.CreateLogger<MarketDepthTool>()),
         };
 
         if (agentOptions.Value.ResearchWebEnabled && webSearchProvider is not null)

@@ -59,6 +59,27 @@ public sealed class AhlAnalyticsClient : IDisposable
         """<meta\s+name=["']access-token["']\s+content=["']([^"']+)["']""",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+    /// <summary>
+    /// The CSRF token from the same landing page, sent on non-GET requests.
+    ///
+    /// <para>
+    /// <b>It is not actually required.</b> Verified live on 2026-08-20: the market-snapshot POST
+    /// answers 200 with or without the header. An earlier version of this comment claimed a POST
+    /// without it was rejected with 419, and that was wrong — the CSRF theory was a guess made while
+    /// the broker's SSO endpoint was down and no live POST could be tried.
+    /// </para>
+    ///
+    /// <para>
+    /// What the same test DID establish is the real dependency: the portal's <c>laravel_session</c>
+    /// cookie is required for every <c>/api/v3</c> call, GET and POST alike. Bearer alone answers
+    /// <c>401 Unauthenticated</c> — see the cookie container in the constructor. The header is still
+    /// sent because it is free, harmless, and matches what the portal's own page does.
+    /// </para>
+    /// </summary>
+    private static readonly Regex CsrfTokenMeta = new(
+        """<meta\s+name=["']csrf-token["']\s+content=["']([^"']+)["']""",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
     private readonly AhkPortalClient _portal;
     private readonly IRuntimePluginOptions<AhlAnalyticsConfig> _config;
     private readonly ILogger<AhlAnalyticsClient> _logger;
@@ -71,10 +92,47 @@ public sealed class AhlAnalyticsClient : IDisposable
     private readonly HttpClient _http;
 
     private string? _bearer;
+    private string? _csrf;
     private DateTimeOffset _bearerObtainedAt;
+
+    /// <summary>
+    /// Why the last call failed, in the caller's words rather than the log's. Surfaced through the
+    /// management API and the tools so a failure reports its actual status code instead of a guess:
+    /// "the portal could not be reached" is indistinguishable between no session, a throttle, and a
+    /// rejected POST, and those need different responses.
+    /// </summary>
+    public string? LastError { get; private set; }
 
     private AhlSnapshotData? _snapshot;
     private DateTimeOffset _snapshotAt;
+
+    /// <summary>
+    /// When the last handshake attempt failed, and the reason.
+    ///
+    /// <para>
+    /// This is a circuit breaker, and it exists because of a specific incident shape. Hop ① runs
+    /// against the broker session, so restoring a dead one launches a browser and LOGS IN. On
+    /// 2026-08-20 the broker's <c>GetAnalyticsURL</c> endpoint began answering 500 while everything
+    /// else was healthy — a fault no retry can fix. Without a cooldown, every caller that wants a
+    /// snapshot re-attempts the handshake, and each attempt can cost a login; a dashboard polling on a
+    /// timer then becomes a login generator against an account the broker has already blocked once for
+    /// exactly that (see docs/phase-b-runbook.md). Failing fast for a few minutes is strictly better
+    /// than rediscovering a permanent outage every thirty seconds.
+    /// </para>
+    /// </summary>
+    private DateTimeOffset _handshakeFailedAt;
+    private string? _handshakeError;
+
+    /// <summary>How long to stop attempting the handshake after a failure.</summary>
+    private static readonly TimeSpan HandshakeCooldown = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// Whether the handshake is currently in cooldown after a failure, and therefore whether a caller
+    /// asking for fresh data will be refused without any network traffic.
+    /// </summary>
+    public bool HandshakeInCooldown =>
+        _handshakeError is not null &&
+        DateTimeOffset.UtcNow - _handshakeFailedAt < HandshakeCooldown;
 
     /// <summary>Timestamps of recent requests, for the client-side rate limiter.</summary>
     private readonly Queue<DateTimeOffset> _recent = new();
@@ -91,6 +149,14 @@ public sealed class AhlAnalyticsClient : IDisposable
 
         _http = new HttpClient(new SocketsHttpHandler
         {
+            // EXPLICIT cookie jar. The portal requires its laravel_session cookie on every /api/v3
+            // call — Bearer alone answers 401 Unauthenticated (verified 2026-08-20, GET and POST
+            // alike) — and that cookie is set by the SSO landing page during the handshake. Relying
+            // on UseCookies defaulting to true would leave the entire integration resting on a
+            // handler default, and the failure if it ever changed would present as "the token stopped
+            // working" rather than "cookies were dropped".
+            CookieContainer = new CookieContainer(),
+            UseCookies = true,
             // Same corporate-proxy reason as AhkPortalClient: without this, every call on a network
             // with an authenticating proxy dies at the tunnel with 407 before reaching the portal,
             // and the symptom is misleading — the handshake's broker hop succeeds (it uses a
@@ -137,19 +203,27 @@ public sealed class AhlAnalyticsClient : IDisposable
         if (!Enabled) return null;
         if (!force && HasToken) return _bearer;
 
+        // Fail fast while a previous failure is still cooling down, WITHOUT touching the network — see
+        // the field's remarks for why this is a safety property and not an optimisation.
+        if (HandshakeInCooldown)
+        {
+            LastError = _handshakeError;
+            return null;
+        }
+
         await _authGate.WaitAsync(ct);
         try
         {
             // Another caller may have completed the handshake while we waited on the gate.
             if (!force && HasToken) return _bearer;
+            if (HandshakeInCooldown) { LastError = _handshakeError; return null; }
 
             // Hop ①: the broker portal mints the SSO URL. This is the only hop needing the broker
             // session, and the only one that can cost a login.
-            var ssoUrl = await _portal.GetAnalyticsUrlAsync(ct);
+            var (ssoUrl, hopOneError) = await _portal.GetAnalyticsUrlAsync(ct);
             if (ssoUrl is null)
             {
-                _logger.LogWarning("[AhlAnalytics] Could not obtain the analytics SSO URL " +
-                                   "(no broker session, or the portal refused).");
+                RecordHandshakeFailure(hopOneError ?? "Could not obtain the analytics SSO URL.");
                 return null;
             }
 
@@ -160,8 +234,8 @@ public sealed class AhlAnalyticsClient : IDisposable
                 using var response = await _http.GetAsync(ssoUrl, ct);
                 if (!response.IsSuccessStatusCode)
                 {
-                    _logger.LogWarning("[AhlAnalytics] SSO landing page answered {Status}.",
-                        (int)response.StatusCode);
+                    RecordHandshakeFailure(
+                        $"The analytics SSO landing page answered {(int)response.StatusCode}.");
                     return null;
                 }
                 html = await response.Content.ReadAsStringAsync(ct);
@@ -169,21 +243,31 @@ public sealed class AhlAnalyticsClient : IDisposable
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "[AhlAnalytics] SSO landing page request failed.");
+                RecordHandshakeFailure($"The analytics SSO landing page request failed: {ex.Message}");
                 return null;
             }
 
             var match = AccessTokenMeta.Match(html.Length > 16_384 ? html[..16_384] : html);
             if (!match.Success)
             {
-                _logger.LogWarning(
-                    "[AhlAnalytics] SSO landing page carried no access-token meta tag " +
-                    "({Length} bytes). The portal's login markup may have changed.", html.Length);
+                RecordHandshakeFailure(
+                    $"The analytics SSO page carried no access-token meta tag ({html.Length} bytes); " +
+                    "the portal's markup may have changed.");
                 return null;
             }
 
             _bearer = match.Groups[1].Value;
+            _csrf = CsrfTokenMeta.Match(html.Length > 16_384 ? html[..16_384] : html) is { Success: true } c
+                ? c.Groups[1].Value
+                : null;
+            if (_csrf is null)
+            {
+                _logger.LogWarning("[AhlAnalytics] No csrf-token meta tag on the SSO page; " +
+                                   "POST endpoints (market snapshot, news) will likely be refused.");
+            }
             _bearerObtainedAt = DateTimeOffset.UtcNow;
+            _handshakeError = null;
+            LastError = null;
             _logger.LogInformation("[AhlAnalytics] Obtained an analytics API token via SSO.");
             return _bearer;
         }
@@ -191,6 +275,17 @@ public sealed class AhlAnalyticsClient : IDisposable
         {
             _authGate.Release();
         }
+    }
+
+    /// <summary>Opens the cooldown and records the reason for callers to report.</summary>
+    private void RecordHandshakeFailure(string reason)
+    {
+        _handshakeFailedAt = DateTimeOffset.UtcNow;
+        _handshakeError = reason;
+        LastError = reason;
+        _logger.LogWarning(
+            "[AhlAnalytics] Handshake failed, not retrying for {Minutes} minutes: {Reason}",
+            HandshakeCooldown.TotalMinutes, reason);
     }
 
     // ── transport ─────────────────────────────────────────────────────────────
@@ -230,8 +325,14 @@ public sealed class AhlAnalyticsClient : IDisposable
     /// <summary>
     /// Sends one API request, handling the throttle-as-401 behaviour described on the class.
     /// </summary>
+    /// <param name="contentFactory">
+    /// Builds the request body, called once PER ATTEMPT. It has to be a factory rather than an
+    /// instance: an <see cref="HttpContent"/> cannot be sent twice, and disposing the request disposes
+    /// its content, so a retry that reused one would throw instead of retrying. That turned every
+    /// retryable POST failure into a permanent one.
+    /// </param>
     private async Task<string?> SendAsync(
-        HttpMethod method, string path, HttpContent? content, CancellationToken ct)
+        HttpMethod method, string path, Func<HttpContent>? contentFactory, CancellationToken ct)
     {
         if (!Enabled) return null;
 
@@ -244,7 +345,17 @@ public sealed class AhlAnalyticsClient : IDisposable
 
             using var request = new HttpRequestMessage(method, new Uri(BaseUri, path.TrimStart('/')));
             request.Headers.TryAddWithoutValidation("Authorization", "Bearer " + token);
-            if (content is not null) request.Content = content;
+
+            // CSRF on anything that is not a GET. Not required — the POST succeeds without it — but
+            // free to send, and it matches what the portal's own page does, so a future deployment
+            // that starts enforcing it will not break us.
+            if (method != HttpMethod.Get && _csrf is not null)
+            {
+                request.Headers.TryAddWithoutValidation("X-CSRF-TOKEN", _csrf);
+                request.Headers.TryAddWithoutValidation("X-XSRF-TOKEN", _csrf);
+            }
+
+            if (contentFactory is not null) request.Content = contentFactory();
 
             try
             {
@@ -264,10 +375,23 @@ public sealed class AhlAnalyticsClient : IDisposable
                     continue;
                 }
 
+                // 419 Page Expired is Laravel's CSRF rejection. The token itself is fine; the CSRF
+                // value is stale or was never captured, and both are cured by re-running the
+                // handshake — so unlike a 401 this SHOULD re-handshake rather than back off.
+                if ((int)response.StatusCode == 419)
+                {
+                    LastError = "The portal rejected the request as CSRF-expired (419). " +
+                                "Re-running the SSO handshake to obtain a fresh CSRF token.";
+                    _logger.LogWarning("[AhlAnalytics] {Path} answered 419 (CSRF); re-handshaking.", path);
+                    if (attempt < 2) { await EnsureTokenAsync(force: true, ct); continue; }
+                    return null;
+                }
+
                 if (response.StatusCode == HttpStatusCode.Forbidden)
                 {
                     // A real permission boundary — e.g. /analyst-opinion/target, which this account
                     // is not entitled to. Retrying cannot help, so do not.
+                    LastError = $"{path} is not permitted for this account (403).";
                     _logger.LogInformation(
                         "[AhlAnalytics] {Path} is not permitted for this account (403).", path);
                     return null;
@@ -275,23 +399,49 @@ public sealed class AhlAnalyticsClient : IDisposable
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    _logger.LogWarning("[AhlAnalytics] {Method} {Path} returned {Status}.",
-                        method, path, (int)response.StatusCode);
+                    // Include a body snippet: the portal explains itself in the body far more often
+                    // than the status code alone does, and without this a failure is only ever
+                    // reportable as "could not be reached".
+                    var body = await SafeSnippetAsync(response, ct);
+                    LastError = $"{method} {path} returned {(int)response.StatusCode}" +
+                                (body is null ? "." : $": {body}");
+                    _logger.LogWarning("[AhlAnalytics] {Method} {Path} returned {Status}. {Body}",
+                        method, path, (int)response.StatusCode, body);
                     return null;
                 }
 
+                LastError = null;
                 return await response.Content.ReadAsStringAsync(ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception ex)
             {
+                LastError = $"{method} {path} failed: {ex.Message}";
                 _logger.LogWarning(ex, "[AhlAnalytics] {Method} {Path} failed.", method, path);
                 return null;
             }
         }
 
+        LastError ??= $"{path} still failing after retries.";
         _logger.LogWarning("[AhlAnalytics] {Path} still failing after retries.", path);
         return null;
+    }
+
+    /// <summary>A short, log-safe excerpt of a response body; null when it cannot be read.</summary>
+    private static async Task<string?> SafeSnippetAsync(
+        HttpResponseMessage response, CancellationToken ct)
+    {
+        try
+        {
+            var body = await response.Content.ReadAsStringAsync(ct);
+            if (string.IsNullOrWhiteSpace(body)) return null;
+            body = body.Replace('\n', ' ').Replace('\r', ' ').Trim();
+            return body.Length > 200 ? body[..200] + "\u2026" : body;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private async Task<T?> GetJsonAsync<T>(string path, CancellationToken ct) where T : class
@@ -301,9 +451,9 @@ public sealed class AhlAnalyticsClient : IDisposable
     }
 
     private async Task<T?> PostJsonAsync<T>(
-        string path, HttpContent? content, CancellationToken ct) where T : class
+        string path, Func<HttpContent>? contentFactory, CancellationToken ct) where T : class
     {
-        var body = await SendAsync(HttpMethod.Post, path, content, ct);
+        var body = await SendAsync(HttpMethod.Post, path, contentFactory, ct);
         return Deserialize<T>(body, path);
     }
 
@@ -333,14 +483,33 @@ public sealed class AhlAnalyticsClient : IDisposable
     /// from it — gainers, unusual volume, sector rotation — is a sort over this object, not more I/O.
     /// </para>
     /// </summary>
+    /// <param name="allowHandshake">
+    /// Whether this caller may pay for the SSO handshake. <b>Dashboard and other polled callers must
+    /// pass false.</b> Hop ① runs against the broker session, so a handshake can launch a browser and
+    /// log in; a caller on a timer that allowed it would generate a login per poll whenever the
+    /// handshake is failing, which is the incident this parameter exists to prevent. Agent- and
+    /// user-initiated calls pass true, because a person asked for the data and one login is a
+    /// reasonable price.
+    /// </param>
     public async Task<AhlSnapshotData?> GetMarketSnapshotAsync(
-        bool forceRefresh = false, CancellationToken ct = default)
+        bool forceRefresh = false, bool allowHandshake = true, CancellationToken ct = default)
     {
         if (!Enabled) return null;
 
         var ttl = TimeSpan.FromSeconds(Math.Max(5, Config.SnapshotCacheSeconds));
         if (!forceRefresh && _snapshot is not null && DateTimeOffset.UtcNow - _snapshotAt < ttl)
             return _snapshot;
+
+        // A polled caller may only ever serve what a token already reachable can produce. Without a
+        // token it returns the cached snapshot if one exists, and otherwise nothing at all — never a
+        // handshake.
+        if (!allowHandshake && !HasToken)
+        {
+            LastError ??= _handshakeError
+                ?? "No analytics session yet. This view will not start one; run market_movers or " +
+                   "stock_dossier from chat to establish it.";
+            return _snapshot;
+        }
 
         await _snapshotGate.WaitAsync(ct);
         try
@@ -349,15 +518,16 @@ public sealed class AhlAnalyticsClient : IDisposable
                 return _snapshot;
 
             // The endpoint is a POST with a form body; `item=market` is the only value the portal's
-            // own UI ever sends.
-            using var form = new FormUrlEncodedContent(
-                new Dictionary<string, string> { ["item"] = "market" });
-
+            // own UI ever sends. Built per attempt — see SendAsync's contentFactory.
             var response = await PostJsonAsync<AhlMarketSnapshot>(
-                "api/v3/market?path=/req", form, ct);
+                "api/v3/market?path=/req",
+                () => new FormUrlEncodedContent(
+                    new Dictionary<string, string> { ["item"] = "market" }),
+                ct);
 
             if (response?.Data?.Equities is null or { Count: 0 })
             {
+                LastError ??= "The market snapshot returned no equities.";
                 _logger.LogWarning("[AhlAnalytics] Market snapshot came back without equities.");
                 return _snapshot; // keep serving the previous one rather than dropping to nothing
             }

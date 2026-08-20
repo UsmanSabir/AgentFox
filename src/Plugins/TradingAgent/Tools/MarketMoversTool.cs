@@ -149,9 +149,11 @@ public sealed class MarketMoversTool : BaseTool
         var snapshot = await _client.GetMarketSnapshotAsync();
         if (snapshot is null)
         {
+            // Report the upstream reason rather than a guess: an agent that is told "no broker
+            // session" when the truth is "the broker's endpoint is 500ing" will retry pointlessly.
             return ToolResult.Fail(
-                "Could not read the market snapshot from the analytics portal. This usually means no " +
-                "broker session is available for the SSO handshake.");
+                "Could not read the market snapshot from the analytics portal. " +
+                (_client.LastError ?? "No further detail was reported."));
         }
 
         var rows = AhlMovers.Run(snapshot, screen.Value, limit, filter);
