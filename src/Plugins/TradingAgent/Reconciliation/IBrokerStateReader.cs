@@ -20,6 +20,14 @@ public sealed record BrokerReconciliationSnapshot(
     /// </summary>
     public IReadOnlyList<BrokerFill> Fills { get; init; } = [];
 
+    /// <summary>Exact native orders currently resting at the broker.</summary>
+    public IReadOnlyList<BrokerWorkingOrder> OpenOrders { get; init; } = [];
+
+    /// <summary>Current custody positions used to keep recurring SELLs within available holdings.</summary>
+    public IReadOnlyList<BrokerPosition> Positions { get; init; } = [];
+
+    public decimal? AvailableCashPkr { get; init; }
+
     public static BrokerReconciliationSnapshot Unsupported(string reason) =>
         new(false, false, reason, DateTime.UtcNow);
 }
@@ -35,6 +43,15 @@ public sealed record BrokerFill(
     int Quantity,
     decimal Price,
     DateTime FilledUtc);
+
+public sealed record BrokerWorkingOrder(
+    string OrderNo,
+    string Symbol,
+    string? Side,
+    long? RemainingQuantity,
+    decimal? Price);
+
+public sealed record BrokerPosition(string Symbol, decimal Quantity);
 
 public interface IBrokerStateReader
 {

@@ -48,8 +48,6 @@ public sealed class AhkFeedWorker : BackgroundService
     private readonly ILogger<AhkFeedWorker> _logger;
     private readonly TradingActivityLog? _activity;
 
-    private DateTime _lastReloginUtc = DateTime.MinValue;
-
     /// <summary>Last <see cref="AhkPortalClient.SessionEpoch"/> this worker has subscribed against.</summary>
     private int _seenSessionEpoch;
 
@@ -156,6 +154,13 @@ public sealed class AhkFeedWorker : BackgroundService
             LastFeedSymbols    = _lastFeedSymbols.Count,
             ConsecutiveFailures = _consecutiveFailures,
             SessionFailures    = _sessionFailures,
+            AutomaticSessionRecovery = _portal.AutomaticRecoveryArmed,
+            FreshLoginRequired = _portal.FreshLoginRequired,
+            LoginFailures      = _portal.ConsecutiveLoginFailures,
+            LastLoginAttemptUtc = _portal.LastLoginAttemptUtc,
+            LastLoginSuccessUtc = _portal.LastLoginSuccessUtc,
+            NextLoginAttemptUtc = _portal.NextLoginAttemptUtc,
+            LastKeepAliveSuccessUtc = _portal.LastKeepAliveSuccessUtc,
             BrowserHoldsScreen = _broker.BrowserHoldsTradingScreen,
             PollSeconds        = Math.Max(2.0, cfg.PollSeconds)
         };
@@ -216,7 +221,7 @@ public sealed class AhkFeedWorker : BackgroundService
                     _subscriptionGuard.NoteBrowserHoldsScreen();
                     _logger.LogDebug("[AhkFeed] Browser holds the trading screen; skipping this poll.");
                 }
-                else if (DateTime.UtcNow < _sessionRetryNotBeforeUtc)
+                else if (!_portal.HasSession && DateTime.UtcNow < _sessionRetryNotBeforeUtc)
                 {
                     // Backing off after a failed login. Establishing a session LAUNCHES A BROWSER, so
                     // retrying this on the 2s quote cadence is a Chromium relaunch every two seconds
@@ -306,18 +311,6 @@ public sealed class AhkFeedWorker : BackgroundService
             // would only log a confusing recovery for an ordinary startup.
             if (previous != 0)
                 ForceResubscribe("the portal session was re-established, and subscriptions do not survive it");
-        }
-
-        // Keep the session alive. The portal's UI does this about once a minute; letting it lapse
-        // turns every subsequent call into a redirect to the login page.
-        if (DateTime.UtcNow - _lastReloginUtc > TimeSpan.FromSeconds(Math.Max(15, cfg.ReloginSeconds)))
-        {
-            _lastReloginUtc = DateTime.UtcNow;
-            if (!await _portal.ReloginAsync(ct))
-            {
-                _consecutiveFailures++;
-                return;
-            }
         }
 
         await EnsureSubscriptionAsync(cfg, ct);
@@ -630,6 +623,13 @@ public sealed record AhkFeedStatus
 
     public int ConsecutiveFailures { get; init; }
     public int SessionFailures { get; init; }
+    public bool AutomaticSessionRecovery { get; init; }
+    public bool FreshLoginRequired { get; init; }
+    public int LoginFailures { get; init; }
+    public DateTime? LastLoginAttemptUtc { get; init; }
+    public DateTime? LastLoginSuccessUtc { get; init; }
+    public DateTime? NextLoginAttemptUtc { get; init; }
+    public DateTime? LastKeepAliveSuccessUtc { get; init; }
 
     /// <summary>True while the feed is yielding to a browser operation on the trading screen.</summary>
     public bool BrowserHoldsScreen { get; init; }

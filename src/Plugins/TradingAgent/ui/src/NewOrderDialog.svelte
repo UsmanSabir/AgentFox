@@ -22,6 +22,7 @@
   let limitPrice: number | null = null;
   let triggerPercent: number | null = null;
   let expiresInDays = 30;
+  let persistentUntilFilled = false;
   let loading = true;
   let quoteBusy = false;
   let busy = false;
@@ -103,6 +104,8 @@
     : null;
   $: marketDisabled = choice?.orderType === 'MARKET'
     && registry != null && !registry.capabilities.marketOrdersEnabled;
+  $: persistable = choice != null && choice.orderType !== 'MARKET';
+  $: if (!persistable) persistentUntilFilled = false;
   $: estimatedPrice = choice?.orderType === 'MARKET' ? currentPrice
     : choice?.orderType === 'STOPLOSS' ? triggerPrice
     : choice?.submission === 'conditional' ? conditionalLevel : price;
@@ -155,6 +158,9 @@
     const immediate = choice.submission === 'immediate';
     if (immediate && !confirm(
       `${summary}\n\nSubmit this order now? Every policy and risk gate still applies, but if they pass this can place a REAL broker order.`
+      + (persistentUntilFilled
+        ? `\n\nThe unfilled remainder will be submitted again once per PSX trading day for up to ${expiresInDays} day(s).`
+        : '')
     )) return;
 
     busy = true;
@@ -167,9 +173,18 @@
           price,
           triggerPrice,
           limitPrice,
-          clientRequestId
+          clientRequestId,
+          persistentUntilFilled,
+          expiresInDays
         });
-        result = placed.accepted
+        result = persistentUntilFilled && !placed.accepted && placed.persistentOrder?.state !== 'attention'
+          ? {
+              ok: true,
+              title: 'Keep-working order saved',
+              detail: `${placed.reason} It remains active for the next eligible trading day.`,
+              executionId: placed.executionId || undefined
+            }
+          : placed.accepted
           ? { ok: true, title: 'Order accepted', detail: placed.reason, executionId: placed.executionId }
           : {
               ok: false,
@@ -191,6 +206,7 @@
           orderType: choice.orderType,
           price: choice.orderType === 'MARKET' ? null : conditionalLevel,
           expiresInDays,
+          persistentUntilFilled,
           note: `New Order: ${choice.label}`
         };
         const armed = await trading.armed.arm(request);
@@ -265,9 +281,28 @@
             {/if}
             {#if choice.submission === 'conditional'}
               <label><span>Move from {currentPrice ?? 'latest price'} (%)</span><input type="number" min="0.1" max="50" step="0.1" bind:value={triggerPercent} /></label>
+            {/if}
+            {#if choice.submission === 'conditional' || persistentUntilFilled}
               <label><span>Expires in (days)</span><input type="number" min="1" max="365" bind:value={expiresInDays} /></label>
             {/if}
           </div>
+
+          {#if persistable}
+            <label class="persist-check">
+              <input type="checkbox" bind:checked={persistentUntilFilled} />
+              <span>
+                <b>Keep the unfilled remainder working</b>
+                <em>Re-place it once per PSX trading day until fully filled or expired.</em>
+              </span>
+            </label>
+            {#if persistentUntilFilled}
+              <p class="warning">
+                Each day is a new real broker order and must pass the current approval, holdings,
+                reconciliation, kill-switch, and risk limits. The price you entered will not be
+                changed to a worse price merely to fit that day&#39;s trading band.
+              </p>
+            {/if}
+          {/if}
 
           {#if marketDisabled}
             <p class="warning"><AlertTriangle size={13} /> Market orders are disabled in broker settings. Choose a limit-price option or enable them deliberately.</p>
@@ -303,6 +338,13 @@
   .loading { padding:2rem; color:var(--text-3); text-align:center; }
   .symbol-row { display:flex; align-items:end; gap:1rem; padding:1rem; border-bottom:1px solid var(--border); flex-wrap:wrap; }
   label { display:flex; flex-direction:column; gap:.3rem; color:var(--text-3); font-size:.68rem; }
+  .persist-check { margin-top:.8rem; flex-direction:row; align-items:flex-start; gap:.55rem;
+                   padding:.7rem; border:1px solid var(--border); border-radius:var(--radius-sm);
+                   background:var(--surface-2); }
+  .persist-check input { min-width:auto; margin-top:.15rem; }
+  .persist-check span { display:flex; flex-direction:column; gap:.15rem; }
+  .persist-check b { color:var(--text); font-size:.75rem; }
+  .persist-check em { color:var(--text-3); font-style:normal; }
   input { background:var(--surface-2); border:1px solid var(--border-md); border-radius:var(--radius-sm);
           color:var(--text); padding:.5rem .6rem; font:inherit; min-width:150px; }
   .quote { display:grid; grid-template-columns:auto auto auto; align-items:center; gap:.45rem; color:var(--text-3); font-size:.68rem; }

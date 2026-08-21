@@ -19,6 +19,15 @@ public class OrderResult
     /// </para>
     /// </summary>
     public int? Quantity { get; set; }
+
+    /// <summary>
+    /// Quantity requested before the sell-availability gate reduced it. Null when no reduction was
+    /// necessary; <see cref="Quantity"/> is always the amount actually sent to the broker.
+    /// </summary>
+    public int? RequestedQuantity { get; set; }
+
+    /// <summary>Human-readable explanation when a SELL was reduced to available holdings.</summary>
+    public string? QuantityAdjustment { get; set; }
     public string? ScreenshotBefore { get; set; }
     public string? ScreenshotAfter { get; set; }
 

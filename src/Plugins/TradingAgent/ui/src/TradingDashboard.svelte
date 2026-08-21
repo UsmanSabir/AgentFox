@@ -19,6 +19,7 @@
   import MoversPanel from './MoversPanel.svelte';
   import NewOrderDialog from './NewOrderDialog.svelte';
   import PortfolioPanel from './PortfolioPanel.svelte';
+  import PersistentOrdersPanel from './PersistentOrdersPanel.svelte';
 
   /**
    * Non-null while the arming dialog is open. Both entry points — a chart level and an alert — raise the
@@ -26,6 +27,7 @@
    */
   let armContext: ArmOrderDialogContext | null = null;
   let armedPanel: ArmedOrdersPanel | null = null;
+  let persistentPanel: PersistentOrdersPanel | null = null;
   let watchlistPanel: WatchlistPanel | null = null;
   let newOrderOpen = false;
 
@@ -295,7 +297,7 @@
 {#if newOrderOpen}
   <NewOrderDialog
     {selectedSymbol}
-    on:changed={() => { load(); armedPanel?.load(); }}
+    on:changed={() => { load(); armedPanel?.load(); persistentPanel?.load(); }}
     on:close={() => newOrderOpen = false}
   />
 {/if}
@@ -404,6 +406,8 @@
       <div><span class="eyebrow">Automation</span><h2>Orders &amp; signals</h2></div>
       <p>Review waiting triggers and new market alerts.</p>
     </div>
+
+    <PersistentOrdersPanel bind:this={persistentPanel} refreshTick={marketTick} />
 
     <div class="alerts-row">
       <ArmedOrdersPanel bind:this={armedPanel} refreshTick={marketTick} />

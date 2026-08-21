@@ -8,6 +8,7 @@ using TradingAgent.Analysis;
 using TradingAgent.Config;
 using TradingAgent.Manager;
 using TradingAgent.Reconciliation;
+using TradingAgent.Trading;
 using TradingAgent.Watchlist;
 
 namespace TradingAgent.Persistence;
@@ -385,6 +386,308 @@ public sealed class SqliteTradingRepository : ITradingRepository
         await transaction.CommitAsync(ct);
         return inserted;
     }
+
+    // ── Persistent DAY orders ────────────────────────────────────────────────
+
+    public async Task<string> SavePersistentOrderAsync(
+        PersistentOrderIntent intent, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO persistent_order_intents
+                (intent_id, symbol, action, quantity, order_type, price, limit_price, expires_utc,
+                 state, filled_qty, last_attempt_date, attempt_count, last_order_no,
+                 source_armed_id, state_reason, note, created_utc, updated_utc, terminal_utc)
+            VALUES
+                ($id, $symbol, $action, $qty, $type, $price, $limit, $expires,
+                 $state, $filled, $lastDate, $attempts, $orderNo,
+                 $source, $reason, $note, $created, $updated, $terminal)
+            """;
+        command.Parameters.AddWithValue("$id", intent.IntentId);
+        command.Parameters.AddWithValue("$symbol", intent.Symbol);
+        command.Parameters.AddWithValue("$action", intent.Action);
+        command.Parameters.AddWithValue("$qty", intent.Quantity);
+        command.Parameters.AddWithValue("$type", intent.OrderType);
+        command.Parameters.AddWithValue("$price", Money(intent.Price));
+        command.Parameters.AddWithValue("$limit", Money(intent.LimitPrice));
+        command.Parameters.AddWithValue("$expires", intent.ExpiresUtc.ToString("O"));
+        command.Parameters.AddWithValue("$state", intent.State);
+        command.Parameters.AddWithValue("$filled", intent.FilledQuantity);
+        command.Parameters.AddWithValue("$lastDate",
+            intent.LastAttemptSessionDate?.ToString("yyyy-MM-dd") ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$attempts", intent.AttemptCount);
+        command.Parameters.AddWithValue("$orderNo", intent.LastOrderNo ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$source", intent.SourceArmedId ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$reason", intent.StateReason ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$note", intent.Note ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$created", intent.CreatedUtc.ToString("O"));
+        command.Parameters.AddWithValue("$updated", intent.UpdatedUtc.ToString("O"));
+        command.Parameters.AddWithValue("$terminal", intent.TerminalUtc?.ToString("O") ?? (object)DBNull.Value);
+        await command.ExecuteNonQueryAsync(ct);
+        return intent.IntentId;
+    }
+
+    public async Task<PersistentOrderIntent?> GetPersistentOrderAsync(
+        string intentId, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = PersistentOrderSelect + " WHERE i.intent_id = $id";
+        command.Parameters.AddWithValue("$id", intentId);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        return await reader.ReadAsync(ct) ? ReadPersistentOrder(reader) : null;
+    }
+
+    public async Task<IReadOnlyList<PersistentOrderIntent>> GetPersistentOrdersAsync(
+        bool openOnly = true, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = PersistentOrderSelect
+            + (openOnly ? " WHERE i.state NOT IN ('fulfilled','expired','cancelled')" : "")
+            + " ORDER BY i.created_utc DESC";
+        var result = new List<PersistentOrderIntent>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct)) result.Add(ReadPersistentOrder(reader));
+        return result;
+    }
+
+    public async Task<IReadOnlyList<PersistentOrderPlacement>> GetPersistentOrderPlacementsAsync(
+        string intentId, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT placement_id, intent_id, session_date, attempt, quantity, broker_order_no,
+                   execution_id, state, requested_price, submitted_price, message, created_utc
+              FROM persistent_order_placements
+             WHERE intent_id = $id
+             ORDER BY session_date, attempt
+            """;
+        command.Parameters.AddWithValue("$id", intentId);
+        var result = new List<PersistentOrderPlacement>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct)) result.Add(ReadPersistentOrderPlacement(reader));
+        return result;
+    }
+
+    public async Task<PersistentOrderAttemptClaim> TryClaimPersistentOrderAttemptAsync(
+        string intentId, DateOnly sessionDate, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE persistent_order_intents
+               SET state = 'placing',
+                   attempt_count = attempt_count + 1,
+                   last_attempt_date = $date,
+                   state_reason = 'Placement claimed for ' || $date || '.',
+                   updated_utc = $now
+             WHERE intent_id = $id
+               AND state IN ('active','resting','partial')
+               AND expires_utc > $now
+               AND (last_attempt_date IS NULL OR last_attempt_date <> $date)
+            RETURNING attempt_count
+            """;
+        command.Parameters.AddWithValue("$id", intentId);
+        command.Parameters.AddWithValue("$date", sessionDate.ToString("yyyy-MM-dd"));
+        command.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("O"));
+        var value = await command.ExecuteScalarAsync(ct);
+        return value is null
+            ? new PersistentOrderAttemptClaim(false, 0)
+            : new PersistentOrderAttemptClaim(true, Convert.ToInt32(value, CultureInfo.InvariantCulture));
+    }
+
+    public async Task RecordPersistentOrderPlacementAsync(
+        PersistentOrderPlacement placement,
+        string intentState,
+        string? stateReason,
+        CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+
+        var insert = connection.CreateCommand();
+        insert.Transaction = (SqliteTransaction)transaction;
+        insert.CommandText = """
+            INSERT INTO persistent_order_placements
+                (placement_id, intent_id, session_date, attempt, quantity, broker_order_no,
+                 execution_id, state, requested_price, submitted_price, message, created_utc)
+            VALUES
+                ($placement, $intent, $date, $attempt, $qty, $orderNo,
+                 $execution, $state, $requested, $submitted, $message, $created)
+            """;
+        insert.Parameters.AddWithValue("$placement", placement.PlacementId);
+        insert.Parameters.AddWithValue("$intent", placement.IntentId);
+        insert.Parameters.AddWithValue("$date", placement.SessionDate.ToString("yyyy-MM-dd"));
+        insert.Parameters.AddWithValue("$attempt", placement.Attempt);
+        insert.Parameters.AddWithValue("$qty", placement.Quantity);
+        insert.Parameters.AddWithValue("$orderNo", placement.BrokerOrderNo ?? (object)DBNull.Value);
+        insert.Parameters.AddWithValue("$execution", placement.ExecutionId ?? (object)DBNull.Value);
+        insert.Parameters.AddWithValue("$state", placement.State);
+        insert.Parameters.AddWithValue("$requested", Money(placement.RequestedPrice));
+        insert.Parameters.AddWithValue("$submitted", Money(placement.SubmittedPrice));
+        insert.Parameters.AddWithValue("$message", placement.Message ?? (object)DBNull.Value);
+        insert.Parameters.AddWithValue("$created", placement.CreatedUtc.ToString("O"));
+        await insert.ExecuteNonQueryAsync(ct);
+
+        var update = connection.CreateCommand();
+        update.Transaction = (SqliteTransaction)transaction;
+        update.CommandText = """
+            UPDATE persistent_order_intents
+               SET state = $state,
+                   last_order_no = COALESCE($orderNo, last_order_no),
+                   state_reason = $reason,
+                   updated_utc = $now
+             WHERE intent_id = $id AND state = 'placing'
+            """;
+        update.Parameters.AddWithValue("$id", placement.IntentId);
+        update.Parameters.AddWithValue("$state", intentState);
+        update.Parameters.AddWithValue("$orderNo", placement.BrokerOrderNo ?? (object)DBNull.Value);
+        update.Parameters.AddWithValue("$reason", stateReason ?? (object)DBNull.Value);
+        update.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("O"));
+        if (await update.ExecuteNonQueryAsync(ct) != 1)
+            throw new InvalidOperationException(
+                $"Persistent order {placement.IntentId} was not in placing state when its result arrived.");
+
+        await transaction.CommitAsync(ct);
+    }
+
+    public async Task<bool> SetPersistentOrderPlacementStateAsync(
+        string placementId, string state, string? message = null,
+        CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE persistent_order_placements
+               SET state = $state,
+                   message = COALESCE($message, message)
+             WHERE placement_id = $id
+            """;
+        command.Parameters.AddWithValue("$id", placementId);
+        command.Parameters.AddWithValue("$state", state);
+        command.Parameters.AddWithValue("$message", message ?? (object)DBNull.Value);
+        return await command.ExecuteNonQueryAsync(ct) == 1;
+    }
+
+    public async Task<bool> SetPersistentOrderProgressAsync(
+        string intentId, int filledQuantity, string state, string? reason,
+        CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE persistent_order_intents
+               SET filled_qty = MAX(filled_qty, $filled),
+                   state = $state,
+                   state_reason = $reason,
+                   updated_utc = $now,
+                   terminal_utc = CASE WHEN $terminal = 1 THEN COALESCE(terminal_utc, $now)
+                                       ELSE terminal_utc END
+             WHERE intent_id = $id
+               AND state NOT IN ('fulfilled','expired','cancelled')
+            """;
+        command.Parameters.AddWithValue("$id", intentId);
+        command.Parameters.AddWithValue("$filled", Math.Max(0, filledQuantity));
+        command.Parameters.AddWithValue("$state", state);
+        command.Parameters.AddWithValue("$reason", reason ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("O"));
+        command.Parameters.AddWithValue("$terminal", state is "fulfilled" or "expired" or "cancelled" ? 1 : 0);
+        return await command.ExecuteNonQueryAsync(ct) == 1;
+    }
+
+    public async Task<bool> TrySetPersistentOrderStateAsync(
+        string intentId, IReadOnlyCollection<string> expectedStates, string newState,
+        string? reason = null, CancellationToken ct = default)
+    {
+        if (expectedStates.Count == 0) return false;
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        var names = expectedStates.Select((_, i) => $"$state{i}").ToArray();
+        command.CommandText = $"""
+            UPDATE persistent_order_intents
+               SET state = $new,
+                   state_reason = COALESCE($reason, state_reason),
+                   updated_utc = $now,
+                   terminal_utc = CASE WHEN $terminal = 1 THEN COALESCE(terminal_utc, $now)
+                                       ELSE terminal_utc END
+             WHERE intent_id = $id AND state IN ({string.Join(",", names)})
+            """;
+        command.Parameters.AddWithValue("$id", intentId);
+        command.Parameters.AddWithValue("$new", newState);
+        command.Parameters.AddWithValue("$reason", reason ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("O"));
+        command.Parameters.AddWithValue("$terminal", newState is "fulfilled" or "expired" or "cancelled" ? 1 : 0);
+        for (var i = 0; i < expectedStates.Count; i++)
+            command.Parameters.AddWithValue(names[i], expectedStates.ElementAt(i));
+        return await command.ExecuteNonQueryAsync(ct) == 1;
+    }
+
+    private const string PersistentOrderSelect = """
+        SELECT i.intent_id, i.symbol, i.action, i.quantity, i.order_type, i.price, i.limit_price,
+               i.expires_utc, i.state,
+               MAX(i.filled_qty, COALESCE((
+                   SELECT SUM(f.quantity)
+                     FROM persistent_order_placements p
+                     JOIN fills f ON f.broker_order_id = p.broker_order_no
+                    WHERE p.intent_id = i.intent_id
+               ), 0)) AS filled_qty,
+               i.last_attempt_date, i.attempt_count, i.last_order_no, i.source_armed_id,
+               i.state_reason, i.note, i.created_utc, i.updated_utc, i.terminal_utc
+          FROM persistent_order_intents i
+        """;
+
+    private static PersistentOrderIntent ReadPersistentOrder(SqliteDataReader reader) => new()
+    {
+        IntentId = reader.GetString(0),
+        Symbol = reader.GetString(1),
+        Action = reader.GetString(2),
+        Quantity = reader.GetInt32(3),
+        OrderType = reader.GetString(4),
+        Price = ParseDecimal(reader, 5),
+        LimitPrice = ParseDecimal(reader, 6),
+        ExpiresUtc = ParseUtc(reader.GetString(7)),
+        State = reader.GetString(8),
+        FilledQuantity = reader.GetInt32(9),
+        LastAttemptSessionDate = reader.IsDBNull(10)
+            ? null
+            : DateOnly.ParseExact(reader.GetString(10), "yyyy-MM-dd", CultureInfo.InvariantCulture),
+        AttemptCount = reader.GetInt32(11),
+        LastOrderNo = reader.IsDBNull(12) ? null : reader.GetString(12),
+        SourceArmedId = reader.IsDBNull(13) ? null : reader.GetString(13),
+        StateReason = reader.IsDBNull(14) ? null : reader.GetString(14),
+        Note = reader.IsDBNull(15) ? null : reader.GetString(15),
+        CreatedUtc = ParseUtc(reader.GetString(16)),
+        UpdatedUtc = ParseUtc(reader.GetString(17)),
+        TerminalUtc = reader.IsDBNull(18) ? null : ParseUtc(reader.GetString(18))
+    };
+
+    private static PersistentOrderPlacement ReadPersistentOrderPlacement(SqliteDataReader reader) => new()
+    {
+        PlacementId = reader.GetString(0),
+        IntentId = reader.GetString(1),
+        SessionDate = DateOnly.ParseExact(reader.GetString(2), "yyyy-MM-dd", CultureInfo.InvariantCulture),
+        Attempt = reader.GetInt32(3),
+        Quantity = reader.GetInt32(4),
+        BrokerOrderNo = reader.IsDBNull(5) ? null : reader.GetString(5),
+        ExecutionId = reader.IsDBNull(6) ? null : reader.GetString(6),
+        State = reader.GetString(7),
+        RequestedPrice = ParseDecimal(reader, 8),
+        SubmittedPrice = ParseDecimal(reader, 9),
+        Message = reader.IsDBNull(10) ? null : reader.GetString(10),
+        CreatedUtc = ParseUtc(reader.GetString(11))
+    };
 
     public async Task CompleteExecutionAsync(
         string executionId,
@@ -1025,6 +1328,51 @@ public sealed class SqliteTradingRepository : ITradingRepository
                     ON broker_orders(execution_id);
                 CREATE INDEX IF NOT EXISTS ix_fills_order
                     ON fills(broker_order_id);
+                -- Local good-until-expiry intents. PSX only accepts DAY orders, so the durable
+                -- object is the instruction and each session gets one auditable child placement.
+                CREATE TABLE IF NOT EXISTS persistent_order_intents (
+                    intent_id          TEXT PRIMARY KEY,
+                    symbol             TEXT NOT NULL,
+                    action             TEXT NOT NULL,
+                    quantity           INTEGER NOT NULL,
+                    order_type         TEXT NOT NULL,
+                    price              TEXT NULL,
+                    limit_price        TEXT NULL,
+                    expires_utc        TEXT NOT NULL,
+                    state              TEXT NOT NULL DEFAULT 'active',
+                    filled_qty         INTEGER NOT NULL DEFAULT 0,
+                    last_attempt_date  TEXT NULL,
+                    attempt_count      INTEGER NOT NULL DEFAULT 0,
+                    last_order_no      TEXT NULL,
+                    source_armed_id    TEXT NULL,
+                    state_reason       TEXT NULL,
+                    note               TEXT NULL,
+                    created_utc        TEXT NOT NULL,
+                    updated_utc        TEXT NOT NULL,
+                    terminal_utc       TEXT NULL
+                );
+                CREATE TABLE IF NOT EXISTS persistent_order_placements (
+                    placement_id       TEXT PRIMARY KEY,
+                    intent_id          TEXT NOT NULL,
+                    session_date       TEXT NOT NULL,
+                    attempt            INTEGER NOT NULL,
+                    quantity           INTEGER NOT NULL,
+                    broker_order_no    TEXT NULL,
+                    execution_id       TEXT NULL,
+                    state              TEXT NOT NULL,
+                    requested_price    TEXT NULL,
+                    submitted_price    TEXT NULL,
+                    message            TEXT NULL,
+                    created_utc        TEXT NOT NULL,
+                    UNIQUE(intent_id, session_date),
+                    FOREIGN KEY (intent_id) REFERENCES persistent_order_intents(intent_id)
+                );
+                CREATE INDEX IF NOT EXISTS ix_persistent_orders_state
+                    ON persistent_order_intents(state, expires_utc);
+                CREATE INDEX IF NOT EXISTS ix_persistent_placements_intent
+                    ON persistent_order_placements(intent_id, session_date);
+                CREATE INDEX IF NOT EXISTS ix_persistent_placements_broker
+                    ON persistent_order_placements(broker_order_no);
                 CREATE TABLE IF NOT EXISTS positions (
                     account_id TEXT NOT NULL,
                     symbol TEXT NOT NULL,
@@ -1173,7 +1521,8 @@ public sealed class SqliteTradingRepository : ITradingRepository
                     -- by the trail ratchet while trailing is set.
                     trigger_percent TEXT NULL,
                     reference_price TEXT NULL,
-                    trailing        INTEGER NOT NULL DEFAULT 0
+                    trailing        INTEGER NOT NULL DEFAULT 0,
+                    persistent_until_filled INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS ix_armed_orders_state
                     ON armed_orders(state, symbol);
@@ -1250,6 +1599,8 @@ public sealed class SqliteTradingRepository : ITradingRepository
                 connection, "armed_orders", "reference_price", "TEXT NULL", ct);
             await AddColumnIfMissingAsync(
                 connection, "armed_orders", "trailing", "INTEGER NOT NULL DEFAULT 0", ct);
+            await AddColumnIfMissingAsync(
+                connection, "armed_orders", "persistent_until_filled", "INTEGER NOT NULL DEFAULT 0", ct);
             await SeedPerSymbolCoverageAsync(connection, ct);
 
             _initialized = true;
@@ -1776,10 +2127,11 @@ public sealed class SqliteTradingRepository : ITradingRepository
             INSERT INTO armed_orders
                 (armed_id, symbol, trigger_kind, trigger_price, trigger_alert, action, quantity,
                  order_type, price, limit_price, state, armed_utc, expires_utc, note, source_alert,
-                 protective_stop_id, trigger_percent, reference_price, trailing)
+                 protective_stop_id, trigger_percent, reference_price, trailing,
+                 persistent_until_filled)
             VALUES ($id, $symbol, $kind, $tprice, $talert, $action, $qty,
                     $otype, $price, $limit, $state, $armed, $expires, $note, $alert, $stop,
-                    $tpercent, $reference, $trailing)
+                    $tpercent, $reference, $trailing, $persistent)
             """;
         command.Parameters.AddWithValue("$id", order.ArmedId);
         command.Parameters.AddWithValue("$symbol", order.Symbol);
@@ -1802,6 +2154,7 @@ public sealed class SqliteTradingRepository : ITradingRepository
         command.Parameters.AddWithValue("$tpercent", Money(order.TriggerPercent));
         command.Parameters.AddWithValue("$reference", Money(order.ReferencePrice));
         command.Parameters.AddWithValue("$trailing", order.Trailing ? 1 : 0);
+        command.Parameters.AddWithValue("$persistent", order.PersistentUntilFilled ? 1 : 0);
         await command.ExecuteNonQueryAsync(ct);
         return order.ArmedId;
     }
@@ -1816,7 +2169,7 @@ public sealed class SqliteTradingRepository : ITradingRepository
             SELECT armed_id, symbol, trigger_kind, trigger_price, trigger_alert, action, quantity,
                    order_type, price, limit_price, state, armed_utc, expires_utc, fired_utc,
                    execution_id, state_reason, note, source_alert, protective_stop_id,
-                   trigger_percent, reference_price, trailing
+                   trigger_percent, reference_price, trailing, persistent_until_filled
             FROM armed_orders
             {(armedOnly ? "WHERE state = 'armed'" : "")}
             ORDER BY armed_utc DESC
@@ -1889,6 +2242,22 @@ public sealed class SqliteTradingRepository : ITradingRepository
         return await command.ExecuteNonQueryAsync(ct) == 1;
     }
 
+    public async Task<bool> TrySetArmedOrderQuantityAsync(
+        string armedId, int quantity, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE armed_orders
+               SET quantity = MAX(quantity, $quantity)
+             WHERE armed_id = $id AND state = 'armed'
+            """;
+        command.Parameters.AddWithValue("$id", armedId);
+        command.Parameters.AddWithValue("$quantity", quantity);
+        return await command.ExecuteNonQueryAsync(ct) == 1;
+    }
+
     private static ArmedOrder ReadArmedOrder(Microsoft.Data.Sqlite.SqliteDataReader reader) => new()
     {
         ArmedId          = reader.GetString(0),
@@ -1915,7 +2284,8 @@ public sealed class SqliteTradingRepository : ITradingRepository
         ProtectiveStopId = reader.IsDBNull(18) ? null : reader.GetString(18),
         TriggerPercent   = ParseDecimal(reader, 19),
         ReferencePrice   = ParseDecimal(reader, 20),
-        Trailing         = !reader.IsDBNull(21) && reader.GetInt64(21) != 0
+        Trailing         = !reader.IsDBNull(21) && reader.GetInt64(21) != 0,
+        PersistentUntilFilled = !reader.IsDBNull(22) && reader.GetInt64(22) != 0
     };
 
     // ── Protective stops ──────────────────────────────────────────────────────

@@ -195,6 +195,7 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         // IBrokerAccountReader adapter without changing the endpoint or Svelte contract.
         services.AddSingleton<AhkBrokerAccountReader>();
         services.AddSingleton<IBrokerAccountReader>(sp => sp.GetRequiredService<AhkBrokerAccountReader>());
+        services.AddSingleton<BrokerOrderCancellationService>();
         // Same instance behind the narrow interface the order gate consumes.
         services.AddSingleton<IBrokerMarketState>(sp => sp.GetRequiredService<AhkPortalClient>());
         services.AddSingleton<AhkQuoteBook>();
@@ -202,6 +203,10 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         // it adds no traffic; the subscription is per symbol and off by default. See AhkDepthBook for
         // why the payload is kept raw rather than modelled.
         services.AddSingleton<AhkDepthBook>();
+        // One lifecycle owner keeps an already-requested broker session alive and recovers genuine
+        // expiry under a shared login cooldown/backoff. It never logs in merely because the host starts.
+        services.AddSingleton<AhkSessionRecoveryWorker>();
+        services.AddHostedService(sp => sp.GetRequiredService<AhkSessionRecoveryWorker>());
         services.AddSingleton<AhkFeedWorker>();
         services.AddSingleton<MarketDepthTool>();
         services.AddHostedService(sp => sp.GetRequiredService<AhkFeedWorker>());
@@ -261,6 +266,8 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         // the same instance the timer drives.
         services.AddSingleton<ProtectiveStopWorker>();
         services.AddHostedService(sp => sp.GetRequiredService<ProtectiveStopWorker>());
+        services.AddSingleton<PersistentOrderWorker>();
+        services.AddHostedService(sp => sp.GetRequiredService<PersistentOrderWorker>());
         services.AddHostedService<DailyCandleBackfillWorker>();
     }
 
@@ -310,10 +317,9 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             Results.Ok(await accountReader.ReadAccountAsync(ct)))
             .RequireAuthorization("TradingTrader");
 
-        // Explicitly user-initiated: unlike the passive timer, this may harvest the authenticated
-        // browser cookies (or log in when necessary), then reconciles immediately on that same direct
-        // API session. This closes the confusing gap where "the browser is logged in" but the passive
-        // reconciliation reader has never been given a session of its own.
+        // Explicitly user-initiated: unlike the passive timer, this may request immediate session
+        // establishment, but it still obeys the SAME global login cooldown/backoff as background
+        // recovery. It can never create one login per click during a portal outage.
         trading.MapPost("/reconciliation/run", async (
             AhkPortalClient brokerPortal,
             BrokerReconciliationWorker worker,
@@ -362,6 +368,8 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             DashboardOrderRequest body,
             MonitoredUniverse universe,
             TradingAgent.Manager.TradingManager manager,
+            PersistentOrderWorker persistentOrders,
+            TradingReconciliationState reconciliation,
             TradingPolicyProvider policyProvider,
             ApprovalIntentRegistry intentRegistry,
             IOptions<TradingAgentOptions> options,
@@ -435,15 +443,87 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                 EntryPrice = entryPrice,
                 LimitPrice = stopLimit,
                 Confidence = "HIGH",
+                PreservePriceIntent = body.PersistentUntilFilled,
                 RawMessage = $"dashboard:{intent.Id}"
             };
 
             IReadOnlyList<IReadOnlyList<TradingSignal>> groups = [[signal]];
             var policy = policyProvider.Current();
-            var source = "dashboard-order:" + (
-                string.IsNullOrWhiteSpace(body.ClientRequestId)
-                    ? Guid.NewGuid().ToString("N")
-                    : body.ClientRequestId.Trim());
+            PersistentOrderIntent? persistent = null;
+            var effectiveQuantity = body.Quantity.Value;
+            string? sellQuantityAdjustment = null;
+            string source;
+            if (body.PersistentUntilFilled)
+            {
+                if (PersistentOrderDecisions.ValidateEligibility(intent.OrderType) is { } persistenceProblem)
+                    return Results.BadRequest(new
+                    {
+                        error = "order_not_persistable",
+                        message = persistenceProblem
+                    });
+
+                var expires = body.ExpiresUtc
+                    ?? DateTime.UtcNow.AddDays(Math.Clamp(body.ExpiresInDays ?? 30, 1, 365));
+                if (expires <= DateTime.UtcNow)
+                    return Results.BadRequest(new
+                    {
+                        error = "invalid_expiry",
+                        message = "A persistent order must expire in the future."
+                    });
+
+                if (intent.Action.Equals("SELL", StringComparison.OrdinalIgnoreCase))
+                {
+                    var availability = SellQuantityRule.Available(
+                        reconciliation.Current,
+                        symbol,
+                        DateTime.UtcNow,
+                        TimeSpan.FromSeconds(Math.Max(
+                            10, options.Value.ReconciliationMaxAgeSeconds)));
+                    if (!availability.Known)
+                        return Results.Conflict(new
+                        {
+                            error = "sell_availability_unknown",
+                            message = availability.Reason
+                        });
+                    if (availability.AvailableQuantity <= 0)
+                        return Results.Conflict(new
+                        {
+                            error = "no_sellable_holding",
+                            message = $"No uncommitted {symbol} shares are available to sell."
+                        });
+
+                    effectiveQuantity = Math.Min(effectiveQuantity, availability.AvailableQuantity);
+                    if (effectiveQuantity != body.Quantity.Value)
+                    {
+                        sellQuantityAdjustment = new SellQuantityAdjustment(
+                            0, 0, symbol, body.Quantity.Value, effectiveQuantity).Message;
+                    }
+                }
+
+                persistent = new PersistentOrderIntent
+                {
+                    IntentId = Guid.NewGuid().ToString("N"),
+                    Symbol = symbol,
+                    Action = intent.Action,
+                    Quantity = effectiveQuantity,
+                    OrderType = intent.OrderType,
+                    Price = entryPrice,
+                    LimitPrice = stopLimit,
+                    ExpiresUtc = expires,
+                    Note = $"New Order: {intent.Label}"
+                };
+                signal = persistent.ToSignal(effectiveQuantity);
+                groups = [[signal]];
+                source = PersistentOrderWorker.BuildSource(
+                    persistent.IntentId, PsxTime.Today(), attempt: 1);
+            }
+            else
+            {
+                source = "dashboard-order:" + (
+                    string.IsNullOrWhiteSpace(body.ClientRequestId)
+                        ? Guid.NewGuid().ToString("N")
+                        : body.ClientRequestId.Trim());
+            }
 
             // The TradingTrader request is the approval event. Bind it to the exact order and let the
             // manager consume/re-hash the one-time intent exactly as it does for a host tool approval.
@@ -453,6 +533,26 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             intentRegistry.Register(approvalIntent);
             var authorization = ExecutionAuthorization.HostToolGate(
                 http.User.Identity?.Name ?? "trading-dashboard", approvalIntent);
+
+            if (persistent is not null)
+            {
+                var submission = await persistentOrders.CreateAndSubmitAsync(
+                    persistent, authorization, ct);
+                var persistentResult = submission.Execution;
+                return Results.Ok(new
+                {
+                    accepted = submission.Accepted,
+                    IsReplay = persistentResult?.IsReplay ?? false,
+                    ExecutionId = persistentResult?.ExecutionId ?? "",
+                    PolicyVersion = persistentResult?.PolicyVersion ?? policy.Version,
+                    reason = sellQuantityAdjustment is null
+                        ? submission.Reason
+                        : sellQuantityAdjustment + " " + submission.Reason,
+                    Groups = persistentResult?.Groups
+                             ?? Array.Empty<IReadOnlyList<OrderResult>>(),
+                    persistentOrder = submission.Intent
+                });
+            }
 
             var result = await manager.ExecuteGroupsAsync(groups, source, authorization, ct);
             var brokerResults = result.Groups.SelectMany(group => group).ToList();
@@ -468,6 +568,61 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                 result.Reason,
                 result.Groups
             });
+        }).RequireAuthorization("TradingTrader");
+
+        trading.MapGet("/persistent-orders", async (
+            bool? all,
+            ITradingRepository repository,
+            CancellationToken ct) =>
+        {
+            var orders = await repository.GetPersistentOrdersAsync(openOnly: !(all ?? false), ct);
+            var rows = new List<object>(orders.Count);
+            foreach (var order in orders)
+            {
+                var placements = await repository.GetPersistentOrderPlacementsAsync(order.IntentId, ct);
+                rows.Add(new
+                {
+                    order.IntentId,
+                    order.Symbol,
+                    order.Action,
+                    order.Quantity,
+                    order.OrderType,
+                    order.Price,
+                    order.LimitPrice,
+                    order.ExpiresUtc,
+                    order.State,
+                    order.FilledQuantity,
+                    order.RemainingQuantity,
+                    lastAttemptSessionDate = order.LastAttemptSessionDate?.ToString("yyyy-MM-dd"),
+                    order.AttemptCount,
+                    order.LastOrderNo,
+                    order.SourceArmedId,
+                    order.StateReason,
+                    order.Note,
+                    order.CreatedUtc,
+                    order.UpdatedUtc,
+                    order.TerminalUtc,
+                    placements
+                });
+            }
+            return Results.Ok(new { orders = rows });
+        }).RequireAuthorization("TradingAnalyst");
+
+        trading.MapDelete("/persistent-orders/{intentId}", async (
+            string intentId,
+            PersistentOrderWorker worker,
+            CancellationToken ct) =>
+        {
+            var result = await worker.CancelAsync(intentId, ct);
+            return result.State == "missing"
+                ? Results.NotFound(new { error = "not_found", message = result.Message })
+                : Results.Ok(new
+                {
+                    intentId,
+                    completed = result.Completed,
+                    state = result.State,
+                    message = result.Message
+                });
         }).RequireAuthorization("TradingTrader");
 
         // Candle archive: how much daily history is stored, how much is still missing, and what the
@@ -547,7 +702,8 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                     o.StateReason,
                     o.Note,
                     o.SourceAlertId,
-                    o.ProtectiveStopId
+                    o.ProtectiveStopId,
+                    o.PersistentUntilFilled
                 }),
                 // Sent with the orders because a stop and the entry it protects are one thing to
                 // read: "did my buy fill, and is the stop actually at the broker" is a single
@@ -738,6 +894,16 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                     message = $"This order would be refused when it fired: {stopProblem}"
                 });
 
+            if (body.PersistentUntilFilled
+                && PersistentOrderDecisions.ValidateEligibility(body.OrderType) is { } persistenceProblem)
+            {
+                return Results.BadRequest(new
+                {
+                    error = "order_not_persistable",
+                    message = persistenceProblem
+                });
+            }
+
             var order = new ArmedOrder
             {
                 ArmedId          = Guid.NewGuid().ToString("N"),
@@ -753,6 +919,7 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                 OrderType        = (body.OrderType ?? "LIMIT").Trim().ToUpperInvariant(),
                 Price            = body.Price,
                 LimitPrice       = body.LimitPrice,
+                PersistentUntilFilled = body.PersistentUntilFilled,
                 // Default an expiry: an entry trigger left open indefinitely can fire months later
                 // against a thesis nobody remembers forming.
                 ExpiresUtc       = body.ExpiresUtc
@@ -863,6 +1030,7 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                     order.TriggerPercent,
                     order.ReferencePrice,
                     order.Trailing,
+                    order.PersistentUntilFilled,
                     order.Action,
                     order.Quantity,
                     order.OrderType,
@@ -2145,6 +2313,7 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         var configManager  = services.GetRequiredService<PluginConfigManager>();
         var runtimeOptions = services.GetRequiredService<IRuntimePluginOptions<AhkConfig>>();
         var broker         = services.GetRequiredService<AhkBroker>();
+        var portal         = services.GetRequiredService<AhkPortalClient>();
         var logger         = services.GetRequiredService<ILogger<TradingAgentModule>>();
 
         var last = ConnectionFingerprint(runtimeOptions.Current);
@@ -2156,6 +2325,7 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
 
             last = current;
             logger.LogInformation("[TradingAgent] Broker connection settings changed — invalidating AHK browser session.");
+            portal.InvalidateSession("the broker connection settings changed");
             await broker.InvalidateSessionAsync();
         });
     }
@@ -2641,7 +2811,8 @@ public sealed record ArmOrderRequest(
     AttachStopRequest? AttachStop = null,
     decimal? TriggerPercent = null,
     decimal? ReferencePrice = null,
-    bool Trailing = false);
+    bool Trailing = false,
+    bool PersistentUntilFilled = false);
 
 /// <summary>An immediate order submitted from a registry choice in the trading dashboard.</summary>
 public sealed record DashboardOrderRequest(
@@ -2651,7 +2822,10 @@ public sealed record DashboardOrderRequest(
     decimal? Price = null,
     decimal? TriggerPrice = null,
     decimal? LimitPrice = null,
-    string? ClientRequestId = null);
+    string? ClientRequestId = null,
+    bool PersistentUntilFilled = false,
+    DateTime? ExpiresUtc = null,
+    int? ExpiresInDays = null);
 
 /// <summary>Auditable bulk alert state change. Dismiss is the UI's soft-delete operation.</summary>
 public sealed record BulkAlertActionRequest(

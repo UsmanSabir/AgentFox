@@ -28,6 +28,12 @@ public class TradingSignal
     public decimal? LimitPrice { get; set; }
 
     /// <summary>
+    /// Refuse a daily price-band adjustment that would violate the user's original price rather
+    /// than silently turning a persistent order into a different instruction on a later session.
+    /// </summary>
+    public bool PreservePriceIntent { get; set; }
+
+    /// <summary>
     /// For a stop order that came from an armed trigger: whether that trigger fires as the price
     /// RISES (true) or FALLS (false). Null when the order was submitted directly and has no trigger
     /// of its own.
