@@ -76,6 +76,9 @@ public class TradingAgentOptions
     /// </summary>
     public int ProtectiveStopPollMinutes { get; set; } = 3;
 
+    /// <summary>How often active good-until-expiry order intents reconcile their DAY orders.</summary>
+    public int PersistentOrderPollSeconds { get; set; } = 60;
+
     /// <summary>
     /// Seconds an approval intent stays valid between validation and broker submission
     /// (ApprovalRequired mode). Expired intents are rejected and need re-approval. Default 120,

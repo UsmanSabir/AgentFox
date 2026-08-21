@@ -47,6 +47,7 @@
 
   let quantity: number | null = null;
   let expiresInDays = 30;
+  let persistentUntilFilled = false;
   let note = '';
   let busy = false;
   let error: string | null = null;
@@ -79,6 +80,8 @@
   $: isEvent = triggerKind === 'Event';
   $: isPercent = isPercentTrigger(triggerKind);
   $: isStop = orderType === 'STOPLOSS';
+  $: persistable = orderType !== 'MARKET';
+  $: if (!persistable) persistentUntilFilled = false;
   $: fallsToTrigger = triggerKind === 'PriceBelow' || triggerKind === 'PercentDrop';
 
   // Picking the percent kind without a size of move would leave the level blank; 3% is a starting
@@ -207,6 +210,7 @@
       triggerPercent: isPercent ? triggerPercent : null,
       referencePrice: isPercent ? referencePrice : null,
       trailing: isPercent && trailing,
+      persistentUntilFilled,
       orderType,
       price: orderType === 'MARKET' ? null : price ?? level,
       limitPrice: isStop ? limitPrice : null,
@@ -410,6 +414,23 @@
           <input type="number" min="1" max="365" bind:value={expiresInDays} />
         </label>
       </div>
+
+      {#if persistable}
+        <label class="check persist">
+          <input type="checkbox" bind:checked={persistentUntilFilled} />
+          <span>
+            Keep the unfilled remainder working
+            <em>(re-place once per PSX trading day until this order expires or fully fills)</em>
+          </span>
+        </label>
+        {#if persistentUntilFilled}
+          <p class="hint-note">
+            The trigger fires once. After that, only the remaining quantity is submitted each day,
+            using the same price and passing the current approval, holdings, reconciliation,
+            kill-switch, and risk checks.
+          </p>
+        {/if}
+      {/if}
 
       {#if isPercent && trailing && orderType !== 'MARKET'}
         <!-- Said plainly because it is the one place the two features do not compose: the trigger

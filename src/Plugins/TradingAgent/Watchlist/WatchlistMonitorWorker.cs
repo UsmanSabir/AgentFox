@@ -9,6 +9,7 @@ using TradingAgent.Models;
 using TradingAgent.Observability;
 using TradingAgent.Persistence;
 using TradingAgent.Research;
+using TradingAgent.Trading;
 
 namespace TradingAgent.Watchlist;
 
@@ -46,6 +47,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService
     private readonly AlertBroadcaster _broadcaster;
     private readonly ApprovalGate _approvals;
     private readonly TradingAgent.Manager.TradingManager _manager;
+    private readonly PersistentOrderWorker _persistentOrders;
     private readonly TradingAgent.Broker.AhkBroker _broker;
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly ILogger<WatchlistMonitorWorker> _logger;
@@ -64,6 +66,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService
         AlertBroadcaster broadcaster,
         ApprovalGate approvals,
         TradingAgent.Manager.TradingManager manager,
+        PersistentOrderWorker persistentOrders,
         TradingAgent.Broker.AhkBroker broker,
         IOptions<TradingAgentOptions> options,
         ILogger<WatchlistMonitorWorker> logger,
@@ -79,6 +82,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService
         _broadcaster = broadcaster;
         _approvals = approvals;
         _manager = manager;
+        _persistentOrders = persistentOrders;
         _broker = broker;
         _options = options;
         _logger = logger;
@@ -414,13 +418,52 @@ public sealed class WatchlistMonitorWorker : BackgroundService
 
             try
             {
-                var groups = new[] { (IReadOnlyList<TradingSignal>)[order.ToSignal()] };
+                PersistentOrderIntent? persistent = null;
+                TradingSignal signal;
+                string source;
+                if (order.PersistentUntilFilled)
+                {
+                    if (PersistentOrderDecisions.ValidateEligibility(order.OrderType) is { } problem)
+                    {
+                        await _repository.TrySetArmedOrderStateAsync(
+                            order.ArmedId, "firing", "failed", problem, ct: ct);
+                        continue;
+                    }
+
+                    persistent = new PersistentOrderIntent
+                    {
+                        // Deterministic linkage makes a crash visible and prevents a second durable
+                        // instruction being invented for one armed trigger.
+                        IntentId = $"armed-{order.ArmedId}",
+                        Symbol = order.Symbol,
+                        Action = order.Action,
+                        Quantity = order.Quantity,
+                        OrderType = order.OrderType,
+                        Price = order.Price,
+                        LimitPrice = order.LimitPrice,
+                        ExpiresUtc = order.ExpiresUtc ?? DateTime.UtcNow.AddDays(30),
+                        SourceArmedId = order.ArmedId,
+                        Note = order.Note
+                    };
+                    signal = persistent.ToSignal(order.Quantity);
+                    source = PersistentOrderWorker.BuildSource(
+                        persistent.IntentId,
+                        DateOnly.FromDateTime(_calendar.GetStatus().PktNow),
+                        attempt: 1);
+                }
+                else
+                {
+                    signal = order.ToSignal();
+                    source = $"armed:{order.ArmedId}";
+                }
+
+                var groups = new[] { (IReadOnlyList<TradingSignal>)[signal] };
                 var severity = raisedThisPass
                     .FirstOrDefault(a => a.Symbol.Equals(order.Symbol, StringComparison.OrdinalIgnoreCase))
                     ?.Severity;
 
                 var decision = _approvals.Decide(
-                    groups, $"armed:{order.ArmedId}",
+                    groups, source,
                     new ApprovalContext(severity, "armed-order"));
                 var approvalReason = decision.Reason;
 
@@ -440,8 +483,27 @@ public sealed class WatchlistMonitorWorker : BackgroundService
                     continue;
                 }
 
+                if (persistent is not null)
+                {
+                    var submission = await _persistentOrders.CreateAndSubmitAsync(
+                        persistent, decision.Authorization, ct);
+                    await _repository.TrySetArmedOrderStateAsync(
+                        order.ArmedId, "firing", "fired",
+                        $"{why} Persistent order created: {submission.Reason}",
+                        submission.Execution?.ExecutionId, ct);
+                    _logger.LogWarning(
+                        "[ArmedOrders] {ArmedId} handed to persistent order {IntentId}: {Reason}",
+                        order.ArmedId, persistent.IntentId, submission.Reason);
+                    _activity?.Record(
+                        submission.Accepted ? ActivityLevel.Info : ActivityLevel.Warn,
+                        "Armed",
+                        $"{order.Symbol}: trigger created a persistent {order.Action}",
+                        submission.Reason);
+                    continue;
+                }
+
                 var result = await _manager.ExecuteGroupsAsync(
-                    groups, $"armed:{order.ArmedId}", decision.Authorization, ct);
+                    groups, source, decision.Authorization, ct);
 
                 await _repository.TrySetArmedOrderStateAsync(
                     order.ArmedId, "firing",

@@ -114,6 +114,56 @@ public interface ITradingRepository
         IReadOnlyList<TradingAgent.Reconciliation.BrokerFill> fills,
         CancellationToken ct = default);
 
+    // ── Persistent DAY orders ────────────────────────────────────────────────
+
+    Task<string> SavePersistentOrderAsync(
+        TradingAgent.Trading.PersistentOrderIntent intent,
+        CancellationToken ct = default);
+
+    Task<TradingAgent.Trading.PersistentOrderIntent?> GetPersistentOrderAsync(
+        string intentId,
+        CancellationToken ct = default);
+
+    Task<IReadOnlyList<TradingAgent.Trading.PersistentOrderIntent>> GetPersistentOrdersAsync(
+        bool openOnly = true,
+        CancellationToken ct = default);
+
+    Task<IReadOnlyList<TradingAgent.Trading.PersistentOrderPlacement>> GetPersistentOrderPlacementsAsync(
+        string intentId,
+        CancellationToken ct = default);
+
+    /// <summary>Claims the one allowed placement for a trading date.</summary>
+    Task<TradingAgent.Trading.PersistentOrderAttemptClaim> TryClaimPersistentOrderAttemptAsync(
+        string intentId,
+        DateOnly sessionDate,
+        CancellationToken ct = default);
+
+    Task RecordPersistentOrderPlacementAsync(
+        TradingAgent.Trading.PersistentOrderPlacement placement,
+        string intentState,
+        string? stateReason,
+        CancellationToken ct = default);
+
+    Task<bool> SetPersistentOrderPlacementStateAsync(
+        string placementId,
+        string state,
+        string? message = null,
+        CancellationToken ct = default);
+
+    Task<bool> SetPersistentOrderProgressAsync(
+        string intentId,
+        int filledQuantity,
+        string state,
+        string? reason,
+        CancellationToken ct = default);
+
+    Task<bool> TrySetPersistentOrderStateAsync(
+        string intentId,
+        IReadOnlyCollection<string> expectedStates,
+        string newState,
+        string? reason = null,
+        CancellationToken ct = default);
+
     Task AppendEventAsync(
         string executionId,
         string eventType,
@@ -387,6 +437,12 @@ public interface ITradingRepository
         decimal reference,
         decimal triggerPrice,
         bool ratchetUp,
+        CancellationToken ct = default);
+
+    /// <summary>Raises an armed backstop's quantity as additional entry fills are confirmed.</summary>
+    Task<bool> TrySetArmedOrderQuantityAsync(
+        string armedId,
+        int quantity,
         CancellationToken ct = default);
 
     // ── Protective stops ──────────────────────────────────────────────────────

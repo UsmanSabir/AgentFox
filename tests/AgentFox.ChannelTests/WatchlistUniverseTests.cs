@@ -429,6 +429,30 @@ public sealed class WatchlistUniverseTests
             IReadOnlyList<TradingAgent.Reconciliation.BrokerFill> fills,
             CancellationToken ct = default) => throw new NotSupportedException();
 
+        public Task<string> SavePersistentOrderAsync(
+            TradingAgent.Trading.PersistentOrderIntent intent, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<TradingAgent.Trading.PersistentOrderIntent?> GetPersistentOrderAsync(
+            string id, CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<IReadOnlyList<TradingAgent.Trading.PersistentOrderIntent>> GetPersistentOrdersAsync(
+            bool openOnly = true, CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<IReadOnlyList<TradingAgent.Trading.PersistentOrderPlacement>> GetPersistentOrderPlacementsAsync(
+            string id, CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<TradingAgent.Trading.PersistentOrderAttemptClaim> TryClaimPersistentOrderAttemptAsync(
+            string id, DateOnly date, CancellationToken ct = default) => throw new NotSupportedException();
+        public Task RecordPersistentOrderPlacementAsync(
+            TradingAgent.Trading.PersistentOrderPlacement placement, string state, string? reason,
+            CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<bool> SetPersistentOrderPlacementStateAsync(
+            string id, string state, string? message = null, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<bool> SetPersistentOrderProgressAsync(
+            string id, int filled, string state, string? reason, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<bool> TrySetPersistentOrderStateAsync(
+            string id, IReadOnlyCollection<string> expected, string state, string? reason = null,
+            CancellationToken ct = default) => throw new NotSupportedException();
+
         public Task<WatchlistSnapshot> GetWatchlistAsync(CancellationToken ct = default) =>
             throw new InvalidOperationException("database unavailable");
 
@@ -542,6 +566,9 @@ public sealed class WatchlistUniverseTests
         public Task<bool> TrySetArmedOrderTrailAsync(
             string id, decimal reference, decimal triggerPrice, bool ratchetUp,
             CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<bool> TrySetArmedOrderQuantityAsync(
+            string id, int quantity, CancellationToken ct = default) =>
+            throw new NotSupportedException();
         public Task<string> SaveProtectiveStopAsync(
             ProtectiveStop stop, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<IReadOnlyList<ProtectiveStop>> GetProtectiveStopsAsync(

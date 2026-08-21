@@ -331,7 +331,34 @@ public sealed class ProtectiveStopWorker : BackgroundService
             return;
         }
 
-        var entryStillResting = resting is null
+        // A recurring entry can be legitimately between native DAY orders when this pass runs. Its
+        // durable child intent, not the momentary absence of an outstanding row, owns whether the
+        // entry is still alive; otherwise the attached protection would close every night before the
+        // entry got its next placement.
+        PersistentOrderIntent? persistentEntry = null;
+        if (parent.PersistentUntilFilled)
+        {
+            persistentEntry = (await repository.GetPersistentOrdersAsync(openOnly: false, ct))
+                .FirstOrDefault(i => i.SourceArmedId == parent.ArmedId);
+        }
+
+        if (persistentEntry is { FilledQuantity: > 0 } exactFill)
+        {
+            var confirmed = Math.Min(parent.Quantity, exactFill.FilledQuantity);
+            var reason = $"Persistent entry broker orders report {confirmed} exact filled share(s).";
+            await repository.RecordProtectiveStopFillAsync(stop.StopId, confirmed, reason, ct);
+            await ArmBackstopAsync(repository, stop with
+            {
+                State = "active",
+                DesiredQuantity = Math.Max(stop.DesiredQuantity, confirmed)
+            }, confirmed, ct);
+            _activity?.Info("Stops",
+                $"{stop.Symbol}: exact entry fill activated protection ({confirmed})", reason);
+            return;
+        }
+
+        var entryStillResting = persistentEntry is { IsTerminal: false }
+            || resting is null
             || resting.Any(r => r.Symbol.Equals(stop.Symbol, StringComparison.OrdinalIgnoreCase));
 
         // The watch ends with the entry itself: past that, a holdings change is somebody else's trade.
@@ -394,6 +421,21 @@ public sealed class ProtectiveStopWorker : BackgroundService
         DateOnly today,
         CancellationToken ct)
     {
+        if (stop.ParentArmedId is { } parentId)
+        {
+            var entry = (await repository.GetPersistentOrdersAsync(openOnly: false, ct))
+                .FirstOrDefault(i => i.SourceArmedId == parentId);
+            if (entry is { FilledQuantity: > 0 } && entry.FilledQuantity > stop.DesiredQuantity)
+            {
+                var confirmed = entry.FilledQuantity;
+                await repository.RecordProtectiveStopFillAsync(stop.StopId, confirmed,
+                    $"Persistent entry cumulative fill rose to {confirmed} share(s).", ct);
+                if (stop.LocalBackstopArmedId is { } backstopId)
+                    await repository.TrySetArmedOrderQuantityAsync(backstopId, confirmed, ct);
+                stop = stop with { DesiredQuantity = confirmed };
+            }
+        }
+
         // A stop that has already had its session and is not recurring has done its job; it is not
         // re-placed, but it is also not closed, because the position may still be held.
         if (!stop.Recurring && stop.LastPlacedSessionDate is { } placed && placed != today)

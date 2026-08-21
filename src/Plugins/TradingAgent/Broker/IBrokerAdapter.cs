@@ -8,6 +8,7 @@ using System.Text.Json;
 using TradingAgent.Feed;
 using TradingAgent.Models;
 using TradingAgent.Reconciliation;
+using TradingAgent.Risk;
 
 namespace TradingAgent.Broker;
 
@@ -147,6 +148,21 @@ public sealed class AhkBrowserBrokerAdapter : IBrokerAdapter, IBrokerStateReader
             var raw = signal.LimitPrice
                 ?? decimal.Round(price * (1m - Math.Clamp(cfg.StopLimitSlippagePercent, 0m, 20m) / 100m), 2);
             (limitPrice, _) = ClampToBand(raw, band);
+        }
+
+        if (PriceIntentRule.Validate(signal, price, limitPrice) is { } priceProblem)
+        {
+            _logger.LogWarning("[BrokerAdapter] {Symbol}: {Reason}", symbol, priceProblem);
+            return new OrderResult
+            {
+                Success = false,
+                Action = isBuy ? "BUY" : "SELL",
+                Symbol = symbol,
+                Quantity = qty,
+                Message = priceProblem,
+                RequestedPrice = signal.EntryPrice,
+                SubmittedPrice = null
+            };
         }
 
         var request = new PlaceOrderApiRequest(
@@ -306,6 +322,8 @@ public sealed class AhkBrowserBrokerAdapter : IBrokerAdapter, IBrokerStateReader
 
         var failures = new List<string>();
         if (!outstanding.Ok) failures.Add(outstanding.Error ?? "the outstanding order book could not be read");
+        if (outstanding.Ok && outstanding.Orders.Any(o => string.IsNullOrWhiteSpace(o.OrderNo)))
+            failures.Add("an outstanding order was missing its broker order number");
         if (activity is null) failures.Add("today's activity log could not be read");
         if (holdings is null) failures.Add("the account's holdings could not be read");
         if (balance is null) failures.Add("the available cash balance could not be read");
@@ -340,6 +358,24 @@ public sealed class AhkBrowserBrokerAdapter : IBrokerAdapter, IBrokerStateReader
                 f.Price ?? 0m,
                 ParseActivityTimeUtc(f.Time, checkedUtc)))
             .ToList();
+
+        var structuredOpenOrders = outstanding.Ok
+            ? outstanding.Orders
+                .Where(o => !string.IsNullOrWhiteSpace(o.OrderNo))
+                .Select(o => new BrokerWorkingOrder(
+                    o.OrderNo!.Trim(),
+                    o.Scrip?.Trim().ToUpperInvariant() ?? "",
+                    o.Type?.Trim(),
+                    o.Remaining,
+                    o.Price))
+                .ToList()
+            : [];
+
+        var structuredPositions = holdings?
+            .Where(h => !string.IsNullOrWhiteSpace(h.Symbol) && h.QuantityTotal is not null)
+            .Select(h => new BrokerPosition(
+                h.Symbol!.Trim().ToUpperInvariant(), h.QuantityTotal!.Value))
+            .ToList() ?? [];
 
         var details = JsonSerializer.Serialize(new
         {
@@ -390,7 +426,12 @@ public sealed class AhkBrowserBrokerAdapter : IBrokerAdapter, IBrokerStateReader
                 Reason: "Broker state is incomplete: " + string.Join("; ", failures) + ".",
                 CheckedUtc: checkedUtc,
                 DetailsJson: details)
-            { Fills = structuredFills };
+            {
+                Fills = structuredFills,
+                OpenOrders = structuredOpenOrders,
+                Positions = structuredPositions,
+                AvailableCashPkr = balance
+            };
         }
 
         return new BrokerReconciliationSnapshot(
@@ -400,7 +441,12 @@ public sealed class AhkBrowserBrokerAdapter : IBrokerAdapter, IBrokerStateReader
                     $"{holdings!.Count} holding(s) and the cash balance from the broker.",
             CheckedUtc: checkedUtc,
             DetailsJson: details)
-        { Fills = structuredFills };
+        {
+            Fills = structuredFills,
+            OpenOrders = structuredOpenOrders,
+            Positions = structuredPositions,
+            AvailableCashPkr = balance
+        };
     }
 
     /// <summary>Rounds a PKR amount to paisa, preserving null as unknown.</summary>
