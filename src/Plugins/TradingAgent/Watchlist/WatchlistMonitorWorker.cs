@@ -8,7 +8,9 @@ using TradingAgent.Market;
 using TradingAgent.Models;
 using TradingAgent.Observability;
 using TradingAgent.Persistence;
+using TradingAgent.Reconciliation;
 using TradingAgent.Research;
+using TradingAgent.Risk;
 using TradingAgent.Trading;
 
 namespace TradingAgent.Watchlist;
@@ -48,6 +50,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService
     private readonly ApprovalGate _approvals;
     private readonly TradingAgent.Manager.TradingManager _manager;
     private readonly PersistentOrderWorker _persistentOrders;
+    private readonly TradingReconciliationState _reconciliation;
     private readonly TradingAgent.Broker.AhkBroker _broker;
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly ILogger<WatchlistMonitorWorker> _logger;
@@ -67,6 +70,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService
         ApprovalGate approvals,
         TradingAgent.Manager.TradingManager manager,
         PersistentOrderWorker persistentOrders,
+        TradingReconciliationState reconciliation,
         TradingAgent.Broker.AhkBroker broker,
         IOptions<TradingAgentOptions> options,
         ILogger<WatchlistMonitorWorker> logger,
@@ -83,6 +87,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService
         _approvals = approvals;
         _manager = manager;
         _persistentOrders = persistentOrders;
+        _reconciliation = reconciliation;
         _broker = broker;
         _options = options;
         _logger = logger;
@@ -419,6 +424,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService
             try
             {
                 PersistentOrderIntent? persistent = null;
+                string? quantityAdjustment = null;
                 TradingSignal signal;
                 string source;
                 if (order.PersistentUntilFilled)
@@ -430,6 +436,40 @@ public sealed class WatchlistMonitorWorker : BackgroundService
                         continue;
                     }
 
+                    var effectiveQuantity = order.Quantity;
+                    if (order.Action.Equals("SELL", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var availability = SellQuantityRule.Available(
+                            _reconciliation.Current,
+                            order.Symbol,
+                            DateTime.UtcNow,
+                            TimeSpan.FromSeconds(Math.Max(
+                                10, _options.Value.ReconciliationMaxAgeSeconds)));
+                        if (!availability.Known)
+                        {
+                            await _repository.TrySetArmedOrderStateAsync(
+                                order.ArmedId, "firing", "armed",
+                                $"Trigger met, but SELL availability was unknown: {availability.Reason}",
+                                ct: ct);
+                            continue;
+                        }
+                        if (availability.AvailableQuantity <= 0)
+                        {
+                            await _repository.TrySetArmedOrderStateAsync(
+                                order.ArmedId, "firing", "failed",
+                                $"Trigger met, but no uncommitted {order.Symbol} shares were available to sell.",
+                                ct: ct);
+                            continue;
+                        }
+
+                        effectiveQuantity = Math.Min(effectiveQuantity, availability.AvailableQuantity);
+                        if (effectiveQuantity != order.Quantity)
+                        {
+                            quantityAdjustment = new SellQuantityAdjustment(
+                                0, 0, order.Symbol, order.Quantity, effectiveQuantity).Message;
+                        }
+                    }
+
                     persistent = new PersistentOrderIntent
                     {
                         // Deterministic linkage makes a crash visible and prevents a second durable
@@ -437,15 +477,18 @@ public sealed class WatchlistMonitorWorker : BackgroundService
                         IntentId = $"armed-{order.ArmedId}",
                         Symbol = order.Symbol,
                         Action = order.Action,
-                        Quantity = order.Quantity,
+                        Quantity = effectiveQuantity,
                         OrderType = order.OrderType,
                         Price = order.Price,
                         LimitPrice = order.LimitPrice,
                         ExpiresUtc = order.ExpiresUtc ?? DateTime.UtcNow.AddDays(30),
                         SourceArmedId = order.ArmedId,
-                        Note = order.Note
+                        Note = quantityAdjustment is null
+                            ? order.Note
+                            : string.Join(" ", new[] { order.Note, quantityAdjustment }
+                                .Where(x => !string.IsNullOrWhiteSpace(x)))
                     };
-                    signal = persistent.ToSignal(order.Quantity);
+                    signal = persistent.ToSignal(effectiveQuantity);
                     source = PersistentOrderWorker.BuildSource(
                         persistent.IntentId,
                         DateOnly.FromDateTime(_calendar.GetStatus().PktNow),
@@ -489,7 +532,9 @@ public sealed class WatchlistMonitorWorker : BackgroundService
                         persistent, decision.Authorization, ct);
                     await _repository.TrySetArmedOrderStateAsync(
                         order.ArmedId, "firing", "fired",
-                        $"{why} Persistent order created: {submission.Reason}",
+                        $"{why} Persistent order created: "
+                        + (quantityAdjustment is null ? "" : quantityAdjustment + " ")
+                        + submission.Reason,
                         submission.Execution?.ExecutionId, ct);
                     _logger.LogWarning(
                         "[ArmedOrders] {ArmedId} handed to persistent order {IntentId}: {Reason}",

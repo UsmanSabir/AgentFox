@@ -9,6 +9,7 @@ using TradingAgent.Models;
 using TradingAgent.Observability;
 using TradingAgent.Persistence;
 using TradingAgent.Reconciliation;
+using TradingAgent.Risk;
 
 namespace TradingAgent.Trading;
 
@@ -197,6 +198,7 @@ public sealed class PersistentOrderWorker : BackgroundService
         var ownNumbers = placements
             .Select(p => p.BrokerOrderNo?.Trim())
             .Where(n => !string.IsNullOrWhiteSpace(n))
+            .Select(n => n!)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var ownOpen = snapshot.OpenOrders
             .Where(o => ownNumbers.Contains(o.OrderNo.Trim()))
@@ -341,26 +343,21 @@ public sealed class PersistentOrderWorker : BackgroundService
         int? availableToSell = null;
         if (intent.Action.Equals("SELL", StringComparison.OrdinalIgnoreCase))
         {
-            var held = snapshot.Positions
-                .FirstOrDefault(p => p.Symbol.Equals(intent.Symbol, StringComparison.OrdinalIgnoreCase))
-                ?.Quantity ?? 0m;
-            var otherSells = snapshot.OpenOrders
-                .Where(o => o.Symbol.Equals(intent.Symbol, StringComparison.OrdinalIgnoreCase)
-                         && IsSell(o.Side)
-                         && !ownNumbers.Contains(o.OrderNo.Trim()))
-                .ToList();
-            if (otherSells.Any(o => o.RemainingQuantity is null))
+            var availability = SellQuantityRule.Available(
+                snapshot,
+                intent.Symbol,
+                DateTime.UtcNow,
+                TimeSpan.FromSeconds(Math.Max(
+                    10, _options.Value.ReconciliationMaxAgeSeconds)),
+                ownNumbers);
+            if (!availability.Known)
             {
                 await _repository.SetPersistentOrderProgressAsync(intent.IntentId,
                     intent.FilledQuantity, intent.FilledQuantity > 0 ? "partial" : "active",
-                    "Another SELL is open for this symbol, but its remaining quantity is unknown; "
-                    + "no recurring order was placed to avoid overselling.", ct);
+                    availability.Reason + " No recurring order was placed.", ct);
                 return;
             }
-            var committedElsewhere = otherSells
-                .Sum(o => Math.Max(0L, o.RemainingQuantity!.Value));
-            availableToSell = Math.Max(0,
-                (int)Math.Floor(held) - (int)Math.Min(int.MaxValue, committedElsewhere));
+            availableToSell = availability.AvailableQuantity;
         }
 
         var quantity = PersistentOrderDecisions.QuantityToPlace(
@@ -440,13 +437,14 @@ public sealed class PersistentOrderWorker : BackgroundService
                         || message.Contains("unknown", StringComparison.OrdinalIgnoreCase)
                         || message.Contains("unconfirmed", StringComparison.OrdinalIgnoreCase);
         var accepted = execution.Executed && result is { Success: true };
+        var submittedQuantity = result?.Quantity ?? quantity;
         var placement = new PersistentOrderPlacement
         {
             PlacementId = Guid.NewGuid().ToString("N"),
             IntentId = intent.IntentId,
             SessionDate = sessionDate,
             Attempt = claim.Attempt,
-            Quantity = quantity,
+            Quantity = submittedQuantity,
             BrokerOrderNo = result?.OrderId,
             ExecutionId = execution.ExecutionId,
             State = accepted ? "accepted" : isUnknown ? "unknown" : "failed",
@@ -456,7 +454,7 @@ public sealed class PersistentOrderWorker : BackgroundService
         };
         var nextState = accepted ? "resting" : isUnknown ? "attention" : "active";
         var reason = accepted
-            ? $"Broker accepted order #{result!.OrderId ?? "unknown"} for {quantity} share(s)."
+            ? $"Broker accepted order #{result!.OrderId ?? "unknown"} for {submittedQuantity} share(s)."
             : isUnknown
                 ? $"Broker outcome is unknown; automation stopped: {message}"
                 : $"No order was placed for this trading date: {message}";
@@ -470,11 +468,6 @@ public sealed class PersistentOrderWorker : BackgroundService
             reason);
         return new(accepted, intent, execution, reason);
     }
-
-    private static bool IsSell(string? side) =>
-        side is not null
-        && (side.Equals("SELL", StringComparison.OrdinalIgnoreCase)
-         || side.Equals("SEL", StringComparison.OrdinalIgnoreCase));
 
     public static string BuildSource(string intentId, DateOnly sessionDate, int attempt) =>
         $"persistent-order:{intentId}:{sessionDate:yyyyMMdd}:attempt:{attempt}";

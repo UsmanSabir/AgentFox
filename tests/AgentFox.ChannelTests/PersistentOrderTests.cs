@@ -1,4 +1,5 @@
 using TradingAgent.Models;
+using TradingAgent.Reconciliation;
 using TradingAgent.Risk;
 using TradingAgent.Trading;
 
@@ -33,6 +34,55 @@ public sealed class PersistentOrderTests
         var intent = Intent(quantity: 100) with { Action = "SELL" };
         Assert.AreEqual(25,
             PersistentOrderDecisions.QuantityToPlace(intent, filled: 40, availableToSell: 25));
+    }
+
+    [TestMethod]
+    public void SellAvailability_SubtractsOutstandingSellsFromHoldings()
+    {
+        var snapshot = Snapshot(
+            positions: [new("LUCK", 50m)],
+            openOrders: [new("S1", "LUCK", "SEL", 20, 900m)]);
+
+        var decision = SellQuantityRule.Available(
+            snapshot, "LUCK", Now, TimeSpan.FromMinutes(2));
+
+        Assert.IsTrue(decision.Known);
+        Assert.AreEqual(30, decision.AvailableQuantity);
+    }
+
+    [TestMethod]
+    public void SellAvailability_FailsClosedWhenAnOpenSellQuantityIsUnknown()
+    {
+        var snapshot = Snapshot(
+            positions: [new("LUCK", 50m)],
+            openOrders: [new("S1", "LUCK", "SELL", null, 900m)]);
+
+        var decision = SellQuantityRule.Available(
+            snapshot, "LUCK", Now, TimeSpan.FromMinutes(2));
+
+        Assert.IsFalse(decision.Known);
+        StringAssert.Contains(decision.Reason, "no remaining quantity");
+    }
+
+    [TestMethod]
+    public void SellSizing_ReducesOneHundredRequestedToFiftyHeld()
+    {
+        IReadOnlyList<IReadOnlyList<TradingSignal>> groups =
+        [
+            [new() { Action = "SELL", Symbol = "LUCK", Quantity = 100,
+                     OrderType = "LIMIT", EntryPrice = 900m }]
+        ];
+
+        var plan = SellQuantityRule.SizeIndependentSells(
+            groups,
+            Snapshot(positions: [new("LUCK", 50m)]),
+            Now,
+            TimeSpan.FromMinutes(2));
+
+        Assert.IsNull(plan.Problem);
+        Assert.AreEqual(50, plan.Groups[0][0].Quantity);
+        Assert.AreEqual(100, plan.Adjustments.Single().RequestedQuantity);
+        Assert.AreEqual(100, groups[0][0].Quantity, "The approved request must remain immutable.");
     }
 
     [TestMethod]
@@ -120,4 +170,13 @@ public sealed class PersistentOrderTests
         EntryPrice = price,
         PreservePriceIntent = true
     };
+
+    private static BrokerReconciliationSnapshot Snapshot(
+        IReadOnlyList<BrokerPosition>? positions = null,
+        IReadOnlyList<BrokerWorkingOrder>? openOrders = null) =>
+        new(true, true, "ok", Now)
+        {
+            Positions = positions ?? [],
+            OpenOrders = openOrders ?? []
+        };
 }

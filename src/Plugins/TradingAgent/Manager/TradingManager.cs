@@ -29,11 +29,13 @@ public sealed class TradingManager
     private readonly TradingPolicyProvider _policyProvider;
     private readonly ITradingRiskEngine _riskEngine;
     private readonly TradingReconciliationState _reconciliation;
+    private readonly IBrokerStateReader? _brokerStateReader;
     private readonly ApprovalIntentRegistry _intentRegistry;
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly ILogger<TradingManager> _logger;
     private readonly IUserNotifier? _notifier;
     private readonly TradingActivityLog? _activity;
+    private readonly SemaphoreSlim _sellExecutionGate = new(1, 1);
 
     /// <summary>How long an execution alert may take to reach the channels before it is abandoned.</summary>
     private static readonly TimeSpan NotifyTimeout = TimeSpan.FromSeconds(20);
@@ -54,7 +56,8 @@ public sealed class TradingManager
         IOptions<TradingAgentOptions> options,
         ILogger<TradingManager> logger,
         TradingActivityLog? activity = null,
-        IUserNotifier? notifier = null)
+        IUserNotifier? notifier = null,
+        IBrokerStateReader? brokerStateReader = null)
     {
         _activity = activity;
         _notifier = notifier;
@@ -65,6 +68,7 @@ public sealed class TradingManager
         _policyProvider = policyProvider;
         _riskEngine = riskEngine;
         _reconciliation = reconciliation;
+        _brokerStateReader = brokerStateReader;
         _intentRegistry = intentRegistry;
         _options = options;
         _logger = logger;
@@ -101,11 +105,8 @@ public sealed class TradingManager
         if (groups.Count == 0 || groups.All(g => g.Count == 0))
             return Reject(policy.Version, "No orders were supplied.");
 
-        var risk = _riskEngine.Validate(groups, policy.KillSwitch);
-        if (!risk.Allowed)
-            return Reject(policy.Version,
-                "Pre-trade risk validation failed: " + string.Join(" ", risk.Violations));
-
+        // Approval authenticates the exact maximum the caller requested. A later holdings adjustment
+        // may only reduce a SELL, never enlarge or otherwise alter that approved instruction.
         if (mode == "APPROVALREQUIRED")
         {
             if (authorization?.Method != "host-tool-gate")
@@ -120,6 +121,51 @@ public sealed class TradingManager
                 return Reject(policy.Version, intentFailure);
             }
         }
+
+        var sellGateHeld = mode is not ("PAPER" or "SHADOW")
+                           && SellQuantityRule.HasIndependentSell(groups);
+        if (sellGateHeld)
+            await _sellExecutionGate.WaitAsync(ct);
+
+        try
+        {
+
+        // A retail SELL is bounded by custody, not by what the caller typed. Do this at the single
+        // execution boundary so dashboard, agent tool, armed order, protective stop, and retry paths
+        // cannot disagree. Risk limits below are evaluated against the quantity that can actually be
+        // submitted, while the immutable approval above remains bound to the requested maximum.
+        IReadOnlyList<SellQuantityAdjustment> sellAdjustments = [];
+        if (mode is not ("PAPER" or "SHADOW"))
+        {
+            var maxAge = TimeSpan.FromSeconds(
+                Math.Max(10, _options.Value.ReconciliationMaxAgeSeconds));
+            var brokerState = _reconciliation.Current;
+            if (sellGateHeld && _brokerStateReader is not null)
+            {
+                try
+                {
+                    brokerState = await _brokerStateReader.ReadSnapshotAsync(ct);
+                    _reconciliation.Update(brokerState);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    return Reject(policy.Version,
+                        "SELL availability check failed while refreshing the broker book: " + ex.Message);
+                }
+            }
+            var sizing = SellQuantityRule.SizeIndependentSells(
+                groups, brokerState, DateTime.UtcNow, maxAge);
+            if (sizing.Problem is { } sellProblem)
+                return Reject(policy.Version, "SELL availability check failed: " + sellProblem);
+
+            groups = sizing.Groups;
+            sellAdjustments = sizing.Adjustments;
+        }
+
+        var risk = _riskEngine.Validate(groups, policy.KillSwitch);
+        if (!risk.Allowed)
+            return Reject(policy.Version,
+                "Pre-trade risk validation failed: " + string.Join(" ", risk.Violations));
 
         if (mode is "APPROVALREQUIRED" or "BOUNDEDAUTO"
             && _options.Value.RequireReconciliationHealthy)
@@ -172,6 +218,7 @@ public sealed class TradingManager
                 // order accepted at 09:05" after the fact.
                 OrderWindowSource = window.Source,
                 OrderWindowReason = window.Reason,
+                SellQuantityAdjustments = sellAdjustments,
                 authorization
             }, Json), ct);
 
@@ -188,8 +235,10 @@ public sealed class TradingManager
                 RequestedPrice = order.EntryPrice,
                 SubmittedPrice = order.EntryPrice
             }).ToList()).ToList();
+            AnnotateSellAdjustments(simulated, sellAdjustments);
             var result = new TradingExecutionResult(true, false, claim.ExecutionId,
-                policy.Version, $"{mode} execution recorded without broker submission.", simulated);
+                policy.Version, WithSellAdjustment(
+                    $"{mode} execution recorded without broker submission.", sellAdjustments), simulated);
             await PersistResultAsync(result, "simulated", ct);
             return result;
         }
@@ -198,10 +247,13 @@ public sealed class TradingManager
         {
             await _repository.AppendEventAsync(claim.ExecutionId, "broker_submission_started", "{}", ct);
             var brokerResults = await _broker.PlaceOrderGroupsAsync(groups);
+            AnnotateSellAdjustments(brokerResults, sellAdjustments);
             var success = brokerResults.SelectMany(x => x).All(x => x.Success);
             var result = new TradingExecutionResult(true, false, claim.ExecutionId,
                 policy.Version,
-                success ? "Broker accepted all attempted orders." : "One or more broker orders failed.",
+                WithSellAdjustment(
+                    success ? "Broker accepted all attempted orders." : "One or more broker orders failed.",
+                    sellAdjustments),
                 brokerResults);
             await PersistResultAsync(result, success ? "accepted" : "failed", ct);
             return result;
@@ -216,7 +268,38 @@ public sealed class TradingManager
             await PersistResultAsync(result, "unknown", ct);
             return result;
         }
+        }
+        finally
+        {
+            if (sellGateHeld) _sellExecutionGate.Release();
+        }
     }
+
+    private static void AnnotateSellAdjustments(
+        IReadOnlyList<IReadOnlyList<OrderResult>> results,
+        IReadOnlyList<SellQuantityAdjustment> adjustments)
+    {
+        foreach (var adjustment in adjustments)
+        {
+            if (adjustment.GroupIndex >= results.Count
+                || adjustment.OrderIndex >= results[adjustment.GroupIndex].Count)
+                continue;
+
+            var result = results[adjustment.GroupIndex][adjustment.OrderIndex];
+            result.RequestedQuantity = adjustment.RequestedQuantity;
+            result.Quantity = adjustment.SubmittedQuantity;
+            result.QuantityAdjustment = adjustment.Message;
+            result.Message = string.IsNullOrWhiteSpace(result.Message)
+                ? adjustment.Message
+                : result.Message.TrimEnd() + " " + adjustment.Message;
+        }
+    }
+
+    private static string WithSellAdjustment(
+        string reason, IReadOnlyList<SellQuantityAdjustment> adjustments) =>
+        adjustments.Count == 0
+            ? reason
+            : reason + " " + string.Join(" ", adjustments.Select(a => a.Message));
 
     private async Task PersistResultAsync(
         TradingExecutionResult result,
@@ -301,7 +384,12 @@ public sealed class TradingManager
 
             // Size before price. "BUY FFC @ 551" reads the same whether it bought 45 shares or
             // 4,500, and the difference is the entire trade.
-            if (order.Quantity is { } quantity) sb.Append(' ').Append(quantity.ToString("N0"));
+            if (order.Quantity is { } quantity)
+            {
+                sb.Append(' ').Append(quantity.ToString("N0"));
+                if (order.RequestedQuantity is { } requested && requested != quantity)
+                    sb.Append(" (requested ").Append(requested.ToString("N0")).Append(')');
+            }
             if (price.HasValue) sb.Append(" @ ").Append(price.Value.ToString("0.##"));
 
             if (order.Quantity is { } qty && price is { } unit && qty > 0 && unit > 0)

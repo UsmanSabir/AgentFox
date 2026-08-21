@@ -369,6 +369,7 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             MonitoredUniverse universe,
             TradingAgent.Manager.TradingManager manager,
             PersistentOrderWorker persistentOrders,
+            TradingReconciliationState reconciliation,
             TradingPolicyProvider policyProvider,
             ApprovalIntentRegistry intentRegistry,
             IOptions<TradingAgentOptions> options,
@@ -449,6 +450,8 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             IReadOnlyList<IReadOnlyList<TradingSignal>> groups = [[signal]];
             var policy = policyProvider.Current();
             PersistentOrderIntent? persistent = null;
+            var effectiveQuantity = body.Quantity.Value;
+            string? sellQuantityAdjustment = null;
             string source;
             if (body.PersistentUntilFilled)
             {
@@ -468,19 +471,48 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                         message = "A persistent order must expire in the future."
                     });
 
+                if (intent.Action.Equals("SELL", StringComparison.OrdinalIgnoreCase))
+                {
+                    var availability = SellQuantityRule.Available(
+                        reconciliation.Current,
+                        symbol,
+                        DateTime.UtcNow,
+                        TimeSpan.FromSeconds(Math.Max(
+                            10, options.Value.ReconciliationMaxAgeSeconds)));
+                    if (!availability.Known)
+                        return Results.Conflict(new
+                        {
+                            error = "sell_availability_unknown",
+                            message = availability.Reason
+                        });
+                    if (availability.AvailableQuantity <= 0)
+                        return Results.Conflict(new
+                        {
+                            error = "no_sellable_holding",
+                            message = $"No uncommitted {symbol} shares are available to sell."
+                        });
+
+                    effectiveQuantity = Math.Min(effectiveQuantity, availability.AvailableQuantity);
+                    if (effectiveQuantity != body.Quantity.Value)
+                    {
+                        sellQuantityAdjustment = new SellQuantityAdjustment(
+                            0, 0, symbol, body.Quantity.Value, effectiveQuantity).Message;
+                    }
+                }
+
                 persistent = new PersistentOrderIntent
                 {
                     IntentId = Guid.NewGuid().ToString("N"),
                     Symbol = symbol,
                     Action = intent.Action,
-                    Quantity = body.Quantity.Value,
+                    Quantity = effectiveQuantity,
                     OrderType = intent.OrderType,
                     Price = entryPrice,
                     LimitPrice = stopLimit,
                     ExpiresUtc = expires,
                     Note = $"New Order: {intent.Label}"
                 };
-                signal = persistent.ToSignal(body.Quantity.Value);
+                signal = persistent.ToSignal(effectiveQuantity);
                 groups = [[signal]];
                 source = PersistentOrderWorker.BuildSource(
                     persistent.IntentId, PsxTime.Today(), attempt: 1);
@@ -513,7 +545,9 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                     IsReplay = persistentResult?.IsReplay ?? false,
                     ExecutionId = persistentResult?.ExecutionId ?? "",
                     PolicyVersion = persistentResult?.PolicyVersion ?? policy.Version,
-                    reason = submission.Reason,
+                    reason = sellQuantityAdjustment is null
+                        ? submission.Reason
+                        : sellQuantityAdjustment + " " + submission.Reason,
                     Groups = persistentResult?.Groups
                              ?? Array.Empty<IReadOnlyList<OrderResult>>(),
                     persistentOrder = submission.Intent

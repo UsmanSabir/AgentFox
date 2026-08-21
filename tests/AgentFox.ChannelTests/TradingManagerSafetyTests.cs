@@ -206,6 +206,66 @@ public sealed class TradingManagerSafetyTests
     }
 
     [TestMethod]
+    public async Task TradingManager_LiveSellUsesOnlyAvailableHoldingQuantity()
+    {
+        var temp = TempDirectory();
+        try
+        {
+            var configured = new TradingAgentOptions
+            {
+                AutoExecute = true,
+                ExecutionMode = "BoundedAuto",
+                DatabasePath = Path.Combine(temp, "trading.db"),
+                AllowedSymbols = ["LUCK"],
+                RequireReconciliationHealthy = true
+            };
+            var options = Options.Create(configured);
+            var pluginConfig = new PluginConfigManager(
+                Path.Combine(temp, "plugin-config"), NullLogger<PluginConfigManager>.Instance);
+            var policy = new TradingPolicyProvider(options, pluginConfig);
+            var repository = new SqliteTradingRepository(
+                options, new ConfigurationBuilder().Build(), NullLogger<SqliteTradingRepository>.Instance);
+            var broker = new RecordingBroker();
+            var reconciliation = new TradingReconciliationState();
+            reconciliation.Update(new BrokerReconciliationSnapshot(
+                true, true, "older snapshot", DateTime.UtcNow)
+            {
+                Positions = [new("LUCK", 100m)]
+            });
+            var liveSnapshot = new BrokerReconciliationSnapshot(
+                true, true, "fresh book", DateTime.UtcNow)
+            {
+                Positions = [new("LUCK", 50m)]
+            };
+            var calendar = new AlwaysOpenCalendar();
+            var manager = new TradingAgent.Manager.TradingManager(
+                broker, repository, calendar,
+                TradingTestFactory.CalendarOnlyWindow(calendar), policy,
+                new TradingRiskEngine(Options.Create(new AhkConfig()), options),
+                reconciliation, new ApprovalIntentRegistry(), options,
+                NullLogger<TradingAgent.Manager.TradingManager>.Instance,
+                brokerStateReader: new StaticStateReader(liveSnapshot));
+            IReadOnlyList<IReadOnlyList<TradingSignal>> groups =
+            [
+                [new() { Action = "SELL", Symbol = "LUCK", Quantity = 100,
+                         EntryPrice = 900m, OrderType = "LIMIT" }]
+            ];
+
+            var result = await manager.ExecuteGroupsAsync(groups, "sell-available-test");
+
+            Assert.IsTrue(result.Executed, result.Reason);
+            Assert.AreEqual(50, broker.LastGroups![0][0].Quantity);
+            Assert.AreEqual(50, result.Groups[0][0].Quantity);
+            Assert.AreEqual(100, result.Groups[0][0].RequestedQuantity);
+            StringAssert.Contains(result.Reason, "reduced from 100 to 50");
+        }
+        finally
+        {
+            Directory.Delete(temp, recursive: true);
+        }
+    }
+
+    [TestMethod]
     public void SpecialistRegistry_ResolvesDedicatedTradingChannel()
     {
         IAgentRegistry registry = new SpecialistAgentRegistry();
@@ -359,6 +419,7 @@ public sealed class TradingManagerSafetyTests
     private sealed class RecordingBroker : IBrokerAdapter
     {
         public bool WasCalled { get; private set; }
+        public IReadOnlyList<IReadOnlyList<TradingSignal>>? LastGroups { get; private set; }
 
         public Task<IReadOnlyDictionary<string, decimal?>> GetMarketPricesAsync(IReadOnlyList<string> symbols) =>
             Task.FromResult<IReadOnlyDictionary<string, decimal?>>(new Dictionary<string, decimal?>());
@@ -367,7 +428,27 @@ public sealed class TradingManagerSafetyTests
             IReadOnlyList<IReadOnlyList<TradingSignal>> groups)
         {
             WasCalled = true;
-            return Task.FromResult<IReadOnlyList<IReadOnlyList<OrderResult>>>([]);
+            LastGroups = groups;
+            IReadOnlyList<IReadOnlyList<OrderResult>> results = groups
+                .Select(group => (IReadOnlyList<OrderResult>)group.Select(signal => new OrderResult
+                {
+                    Success = true,
+                    OrderId = "test-order",
+                    Action = signal.Action,
+                    Symbol = signal.Symbol,
+                    Quantity = signal.Quantity,
+                    RequestedPrice = signal.EntryPrice,
+                    SubmittedPrice = signal.EntryPrice,
+                    Message = "accepted"
+                }).ToList())
+                .ToList();
+            return Task.FromResult(results);
         }
+    }
+
+    private sealed class StaticStateReader(BrokerReconciliationSnapshot snapshot) : IBrokerStateReader
+    {
+        public Task<BrokerReconciliationSnapshot> ReadSnapshotAsync(CancellationToken ct = default) =>
+            Task.FromResult(snapshot with { CheckedUtc = DateTime.UtcNow });
     }
 }
