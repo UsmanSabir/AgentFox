@@ -1337,6 +1337,7 @@ public sealed class AhkBroker : IAsyncDisposable
         {
             AvailableBalancePkr = balance,
             BalanceSource       = balanceSource,
+            HoldingsAvailable   = best is not null,
             Holdings            = holdings,
             TotalInvestment     = totalInvestment,
             TotalCurrentValue   = totalValue,

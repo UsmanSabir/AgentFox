@@ -141,7 +141,6 @@ public sealed class WatchlistMonitorWorker : BackgroundService
                     settledFor = today;
                     await RunPassAsync("post-close", stoppingToken);
                     await SweepProposalsAsync(stoppingToken);
-                    await PruneAsync(stoppingToken);
                 }
                 else
                 {
@@ -613,15 +612,6 @@ public sealed class WatchlistMonitorWorker : BackgroundService
             if (expired > 0)
                 _logger.LogInformation("[Proposals] Expired {Count} stale proposal(s).", expired);
 
-            if (options.RetentionDays > 0)
-            {
-                var pruned = await _repository.PruneProposalsAsync(
-                    DateTime.UtcNow.AddDays(-options.RetentionDays), ct);
-                if (pruned > 0)
-                    _logger.LogInformation(
-                        "[Proposals] Pruned {Count} resolved proposal(s) older than {Days} days.",
-                        pruned, options.RetentionDays);
-            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -668,25 +658,6 @@ public sealed class WatchlistMonitorWorker : BackgroundService
         }
 
         return null;
-    }
-
-    /// <summary>Drops alert history past the retention window so the table has a ceiling.</summary>
-    private async Task PruneAsync(CancellationToken ct)
-    {
-        var days = _options.Value.Monitor.RetentionDays;
-        if (days <= 0) return;
-
-        try
-        {
-            var removed = await _repository.PruneAlertsAsync(DateTime.UtcNow.AddDays(-days), ct);
-            if (removed > 0)
-                _logger.LogInformation("[WatchlistMonitor] Pruned {Count} alert(s) older than {Days} days.",
-                    removed, days);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "[WatchlistMonitor] Alert pruning failed; retrying tomorrow.");
-        }
     }
 
     private void SetStatus(Func<MonitorStatus, MonitorStatus> update)

@@ -149,6 +149,7 @@ public sealed class TradingManagerSafetyTests
             Assert.IsTrue(executions.Single().Result?.GetProperty("success").GetBoolean());
             Assert.AreEqual("accepted", events.Single().EventType);
             Assert.AreEqual("healthy", reconciliations.Single().State);
+            Assert.AreEqual("ok", reconciliations.Single().Details.GetProperty("reason").GetString());
         }
         finally
         {

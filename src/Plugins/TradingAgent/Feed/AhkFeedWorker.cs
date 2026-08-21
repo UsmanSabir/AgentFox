@@ -138,7 +138,10 @@ public sealed class AhkFeedWorker : BackgroundService
             Enabled            = cfg.Enabled,
             Healthy            = IsHealthy,
             PortalMarketStatus = _portal.LastMarketStatus,
-            SessionEstablished = _sessionFailures == 0 && _portal.AccountCode is not null,
+            // AccountCode is retained for diagnostics after a session expires. It is not proof that
+            // the direct API is still authenticated; reporting it as one made feed status disagree
+            // with reconciliation about the same AhkPortalClient instance.
+            SessionEstablished = _portal.HasSession,
             Account            = _portal.AccountCode,
             SubscribedSymbols  = _subscribed.Count,
             BookSymbols        = _book.Count,

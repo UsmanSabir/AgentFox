@@ -117,6 +117,28 @@ public sealed class OrderLedgerPersistenceTests
             "a fill from outside this system must be visible AS being from outside it");
     }
 
+    [TestMethod]
+    public async Task UnknownExecution_RequiresOneExplicitAuditedResolution()
+    {
+        var repository = NewRepository();
+        var claim = await repository.TryBeginExecutionAsync("unknown-1", "{}", "v1");
+        await repository.CompleteExecutionAsync(
+            claim.ExecutionId, "unknown", "{\"reason\":\"broker reply lost\"}");
+
+        Assert.AreEqual(1, (await repository.GetStatusAsync()).UnknownExecutions);
+        Assert.IsTrue(await repository.ResolveUnknownExecutionAsync(
+            claim.ExecutionId, "placed", "{\"note\":\"found in broker activity\"}"));
+        Assert.IsFalse(await repository.ResolveUnknownExecutionAsync(
+            claim.ExecutionId, "not_placed", "{\"note\":\"stale second click\"}"),
+            "the compare-and-set must not let a second decision rewrite the first one");
+
+        Assert.AreEqual(0, (await repository.GetStatusAsync()).UnknownExecutions);
+        Assert.AreEqual("resolved_placed", (await repository.GetExecutionsAsync()).Single().State);
+        var audit = (await repository.GetEventsAsync()).Single();
+        Assert.AreEqual("unknown_resolved", audit.EventType);
+        Assert.AreEqual("found in broker activity", audit.Payload.GetProperty("note").GetString());
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private SqliteTradingRepository NewRepository()

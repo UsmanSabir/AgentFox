@@ -31,6 +31,7 @@ public sealed class AhkSlowPortalPortfolioTests
 
         Assert.AreEqual(0, snapshot.Warnings.Count,
             $"Expected a clean read. Warnings: {string.Join(" | ", snapshot.Warnings)}");
+        Assert.IsTrue(snapshot.HoldingsAvailable);
         Assert.AreEqual(12_345.67m, snapshot.AvailableBalancePkr);
         Assert.AreEqual(2, snapshot.Holdings.Count);
 
@@ -63,6 +64,8 @@ public sealed class AhkSlowPortalPortfolioTests
         stopwatch.Stop();
 
         Assert.AreEqual(0, snapshot.Holdings.Count);
+        Assert.IsTrue(snapshot.HoldingsAvailable,
+            "a broker-confirmed empty grid must remain distinct from an unreadable grid");
         Assert.AreEqual(12_345.67m, snapshot.AvailableBalancePkr, "The balance panel still loads normally.");
 
         // The row poll must not have run to its 10s timeout. Everything before it is ~7s of staged

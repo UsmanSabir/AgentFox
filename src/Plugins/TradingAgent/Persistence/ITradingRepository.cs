@@ -79,6 +79,18 @@ public interface ITradingRepository
         CancellationToken ct = default);
 
     /// <summary>
+    /// Manually closes an execution whose broker outcome is unknown, after the operator has checked
+    /// the broker's own activity/order book. The compare-and-set prevents a stale or repeated click
+    /// from rewriting an already resolved execution; the audit event is committed atomically with
+    /// the state change.
+    /// </summary>
+    Task<bool> ResolveUnknownExecutionAsync(
+        string executionId,
+        string resolution,
+        string auditPayloadJson,
+        CancellationToken ct = default);
+
+    /// <summary>
     /// Records one row per broker order attempt, keyed by the EXCHANGE's order number when there is one.
     ///
     /// <para>
@@ -314,6 +326,17 @@ public interface ITradingRepository
     Task<bool> SetAlertStateAsync(
         string alertId,
         string state,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Moves selected alerts, or every matching alert when <paramref name="alertIds"/> is null, to a
+    /// new state in one transaction. <paramref name="fromState"/> protects already-resolved rows from
+    /// a bulk "mark read" action.
+    /// </summary>
+    Task<int> SetAlertsStateAsync(
+        IReadOnlyCollection<string>? alertIds,
+        string state,
+        string? fromState = null,
         CancellationToken ct = default);
 
     /// <summary>Count of alerts in the <c>new</c> state, per symbol, for the watchlist badges.</summary>

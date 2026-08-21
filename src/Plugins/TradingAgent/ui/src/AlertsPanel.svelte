@@ -4,7 +4,10 @@
     trading,
     type ArmOrderDialogContext, type TradingAlert, type MonitorStatus, type StockAssessment
   } from './api';
-  import { Bell, Check, X, Activity, RefreshCw, Radio, AlertTriangle, Brain, Crosshair } from 'lucide-svelte';
+  import {
+    Bell, Check, X, Activity, RefreshCw, Radio, AlertTriangle, Brain, Crosshair,
+    CheckCheck, Trash2
+  } from 'lucide-svelte';
   import AssessmentCard from './AssessmentCard.svelte';
 
   /** Verdicts fetched on demand, by alert id. Never fetched automatically — see api.assess. */
@@ -30,6 +33,7 @@
   let busyAlertIds = new Set<string>();
   let error: string | null = null;
   let showDismissed = false;
+  let selectedAlertIds = new Set<string>();
   let live = false;
   let stopStream: (() => void) | null = null;
 
@@ -104,6 +108,44 @@
     }
   }
 
+  function toggleSelected(alertId: string) {
+    const next = new Set(selectedAlertIds);
+    if (next.has(alertId)) next.delete(alertId); else next.add(alertId);
+    selectedAlertIds = next;
+  }
+
+  function toggleSelectAll() {
+    selectedAlertIds = visible.every(alert => selectedAlertIds.has(alert.alertId))
+      ? new Set()
+      : new Set(visible.map(alert => alert.alertId));
+  }
+
+  async function bulkAction(action: 'acknowledge' | 'dismiss', all = false) {
+    if (busy) return;
+    const ids = all ? undefined : [...selectedAlertIds];
+    if (!all && !ids?.length) return;
+    const label = action === 'acknowledge' ? 'mark read' : 'delete from the active view';
+    if (action === 'dismiss' && !confirm(
+      `${all ? 'Clear all alerts' : `Delete ${ids!.length} selected alert(s)`}?\n\n` +
+      `This will ${label}. The audit record is retained and can be viewed with “show dismissed”.`
+    )) return;
+
+    busy = true;
+    error = null;
+    try {
+      const result = await trading.alerts.bulk(action, ids, all);
+      const affected = all ? alerts.map(alert => alert.alertId) : ids!;
+      const state = result.state;
+      alerts = alerts.map(alert => affected.includes(alert.alertId) ? { ...alert, state } : alert);
+      selectedAlertIds = new Set();
+      dispatch('alertsChanged');
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
   /**
    * Arms an order on the KIND of event this alert is — not on this instance, which has already
    * happened. Side is inferred from the event's direction (a bounce or breakout is a buy case, a
@@ -164,6 +206,9 @@
 
   $: visible = showDismissed ? alerts : alerts.filter(a => a.state !== 'dismissed');
   $: openCount = alerts.filter(a => a.state === 'new').length;
+  $: liveBarCount = visible.filter(a => a.fromLiveBar).length;
+  $: selectedVisibleCount = visible.filter(alert => selectedAlertIds.has(alert.alertId)).length;
+  $: allVisibleSelected = visible.length > 0 && selectedVisibleCount === visible.length;
 
   const when = (iso: string) => new Date(iso).toLocaleString();
   const label = (kind: string) => kind.replace(/([a-z])([A-Z])/g, '$1 $2');
@@ -201,6 +246,33 @@
   {/if}
   {#if error}<p class="status-line danger">{error}</p>{/if}
 
+  {#if liveBarCount > 0}
+    <p class="live-bar-note">
+      <AlertTriangle size={13} />
+      <span><b>Today’s daily candle is still open.</b> During market hours, daily alerts use the live
+      candle so they arrive promptly; the signal can change or disappear by the closing bell.</span>
+    </p>
+  {/if}
+
+  {#if !loading && visible.length}
+    <div class="bulk-actions" aria-label="Bulk alert actions">
+      <label class="select-all">
+        <input type="checkbox" checked={allVisibleSelected} on:change={toggleSelectAll} />
+        {allVisibleSelected ? 'Clear selection' : 'Select all'}
+      </label>
+      <span>{selectedVisibleCount} selected</span>
+      <button class="btn btn-ghost" on:click={() => bulkAction('acknowledge')} disabled={!selectedVisibleCount || busy}>
+        <CheckCheck size={13} /> Mark read
+      </button>
+      <button class="btn btn-ghost danger-action" on:click={() => bulkAction('dismiss')} disabled={!selectedVisibleCount || busy}>
+        <Trash2 size={13} /> Delete
+      </button>
+      <button class="btn btn-ghost danger-action push" on:click={() => bulkAction('dismiss', true)} disabled={busy}>
+        <Trash2 size={13} /> Clear all
+      </button>
+    </div>
+  {/if}
+
   {#if loading}
     <p class="status-line">Loading alerts…</p>
   {:else if !visible.length}
@@ -213,12 +285,20 @@
     <ul class="list">
       {#each visible as alert (alert.alertId)}
         <li class="alert {alert.severity.toLowerCase()}" class:resolved={alert.state !== 'new'}>
+          <label class="row-select" title="Select alert">
+            <input
+              type="checkbox"
+              checked={selectedAlertIds.has(alert.alertId)}
+              on:change={() => toggleSelected(alert.alertId)}
+              aria-label="Select {alert.symbol} alert"
+            />
+          </label>
           <button class="body" on:click={() => dispatch('select', alert.symbol)}>
             <div class="row-1">
               <span class="symbol">{alert.symbol}</span>
               <span class="kind">{label(alert.kind)}</span>
               {#if alert.weeklyConfirmed}<span class="chip ok">weekly ✓</span>{/if}
-              {#if alert.fromLiveBar}<span class="chip warn" title="Raised from a still-forming bar — it can still un-happen before the close">forming bar</span>{/if}
+              {#if alert.fromLiveBar}<span class="chip warn" title="Uses today’s still-open candle; the signal can change before market close">open candle</span>{/if}
               {#if alert.state !== 'new'}<span class="chip">{alert.state}</span>{/if}
             </div>
             <p class="summary">{alert.summary}</p>
@@ -287,6 +367,19 @@
   .status-line { margin:0; color:var(--text-3); font-size:.72rem; }
   .status-line.warn { color:var(--warning); }
   .status-line.danger { color:var(--danger); }
+  .live-bar-note { margin:0; padding:.55rem .65rem; border:1px solid color-mix(in srgb,var(--warning) 32%,var(--border)); border-radius:var(--radius-sm); background:color-mix(in srgb,var(--warning) 7%,transparent); color:var(--text-2); font-size:.7rem; line-height:1.4; display:flex; align-items:flex-start; gap:.45rem; }
+  .live-bar-note :global(svg) { color:var(--warning); flex:0 0 auto; margin-top:.1rem; }
+  .live-bar-note b { color:var(--warning); }
+
+  .bulk-actions {
+    display:flex; align-items:center; gap:.45rem; flex-wrap:wrap; padding:.4rem .5rem;
+    background:var(--surface-2); border:1px solid var(--border); border-radius:var(--radius-sm);
+    color:var(--text-3); font-size:.68rem;
+  }
+  .bulk-actions .btn { display:flex; align-items:center; gap:.3rem; padding:.32rem .5rem; }
+  .bulk-actions .push { margin-left:auto; }
+  .select-all { display:flex; align-items:center; gap:.3rem; cursor:pointer; color:var(--text-2); }
+  .danger-action:hover:not(:disabled) { color:var(--danger); border-color:color-mix(in srgb, var(--danger) 40%, transparent); }
 
   .empty {
     color:var(--text-3); font-size:.75rem; margin:0; padding:1.25rem 0; text-align:center;
@@ -305,6 +398,7 @@
   .alert.medium   { border-left-color:var(--info); }
   .alert.low      { border-left-color:var(--text-3); }
   .alert.resolved { opacity:.55; }
+  .row-select { padding:.65rem 0 0 .5rem; display:flex; cursor:pointer; }
 
   .body { flex:1; background:none; border:0; text-align:left; cursor:pointer; padding:.5rem .6rem; font:inherit; color:var(--text); display:flex; flex-direction:column; gap:.25rem; min-width:0; }
   .row-1 { display:flex; align-items:center; gap:.4rem; flex-wrap:wrap; }

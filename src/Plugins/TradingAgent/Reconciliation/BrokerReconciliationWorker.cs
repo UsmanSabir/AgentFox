@@ -17,6 +17,7 @@ public sealed class BrokerReconciliationWorker : BackgroundService
     private readonly ITradingRepository _repository;
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly ILogger<BrokerReconciliationWorker> _logger;
+    private readonly SemaphoreSlim _runGate = new(1, 1);
 
     public BrokerReconciliationWorker(
         IBrokerStateReader reader,
@@ -37,14 +38,32 @@ public sealed class BrokerReconciliationWorker : BackgroundService
         var delay = TimeSpan.FromSeconds(Math.Max(10, _options.Value.ReconciliationIntervalSeconds));
         while (!stoppingToken.IsCancellationRequested)
         {
+            try { await RunNowAsync(stoppingToken); }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
+
+            try { await Task.Delay(delay, stoppingToken); }
+            catch (OperationCanceledException) { break; }
+        }
+    }
+
+    /// <summary>
+    /// Runs one single-flight pass. The dashboard uses this after a user-initiated broker-session
+    /// handshake, so an already open browser session can be harvested immediately instead of waiting
+    /// for both the feed and the next timer tick.
+    /// </summary>
+    public async Task<BrokerReconciliationSnapshot> RunNowAsync(CancellationToken ct = default)
+    {
+        await _runGate.WaitAsync(ct);
+        try
+        {
             BrokerReconciliationSnapshot snapshot;
             try
             {
-                snapshot = await _reader.ReadSnapshotAsync(stoppingToken);
+                snapshot = await _reader.ReadSnapshotAsync(ct);
             }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
-                break;
+                throw;
             }
             catch (Exception ex)
             {
@@ -53,13 +72,11 @@ public sealed class BrokerReconciliationWorker : BackgroundService
             }
 
             _state.Update(snapshot);
-            await _repository.RecordReconciliationAsync(snapshot, stoppingToken);
+            await _repository.RecordReconciliationAsync(snapshot, ct);
 
-            // Fills become rows. Idempotent by design: this log is re-read every pass, so the same fill
-            // arrives again on every one of them for the rest of the trading day.
             if (snapshot.Fills.Count > 0)
             {
-                var stored = await _repository.RecordFillsAsync(snapshot.Fills, stoppingToken);
+                var stored = await _repository.RecordFillsAsync(snapshot.Fills, ct);
                 if (stored > 0)
                     _logger.LogInformation(
                         "[BrokerReconciliation] Recorded {Stored} new fill(s) of {Seen} reported.",
@@ -68,8 +85,11 @@ public sealed class BrokerReconciliationWorker : BackgroundService
             if (!snapshot.Healthy)
                 _logger.LogWarning("[Reconciliation] Unhealthy: {Reason}", snapshot.Reason);
 
-            try { await Task.Delay(delay, stoppingToken); }
-            catch (OperationCanceledException) { break; }
+            return snapshot;
+        }
+        finally
+        {
+            _runGate.Release();
         }
     }
 }
