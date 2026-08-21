@@ -116,6 +116,7 @@ public sealed class PortfolioReader
             {
                 AvailableBalancePkr = balance,
                 BalanceSource = balance is null ? null : "GET /Home/GetAccountBalance",
+                HoldingsAvailable = true,
                 Holdings = holdings,
                 TotalInvestment = SumOrNull(holdings.Select(h => h.InvestmentValue)),
                 TotalCurrentValue = SumOrNull(holdings.Select(h => h.CurrentValue)),

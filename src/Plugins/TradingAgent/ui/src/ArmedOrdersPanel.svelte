@@ -1,7 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { trading, type ArmedOrdersResponse, type ArmedOrder, type ProtectiveStop } from './api';
-  import { Crosshair, Trash2, RefreshCw, Zap, ShieldAlert, Clock, Shield, ShieldOff } from 'lucide-svelte';
+  import {
+    Crosshair, Trash2, RefreshCw, Zap, ShieldAlert, Clock, Shield, ShieldOff, ListChecks
+  } from 'lucide-svelte';
 
   export let refreshTick = 0;
 
@@ -11,6 +13,7 @@
   let error: string | null = null;
   let notice: string | null = null;
   let showHistory = false;
+  let selectedOrderIds = new Set<string>();
 
   export async function load() {
     try {
@@ -37,6 +40,42 @@
       await load();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  function toggleSelected(armedId: string) {
+    const next = new Set(selectedOrderIds);
+    if (next.has(armedId)) next.delete(armedId); else next.add(armedId);
+    selectedOrderIds = next;
+  }
+
+  function toggleSelectAll() {
+    const armed = entries.filter(order => order.state === 'armed');
+    selectedOrderIds = armed.length && armed.every(order => selectedOrderIds.has(order.armedId))
+      ? new Set()
+      : new Set(armed.map(order => order.armedId));
+  }
+
+  async function disarmSelected() {
+    if (busy || !selectedOrderIds.size) return;
+    const selected = entries.filter(order => selectedOrderIds.has(order.armedId));
+    if (!confirm(
+      `Disarm ${selected.length} selected trigger(s)?\n\n` +
+      'No broker order is cancelled; these waiting local triggers simply stop being watched.'
+    )) return;
+
+    busy = true;
+    error = null;
+    try {
+      await Promise.all(selected.map(order => trading.armed.disarm(order.armedId)));
+      notice = `${selected.length} waiting trigger(s) disarmed.`;
+      selectedOrderIds = new Set();
+      await load();
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+      await load();
     } finally {
       busy = false;
     }
@@ -132,6 +171,9 @@
 
   /** The local backstops are shown as part of their stop, not as loose triggers in the main list. */
   $: entries = (data?.orders ?? []).filter(o => !o.protectiveStopId);
+  $: selectableEntries = entries.filter(order => order.state === 'armed');
+  $: selectedCount = selectableEntries.filter(order => selectedOrderIds.has(order.armedId)).length;
+  $: allSelected = selectableEntries.length > 0 && selectedCount === selectableEntries.length;
 
   /**
    * Where the protection actually IS, which is the only thing worth reading on this row. "Armed" is
@@ -225,6 +267,19 @@
   {#if notice}<p class="line">{notice}</p>{/if}
   {#if error}<p class="line danger">{error}</p>{/if}
 
+  {#if !loading && selectableEntries.length}
+    <div class="bulk-actions">
+      <label>
+        <input type="checkbox" checked={allSelected} on:change={toggleSelectAll} />
+        <ListChecks size={12} /> {allSelected ? 'Clear selection' : 'Select all waiting'}
+      </label>
+      <span>{selectedCount} selected</span>
+      <button class="btn btn-danger" on:click={disarmSelected} disabled={!selectedCount || busy}>
+        <Trash2 size={13} /> Disarm selected
+      </button>
+    </div>
+  {/if}
+
   {#if loading}
     <p class="line">Loading…</p>
   {:else if !entries.length && !stops.length}
@@ -237,6 +292,16 @@
     <ul class="list">
       {#each entries as order (order.armedId)}
         <li class="row {order.state}">
+          {#if order.state === 'armed'}
+            <label class="row-select" title="Select waiting trigger">
+              <input
+                type="checkbox"
+                checked={selectedOrderIds.has(order.armedId)}
+                on:change={() => toggleSelected(order.armedId)}
+                aria-label="Select {order.symbol} trigger"
+              />
+            </label>
+          {/if}
           <div class="body">
             <!-- The ORDER first (size, price, what it commits), the trigger second. The trigger is
                  when it goes in; this line is what goes in, and reading the card without it meant
@@ -354,6 +419,11 @@
 
   .line { margin: 0; color: var(--text-3); font-size: .73rem; }
   .line.danger { color: var(--danger); }
+  .bulk-actions { display:flex; align-items:center; gap:.5rem; flex-wrap:wrap; padding:.4rem .5rem;
+                  background:var(--surface-2); border:1px solid var(--border); border-radius:var(--radius-sm);
+                  color:var(--text-3); font-size:.68rem; }
+  .bulk-actions label { display:flex; align-items:center; gap:.3rem; color:var(--text-2); cursor:pointer; }
+  .bulk-actions .btn { margin-left:auto; display:flex; align-items:center; gap:.3rem; padding:.32rem .5rem; }
   .empty { margin: 0; color: var(--text-3); font-size: .74rem; padding: .9rem 0; text-align: center; line-height: 1.6; }
 
   .list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .3rem;
@@ -363,6 +433,7 @@
   .row.fired { border-left-color: var(--success); opacity: .7; }
   .row.cancelled, .row.expired { border-left-color: var(--text-3); opacity: .55; }
   .row.failed { border-left-color: var(--danger); }
+  .row-select { padding:.65rem 0 0 .4rem; display:flex; cursor:pointer; }
 
   .body { flex: 1; padding: .45rem .55rem; display: flex; flex-direction: column; gap: .2rem; min-width: 0; }
   .row-1 { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; font-size: .76rem; }

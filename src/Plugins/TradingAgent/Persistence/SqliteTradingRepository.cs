@@ -245,7 +245,16 @@ public sealed class SqliteTradingRepository : ITradingRepository
             """;
         command.Parameters.AddWithValue("$id", Guid.NewGuid().ToString("N"));
         command.Parameters.AddWithValue("$state", snapshot.Healthy ? "healthy" : "unhealthy");
-        command.Parameters.AddWithValue("$details", snapshot.DetailsJson);
+        // Keep the verdict alongside the broker payload. A no-session pass has an intentionally empty
+        // broker payload, and persisting only that "{}" made the reconciliation history unable to
+        // answer the one question an unhealthy row raises: why?
+        command.Parameters.AddWithValue("$details", JsonSerializer.Serialize(new
+        {
+            snapshot.Supported,
+            snapshot.Healthy,
+            snapshot.Reason,
+            brokerSnapshot = ParseJson(snapshot.DetailsJson)
+        }, JsonSerializerOptions.Web));
         command.Parameters.AddWithValue("$checked", snapshot.CheckedUtc.ToString("O"));
         await command.ExecuteNonQueryAsync(ct);
     }
@@ -396,6 +405,55 @@ public sealed class SqliteTradingRepository : ITradingRepository
         command.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("O"));
         command.Parameters.AddWithValue("$id", executionId);
         await command.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<bool> ResolveUnknownExecutionAsync(
+        string executionId,
+        string resolution,
+        string auditPayloadJson,
+        CancellationToken ct = default)
+    {
+        var state = resolution switch
+        {
+            "placed"     => "resolved_placed",
+            "not_placed" => "resolved_not_placed",
+            _ => throw new ArgumentOutOfRangeException(nameof(resolution), resolution,
+                "Unknown executions can only be resolved as placed or not_placed.")
+        };
+
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+
+        var update = connection.CreateCommand();
+        update.Transaction = (SqliteTransaction)transaction;
+        update.CommandText = """
+            UPDATE trading_executions
+            SET state = $state, updated_utc = $now
+            WHERE execution_id = $id AND state = 'unknown'
+            """;
+        update.Parameters.AddWithValue("$state", state);
+        update.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("O"));
+        update.Parameters.AddWithValue("$id", executionId);
+        if (await update.ExecuteNonQueryAsync(ct) != 1)
+        {
+            await transaction.RollbackAsync(ct);
+            return false;
+        }
+
+        var audit = connection.CreateCommand();
+        audit.Transaction = (SqliteTransaction)transaction;
+        audit.CommandText = """
+            INSERT INTO trading_order_events (execution_id, event_type, payload_json, created_utc)
+            VALUES ($id, 'unknown_resolved', $payload, $now)
+            """;
+        audit.Parameters.AddWithValue("$id", executionId);
+        audit.Parameters.AddWithValue("$payload", auditPayloadJson);
+        audit.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("O"));
+        await audit.ExecuteNonQueryAsync(ct);
+
+        await transaction.CommitAsync(ct);
+        return true;
     }
 
     public async Task AppendEventAsync(
@@ -1638,6 +1696,48 @@ public sealed class SqliteTradingRepository : ITradingRepository
         command.Parameters.AddWithValue("$id", alertId);
         command.Parameters.AddWithValue("$state", state);
         return await command.ExecuteNonQueryAsync(ct) == 1;
+    }
+
+    public async Task<int> SetAlertsStateAsync(
+        IReadOnlyCollection<string>? alertIds,
+        string state,
+        string? fromState = null,
+        CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        var where = new List<string>();
+
+        if (alertIds is not null)
+        {
+            var ids = alertIds
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .Select(id => id.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (ids.Count == 0) return 0;
+
+            var parameters = new List<string>(ids.Count);
+            for (var i = 0; i < ids.Count; i++)
+            {
+                var name = $"$id{i}";
+                parameters.Add(name);
+                command.Parameters.AddWithValue(name, ids[i]);
+            }
+            where.Add($"alert_id IN ({string.Join(",", parameters)})");
+        }
+
+        if (!string.IsNullOrWhiteSpace(fromState))
+        {
+            where.Add("state = $from_state");
+            command.Parameters.AddWithValue("$from_state", fromState.Trim());
+        }
+
+        command.CommandText = "UPDATE watchlist_alerts SET state = $state"
+            + (where.Count > 0 ? " WHERE " + string.Join(" AND ", where) : "");
+        command.Parameters.AddWithValue("$state", state);
+        return await command.ExecuteNonQueryAsync(ct);
     }
 
     public async Task<IReadOnlyDictionary<string, int>> GetOpenAlertCountsAsync(CancellationToken ct = default)

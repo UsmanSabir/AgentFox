@@ -279,8 +279,9 @@ public sealed class AhkBrowserBrokerAdapter : IBrokerAdapter, IBrokerStateReader
             return new BrokerReconciliationSnapshot(
                 Supported: true,
                 Healthy: false,
-                Reason: "No broker session is established, so the account's state could not be read. " +
-                        "Reconciliation never logs in by itself; it reports what an existing session can see.",
+                Reason: "No direct broker API session is established, so the account's state could not be read. " +
+                        "An authenticated browser can exist separately; use Check broker now to hand its " +
+                        "session to reconciliation. The periodic check never triggers a login by itself.",
                 CheckedUtc: checkedUtc);
         }
 

@@ -8,7 +8,7 @@
   import {
     RefreshCw, ShieldAlert, Activity, FileText, ListChecks, Scale, History, Power,
     Database, Download, Play, XCircle, ChevronDown, ChevronRight, LayoutDashboard,
-    BellRing
+    BellRing, ShoppingCart, AlertTriangle
   } from 'lucide-svelte';
   import WatchlistPanel from './WatchlistPanel.svelte';
   import ChartPane from './ChartPane.svelte';
@@ -17,6 +17,8 @@
   import ArmOrderDialog from './ArmOrderDialog.svelte';
   import ActivityPanel from './ActivityPanel.svelte';
   import MoversPanel from './MoversPanel.svelte';
+  import NewOrderDialog from './NewOrderDialog.svelte';
+  import PortfolioPanel from './PortfolioPanel.svelte';
 
   /**
    * Non-null while the arming dialog is open. Both entry points — a chart level and an alert — raise the
@@ -25,6 +27,7 @@
   let armContext: ArmOrderDialogContext | null = null;
   let armedPanel: ArmedOrdersPanel | null = null;
   let watchlistPanel: WatchlistPanel | null = null;
+  let newOrderOpen = false;
 
   /** Symbol the watchlist has selected; drives the chart pane. */
   let selectedSymbol: string | null = null;
@@ -37,6 +40,8 @@
   /** Proposal inbox: open-only by default, since a decision queue should read as empty when it is. */
   let showResolvedProposals = false;
   let proposalBusy: string | null = null;
+  let reconciliationBusy = false;
+  let resolvingExecution: string | null = null;
 
   async function loadProposals() {
     try {
@@ -192,6 +197,75 @@
   const date = (value?: string) => value ? new Date(value).toLocaleString() : '—';
   const json = (value: unknown) => JSON.stringify(value, null, 2);
 
+  const reconciliationLabel = (value: TradingStatus) => {
+    if (!value.reconciliation.supported) return 'Not supported';
+    const reason = value.reconciliation.reason.toLowerCase();
+    if (reason.includes('session') && (reason.includes('no direct') || reason.includes('not established')))
+      return 'Waiting for broker';
+    if (!value.reconciliation.healthy) return 'Needs attention';
+    if (!value.reconciliationFresh) return 'Stale';
+    return 'Healthy';
+  };
+
+  const liveBlockReason = (value: TradingStatus) => {
+    if (value.killSwitch) return 'The kill switch is active.';
+    if (!value.policy.autoExecute) return 'Automatic execution is disabled by policy.';
+    if (value.policy.executionMode.toLowerCase() === 'disabled') return 'Trading execution mode is disabled.';
+    if (!value.reconciliation.healthy || !value.reconciliationFresh) return value.reconciliation.reason;
+    return 'One or more live safety gates are not ready.';
+  };
+
+  const executionReason = (item: TradingExecution) => {
+    const result = item.result as { reason?: string } | null | undefined;
+    return result?.reason ?? null;
+  };
+
+  $: unknownExecutions = executions.filter(item => item.state === 'unknown');
+
+  async function reconcileNow() {
+    if (reconciliationBusy) return;
+    reconciliationBusy = true;
+    error = null;
+    try {
+      const result = await trading.reconcileNow();
+      await load();
+      if (!result.reconciliation.healthy)
+        error = `Broker check is still blocked: ${result.reconciliation.reason}`;
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      reconciliationBusy = false;
+    }
+  }
+
+  async function resolveUnknown(item: TradingExecution, resolution: 'placed' | 'not_placed') {
+    if (resolvingExecution) return;
+    const outcome = resolution === 'placed'
+      ? 'the broker shows this order or fill'
+      : 'the broker confirms no order was placed';
+    if (!confirm(
+      `Resolve ${item.executionId}?\n\nChoose this only after checking the broker’s own activity ` +
+      `and order book and confirming that ${outcome}. This does not place or retry an order.`
+    )) return;
+    const note = prompt('What did you verify at the broker? This note is required and is saved to the audit trail.');
+    if (note === null) return;
+    if (!note.trim()) {
+      error = 'A broker-check note is required before an unknown outcome can be resolved.';
+      return;
+    }
+
+    resolvingExecution = item.executionId;
+    error = null;
+    try {
+      await trading.resolveUnknownExecution(item.executionId, resolution, note.trim());
+      await load();
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      resolvingExecution = null;
+    }
+  }
+
   async function toggleKillSwitch() {
     if (!status || killSwitchBusy) return;
     const next = !status.killSwitch;
@@ -218,10 +292,21 @@
   />
 {/if}
 
+{#if newOrderOpen}
+  <NewOrderDialog
+    {selectedSymbol}
+    on:changed={() => { load(); armedPanel?.load(); }}
+    on:close={() => newOrderOpen = false}
+  />
+{/if}
+
 <div class="page-wrap fade-in">
   <div class="page-header-row">
     <div><h1 class="page-title">Trading Manager</h1><p class="page-sub">Monitor PSX signals, prepare conditional orders, and review execution history</p></div>
     <div class="header-actions">
+      <button class="btn btn-primary new-order-btn" on:click={() => newOrderOpen = true}>
+        <ShoppingCart size={14} /> New Order
+      </button>
       {#if status}
         <button
           class="btn kill-switch-btn"
@@ -239,7 +324,7 @@
   {:else if status}
     <div class:blocked={!status.liveExecutionReady} class="safety-banner">
       <ShieldAlert size={19} />
-      <div><b>{status.liveExecutionReady ? 'Live safety gates ready' : 'Live execution blocked'}</b><span>{status.liveExecutionReady ? 'All reported live prerequisites are healthy.' : status.reconciliation.reason}</span></div>
+      <div><b>{status.liveExecutionReady ? 'Live safety gates ready' : 'Live execution blocked'}</b><span>{status.liveExecutionReady ? 'All reported live prerequisites are healthy.' : liveBlockReason(status)}</span></div>
     </div>
 
     <section class="disclosure-card status-card" class:open={statusOpen}>
@@ -257,7 +342,7 @@
         <span class="summary-chips">
           <span class="summary-chip">{status.policy.executionMode}</span>
           <span class="summary-chip" class:good={status.market.isOpen}>{status.market.isOpen ? 'Market open' : 'Market closed'}</span>
-          <span class="summary-chip" class:warn={!status.reconciliation.healthy || !status.reconciliationFresh}>{status.reconciliation.healthy && status.reconciliationFresh ? 'Reconciled' : 'Reconciliation issue'}</span>
+          <span class="summary-chip" class:warn={!status.reconciliation.healthy || !status.reconciliationFresh}>{status.reconciliation.healthy && status.reconciliationFresh ? 'Reconciled' : reconciliationLabel(status)}</span>
           {#if status.ledger.pendingProposals > 0}<span class="summary-chip primary">{status.ledger.pendingProposals} pending</span>{/if}
           {#if status.ledger.unknownExecutions > 0}<span class="summary-chip danger">{status.ledger.unknownExecutions} unknown</span>{/if}
         </span>
@@ -267,13 +352,15 @@
         <div class="status-grid" id="system-status-content">
           <div class="metric"><span>Mode</span><b>{status.policy.executionMode}</b><small>Auto execute: {status.policy.autoExecute ? 'on' : 'off'} · kill switch: {status.killSwitch ? 'active' : 'clear'}</small></div>
           <div class="metric"><span>Market</span><b class:good={status.market.isOpen}>{status.market.isOpen ? 'Open' : 'Closed'}</b><small>{status.market.reason}</small></div>
-          <div class="metric"><span>Reconciliation</span><b class:good={status.reconciliation.healthy && status.reconciliationFresh}>{status.reconciliation.healthy && status.reconciliationFresh ? 'Healthy' : 'Unhealthy/stale'}</b><small>{date(status.reconciliation.checkedUtc)}</small></div>
+          <div class="metric"><span>Reconciliation</span><b class:good={status.reconciliation.healthy && status.reconciliationFresh}>{reconciliationLabel(status)}</b><small>{status.reconciliation.reason} · checked {date(status.reconciliation.checkedUtc)}</small><button class="metric-action" on:click={reconcileNow} disabled={reconciliationBusy}>{reconciliationBusy ? 'Checking broker…' : 'Check broker now'}</button></div>
           <div class="metric"><span>Pending proposals</span><b>{status.ledger.pendingProposals}</b><small>Policy {status.policy.version}</small></div>
           <div class="metric"><span>Accepted executions</span><b>{status.ledger.acceptedExecutions}</b><small>{status.ledger.submittingExecutions} submitting</small></div>
-          <div class="metric"><span>Unknown outcomes</span><b class:danger={status.ledger.unknownExecutions > 0}>{status.ledger.unknownExecutions}</b><small>Require manual reconciliation</small></div>
+          <div class="metric"><span>Unknown broker outcomes</span><b class:danger={status.ledger.unknownExecutions > 0}>{status.ledger.unknownExecutions}</b><small>{status.ledger.unknownExecutions > 0 ? 'The broker handoff started, but its reply was lost. Check Executions before retrying.' : 'No unresolved broker handoffs.'}</small></div>
         </div>
       {/if}
     </section>
+
+    <PortfolioPanel />
 
     <div class="section-heading">
       <div><span class="eyebrow">Workspace</span><h2>Market overview</h2></div>
@@ -495,7 +582,10 @@
             </div>
           {:else if tab === 'executions'}
             <div class="records">
-              {#each executions as item}<article class="record"><header><b>{item.executionId}</b><span class="state">{item.state}</span></header><div class="meta">{date(item.createdUtc)} · policy {item.policyVersion}</div><details class="record-details"><summary>View execution data</summary><pre>{json(item.result ?? item.request)}</pre></details></article>{:else}<div class="empty">No executions recorded</div>{/each}
+              {#if unknownExecutions.length}
+                <div class="unknown-help"><AlertTriangle size={14} /><span><b>{unknownExecutions.length} outcome(s) need checking.</b> “Unknown” means submission began but no reliable broker reply came back. Do not repeat the order until the broker activity/order book confirms whether it exists.</span></div>
+              {/if}
+              {#each executions as item}<article class="record" class:unknown={item.state === 'unknown'}><header><b>{item.executionId}</b><span class="state">{item.state.replaceAll('_', ' ')}</span></header><div class="meta">{date(item.createdUtc)} · policy {item.policyVersion}</div>{#if executionReason(item)}<p class="reason">{executionReason(item)}</p>{/if}<details class="record-details" open={item.state === 'unknown'}><summary>View execution data</summary><pre>{json(item.result ?? item.request)}</pre></details>{#if item.state === 'unknown'}<div class="record-actions"><button class="btn btn-primary" on:click={() => resolveUnknown(item, 'placed')} disabled={resolvingExecution !== null}>Broker shows order/fill</button><button class="btn btn-ghost" on:click={() => resolveUnknown(item, 'not_placed')} disabled={resolvingExecution !== null}>Broker confirms not placed</button></div>{/if}</article>{:else}<div class="empty">No executions recorded</div>{/each}
             </div>
           {:else if tab === 'reconciliation'}
             <div class="records">
@@ -515,6 +605,7 @@
 <style>
   .page-header-row { display:flex; justify-content:space-between; align-items:flex-start; gap:1rem; margin-bottom:1.25rem; }
   .header-actions { display:flex; gap:.6rem; align-items:center; }
+  .new-order-btn { display:flex; align-items:center; gap:.4rem; white-space:nowrap; font-weight:700; }
   .kill-switch-btn { display:flex; align-items:center; gap:.4rem; border:1px solid rgba(52,211,153,.35); background:rgba(52,211,153,.08); color:var(--success); border-radius:var(--radius); padding:.55rem .9rem; font-size:.78rem; font-weight:600; cursor:pointer; }
   .kill-switch-btn.active { border-color:rgba(248,113,113,.45); background:rgba(248,113,113,.15); color:var(--danger); }
   .kill-switch-btn:disabled { opacity:.6; cursor:wait; }
@@ -553,6 +644,8 @@
   .status-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:.65rem; padding:0 1rem 1rem; }
   .metric { background:var(--surface-2); border:1px solid var(--border); border-radius:var(--radius-sm); padding:.8rem; display:flex; flex-direction:column; gap:.35rem; }
   .metric span,.metric small { color:var(--text-3); font-size:.7rem; }.metric b { color:var(--text); font-size:1.05rem; }.metric b.good { color:var(--success); }.metric b.danger { color:var(--danger); }
+  .metric-action { align-self:flex-start; margin-top:.15rem; border:0; padding:0; background:none; color:var(--primary); font:inherit; font-size:.7rem; font-weight:650; cursor:pointer; }
+  .metric-action:hover { text-decoration:underline; }.metric-action:disabled { opacity:.55; cursor:wait; }
   .section-heading { display:flex; justify-content:space-between; align-items:flex-end; gap:1rem; margin:1.55rem 0 .75rem; }
   .section-heading.compact { margin-top:1.4rem; }
   .section-heading h2 { margin:.12rem 0 0; color:var(--text); font-size:.98rem; font-weight:600; }
@@ -596,7 +689,12 @@
   .inbox-head p { margin:0; color:var(--text-3); font-size:.72rem; line-height:1.55; max-width:70ch; }
   .inbox-head .toggle { display:flex; align-items:center; gap:.3rem; color:var(--text-3); font-size:.7rem; cursor:pointer; white-space:nowrap; }
   .record.resolved { opacity:.6; }
+  .record.unknown { border-color:color-mix(in srgb,var(--danger) 45%,var(--border)); }
   .record .reason { color:var(--warning); font-size:.73rem; }
+  .unknown-help { display:flex; gap:.5rem; align-items:flex-start; padding:.7rem .8rem; color:var(--danger);
+                  background:color-mix(in srgb,var(--danger) 8%,transparent); border:1px solid color-mix(in srgb,var(--danger) 30%,transparent);
+                  border-radius:var(--radius-sm); font-size:.72rem; line-height:1.5; }
+  .unknown-help span { color:var(--text-2); }.unknown-help b { color:var(--danger); }
   .record-actions { display:flex; gap:.5rem; margin-top:.6rem; }
   .record-actions .btn { display:flex; align-items:center; gap:.35rem; }
   .records { display:flex; flex-direction:column; gap:.7rem; }.record { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:1rem; }.record header { display:flex; justify-content:space-between; gap:1rem; color:var(--text); }.record header b { font-family:monospace; font-size:.8rem; overflow-wrap:anywhere; }.state { color:var(--primary); text-transform:uppercase; font-size:.68rem; }.meta { color:var(--text-3); font-size:.68rem; margin-top:.35rem; }.record p { color:var(--text-2); font-size:.8rem; }.record pre { background:var(--surface-2); border-radius:var(--radius-sm); padding:.7rem; max-height:240px; overflow:auto; color:var(--text-2); font-size:.7rem; white-space:pre-wrap; }

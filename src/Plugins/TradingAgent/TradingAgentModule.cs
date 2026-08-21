@@ -191,6 +191,10 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         services.AddSingleton<AhlCandleSource>();
 
         services.AddSingleton<PortfolioReader>();
+        // Dashboard/API account data is broker-neutral. A future broker supplies another
+        // IBrokerAccountReader adapter without changing the endpoint or Svelte contract.
+        services.AddSingleton<AhkBrokerAccountReader>();
+        services.AddSingleton<IBrokerAccountReader>(sp => sp.GetRequiredService<AhkBrokerAccountReader>());
         // Same instance behind the narrow interface the order gate consumes.
         services.AddSingleton<IBrokerMarketState>(sp => sp.GetRequiredService<AhkPortalClient>());
         services.AddSingleton<AhkQuoteBook>();
@@ -249,7 +253,9 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         services.AddSingleton<WatchlistMonitorWorker>();
         services.AddHostedService(sp => sp.GetRequiredService<WatchlistMonitorWorker>());
         services.AddHostedService<TradingSafetyStartupValidator>();
-        services.AddHostedService<BrokerReconciliationWorker>();
+        services.AddSingleton<BrokerReconciliationWorker>();
+        services.AddHostedService(sp => sp.GetRequiredService<BrokerReconciliationWorker>());
+        services.AddHostedService<TradingRetentionWorker>();
         services.AddHostedService<TakeProfitRetryWorker>();
         // Singleton AND hosted service, so the arm endpoint can kick an immediate baseline capture on
         // the same instance the timer drives.
@@ -298,6 +304,26 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             });
         });
 
+        trading.MapGet("/account", async (
+            IBrokerAccountReader accountReader,
+            CancellationToken ct) =>
+            Results.Ok(await accountReader.ReadAccountAsync(ct)))
+            .RequireAuthorization("TradingTrader");
+
+        // Explicitly user-initiated: unlike the passive timer, this may harvest the authenticated
+        // browser cookies (or log in when necessary), then reconciles immediately on that same direct
+        // API session. This closes the confusing gap where "the browser is logged in" but the passive
+        // reconciliation reader has never been given a session of its own.
+        trading.MapPost("/reconciliation/run", async (
+            AhkPortalClient brokerPortal,
+            BrokerReconciliationWorker worker,
+            CancellationToken ct) =>
+        {
+            var sessionEstablished = await brokerPortal.EnsureSessionAsync(ct);
+            var snapshot = await worker.RunNowAsync(ct);
+            return Results.Ok(new { sessionEstablished, reconciliation = snapshot });
+        }).RequireAuthorization("TradingTrader");
+
         // Dedicated, no-restart kill switch: flips the runtime policy overlay (same store the
         // generic /plugin-config/trading-agent editor writes to) so TradingRiskEngine picks it up
         // on the very next order via TradingPolicyProvider — nothing to restart.
@@ -315,6 +341,134 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
                 body.Active ? "ACTIVATED" : "cleared", body.Reason ?? "(none given)");
             return Results.Ok(new { killSwitch = body.Active });
         }).RequireAuthorization("ManagementAdministrator");
+
+        // The dashboard speaks in outcomes ("book profit", "sell if it drops") rather than leaking
+        // broker vocabulary into every button. This registry is the single contract for those choices.
+        trading.MapGet("/order-intents", (IRuntimePluginOptions<AhkConfig> brokerConfig) =>
+            Results.Ok(new
+            {
+                intents = OrderIntentRegistry.All,
+                capabilities = new
+                {
+                    marketOrdersEnabled = brokerConfig.Current.AllowMarketOrders,
+                    brokerOrderTypes = new[] { "LIMIT", "MARKET", "STOPLOSS" },
+                    conditionalTriggerTypes = Enum.GetNames<ArmedTriggerKind>()
+                }
+            }));
+
+        // An authenticated, human-friendly adapter over the existing deterministic manager. Policy,
+        // reconciliation, market window, risk caps, idempotency, and the kill switch remain downstream.
+        trading.MapPost("/orders", async (
+            DashboardOrderRequest body,
+            MonitoredUniverse universe,
+            TradingAgent.Manager.TradingManager manager,
+            TradingPolicyProvider policyProvider,
+            ApprovalIntentRegistry intentRegistry,
+            IOptions<TradingAgentOptions> options,
+            HttpContext http,
+            CancellationToken ct) =>
+        {
+            var intent = OrderIntentRegistry.Find(body.OrderIntentId);
+            if (intent is null)
+                return Results.BadRequest(new
+                {
+                    error = "unknown_order_intent",
+                    message = $"Unknown order choice '{body.OrderIntentId}'. Refresh and choose one from the registry."
+                });
+
+            if (!intent.Submission.Equals("immediate", StringComparison.OrdinalIgnoreCase))
+                return Results.BadRequest(new
+                {
+                    error = "conditional_order_intent",
+                    message = $"'{intent.Label}' is a waiting trigger and must be armed, not placed immediately."
+                });
+
+            string symbol;
+            try { symbol = PsxDataClient.NormalizeStockSymbol(body.Symbol ?? ""); }
+            catch (ArgumentException ex)
+            {
+                return Results.BadRequest(new { error = "invalid_symbol", message = ex.Message });
+            }
+
+            if (!universe.IsTradable(symbol))
+                return Results.BadRequest(new
+                {
+                    error = "not_tradable",
+                    message = $"'{symbol}' is not in AllowedSymbols, so the risk engine will not trade it."
+                });
+
+            if (body.Quantity is not > 0)
+                return Results.BadRequest(new { error = "invalid_quantity", message = "Quantity must be positive." });
+
+            decimal? entryPrice = intent.OrderType switch
+            {
+                "MARKET"   => null,
+                "STOPLOSS" => body.TriggerPrice,
+                _          => body.Price
+            };
+
+            if (intent.OrderType != "MARKET" && entryPrice is not > 0)
+                return Results.BadRequest(new
+                {
+                    error = "price_required",
+                    message = intent.OrderType == "STOPLOSS"
+                        ? "Enter the price that triggers the stop."
+                        : "Enter a positive limit price."
+                });
+
+            decimal? stopLimit = null;
+            if (intent.OrderType == "STOPLOSS" && entryPrice is { } trigger)
+            {
+                // A stop limit belongs just through the trigger in the direction price is moving.
+                stopLimit = body.LimitPrice ?? decimal.Round(
+                    trigger * (intent.Action == "SELL" ? 0.99m : 1.01m), 2,
+                    MidpointRounding.AwayFromZero);
+            }
+
+            var signal = new TradingSignal
+            {
+                IsSignal = true,
+                Action = intent.Action,
+                Symbol = symbol,
+                Quantity = body.Quantity,
+                OrderType = intent.OrderType,
+                EntryPrice = entryPrice,
+                LimitPrice = stopLimit,
+                Confidence = "HIGH",
+                RawMessage = $"dashboard:{intent.Id}"
+            };
+
+            IReadOnlyList<IReadOnlyList<TradingSignal>> groups = [[signal]];
+            var policy = policyProvider.Current();
+            var source = "dashboard-order:" + (
+                string.IsNullOrWhiteSpace(body.ClientRequestId)
+                    ? Guid.NewGuid().ToString("N")
+                    : body.ClientRequestId.Trim());
+
+            // The TradingTrader request is the approval event. Bind it to the exact order and let the
+            // manager consume/re-hash the one-time intent exactly as it does for a host tool approval.
+            var approvalIntent = ApprovalIntent.Create(
+                groups, source, policy.Version,
+                TimeSpan.FromSeconds(Math.Max(10, options.Value.ApprovalIntentTtlSeconds)));
+            intentRegistry.Register(approvalIntent);
+            var authorization = ExecutionAuthorization.HostToolGate(
+                http.User.Identity?.Name ?? "trading-dashboard", approvalIntent);
+
+            var result = await manager.ExecuteGroupsAsync(groups, source, authorization, ct);
+            var brokerResults = result.Groups.SelectMany(group => group).ToList();
+            var brokerAccepted = result.Executed
+                && brokerResults.Count > 0
+                && brokerResults.All(order => order.Success);
+            return Results.Ok(new
+            {
+                accepted = brokerAccepted,
+                result.IsReplay,
+                result.ExecutionId,
+                result.PolicyVersion,
+                result.Reason,
+                result.Groups
+            });
+        }).RequireAuthorization("TradingTrader");
 
         // Candle archive: how much daily history is stored, how much is still missing, and what the
         // backfill is doing right now. Read-only, so any management viewer can see it.
@@ -1095,6 +1249,35 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             return ok ? Results.Ok(new { alertId, state = "dismissed" }) : Results.NotFound();
         }).RequireAuthorization("TradingAnalyst");
 
+        trading.MapPost("/alerts/bulk", async (
+            BulkAlertActionRequest body,
+            ITradingRepository repository,
+            CancellationToken ct) =>
+        {
+            var action = (body.Action ?? "").Trim().ToLowerInvariant();
+            if (action is not ("acknowledge" or "dismiss"))
+                return Results.BadRequest(new
+                {
+                    error = "invalid_action",
+                    message = "Bulk alert action must be acknowledge or dismiss."
+                });
+
+            var ids = body.All ? null : body.AlertIds;
+            if (!body.All && (ids is null || ids.Count == 0))
+                return Results.BadRequest(new
+                {
+                    error = "no_alerts",
+                    message = "Select at least one alert, or set all=true."
+                });
+
+            var target = action == "acknowledge" ? "acknowledged" : "dismissed";
+            // Mark-read only moves unread alerts. Dismiss is the auditable soft-delete operation and
+            // intentionally also hides acknowledged rows.
+            var changed = await repository.SetAlertsStateAsync(
+                ids, target, action == "acknowledge" ? "new" : null, ct);
+            return Results.Ok(new { changed, state = target });
+        }).RequireAuthorization("TradingAnalyst");
+
         // Live alert stream. SSE rather than polling so a level break reaches an open page in seconds.
         // The client reads it with fetch (not EventSource) because the /api group needs the management
         // API key header, which EventSource cannot send — the same reason the host's chat stream does.
@@ -1871,6 +2054,59 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             CancellationToken ct) =>
             Results.Ok(await repository.GetExecutionsAsync(limit ?? 100, ct)));
 
+        trading.MapPost("/executions/{executionId}/resolve", async (
+            string executionId,
+            ResolveUnknownExecutionRequest body,
+            HttpContext http,
+            ITradingRepository repository,
+            ILogger<TradingAgentModule> logger,
+            CancellationToken ct) =>
+        {
+            var resolution = body.Resolution?.Trim().ToLowerInvariant();
+            if (resolution is not ("placed" or "not_placed"))
+                return Results.BadRequest(new
+                {
+                    error = "invalid_resolution",
+                    message = "Choose placed or not_placed after checking the broker's own order book/activity."
+                });
+
+            var note = body.Note?.Trim();
+            if (string.IsNullOrWhiteSpace(note))
+                return Results.BadRequest(new
+                {
+                    error = "resolution_note_required",
+                    message = "Record what you checked at the broker before resolving an unknown outcome."
+                });
+
+            var resolvedBy = http.User.Identity?.Name ?? "operator";
+            var resolvedUtc = DateTime.UtcNow;
+            var payload = JsonSerializer.Serialize(new
+            {
+                resolution,
+                note,
+                resolvedBy,
+                resolvedUtc,
+                automaticRetry = false
+            }, JsonSerializerOptions.Web);
+
+            if (!await repository.ResolveUnknownExecutionAsync(executionId, resolution, payload, ct))
+                return Results.Conflict(new
+                {
+                    error = "not_unknown",
+                    message = "This execution does not exist or is no longer unresolved. Refresh before acting again."
+                });
+
+            logger.LogWarning(
+                "[Trading] Unknown execution {ExecutionId} manually resolved as {Resolution} by {ResolvedBy}: {Note}",
+                executionId, resolution, resolvedBy, note);
+            return Results.Ok(new
+            {
+                executionId,
+                state = resolution == "placed" ? "resolved_placed" : "resolved_not_placed",
+                resolvedUtc
+            });
+        }).RequireAuthorization("TradingTrader");
+
         trading.MapGet("/events", async (
             int? limit,
             ITradingRepository repository,
@@ -2374,6 +2610,8 @@ public sealed record AssessRequest(string? Symbol, string? Interval = null, stri
 /// <summary>Why a proposal was rejected — recorded so a terminal state is explicable later.</summary>
 public sealed record ProposalRejectRequest(string? Reason = null);
 
+public sealed record ResolveUnknownExecutionRequest(string? Resolution, string? Note);
+
 /// <summary>An order to hold until a price level is reached or an alert kind fires.</summary>
 /// <param name="TriggerPercent">
 /// Size of the move, in percent, for a PercentDrop/PercentRise trigger. Ignored by every other kind.
@@ -2404,6 +2642,22 @@ public sealed record ArmOrderRequest(
     decimal? TriggerPercent = null,
     decimal? ReferencePrice = null,
     bool Trailing = false);
+
+/// <summary>An immediate order submitted from a registry choice in the trading dashboard.</summary>
+public sealed record DashboardOrderRequest(
+    string? OrderIntentId,
+    string? Symbol,
+    int? Quantity,
+    decimal? Price = null,
+    decimal? TriggerPrice = null,
+    decimal? LimitPrice = null,
+    string? ClientRequestId = null);
+
+/// <summary>Auditable bulk alert state change. Dismiss is the UI's soft-delete operation.</summary>
+public sealed record BulkAlertActionRequest(
+    string? Action,
+    IReadOnlyList<string>? AlertIds = null,
+    bool All = false);
 
 /// <summary>
 /// A protective stop to attach to a BUY entry, armed only once the entry is confirmed filled.

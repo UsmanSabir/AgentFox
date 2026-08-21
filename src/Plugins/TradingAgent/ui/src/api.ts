@@ -130,6 +130,49 @@ export interface TradingStatus {
   checkedUtc: string;
 }
 
+/** One layman-facing choice from the server-side order intent registry. */
+export interface OrderIntentDefinition {
+  id: string;
+  label: string;
+  description: string;
+  category: string;
+  submission: 'immediate' | 'conditional';
+  action: 'BUY' | 'SELL';
+  orderType: 'LIMIT' | 'MARKET' | 'STOPLOSS';
+  triggerKind: TriggerKind | null;
+  priceField: 'none' | 'limit' | 'target' | 'stop' | 'limit-at-trigger' | string;
+  defaultPercent: number | null;
+  trailing: boolean;
+}
+
+export interface OrderIntentRegistryResponse {
+  intents: OrderIntentDefinition[];
+  capabilities: {
+    marketOrdersEnabled: boolean;
+    brokerOrderTypes: string[];
+    conditionalTriggerTypes: string[];
+  };
+}
+
+export interface DashboardOrderRequest {
+  orderIntentId: string;
+  symbol: string;
+  quantity: number;
+  price?: number | null;
+  triggerPrice?: number | null;
+  limitPrice?: number | null;
+  clientRequestId: string;
+}
+
+export interface DashboardOrderResult {
+  accepted: boolean;
+  isReplay: boolean;
+  executionId: string;
+  policyVersion: string;
+  reason: string;
+  groups: unknown[];
+}
+
 /**
  * Coverage of the local daily-candle archive that weekly support/resistance is derived from, plus
  * whatever the backfill is doing right now.
@@ -207,6 +250,63 @@ export interface TradingExecution {
   policyVersion: string;
   createdUtc: string;
   updatedUtc: string;
+}
+
+export interface BrokerAccountBalance {
+  key: string;
+  label: string;
+  value?: number | null;
+  currency?: string | null;
+  attributes: Record<string, string | null>;
+}
+
+export interface BrokerAccountHolding {
+  instrumentId: string;
+  symbol?: string | null;
+  exchange?: string | null;
+  assetType?: string | null;
+  quantity?: number | null;
+  averageCost?: number | null;
+  marketPrice?: number | null;
+  costValue?: number | null;
+  marketValue?: number | null;
+  unrealizedProfitLoss?: number | null;
+  unrealizedProfitLossPercent?: number | null;
+  currency?: string | null;
+  attributes: Record<string, string | null>;
+}
+
+export interface BrokerAccountOrder {
+  orderId: string;
+  externalOrderId?: string | null;
+  instrumentId: string;
+  symbol?: string | null;
+  exchange?: string | null;
+  side?: string | null;
+  orderType?: string | null;
+  status?: string | null;
+  quantity?: number | null;
+  remainingQuantity?: number | null;
+  price?: number | null;
+  triggerPrice?: number | null;
+  currency?: string | null;
+  placedAt?: string | null;
+  attributes: Record<string, string | null>;
+}
+
+export interface BrokerAccountSnapshot {
+  brokerId: string;
+  brokerName: string;
+  accountLabel?: string | null;
+  balancesAvailable: boolean;
+  holdingsAvailable: boolean;
+  ordersAvailable: boolean;
+  balances: BrokerAccountBalance[];
+  holdings: BrokerAccountHolding[];
+  orders: BrokerAccountOrder[];
+  retrievedAtUtc: string;
+  warnings: string[];
+  attributes: Record<string, string | null>;
 }
 
 export interface TradingEvent {
@@ -779,6 +879,10 @@ export interface MoversQuery {
 
 export const trading = {
   status:         ()            => get<TradingStatus>('/trading/status'),
+  account:        ()            => get<BrokerAccountSnapshot>('/trading/account', 60_000),
+  orderIntents:   ()            => get<OrderIntentRegistryResponse>('/trading/order-intents'),
+  placeOrder:     (request: DashboardOrderRequest) =>
+    post<DashboardOrderResult>('/trading/orders', request, 60_000),
   // Open-only by default: an empty inbox is the normal state, and a list dominated by last month's
   // resolved proposals is exactly what made this feel like a log rather than a queue.
   proposals: (openOnly = true, limit = 100) =>
@@ -799,8 +903,15 @@ export const trading = {
     post<{ proposalId: string; status: string }>(
       `/trading/proposals/${encodeURIComponent(proposalId)}/reject`, { reason }),
   executions:     (limit = 100) => get<TradingExecution[]>(`/trading/executions?limit=${limit}`),
+  resolveUnknownExecution: (executionId: string, resolution: 'placed' | 'not_placed', note: string) =>
+    post<{ executionId: string; state: string; resolvedUtc: string }>(
+      `/trading/executions/${encodeURIComponent(executionId)}/resolve`, { resolution, note }),
   events:         (limit = 200) => get<TradingEvent[]>(`/trading/events?limit=${limit}`),
   reconciliation: (limit = 100) => get<ReconciliationRun[]>(`/trading/reconciliation?limit=${limit}`),
+  reconcileNow: () => post<{
+    sessionEstablished: boolean;
+    reconciliation: TradingStatus['reconciliation'];
+  }>('/trading/reconciliation/run', undefined, 60_000),
 
   setKillSwitch: (active: boolean, reason?: string) =>
     post<{ killSwitch: boolean }>('/trading/kill-switch', { active, reason }),
@@ -836,6 +947,8 @@ export const trading = {
     },
     ack:     (id: string) => post<{ alertId: string; state: string }>(`/trading/alerts/${id}/ack`),
     dismiss: (id: string) => post<{ alertId: string; state: string }>(`/trading/alerts/${id}/dismiss`),
+    bulk: (action: 'acknowledge' | 'dismiss', alertIds?: string[], all = false) =>
+      post<{ changed: number; state: string }>('/trading/alerts/bulk', { action, alertIds, all }),
 
     /**
      * Live stream of new alerts. Uses fetch rather than EventSource because the /api group requires

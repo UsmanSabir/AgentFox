@@ -29,6 +29,11 @@ public sealed record PortfolioSnapshot
     public decimal? AvailableBalancePkr { get; init; }
     /// <summary>Raw text of the balance label the value was read from, for auditability.</summary>
     public string? BalanceSource { get; init; }
+    /// <summary>
+    /// True only when the holdings source was successfully read. An empty list with this true means
+    /// the account is genuinely empty; false means the positions are unknown.
+    /// </summary>
+    public bool HoldingsAvailable { get; init; } = true;
     public IReadOnlyList<HoldingPosition> Holdings { get; init; } = [];
     public decimal? TotalInvestment { get; init; }
     public decimal? TotalCurrentValue { get; init; }

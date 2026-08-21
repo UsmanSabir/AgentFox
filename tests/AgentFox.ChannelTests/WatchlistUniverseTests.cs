@@ -307,6 +307,47 @@ public sealed class WatchlistUniverseTests
             + "that rejection exists to avoid.");
     }
 
+    [TestMethod]
+    public async Task BulkAlertState_ChangesOnlyTheSelectedRows()
+    {
+        using var env = TestEnv.Create(["OGDC", "LUCK"]);
+        var first = await env.Repository.SaveAlertAsync(Alert("OGDC"), new DateOnly(2026, 8, 21));
+        var second = await env.Repository.SaveAlertAsync(Alert("LUCK"), new DateOnly(2026, 8, 21));
+
+        Assert.AreEqual(1, await env.Repository.SetAlertsStateAsync(
+            [first], "acknowledged", "new"));
+
+        var rows = await env.Repository.GetAlertsAsync(limit: 10);
+        Assert.AreEqual("acknowledged", rows.Single(row => row.AlertId == first).State);
+        Assert.AreEqual("new", rows.Single(row => row.AlertId == second).State);
+
+        Assert.AreEqual(2, await env.Repository.SetAlertsStateAsync(null, "dismissed"));
+        Assert.IsTrue((await env.Repository.GetAlertsAsync(limit: 10))
+            .All(row => row.State == "dismissed"));
+    }
+
+    [TestMethod]
+    public async Task AlertRetention_PhysicallyDeletesDismissedRowsAfterTheCutoff()
+    {
+        using var env = TestEnv.Create(["OGDC"]);
+        var id = await env.Repository.SaveAlertAsync(Alert("OGDC"), new DateOnly(2026, 8, 21));
+        await env.Repository.SetAlertStateAsync(id, "dismissed");
+
+        Assert.AreEqual(1, await env.Repository.PruneAlertsAsync(DateTime.UtcNow.AddMinutes(1)));
+        Assert.AreEqual(0, (await env.Repository.GetAlertsAsync(limit: 10)).Count,
+            "retention is a real DELETE; SQLite can reuse the released page space");
+    }
+
+    private static DetectedAlert Alert(string symbol) => new()
+    {
+        Symbol = symbol,
+        Kind = AlertKind.SupportBounce,
+        Severity = AlertSeverity.Medium,
+        Price = 100m,
+        Interval = "1D",
+        Summary = $"{symbol} bounced"
+    };
+
     private static TradingAgent.Research.PsxCandle Candle(string symbol, DateOnly date) => new()
     {
         Symbol = symbol,
@@ -415,6 +456,8 @@ public sealed class WatchlistUniverseTests
             throw new NotSupportedException();
         public Task CompleteExecutionAsync(string a, string b, string c, CancellationToken ct = default) =>
             throw new NotSupportedException();
+        public Task<bool> ResolveUnknownExecutionAsync(string a, string b, string c, CancellationToken ct = default) =>
+            throw new NotSupportedException();
         public Task AppendEventAsync(string a, string b, string c, CancellationToken ct = default) =>
             throw new NotSupportedException();
         public Task SaveDailySessionAsync(
@@ -471,6 +514,9 @@ public sealed class WatchlistUniverseTests
             throw new NotSupportedException();
         public Task<bool> SetAlertStateAsync(string id, string state, CancellationToken ct = default) =>
             throw new NotSupportedException();
+        public Task<int> SetAlertsStateAsync(
+            IReadOnlyCollection<string>? ids, string state, string? fromState = null,
+            CancellationToken ct = default) => throw new NotSupportedException();
         public Task<IReadOnlyDictionary<string, int>> GetOpenAlertCountsAsync(CancellationToken ct = default) =>
             throw new NotSupportedException();
         public Task<int> PruneAlertsAsync(DateTime before, CancellationToken ct = default) =>

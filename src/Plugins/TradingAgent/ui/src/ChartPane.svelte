@@ -540,7 +540,7 @@
           <span>
             {data.snapshot.close} · {pct(data.snapshot.dayChangePercent)} ·
             {data.snapshot.setup} · {data.barsAnalyzed} bars
-            {#if data.usesLiveBar} · <em>live bar forming</em>{/if}
+            {#if data.usesLiveBar} · <em title="Today’s candle is still changing until market close">today’s candle open</em>{/if}
           </span>
         {:else}
           <span>Candles, support/resistance, and indicators</span>
