@@ -93,8 +93,18 @@ public sealed class TradingAgentRuntime
         };
     }
 
-    public static void AddCore(IServiceCollection services, IConfiguration config)
+    public static void AddCore(
+        IServiceCollection services,
+        IConfiguration config,
+        TradingCompositionOptions? options = null)
     {
+        GuardAgainstASecondEdition(services, options?.EditionName ?? "community");
+
+        // Registered so endpoints and /trading/status can report which edition composed the
+        // engine; both editions share the module name "trading-agent", so this is the only
+        // thing that distinguishes them at run time.
+        services.AddSingleton(options ?? TradingCompositionOptions.Community);
+
         // Before anything else: the notify_user tool and the channels UI both enumerate the topic
         // registry to show operators what can be subscribed to, and both are built during host
         // startup. Declared later, this plugin's subjects would be missing from the list an
@@ -230,6 +240,44 @@ public sealed class TradingAgentRuntime
     }
 
     /// <summary>
+    /// Refuses to compose the engine twice into one host, and says which two things collided.
+    ///
+    /// <para>
+    /// The community and premium entry plugins are mutually exclusive deployment artifacts. Both
+    /// installed at once is not a degraded configuration, it is a duplicate-order defect: each entry
+    /// plugin is loaded into its own <c>AssemblyLoadContext</c> with its own copy of this assembly,
+    /// so the host would run two <c>AhkFeedWorker</c>s, two <c>WatchlistMonitorWorker</c>s, two
+    /// <c>BrokerReconciliationWorker</c>s, two writers against the same SQLite ledger, and two
+    /// browser sessions against one broker account. Failing startup loudly is the only safe outcome;
+    /// a half-working double install is worse than no install.
+    /// </para>
+    ///
+    /// <para>
+    /// This catches two entry plugins in ONE process. It cannot see a second AgentFox process
+    /// pointed at the same data directory — see EDITION_SPLIT_PLAN.md step 4 for the ledger-lock
+    /// hardening that would.
+    /// </para>
+    /// </summary>
+    private static void GuardAgainstASecondEdition(IServiceCollection services, string edition)
+    {
+        // Compared by NAME, not by type: across two load contexts the two marker types are distinct
+        // Type objects that never compare equal, so a typed lookup would not see the other edition.
+        if (services.Any(d => d.ServiceType.FullName == TradingCoreMarker.TypeName))
+            throw new InvalidOperationException(
+                $"Two TradingAgent edition plugins are installed — a second one ('{edition}') tried to " +
+                "compose the trading engine after another edition already had. The community and " +
+                "premium entry plugins are mutually exclusive: each is loaded into its own " +
+                "AssemblyLoadContext with its own copy of TradingAgent.Core, so running both would " +
+                "start duplicate feed, watchlist-monitor and reconciliation workers, two writers " +
+                "against the same SQLite ledger, and two browser sessions against one broker " +
+                "account — placing duplicate orders. Remove one entry plugin from the host's " +
+                "plugins/ folder (each edition is a folder containing its own .deps.json) and " +
+                "restart.");
+
+        services.AddSingleton<TradingCoreMarker>();
+    }
+
+    /// <summary>
     /// Post-build wiring that needs a built container rather than a service collection.
     /// </summary>
     public static void Start(IServiceProvider services)
@@ -271,7 +319,10 @@ public sealed class TradingAgentRuntime
     /// <summary>
     /// Registers the engine's tools with the agent and wires the audit hooks that record them.
     /// </summary>
-    public static void RegisterCoreTools(IPluginContext context, IServiceProvider services)
+    public static void RegisterCoreTools(
+        IPluginContext context,
+        IServiceProvider services,
+        TradingCompositionOptions? options = null)
     {
         var chatClient    = services.GetRequiredService<IChatClient>();
         var agentOptions  = services.GetRequiredService<IOptions<TradingAgentOptions>>();
@@ -367,6 +418,12 @@ public sealed class TradingAgentRuntime
                 loggers.CreateLogger<ResearchWebTool>()));
         }
 
+        // Edition tools join the SAME list, so they pass through the same registration loop and
+        // therefore the same audit name set and the same pre/post/error hooks below. Registering
+        // them separately would leave their executions unrecorded.
+        var composition = options ?? TradingCompositionOptions.Community;
+        tradingTools.AddRange(composition.AdditionalTools);
+
         var ownToolNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         // These read-only discovery tools are advertised from the dashboard's ordinary chat link,
         // so they must exist in the primary registry as well as the isolated specialist. Execution
@@ -375,6 +432,8 @@ public sealed class TradingAgentRuntime
         {
             "market_movers", "stock_dossier", "get_market_depth"
         };
+        foreach (var name in composition.AdditionalPrimaryReadToolNames)
+            primaryReadTools.Add(name);
         foreach (var tool in tradingTools)
         {
             context.RegisterAgentTool("trading-agent", tool);
@@ -412,8 +471,12 @@ public sealed class TradingAgentRuntime
     /// <summary>
     /// Registers the isolated trading specialist and the router hint that delegates to it.
     /// </summary>
-    public static void RegisterSpecialist(IPluginContext context, IServiceProvider services)
+    public static void RegisterSpecialist(
+        IPluginContext context,
+        IServiceProvider services,
+        TradingCompositionOptions? options = null)
     {
+        var composition       = options ?? TradingCompositionOptions.Community;
         var agentOptions      = services.GetRequiredService<IOptions<TradingAgentOptions>>();
         var policy            = services.GetRequiredService<TradingPolicyProvider>();
         var loggers           = services.GetRequiredService<ILoggerFactory>();
@@ -428,7 +491,10 @@ public sealed class TradingAgentRuntime
             ChannelTypes = ["whatsapp-bridge"],
             RouteHints = ["PSX", "stock", "portfolio", "trade", "buy", "sell", "market"],
             StrongRouteHints = ["PSX"],
-            ToolNames = BuildSpecialistToolNames(webSearchProvider, agentOptions.Value.ResearchWebEnabled),
+            ToolNames = BuildSpecialistToolNames(
+                webSearchProvider,
+                agentOptions.Value.ResearchWebEnabled,
+                composition.AdditionalSpecialistToolNames),
             ModelKey = string.IsNullOrWhiteSpace(agentOptions.Value.ParserModelKey)
                 ? null
                 : agentOptions.Value.ParserModelKey,
@@ -509,7 +575,7 @@ public sealed class TradingAgentRuntime
                 - MinConfidence: {startupPolicy.MinConfidence}
                 - PolicyVersion: {startupPolicy.Version}
                 - Allowed symbols ({agentOptions.Value.AllowedSymbols.Count}): {DescribeAllowedSymbols(agentOptions.Value.AllowedSymbols)}
-                """
+                """ + SpecialistPromptAppendix(composition)
         });
 
         // Keep the general agent's prompt small: it should delegate, not perform the specialist workflow.
@@ -526,11 +592,22 @@ public sealed class TradingAgentRuntime
 
         var logger = loggers.CreateLogger<TradingAgentRuntime>();
         logger.LogInformation(
-            "[TradingAgent] Ready. AutoExecute={Auto} MinConfidence={Min} DupWindow={Dup}min",
+            "[TradingAgent] Ready. Edition={Edition} AutoExecute={Auto} MinConfidence={Min} DupWindow={Dup}min",
+            composition.EditionName,
             agentOptions.Value.AutoExecute,
             agentOptions.Value.MinConfidence,
             agentOptions.Value.DuplicateWindowMinutes);
     }
+
+    /// <summary>
+    /// The edition's prompt block, appended to the core specialist prompt. Returns empty for the
+    /// community edition. Separated by a blank line and a heading so an appendix cannot run into
+    /// the core prompt's last bullet and read as part of it.
+    /// </summary>
+    private static string SpecialistPromptAppendix(TradingCompositionOptions composition) =>
+        string.IsNullOrWhiteSpace(composition.SpecialistPromptAppendix)
+            ? string.Empty
+            : "\n\n" + composition.SpecialistPromptAppendix.Trim() + "\n";
 
     /// <summary>
     /// Renders the tradable universe for the prompt. Truncated because the list is unbounded in
@@ -549,7 +626,8 @@ public sealed class TradingAgentRuntime
 
     internal static IReadOnlyList<string> BuildSpecialistToolNames(
         IWebSearchProvider? webSearchProvider,
-        bool researchWebEnabled)
+        bool researchWebEnabled,
+        IReadOnlyList<string>? additionalToolNames = null)
     {
         var names = new List<string>
         {
@@ -564,6 +642,11 @@ public sealed class TradingAgentRuntime
         };
         if (researchWebEnabled && webSearchProvider is not null)
             names.Add("research_web");
+        // Appended last and de-duplicated: an edition naming a tool the core already grants is a
+        // redundancy, not an error, and it must not produce a duplicate entry in the allowlist.
+        foreach (var name in additionalToolNames ?? [])
+            if (!names.Contains(name, StringComparer.OrdinalIgnoreCase))
+                names.Add(name);
         return names;
     }
 }

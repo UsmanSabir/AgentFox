@@ -359,8 +359,10 @@ Rules that keep this honest:
   overlay data contract. A premium-only *second page* is never the answer (1.3). If premium needs
   structural UI changes rather than chart data, it builds a superset bundle and *replaces* the
   `trading` page — see step 3b, "structural UI enhancements".
-- `ContributeCoreUi` (bool, default true) exists for exactly that case: set false and Core yields no
-  page, so the premium bundle owns slug `trading` and there is never a duplicate-slug collision.
+- No `ContributeCoreUi` flag is needed for that case, and none was added: `GetPages` is a member of
+  the entry module, so a premium module simply returns its own page instead of calling
+  `GetCorePages()`. One less field, and the choice sits where it is made. The rule it encodes still
+  holds — exactly one edition may contribute slug `trading`.
 - Additional pre-trade risk rules go through DI (`IPreTradeRiskRule` when section 5.2 lands), not
   through this options record.
 - Premium may **add** routes freely but may not re-map a core route (2.2). If a specific core route
