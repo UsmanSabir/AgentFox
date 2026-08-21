@@ -23,7 +23,27 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- Required for ManifestEmbeddedFileProvider to serve the dashboard from inside
+         TradingAgent.Core.dll (see the UI ItemGroup below). -->
+    <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
   </PropertyGroup>
+
+  <!-- ── The trading dashboard ───────────────────────────────────────────────
+       Built from ../TradingAgent/ui (a separate npm project, so charting dependencies never enter
+       the host frontend) into this project's wwwroot, and embedded HERE rather than in the entry
+       plugin. That is what lets every edition serve one dashboard: the community entry and a
+       premium entry both resolve it from this assembly via
+       TradingAgentRuntime.GetCorePages() -> typeof(TradingAgentRuntime).Assembly, so a premium
+       edition adds features to this UI through data (chart overlays) instead of shipping a second
+       page. Embedding it in an entry plugin would give each edition its own copy and force premium
+       to rebuild the whole Svelte app.
+
+       Build with: cd ../TradingAgent/ui && npm ci && npm run build
+       The condition means a backend-only build still succeeds — GetCorePages() then finds no
+       manifest and contributes no page, which is a legitimate build, not a broken one. -->
+  <ItemGroup Condition="Exists('$(MSBuildProjectDirectory)\wwwroot')">
+    <EmbeddedResource Include="wwwroot\**\*" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Agents.AI.Harness" />
