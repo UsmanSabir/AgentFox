@@ -15,6 +15,7 @@ using System.Text.Json;
 using TradingAgent.AhlAnalytics;
 using TradingAgent.Analysis;
 using TradingAgent.Broker;
+using TradingAgent.Chart;
 using TradingAgent.Models;
 using TradingAgent.Config;
 using TradingAgent.Feed;
@@ -63,6 +64,7 @@ public sealed partial class TradingCoreEndpoints
             bool? includeLive,
             CandleAnalysisService analysis,
             MonitoredUniverse universe,
+            ChartOverlayCollector overlayCollector,
             IOptions<TradingAgentOptions> options,
             ILogger<TradingCoreEndpoints> logger,
             CancellationToken ct) =>
@@ -98,6 +100,20 @@ public sealed partial class TradingCoreEndpoints
 
                 var technical = TechnicalOptions.From(options.Value.Scan);
                 var snapshot = result.Snapshot;
+
+                // Edition overlays: projections, predicted points, a next target, a confidence band.
+                // Always present and always the same shape, so the client has one code path; empty
+                // for the community edition, which registers no provider. The collector owns the
+                // failure boundary — a provider that throws or overruns its budget is dropped and the
+                // chart still renders, because this is a read path a person is waiting on.
+                var overlays = await overlayCollector.CollectAsync(
+                    result.Symbol,
+                    result.Interval,
+                    candles.Select(c => new DateTimeOffset(
+                        c.BucketStartUtc ?? c.Date.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc),
+                        TimeSpan.Zero).ToUnixTimeSeconds()).ToList(),
+                    ct);
+
                 return Results.Ok(new
                 {
                     symbol = result.Symbol,
@@ -158,6 +174,8 @@ public sealed partial class TradingCoreEndpoints
                                 : (decimal?)null
                         })
                     },
+
+                    overlays,
 
                     plan = new
                     {

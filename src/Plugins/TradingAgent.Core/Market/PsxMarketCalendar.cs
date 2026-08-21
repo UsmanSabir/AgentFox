@@ -24,6 +24,37 @@ public sealed class PsxMarketCalendar : IMarketCalendar
         _logger = logger;
     }
 
+    /// <summary>
+    /// Whether the exchange trades at all on <paramref name="date"/>, applying the same
+    /// configuration precedence <see cref="GetStatus"/> uses: an explicit session override wins over
+    /// the holiday list, which wins over the regular weekly shape.
+    ///
+    /// <para>
+    /// A malformed holiday or override entry means "assume the regular weekly shape" rather than
+    /// throwing. The caller is projecting future session dates for a chart, and a bad config line
+    /// must not be able to take down a read path — <see cref="GetStatus"/> already logs the problem
+    /// on the path where it decides whether an order may be placed.
+    /// </para>
+    /// </summary>
+    public bool IsTradingDay(DateOnly date)
+    {
+        var opts = _options.Value;
+        try
+        {
+            if (ParseOverrides(opts.MarketSessionOverrides).TryGetValue(date, out var dayOverride))
+                return !dayOverride.Closed && dayOverride.Sessions.Count > 0;
+
+            if (ParseHolidays(opts.MarketHolidays).Contains(date))
+                return false;
+        }
+        catch (InvalidOperationException)
+        {
+            // Fall through to the regular weekly shape; GetStatus surfaces the config error.
+        }
+
+        return RegularSessions(date.DayOfWeek).Count > 0;
+    }
+
     public MarketStatus GetStatus(DateTime? utcNow = null)
     {
         var utc = DateTime.SpecifyKind(utcNow ?? DateTime.UtcNow, DateTimeKind.Utc);

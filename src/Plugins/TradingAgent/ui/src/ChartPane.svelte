@@ -190,6 +190,11 @@
   let sma50Series: ISeriesApi<'Line'> | null = null;
   let rsiSeries: ISeriesApi<'Line'> | null = null;
   let priceLines: IPriceLine[] = [];
+  // Overlay artefacts are owned separately from the core ones so a render can replace them without
+  // disturbing the support/resistance lines or the plan markers.
+  let overlaySeries: ISeriesApi<'Line'>[] = [];
+  let overlayPriceLines: IPriceLine[] = [];
+  let overlayMarkers: ISeriesMarkersPluginApi<Time> | null = null;
   let markers: ISeriesMarkersPluginApi<Time> | null = null;
   let resizeObserver: ResizeObserver | null = null;
 
@@ -324,15 +329,139 @@
 
     drawLevels(d);
     drawPlanMarkers(d);
+    const projectedBars = drawOverlays(d);
     // Logical range ignores weekends and archive gaps, so the latest candles use the available width
     // instead of being compressed into the right half of the plot by calendar time.
     if (d.candles.length > 0) {
       const visibleBars = expanded ? 110 : 72;
       chart.timeScale().setVisibleLogicalRange({
         from: Math.max(-1, d.candles.length - visibleBars),
-        to: d.candles.length + 4
+        // Room for whatever projects past the last bar. Without this the projected tail renders
+        // off-screen and the feature reads as broken rather than as absent.
+        to: d.candles.length + Math.max(4, projectedBars + 2)
       });
     }
+  }
+
+  /**
+   * Maps an overlay's semantic `kind` to a theme token. Overlays never carry colors: an edition that
+   * sent its own would own this dashboard's palette and break one of the two themes. An unrecognised
+   * kind lands on neutral rather than throwing, so a newer backend cannot break an older client.
+   */
+  function overlayColor(kind: string): string {
+    switch (kind) {
+      case 'projection':
+      case 'prediction': return token('--accent', '#a78bfa');
+      case 'target':     return token('--success', '#34d399');
+      case 'stop':       return token('--danger', '#f87171');
+      case 'entry':      return token('--primary', '#818cf8');
+      case 'support':    return token('--success', '#34d399');
+      case 'resistance': return token('--danger', '#f87171');
+      default:           return token('--info', '#60a5fa');
+    }
+  }
+
+  /**
+   * Draws whatever the backend asked for: edition overlays — projections, predicted points, a next
+   * target, a confidence band — on this same chart rather than on a second page.
+   *
+   * Empty in the community build, so this is a no-op there. Returns how many bars the overlays
+   * project PAST the last candle, which the caller needs to leave room for.
+   *
+   * Everything here is presentation. Nothing drawn from an overlay is ever an execution input; the
+   * order path reads the server-side model, never this response.
+   */
+  function drawOverlays(d: ChartData): number {
+    // Tear down last render's artefacts first — overlays change per symbol and per interval, and a
+    // stale projection left on the chart would be read as a current one.
+    for (const s of overlaySeries) chart!.removeSeries(s);
+    overlaySeries = [];
+    for (const line of overlayPriceLines) candleSeries!.removePriceLine(line);
+    overlayPriceLines = [];
+    overlayMarkers?.setMarkers([]);
+
+    const o = d.overlays;
+    if (!o) return 0;
+
+    const lastBar = d.candles.length ? d.candles[d.candles.length - 1].time : 0;
+    let furthest = lastBar;
+
+    for (const level of o.levels ?? []) {
+      overlayPriceLines.push(candleSeries!.createPriceLine({
+        price: level.price,
+        color: overlayColor(level.kind),
+        lineWidth: Math.min(3, Math.max(1, level.weight)) as 1 | 2 | 3,
+        lineStyle: level.confirmed ? 0 : 2,
+        axisLabelVisible: true,
+        title: level.label
+      }));
+    }
+
+    const addLine = (
+      id: string, kind: string, dashed: boolean,
+      points: { time: number; value: number }[]
+    ) => {
+      if (points.length === 0) return;
+      const series = chart!.addSeries(LineSeries, {
+        color: overlayColor(kind),
+        lineWidth: 2,
+        lineStyle: dashed ? 2 : 0,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: false
+      });
+      // Sorted and de-duplicated by time: lightweight-charts requires strictly ascending times and
+      // throws on an out-of-order point, which would take down the whole chart for one bad overlay.
+      const clean = [...points]
+        .sort((a, b) => a.time - b.time)
+        .filter((pt, i, all) => i === 0 || pt.time !== all[i - 1].time);
+      series.setData(clean.map(pt => ({ time: pt.time as UTCTimestamp, value: pt.value })));
+      overlaySeries.push(series);
+      const last = clean[clean.length - 1].time;
+      if (last > furthest) furthest = last;
+    };
+
+    for (const series of o.series ?? [])
+      addLine(series.id, series.kind, series.dashed, series.points ?? []);
+
+    // A band is two lines. Drawn as an upper and a lower edge rather than a filled area because
+    // lightweight-charts has no band primitive, and two dashed edges read correctly either way.
+    for (const band of o.bands ?? []) {
+      const pts = band.points ?? [];
+      addLine(`${band.id}:upper`, band.kind, true, pts.map(pt => ({ time: pt.time, value: pt.upper })));
+      addLine(`${band.id}:lower`, band.kind, true, pts.map(pt => ({ time: pt.time, value: pt.lower })));
+    }
+
+    const markerList = (o.markers ?? []).map(m => ({
+      time: m.time as UTCTimestamp,
+      position: (m.position === 'belowBar' ? 'belowBar' : 'aboveBar') as 'aboveBar' | 'belowBar',
+      color: overlayColor(m.kind),
+      shape: 'circle' as const,
+      text: m.text
+    })).sort((a, b) => (a.time as number) - (b.time as number));
+    if (markerList.length > 0) {
+      for (const m of markerList) if ((m.time as number) > furthest) furthest = m.time as number;
+      if (overlayMarkers) overlayMarkers.setMarkers(markerList);
+      else overlayMarkers = createSeriesMarkers(candleSeries!, markerList);
+    }
+
+    if (furthest <= lastBar || d.candles.length < 2) return 0;
+    // Convert the projected span into BARS, using this series' own median bar spacing. Logical range
+    // counts bars, not seconds, so a seconds-based figure would be meaningless to the time scale.
+    const spacing = medianBarSpacing(d);
+    return spacing > 0 ? Math.ceil((furthest - lastBar) / spacing) : 0;
+  }
+
+  /** Median gap between bars — robust to weekends and archive gaps in a way a mean is not. */
+  function medianBarSpacing(d: ChartData): number {
+    const gaps: number[] = [];
+    for (let i = 1; i < d.candles.length; i++) {
+      const gap = d.candles[i].time - d.candles[i - 1].time;
+      if (gap > 0) gaps.push(gap);
+    }
+    if (gaps.length === 0) return 0;
+    gaps.sort((a, b) => a - b);
+    return gaps[Math.floor(gaps.length / 2)];
   }
 
   /**

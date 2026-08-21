@@ -15,6 +15,7 @@ using System.Text.Json;
 using TradingAgent.AhlAnalytics;
 using TradingAgent.Analysis;
 using TradingAgent.Broker;
+using TradingAgent.Chart;
 using TradingAgent.Models;
 using TradingAgent.Config;
 using TradingAgent.Feed;
@@ -197,6 +198,10 @@ public sealed class TradingAgentRuntime
         // One loader + analyzer shared by analyze_candles and the chart endpoint, so the levels drawn
         // on screen are the same ones the specialist quotes.
         services.AddSingleton<CandleAnalysisService>();
+        // Collects whatever an edition wants drawn on the chart the dashboard already renders.
+        // The community edition registers no IChartOverlayProvider, so this resolves to an empty
+        // set and /trading/candles returns exactly what it always did.
+        services.AddSingleton<ChartOverlayCollector>();
         // One confidence rubric, shared by research_stock and the /assess endpoints.
         services.AddSingleton<StockAssessmentService>();
         // Slow local-model calls outlive the HTTP request that submits them. Register one instance as
