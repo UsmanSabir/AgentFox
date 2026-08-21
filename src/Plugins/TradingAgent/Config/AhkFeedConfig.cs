@@ -19,11 +19,11 @@ public sealed class AhkFeedConfig
     /// On by default, now that the feed has been verified live end to end.
     ///
     /// <para>
-    /// Enabling it has a side effect beyond data: the feed needs a broker session, so it keeps one
-    /// authenticated and warm during market hours (bounded by
-    /// <see cref="OnlyDuringMarketHours"/>). That session is the same one the order path uses, which
-    /// is why the poll cadence is pinned to the portal's own and why the worker yields while the
-    /// browser holds the trading screen.
+    /// Enabling it has a side effect beyond data: during market hours the feed is usually the first
+    /// consumer to request a broker session. Once requested, <see cref="Feed.AhkSessionRecoveryWorker"/>
+    /// keeps that same session alive independently; it does not create repeated logins. The session is
+    /// the same one the order path uses, which is why the poll cadence is pinned to the portal's own
+    /// and why the worker yields while the browser holds the trading screen.
     /// </para>
     ///
     /// <para>
@@ -45,8 +45,8 @@ public sealed class AhkFeedConfig
     public double PollSeconds { get; set; } = 2.0;
 
     /// <summary>
-    /// Seconds between <c>POST /Home/Relogin</c> calls, which keep the session alive. The portal's
-    /// UI does this about once a minute.
+    /// Seconds between background <c>POST /Home/Relogin</c> calls, which renew the existing session
+    /// before expiry. The portal's UI does this about once a minute. This is a keepalive, not LOGIN.
     /// </summary>
     public double ReloginSeconds { get; set; } = 60.0;
 

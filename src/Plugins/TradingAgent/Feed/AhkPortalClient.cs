@@ -23,10 +23,10 @@ namespace TradingAgent.Feed;
 /// <para>
 /// <b>Session lifecycle.</b> Cookies are harvested once, then kept alive by <c>POST /Home/Relogin</c>,
 /// whose response body carries a status digit — <c>"0"</c> healthy, <c>"8"</c> dead. On <c>"8"</c>,
-/// or on a response that redirects back to the login page, the cookies are dropped and re-harvested
-/// from the browser on the next call. Everything here is fail-soft and returns null/empty rather
-/// than throwing: the callers are a market-data poller and an order-cancel tool, and both have to
-/// report a problem rather than propagate one.
+/// or on a response that redirects back to the login page, the cookies are dropped and the dedicated
+/// session worker re-harvests them under a minimum-login interval and exponential failure backoff.
+/// Everything here is fail-soft and returns null/empty rather than throwing: the callers are a
+/// market-data poller and an order-cancel tool, and both have to report a problem rather than propagate one.
 /// </para>
 /// </summary>
 /// <summary>
@@ -58,9 +58,19 @@ public sealed class AhkPortalClient : IBrokerMarketState, IDisposable
     /// <summary>Serialises session (re)establishment so a burst of callers triggers one login, not five.</summary>
     private readonly SemaphoreSlim _sessionGate = new(1, 1);
 
+    /// <summary>Serialises the full discard + login + harvest recovery sequence.</summary>
+    private readonly SemaphoreSlim _freshLoginGate = new(1, 1);
+
     private HttpClient? _http;
     private CookieContainer? _cookies;
     private bool _sessionReady;
+    private int _freshLoginRequired;
+    private int _automaticRecoveryArmed;
+    private int _consecutiveLoginFailures;
+    private DateTime _lastLoginAttemptUtc = DateTime.MinValue;
+    private DateTime _lastLoginSuccessUtc = DateTime.MinValue;
+    private DateTime _nextLoginAttemptUtc = DateTime.MinValue;
+    private DateTime _lastKeepAliveSuccessUtc = DateTime.MinValue;
 
     public AhkPortalClient(
         AhkBroker broker,
@@ -99,11 +109,32 @@ public sealed class AhkPortalClient : IBrokerMarketState, IDisposable
     /// </para>
     ///
     /// <para>
-    /// So: anything user-initiated may call <see cref="EnsureSessionAsync"/> and pay for a login;
-    /// anything on a timer must check this first and report "no session" rather than create one.
+    /// So passive reconciliation still checks this first. The dedicated session recovery worker is
+    /// the only timer allowed to establish a session, and <see cref="EnsureSessionAsync"/> enforces a
+    /// shared cooldown/backoff even for user-initiated callers.
     /// </para>
     /// </summary>
     public bool HasSession => _sessionReady && _http is not null;
+
+    /// <summary>
+    /// Whether the portal has returned the session-specific empty account payload observed when an
+    /// otherwise authenticated session becomes a zombie. The background session worker consumes this
+    /// signal; dashboard requests never rotate the login independently.
+    /// </summary>
+    public bool FreshLoginRequired => Volatile.Read(ref _freshLoginRequired) != 0;
+
+    /// <summary>
+    /// Becomes true after any component has requested a broker session. It lets the background worker
+    /// recover a session that later expires (or an initial login that failed) without logging in merely
+    /// because AgentFox started while nobody needed the broker.
+    /// </summary>
+    public bool AutomaticRecoveryArmed => Volatile.Read(ref _automaticRecoveryArmed) != 0;
+
+    public int ConsecutiveLoginFailures => Volatile.Read(ref _consecutiveLoginFailures);
+    public DateTime? LastLoginAttemptUtc => OptionalUtc(_lastLoginAttemptUtc);
+    public DateTime? LastLoginSuccessUtc => OptionalUtc(_lastLoginSuccessUtc);
+    public DateTime? NextLoginAttemptUtc => OptionalUtc(_nextLoginAttemptUtc);
+    public DateTime? LastKeepAliveSuccessUtc => OptionalUtc(_lastKeepAliveSuccessUtc);
 
     /// <summary>
     /// Increments every time a session is established, so callers can tell a NEW session from the one
@@ -127,6 +158,7 @@ public sealed class AhkPortalClient : IBrokerMarketState, IDisposable
     /// </summary>
     public async Task<bool> EnsureSessionAsync(CancellationToken ct = default)
     {
+        Interlocked.Exchange(ref _automaticRecoveryArmed, 1);
         if (_sessionReady && _http is not null) return true;
 
         await _sessionGate.WaitAsync(ct);
@@ -134,10 +166,21 @@ public sealed class AhkPortalClient : IBrokerMarketState, IDisposable
         {
             if (_sessionReady && _http is not null) return true;
 
+            var now = DateTime.UtcNow;
+            if (now < _nextLoginAttemptUtc)
+            {
+                _logger.LogDebug(
+                    "[AhkPortal] Broker login is cooling down until {RetryUtc}; no login was attempted.",
+                    _nextLoginAttemptUtc);
+                return false;
+            }
+
+            _lastLoginAttemptUtc = now;
+
             var cookies = await _broker.GetSessionCookiesAsync(ct);
             if (cookies.Count == 0)
             {
-                _logger.LogWarning("[AhkPortal] No session cookies available; the direct API stays offline.");
+                RecordLoginFailure("No session cookies were available");
                 return false;
             }
 
@@ -206,6 +249,10 @@ public sealed class AhkPortalClient : IBrokerMarketState, IDisposable
 
             _sessionReady = true;
             SessionEpoch++;
+            _lastLoginSuccessUtc = DateTime.UtcNow;
+            _nextLoginAttemptUtc = _lastLoginSuccessUtc.AddSeconds(
+                Math.Max(30, _config.Current.MinimumLoginIntervalSeconds));
+            Interlocked.Exchange(ref _consecutiveLoginFailures, 0);
             _logger.LogInformation(
                 "[AhkPortal] Direct API session established for account {Account} (session #{Epoch}).",
                 AccountCode ?? "(unknown)", SessionEpoch);
@@ -213,7 +260,7 @@ public sealed class AhkPortalClient : IBrokerMarketState, IDisposable
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogWarning(ex, "[AhkPortal] Could not establish a direct API session.");
+            RecordLoginFailure("The broker session could not be established", ex);
             return false;
         }
         finally
@@ -231,6 +278,60 @@ public sealed class AhkPortalClient : IBrokerMarketState, IDisposable
     }
 
     /// <summary>
+    /// Discards both the direct HTTP session and the browser's persisted portal session, then logs in
+    /// and harvests a new cookie set. Only the background recovery worker calls this, and only after
+    /// <see cref="FreshLoginRequired"/> identifies the captured zombie-session payload. The same
+    /// minimum-login interval and failure backoff as every other path are enforced before teardown.
+    /// </summary>
+    public async Task<bool> EstablishFreshLoginAsync(CancellationToken ct = default)
+    {
+        await _freshLoginGate.WaitAsync(ct);
+        try
+        {
+            if (!FreshLoginRequired) return HasSession;
+
+            await _sessionGate.WaitAsync(ct);
+            try
+            {
+                if (DateTime.UtcNow < _nextLoginAttemptUtc)
+                    return false;
+
+                _sessionReady = false;
+                _http?.Dispose();
+                _http = null;
+                _cookies = null;
+
+                _logger.LogWarning(
+                    "[AhkPortal] Rotating the broker login after the current session returned an empty " +
+                    "account payload. The background recovery worker will establish one clean session.");
+
+                // Deleting the browser profile matters here. Merely harvesting again can return the
+                // same cookies for the same server-side zombie session, which is why dashboard
+                // refreshes used to do nothing until the whole AgentFox process was restarted.
+                await _broker.InvalidateSessionAsync(ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                RecordLoginFailure("The stale broker session could not be discarded", ex);
+                return false;
+            }
+            finally
+            {
+                _sessionGate.Release();
+            }
+
+            var established = await EnsureSessionAsync(ct);
+            if (established)
+                Interlocked.Exchange(ref _freshLoginRequired, 0);
+            return established;
+        }
+        finally
+        {
+            _freshLoginGate.Release();
+        }
+    }
+
+    /// <summary>
     /// Keeps the session alive. Returns false when the portal says the session is finished, which is
     /// the caller's cue to stop polling until a fresh login. The portal answers with a bare string
     /// whose content is the status — <c>"8"</c> means logged out, <c>"0"</c> means fine.
@@ -240,13 +341,41 @@ public sealed class AhkPortalClient : IBrokerMarketState, IDisposable
         var body = await PostAsync("Home/Relogin", content: null, ct);
         if (body is null) return false;
 
-        if (body.Contains('8'))
+        switch (ClassifyReloginResponse(body))
         {
-            InvalidateSession("the portal reported the session as logged out (Relogin returned 8).");
-            return false;
-        }
+            case AhkReloginResponse.Healthy:
+                _lastKeepAliveSuccessUtc = DateTime.UtcNow;
+                return true;
 
-        return true;
+            case AhkReloginResponse.Expired:
+                InvalidateSession("the portal reported the session as logged out.");
+                return false;
+
+            default:
+                _logger.LogWarning(
+                    "[AhkPortal] Relogin returned an unknown response; retaining the current session " +
+                    "and retrying keepalive without attempting a new login. Body={Body}",
+                    body.Length > 120 ? body[..120] : body);
+                return false;
+        }
+    }
+
+    internal static AhkReloginResponse ClassifyReloginResponse(string? body)
+    {
+        if (string.IsNullOrWhiteSpace(body)) return AhkReloginResponse.Unknown;
+
+        // A redirect/login page is authoritative even if its markup happens to contain a status digit.
+        if (body.Contains("<html", StringComparison.OrdinalIgnoreCase) ||
+            body.Contains("_Login", StringComparison.OrdinalIgnoreCase))
+            return AhkReloginResponse.Expired;
+
+        var normalized = body.Trim().Trim('"').Trim();
+        // The captured portal contract says the short status string *contains* 0 or 8. Bound the
+        // check to a status-sized response so timestamps and arbitrary error pages cannot be
+        // mistaken for a healthy/dead-session signal.
+        if (normalized.Length <= 32 && normalized.Contains('8')) return AhkReloginResponse.Expired;
+        if (normalized.Length <= 32 && normalized.Contains('0')) return AhkReloginResponse.Healthy;
+        return AhkReloginResponse.Unknown;
     }
 
     // ── Market data ───────────────────────────────────────────────────────────
@@ -601,7 +730,20 @@ public sealed class AhkPortalClient : IBrokerMarketState, IDisposable
         if (string.IsNullOrWhiteSpace(body)) return null;
 
         var value = ParseBalance(body);
-        if (value is not null) return value;
+        if (value is not null)
+        {
+            Interlocked.Exchange(ref _freshLoginRequired, 0);
+            return value;
+        }
+
+        if (IsZombieSessionBalanceResponse(body))
+        {
+            Interlocked.Exchange(ref _freshLoginRequired, 1);
+            _logger.LogWarning(
+                "[AhkPortal] GetAccountBalance returned the empty JSON string used by a stale " +
+                "server-side session. Background recovery will rotate it after the login cooldown.");
+            return null;
+        }
 
         _logger.LogWarning("[AhkPortal] GetAccountBalance returned an unparseable value: {Body}",
             body.Length > 120 ? body[..120] : body);
@@ -635,6 +777,14 @@ public sealed class AhkPortalClient : IBrokerMarketState, IDisposable
             ? value
             : null;
     }
+
+    /// <summary>
+    /// The captured zombie-session signature is a successful JSON response whose value is the empty
+    /// string. Do not classify a zero-byte response the same way: that can be an ordinary endpoint
+    /// outage and must not spend a broker login.
+    /// </summary>
+    internal static bool IsZombieSessionBalanceResponse(string? body) =>
+        string.Equals(body?.Trim(), "\"\"", StringComparison.Ordinal);
 
     /// <summary>
     /// The account's holdings, from <c>GET /Home/GetCollaterals?account=…</c>. Null means the read
@@ -859,11 +1009,48 @@ public sealed class AhkPortalClient : IBrokerMarketState, IDisposable
         }
     }
 
+    private void RecordLoginFailure(string reason, Exception? exception = null)
+    {
+        var failures = Interlocked.Increment(ref _consecutiveLoginFailures);
+        var cfg = _config.Current;
+        _nextLoginAttemptUtc = AhkSessionRetryPolicy.NextLoginAttemptUtc(
+            DateTime.UtcNow,
+            _lastLoginAttemptUtc,
+            failures,
+            cfg.LoginRetryInitialSeconds,
+            cfg.LoginRetryMaxSeconds,
+            cfg.MinimumLoginIntervalSeconds);
+
+        if (exception is null)
+        {
+            _logger.LogWarning(
+                "[AhkPortal] {Reason}; login attempt {Failures} failed. No login will be attempted " +
+                "before {RetryUtc}.", reason, failures, _nextLoginAttemptUtc);
+        }
+        else
+        {
+            _logger.LogWarning(exception,
+                "[AhkPortal] {Reason}; login attempt {Failures} failed. No login will be attempted " +
+                "before {RetryUtc}.", reason, failures, _nextLoginAttemptUtc);
+        }
+    }
+
+    private static DateTime? OptionalUtc(DateTime value) =>
+        value == DateTime.MinValue ? null : value;
+
     public void Dispose()
     {
         _http?.Dispose();
         _sessionGate.Dispose();
+        _freshLoginGate.Dispose();
     }
+}
+
+internal enum AhkReloginResponse
+{
+    Unknown,
+    Healthy,
+    Expired
 }
 
 /// <summary>

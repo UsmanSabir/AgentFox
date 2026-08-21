@@ -202,6 +202,10 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         // it adds no traffic; the subscription is per symbol and off by default. See AhkDepthBook for
         // why the payload is kept raw rather than modelled.
         services.AddSingleton<AhkDepthBook>();
+        // One lifecycle owner keeps an already-requested broker session alive and recovers genuine
+        // expiry under a shared login cooldown/backoff. It never logs in merely because the host starts.
+        services.AddSingleton<AhkSessionRecoveryWorker>();
+        services.AddHostedService(sp => sp.GetRequiredService<AhkSessionRecoveryWorker>());
         services.AddSingleton<AhkFeedWorker>();
         services.AddSingleton<MarketDepthTool>();
         services.AddHostedService(sp => sp.GetRequiredService<AhkFeedWorker>());
@@ -310,10 +314,9 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
             Results.Ok(await accountReader.ReadAccountAsync(ct)))
             .RequireAuthorization("TradingTrader");
 
-        // Explicitly user-initiated: unlike the passive timer, this may harvest the authenticated
-        // browser cookies (or log in when necessary), then reconciles immediately on that same direct
-        // API session. This closes the confusing gap where "the browser is logged in" but the passive
-        // reconciliation reader has never been given a session of its own.
+        // Explicitly user-initiated: unlike the passive timer, this may request immediate session
+        // establishment, but it still obeys the SAME global login cooldown/backoff as background
+        // recovery. It can never create one login per click during a portal outage.
         trading.MapPost("/reconciliation/run", async (
             AhkPortalClient brokerPortal,
             BrokerReconciliationWorker worker,
@@ -2145,6 +2148,7 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
         var configManager  = services.GetRequiredService<PluginConfigManager>();
         var runtimeOptions = services.GetRequiredService<IRuntimePluginOptions<AhkConfig>>();
         var broker         = services.GetRequiredService<AhkBroker>();
+        var portal         = services.GetRequiredService<AhkPortalClient>();
         var logger         = services.GetRequiredService<ILogger<TradingAgentModule>>();
 
         var last = ConnectionFingerprint(runtimeOptions.Current);
@@ -2156,6 +2160,7 @@ public sealed class TradingAgentModule : IAgentAwareModule, IPluginUiContributor
 
             last = current;
             logger.LogInformation("[TradingAgent] Broker connection settings changed — invalidating AHK browser session.");
+            portal.InvalidateSession("the broker connection settings changed");
             await broker.InvalidateSessionAsync();
         });
     }

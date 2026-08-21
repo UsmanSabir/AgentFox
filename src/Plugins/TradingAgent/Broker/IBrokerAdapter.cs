@@ -272,16 +272,21 @@ public sealed class AhkBrowserBrokerAdapter : IBrokerAdapter, IBrokerStateReader
         // Passive by construction: this runs on a 60-second timer, and establishing a session here
         // would mean harvesting cookies from the browser broker — which logs in when no session is
         // live. A dead session would then produce a login attempt every single tick. Reporting
-        // "no session" is both honest and the only safe answer; the feed worker or a user-initiated
-        // read establishes the session, and this picks it up on the next pass.
+        // "no session" is both honest and the only safe answer. The separate session worker owns
+        // recovery under a global cooldown, and triggers an immediate pass after it succeeds.
         if (!_portal.HasSession)
         {
+            var recovery = _portal.NextLoginAttemptUtc is { } retry && retry > DateTime.UtcNow
+                ? $" Background recovery is active; the broker-safe login cooldown lasts until {retry:u}."
+                : _portal.AutomaticRecoveryArmed
+                    ? " Background recovery is active and will retry without requiring a dashboard action."
+                    : " Recovery will start automatically after a broker session is first requested.";
             return new BrokerReconciliationSnapshot(
                 Supported: true,
                 Healthy: false,
                 Reason: "No direct broker API session is established, so the account's state could not be read. " +
-                        "An authenticated browser can exist separately; use Check broker now to hand its " +
-                        "session to reconciliation. The periodic check never triggers a login by itself.",
+                        "An authenticated browser can exist separately. Session maintenance runs independently; " +
+                        "the periodic reconciliation check itself never triggers a login." + recovery,
                 CheckedUtc: checkedUtc);
         }
 
