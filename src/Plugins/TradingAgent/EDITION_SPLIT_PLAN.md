@@ -1,6 +1,6 @@
 # Edition Split Implementation Plan
 
-Status: proposed refactor plan
+Status: steps 1-5 implemented 2026-08-21; steps 6-7 outstanding
 Prepared: 2026-08-21
 Implements: [PREMIUM_AUTO_TRADING_PLAN.md](PREMIUM_AUTO_TRADING_PLAN.md) section 7, "Keeping premium code private"
 Scope: this public repository only. No premium logic, no strategy code, no behavior change.
@@ -18,6 +18,37 @@ Every step below must leave the solution building and `AgentFox.ChannelTests` gr
 3 and 5 change no runtime decision at all — they move code and introduce composition entry points.
 Only step 3b (a new overlay data channel on an existing endpoint, empty in the community edition) and
 step 4 (a startup guard) add behavior, and both are additive.
+
+---
+
+## 0. Implementation log
+
+| Step | Commit | Outcome |
+| --- | --- | --- |
+| 1 — extract `TradingAgent.Core` | `eac630f` | Pure `git mv`. Zero edits in the 38 trading test files, as predicted; namespaces unchanged. |
+| 2 — `TradingAgentRuntime` + `TradingCoreEndpoints` | `b792d20` | Module 2,696 → 90 lines. Line-by-line audit: 54 lines differ, all intended renames. |
+| 2b — split endpoints by area | `38c5283` | 11 `Endpoints.<Area>.cs` partials. Proved a pure move by line-multiset diff: 1 line lost (the class decl, now `partial`), everything added is boilerplate. |
+| 3 — `TradingCompositionOptions` | `2f7caa5` | No `ContributeCoreUi` field — see the note in step 3. |
+| 4 — duplicate-edition guard | `2f7caa5` | Name-compared service marker; 3 tests. |
+| — merge `dev` | `03d7548` | 3 commits, 37 files. Rename detection placed dev's 7 new engine files in Core unaided; only `TradingAgentModule.cs` needed hand-porting. Verified no dev content was dropped. |
+| 3b — chart overlay contract | `2b2c761` | Overlay DTOs, provider seam, collector, `overlays` on `/trading/candles`, generic renderer in `ChartPane`; 10 tests. |
+| 5 — dashboard embedded in Core | `fd3bbd9` | Entry csproj down to two `ProjectReference`s and **no** `PackageReference`; deployed closure byte-identical at 58 DLLs. |
+
+Deviations from the plan as written, both recorded in place: no `ContributeCoreUi` option (step 3),
+and `IMarketCalendar` gained an `IsTradingDay` default interface method that step 3b did not
+anticipate needing (the projection has to know which future dates are sessions).
+
+Verification standing at the end of step 5: solution builds with 0 errors, `svelte-check` clean,
+609 passed / 0 failed / 6 skipped (the 6 are live-portal tests gated behind `AHK_*` env vars). The
+`PsxListingStatusTests` `MARICEL` failure this plan expected as pre-existing now passes — it was
+fixed before this work began.
+
+Not yet done, and deliberately: **step 6 (packaging)** and **step 7 (private-repo skeleton)**, per
+decision 3. Also outstanding is the live smoke run against `10.40.0.20:8080` — every gate above is
+build, publish, and test evidence, which does not substitute for exercising the real dashboard,
+specialist, and WhatsApp channel once. Verification check 2 in section 4 (Core ships no
+`.deps.json`) is currently covered by the publish inspection rather than an automated test; fold it
+into step 6's packaging test.
 
 ---
 
