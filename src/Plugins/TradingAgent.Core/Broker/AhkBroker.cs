@@ -9,6 +9,7 @@ using PuppeteerSharp;
 using TradingAgent.Config;
 using TradingAgent.Models;
 using TradingAgent.Observability;
+using TradingAgent.Risk;
 using TradingAgent.Watchlist;
 
 namespace TradingAgent.Broker;
@@ -2031,6 +2032,7 @@ public sealed class AhkBroker : IAsyncDisposable
     {
         var cfg     = _config.Current;
         var qty     = signal.Quantity ?? cfg.DefaultQty;
+        var isStop  = signal.OrderType.Equals("STOPLOSS", StringComparison.OrdinalIgnoreCase);
         var isLimit = !signal.OrderType.Equals("MARKET", StringComparison.OrdinalIgnoreCase);
 
         _logger.LogInformation("[AhkBroker] BUY {Symbol} x{Qty} @ {Price} ({Type})",
@@ -2041,7 +2043,7 @@ public sealed class AhkBroker : IAsyncDisposable
         await OpenOrderDialogAsync("buy");
 
         // Set order type explicitly so a stale "Market"/"Limit" from a prior order can't misroute this one.
-        await SelectByVisibleTextAsync("#buyordertype", isLimit ? "Limit" : "Market");
+        await SelectByVisibleTextAsync("#buyordertype", isStop ? "Stop Loss" : isLimit ? "Limit" : "Market");
 
         await FillFieldAsync("#buysymbol", signal.Symbol);
         await ResolveSymbolAsync("buy");
@@ -2049,6 +2051,7 @@ public sealed class AhkBroker : IAsyncDisposable
         await FillFieldAsync("#buyvolume", qty.ToString());
 
         decimal? requestedPrice = null, submittedPrice = null;
+        decimal? submittedLimitPrice = null;
         string?  priceAdjustment = null;
         if (isLimit && signal.EntryPrice.HasValue)
         {
@@ -2056,11 +2059,36 @@ public sealed class AhkBroker : IAsyncDisposable
             (var finalPrice, priceAdjustment) = await ResolveLimitPriceAsync(requestedPrice.Value, "buy");
             submittedPrice = finalPrice;
 
+            if (isStop)
+            {
+                await WaitForLimitPriceEnabledAsync("buy");
+                var limit = signal.LimitPrice
+                    ?? decimal.Round(finalPrice * (1m + Math.Clamp(
+                        cfg.StopLimitSlippagePercent, 0m, 20m) / 100m), 2);
+                (limit, _) = await ResolveLimitPriceAsync(limit, "buy");
+                submittedLimitPrice = limit;
+            }
+
+            if (PriceIntentRule.Validate(signal, finalPrice, submittedLimitPrice) is { } priceProblem)
+            {
+                return new OrderResult
+                {
+                    Success = false,
+                    Action = "BUY",
+                    Symbol = signal.Symbol,
+                    Quantity = qty,
+                    Message = priceProblem,
+                    RequestedPrice = requestedPrice
+                };
+            }
+
             // #buylimitprice is DISABLED for every order type except Stop Loss (the portal's
             // order-type handler owns that), so writing to it on an ordinary limit order targets a
             // disabled input: the value never sticks and FillFieldAsync spends its verify-and-refill
             // retry for nothing. Only #buyprice matters here.
             await FillFieldAsync("#buyprice", finalPrice.ToString("F2"));
+            if (submittedLimitPrice is { } buyLimit)
+                await FillFieldAsync("#buylimitprice", buyLimit.ToString("F2"));
         }
 
         await FillFieldAsync("#buyPIN", cfg.TradingPin);
@@ -2125,6 +2153,7 @@ public sealed class AhkBroker : IAsyncDisposable
         await FillFieldAsync("#sellvolume", qty.ToString());
 
         decimal? requestedPrice = null, submittedPrice = null;
+        decimal? submittedLimitPrice = null;
         string?  priceAdjustment = null;
         if (isLimit && signal.EntryPrice.HasValue)
         {
@@ -2149,11 +2178,37 @@ public sealed class AhkBroker : IAsyncDisposable
                 var limit = signal.LimitPrice
                     ?? decimal.Round(finalPrice * (1m - Math.Clamp(cfg.StopLimitSlippagePercent, 0m, 20m) / 100m), 2);
                 (limit, _) = await ResolveLimitPriceAsync(limit, "sell");
+                submittedLimitPrice = limit;
+
+                if (PriceIntentRule.Validate(signal, finalPrice, submittedLimitPrice) is { } priceProblem)
+                {
+                    return new OrderResult
+                    {
+                        Success = false,
+                        Action = "SELL",
+                        Symbol = signal.Symbol,
+                        Quantity = qty,
+                        Message = priceProblem,
+                        RequestedPrice = requestedPrice
+                    };
+                }
 
                 await FillFieldAsync("#selllimitprice", limit.ToString("F2"));
                 _logger.LogInformation(
                     "[AhkBroker] SELL {Symbol} STOP trigger {Trigger} → limit {Limit}.",
                     signal.Symbol, finalPrice, limit);
+            }
+            else if (PriceIntentRule.Validate(signal, finalPrice, null) is { } priceProblem)
+            {
+                return new OrderResult
+                {
+                    Success = false,
+                    Action = "SELL",
+                    Symbol = signal.Symbol,
+                    Quantity = qty,
+                    Message = priceProblem,
+                    RequestedPrice = requestedPrice
+                };
             }
         }
 

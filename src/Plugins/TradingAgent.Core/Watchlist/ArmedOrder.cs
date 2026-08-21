@@ -184,6 +184,12 @@ public sealed record ArmedOrder
     public string? ProtectiveStopId { get; init; }
 
     /// <summary>
+    /// Once the local trigger fires, hand the LIMIT/STOPLOSS to the persistent DAY-order lifecycle
+    /// instead of treating broker acceptance as completion.
+    /// </summary>
+    public bool PersistentUntilFilled { get; init; }
+
+    /// <summary>
     /// The level this order fires at as of right now: recomputed for a percent trigger, the stored
     /// level for a fixed one, null for an event.
     /// </summary>

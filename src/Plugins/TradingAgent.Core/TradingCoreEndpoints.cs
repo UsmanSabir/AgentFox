@@ -115,7 +115,8 @@ public sealed record ArmOrderRequest(
     AttachStopRequest? AttachStop = null,
     decimal? TriggerPercent = null,
     decimal? ReferencePrice = null,
-    bool Trailing = false);
+    bool Trailing = false,
+    bool PersistentUntilFilled = false);
 
 /// <summary>An immediate order submitted from a registry choice in the trading dashboard.</summary>
 public sealed record DashboardOrderRequest(
@@ -125,7 +126,10 @@ public sealed record DashboardOrderRequest(
     decimal? Price = null,
     decimal? TriggerPrice = null,
     decimal? LimitPrice = null,
-    string? ClientRequestId = null);
+    string? ClientRequestId = null,
+    bool PersistentUntilFilled = false,
+    DateTime? ExpiresUtc = null,
+    int? ExpiresInDays = null);
 
 /// <summary>Auditable bulk alert state change. Dismiss is the UI's soft-delete operation.</summary>
 public sealed record BulkAlertActionRequest(

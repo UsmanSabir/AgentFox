@@ -96,10 +96,9 @@ public sealed partial class TradingCoreEndpoints
             Results.Ok(await accountReader.ReadAccountAsync(ct)))
             .RequireAuthorization("TradingTrader");
 
-        // Explicitly user-initiated: unlike the passive timer, this may harvest the authenticated
-        // browser cookies (or log in when necessary), then reconciles immediately on that same direct
-        // API session. This closes the confusing gap where "the browser is logged in" but the passive
-        // reconciliation reader has never been given a session of its own.
+        // Explicitly user-initiated: unlike the passive timer, this may request immediate session
+        // establishment, but it still obeys the SAME global login cooldown/backoff as background
+        // recovery. It can never create one login per click during a portal outage.
         trading.MapPost("/reconciliation/run", async (
             AhkPortalClient brokerPortal,
             BrokerReconciliationWorker worker,

@@ -26,6 +26,14 @@ carried by cookies:
 response body is a status string: containing `"0"` means OK, containing `"8"` means the session is
 dead and the client must log in again.
 
+No server-side idle timeout, absolute session lifetime, or login rate-limit interval was exposed by
+the captured traffic. `.AspNetCore.Session` was a browser-session cookie with no client-side expiry;
+that does not reveal when the server will expire it. A client should therefore renew the existing
+session on the observed one-minute `Relogin` cadence and start a fresh login only after a confirmed
+dead-session response (or another confirmed authentication failure), never from an assumed TTL.
+The related live-test runbook records that roughly 15 browser logins in two hours preceded a broker
+access block, so fresh-login retries must also be globally throttled and backed off.
+
 ## Live pricing
 
 Three calls, in order:

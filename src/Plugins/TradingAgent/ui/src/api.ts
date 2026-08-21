@@ -162,6 +162,8 @@ export interface DashboardOrderRequest {
   triggerPrice?: number | null;
   limitPrice?: number | null;
   clientRequestId: string;
+  persistentUntilFilled?: boolean;
+  expiresInDays?: number;
 }
 
 export interface DashboardOrderResult {
@@ -171,7 +173,49 @@ export interface DashboardOrderResult {
   policyVersion: string;
   reason: string;
   groups: unknown[];
+  persistentOrder?: PersistentOrder | null;
 }
+
+export interface PersistentOrderPlacement {
+  placementId: string;
+  intentId: string;
+  sessionDate: string;
+  attempt: number;
+  quantity: number;
+  brokerOrderNo: string | null;
+  executionId: string | null;
+  state: 'accepted' | 'failed' | 'unknown' | string;
+  requestedPrice: number | null;
+  submittedPrice: number | null;
+  message: string | null;
+  createdUtc: string;
+}
+
+export interface PersistentOrder {
+  intentId: string;
+  symbol: string;
+  action: 'BUY' | 'SELL' | string;
+  quantity: number;
+  orderType: 'LIMIT' | 'STOPLOSS' | string;
+  price: number | null;
+  limitPrice: number | null;
+  expiresUtc: string;
+  state: string;
+  filledQuantity: number;
+  remainingQuantity: number;
+  lastAttemptSessionDate: string | null;
+  attemptCount: number;
+  lastOrderNo: string | null;
+  sourceArmedId: string | null;
+  stateReason: string | null;
+  note: string | null;
+  createdUtc: string;
+  updatedUtc: string;
+  terminalUtc: string | null;
+  placements: PersistentOrderPlacement[];
+}
+
+export interface PersistentOrdersResponse { orders: PersistentOrder[]; }
 
 /**
  * Coverage of the local daily-candle archive that weekly support/resistance is derived from, plus
@@ -579,6 +623,7 @@ export interface ArmedOrder {
   sourceAlertId: string | null;
   /** Set when this order is the local backstop for a protective stop, not an ordinary trigger. */
   protectiveStopId: string | null;
+  persistentUntilFilled: boolean;
 }
 
 /**
@@ -653,6 +698,8 @@ export interface ArmOrderRequest {
   referencePrice?: number | null;
   /** Trail the reference with the price — a drop trigger then behaves as a trailing stop. */
   trailing?: boolean;
+  /** After the trigger, keep re-placing a LIMIT/STOPLOSS each trading day until filled or expired. */
+  persistentUntilFilled?: boolean;
 }
 
 /** A protective stop to attach to a BUY entry. Sized at fill time, not here. */
@@ -883,6 +930,13 @@ export const trading = {
   orderIntents:   ()            => get<OrderIntentRegistryResponse>('/trading/order-intents'),
   placeOrder:     (request: DashboardOrderRequest) =>
     post<DashboardOrderResult>('/trading/orders', request, 60_000),
+  persistentOrders: {
+    list: (all = false) =>
+      get<PersistentOrdersResponse>(`/trading/persistent-orders?all=${all}`),
+    cancel: (intentId: string) =>
+      del<{ intentId: string; completed: boolean; state: string; message: string }>(
+        `/trading/persistent-orders/${encodeURIComponent(intentId)}`)
+  },
   // Open-only by default: an empty inbox is the normal state, and a list dominated by last month's
   // resolved proposals is exactly what made this feel like a log rather than a queue.
   proposals: (openOnly = true, limit = 100) =>

@@ -170,6 +170,7 @@ public sealed class TradingAgentRuntime
         // IBrokerAccountReader adapter without changing the endpoint or Svelte contract.
         services.AddSingleton<AhkBrokerAccountReader>();
         services.AddSingleton<IBrokerAccountReader>(sp => sp.GetRequiredService<AhkBrokerAccountReader>());
+        services.AddSingleton<BrokerOrderCancellationService>();
         // Same instance behind the narrow interface the order gate consumes.
         services.AddSingleton<IBrokerMarketState>(sp => sp.GetRequiredService<AhkPortalClient>());
         services.AddSingleton<AhkQuoteBook>();
@@ -177,6 +178,10 @@ public sealed class TradingAgentRuntime
         // it adds no traffic; the subscription is per symbol and off by default. See AhkDepthBook for
         // why the payload is kept raw rather than modelled.
         services.AddSingleton<AhkDepthBook>();
+        // One lifecycle owner keeps an already-requested broker session alive and recovers genuine
+        // expiry under a shared login cooldown/backoff. It never logs in merely because the host starts.
+        services.AddSingleton<AhkSessionRecoveryWorker>();
+        services.AddHostedService(sp => sp.GetRequiredService<AhkSessionRecoveryWorker>());
         services.AddSingleton<AhkFeedWorker>();
         services.AddSingleton<MarketDepthTool>();
         services.AddHostedService(sp => sp.GetRequiredService<AhkFeedWorker>());
@@ -236,6 +241,8 @@ public sealed class TradingAgentRuntime
         // the same instance the timer drives.
         services.AddSingleton<ProtectiveStopWorker>();
         services.AddHostedService(sp => sp.GetRequiredService<ProtectiveStopWorker>());
+        services.AddSingleton<PersistentOrderWorker>();
+        services.AddHostedService(sp => sp.GetRequiredService<PersistentOrderWorker>());
         services.AddHostedService<DailyCandleBackfillWorker>();
     }
 
@@ -297,6 +304,7 @@ public sealed class TradingAgentRuntime
         var configManager  = services.GetRequiredService<PluginConfigManager>();
         var runtimeOptions = services.GetRequiredService<IRuntimePluginOptions<AhkConfig>>();
         var broker         = services.GetRequiredService<AhkBroker>();
+        var portal         = services.GetRequiredService<AhkPortalClient>();
         var logger         = services.GetRequiredService<ILogger<TradingAgentRuntime>>();
 
         var last = ConnectionFingerprint(runtimeOptions.Current);
@@ -308,6 +316,7 @@ public sealed class TradingAgentRuntime
 
             last = current;
             logger.LogInformation("[TradingAgent] Broker connection settings changed — invalidating AHK browser session.");
+            portal.InvalidateSession("the broker connection settings changed");
             await broker.InvalidateSessionAsync();
         });
     }

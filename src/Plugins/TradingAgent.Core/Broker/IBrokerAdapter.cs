@@ -8,6 +8,7 @@ using System.Text.Json;
 using TradingAgent.Feed;
 using TradingAgent.Models;
 using TradingAgent.Reconciliation;
+using TradingAgent.Risk;
 
 namespace TradingAgent.Broker;
 
@@ -149,6 +150,21 @@ public sealed class AhkBrowserBrokerAdapter : IBrokerAdapter, IBrokerStateReader
             (limitPrice, _) = ClampToBand(raw, band);
         }
 
+        if (PriceIntentRule.Validate(signal, price, limitPrice) is { } priceProblem)
+        {
+            _logger.LogWarning("[BrokerAdapter] {Symbol}: {Reason}", symbol, priceProblem);
+            return new OrderResult
+            {
+                Success = false,
+                Action = isBuy ? "BUY" : "SELL",
+                Symbol = symbol,
+                Quantity = qty,
+                Message = priceProblem,
+                RequestedPrice = signal.EntryPrice,
+                SubmittedPrice = null
+            };
+        }
+
         var request = new PlaceOrderApiRequest(
             Side: isBuy ? "BUY" : "SEL",
             Symbol: symbol,
@@ -272,16 +288,21 @@ public sealed class AhkBrowserBrokerAdapter : IBrokerAdapter, IBrokerStateReader
         // Passive by construction: this runs on a 60-second timer, and establishing a session here
         // would mean harvesting cookies from the browser broker — which logs in when no session is
         // live. A dead session would then produce a login attempt every single tick. Reporting
-        // "no session" is both honest and the only safe answer; the feed worker or a user-initiated
-        // read establishes the session, and this picks it up on the next pass.
+        // "no session" is both honest and the only safe answer. The separate session worker owns
+        // recovery under a global cooldown, and triggers an immediate pass after it succeeds.
         if (!_portal.HasSession)
         {
+            var recovery = _portal.NextLoginAttemptUtc is { } retry && retry > DateTime.UtcNow
+                ? $" Background recovery is active; the broker-safe login cooldown lasts until {retry:u}."
+                : _portal.AutomaticRecoveryArmed
+                    ? " Background recovery is active and will retry without requiring a dashboard action."
+                    : " Recovery will start automatically after a broker session is first requested.";
             return new BrokerReconciliationSnapshot(
                 Supported: true,
                 Healthy: false,
                 Reason: "No direct broker API session is established, so the account's state could not be read. " +
-                        "An authenticated browser can exist separately; use Check broker now to hand its " +
-                        "session to reconciliation. The periodic check never triggers a login by itself.",
+                        "An authenticated browser can exist separately. Session maintenance runs independently; " +
+                        "the periodic reconciliation check itself never triggers a login." + recovery,
                 CheckedUtc: checkedUtc);
         }
 
@@ -301,6 +322,8 @@ public sealed class AhkBrowserBrokerAdapter : IBrokerAdapter, IBrokerStateReader
 
         var failures = new List<string>();
         if (!outstanding.Ok) failures.Add(outstanding.Error ?? "the outstanding order book could not be read");
+        if (outstanding.Ok && outstanding.Orders.Any(o => string.IsNullOrWhiteSpace(o.OrderNo)))
+            failures.Add("an outstanding order was missing its broker order number");
         if (activity is null) failures.Add("today's activity log could not be read");
         if (holdings is null) failures.Add("the account's holdings could not be read");
         if (balance is null) failures.Add("the available cash balance could not be read");
@@ -335,6 +358,24 @@ public sealed class AhkBrowserBrokerAdapter : IBrokerAdapter, IBrokerStateReader
                 f.Price ?? 0m,
                 ParseActivityTimeUtc(f.Time, checkedUtc)))
             .ToList();
+
+        var structuredOpenOrders = outstanding.Ok
+            ? outstanding.Orders
+                .Where(o => !string.IsNullOrWhiteSpace(o.OrderNo))
+                .Select(o => new BrokerWorkingOrder(
+                    o.OrderNo!.Trim(),
+                    o.Scrip?.Trim().ToUpperInvariant() ?? "",
+                    o.Type?.Trim(),
+                    o.Remaining,
+                    o.Price))
+                .ToList()
+            : [];
+
+        var structuredPositions = holdings?
+            .Where(h => !string.IsNullOrWhiteSpace(h.Symbol) && h.QuantityTotal is not null)
+            .Select(h => new BrokerPosition(
+                h.Symbol!.Trim().ToUpperInvariant(), h.QuantityTotal!.Value))
+            .ToList() ?? [];
 
         var details = JsonSerializer.Serialize(new
         {
@@ -385,7 +426,12 @@ public sealed class AhkBrowserBrokerAdapter : IBrokerAdapter, IBrokerStateReader
                 Reason: "Broker state is incomplete: " + string.Join("; ", failures) + ".",
                 CheckedUtc: checkedUtc,
                 DetailsJson: details)
-            { Fills = structuredFills };
+            {
+                Fills = structuredFills,
+                OpenOrders = structuredOpenOrders,
+                Positions = structuredPositions,
+                AvailableCashPkr = balance
+            };
         }
 
         return new BrokerReconciliationSnapshot(
@@ -395,7 +441,12 @@ public sealed class AhkBrowserBrokerAdapter : IBrokerAdapter, IBrokerStateReader
                     $"{holdings!.Count} holding(s) and the cash balance from the broker.",
             CheckedUtc: checkedUtc,
             DetailsJson: details)
-        { Fills = structuredFills };
+        {
+            Fills = structuredFills,
+            OpenOrders = structuredOpenOrders,
+            Positions = structuredPositions,
+            AvailableCashPkr = balance
+        };
     }
 
     /// <summary>Rounds a PKR amount to paisa, preserving null as unknown.</summary>

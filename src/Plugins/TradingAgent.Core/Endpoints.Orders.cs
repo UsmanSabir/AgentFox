@@ -57,6 +57,8 @@ public sealed partial class TradingCoreEndpoints
             DashboardOrderRequest body,
             MonitoredUniverse universe,
             TradingAgent.Manager.TradingManager manager,
+            PersistentOrderWorker persistentOrders,
+            TradingReconciliationState reconciliation,
             TradingPolicyProvider policyProvider,
             ApprovalIntentRegistry intentRegistry,
             IOptions<TradingAgentOptions> options,
@@ -130,15 +132,87 @@ public sealed partial class TradingCoreEndpoints
                 EntryPrice = entryPrice,
                 LimitPrice = stopLimit,
                 Confidence = "HIGH",
+                PreservePriceIntent = body.PersistentUntilFilled,
                 RawMessage = $"dashboard:{intent.Id}"
             };
 
             IReadOnlyList<IReadOnlyList<TradingSignal>> groups = [[signal]];
             var policy = policyProvider.Current();
-            var source = "dashboard-order:" + (
-                string.IsNullOrWhiteSpace(body.ClientRequestId)
-                    ? Guid.NewGuid().ToString("N")
-                    : body.ClientRequestId.Trim());
+            PersistentOrderIntent? persistent = null;
+            var effectiveQuantity = body.Quantity.Value;
+            string? sellQuantityAdjustment = null;
+            string source;
+            if (body.PersistentUntilFilled)
+            {
+                if (PersistentOrderDecisions.ValidateEligibility(intent.OrderType) is { } persistenceProblem)
+                    return Results.BadRequest(new
+                    {
+                        error = "order_not_persistable",
+                        message = persistenceProblem
+                    });
+
+                var expires = body.ExpiresUtc
+                    ?? DateTime.UtcNow.AddDays(Math.Clamp(body.ExpiresInDays ?? 30, 1, 365));
+                if (expires <= DateTime.UtcNow)
+                    return Results.BadRequest(new
+                    {
+                        error = "invalid_expiry",
+                        message = "A persistent order must expire in the future."
+                    });
+
+                if (intent.Action.Equals("SELL", StringComparison.OrdinalIgnoreCase))
+                {
+                    var availability = SellQuantityRule.Available(
+                        reconciliation.Current,
+                        symbol,
+                        DateTime.UtcNow,
+                        TimeSpan.FromSeconds(Math.Max(
+                            10, options.Value.ReconciliationMaxAgeSeconds)));
+                    if (!availability.Known)
+                        return Results.Conflict(new
+                        {
+                            error = "sell_availability_unknown",
+                            message = availability.Reason
+                        });
+                    if (availability.AvailableQuantity <= 0)
+                        return Results.Conflict(new
+                        {
+                            error = "no_sellable_holding",
+                            message = $"No uncommitted {symbol} shares are available to sell."
+                        });
+
+                    effectiveQuantity = Math.Min(effectiveQuantity, availability.AvailableQuantity);
+                    if (effectiveQuantity != body.Quantity.Value)
+                    {
+                        sellQuantityAdjustment = new SellQuantityAdjustment(
+                            0, 0, symbol, body.Quantity.Value, effectiveQuantity).Message;
+                    }
+                }
+
+                persistent = new PersistentOrderIntent
+                {
+                    IntentId = Guid.NewGuid().ToString("N"),
+                    Symbol = symbol,
+                    Action = intent.Action,
+                    Quantity = effectiveQuantity,
+                    OrderType = intent.OrderType,
+                    Price = entryPrice,
+                    LimitPrice = stopLimit,
+                    ExpiresUtc = expires,
+                    Note = $"New Order: {intent.Label}"
+                };
+                signal = persistent.ToSignal(effectiveQuantity);
+                groups = [[signal]];
+                source = PersistentOrderWorker.BuildSource(
+                    persistent.IntentId, PsxTime.Today(), attempt: 1);
+            }
+            else
+            {
+                source = "dashboard-order:" + (
+                    string.IsNullOrWhiteSpace(body.ClientRequestId)
+                        ? Guid.NewGuid().ToString("N")
+                        : body.ClientRequestId.Trim());
+            }
 
             // The TradingTrader request is the approval event. Bind it to the exact order and let the
             // manager consume/re-hash the one-time intent exactly as it does for a host tool approval.
@@ -148,6 +222,26 @@ public sealed partial class TradingCoreEndpoints
             intentRegistry.Register(approvalIntent);
             var authorization = ExecutionAuthorization.HostToolGate(
                 http.User.Identity?.Name ?? "trading-dashboard", approvalIntent);
+
+            if (persistent is not null)
+            {
+                var submission = await persistentOrders.CreateAndSubmitAsync(
+                    persistent, authorization, ct);
+                var persistentResult = submission.Execution;
+                return Results.Ok(new
+                {
+                    accepted = submission.Accepted,
+                    IsReplay = persistentResult?.IsReplay ?? false,
+                    ExecutionId = persistentResult?.ExecutionId ?? "",
+                    PolicyVersion = persistentResult?.PolicyVersion ?? policy.Version,
+                    reason = sellQuantityAdjustment is null
+                        ? submission.Reason
+                        : sellQuantityAdjustment + " " + submission.Reason,
+                    Groups = persistentResult?.Groups
+                             ?? Array.Empty<IReadOnlyList<OrderResult>>(),
+                    persistentOrder = submission.Intent
+                });
+            }
 
             var result = await manager.ExecuteGroupsAsync(groups, source, authorization, ct);
             var brokerResults = result.Groups.SelectMany(group => group).ToList();
@@ -165,5 +259,59 @@ public sealed partial class TradingCoreEndpoints
             });
         }).RequireAuthorization("TradingTrader");
 
+        trading.MapGet("/persistent-orders", async (
+            bool? all,
+            ITradingRepository repository,
+            CancellationToken ct) =>
+        {
+            var orders = await repository.GetPersistentOrdersAsync(openOnly: !(all ?? false), ct);
+            var rows = new List<object>(orders.Count);
+            foreach (var order in orders)
+            {
+                var placements = await repository.GetPersistentOrderPlacementsAsync(order.IntentId, ct);
+                rows.Add(new
+                {
+                    order.IntentId,
+                    order.Symbol,
+                    order.Action,
+                    order.Quantity,
+                    order.OrderType,
+                    order.Price,
+                    order.LimitPrice,
+                    order.ExpiresUtc,
+                    order.State,
+                    order.FilledQuantity,
+                    order.RemainingQuantity,
+                    lastAttemptSessionDate = order.LastAttemptSessionDate?.ToString("yyyy-MM-dd"),
+                    order.AttemptCount,
+                    order.LastOrderNo,
+                    order.SourceArmedId,
+                    order.StateReason,
+                    order.Note,
+                    order.CreatedUtc,
+                    order.UpdatedUtc,
+                    order.TerminalUtc,
+                    placements
+                });
+            }
+            return Results.Ok(new { orders = rows });
+        }).RequireAuthorization("TradingAnalyst");
+
+        trading.MapDelete("/persistent-orders/{intentId}", async (
+            string intentId,
+            PersistentOrderWorker worker,
+            CancellationToken ct) =>
+        {
+            var result = await worker.CancelAsync(intentId, ct);
+            return result.State == "missing"
+                ? Results.NotFound(new { error = "not_found", message = result.Message })
+                : Results.Ok(new
+                {
+                    intentId,
+                    completed = result.Completed,
+                    state = result.State,
+                    message = result.Message
+                });
+        }).RequireAuthorization("TradingTrader");
     }
 }

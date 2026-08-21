@@ -127,6 +127,23 @@ public class AhkConfig
     public string SessionDir { get; set; } = "session_ahk";
     public string LogDir { get; set; } = "logs/trading";
 
+    /// <summary>
+    /// Minimum time between broker LOGIN attempts. Keepalive calls do not count: they preserve the
+    /// current session and are controlled by <c>AhkFeed.ReloginSeconds</c>. This guard applies to
+    /// every caller, including HTTP requests, so concurrent dashboard/background work cannot bypass
+    /// the broker's post-login blocking interval.
+    /// </summary>
+    public int MinimumLoginIntervalSeconds { get; set; } = 600;
+
+    /// <summary>
+    /// Initial exponential-backoff component after a failed login. The effective retry delay is
+    /// never shorter than <see cref="MinimumLoginIntervalSeconds"/>.
+    /// </summary>
+    public int LoginRetryInitialSeconds { get; set; } = 60;
+
+    /// <summary>Maximum exponential retry delay while the portal is down or access is blocked.</summary>
+    public int LoginRetryMaxSeconds { get; set; } = 900;
+
     /// <summary>Run Chromium without a visible window. Default true so the agent can run as a service.</summary>
     public bool Headless { get; set; } = true;
 

@@ -6,6 +6,7 @@ using TradingAgent.Config;
 using TradingAgent.Models;
 using TradingAgent.Persistence;
 using TradingAgent.Reconciliation;
+using TradingAgent.Trading;
 
 namespace AgentFox.ChannelTests;
 
@@ -137,6 +138,65 @@ public sealed class OrderLedgerPersistenceTests
         var audit = (await repository.GetEventsAsync()).Single();
         Assert.AreEqual("unknown_resolved", audit.EventType);
         Assert.AreEqual("found in broker activity", audit.Payload.GetProperty("note").GetString());
+    }
+
+    [TestMethod]
+    public async Task PersistentOrder_ClaimsOncePerDate_AndProjectsExactBrokerFills()
+    {
+        var repository = NewRepository();
+        var intent = new PersistentOrderIntent
+        {
+            IntentId = "persistent-1",
+            Symbol = "FFC",
+            Action = "BUY",
+            Quantity = 10,
+            OrderType = "LIMIT",
+            Price = 550m,
+            ExpiresUtc = DateTime.UtcNow.AddDays(30)
+        };
+        await repository.SavePersistentOrderAsync(intent);
+
+        var date = new DateOnly(2026, 8, 21);
+        var claim = await repository.TryClaimPersistentOrderAttemptAsync(intent.IntentId, date);
+        Assert.IsTrue(claim.Acquired);
+        Assert.AreEqual(1, claim.Attempt);
+        Assert.IsFalse((await repository.TryClaimPersistentOrderAttemptAsync(intent.IntentId, date)).Acquired,
+            "one intent must never submit twice on the same trading date");
+
+        var execution = await repository.TryBeginExecutionAsync("persistent-exec", "{}", "v1");
+        await repository.RecordBrokerOrdersAsync(execution.ExecutionId,
+        [
+            new OrderResult
+            {
+                Success = true, OrderId = "PERSIST-001", Action = "BUY", Symbol = "FFC", Quantity = 10
+            }
+        ]);
+        await repository.RecordPersistentOrderPlacementAsync(new PersistentOrderPlacement
+        {
+            PlacementId = "placement-1",
+            IntentId = intent.IntentId,
+            SessionDate = date,
+            Attempt = claim.Attempt,
+            Quantity = 10,
+            BrokerOrderNo = "PERSIST-001",
+            ExecutionId = execution.ExecutionId,
+            State = "accepted",
+            RequestedPrice = 550m,
+            SubmittedPrice = 550m
+        }, "resting", "accepted");
+
+        await repository.RecordFillsAsync(
+        [
+            new BrokerFill("PERSIST-001", "FFC", "BUY", 4, 550m,
+                new DateTime(2026, 8, 21, 6, 0, 0, DateTimeKind.Utc))
+        ]);
+
+        var loaded = await repository.GetPersistentOrderAsync(intent.IntentId);
+        Assert.IsNotNull(loaded);
+        Assert.AreEqual(4, loaded.FilledQuantity);
+        Assert.AreEqual(6, loaded.RemainingQuantity);
+        Assert.AreEqual("PERSIST-001", loaded.LastOrderNo);
+        Assert.AreEqual(1, (await repository.GetPersistentOrderPlacementsAsync(intent.IntentId)).Count);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

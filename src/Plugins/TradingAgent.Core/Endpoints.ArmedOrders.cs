@@ -102,7 +102,8 @@ public sealed partial class TradingCoreEndpoints
                     o.StateReason,
                     o.Note,
                     o.SourceAlertId,
-                    o.ProtectiveStopId
+                    o.ProtectiveStopId,
+                    o.PersistentUntilFilled
                 }),
                 // Sent with the orders because a stop and the entry it protects are one thing to
                 // read: "did my buy fill, and is the stop actually at the broker" is a single
@@ -293,6 +294,16 @@ public sealed partial class TradingCoreEndpoints
                     message = $"This order would be refused when it fired: {stopProblem}"
                 });
 
+            if (body.PersistentUntilFilled
+                && PersistentOrderDecisions.ValidateEligibility(body.OrderType) is { } persistenceProblem)
+            {
+                return Results.BadRequest(new
+                {
+                    error = "order_not_persistable",
+                    message = persistenceProblem
+                });
+            }
+
             var order = new ArmedOrder
             {
                 ArmedId          = Guid.NewGuid().ToString("N"),
@@ -308,6 +319,7 @@ public sealed partial class TradingCoreEndpoints
                 OrderType        = (body.OrderType ?? "LIMIT").Trim().ToUpperInvariant(),
                 Price            = body.Price,
                 LimitPrice       = body.LimitPrice,
+                PersistentUntilFilled = body.PersistentUntilFilled,
                 // Default an expiry: an entry trigger left open indefinitely can fire months later
                 // against a thesis nobody remembers forming.
                 ExpiresUtc       = body.ExpiresUtc
@@ -418,6 +430,7 @@ public sealed partial class TradingCoreEndpoints
                     order.TriggerPercent,
                     order.ReferencePrice,
                     order.Trailing,
+                    order.PersistentUntilFilled,
                     order.Action,
                     order.Quantity,
                     order.OrderType,

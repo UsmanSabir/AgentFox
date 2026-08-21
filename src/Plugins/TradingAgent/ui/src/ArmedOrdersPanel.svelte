@@ -320,6 +320,7 @@
             <div class="row-2">
               fires when {order.triggerKind === 'Event' ? 'event' : 'price'} {describeTrigger(order)}
               {#if order.trailing}<span class="chip trail">trailing</span>{/if}
+              {#if order.persistentUntilFilled}<span class="chip">keep working after trigger</span>{/if}
               {#if order.orderType === 'STOPLOSS' && order.limitPrice != null}
                 · stop limit {num(order.limitPrice)}
               {/if}
