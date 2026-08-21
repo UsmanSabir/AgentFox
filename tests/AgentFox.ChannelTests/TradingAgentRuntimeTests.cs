@@ -1,40 +1,35 @@
-using System.Reflection;
 using System.Text.Json;
 using TradingAgent;
 using TradingAgent.Watchlist;
 
 namespace AgentFox.ChannelTests;
 
+/// <summary>
+/// Contracts of the trading engine's composition surface. These used to reflect over private
+/// statics on TradingAgentModule; the members are now <c>internal</c> on the Core types that own
+/// them, so a rename or signature change fails the BUILD instead of failing a null check at run
+/// time. Core grants this assembly InternalsVisibleTo for exactly this.
+/// </summary>
 [TestClass]
-public class TradingAgentModuleTests
+public class TradingAgentRuntimeTests
 {
     [TestMethod]
     public void BuildSpecialistToolNames_ExposesTradingAndDiscoveryTools()
     {
-        var method = typeof(TradingAgentModule).GetMethod(
-            "BuildSpecialistToolNames",
-            BindingFlags.NonPublic | BindingFlags.Static);
+        var names = TradingAgentRuntime.BuildSpecialistToolNames(
+            webSearchProvider: null,
+            researchWebEnabled: false).ToList();
 
-        Assert.IsNotNull(method);
-
-        var names = (IReadOnlyList<string>)method!.Invoke(null, [null, false])!;
-
-        CollectionAssert.Contains(names.ToList(), "place_order");
-        CollectionAssert.Contains(names.ToList(), "place_orders");
-        CollectionAssert.Contains(names.ToList(), "market_movers");
-        CollectionAssert.Contains(names.ToList(), "stock_dossier");
-        CollectionAssert.Contains(names.ToList(), "get_market_depth");
+        CollectionAssert.Contains(names, "place_order");
+        CollectionAssert.Contains(names, "place_orders");
+        CollectionAssert.Contains(names, "market_movers");
+        CollectionAssert.Contains(names, "stock_dossier");
+        CollectionAssert.Contains(names, "get_market_depth");
     }
 
     [TestMethod]
     public void SerializeAlertForSse_UsesSameCamelCaseContractAsRestApi()
     {
-        var method = typeof(TradingAgentModule).GetMethod(
-            "SerializeAlertForSse",
-            BindingFlags.NonPublic | BindingFlags.Static);
-
-        Assert.IsNotNull(method);
-
         var alert = new AlertRecord
         {
             AlertId = "alert-1",
@@ -49,7 +44,7 @@ public class TradingAgentModuleTests
             SessionDate = "2026-08-13"
         };
 
-        var json = (string)method!.Invoke(null, [alert])!;
+        var json = TradingCoreEndpoints.SerializeAlertForSse(alert);
         using var document = JsonDocument.Parse(json);
 
         Assert.IsTrue(document.RootElement.TryGetProperty("alertId", out _));
