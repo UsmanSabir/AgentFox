@@ -8,7 +8,7 @@ namespace TradingAgent.Config;
 /// connection (portal URL and credentials) as a separate definition. Credential values are declared
 /// <c>Sensitive</c>: the web layer masks them on read and the config store encrypts them at rest,
 /// and changes are applied by <see cref="TradingAgent.Broker.AhkBroker"/> on the next browser
-/// session (see the credential-change listener in <see cref="TradingAgentModule"/>).
+/// session (see the credential-change listener in the trading entry plugin's module).
 /// </summary>
 public sealed class TradingPluginConfigDefinitionProvider : IPluginConfigDefinitionProvider
 {

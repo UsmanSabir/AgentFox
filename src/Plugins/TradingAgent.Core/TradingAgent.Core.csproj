@@ -1,0 +1,52 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- ── The trading engine, as a LIBRARY ────────────────────────────────────
+       Everything the trading plugin does lives here: broker, market data, analysis, risk,
+       TradingManager, persistence, tools, workers, and the management endpoints. The deployed
+       *entry plugin* (../TradingAgent) is a thin shim that delegates to this assembly, and a
+       separately licensed premium entry plugin composes the same assembly the same way.
+
+       CRITICAL — this project must NEVER get an OutputPath into the host's plugins/ folder, and
+       must never ship a .deps.json beside the entry plugin. The host's plugin loader treats any
+       DLL with a sibling .deps.json as an entry plugin and gives it its OWN AssemblyLoadContext
+       (see Agent/Program.cs, the .deps.json check in LoadPluginsAndModules). A referenced
+       library's .deps.json is not copied into the referencing project's output, which is exactly
+       what keeps this assembly invisible to discovery and loaded inside the entry plugin's single
+       context — one set of singletons, one type identity. Giving it an OutputPath would make it a
+       second entry plugin: duplicate feed/monitor/reconciliation workers, two writers against one
+       SQLite ledger, and two broker browser sessions against one account.
+
+       Namespaces are deliberately unchanged (TradingAgent.*, not TradingAgent.Core.*): a namespace
+       is not an assembly, and keeping them stable is what made this split a pure file move. -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Agents.AI.Harness" />
+    <PackageReference Include="PuppeteerSharp" />
+    <!-- Must match the version the HOST resolves. PluginLoadContext delegates all
+         Microsoft.Extensions.* assemblies to the host's default load context so plugin and host
+         share one IChatClient type; .NET roll-forward only binds UP, so building against a HIGHER
+         version than the host ships fails with FileNotFoundException at OnAgentReadyAsync. -->
+    <PackageReference Include="Microsoft.Extensions.AI.Abstractions" />
+    <!-- BackgroundService / IHostedService for the plugin's hosted workers. Same pinning rule. -->
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" />
+    <!-- ManifestEmbeddedFileProvider, for serving the embedded plugin UI. Same pinning rule. -->
+    <PackageReference Include="Microsoft.Extensions.FileProviders.Embedded" />
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+    <!-- Override Microsoft.Data.Sqlite's minimum native bundle with the maintained release;
+         2.1.11 is deprecated and affected by GHSA-2m69-gcr7-jv3q. -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Also the source of the Microsoft.AspNetCore.App FrameworkReference this project's
+         endpoint code compiles against. -->
+    <ProjectReference Include="..\..\AgentFox.Plugins\AgentFox.Plugins.csproj" />
+  </ItemGroup>
+
+</Project>

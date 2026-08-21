@@ -54,6 +54,13 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\AgentFox.Plugins\AgentFox.Plugins.csproj" />
+    <!-- The trading engine. This project is only the ENTRY plugin: the assembly the host's loader
+         discovers (it is the one with a .deps.json) and the assembly channel providers must live in.
+         Everything else — broker, market data, analysis, risk, TradingManager, persistence, tools,
+         workers, endpoints — lives in TradingAgent.Core, which a premium entry plugin composes the
+         same way this one does. TradingAgent.Core deliberately has no OutputPath of its own; see the
+         comment at the top of TradingAgent.Core.csproj for why that matters to the loader. -->
+    <ProjectReference Include="..\TradingAgent.Core\TradingAgent.Core.csproj" />
   </ItemGroup>
 
 </Project>

@@ -32,6 +32,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AgentFox.TavilySearch", "Pl
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TradingAgent", "Plugins\TradingAgent\TradingAgent.csproj", "{CCCF2B96-0CBD-420F-BAC8-15910924ED29}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TradingAgent.Core", "Plugins\TradingAgent.Core\TradingAgent.Core.csproj", "{0C5D9286-282B-4624-B85E-8176FA76A2B1}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -162,6 +164,18 @@ Global
 		{CCCF2B96-0CBD-420F-BAC8-15910924ED29}.Release|x64.Build.0 = Release|Any CPU
 		{CCCF2B96-0CBD-420F-BAC8-15910924ED29}.Release|x86.ActiveCfg = Release|Any CPU
 		{CCCF2B96-0CBD-420F-BAC8-15910924ED29}.Release|x86.Build.0 = Release|Any CPU
+		{0C5D9286-282B-4624-B85E-8176FA76A2B1}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0C5D9286-282B-4624-B85E-8176FA76A2B1}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{0C5D9286-282B-4624-B85E-8176FA76A2B1}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{0C5D9286-282B-4624-B85E-8176FA76A2B1}.Debug|x64.Build.0 = Debug|Any CPU
+		{0C5D9286-282B-4624-B85E-8176FA76A2B1}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{0C5D9286-282B-4624-B85E-8176FA76A2B1}.Debug|x86.Build.0 = Debug|Any CPU
+		{0C5D9286-282B-4624-B85E-8176FA76A2B1}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0C5D9286-282B-4624-B85E-8176FA76A2B1}.Release|Any CPU.Build.0 = Release|Any CPU
+		{0C5D9286-282B-4624-B85E-8176FA76A2B1}.Release|x64.ActiveCfg = Release|Any CPU
+		{0C5D9286-282B-4624-B85E-8176FA76A2B1}.Release|x64.Build.0 = Release|Any CPU
+		{0C5D9286-282B-4624-B85E-8176FA76A2B1}.Release|x86.ActiveCfg = Release|Any CPU
+		{0C5D9286-282B-4624-B85E-8176FA76A2B1}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -174,6 +188,7 @@ Global
 		{F9AA3A72-D6A5-4957-9890-DF18971F129A} = {430AC596-E6CC-40F2-A662-4A43BC4A22E3}
 		{5CBB4B02-7086-4E8A-A9FD-BC5EBF64B79E} = {430AC596-E6CC-40F2-A662-4A43BC4A22E3}
 		{CCCF2B96-0CBD-420F-BAC8-15910924ED29} = {430AC596-E6CC-40F2-A662-4A43BC4A22E3}
+		{0C5D9286-282B-4624-B85E-8176FA76A2B1} = {430AC596-E6CC-40F2-A662-4A43BC4A22E3}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {EA5EF7EC-D5C8-4E10-9E19-AE1D086CD520}
