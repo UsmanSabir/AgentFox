@@ -59,6 +59,7 @@ public sealed class ChartOverlayCollector
         string symbol,
         string interval,
         IReadOnlyList<long> barTimes,
+        decimal lastClose,
         CancellationToken ct)
     {
         if (_providers.Count == 0 || barTimes.Count == 0)
@@ -70,6 +71,7 @@ public sealed class ChartOverlayCollector
             barTimes[0],
             barTimes[^1],
             barTimes.Count,
+            lastClose,
             NextSessionTimes(barTimes[^1], interval));
 
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);

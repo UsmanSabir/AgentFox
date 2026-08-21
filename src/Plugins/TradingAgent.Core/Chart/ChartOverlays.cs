@@ -125,12 +125,19 @@ public static class ChartOverlayKind
 /// would draw a target on a Saturday or on a configured market holiday. A provider that wants to
 /// project forward must take its x-values from here.
 /// </param>
+/// <param name="LastClose">
+/// The close of the last bar in the series being drawn. Supplied because a provider annotating a
+/// chart almost always needs the price context of that chart, and re-deriving it from its own source
+/// risks anchoring an overlay to a slightly different price than the candles show — which renders as
+/// a projection that visibly does not meet the series it projects from.
+/// </param>
 public sealed record ChartOverlayRequest(
     string Symbol,
     string Interval,
     long FirstBarTime,
     long LastBarTime,
     int BarCount,
+    decimal LastClose,
     IReadOnlyList<long> NextSessionTimes);
 
 /// <summary>

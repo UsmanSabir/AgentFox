@@ -23,6 +23,9 @@ public class ChartOverlayTests
 {
     // 2026-08-21 is a Friday; 22nd/23rd are the weekend.
     private const long FridayBar = 1787270400;   // 2026-08-21T00:00:00Z
+    // A provider is handed the chart's own last close so an overlay it anchors cannot disagree with
+    // the candles being drawn.
+    private const decimal LastClose = 100m;
 
     private static ChartOverlayCollector Collector(
         IEnumerable<IChartOverlayProvider> providers,
@@ -44,7 +47,7 @@ public class ChartOverlayTests
         var collector = Collector([]);
 
         Assert.IsFalse(collector.HasProviders);
-        var overlays = await collector.CollectAsync("ATRL", "1D", [FridayBar], CancellationToken.None);
+        var overlays = await collector.CollectAsync("ATRL", "1D", [FridayBar], LastClose, CancellationToken.None);
 
         // Empty, never null: the client has exactly one rendering path whatever the edition.
         Assert.IsTrue(overlays.IsEmpty);
@@ -64,7 +67,7 @@ public class ChartOverlayTests
             new StubProvider("second", OneLevel("b", 200m))
         ]);
 
-        var overlays = await collector.CollectAsync("ATRL", "1D", [FridayBar], CancellationToken.None);
+        var overlays = await collector.CollectAsync("ATRL", "1D", [FridayBar], LastClose, CancellationToken.None);
 
         Assert.AreEqual(2, overlays.Levels.Count);
         Assert.AreEqual("a", overlays.Levels[0].Id);
@@ -81,7 +84,7 @@ public class ChartOverlayTests
             new StubProvider("healthy", OneLevel("kept", 150m))
         ]);
 
-        var overlays = await collector.CollectAsync("ATRL", "1D", [FridayBar], CancellationToken.None);
+        var overlays = await collector.CollectAsync("ATRL", "1D", [FridayBar], LastClose, CancellationToken.None);
 
         Assert.AreEqual(1, overlays.Levels.Count);
         Assert.AreEqual("kept", overlays.Levels[0].Id);
@@ -95,7 +98,7 @@ public class ChartOverlayTests
         var collector = Collector([new SlowProvider("hanging")]);
 
         var started = DateTime.UtcNow;
-        var overlays = await collector.CollectAsync("ATRL", "1D", [FridayBar], CancellationToken.None);
+        var overlays = await collector.CollectAsync("ATRL", "1D", [FridayBar], LastClose, CancellationToken.None);
         var elapsed = DateTime.UtcNow - started;
 
         Assert.IsTrue(overlays.IsEmpty);
@@ -114,7 +117,7 @@ public class ChartOverlayTests
         await caller.CancelAsync();
 
         await Assert.ThrowsExactlyAsync<TaskCanceledException>(() =>
-            collector.CollectAsync("ATRL", "1D", [FridayBar], caller.Token));
+            collector.CollectAsync("ATRL", "1D", [FridayBar], LastClose, caller.Token));
     }
 
     // ── projected timestamps come from the calendar ───────────────────────────

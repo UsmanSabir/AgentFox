@@ -112,6 +112,7 @@ public sealed partial class TradingCoreEndpoints
                     candles.Select(c => new DateTimeOffset(
                         c.BucketStartUtc ?? c.Date.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc),
                         TimeSpan.Zero).ToUnixTimeSeconds()).ToList(),
+                    snapshot.Close,
                     ct);
 
                 return Results.Ok(new

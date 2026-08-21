@@ -344,6 +344,17 @@
   }
 
   /**
+   * Drops the overlay handles without touching the chart. Called wherever the chart itself is
+   * destroyed, so the next render starts from a clean slate rather than holding references into a
+   * disposed chart.
+   */
+  function forgetOverlayArtifacts() {
+    overlaySeries = [];
+    overlayPriceLines = [];
+    overlayMarkers = null;
+  }
+
+  /**
    * Maps an overlay's semantic `kind` to a theme token. Overlays never carry colors: an edition that
    * sent its own would own this dashboard's palette and break one of the two themes. An unrecognised
    * kind lands on neutral rather than throwing, so a newer backend cannot break an older client.
@@ -374,11 +385,20 @@
   function drawOverlays(d: ChartData): number {
     // Tear down last render's artefacts first — overlays change per symbol and per interval, and a
     // stale projection left on the chart would be read as a current one.
-    for (const s of overlaySeries) chart!.removeSeries(s);
-    overlaySeries = [];
-    for (const line of overlayPriceLines) candleSeries!.removePriceLine(line);
-    overlayPriceLines = [];
-    overlayMarkers?.setMarkers([]);
+    //
+    // Guarded: if the chart was destroyed and rebuilt between renders these handles belong to a
+    // chart that no longer exists, and lightweight-charts throws on them. An exception here would
+    // abort the whole draw and take the overlay layer down silently, so a stale handle is simply
+    // dropped instead. forgetOverlayArtifacts() at each teardown site is the primary fix; this is
+    // the backstop for a teardown site added later that forgets to call it.
+    try {
+      for (const s of overlaySeries) chart!.removeSeries(s);
+      for (const line of overlayPriceLines) candleSeries!.removePriceLine(line);
+      overlayMarkers?.setMarkers([]);
+    } catch {
+      // handles from a disposed chart; nothing to clean up
+    }
+    forgetOverlayArtifacts();
 
     const o = d.overlays;
     if (!o) return 0;
@@ -511,6 +531,7 @@
     candleSeries = volumeSeries = sma20Series = sma50Series = rsiSeries = null;
     priceLines = [];
     markers = null;
+    forgetOverlayArtifacts();
     if (data) render(data);
   }
 
@@ -587,6 +608,7 @@
       candleSeries = volumeSeries = sma20Series = sma50Series = rsiSeries = null;
       priceLines = [];
       markers = null;
+      forgetOverlayArtifacts();
       data = null;
     }
     try {
