@@ -216,7 +216,7 @@ public class AhkConfig
     /// must never become "so try again".
     /// </para>
     /// </summary>
-    public bool PreferDirectApiForPlacement { get; set; } = false;
+    public bool PreferDirectApiForPlacement { get; set; } = true;
 
     /// <summary>Tab that reveals resting orders.</summary>
     public string OutstandingLogTabSelector { get; set; } = "a[href='#out_log']";
