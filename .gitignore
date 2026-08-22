@@ -66,3 +66,6 @@ appsettings.*.json
 .pnpm-store/
 *.env
 *.env.local
+
+src/Plugins/TradingAgent/ui/node_modules/
+src/Plugins/TradingAgent/wwwroot/
