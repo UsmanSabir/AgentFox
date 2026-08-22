@@ -92,6 +92,9 @@ public sealed partial class TradingCoreEndpoints
                 {
                     symbol = e.Symbol,
                     companyName = marketWatch.GetValueOrDefault(e.Symbol)?.CompanyName,
+                    // Current session move against the previous close. It stays null when the
+                    // market-watch quote is unavailable; unknown must not be presented as flat.
+                    dayChangePercent = marketWatch.GetValueOrDefault(e.Symbol)?.ChangePercent,
                     addedUtc = e.AddedUtc,
                     source = e.Source,
                     sortOrder = e.SortOrder,

@@ -378,6 +378,8 @@ export interface ReconciliationRun {
 export interface WatchlistEntry {
   symbol: string;
   companyName?: string | null;
+  /** Current session move from the previous close; absent when market-watch data is unavailable. */
+  dayChangePercent?: number | null;
   addedUtc: string;
   source: 'seed' | 'user' | string;
   sortOrder: number;
