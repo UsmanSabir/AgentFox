@@ -130,6 +130,38 @@ public class TradingAgentOptions
     /// <summary>Fail closed when AllowedSymbols is empty (recommended).</summary>
     public bool RequireConfiguredSymbols { get; set; } = true;
 
+    /// <summary>
+    /// Symbols you operate BY HAND: automation may not originate an order for them, and you still can.
+    ///
+    /// <para>
+    /// This is the deny list <see cref="AllowedSymbols"/> cannot express. That list answers "may this
+    /// order exist at all" and every path crosses it, so removing a symbol from it does not make the
+    /// symbol manual — it makes it untradable, including from the dashboard. What is wanted for a name
+    /// you intend to hand-manage is the orthogonal question: "may a ROBOT originate this order". So the
+    /// check deliberately does NOT live in <see cref="Risk.TradingRiskEngine"/>; it lives at the
+    /// automation boundary (<see cref="Manager.TradingManager"/> and <see cref="Manager.ApprovalGate"/>),
+    /// which is the only place the two questions can have different answers.
+    /// </para>
+    ///
+    /// <para>
+    /// A manual-only symbol is still charted, scanned, alerted on, and archived exactly as before —
+    /// muting it is what <c>alerts_enabled</c> is for. What it loses is unattended EXECUTION: armed
+    /// order triggers, protective-stop raises, take-profit retries, monitor-fired orders and strategy
+    /// passes are all refused for it, entries and exits alike. That means nothing raises a stop for you
+    /// on these names; hand-managing the exit is the whole point of the flag, and is why it is not the
+    /// default.
+    /// </para>
+    ///
+    /// <para>
+    /// The effective deny set is this list UNION every watchlist entry with automation switched off
+    /// (see <see cref="Watchlist.MonitoredUniverse.ManualOnlyAsync"/>). Config is the durable floor —
+    /// it cannot be edited away over the web API — while the per-symbol watchlist toggle is for
+    /// day-to-day changes. Both only ever NARROW what automation may do, which is why a runtime-editable
+    /// entry is safe here when one would not be for <see cref="AllowedSymbols"/>.
+    /// </para>
+    /// </summary>
+    public List<string> ManualOnlySymbols { get; set; } = [];
+
     public int MaxOrdersPerBatch { get; set; } = 10;
     public decimal MaxBatchValuePkr { get; set; } = 250_000m;
 

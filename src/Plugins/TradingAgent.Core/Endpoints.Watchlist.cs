@@ -69,6 +69,10 @@ public sealed partial class TradingCoreEndpoints
             await universe.SeedIfNeededAsync(ct: ct);
             var snapshot = await repository.GetWatchlistAsync(ct);
             var tradable = universe.ForExecution().ToHashSet(StringComparer.OrdinalIgnoreCase);
+            // The configured half of the deny set, so the UI can show a row as locked rather than
+            // offering a toggle that silently cannot take effect.
+            var manualByConfig = universe.ConfiguredManualOnly()
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
             var symbols = snapshot.Entries.Select(e => e.Symbol).ToList();
             var barCounts = await repository.GetDailyBarCountsAsync(symbols, ct);
             var openAlerts = await repository.GetOpenAlertCountsAsync(ct);
@@ -102,6 +106,12 @@ public sealed partial class TradingCoreEndpoints
                     alertsEnabled = e.AlertsEnabled,
                     notes = e.Notes,
                     tradable = tradable.Contains(e.Symbol),
+                    // The stored toggle, and the effective answer after the configured list is folded
+                    // in. They differ for a config-pinned symbol, which is exactly when the UI must
+                    // not present a toggle as if it would work.
+                    autoTradeEnabled = e.AutoTradeEnabled,
+                    manualOnly = !e.AutoTradeEnabled || manualByConfig.Contains(e.Symbol),
+                    manualOnlyLocked = manualByConfig.Contains(e.Symbol),
                     archivedBars = barCounts.GetValueOrDefault(e.Symbol),
                     hasWeeklyHistory = barCounts.GetValueOrDefault(e.Symbol) >= weeklyReadyBars,
                     openAlerts = openAlerts.GetValueOrDefault(e.Symbol)
@@ -113,7 +123,11 @@ public sealed partial class TradingCoreEndpoints
                 configuredListChanged =
                     snapshot.SeedHash is not null && snapshot.SeedHash != universe.CurrentSeedHash(),
                 tradableSymbols = tradable.Count,
-                maxSymbols = options.Value.Watchlist.MaxSymbols
+                maxSymbols = options.Value.Watchlist.MaxSymbols,
+                // Symbols pinned manual-only by configuration, including any not on the watchlist at
+                // all: they still block automation, and an operator looking for "why did nothing fire"
+                // needs to see them somewhere.
+                configuredManualOnly = universe.ConfiguredManualOnly()
             });
         });
 
@@ -188,11 +202,16 @@ public sealed partial class TradingCoreEndpoints
                 symbol,
                 added,
                 tradable = universe.IsTradable(symbol),
-                // Said up front rather than discovered at order time.
-                message = universe.IsTradable(symbol)
-                    ? null
-                    : $"'{symbol}' will be monitored and charted, but it is not in AllowedSymbols, so an "
-                    + "order for it would be rejected by the risk engine.",
+                manualOnly = await universe.IsManualOnlyAsync(symbol, ct),
+                // Said up front rather than discovered at order time. Two different limits, so they
+                // are reported separately: one says no order may exist, the other says only yours may.
+                message = !universe.IsTradable(symbol)
+                    ? $"'{symbol}' will be monitored and charted, but it is not in AllowedSymbols, so an "
+                      + "order for it would be rejected by the risk engine."
+                    : await universe.IsManualOnlyAsync(symbol, ct)
+                        ? $"'{symbol}' is set to manual-only: it will be monitored, charted and alerted "
+                          + "on, but no automation will trade it — you place its orders yourself."
+                        : null,
                 warning
             });
         }).RequireAuthorization("TradingAnalyst");
@@ -224,11 +243,26 @@ public sealed partial class TradingCoreEndpoints
         {
             var normalized = symbol.Trim().ToUpperInvariant();
             var updated = await repository.UpdateWatchlistSymbolAsync(
-                normalized, body.AlertsEnabled, body.Notes, body.Pinned, ct);
+                normalized, body.AlertsEnabled, body.Notes, body.Pinned, body.AutoTradeEnabled, ct);
             universe.Invalidate();
-            return updated
-                ? Results.Ok(new { symbol = normalized, updated })
-                : Results.NotFound(new { symbol = normalized, updated });
+            if (!updated) return Results.NotFound(new { symbol = normalized, updated });
+
+            // Switching automation back ON cannot lift a configured pin, and saying so here is the
+            // difference between "the toggle is broken" and "this symbol is pinned in appsettings".
+            var lockedByConfig = body.AutoTradeEnabled == true
+                && universe.ConfiguredManualOnly().Contains(normalized, StringComparer.OrdinalIgnoreCase);
+
+            return Results.Ok(new
+            {
+                symbol = normalized,
+                updated,
+                manualOnly = await universe.IsManualOnlyAsync(normalized, ct),
+                message = lockedByConfig
+                    ? $"'{normalized}' stays manual-only: it is listed in "
+                      + "Plugins:TradingAgent:ManualOnlySymbols, which the API cannot override. "
+                      + "Remove it there and restart to let automation trade it."
+                    : null
+            });
         }).RequireAuthorization("TradingAnalyst");
 
         trading.MapPost("/watchlist/reorder", async (

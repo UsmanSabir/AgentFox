@@ -387,6 +387,15 @@ export interface WatchlistEntry {
   alertsEnabled: boolean;
   notes?: string | null;
   tradable: boolean;
+  /**
+   * The stored per-symbol toggle. False = manual-only: no automation may originate an order for the
+   * symbol, entry or exit, while you still can. Distinct from `alertsEnabled`, which only mutes.
+   */
+  autoTradeEnabled: boolean;
+  /** Effective answer, after `ManualOnlySymbols` from configuration is folded in. */
+  manualOnly: boolean;
+  /** True when the pin comes from configuration, which the API cannot lift — show it, don't offer it. */
+  manualOnlyLocked: boolean;
   archivedBars: number;
   hasWeeklyHistory: boolean;
   /** Alerts still in the `new` state for this symbol — drives the row badge. */
@@ -847,6 +856,11 @@ export interface WatchlistResponse {
   configuredListChanged: boolean;
   tradableSymbols: number;
   maxSymbols: number;
+  /**
+   * Symbols pinned manual-only in configuration. Includes any that are not on the watchlist at all —
+   * they still block automation, so they have to be visible somewhere.
+   */
+  configuredManualOnly: string[];
 }
 
 
@@ -1219,14 +1233,28 @@ export const trading = {
                                   symbol: string;
                                   added: boolean;
                                   tradable: boolean;
+                                  manualOnly: boolean;
                                   message?: string | null;
                                   warning?: string | null;
                                 }>('/trading/watchlist', { symbol }),
     remove: (symbol: string) =>
       del<{ symbol: string; removed: boolean }>(`/trading/watchlist/${encodeURIComponent(symbol)}`),
-    update: (symbol: string, changes: { alertsEnabled?: boolean; notes?: string; pinned?: boolean }) =>
-      patch<{ symbol: string; updated: boolean }>(
-        `/trading/watchlist/${encodeURIComponent(symbol)}`, changes),
+    update: (
+      symbol: string,
+      changes: {
+        alertsEnabled?: boolean;
+        notes?: string;
+        pinned?: boolean;
+        /** False = manual-only. A true here cannot lift a pin from `ManualOnlySymbols`; the response says so. */
+        autoTradeEnabled?: boolean;
+      }
+    ) =>
+      patch<{
+        symbol: string;
+        updated: boolean;
+        manualOnly?: boolean;
+        message?: string | null;
+      }>(`/trading/watchlist/${encodeURIComponent(symbol)}`, changes),
     reorder: (symbols: string[]) =>
       post<{ reordered: boolean; symbols: number }>('/trading/watchlist/reorder', { symbols }),
     reset:  ()               => post<{ symbols: number }>('/trading/watchlist/reset')

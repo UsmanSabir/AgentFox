@@ -202,6 +202,7 @@ and "what am I allowed to trade":
 | --- | --- | --- | --- |
 | **Watchlist** | `watchlist` table (seeded once from `AllowedSymbols`) | charting, scanning, monitoring, alerts, archived history | **yes** — Trading page, `/api/trading/watchlist` |
 | **AllowedSymbols** | `appsettings.json` | what an order may be placed for (`TradingRiskEngine`) | no — config + restart |
+| **Manual-only** | `ManualOnlySymbols` in config, ∪ the per-symbol watchlist toggle | symbols *only you* may order — automation may not | **partly** — the toggle is, config is not |
 
 `MonitoredUniverse` is the single place that answers "which symbols":
 
@@ -211,6 +212,8 @@ and "what am I allowed to trade":
 - `ForArchiveAsync()` → same as monitoring by default, so a watched symbol accumulates the daily
   history its weekly levels need. Costs no extra portal requests (a session fetch already returns
   every symbol in the market), only rows.
+- `ManualOnlyAsync()` → the deny set. Subtracted from none of the above: a manual-only symbol is still
+  charted, scanned, alerted on and archived. What it loses is unattended execution.
 
 Consequences the UI states explicitly rather than leaving to be discovered at order time:
 
@@ -221,6 +224,46 @@ Consequences the UI states explicitly rather than leaving to be discovered at or
 - The watchlist is seeded from `AllowedSymbols` **once**. If the configured list changes later, the
   watchlist is *not* updated (that would discard your edits); the API reports
   `configuredListChanged: true` and the UI offers **Reset**, which is the only thing that re-seeds.
+
+### Manual-only symbols — the deny list
+
+For a name you intend to trade by hand. `AllowedSymbols` cannot express this: it answers *"may this
+order exist"*, every path crosses it, and removing a symbol from it stops **you** ordering it too.
+Manual-only answers the orthogonal question — *"may a robot originate this order"* — which is why it is
+deliberately **not** in `TradingRiskEngine`, and lives at the automation boundary instead:
+
+```jsonc
+"ManualOnlySymbols": ["NETSOL"]     // durable floor; the web API cannot lift it
+```
+
+…plus a per-symbol toggle on each watchlist row (the 🤖/✋ button, `autoTradeEnabled`). The effective
+deny set is the **union**, and both halves only ever narrow — there is no watchlist entry that can
+cancel a configured pin, which is what makes the runtime toggle safe here when one would not be for
+`AllowedSymbols`.
+
+What a manual-only symbol loses:
+
+| Path | Manual-only |
+| --- | --- |
+| Dashboard order, approving a proposal | **allowed** — that is the point |
+| Armed order triggers, `PersistentOrderWorker` | refused (and arming one is refused up front) |
+| `ProtectiveStopWorker` stop raises, take-profit retries | refused — **you** manage the exit |
+| Strategy passes (premium edition) | refused at the boundary |
+| `place_order` / `place_orders` agent tools | declined, with a message telling the agent to hand it over |
+| Charting, scanning, `scan_watchlist`, alerts, archive | unchanged — a hand-managed name usually wants *louder* alerts |
+
+Enforced in two places on purpose. `ApprovalGate.Decide` refuses early (before its `BoundedAuto`
+short-circuit, which would otherwise wave through the very mode most likely to fire unattended) and
+names the symbol in the reason; `TradingManager.ExecuteGroupsAsync` then re-asks authoritatively at the
+single execution boundary, so a caller that submits **without** asking the gate — a retry worker, a
+strategy, anything added later — is still refused. The test there is attendance:
+`ExecutionAuthorization.Attended`, true only when a human said yes to *that* order. A null
+authorization and a pre-authorized trigger both fail it, which is the direction a new caller should
+fail in.
+
+The trade-off, stated because it is the one that bites: **nothing raises a stop for you on these
+names.** Hand-managing the exit is what was asked for, and it is why manual-only is opt-in per symbol
+rather than a mode.
 
 ---
 
@@ -340,7 +383,7 @@ the audit trail.
 | GET | `/api/trading/watchlist` | ManagementViewer |
 | POST | `/api/trading/watchlist` — `{ symbol }`, validated against the live market watch | TradingAnalyst |
 | DELETE | `/api/trading/watchlist/{symbol}` — keeps archived bars | TradingAnalyst |
-| PATCH | `/api/trading/watchlist/{symbol}` — `{ alertsEnabled?, notes? }` | TradingAnalyst |
+| PATCH | `/api/trading/watchlist/{symbol}` — `{ alertsEnabled?, notes?, pinned?, autoTradeEnabled? }` (`autoTradeEnabled: false` = manual-only) | TradingAnalyst |
 | POST | `/api/trading/watchlist/reset` — reseed from `AllowedSymbols` | TradingAnalyst |
 
 ---
@@ -368,6 +411,7 @@ Add the following sections to `appsettings.json`.
     "DuplicateWindowMinutes": 60,
     "DatabasePath":           "trading/trading.db",
     "AllowedSymbols":         ["OGDC", "PPL"],
+    "ManualOnlySymbols":      [],
     "RequireConfiguredSymbols": true,
     "MaxOrdersPerBatch":      10,
     "MaxBatchValuePkr":       250000,

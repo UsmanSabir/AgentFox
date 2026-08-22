@@ -27,6 +27,9 @@ namespace TradingAgent.Watchlist;
 ///   <item><see cref="ForArchiveAsync"/> — which symbols get deep daily history. Same as monitoring by
 ///   default, because a monitored symbol with no history produces no weekly structure. Costs no extra
 ///   requests: a session fetch already returns every symbol in the market, so this only adds rows.</item>
+///   <item><see cref="ManualOnlyAsync"/> — the DENY set: symbols no automation may originate an order
+///   for. Subtracted from nothing above, because a manual-only symbol is still watched, charted,
+///   scanned and alerted on; what it loses is unattended execution.</item>
 /// </list>
 ///
 /// <para>
@@ -49,6 +52,13 @@ public sealed class MonitoredUniverse
     private readonly SemaphoreSlim _gate = new(1, 1);
     private List<string>? _cachedMonitoring;
     private DateTime _cachedAtUtc = DateTime.MinValue;
+
+    /// <summary>
+    /// Last known manual-only set from the watchlist, WITHOUT the configured list folded in. Written
+    /// under <see cref="_gate"/>, read without it by <see cref="IsManualOnlySnapshot"/> — a reference
+    /// swap of an immutable set, so a racing reader sees the old set or the new one, never a torn one.
+    /// </summary>
+    private volatile HashSet<string> _manualOnlyFromWatchlist = new(StringComparer.OrdinalIgnoreCase);
 
     public MonitoredUniverse(
         IOptions<TradingAgentOptions> options,
@@ -86,10 +96,16 @@ public sealed class MonitoredUniverse
             {
                 await SeedIfNeededAsync(allowed, ct);
                 var watchlist = await _repository.GetWatchlistAsync(ct);
+                // One read, two answers. The monitor calls this every pass, so folding the deny set in
+                // here is what keeps IsManualOnlySnapshot warm for the synchronous callers without a
+                // second query against the same table.
+                var manual = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 foreach (var entry in watchlist.Entries)
                 {
                     if (seen.Add(entry.Symbol)) resolved.Add(entry.Symbol);
+                    if (!entry.AutoTradeEnabled) manual.Add(entry.Symbol);
                 }
+                _manualOnlyFromWatchlist = manual;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -123,6 +139,88 @@ public sealed class MonitoredUniverse
     /// <summary>True when the symbol may be ordered (i.e. is in AllowedSymbols).</summary>
     public bool IsTradable(string symbol) =>
         ForExecution().Contains(symbol.Trim(), StringComparer.OrdinalIgnoreCase);
+
+    // ── Manual-only: the deny set ─────────────────────────────────────────────
+    // Deliberately NOT part of any list above. A manual-only symbol keeps every bit of its analysis;
+    // what it loses is the right of automation to originate an order for it. That is a different
+    // question from "may this order exist", which is why it is answered here and enforced at the
+    // automation boundary rather than in TradingRiskEngine — see TradingAgentOptions.ManualOnlySymbols.
+
+    /// <summary>The configured half of the deny set: durable, and not editable over the web API.</summary>
+    public IReadOnlyList<string> ConfiguredManualOnly() => Normalize(_options.Value.ManualOnlySymbols);
+
+    /// <summary>
+    /// Every symbol automation must not trade: the configured list UNION each watchlist entry with
+    /// automation switched off. Authoritative — reads through to the watchlist.
+    /// </summary>
+    public async Task<IReadOnlySet<string>> ManualOnlyAsync(CancellationToken ct = default)
+    {
+        // Refreshes _manualOnlyFromWatchlist as a side effect when the cache is cold, and is a cheap
+        // no-op when it is warm.
+        await ForMonitoringAsync(ct);
+        return Combine(_manualOnlyFromWatchlist);
+    }
+
+    /// <summary>True when no automation may originate an order for this symbol.</summary>
+    public async Task<bool> IsManualOnlyAsync(string symbol, CancellationToken ct = default) =>
+        (await ManualOnlyAsync(ct)).Contains(symbol.Trim().ToUpperInvariant());
+
+    /// <summary>
+    /// The first symbol in <paramref name="symbols"/> that is manual-only, or null. Authoritative.
+    /// Returning the offender rather than a bool is what lets the caller name it in the refusal.
+    /// </summary>
+    public async Task<string?> FirstManualOnlyAsync(
+        IEnumerable<string?> symbols, CancellationToken ct = default)
+    {
+        var deny = await ManualOnlyAsync(ct);
+        foreach (var symbol in symbols)
+        {
+            var normalized = symbol?.Trim().ToUpperInvariant();
+            if (!string.IsNullOrEmpty(normalized) && deny.Contains(normalized)) return normalized;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Synchronous, best-effort answer for callers that cannot await — the configured list (always
+    /// current) plus the last watchlist read (up to <see cref="CacheFor"/> stale, or empty before the
+    /// first read).
+    ///
+    /// <para>
+    /// Deliberately the weaker of the two, and safe because it is never the only check: it exists so
+    /// an unattended path can refuse EARLY with a reason naming the symbol, while
+    /// <see cref="Manager.TradingManager"/> re-asks authoritatively at the execution boundary. A stale
+    /// miss here therefore delays the refusal to the boundary; it does not lose it.
+    /// </para>
+    /// </summary>
+    public bool IsManualOnlySnapshot(string? symbol)
+    {
+        var normalized = symbol?.Trim().ToUpperInvariant();
+        return !string.IsNullOrEmpty(normalized) && Combine(_manualOnlyFromWatchlist).Contains(normalized);
+    }
+
+    /// <summary>The first manual-only symbol among <paramref name="symbols"/>, best-effort. See above.</summary>
+    public string? FirstManualOnlySnapshot(IEnumerable<string?> symbols)
+    {
+        var deny = Combine(_manualOnlyFromWatchlist);
+        foreach (var symbol in symbols)
+        {
+            var normalized = symbol?.Trim().ToUpperInvariant();
+            if (!string.IsNullOrEmpty(normalized) && deny.Contains(normalized)) return normalized;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Config ∪ watchlist. Both halves only ever ADD to the deny set: there is no "allow" entry that
+    /// can cancel a configured one, so an operator cannot loosen the durable floor from the UI.
+    /// </summary>
+    private HashSet<string> Combine(IReadOnlySet<string> fromWatchlist)
+    {
+        var combined = new HashSet<string>(ConfiguredManualOnly(), StringComparer.OrdinalIgnoreCase);
+        combined.UnionWith(fromWatchlist);
+        return combined;
+    }
 
     /// <summary>Drops the cached universe. Call after any watchlist mutation.</summary>
     public void Invalidate()

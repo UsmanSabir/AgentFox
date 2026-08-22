@@ -208,6 +208,15 @@ public sealed class ScanWatchlistTool : BaseTool
                     + "the watchlist but not in AllowedSymbols, so an order for them would be rejected. "
                     + "Each result carries 'tradable'.");
 
+        // Scanned and reported like any other symbol — a hand-managed name is exactly one you want a
+        // setup called out on. What changes is who acts: the note says hand it over rather than trade it.
+        var manualOnly = await _universe.ManualOnlyAsync();
+        var manualScanned = universe.Count(sym => manualOnly.Contains(sym));
+        if (manualScanned > 0)
+            notes.Add($"{manualScanned} of {universe.Count} scanned symbols are manual-only: report any "
+                    + "setup on them to the operator to place, and do not place it yourself. Each result "
+                    + "carries 'manual_only'.");
+
         // ── Candles ───────────────────────────────────────────────────────────
         // Weekly structure needs a far deeper window than the daily read; the archive serves it
         // locally, so asking for it costs a query rather than hundreds of portal requests.
@@ -312,7 +321,7 @@ public sealed class ScanWatchlistTool : BaseTool
                 .ThenBy(a => a.Snapshot.PercentAboveSupport ?? decimal.MaxValue)
                 .ThenByDescending(a => a.Snapshot.RewardRiskRatio ?? 0m)
                 .Take(maxResults)
-                .Select(a => Project(a, tradable))
+                .Select(a => Project(a, tradable, manualOnly))
                 .ToList();
         }
 
@@ -329,7 +338,7 @@ public sealed class ScanWatchlistTool : BaseTool
                 .ThenByDescending(a => a.Multi.Alignment == TimeframeAlignment.Aligned)
                 .ThenBy(a => a.Snapshot.PercentBelowResistance ?? decimal.MaxValue)
                 .Take(maxResults)
-                .Select(a => Project(a, tradable))
+                .Select(a => Project(a, tradable, manualOnly))
                 .ToList();
         }
 
@@ -418,7 +427,8 @@ public sealed class ScanWatchlistTool : BaseTool
     }
 
     /// <summary>Flattens a candidate into the compact row the agent reasons over.</summary>
-    private static object Project(Candidate candidate, IReadOnlySet<string> tradable)
+    private static object Project(
+        Candidate candidate, IReadOnlySet<string> tradable, IReadOnlySet<string> manualOnly)
     {
         var s = candidate.Snapshot;
         var multi = candidate.Multi;
@@ -435,6 +445,10 @@ public sealed class ScanWatchlistTool : BaseTool
             // watchlist, which is deliberately wider than AllowedSymbols, so a candidate can be a
             // genuine setup and still not be executable — the caller must say so, not imply a trade.
             tradable = tradable.Contains(s.Symbol),
+            // Tradable, but not BY YOU-the-agent: the operator hand-manages this name. Reported beside
+            // 'tradable' because the two refusals have different remedies — one needs a config change,
+            // this one needs a human to place the order.
+            manual_only = manualOnly.Contains(s.Symbol),
             close = s.Close,
             as_of = s.AsOf.ToString("yyyy-MM-dd"),
             uses_live_bar = s.UsesLiveBar,

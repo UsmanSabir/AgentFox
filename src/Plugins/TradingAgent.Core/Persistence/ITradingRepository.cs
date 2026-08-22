@@ -304,11 +304,17 @@ public interface ITradingRepository
     Task<bool> RemoveWatchlistSymbolAsync(string symbol, CancellationToken ct = default);
 
     /// <summary>Updates the per-symbol fields the user controls. False when the symbol is unknown.</summary>
+    /// <param name="autoTradeEnabled">
+    /// False makes the symbol manual-only: automation may no longer originate an order for it, while
+    /// the operator still can. Editable at runtime because it only ever NARROWS what automation may
+    /// do — the same reason a watchlist edit may never widen what may be traded.
+    /// </param>
     Task<bool> UpdateWatchlistSymbolAsync(
         string symbol,
         bool? alertsEnabled,
         string? notes,
         bool? pinned = null,
+        bool? autoTradeEnabled = null,
         CancellationToken ct = default);
 
     /// <summary>Persists the complete display order after a drag operation.</summary>
@@ -507,6 +513,15 @@ public interface ITradingRepository
 }
 
 /// <summary>One watched symbol.</summary>
+/// <param name="AlertsEnabled">
+/// False MUTES the symbol: it is still analyzed and its state still advances, nothing is raised.
+/// </param>
+/// <param name="AutoTradeEnabled">
+/// False makes the symbol MANUAL-ONLY: no automation may originate an order for it, entry or exit,
+/// while the operator still can. Orthogonal to <paramref name="AlertsEnabled"/> — a manual-only symbol
+/// normally wants its alerts louder, not quieter, since you are the one acting on them.
+/// Defaults to true, so an existing database keeps behaving exactly as it did.
+/// </param>
 public sealed record WatchlistEntry(
     string Symbol,
     DateTime AddedUtc,
@@ -514,7 +529,8 @@ public sealed record WatchlistEntry(
     int SortOrder,
     bool Pinned,
     bool AlertsEnabled,
-    string? Notes);
+    string? Notes,
+    bool AutoTradeEnabled = true);
 
 /// <summary>
 /// The watchlist plus its seeding provenance. <see cref="SeedHash"/> is the hash of the

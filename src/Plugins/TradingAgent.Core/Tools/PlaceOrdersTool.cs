@@ -8,6 +8,7 @@ using TradingAgent.Manager;
 using TradingAgent.Models;
 using TradingAgent.Safety;
 using TradingAgent.Trading;
+using TradingAgent.Watchlist;
 
 namespace TradingAgent.Tools;
 
@@ -43,6 +44,7 @@ public sealed class PlaceOrdersTool : BaseTool
     private readonly PendingTakeProfitStore _pendingSells;
     private readonly ApprovalIntentRegistry _intentRegistry;
     private readonly ILogger<PlaceOrdersTool> _logger;
+    private readonly MonitoredUniverse? _universe;
 
     public override string Name => "place_orders";
 
@@ -94,7 +96,8 @@ public sealed class PlaceOrdersTool : BaseTool
         IOptions<AhkConfig> ahkConfig,
         PendingTakeProfitStore pendingSells,
         ApprovalIntentRegistry intentRegistry,
-        ILogger<PlaceOrdersTool> logger)
+        ILogger<PlaceOrdersTool> logger,
+        MonitoredUniverse? universe = null)
     {
         _manager      = manager;
         _agentOptions = agentOptions;
@@ -103,6 +106,7 @@ public sealed class PlaceOrdersTool : BaseTool
         _pendingSells = pendingSells;
         _intentRegistry = intentRegistry;
         _logger       = logger;
+        _universe     = universe;
     }
 
     /// <summary>One order as supplied by the model (snake_case JSON).</summary>
@@ -152,7 +156,21 @@ public sealed class PlaceOrdersTool : BaseTool
         var livePrices = await ResolveLivePricesAsync(orders, policy);
 
         // ── Validate each order into a group (or a skip reason) ────────────────
-        var validated = orders.Select(o => (order: o, plan: BuildGroup(o, policy, ahk, livePrices, batchConfidence))).ToList();
+        // A manual-only symbol is skipped like any other rejected tip, so the rest of the batch still
+        // runs — this is a per-symbol restriction, and failing the whole message because one name is
+        // hand-managed would be a worse answer than reporting that one line. Same reasoning as the
+        // single-order tool: see PlaceOrderTool's manual-only gate.
+        var manualOnly = _universe is not null
+            ? await _universe.ManualOnlyAsync()
+            : (IReadOnlySet<string>)new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        var validated = orders.Select(o => (
+            order: o,
+            plan: manualOnly.Contains(o.Symbol?.Trim().ToUpperInvariant() ?? "")
+                ? new OrderPlan(null,
+                    $"{o.Symbol?.Trim().ToUpperInvariant()} is set to manual-only — it is operated by "
+                    + "hand. Report the setup to the operator instead of placing it.", false, false)
+                : BuildGroup(o, policy, ahk, livePrices, batchConfidence))).ToList();
         var groups    = validated.Where(v => v.plan.Group is not null)
                                  .Select(v => v.plan.Group!)
                                  .ToList();

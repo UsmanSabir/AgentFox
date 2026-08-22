@@ -272,6 +272,19 @@ public sealed partial class TradingCoreEndpoints
                             + "by the risk engine. Arming one would be protection in name only."
                 });
 
+            // Identical reasoning, different reason: an armed order exists precisely to fire while
+            // nobody is watching, and that is what a manual-only symbol has switched off. Arming one
+            // would leave a trigger that gets refused at the boundary the moment it mattered.
+            if (await universe.IsManualOnlyAsync(symbol, ct))
+                return Results.BadRequest(new
+                {
+                    error = "manual_only",
+                    message = $"'{symbol}' is set to manual-only, so nothing may fire for it unattended — "
+                            + "an armed order would be refused at the moment it triggered. Place the order "
+                            + "yourself when the level comes, or switch automation back on for the symbol "
+                            + "on the watchlist."
+                });
+
             // Same reasoning as the tradability check above, applied to the stop's own geometry: an
             // armed stop whose limit sits on the wrong side of its trigger is refused by the risk
             // engine at fire time, which is the one moment it was supposed to work. Checking it here

@@ -3,6 +3,7 @@ using Microsoft.Extensions.Options;
 using TradingAgent.Config;
 using TradingAgent.Market;
 using TradingAgent.Models;
+using TradingAgent.Watchlist;
 
 namespace TradingAgent.Manager;
 
@@ -21,7 +22,8 @@ namespace TradingAgent.Manager;
 /// <para>
 /// It can never widen risk: the kill switch, AllowedSymbols, the market calendar, reconciliation
 /// health, and the value caps all live in the risk engine and the manager, and none of them consult
-/// this class. This decides confirmation only.
+/// this class. This decides confirmation only — and, in one direction only, refuses: a manual-only
+/// symbol is denied here as early as possible, but the binding refusal is <see cref="TradingManager"/>'s.
 /// </para>
 /// </summary>
 public sealed class ApprovalGate
@@ -32,6 +34,7 @@ public sealed class ApprovalGate
     private readonly TradingAgent.Market.OrderWindow _orderWindow;
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly ILogger<ApprovalGate> _logger;
+    private readonly MonitoredUniverse? _universe;
 
     private readonly object _lock = new();
     private DateTime? _armedUntilUtc;
@@ -45,7 +48,8 @@ public sealed class ApprovalGate
         IMarketCalendar calendar,
         TradingAgent.Market.OrderWindow orderWindow,
         IOptions<TradingAgentOptions> options,
-        ILogger<ApprovalGate> logger)
+        ILogger<ApprovalGate> logger,
+        MonitoredUniverse? universe = null)
     {
         _intents = intents;
         _policy = policy;
@@ -53,6 +57,9 @@ public sealed class ApprovalGate
         _orderWindow = orderWindow;
         _options = options;
         _logger = logger;
+        // Optional so the gate still constructs in a test that does not care about the deny set. The
+        // authoritative manual-only refusal is TradingManager's, not this early one.
+        _universe = universe;
         _sessionDate = PsxTime.Today();
     }
 
@@ -182,6 +189,21 @@ public sealed class ApprovalGate
         {
             Disarm("kill-switch");
             return ApprovalDecision.Denied("The kill switch is active.");
+        }
+
+        // A manual-only symbol outranks the execution mode, and is therefore checked BEFORE the
+        // BoundedAuto exit below — which returns "no approval needed" and would otherwise wave through
+        // the one mode where an unattended order is most likely. See TradingAgentOptions.ManualOnlySymbols.
+        //
+        // Best-effort by necessity: this method is synchronous and the watchlist half of the deny set
+        // lives in the database. A symbol switched to manual-only seconds ago can still be missed here
+        // and is then refused at the execution boundary instead, which is the authoritative check.
+        if (_universe?.FirstManualOnlySnapshot(
+                groups.SelectMany(g => g).Select(o => o.Symbol)) is { } manualSymbol)
+        {
+            return ApprovalDecision.Denied(
+                $"{manualSymbol} is set to manual-only: unattended execution is not available for it, "
+                + "so this order waits for you to place it by hand.");
         }
 
         // BoundedAuto is itself the operator saying "act within the configured bounds". TradingManager
@@ -320,7 +342,9 @@ public sealed class ApprovalGate
             + "This order will NOT ask for confirmation.",
             actor, intent.IntentId, intent.EstimatedExposurePkr);
 
-        return ExecutionAuthorization.HostToolGate(actor, intent);
+        // PreAuthorized, not HostToolGate: identical gate and identical intent, but nobody was watching.
+        // TradingManager needs that distinction to keep automation out of a manual-only symbol.
+        return ExecutionAuthorization.PreAuthorized(actor, intent);
     }
 
     /// <summary>The per-session counter resets with the trading day, not with the process.</summary>

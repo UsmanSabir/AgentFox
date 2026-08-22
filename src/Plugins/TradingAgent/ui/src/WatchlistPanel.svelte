@@ -4,7 +4,7 @@
   import {
     Plus, RotateCcw, Trash2, Bell, BellOff, Eye, AlertTriangle, Clock, Search,
     Download, Pin, PinOff, GripVertical, PanelLeftClose, PanelLeftOpen,
-    ArrowUpRight, ArrowDownRight, Minus
+    ArrowUpRight, ArrowDownRight, Minus, Bot, Hand, Lock
   } from 'lucide-svelte';
 
   /** Selected symbol, so the chart pane (Phase 2) can follow the list. */
@@ -217,14 +217,48 @@
     }
   }
 
+  /**
+   * Hands the symbol to you, or back to the machine. Confirmed on the way IN because it silently
+   * stops protective stops being raised and take-profits being armed for the position — hand-managing
+   * the exit is the point, but it is not something to discover later. The server's reply carries the
+   * one case the toggle cannot satisfy: a symbol pinned manual-only in appsettings.
+   */
+  async function toggleAutoTrade(entry: WatchlistEntry) {
+    if (busy || entry.manualOnlyLocked) return;
+    if (entry.autoTradeEnabled && !confirm(
+      `Set ${entry.symbol} to manual-only?\n\n` +
+      `No automation will place an order for it again — no armed triggers, no strategy entries, and ` +
+      `no protective stops or take-profits on the way out. You place every order for it yourself.\n\n` +
+      `It stays charted, scanned and alerted on.`
+    )) return;
+
+    busy = true;
+    try {
+      const result = await trading.watchlist.update(
+        entry.symbol, { autoTradeEnabled: !entry.autoTradeEnabled });
+      notice = result.message ?? null;
+      await load();
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
   async function reset() {
     if (busy) return;
     const userAdded = data?.entries.filter(e => e.source === 'user').length ?? 0;
+    const manual = data?.entries.filter(e => !e.autoTradeEnabled).length ?? 0;
     if (!confirm(
       `Reset the watchlist to the configured allowed-symbols list?\n\n` +
       (userAdded > 0
         ? `This discards ${userAdded} symbol(s) you added, along with any mute settings and notes.`
-        : `Any mute settings and notes will be discarded.`)
+        : `Any mute settings and notes will be discarded.`) +
+      // Called out separately: the others are cosmetic, this one hands symbols back to automation.
+      (manual > 0
+        ? `\n\n${manual} symbol(s) are currently manual-only. Resetting clears that, and automation ` +
+          `will be free to trade them again — unless they are also listed in ManualOnlySymbols.`
+        : ``)
     )) return;
     busy = true;
     try {
@@ -262,6 +296,10 @@
   $: gapBySymbol = new Map(
     (archive?.symbolsShortOfWeekly ?? []).map(gap => [gap.symbol, gap]));
   $: openAlertCount = (data?.entries ?? []).reduce((total, entry) => total + entry.openAlerts, 0);
+  // Counted against `manualOnly`, not the stored toggle: a symbol pinned in appsettings is just as
+  // hand-managed as one switched off here, and the header is answering "how many do I place myself".
+  // Restricted to tradable rows for the same reason the badge is — see the badge's comment.
+  $: manualOnlyCount = (data?.entries ?? []).filter(e => e.tradable && e.manualOnly).length;
   $: selectedCompany = data?.entries.find(entry => entry.symbol === selected)?.companyName ?? null;
   $: filteredEntries = (data?.entries ?? []).filter(entry =>
     (!alertsOnly || entry.openAlerts > 0) &&
@@ -284,7 +322,7 @@
       </b>
       <span>
         {#if data}
-          {data.entries.length} / {data.maxSymbols} watched · {data.tradableSymbols} tradable
+          {data.entries.length} / {data.maxSymbols} watched · {data.tradableSymbols} tradable{manualOnlyCount > 0 ? ` · ${manualOnlyCount} manual` : ''}
         {:else}Symbols monitored for trend, support, and resistance{/if}
       </span>
     </div>
@@ -425,6 +463,17 @@
                 <span class="tag monitor" title="Not in AllowedSymbols — an order for it would be rejected by the risk engine">
                   <Eye size={11} /> monitor-only
                 </span>
+              {:else if entry.manualOnly}
+                <!-- Only shown for a tradable symbol: "manual-only" on a name nothing may trade at all
+                     would be describing a restriction that is not the operative one. -->
+                <span
+                  class="tag manual"
+                  title={entry.manualOnlyLocked
+                    ? 'Pinned manual-only in appsettings (ManualOnlySymbols) — you place every order for it; no automation will, in either direction.'
+                    : 'Manual-only — you place every order for it. No armed triggers, no strategy entries, no automatic stops or take-profits.'}
+                >
+                  {#if entry.manualOnlyLocked}<Lock size={11} />{:else}<Hand size={11} />{/if} manual
+                </span>
               {/if}
               {#if !entry.hasWeeklyHistory}
                 <span
@@ -465,6 +514,30 @@
             >
               {#if entry.alertsEnabled}<Bell size={13} />{:else}<BellOff size={13} />{/if}
             </button>
+            {#if entry.tradable}
+              <button
+                class="icon"
+                class:active={entry.manualOnly}
+                title={entry.manualOnlyLocked
+                  ? 'Pinned manual-only in appsettings — remove it from ManualOnlySymbols and restart to change this'
+                  : entry.autoTradeEnabled
+                    ? 'Hand this symbol to yourself: no automation will trade it, entry or exit'
+                    : 'Let automation trade this symbol again'}
+                aria-label={entry.autoTradeEnabled
+                  ? `Set ${entry.symbol} to manual-only`
+                  : `Allow automation for ${entry.symbol}`}
+                on:click={() => toggleAutoTrade(entry)}
+                disabled={busy || entry.manualOnlyLocked}
+              >
+                {#if entry.manualOnlyLocked}
+                  <Lock size={13} />
+                {:else if entry.autoTradeEnabled}
+                  <Bot size={13} />
+                {:else}
+                  <Hand size={13} />
+                {/if}
+              </button>
+            {/if}
             <button class="icon danger" title="Remove from watchlist" on:click={() => remove(entry)} disabled={busy}>
               <Trash2 size={13} />
             </button>
@@ -582,6 +655,11 @@
     border:1px solid var(--border-md); color:var(--text-3);
   }
   .tag.monitor { color:var(--info); border-color:color-mix(in srgb, var(--info) 35%, transparent); }
+  /* Deliberately quieter than .alert: a hand-managed symbol is a standing arrangement, not a problem. */
+  .tag.manual {
+    color:var(--text-2); border-color:var(--border-md);
+    background:color-mix(in srgb, var(--text-3) 10%, transparent);
+  }
   .tag.pending { color:var(--warning); border-color:color-mix(in srgb, var(--warning) 35%, transparent); }
   .tag.alert {
     color:var(--danger); border-color:color-mix(in srgb, var(--danger) 45%, transparent);

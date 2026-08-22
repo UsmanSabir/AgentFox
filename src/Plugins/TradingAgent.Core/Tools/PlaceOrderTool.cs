@@ -8,6 +8,7 @@ using TradingAgent.Manager;
 using TradingAgent.Models;
 using TradingAgent.Safety;
 using TradingAgent.Trading;
+using TradingAgent.Watchlist;
 
 namespace TradingAgent.Tools;
 
@@ -37,6 +38,7 @@ public sealed class PlaceOrderTool : BaseTool
     private readonly PendingTakeProfitStore _pendingSells;
     private readonly ApprovalIntentRegistry _intentRegistry;
     private readonly ILogger<PlaceOrderTool> _logger;
+    private readonly MonitoredUniverse? _universe;
 
     public override string Name => "place_order";
 
@@ -68,7 +70,8 @@ public sealed class PlaceOrderTool : BaseTool
         IOptions<AhkConfig> ahkConfig,
         PendingTakeProfitStore pendingSells,
         ApprovalIntentRegistry intentRegistry,
-        ILogger<PlaceOrderTool> logger)
+        ILogger<PlaceOrderTool> logger,
+        MonitoredUniverse? universe = null)
     {
         _manager      = manager;
         _agentOptions = agentOptions;
@@ -77,6 +80,7 @@ public sealed class PlaceOrderTool : BaseTool
         _pendingSells = pendingSells;
         _intentRegistry = intentRegistry;
         _logger       = logger;
+        _universe     = universe;
     }
 
     protected override async Task<ToolResult> ExecuteInternalAsync(
@@ -101,6 +105,20 @@ public sealed class PlaceOrderTool : BaseTool
 
         if (string.IsNullOrEmpty(action) || string.IsNullOrEmpty(symbol))
             return ToolResult.Fail("'action' and 'symbol' are required.");
+
+        // ── 1b. Manual-only gate ──────────────────────────────────────────────
+        // Refused here as well as at the execution boundary, and the reason is the model. An agent
+        // order reaches TradingManager carrying a host-tool-gate authorization, which counts as
+        // attended — correctly, when HITL is putting the call in front of someone. With HITL off for
+        // this tool there is nobody there, and "manually operated" plainly did not mean "by the LLM".
+        // So the tool declines outright and says who should place it instead.
+        if (_universe is not null && await _universe.IsManualOnlyAsync(symbol))
+        {
+            _logger.LogInformation("[PlaceOrder] {Symbol} is manual-only — declined.", symbol);
+            return ToolResult.Ok(Skipped(
+                $"{symbol} is set to manual-only: it is operated by hand, so this order was not placed. "
+                + "Report the setup to the operator and let them place it from the trading dashboard."));
+        }
 
         decimal? price = null;
         if (arguments.TryGetValue("price", out var priceRaw) && priceRaw is not null)

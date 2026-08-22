@@ -513,7 +513,8 @@ public sealed class WatchlistUniverseTests
         public Task<bool> RemoveWatchlistSymbolAsync(string s, CancellationToken ct = default) =>
             throw new NotSupportedException();
         public Task<bool> UpdateWatchlistSymbolAsync(
-            string s, bool? a, string? n, bool? p = null, CancellationToken ct = default) =>
+            string s, bool? a, string? n, bool? p = null, bool? autoTrade = null,
+            CancellationToken ct = default) =>
             throw new NotSupportedException();
         public Task<bool> ReorderWatchlistAsync(
             IReadOnlyList<string> symbols, CancellationToken ct = default) => throw new NotSupportedException();

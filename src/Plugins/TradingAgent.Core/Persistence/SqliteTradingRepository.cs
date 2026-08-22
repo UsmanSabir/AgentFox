@@ -1452,7 +1452,11 @@ public sealed class SqliteTradingRepository : ITradingRepository
                     sort_order     INTEGER NOT NULL DEFAULT 0,
                     pinned         INTEGER NOT NULL DEFAULT 0,
                     alerts_enabled INTEGER NOT NULL DEFAULT 1,
-                    notes          TEXT NULL
+                    notes          TEXT NULL,
+                    -- 0 = manual-only: automation may not originate an order for this symbol, the
+                    -- operator still may. It narrows only, which is why it is editable at runtime
+                    -- while AllowedSymbols is not. Defaults to 1 so nothing changes until asked.
+                    auto_trade_enabled INTEGER NOT NULL DEFAULT 1
                 );
                 -- Single row. seed_hash records the AllowedSymbols the watchlist was seeded from, so
                 -- the UI can report that the configured universe has changed since — without ever
@@ -1601,6 +1605,11 @@ public sealed class SqliteTradingRepository : ITradingRepository
                 connection, "armed_orders", "trailing", "INTEGER NOT NULL DEFAULT 0", ct);
             await AddColumnIfMissingAsync(
                 connection, "armed_orders", "persistent_until_filled", "INTEGER NOT NULL DEFAULT 0", ct);
+            // Defaults to 1 (automation allowed) so an existing watchlist keeps behaving exactly as it
+            // did: this is an opt-in restriction, and a migration that silently froze automation for
+            // every watched symbol would be the same bug in the other direction.
+            await AddColumnIfMissingAsync(
+                connection, "watchlist", "auto_trade_enabled", "INTEGER NOT NULL DEFAULT 1", ct);
             await SeedPerSymbolCoverageAsync(connection, ct);
 
             _initialized = true;
@@ -1626,7 +1635,8 @@ public sealed class SqliteTradingRepository : ITradingRepository
         var entries = new List<WatchlistEntry>();
         var read = connection.CreateCommand();
         read.CommandText = """
-            SELECT symbol, added_utc, source, sort_order, pinned, alerts_enabled, notes
+            SELECT symbol, added_utc, source, sort_order, pinned, alerts_enabled, notes,
+                   auto_trade_enabled
             FROM watchlist
             ORDER BY pinned DESC, sort_order, symbol
             """;
@@ -1641,7 +1651,8 @@ public sealed class SqliteTradingRepository : ITradingRepository
                     reader.GetInt32(3),
                     reader.GetInt64(4) != 0,
                     reader.GetInt64(5) != 0,
-                    reader.IsDBNull(6) ? null : reader.GetString(6)));
+                    reader.IsDBNull(6) ? null : reader.GetString(6),
+                    reader.GetInt64(7) != 0));
             }
         }
 
@@ -1724,9 +1735,10 @@ public sealed class SqliteTradingRepository : ITradingRepository
 
     public async Task<bool> UpdateWatchlistSymbolAsync(
         string symbol, bool? alertsEnabled, string? notes, bool? pinned = null,
-        CancellationToken ct = default)
+        bool? autoTradeEnabled = null, CancellationToken ct = default)
     {
-        if (alertsEnabled is null && notes is null && pinned is null) return true;
+        if (alertsEnabled is null && notes is null && pinned is null && autoTradeEnabled is null)
+            return true;
 
         await EnsureInitializedAsync(ct);
         await using var connection = await OpenAsync(ct);
@@ -1735,9 +1747,10 @@ public sealed class SqliteTradingRepository : ITradingRepository
         // field cannot blank the other.
         command.CommandText = """
             UPDATE watchlist
-               SET alerts_enabled = COALESCE($alerts, alerts_enabled),
-                   notes          = COALESCE($notes, notes),
-                   pinned         = COALESCE($pinned, pinned)
+               SET alerts_enabled     = COALESCE($alerts, alerts_enabled),
+                   notes              = COALESCE($notes, notes),
+                   pinned             = COALESCE($pinned, pinned),
+                   auto_trade_enabled = COALESCE($autoTrade, auto_trade_enabled)
              WHERE symbol = $symbol
             """;
         command.Parameters.AddWithValue("$symbol", symbol);
@@ -1746,6 +1759,8 @@ public sealed class SqliteTradingRepository : ITradingRepository
         command.Parameters.AddWithValue("$notes", notes ?? (object)DBNull.Value);
         command.Parameters.AddWithValue("$pinned",
             pinned is null ? DBNull.Value : pinned.Value ? 1 : 0);
+        command.Parameters.AddWithValue("$autoTrade",
+            autoTradeEnabled is null ? DBNull.Value : autoTradeEnabled.Value ? 1 : 0);
         return await command.ExecuteNonQueryAsync(ct) == 1;
     }
 

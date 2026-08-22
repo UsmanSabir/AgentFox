@@ -11,6 +11,7 @@ using TradingAgent.Observability;
 using TradingAgent.Persistence;
 using TradingAgent.Risk;
 using TradingAgent.Reconciliation;
+using TradingAgent.Watchlist;
 using Microsoft.Extensions.Options;
 
 namespace TradingAgent.Manager;
@@ -35,6 +36,7 @@ public sealed class TradingManager
     private readonly ILogger<TradingManager> _logger;
     private readonly IUserNotifier? _notifier;
     private readonly TradingActivityLog? _activity;
+    private readonly MonitoredUniverse? _universe;
     private readonly SemaphoreSlim _sellExecutionGate = new(1, 1);
 
     /// <summary>How long an execution alert may take to reach the channels before it is abandoned.</summary>
@@ -43,6 +45,10 @@ public sealed class TradingManager
     /// <param name="notifier">
     /// Optional channel broadcaster. Defaulted so the manager still activates in a host that does
     /// not register <see cref="IUserNotifier"/> (and in tests); alerts are simply skipped then.
+    /// </param>
+    /// <param name="universe">
+    /// Supplies the manual-only deny set. Defaulted for the same reason as the others; a manager built
+    /// without it enforces every other gate and simply has no hand-managed symbols.
     /// </param>
     public TradingManager(
         IBrokerAdapter broker,
@@ -57,8 +63,10 @@ public sealed class TradingManager
         ILogger<TradingManager> logger,
         TradingActivityLog? activity = null,
         IUserNotifier? notifier = null,
-        IBrokerStateReader? brokerStateReader = null)
+        IBrokerStateReader? brokerStateReader = null,
+        MonitoredUniverse? universe = null)
     {
+        _universe = universe;
         _activity = activity;
         _notifier = notifier;
         _broker = broker;
@@ -166,6 +174,42 @@ public sealed class TradingManager
         if (!risk.Allowed)
             return Reject(policy.Version,
                 "Pre-trade risk validation failed: " + string.Join(" ", risk.Violations));
+
+        // ── Manual-only symbols ───────────────────────────────────────────────
+        // The one gate that asks WHO is trading rather than WHAT. Everything above answers "may this
+        // order exist", and the answer is the same for a person and a robot; a symbol the operator
+        // hand-manages needs those answers to differ, so it cannot be expressed in the risk engine
+        // (dropping it from AllowedSymbols would ban the operator too) and is enforced here instead.
+        //
+        // Placed at the single execution boundary on purpose. ApprovalGate refuses earlier and with a
+        // better message, but only paths that ASK it are covered — and a strategy, retry worker, or a
+        // future caller that submits without asking would otherwise sail past. Attendance is the test:
+        // an authorization is required, and it must be one a human gave for THIS order. Absent
+        // authorization (every unattended worker) and pre-authorized policy both fail it, which is the
+        // direction a new caller should fail in.
+        if (_universe is not null)
+        {
+            var symbols = groups.SelectMany(g => g).Select(o => o.Symbol);
+            if (await _universe.FirstManualOnlyAsync(symbols, ct) is { } manualSymbol)
+            {
+                if (authorization is not { Attended: true })
+                {
+                    _logger.LogWarning(
+                        "[TradingManager] Refused an unattended order for {Symbol}: the symbol is "
+                        + "manual-only. Authorization was {Method}.",
+                        manualSymbol, authorization?.Method ?? "none");
+                    return Reject(policy.Version,
+                        $"{manualSymbol} is manual-only: automation may not place orders for it, "
+                        + "entries or exits. Place this one yourself, or turn automation back on for "
+                        + "the symbol on the watchlist (or remove it from ManualOnlySymbols).");
+                }
+
+                // Attended and allowed — but recorded, because "who traded a hand-managed name" is
+                // exactly the question this flag makes worth asking later.
+                _activity?.Info("Orders", $"Manual-only {manualSymbol} traded by hand",
+                    $"Authorized by {authorization.Actor} via {authorization.Method}.");
+            }
+        }
 
         if (mode is "APPROVALREQUIRED" or "BOUNDEDAUTO"
             && _options.Value.RequireReconciliationHealthy)

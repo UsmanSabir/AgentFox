@@ -72,6 +72,7 @@ public sealed partial class TradingCoreEndpoints
 
         trading.MapPost("/proposals/{proposalId}/execute", async (
             string proposalId,
+            HttpContext http,
             ITradingRepository repository,
             TradingAgent.Manager.TradingManager manager,
             ILogger<TradingCoreEndpoints> logger,
@@ -124,8 +125,15 @@ public sealed partial class TradingCoreEndpoints
                 // Each order as its own group: they are independent, so one failing must not skip the
                 // rest (grouping means "stop at the first failure", which is for a buy→sell pair).
                 var groups = orders.Select(o => (IReadOnlyList<TradingSignal>)[o]).ToList();
+                // Attendant, not HostToolGate: it records that a person clicked — which is what a
+                // manual-only symbol needs to know — without minting the approval intent that
+                // ApprovalRequired mode demands. That mode still refuses this endpoint exactly as it
+                // did before; claiming the stronger authorization here would have quietly changed it.
                 var result = await manager.ExecuteGroupsAsync(
-                    groups, $"proposal:{proposalId}", ct: ct);
+                    groups, $"proposal:{proposalId}",
+                    ExecutionAuthorization.Attendant(
+                        http.User.Identity?.Name ?? "trading-dashboard"),
+                    ct);
 
                 await repository.TrySetProposalStateAsync(
                     proposalId, "executing",
