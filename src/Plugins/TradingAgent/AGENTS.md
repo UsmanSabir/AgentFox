@@ -8,6 +8,15 @@
 - Keep existing expert entry points (chart levels, alert actions, armed-order dialog, proposal actions) when changing the consolidated flow. **New Order** is an additional simple entry point, not a replacement.
 - Prefills are editable starting values, never recommendations. Show the resulting order as a plain-language sentence before submission and require explicit quantity.
 
+## Manual-only symbols
+
+- Manual-only is a **deny list for automation only**, never for the operator. It must not be pushed down into `TradingRiskEngine`, and `AllowedSymbols` must not be used to express it: that list decides whether an order may exist at all, so narrowing it bans the dashboard along with the workers. Two different questions, two different places.
+- The effective set is `ManualOnlySymbols` (config) **union** every watchlist row with `auto_trade_enabled = 0`. Both halves may only add. Never give the API a way to clear a configured pin — config is the durable floor, and the runtime toggle is safe *because* it can only narrow.
+- Keep the check in both places. `ApprovalGate.Decide` refuses early, and must stay **above** the `BoundedAuto` short-circuit — below it the check is dead in the mode most likely to fire unattended. `TradingManager.ExecuteGroupsAsync` then re-asks authoritatively, so a caller that never consults the gate (retry worker, strategy, anything new) is still refused.
+- The boundary test is `ExecutionAuthorization.Attended` — a human said yes to *that* order. It defaults to false so a new automated caller is denied by omission. Do not mark an unattended caller `HostToolGate`/`Attendant` to get an order through; use `PreAuthorized` for standing policy permission.
+- A manual-only symbol keeps every bit of its analysis: charts, scans, alerts, archive. Do not "tidy" it out of the monitoring or archive universes — muting is what `alerts_enabled` is for, and a hand-managed name usually wants louder alerts, not quieter.
+- Nothing raises a stop or arms a take-profit for these symbols. That is the requested behaviour, not an oversight; if you add an exit automation, it must respect the deny set, and any option to exempt exits has to be explicit and off by default.
+
 ## Alerts and operational status
 
 - Alert "delete" is a dismissal/soft delete. Keep the persisted audit row and expose it through **show dismissed** until `Monitor.RetentionDays` expires. `TradingRetentionWorker` owns daily pruning independently of monitor/market state; do not move retention back into a market-hours branch. SQLite reuses the freed pages even when its file does not immediately shrink. Bulk mutations belong in repository methods so select-all is not limited to the first UI page.

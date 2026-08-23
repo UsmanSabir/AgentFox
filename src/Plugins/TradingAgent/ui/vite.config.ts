@@ -9,7 +9,12 @@ import { defineConfig, loadEnv } from 'vite';
 //               /plugin-assets/{slug}/. That is where the host serves this plugin's embedded
 //               wwwroot from; a default base of '/' would 404 inside the frame. Note it is NOT
 //               /ext/trading — that path is the host page that frames us.
-//   outDir    — ../wwwroot, which TradingAgent.csproj embeds into the plugin DLL.
+//   outDir    — ../../TradingAgent.Core/wwwroot, which TradingAgent.Core.csproj embeds into
+//               the CORE assembly rather than this entry plugin. That is what lets every
+//               edition of the plugin serve this one dashboard: the community entry and a
+//               premium entry both get the same bundle from the same assembly, so premium
+//               adds features to this UI through data (chart overlays) rather than by
+//               shipping a second page. See ../EDITION_SPLIT_PLAN.md.
 export default defineConfig(({ mode }) => {
 	const env = loadEnv(mode, '.', '');
 	const backendUrl = env.BACKEND_URL ?? 'http://localhost:5000';
@@ -18,7 +23,7 @@ export default defineConfig(({ mode }) => {
 		base: '/plugin-assets/trading/',
 		plugins: [svelte()],
 		build: {
-			outDir: '../wwwroot',
+			outDir: '../../TradingAgent.Core/wwwroot',
 			emptyOutDir: true,
 			// The host embeds these files as resources, so hashed names are fine but a manifest is not
 			// needed; keep the output flat and predictable for the EmbeddedResource glob.

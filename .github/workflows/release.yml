@@ -110,10 +110,12 @@ jobs:
           -o staging/${{ matrix.rid }}
 
       # The trading plugin ships its own web UI, built from a SEPARATE npm project so its
-      # dependencies never enter the host frontend. It writes to src/Plugins/TradingAgent/wwwroot,
-      # which TradingAgent.csproj embeds as EmbeddedResource — so like the host wwwroot above, this
-      # must run BEFORE the plugin is published or the plugin ships with no UI (the host then simply
-      # shows no Trading page; the backend is unaffected).
+      # dependencies never enter the host frontend. It writes to
+      # src/Plugins/TradingAgent.Core/wwwroot, which TradingAgent.Core.csproj embeds as
+      # EmbeddedResource — the CORE assembly, not the entry plugin, so every edition of the plugin
+      # serves the same dashboard. Like the host wwwroot above, this must run BEFORE the plugin is
+      # published or the plugin ships with no UI (the host then simply shows no Trading page; the
+      # backend is unaffected).
       - name: Build Trading plugin UI
         shell: bash
         run: npm ci && npm run build

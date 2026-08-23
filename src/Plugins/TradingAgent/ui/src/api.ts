@@ -378,6 +378,8 @@ export interface ReconciliationRun {
 export interface WatchlistEntry {
   symbol: string;
   companyName?: string | null;
+  /** Current session move from the previous close; absent when market-watch data is unavailable. */
+  dayChangePercent?: number | null;
   addedUtc: string;
   source: 'seed' | 'user' | string;
   sortOrder: number;
@@ -385,6 +387,15 @@ export interface WatchlistEntry {
   alertsEnabled: boolean;
   notes?: string | null;
   tradable: boolean;
+  /**
+   * The stored per-symbol toggle. False = manual-only: no automation may originate an order for the
+   * symbol, entry or exit, while you still can. Distinct from `alertsEnabled`, which only mutes.
+   */
+  autoTradeEnabled: boolean;
+  /** Effective answer, after `ManualOnlySymbols` from configuration is folded in. */
+  manualOnly: boolean;
+  /** True when the pin comes from configuration, which the API cannot lift — show it, don't offer it. */
+  manualOnlyLocked: boolean;
   archivedBars: number;
   hasWeeklyHistory: boolean;
   /** Alerts still in the `new` state for this symbol — drives the row badge. */
@@ -421,6 +432,42 @@ export interface ChartLevel {
   distancePercent: number | null;
 }
 
+/**
+ * Extra marks the backend asked us to draw. Always present and always this shape — empty for the
+ * community edition, populated by a licensed edition (projections, predicted points, a next target,
+ * a confidence band). The renderer is shared, so there is one drawing path whatever produced them.
+ *
+ * `kind` is a SEMANTIC token, never a color: the client maps it to a theme token so overlays stay
+ * legible in both light and dark and an edition cannot take over the palette. An unknown kind falls
+ * back to neutral rather than breaking the chart.
+ */
+export type ChartOverlayKind =
+  | 'projection' | 'prediction' | 'target' | 'entry' | 'stop'
+  | 'support' | 'resistance' | 'neutral' | string;
+
+export interface ChartOverlayPoint { time: number; value: number; }
+
+export interface ChartOverlays {
+  levels: {
+    id: string; label: string; price: number;
+    kind: ChartOverlayKind; weight: number; confirmed: boolean;
+  }[];
+  /** A line across time; `points` may extend PAST the last candle — that is a projection. */
+  series: {
+    id: string; label: string; kind: ChartOverlayKind;
+    dashed: boolean; points: ChartOverlayPoint[];
+  }[];
+  markers: {
+    id: string; time: number; text: string; kind: ChartOverlayKind;
+    position: 'aboveBar' | 'belowBar'; value: number | null;
+  }[];
+  /** Upper/lower envelope drawn as two lines — a confidence band around a projection. */
+  bands: {
+    id: string; label: string; kind: ChartOverlayKind;
+    points: { time: number; lower: number; upper: number; }[];
+  }[];
+}
+
 export interface ChartData {
   symbol: string;
   interval: string;
@@ -434,6 +481,8 @@ export interface ChartData {
   thresholds: { rsiOversold: number; rsiOverbought: number };
   candles: ChartCandle[];
   levels: { supports: ChartLevel[]; resistances: ChartLevel[] };
+  /** Edition overlays. Empty in the community build; see ChartOverlays. */
+  overlays: ChartOverlays;
   plan: {
     entry: number | null;
     stop: number | null;
@@ -805,8 +854,44 @@ export interface WatchlistResponse {
   seededUtc?: string | null;
   /** AllowedSymbols changed since seeding — offer a reset, never reseed silently. */
   configuredListChanged: boolean;
+  /** The policy source currently controlling which symbols may pass execution risk validation. */
+  executionUniverseSource: 'AllowedSymbols' | 'Watchlist';
   tradableSymbols: number;
   maxSymbols: number;
+  /**
+   * Symbols pinned manual-only in configuration. Includes any that are not on the watchlist at all —
+   * they still block automation, so they have to be visible somewhere.
+   */
+  configuredManualOnly: string[];
+}
+
+export interface WatchlistPresetPreview {
+  index: 'KSE100' | 'KSE30';
+  label: string;
+  source: string;
+  sourceUrl?: string | null;
+  count: number;
+  alreadyWatched: number;
+  missing: number;
+  outsideIndex: number;
+  projectedMergeCount: number;
+  maxSymbols: number;
+  /** True when applying the preset also changes which symbols are eligible for execution. */
+  grantsTradingPermission: boolean;
+  warning?: string | null;
+}
+
+export interface WatchlistPresetResult {
+  index: 'KSE100' | 'KSE30';
+  mode: 'merge' | 'replace';
+  source: string;
+  sourceUrl?: string | null;
+  total: number;
+  added: number;
+  removed: number;
+  preserved: number;
+  warning?: string | null;
+  message: string;
 }
 
 
@@ -1179,17 +1264,35 @@ export const trading = {
                                   symbol: string;
                                   added: boolean;
                                   tradable: boolean;
+                                  manualOnly: boolean;
                                   message?: string | null;
                                   warning?: string | null;
                                 }>('/trading/watchlist', { symbol }),
     remove: (symbol: string) =>
       del<{ symbol: string; removed: boolean }>(`/trading/watchlist/${encodeURIComponent(symbol)}`),
-    update: (symbol: string, changes: { alertsEnabled?: boolean; notes?: string; pinned?: boolean }) =>
-      patch<{ symbol: string; updated: boolean }>(
-        `/trading/watchlist/${encodeURIComponent(symbol)}`, changes),
+    update: (
+      symbol: string,
+      changes: {
+        alertsEnabled?: boolean;
+        notes?: string;
+        pinned?: boolean;
+        /** False = manual-only. A true here cannot lift a pin from `ManualOnlySymbols`; the response says so. */
+        autoTradeEnabled?: boolean;
+      }
+    ) =>
+      patch<{
+        symbol: string;
+        updated: boolean;
+        manualOnly?: boolean;
+        message?: string | null;
+      }>(`/trading/watchlist/${encodeURIComponent(symbol)}`, changes),
     reorder: (symbols: string[]) =>
       post<{ reordered: boolean; symbols: number }>('/trading/watchlist/reorder', { symbols }),
-    reset:  ()               => post<{ symbols: number }>('/trading/watchlist/reset')
+    reset:  ()               => post<{ symbols: number }>('/trading/watchlist/reset'),
+    previewPreset: (index: 'KSE100' | 'KSE30') =>
+      get<WatchlistPresetPreview>(`/trading/watchlist/presets/${index}`),
+    applyPreset: (index: 'KSE100' | 'KSE30', mode: 'merge' | 'replace') =>
+      post<WatchlistPresetResult>(`/trading/watchlist/presets/${index}`, { mode })
   },
 
   movers: {
