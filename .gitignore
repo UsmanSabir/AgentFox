@@ -80,3 +80,7 @@ src/Plugins/TradingAgent/wwwroot/
 .agents/
 .claude/
 .github/
+# Standalone marketing website build and dependency output.
+/website/node_modules/
+/website/.svelte-kit/
+/website/build/
