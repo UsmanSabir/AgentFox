@@ -300,6 +300,18 @@ public interface ITradingRepository
         string source,
         CancellationToken ct = default);
 
+    /// <summary>
+    /// Adds an index universe to the watchlist, or replaces the watchlist with it. Existing rows that
+    /// remain in the target keep their alerts, pin, notes and manual-only setting; only genuinely new
+    /// rows receive defaults. This changes execution eligibility only when Watchlist is the explicitly
+    /// configured execution source.
+    /// </summary>
+    Task<WatchlistBulkApplyResult> ApplyWatchlistSymbolsAsync(
+        IReadOnlyList<string> symbols,
+        bool replace,
+        string source,
+        CancellationToken ct = default);
+
     /// <summary>Removes a symbol. False when it was not present. Archived bars are kept.</summary>
     Task<bool> RemoveWatchlistSymbolAsync(string symbol, CancellationToken ct = default);
 
@@ -307,7 +319,7 @@ public interface ITradingRepository
     /// <param name="autoTradeEnabled">
     /// False makes the symbol manual-only: automation may no longer originate an order for it, while
     /// the operator still can. Editable at runtime because it only ever NARROWS what automation may
-    /// do — the same reason a watchlist edit may never widen what may be traded.
+    /// do. It is independent of which universe supplies base execution eligibility.
     /// </param>
     Task<bool> UpdateWatchlistSymbolAsync(
         string symbol,
@@ -541,6 +553,13 @@ public sealed record WatchlistSnapshot(
     IReadOnlyList<WatchlistEntry> Entries,
     DateTime? SeededUtc,
     string? SeedHash);
+
+/// <summary>Result of an additive or replacing watchlist preset operation.</summary>
+public sealed record WatchlistBulkApplyResult(
+    int Total,
+    int Added,
+    int Removed,
+    int Preserved);
 
 /// <summary>
 /// Size and reach of the archived daily-candle history. <see cref="CoveredDates"/> counts dates

@@ -19,9 +19,9 @@ namespace TradingAgent.Watchlist;
 /// </para>
 ///
 /// <list type="bullet">
-///   <item><see cref="ForExecutionAsync"/> — AllowedSymbols ONLY. What may be ORDERED. This is the
-///   list <see cref="Risk.TradingRiskEngine"/> enforces (it reads configuration directly, and is not
-///   changed by any of this). Editing the watchlist must never widen it.</item>
+///   <item><see cref="ForExecutionAsync"/> — the explicitly selected execution source: configured
+///   AllowedSymbols (the default) or the editable watchlist. This authoritative snapshot is passed
+///   into <see cref="Risk.TradingRiskEngine"/> at the execution boundary.</item>
 ///   <item><see cref="ForMonitoringAsync"/> — watchlist ∪ AllowedSymbols. What is CHARTED, SCANNED,
 ///   and ALERTED on. A superset is safe here: the output is information, not an order.</item>
 ///   <item><see cref="ForArchiveAsync"/> — which symbols get deep daily history. Same as monitoring by
@@ -71,10 +71,34 @@ public sealed class MonitoredUniverse
     }
 
     /// <summary>
-    /// Symbols that may actually be traded: the configured allow-list, normalized. Synchronous and
-    /// database-free by design — this must not become dependent on mutable state.
+    /// The normalized, configured allow-list. Used for first-run seeding and Reset even when the
+    /// watchlist is the selected execution source.
     /// </summary>
-    public IReadOnlyList<string> ForExecution() => Normalize(_options.Value.AllowedSymbols);
+    public IReadOnlyList<string> ConfiguredAllowedSymbols() => Normalize(_options.Value.AllowedSymbols);
+
+    /// <summary>
+    /// Symbols that may actually be traded. Watchlist mode deliberately reads through to storage on
+    /// every execution attempt: a removed symbol must not remain tradable for a cache TTL. Failure to
+    /// resolve mutable policy fails closed rather than falling back to a wider or different source.
+    /// </summary>
+    public async Task<IReadOnlyList<string>> ForExecutionAsync(CancellationToken ct = default)
+    {
+        if (_options.Value.ExecutionUniverseSource == TradingExecutionUniverseSource.AllowedSymbols)
+            return ConfiguredAllowedSymbols();
+
+        try
+        {
+            await SeedIfNeededAsync(ct: ct);
+            var watchlist = await _repository.GetWatchlistAsync(ct);
+            return Normalize(watchlist.Entries.Select(entry => entry.Symbol));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogError(ex,
+                "[Watchlist] Could not resolve the selected execution universe; execution fails closed.");
+            return [];
+        }
+    }
 
     /// <summary>Symbols to chart, scan, and raise alerts for: the watchlist plus the tradable list.</summary>
     public async Task<IReadOnlyList<string>> ForMonitoringAsync(CancellationToken ct = default)
@@ -88,7 +112,7 @@ public sealed class MonitoredUniverse
             if (_cachedMonitoring is { } raced && DateTime.UtcNow - _cachedAtUtc < CacheFor)
                 return raced;
 
-            var allowed = ForExecution();
+            var allowed = ConfiguredAllowedSymbols();
             var resolved = new List<string>(allowed);
             var seen = new HashSet<string>(allowed, StringComparer.OrdinalIgnoreCase);
 
@@ -134,11 +158,11 @@ public sealed class MonitoredUniverse
     public async Task<IReadOnlyList<string>> ForArchiveAsync(CancellationToken ct = default) =>
         _options.Value.Watchlist.ArchiveWatchlistSymbols
             ? await ForMonitoringAsync(ct)
-            : ForExecution();
+            : ConfiguredAllowedSymbols();
 
-    /// <summary>True when the symbol may be ordered (i.e. is in AllowedSymbols).</summary>
-    public bool IsTradable(string symbol) =>
-        ForExecution().Contains(symbol.Trim(), StringComparer.OrdinalIgnoreCase);
+    /// <summary>True when the symbol is in the selected execution universe.</summary>
+    public async Task<bool> IsTradableAsync(string symbol, CancellationToken ct = default) =>
+        (await ForExecutionAsync(ct)).Contains(symbol.Trim(), StringComparer.OrdinalIgnoreCase);
 
     // ── Manual-only: the deny set ─────────────────────────────────────────────
     // Deliberately NOT part of any list above. A manual-only symbol keeps every bit of its analysis;
@@ -238,7 +262,7 @@ public sealed class MonitoredUniverse
     {
         if (!_options.Value.Watchlist.SeedFromAllowedSymbols) return;
 
-        var seed = allowed ?? ForExecution();
+        var seed = allowed ?? ConfiguredAllowedSymbols();
         if (seed.Count == 0) return;
 
         await _repository.EnsureWatchlistSeededAsync(seed, SeedHash(seed), ct);
@@ -257,7 +281,7 @@ public sealed class MonitoredUniverse
     }
 
     /// <summary>Current fingerprint of the configured allow-list.</summary>
-    public string CurrentSeedHash() => SeedHash(ForExecution());
+    public string CurrentSeedHash() => SeedHash(ConfiguredAllowedSymbols());
 
     private static List<string> Normalize(IEnumerable<string> symbols) =>
         symbols.Select(s => s.Trim().ToUpperInvariant())

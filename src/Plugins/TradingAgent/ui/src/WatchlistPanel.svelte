@@ -1,10 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { trading, type WatchlistEntry, type WatchlistResponse, type CandleArchiveStatus } from './api';
+  import {
+    trading, type WatchlistEntry, type WatchlistResponse, type CandleArchiveStatus,
+    type WatchlistPresetPreview
+  } from './api';
   import {
     Plus, RotateCcw, Trash2, Bell, BellOff, Eye, AlertTriangle, Clock, Search,
     Download, Pin, PinOff, GripVertical, PanelLeftClose, PanelLeftOpen,
-    ArrowUpRight, ArrowDownRight, Minus, Bot, Hand, Lock
+    ArrowUpRight, ArrowDownRight, Minus, Bot, Hand, Lock, ListPlus, X
   } from 'lucide-svelte';
 
   /** Selected symbol, so the chart pane (Phase 2) can follow the list. */
@@ -32,6 +35,15 @@
   let alertsOnly = false;
   let draggedSymbol: string | null = null;
   let dragOverSymbol: string | null = null;
+  let preset: WatchlistPresetPreview | null = null;
+  let presetLoading = false;
+  let executionSourceNoteDismissed = false;
+  const executionSourceNoteStorageKey = 'trading-watchlist-execution-source-note-dismissed-v1';
+
+  function dismissExecutionSourceNote() {
+    executionSourceNoteDismissed = true;
+    localStorage.setItem(executionSourceNoteStorageKey, 'true');
+  }
 
   function toggleCompact() {
     compact = !compact;
@@ -104,6 +116,7 @@
     error = null;
     try {
       data = await trading.watchlist.list();
+      if (selected && !data.entries.some(entry => entry.symbol === selected)) selected = null;
       if (!selected && data.entries.length) selected = data.entries[0].symbol;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -178,6 +191,47 @@
       input = '';
       await load();
       selected = result.symbol;
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function previewPreset(index: 'KSE100' | 'KSE30') {
+    if (presetLoading || busy) return;
+    presetLoading = true;
+    error = null;
+    try {
+      preset = await trading.watchlist.previewPreset(index);
+    } catch (e) {
+      preset = null;
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      presetLoading = false;
+    }
+  }
+
+  async function applyPreset(mode: 'merge' | 'replace') {
+    if (!preset || busy || presetLoading) return;
+    if (mode === 'replace' && !confirm(
+      `Replace the watchlist with ${preset.label}?\n\n` +
+      `${preset.outsideIndex} current symbol(s) will be removed and ${preset.missing} added. ` +
+      `${preset.alreadyWatched} overlapping symbol(s) keep their pin, alerts, notes and manual-only settings.\n\n` +
+      (preset.grantsTradingPermission
+        ? `The watchlist is your execution universe. Index members will become tradable, subject to every risk control.`
+        : `This changes monitoring only. It does not add anything to AllowedSymbols or grant trading permission.`)
+    )) return;
+
+    busy = true;
+    error = null;
+    notice = null;
+    try {
+      const result = await trading.watchlist.applyPreset(preset.index, mode);
+      notice = `${result.message} ${result.added} added, ${result.removed} removed, ${result.preserved} preserved.` +
+        (result.warning ? ` ${result.warning}` : '');
+      preset = null;
+      await load();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -290,6 +344,7 @@
 
   onMount(() => {
     compact = localStorage.getItem('trading-watchlist-density') === 'compact';
+    executionSourceNoteDismissed = localStorage.getItem(executionSourceNoteStorageKey) === 'true';
     load();
   });
 
@@ -300,6 +355,7 @@
   // hand-managed as one switched off here, and the header is answering "how many do I place myself".
   // Restricted to tradable rows for the same reason the badge is — see the badge's comment.
   $: manualOnlyCount = (data?.entries ?? []).filter(e => e.tradable && e.manualOnly).length;
+  $: watchlistControlsExecution = data?.executionUniverseSource === 'Watchlist';
   $: selectedCompany = data?.entries.find(entry => entry.symbol === selected)?.companyName ?? null;
   $: filteredEntries = (data?.entries ?? []).filter(entry =>
     (!alertsOnly || entry.openAlerts > 0) &&
@@ -355,12 +411,74 @@
     </button>
   </form>
 
+  <div class="preset-row" aria-label="Index watchlist presets">
+    <span><ListPlus size={13} /> Index lists</span>
+    <button type="button" on:click={() => previewPreset('KSE100')} disabled={busy || presetLoading}>
+      KSE 100
+    </button>
+    <button type="button" on:click={() => previewPreset('KSE30')} disabled={busy || presetLoading}>
+      KSE 30
+    </button>
+  </div>
+
+  {#if preset}
+    <div class="preset-card">
+      <div class="preset-summary">
+        <div>
+          <b>{preset.label}</b>
+          <span>{preset.count} members · {preset.missing} missing · {preset.alreadyWatched} already watched</span>
+        </div>
+        <button class="icon close" type="button" on:click={() => preset = null}
+          aria-label="Close index list options" title="Close"><X size={13} /></button>
+      </div>
+      <div class="preset-actions">
+        <button
+          class="btn btn-primary"
+          type="button"
+          on:click={() => applyPreset('merge')}
+          disabled={busy || preset.missing === 0 || preset.projectedMergeCount > preset.maxSymbols}
+          title={preset.projectedMergeCount > preset.maxSymbols
+            ? `Adding would exceed the ${preset.maxSymbols}-symbol limit`
+            : 'Keep the current watchlist and add only missing index members'}
+        >Add {preset.missing} missing</button>
+        <button class="btn btn-ghost replace" type="button" on:click={() => applyPreset('replace')} disabled={busy}>
+          Replace list
+        </button>
+      </div>
+      <small>
+        {#if preset.grantsTradingPermission}
+          Execution universe — members become tradable, subject to all risk controls.
+        {:else}
+          Monitoring only — trading permissions stay unchanged.
+        {/if}
+        Source: {preset.source}.
+        {#if preset.warning} {preset.warning}{/if}
+      </small>
+    </div>
+  {/if}
+
   {#if data?.configuredListChanged}
     <p class="note warn">
       <AlertTriangle size={13} />
       The configured allowed-symbols list has changed since this watchlist was seeded. It is not
       updated automatically — that would discard your edits. Use Reset to adopt the new list.
     </p>
+  {/if}
+
+  {#if watchlistControlsExecution && !executionSourceNoteDismissed}
+    <div class="note execution-source" role="note">
+      <span>
+        Watchlist controls trading eligibility. Removing a symbol blocks new orders; adding one permits
+        orders only after every normal risk and safety check passes.
+      </span>
+      <button
+        class="note-close"
+        type="button"
+        on:click={dismissExecutionSourceNote}
+        aria-label="Dismiss trading eligibility note"
+        title="Dismiss this note"
+      ><X size={13} /></button>
+    </div>
   {/if}
 
   {#if error}<p class="note danger">{error}</p>{/if}
@@ -490,6 +608,7 @@
               class="icon pin"
               class:active={entry.pinned}
               title={entry.pinned ? 'Unpin from the top' : 'Pin to the top'}
+              data-tooltip={entry.pinned ? 'Unpin' : 'Pin to top'}
               aria-label={entry.pinned ? `Unpin ${entry.symbol}` : `Pin ${entry.symbol}`}
               on:click={() => togglePin(entry)}
               disabled={busy}
@@ -500,6 +619,8 @@
               <button
                 class="icon"
                 title="Fetch the daily sessions this symbol was never requested for, so weekly levels can be computed"
+                data-tooltip="Fetch history"
+                aria-label={`Fetch missing price history for ${entry.symbol}`}
                 on:click={() => fillHistory(entry)}
                 disabled={busy || archive?.progress.isRunning}
               >
@@ -509,6 +630,8 @@
             <button
               class="icon"
               title={entry.alertsEnabled ? 'Mute alerts for this symbol' : 'Unmute alerts'}
+              data-tooltip={entry.alertsEnabled ? 'Mute alerts' : 'Enable alerts'}
+              aria-label={entry.alertsEnabled ? `Mute alerts for ${entry.symbol}` : `Enable alerts for ${entry.symbol}`}
               on:click={() => toggleAlerts(entry)}
               disabled={busy}
             >
@@ -523,6 +646,9 @@
                   : entry.autoTradeEnabled
                     ? 'Hand this symbol to yourself: no automation will trade it, entry or exit'
                     : 'Let automation trade this symbol again'}
+                data-tooltip={entry.manualOnlyLocked
+                  ? 'Manual-only locked'
+                  : entry.autoTradeEnabled ? 'Set manual-only' : 'Allow automation'}
                 aria-label={entry.autoTradeEnabled
                   ? `Set ${entry.symbol} to manual-only`
                   : `Allow automation for ${entry.symbol}`}
@@ -538,7 +664,8 @@
                 {/if}
               </button>
             {/if}
-            <button class="icon danger" title="Remove from watchlist" on:click={() => remove(entry)} disabled={busy}>
+            <button class="icon danger" title="Remove from watchlist" data-tooltip="Remove"
+              aria-label={`Remove ${entry.symbol} from watchlist`} on:click={() => remove(entry)} disabled={busy}>
               <Trash2 size={13} />
             </button>
           </div>
@@ -555,8 +682,14 @@
     border: 1px solid var(--border);
     border-radius: var(--radius);
     padding: 1rem;
-    height: 100%;
+    height:auto;
+    max-height:none;
+    align-self:stretch;
     min-height: 0;
+    overflow:hidden;
+    /* Ignore the list's 100+ row intrinsic height when the parent grid chooses its row height. The
+       chart/details card establishes that height; this card then stretches to match it. */
+    contain:size;
     display: flex;
     flex-direction: column;
     gap: .7rem;
@@ -581,6 +714,31 @@
   .symbol-input::placeholder { color:var(--text-3); text-transform:none; }
   .symbol-input:focus { outline:none; border-color:var(--primary); }
   .add-row .btn { display:flex; align-items:center; gap:.35rem; }
+
+  .preset-row {
+    display:flex; align-items:center; gap:.35rem; min-width:0;
+    color:var(--text-3); font-size:.68rem;
+  }
+  .preset-row > span { display:flex; align-items:center; gap:.3rem; margin-right:auto; white-space:nowrap; }
+  .preset-row button {
+    border:1px solid var(--border-md); background:var(--surface-2); color:var(--text-2);
+    border-radius:999px; padding:.22rem .5rem; font:inherit; font-size:.68rem; cursor:pointer;
+  }
+  .preset-row button:hover { color:var(--primary); border-color:color-mix(in srgb, var(--primary) 45%, var(--border)); }
+  .preset-row button:disabled { opacity:.5; cursor:wait; }
+  .preset-card {
+    display:flex; flex-direction:column; gap:.5rem; padding:.65rem;
+    border:1px solid color-mix(in srgb, var(--primary) 28%, var(--border));
+    border-radius:var(--radius-sm); background:color-mix(in srgb, var(--primary) 5%, var(--surface-2));
+  }
+  .preset-summary { display:flex; justify-content:space-between; gap:.5rem; align-items:flex-start; }
+  .preset-summary > div { display:flex; flex-direction:column; gap:.1rem; min-width:0; }
+  .preset-summary b { color:var(--text); font-size:.78rem; }
+  .preset-summary span, .preset-card small { color:var(--text-3); font-size:.65rem; line-height:1.45; }
+  .preset-actions { display:flex; gap:.4rem; }
+  .preset-actions .btn { font-size:.7rem; padding:.32rem .55rem; }
+  .preset-actions .replace { color:var(--danger); }
+  .preset-card .close { flex:0 0 auto; }
 
   .filter-row { display:flex; align-items:center; gap:.45rem; }
   .search-row {
@@ -611,15 +769,30 @@
   }
   .note.warn { color:var(--warning); }
   .note.danger { color:var(--danger); }
+  .note.execution-source {
+    color:var(--info); padding:.42rem .52rem; border-radius:var(--radius-sm);
+    border:1px solid color-mix(in srgb, var(--info) 28%, var(--border));
+    background:color-mix(in srgb, var(--info) 7%, var(--surface-2));
+  }
+  .execution-source > span { flex:1; min-width:0; }
+  .note-close {
+    flex:0 0 auto; display:grid; place-items:center; width:22px; height:22px; padding:0;
+    margin:-.18rem -.25rem 0 0; border:0; border-radius:var(--radius-sm);
+    background:transparent; color:currentColor; cursor:pointer; opacity:.72;
+  }
+  .note-close:hover { opacity:1; background:color-mix(in srgb, var(--info) 12%, transparent); }
+  .note-close:focus-visible { opacity:1; outline:2px solid var(--info); outline-offset:1px; }
 
   /* Scrolls internally: a 150-symbol watchlist must not push the rest of the page off-screen. */
   .rows {
     list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:2px;
-    flex:1; min-height:0; max-height:none; overflow-y:auto; overflow-x:hidden;
+    flex:1 1 0; min-height:0; max-height:none; overflow-y:auto; overflow-x:hidden;
+    scrollbar-gutter:stable; overscroll-behavior:contain;
   }
   .rows li {
-    display:flex; align-items:center; gap:.4rem;
-    border-radius:var(--radius-sm); padding:.1rem .25rem .1rem .1rem;
+    display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:.3rem;
+    width:100%; box-sizing:border-box;
+    border-radius:var(--radius-sm); padding:.1rem .2rem .1rem .05rem;
     border:1px solid transparent;
   }
   .rows li:hover { background:var(--surface-2); }
@@ -633,11 +806,12 @@
   .drag-handle:active { cursor:grabbing; }
 
   .pick {
-    flex:1; display:flex; align-items:center; gap:.5rem; flex-wrap:wrap;
+    min-width:0; width:100%; display:flex; flex-direction:column;
+    align-items:flex-start; gap:.28rem;
     background:none; border:0; cursor:pointer; padding:.4rem .5rem; text-align:left;
     font:inherit; color:var(--text);
   }
-  .identity { display:flex; min-width:0; flex-direction:column; gap:.08rem; }
+  .identity { display:flex; width:100%; min-width:0; overflow:hidden; flex-direction:column; gap:.08rem; }
   .symbol-line { display:flex; align-items:center; gap:.4rem; min-width:0; }
   .symbol { font-weight:600; font-size:.8rem; font-family:ui-monospace, monospace; }
   .day-change {
@@ -647,8 +821,9 @@
   .day-change.up { color:var(--success); }
   .day-change.down { color:var(--danger); }
   .day-change.flat { color:var(--text-3); }
-  .company { color:var(--text-3); font-size:.64rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:180px; }
-  .tags { display:flex; gap:.3rem; flex-wrap:wrap; }
+  .company { color:var(--text-3); font-size:.64rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; width:100%; }
+  .tags { display:flex; justify-content:flex-start; align-items:center; gap:.3rem; flex-wrap:wrap; }
+  .tags:empty { display:none; }
   .tag {
     display:inline-flex; align-items:center; gap:.2rem;
     font-size:.63rem; padding:.1rem .35rem; border-radius:999px;
@@ -666,15 +841,29 @@
     background:color-mix(in srgb, var(--danger) 12%, transparent); font-weight:600;
   }
 
-  .row-actions { display:flex; gap:.15rem; }
+  .row-actions { display:flex; align-items:center; gap:.05rem; flex:0 0 auto; }
   .icon {
     background:none; border:0; cursor:pointer; color:var(--text-3);
-    padding:.3rem; border-radius:var(--radius-sm); display:flex; align-items:center;
+    width:26px; height:26px; padding:0; box-sizing:border-box;
+    border-radius:var(--radius-sm); display:grid; place-items:center; position:relative;
   }
   .icon:hover { background:var(--surface-3); color:var(--text); }
   .icon.danger:hover { color:var(--danger); }
   .icon.pin.active { color:var(--primary); }
   .icon:disabled { opacity:.5; cursor:wait; }
+  .icon:focus-visible { outline:2px solid var(--primary); outline-offset:1px; }
+  .row-actions .icon[data-tooltip]::after {
+    content:attr(data-tooltip); position:absolute; right:calc(100% + .35rem); top:50%;
+    transform:translateY(-50%) translateX(.15rem); z-index:30; opacity:0; pointer-events:none;
+    padding:.28rem .45rem; border-radius:5px; white-space:nowrap;
+    background:var(--text); color:var(--surface); box-shadow:0 4px 14px rgba(0,0,0,.18);
+    font-size:.64rem; font-weight:600; line-height:1;
+    transition:opacity 120ms ease, transform 120ms ease;
+  }
+  .row-actions .icon[data-tooltip]:hover::after,
+  .row-actions .icon[data-tooltip]:focus-visible::after {
+    opacity:1; transform:translateY(-50%) translateX(0);
+  }
 
   /* Compact mode is a narrow rail, not merely shorter rows. Editing/search controls remain one click
      away in the expanded view while selection, pinning, alerts, and drag sorting stay visible. */
@@ -685,11 +874,13 @@
   .watchlist.compact .head-copy > span,
   .watchlist.compact header .btn,
   .watchlist.compact .add-row,
+  .watchlist.compact .preset-row,
+  .watchlist.compact .preset-card,
   .watchlist.compact .filter-row,
   .watchlist.compact .note { display:none; }
   .watchlist.compact .header-actions { flex:0 0 auto; }
   .watchlist.compact .rows { gap:0; }
-  .watchlist.compact .rows li { gap:.15rem; padding:0 .1rem 0 0; }
+  .watchlist.compact .rows li { grid-template-columns:auto minmax(0,1fr) auto; gap:.15rem; padding:0 .1rem 0 0; }
   .watchlist.compact .drag-handle { flex:0 0 auto; }
   .watchlist.compact .pick { min-width:0; padding:.34rem .1rem; gap:.2rem; }
   .watchlist.compact .identity { min-width:0; }
@@ -701,11 +892,11 @@
   .watchlist.compact .row-actions .icon:not(.pin) { display:none; }
   .watchlist.compact .tag.alert { padding:.08rem .2rem; font-size:.58rem; }
   .watchlist.compact .row-actions { flex:0 0 auto; }
-  .watchlist.compact .row-actions .icon { padding:.2rem; }
+  .watchlist.compact .row-actions .icon { width:22px; height:22px; }
 
   /* In the stacked mobile layout the chart no longer establishes this panel's height. */
   @media (max-width: 820px) {
-    .watchlist { height:auto; }
+    .watchlist { height:auto; max-height:none; overflow:visible; contain:none; }
     .rows { flex:none; max-height:min(52vh, 420px); }
   }
 </style>

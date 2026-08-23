@@ -314,7 +314,7 @@ public sealed partial class TradingCoreEndpoints
         {
             symbol = normalized,
             interval = candles.Interval,
-            tradable = universe.IsTradable(normalized),
+            tradable = await universe.IsTradableAsync(normalized, ct),
             technical = snapshot,
             weekly = new
             {

@@ -19,8 +19,8 @@ namespace TradingAgent.Tools;
 /// <see cref="TradingAgentOptions.AllowedSymbols"/> (see
 /// <see cref="TradingAgent.Watchlist.MonitoredUniverse"/>). Scanning a superset of the tradable list
 /// is deliberate: a watched symbol should show up in a scan. Each result therefore carries
-/// <c>tradable</c>, because a candidate outside AllowedSymbols is information only — the risk engine
-/// will refuse an order for it, and the caller must say so rather than recommend it as actionable.
+/// <c>tradable</c>, because a candidate outside the selected execution universe is information only —
+/// the risk engine will refuse an order for it, and the caller must say so rather than recommend it.
 ///
 /// Ranking is deterministic (<see cref="TechnicalAnalyzer"/>), and stocks at the bottom of their
 /// range because they are still falling are reported under <c>avoid</c>, never as buy candidates.
@@ -188,8 +188,7 @@ public sealed class ScanWatchlistTool : BaseTool
         if (universe.Count == 0)
             return ToolResult.Fail(
                 "There are no symbols to scan. Add PSX tickers to the watchlist on the Trading page, " +
-                "configure Plugins:TradingAgent:AllowedSymbols (the list the risk engine enforces at " +
-                "order time), or pass 'symbols' explicitly.");
+                "configure the selected execution source, or pass 'symbols' explicitly.");
 
         if (universe.Count > MaxUniverse)
         {
@@ -201,11 +200,11 @@ public sealed class ScanWatchlistTool : BaseTool
 
         // Resolved once for the whole scan: which of these symbols an order could actually be placed
         // for. Everything else here is analysis, which is allowed to range wider.
-        var tradable = _universe.ForExecution().ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var tradable = (await _universe.ForExecutionAsync()).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var monitorOnly = universe.Count(sym => !tradable.Contains(sym));
         if (monitorOnly > 0)
             notes.Add($"{monitorOnly} of {universe.Count} scanned symbols are monitor-only: they are on "
-                    + "the watchlist but not in AllowedSymbols, so an order for them would be rejected. "
+                    + "the watchlist but not in the selected execution universe, so an order for them would be rejected. "
                     + "Each result carries 'tradable'.");
 
         // Scanned and reported like any other symbol — a hand-managed name is exactly one you want a
@@ -442,7 +441,7 @@ public sealed class ScanWatchlistTool : BaseTool
         {
             symbol = s.Symbol,
             // Whether an ORDER for this symbol can pass the risk engine. The scan universe is the
-            // watchlist, which is deliberately wider than AllowedSymbols, so a candidate can be a
+            // monitoring universe, which may be wider than the selected execution source, so a candidate can be a
             // genuine setup and still not be executable — the caller must say so, not imply a trade.
             tradable = tradable.Contains(s.Symbol),
             // Tradable, but not BY YOU-the-agent: the operator hand-manages this name. Reported beside

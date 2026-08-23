@@ -535,11 +535,11 @@ public sealed class TradingAgentRuntime
                   stock", "anything at support", "what should I sell"), call scan_watchlist FIRST:
                     * Its universe is the user's watchlist plus the configured allowed-symbols list. Every
                       result carries `tradable`. A candidate with tradable=false is NOT executable — the
-                      risk engine only accepts allowed symbols — so you may report it as something being
+                      risk engine only accepts the selected execution universe — so you may report it as something being
                       watched, but you must say plainly that an order for it would be rejected, and never
                       present it as an actionable buy or sell. Prefer tradable candidates.
                       If the scan returns no symbols at all, say so and ask for the watchlist or
-                      AllowedSymbols to be set up; do not scan the whole market instead.
+                      selected execution source to be set up; do not scan the whole market instead.
                     * Call get_portfolio and pass its holdings to scan_watchlist so sell candidates you
                       actually own rank first and carry unrealized P&L.
                     * Recommend a BUY only from buy_candidates (at support). NEVER recommend anything
@@ -588,7 +588,8 @@ public sealed class TradingAgentRuntime
                 - AutoExecute: {startupPolicy.AutoExecute}
                 - MinConfidence: {startupPolicy.MinConfidence}
                 - PolicyVersion: {startupPolicy.Version}
-                - Allowed symbols ({agentOptions.Value.AllowedSymbols.Count}): {DescribeAllowedSymbols(agentOptions.Value.AllowedSymbols)}
+                - Execution universe source: {agentOptions.Value.ExecutionUniverseSource}
+                - Configured AllowedSymbols baseline ({agentOptions.Value.AllowedSymbols.Count}): {DescribeAllowedSymbols(agentOptions.Value.AllowedSymbols)}
                 """ + SpecialistPromptAppendix(composition)
         });
 
@@ -631,7 +632,7 @@ public sealed class TradingAgentRuntime
     private static string DescribeAllowedSymbols(IReadOnlyList<string> symbols)
     {
         if (symbols.Count == 0)
-            return "none configured — recommendations cannot be executed until AllowedSymbols is set";
+            return "none configured";
 
         const int shown = 40;
         var listed = string.Join(", ", symbols.Take(shown));

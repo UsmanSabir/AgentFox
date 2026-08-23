@@ -264,11 +264,11 @@ public sealed partial class TradingCoreEndpoints
             // Refuse up front rather than at fire time. An armed order for a non-tradable symbol would
             // sit there looking like protection and be rejected by the risk engine the moment it
             // mattered — which is the failure mode worth designing out.
-            if (!universe.IsTradable(symbol))
+            if (!await universe.IsTradableAsync(symbol, ct))
                 return Results.BadRequest(new
                 {
                     error = "not_tradable",
-                    message = $"'{symbol}' is not in AllowedSymbols, so an order for it would be refused "
+                    message = $"'{symbol}' is not in the selected execution universe, so an order for it would be refused "
                             + "by the risk engine. Arming one would be protection in name only."
                 });
 

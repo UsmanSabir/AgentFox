@@ -19,7 +19,10 @@ public sealed partial class TradingRiskEngine : ITradingRiskEngine
         _agentOptions = agentOptions;
     }
 
-    public RiskValidationResult Validate(IReadOnlyList<IReadOnlyList<TradingSignal>> groups, bool? killSwitchOverride = null)
+    public RiskValidationResult Validate(
+        IReadOnlyList<IReadOnlyList<TradingSignal>> groups,
+        bool? killSwitchOverride = null,
+        IReadOnlyCollection<string>? executionUniverseOverride = null)
     {
         var cfg = _options.Value;
         var agent = _agentOptions.Value;
@@ -30,12 +33,22 @@ public sealed partial class TradingRiskEngine : ITradingRiskEngine
         if (orderCount > Math.Max(1, agent.MaxOrdersPerBatch))
             violations.Add($"Batch has {orderCount} orders; maximum is {agent.MaxOrdersPerBatch}.");
 
-        var allowed = agent.AllowedSymbols
+        if (agent.ExecutionUniverseSource == TradingExecutionUniverseSource.Watchlist
+            && executionUniverseOverride is null)
+        {
+            violations.Add("The Watchlist execution universe was not resolved; execution fails closed.");
+        }
+
+        var universe = executionUniverseOverride ?? agent.AllowedSymbols;
+        var allowed = universe
             .Select(x => x.Trim().ToUpperInvariant())
             .Where(x => x.Length > 0)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var restrictToSelectedUniverse =
+            agent.ExecutionUniverseSource == TradingExecutionUniverseSource.Watchlist
+            || allowed.Count > 0;
         if (agent.RequireConfiguredSymbols && allowed.Count == 0)
-            violations.Add("No AllowedSymbols are configured; execution fails closed.");
+            violations.Add("The selected execution universe is empty; execution fails closed.");
 
         decimal batchValue = 0;
         var index = 0;
@@ -51,8 +64,8 @@ public sealed partial class TradingRiskEngine : ITradingRiskEngine
                 violations.Add($"{label}: action must be BUY or SELL.");
             if (!SymbolPattern().IsMatch(symbol))
                 violations.Add($"{label}: symbol '{symbol}' is invalid.");
-            else if (allowed.Count > 0 && !allowed.Contains(symbol))
-                violations.Add($"{label}: symbol '{symbol}' is not in AllowedSymbols.");
+            else if (restrictToSelectedUniverse && !allowed.Contains(symbol))
+                violations.Add($"{label}: symbol '{symbol}' is not in the selected execution universe.");
             if (order.Quantity is not > 0)
                 violations.Add($"{label}: quantity must be a positive integer.");
             if (orderType is not ("LIMIT" or "MARKET" or "STOPLOSS"))

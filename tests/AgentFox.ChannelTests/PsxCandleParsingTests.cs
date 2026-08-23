@@ -197,6 +197,41 @@ public sealed class PsxCandleParsingTests
     }
 
     [TestMethod]
+    public void ParseIndexConstituentTable_ReadsSemanticSymbolColumnAndDeduplicates()
+    {
+        const string html = """
+            <table><thead><tr>
+              <th data-name="symbol">SYMBOL</th><th data-name="price">PRICE</th>
+            </tr></thead><tbody>
+              <tr><td data-value="OGDC"><a title="Oil &amp; Gas Development">OGDC</a></td><td>200</td></tr>
+              <tr><td data-value="HBL">HBL</td><td>150</td></tr>
+              <tr><td data-value="ogdc">OGDC duplicate</td><td>201</td></tr>
+            </tbody></table>
+            """;
+
+        CollectionAssert.AreEqual(
+            new[] { "HBL", "OGDC" }, PsxDataClient.ParseIndexConstituentTable(html).ToArray());
+    }
+
+    [TestMethod]
+    public void ParseIndexConstituentTable_CurrentPsxMarkup_StaysInsideConstituentTable()
+    {
+        const string html = """
+            <a href="/company/NOISE">unrelated page link</a>
+            <h2>KSE 100 INDEX Constituents</h2><div><table><thead><tr>
+              <th>SYMBOL</th><th>NAME</th><th>CURRENT</th>
+            </tr></thead><tbody>
+              <tr><td data-order="OGDC"><a class="tbl__symbol" href="/company/OGDC"><strong>OGDC</strong></a></td><td>Oil &amp; Gas Development</td><td>200</td></tr>
+              <tr><td data-order="HBL"><a class="tbl__symbol" href="/company/HBL"><strong>HBL</strong></a></td><td>Habib Bank</td><td>150</td></tr>
+            </tbody></table></div>
+            <a href="/company/ALSONOISE">another page link</a>
+            """;
+
+        CollectionAssert.AreEqual(
+            new[] { "HBL", "OGDC" }, PsxDataClient.ParseIndexConstituentTable(html).ToArray());
+    }
+
+    [TestMethod]
     public void ParseMarketWatchTable_ReadsLiveQuote()
     {
         var quotes = PsxDataClient.ParseMarketWatchTable(MarketWatchFragment, new DateTime(2026, 8, 11, 9, 0, 0, DateTimeKind.Utc));

@@ -20,7 +20,7 @@ namespace TradingAgent.Manager;
 /// </para>
 ///
 /// <para>
-/// It can never widen risk: the kill switch, AllowedSymbols, the market calendar, reconciliation
+/// It can never widen risk: the kill switch, selected execution universe, market calendar, reconciliation
 /// health, and the value caps all live in the risk engine and the manager, and none of them consult
 /// this class. This decides confirmation only — and, in one direction only, refuses: a manual-only
 /// symbol is denied here as early as possible, but the binding refusal is <see cref="TradingManager"/>'s.
@@ -142,7 +142,7 @@ public sealed class ApprovalGate
         if (executionMode.Equals("BoundedAuto", StringComparison.OrdinalIgnoreCase))
             return (true,
                 "Execution mode is BoundedAuto: a triggered order WILL be submitted unattended, subject "
-                + "to the risk engine's limits (AllowedSymbols, order value, market hours).");
+                + "to the risk engine's limits (selected execution universe, order value, market hours).");
 
         if (!executionMode.Equals("ApprovalRequired", StringComparison.OrdinalIgnoreCase))
             return (false, $"Execution mode is {executionMode}, which does not place live orders.");

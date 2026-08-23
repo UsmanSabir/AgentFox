@@ -1443,8 +1443,7 @@ public sealed class SqliteTradingRepository : ITradingRepository
                     PRIMARY KEY (symbol, interval_minutes, bucket_start_utc)
                 );
                 -- The user's monitoring universe: seeded from AllowedSymbols but independent of it
-                -- afterwards, so adding a symbol to watch never widens what may be traded (that
-                -- stays AllowedSymbols, read directly by TradingRiskEngine).
+                -- afterwards. It is also the execution universe when that source is selected.
                 CREATE TABLE IF NOT EXISTS watchlist (
                     symbol         TEXT PRIMARY KEY,
                     added_utc      TEXT NOT NULL,
@@ -1454,8 +1453,8 @@ public sealed class SqliteTradingRepository : ITradingRepository
                     alerts_enabled INTEGER NOT NULL DEFAULT 1,
                     notes          TEXT NULL,
                     -- 0 = manual-only: automation may not originate an order for this symbol, the
-                    -- operator still may. It narrows only, which is why it is editable at runtime
-                    -- while AllowedSymbols is not. Defaults to 1 so nothing changes until asked.
+                    -- operator still may. It narrows automation only. Defaults to 1 so nothing
+                    -- changes until asked.
                     auto_trade_enabled INTEGER NOT NULL DEFAULT 1
                 );
                 -- Single row. seed_hash records the AllowedSymbols the watchlist was seeded from, so
@@ -1721,6 +1720,80 @@ public sealed class SqliteTradingRepository : ITradingRepository
         command.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("O"));
         command.Parameters.AddWithValue("$source", source);
         return await command.ExecuteNonQueryAsync(ct) == 1;
+    }
+
+    public async Task<WatchlistBulkApplyResult> ApplyWatchlistSymbolsAsync(
+        IReadOnlyList<string> symbols, bool replace, string source, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+
+        var target = symbols
+            .Select(symbol => symbol.Trim().ToUpperInvariant())
+            .Where(symbol => symbol.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(symbol => symbol, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var targetSet = target.ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var existing = new List<string>();
+        var read = connection.CreateCommand();
+        read.Transaction = (SqliteTransaction)transaction;
+        read.CommandText = "SELECT symbol FROM watchlist ORDER BY pinned DESC, sort_order, symbol";
+        await using (var reader = await read.ExecuteReaderAsync(ct))
+            while (await reader.ReadAsync(ct)) existing.Add(reader.GetString(0));
+
+        var existingSet = existing.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var preserved = existing.Count(targetSet.Contains);
+        var removed = replace ? existing.Count(symbol => !targetSet.Contains(symbol)) : 0;
+
+        if (replace && removed > 0)
+        {
+            foreach (var symbol in existing.Where(symbol => !targetSet.Contains(symbol)))
+            {
+                var delete = connection.CreateCommand();
+                delete.Transaction = (SqliteTransaction)transaction;
+                delete.CommandText = "DELETE FROM watchlist WHERE symbol = $symbol";
+                delete.Parameters.AddWithValue("$symbol", symbol);
+                await delete.ExecuteNonQueryAsync(ct);
+            }
+        }
+
+        var added = 0;
+        var nextOrder = existing.Count == 0 ? 0 : existing.Count;
+        foreach (var symbol in target.Where(symbol => !existingSet.Contains(symbol)))
+        {
+            var insert = connection.CreateCommand();
+            insert.Transaction = (SqliteTransaction)transaction;
+            insert.CommandText = """
+                INSERT INTO watchlist (symbol, added_utc, source, sort_order, alerts_enabled)
+                VALUES ($symbol, $now, $source, $order, 1)
+                """;
+            insert.Parameters.AddWithValue("$symbol", symbol);
+            insert.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("O"));
+            insert.Parameters.AddWithValue("$source", source);
+            insert.Parameters.AddWithValue("$order", nextOrder++);
+            added += await insert.ExecuteNonQueryAsync(ct);
+        }
+
+        // Close order gaps after replacement while retaining the user's relative order for rows that
+        // survived. New index members follow alphabetically, making the result stable and predictable.
+        var finalOrder = existing.Where(symbol => !replace || targetSet.Contains(symbol))
+            .Concat(target.Where(symbol => !existingSet.Contains(symbol)))
+            .ToList();
+        for (var i = 0; i < finalOrder.Count; i++)
+        {
+            var update = connection.CreateCommand();
+            update.Transaction = (SqliteTransaction)transaction;
+            update.CommandText = "UPDATE watchlist SET sort_order = $order WHERE symbol = $symbol";
+            update.Parameters.AddWithValue("$order", i);
+            update.Parameters.AddWithValue("$symbol", finalOrder[i]);
+            await update.ExecuteNonQueryAsync(ct);
+        }
+
+        await transaction.CommitAsync(ct);
+        return new WatchlistBulkApplyResult(finalOrder.Count, added, removed, preserved);
     }
 
     public async Task<bool> RemoveWatchlistSymbolAsync(string symbol, CancellationToken ct = default)

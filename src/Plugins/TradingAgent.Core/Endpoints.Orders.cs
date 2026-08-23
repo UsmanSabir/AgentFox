@@ -87,11 +87,11 @@ public sealed partial class TradingCoreEndpoints
                 return Results.BadRequest(new { error = "invalid_symbol", message = ex.Message });
             }
 
-            if (!universe.IsTradable(symbol))
+            if (!await universe.IsTradableAsync(symbol, ct))
                 return Results.BadRequest(new
                 {
                     error = "not_tradable",
-                    message = $"'{symbol}' is not in AllowedSymbols, so the risk engine will not trade it."
+                    message = $"'{symbol}' is not in the selected execution universe, so the risk engine will not trade it."
                 });
 
             if (body.Quantity is not > 0)

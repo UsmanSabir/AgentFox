@@ -688,11 +688,20 @@
           {#if companyName}<strong>{companyName}</strong>{/if}
         </div>
         {#if data}
-          <span>
-            {data.snapshot.close} · {pct(data.snapshot.dayChangePercent)} ·
-            {data.snapshot.setup} · {data.barsAnalyzed} bars
-            {#if data.usesLiveBar} · <em title="Today’s candle is still changing until market close">today’s candle open</em>{/if}
-          </span>
+          <div class="quote-line">
+            <span class="price-readout">
+              <small>{data.usesLiveBar ? 'Current price' : 'Last close'}</small>
+              <strong>{data.snapshot.close}</strong>
+            </span>
+            <span class:positive={(data.snapshot.dayChangePercent ?? 0) > 0}
+              class:negative={(data.snapshot.dayChangePercent ?? 0) < 0}>
+              {pct(data.snapshot.dayChangePercent)}
+            </span>
+            <span>{data.snapshot.setup} · {data.barsAnalyzed} bars · as of {data.snapshot.asOf}</span>
+            {#if data.usesLiveBar}
+              <em title="The exchange is open and this candle is still forming">live candle</em>
+            {/if}
+          </div>
         {:else}
           <span>Candles, support/resistance, and indicators</span>
         {/if}
@@ -894,9 +903,21 @@
   .title div { display:flex; flex-direction:column; gap:.2rem; min-width:0; }
   .title .instrument { flex-direction:row; align-items:baseline; gap:.45rem; flex-wrap:wrap; }
   .title b { color:var(--text); font-size:.9rem; font-family:ui-monospace, monospace; }
-  .title strong { color:var(--text-2); font-size:.72rem; font-weight:500; }
+  .title .instrument strong { color:var(--text-2); font-size:.72rem; font-weight:500; }
   .title span { color:var(--text-3); font-size:.72rem; }
   .title em { color:var(--warning); font-style:normal; }
+  .title .quote-line {
+    display:flex; flex-direction:row; align-items:center; gap:.42rem; flex-wrap:wrap;
+    font-variant-numeric:tabular-nums;
+  }
+  .price-readout {
+    display:inline-flex; align-items:baseline; gap:.28rem; padding:.12rem .42rem;
+    border-radius:6px; background:var(--surface-2); border:1px solid var(--border-md);
+  }
+  .price-readout small { color:var(--text-3); font-size:.6rem; text-transform:uppercase; letter-spacing:.035em; }
+  .title .price-readout strong { color:var(--text); font-size:1rem; font-weight:750; line-height:1; }
+  .quote-line .positive { color:var(--success); font-weight:700; }
+  .quote-line .negative { color:var(--danger); font-weight:700; }
 
   .head-actions { display:flex; align-items:center; gap:.5rem; flex-wrap:wrap; }
   .intervals { display:flex; padding:2px; border:1px solid var(--border-md); border-radius:8px; background:var(--surface-2); }

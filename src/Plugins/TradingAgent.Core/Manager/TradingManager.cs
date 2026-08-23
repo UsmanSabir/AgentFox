@@ -170,7 +170,11 @@ public sealed class TradingManager
             sellAdjustments = sizing.Adjustments;
         }
 
-        var risk = _riskEngine.Validate(groups, policy.KillSwitch);
+        IReadOnlyList<string>? executionUniverse = null;
+        if (_universe is not null)
+            executionUniverse = await _universe.ForExecutionAsync(ct);
+
+        var risk = _riskEngine.Validate(groups, policy.KillSwitch, executionUniverse);
         if (!risk.Allowed)
             return Reject(policy.Version,
                 "Pre-trade risk validation failed: " + string.Join(" ", risk.Violations));

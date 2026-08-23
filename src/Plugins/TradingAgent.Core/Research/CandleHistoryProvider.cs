@@ -30,6 +30,7 @@ public sealed class CandleHistoryProvider
     private readonly MonitoredUniverse _universe;
     private readonly AhlCandleSource _ahl;
     private readonly TradingActivityLog _activity;
+    private readonly IMarketCalendar _calendar;
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly ILogger<CandleHistoryProvider> _logger;
 
@@ -48,6 +49,7 @@ public sealed class CandleHistoryProvider
         MonitoredUniverse universe,
         AhlCandleSource ahl,
         TradingActivityLog activity,
+        IMarketCalendar calendar,
         IOptions<TradingAgentOptions> options,
         ILogger<CandleHistoryProvider> logger)
     {
@@ -57,6 +59,7 @@ public sealed class CandleHistoryProvider
         _universe = universe;
         _ahl = ahl;
         _activity = activity;
+        _calendar = calendar;
         _options = options;
         _logger = logger;
     }
@@ -138,6 +141,12 @@ public sealed class CandleHistoryProvider
                 fromPortal.Add(symbol);
         }
 
+        // A market-watch row has no session date. Outside an open exchange session it can be Friday's
+        // stale quote on Sunday, so it must never be promoted into a synthetic "today" candle. The
+        // settled archive/portal remains authoritative while closed.
+        var market = _calendar.GetStatus();
+        var includeFormingBar = includeLive && market.IsOpen;
+
         // ── Portal top-up ─────────────────────────────────────────────────────
         CandleHistory? portal = null;
         if (fromPortal.Count > 0)
@@ -145,7 +154,7 @@ public sealed class CandleHistoryProvider
             portal = await _dataClient.GetCandleHistoryAsync(
                 fromPortal.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
                 Math.Min(sessions, _options.Value.Scan.LookbackDays),
-                includeLive,
+                includeFormingBar,
                 ct);
             warnings.AddRange(portal.Warnings);
 
@@ -160,11 +169,11 @@ public sealed class CandleHistoryProvider
         // preferring it whenever a portal fetch happened would silently bypass the broker feed on
         // the common path. The composite is asked every time — its PSX source reads the same cached
         // snapshot the portal fetch already populated, so this costs no additional request.
-        var live = includeLive
+        var live = includeFormingBar
             ? await GetLiveSafeAsync(warnings, ct)
             : new Dictionary<string, PsxLiveQuote>();
 
-        var today = PsxTime.Today();
+        var today = DateOnly.FromDateTime(market.PktNow);
         var series = new Dictionary<string, IReadOnlyList<PsxCandle>>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var symbol in symbols.Distinct(StringComparer.OrdinalIgnoreCase))

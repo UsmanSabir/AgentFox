@@ -854,6 +854,8 @@ export interface WatchlistResponse {
   seededUtc?: string | null;
   /** AllowedSymbols changed since seeding — offer a reset, never reseed silently. */
   configuredListChanged: boolean;
+  /** The policy source currently controlling which symbols may pass execution risk validation. */
+  executionUniverseSource: 'AllowedSymbols' | 'Watchlist';
   tradableSymbols: number;
   maxSymbols: number;
   /**
@@ -861,6 +863,35 @@ export interface WatchlistResponse {
    * they still block automation, so they have to be visible somewhere.
    */
   configuredManualOnly: string[];
+}
+
+export interface WatchlistPresetPreview {
+  index: 'KSE100' | 'KSE30';
+  label: string;
+  source: string;
+  sourceUrl?: string | null;
+  count: number;
+  alreadyWatched: number;
+  missing: number;
+  outsideIndex: number;
+  projectedMergeCount: number;
+  maxSymbols: number;
+  /** True when applying the preset also changes which symbols are eligible for execution. */
+  grantsTradingPermission: boolean;
+  warning?: string | null;
+}
+
+export interface WatchlistPresetResult {
+  index: 'KSE100' | 'KSE30';
+  mode: 'merge' | 'replace';
+  source: string;
+  sourceUrl?: string | null;
+  total: number;
+  added: number;
+  removed: number;
+  preserved: number;
+  warning?: string | null;
+  message: string;
 }
 
 
@@ -1257,7 +1288,11 @@ export const trading = {
       }>(`/trading/watchlist/${encodeURIComponent(symbol)}`, changes),
     reorder: (symbols: string[]) =>
       post<{ reordered: boolean; symbols: number }>('/trading/watchlist/reorder', { symbols }),
-    reset:  ()               => post<{ symbols: number }>('/trading/watchlist/reset')
+    reset:  ()               => post<{ symbols: number }>('/trading/watchlist/reset'),
+    previewPreset: (index: 'KSE100' | 'KSE30') =>
+      get<WatchlistPresetPreview>(`/trading/watchlist/presets/${index}`),
+    applyPreset: (index: 'KSE100' | 'KSE30', mode: 'merge' | 'replace') =>
+      post<WatchlistPresetResult>(`/trading/watchlist/presets/${index}`, { mode })
   },
 
   movers: {

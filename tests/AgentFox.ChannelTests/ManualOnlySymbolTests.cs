@@ -54,8 +54,8 @@ public sealed class ManualOnlySymbolTests
 
         // The whole point: a hand-managed symbol is still fully tradable and fully watched. If any of
         // these changed, "manual-only" would have collapsed back into "removed from AllowedSymbols".
-        CollectionAssert.AreEqual(new[] { "OGDC" }, env.Universe.ForExecution().ToArray());
-        Assert.IsTrue(env.Universe.IsTradable("OGDC"));
+        CollectionAssert.AreEqual(new[] { "OGDC" }, (await env.Universe.ForExecutionAsync()).ToArray());
+        Assert.IsTrue(await env.Universe.IsTradableAsync("OGDC"));
         CollectionAssert.Contains((await env.Universe.ForMonitoringAsync()).ToArray(), "OGDC");
         CollectionAssert.Contains((await env.Universe.ForArchiveAsync()).ToArray(), "OGDC");
     }

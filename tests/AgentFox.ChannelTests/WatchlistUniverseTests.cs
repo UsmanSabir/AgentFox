@@ -11,9 +11,8 @@ namespace AgentFox.ChannelTests;
 /// <summary>
 /// Covers the split between what may be WATCHED and what may be TRADED.
 ///
-/// The invariant under test throughout: no watchlist operation may ever widen
-/// <see cref="MonitoredUniverse.ForExecution"/>. That list is what the risk engine enforces, so if
-/// editing a watchlist could grow it, the UI would have become an order-permission editor.
+/// AllowedSymbols mode keeps watchlist edits monitoring-only. Watchlist mode intentionally makes the
+/// same edits authoritative for execution, while the risk engine and every other gate remain intact.
 /// </summary>
 [TestClass]
 public sealed class WatchlistUniverseTests
@@ -51,13 +50,13 @@ public sealed class WatchlistUniverseTests
         var monitoring = await env.Universe.ForMonitoringAsync();
         CollectionAssert.Contains(monitoring.ToArray(), "HBL", "A watched symbol must be monitored.");
 
-        var execution = env.Universe.ForExecution();
+        var execution = await env.Universe.ForExecutionAsync();
         CollectionAssert.DoesNotContain(execution.ToArray(), "HBL",
             "Watchlist edits must never widen the tradable universe.");
         CollectionAssert.AreEqual(new[] { "OGDC" }, execution.ToArray());
 
-        Assert.IsFalse(env.Universe.IsTradable("HBL"));
-        Assert.IsTrue(env.Universe.IsTradable("ogdc"), "Tradability is case-insensitive.");
+        Assert.IsFalse(await env.Universe.IsTradableAsync("HBL"));
+        Assert.IsTrue(await env.Universe.IsTradableAsync("ogdc"), "Tradability is case-insensitive.");
     }
 
     [TestMethod]
@@ -85,7 +84,7 @@ public sealed class WatchlistUniverseTests
         await env.Repository.AddWatchlistSymbolAsync("HBL", "user");
         await env.Repository.RemoveWatchlistSymbolAsync("LUCK");
 
-        var seed = env.Universe.ForExecution();
+        var seed = env.Universe.ConfiguredAllowedSymbols();
         var count = await env.Repository.ResetWatchlistAsync(seed, MonitoredUniverse.SeedHash(seed));
 
         Assert.AreEqual(2, count);
@@ -142,6 +141,70 @@ public sealed class WatchlistUniverseTests
 
         Assert.IsFalse(await env.Repository.UpdateWatchlistSymbolAsync("NOPE", true, null));
         Assert.IsFalse(await env.Repository.RemoveWatchlistSymbolAsync("NOPE"));
+    }
+
+    [TestMethod]
+    public async Task IndexMerge_AddsOnlyMissingMembersAndNeverWidensExecution()
+    {
+        using var env = TestEnv.Create(["OGDC"]);
+        await env.Universe.SeedIfNeededAsync();
+        await env.Repository.AddWatchlistSymbolAsync("HBL", "user");
+
+        var result = await env.Repository.ApplyWatchlistSymbolsAsync(
+            ["HBL", "LUCK", "MARI"], replace: false, source: "index:KSE100");
+        env.Universe.Invalidate();
+
+        Assert.AreEqual(4, result.Total);
+        Assert.AreEqual(2, result.Added);
+        Assert.AreEqual(0, result.Removed);
+        Assert.AreEqual(1, result.Preserved);
+        CollectionAssert.AreEquivalent(
+            new[] { "OGDC", "HBL", "LUCK", "MARI" },
+            (await env.Repository.GetWatchlistAsync()).Entries.Select(entry => entry.Symbol).ToArray());
+        CollectionAssert.AreEqual(new[] { "OGDC" }, (await env.Universe.ForExecutionAsync()).ToArray(),
+            "An index preset is a monitoring edit, never an execution-universe edit.");
+    }
+
+    [TestMethod]
+    public async Task WatchlistExecutionSource_FollowsAddsAndRemovals()
+    {
+        using var env = TestEnv.Create(
+            ["OGDC"], TradingExecutionUniverseSource.Watchlist);
+        await env.Universe.SeedIfNeededAsync();
+        await env.Repository.AddWatchlistSymbolAsync("HBL", "user");
+        await env.Repository.RemoveWatchlistSymbolAsync("OGDC");
+        env.Universe.Invalidate();
+
+        CollectionAssert.AreEqual(new[] { "HBL" }, (await env.Universe.ForExecutionAsync()).ToArray());
+        Assert.IsTrue(await env.Universe.IsTradableAsync("hbl"));
+        Assert.IsFalse(await env.Universe.IsTradableAsync("OGDC"),
+            "A removed watchlist symbol must stop being tradable even if it remains in AllowedSymbols.");
+    }
+
+    [TestMethod]
+    public async Task IndexReplace_PreservesOverlappingRowPreferences()
+    {
+        using var env = TestEnv.Create([]);
+        await env.Repository.AddWatchlistSymbolAsync("OGDC", "user");
+        await env.Repository.AddWatchlistSymbolAsync("HBL", "user");
+        await env.Repository.UpdateWatchlistSymbolAsync(
+            "HBL", alertsEnabled: false, notes: "keep me", pinned: true, autoTradeEnabled: false);
+
+        var result = await env.Repository.ApplyWatchlistSymbolsAsync(
+            ["HBL", "LUCK"], replace: true, source: "index:KSE30");
+        var rows = (await env.Repository.GetWatchlistAsync()).Entries;
+
+        Assert.AreEqual(2, result.Total);
+        Assert.AreEqual(1, result.Added);
+        Assert.AreEqual(1, result.Removed);
+        Assert.AreEqual(1, result.Preserved);
+        var hbl = rows.Single(entry => entry.Symbol == "HBL");
+        Assert.IsTrue(hbl.Pinned);
+        Assert.IsFalse(hbl.AlertsEnabled);
+        Assert.IsFalse(hbl.AutoTradeEnabled);
+        Assert.AreEqual("keep me", hbl.Notes);
+        Assert.AreEqual("user", hbl.Source, "An overlapping row keeps its original provenance.");
+        Assert.AreEqual("index:KSE30", rows.Single(entry => entry.Symbol == "LUCK").Source);
     }
 
     [TestMethod]
@@ -368,7 +431,9 @@ public sealed class WatchlistUniverseTests
         public required MonitoredUniverse Universe { get; init; }
         public required string TempPath { get; init; }
 
-        public static TestEnv Create(string[] allowedSymbols)
+        public static TestEnv Create(
+            string[] allowedSymbols,
+            TradingExecutionUniverseSource executionSource = TradingExecutionUniverseSource.AllowedSymbols)
         {
             var temp = Path.Combine(Path.GetTempPath(), $"agentfox-watchlist-tests-{Guid.NewGuid():N}");
             Directory.CreateDirectory(temp);
@@ -376,7 +441,8 @@ public sealed class WatchlistUniverseTests
             var options = Microsoft.Extensions.Options.Options.Create(new TradingAgentOptions
             {
                 DatabasePath = Path.Combine(temp, "trading.db"),
-                AllowedSymbols = [.. allowedSymbols]
+                AllowedSymbols = [.. allowedSymbols],
+                ExecutionUniverseSource = executionSource
             });
             var repository = new SqliteTradingRepository(
                 options, new ConfigurationBuilder().Build(),
@@ -509,6 +575,9 @@ public sealed class WatchlistUniverseTests
             string s, int i, int m, DateTime? before = null, CancellationToken ct = default) =>
             throw new NotSupportedException();
         public Task<bool> AddWatchlistSymbolAsync(string s, string src, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<WatchlistBulkApplyResult> ApplyWatchlistSymbolsAsync(
+            IReadOnlyList<string> symbols, bool replace, string source, CancellationToken ct = default) =>
             throw new NotSupportedException();
         public Task<bool> RemoveWatchlistSymbolAsync(string s, CancellationToken ct = default) =>
             throw new NotSupportedException();

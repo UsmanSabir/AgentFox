@@ -56,8 +56,8 @@ public sealed partial class TradingCoreEndpoints
     {
         // ── Watchlist ─────────────────────────────────────────────────────────
         // The user's monitoring universe. Reads are viewer-level; edits require TradingAnalyst.
-        // Nothing here can widen what may be traded — AllowedSymbols stays configuration-only, and
-        // each entry reports whether an order for it would pass the risk engine.
+        // When ExecutionUniverseSource is Watchlist, edits also change the execution universe; every
+        // order still crosses the same deterministic risk, calendar, sizing, and reconciliation gates.
 
         trading.MapGet("/watchlist", async (
             MonitoredUniverse universe,
@@ -68,7 +68,8 @@ public sealed partial class TradingCoreEndpoints
         {
             await universe.SeedIfNeededAsync(ct: ct);
             var snapshot = await repository.GetWatchlistAsync(ct);
-            var tradable = universe.ForExecution().ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var tradable = (await universe.ForExecutionAsync(ct))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
             // The configured half of the deny set, so the UI can show a row as locked rather than
             // offering a toggle that silently cannot take effect.
             var manualByConfig = universe.ConfiguredManualOnly()
@@ -122,6 +123,7 @@ public sealed partial class TradingCoreEndpoints
                 // would silently discard the user's edits.
                 configuredListChanged =
                     snapshot.SeedHash is not null && snapshot.SeedHash != universe.CurrentSeedHash(),
+                executionUniverseSource = options.Value.ExecutionUniverseSource.ToString(),
                 tradableSymbols = tradable.Count,
                 maxSymbols = options.Value.Watchlist.MaxSymbols,
                 // Symbols pinned manual-only by configuration, including any not on the watchlist at
@@ -197,22 +199,154 @@ public sealed partial class TradingCoreEndpoints
             if (added)
                 logger.LogInformation("[Watchlist] Added {Symbol} via web API.", symbol);
 
+            var isTradable = await universe.IsTradableAsync(symbol, ct);
+            var isManualOnly = await universe.IsManualOnlyAsync(symbol, ct);
             return Results.Ok(new
             {
                 symbol,
                 added,
-                tradable = universe.IsTradable(symbol),
-                manualOnly = await universe.IsManualOnlyAsync(symbol, ct),
+                tradable = isTradable,
+                manualOnly = isManualOnly,
                 // Said up front rather than discovered at order time. Two different limits, so they
                 // are reported separately: one says no order may exist, the other says only yours may.
-                message = !universe.IsTradable(symbol)
-                    ? $"'{symbol}' will be monitored and charted, but it is not in AllowedSymbols, so an "
+                message = !isTradable
+                    ? $"'{symbol}' will be monitored and charted, but it is not in the selected execution universe, so an "
                       + "order for it would be rejected by the risk engine."
-                    : await universe.IsManualOnlyAsync(symbol, ct)
+                    : isManualOnly
                         ? $"'{symbol}' is set to manual-only: it will be monitored, charted and alerted "
                           + "on, but no automation will trade it — you place its orders yourself."
                         : null,
                 warning
+            });
+        }).RequireAuthorization("TradingAnalyst");
+
+        trading.MapGet("/watchlist/presets/{index}", async (
+            string index,
+            MonitoredUniverse universe,
+            ITradingRepository repository,
+            PsxDataClient dataClient,
+            AhlAnalyticsClient analytics,
+            AhkPortalClient brokerPortal,
+            IOptions<TradingAgentOptions> options,
+            CancellationToken ct) =>
+        {
+            var normalized = NormalizeWatchlistPreset(index);
+            if (normalized is null)
+                return Results.BadRequest(new
+                {
+                    error = "unknown_watchlist_preset",
+                    message = "Choose KSE100 or KSE30."
+                });
+
+            var preset = await LoadWatchlistPresetAsync(
+                normalized, dataClient, analytics, brokerPortal, ct);
+            if (preset.Symbols.Count == 0)
+                return Results.Json(new
+                {
+                    error = "watchlist_preset_unavailable",
+                    message = preset.Error ?? $"No {normalized} constituents are currently available."
+                }, statusCode: StatusCodes.Status503ServiceUnavailable);
+
+            await universe.SeedIfNeededAsync(ct: ct);
+            var current = await repository.GetWatchlistAsync(ct);
+            var watched = current.Entries.Select(entry => entry.Symbol)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var members = preset.Symbols.ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            return Results.Ok(new
+            {
+                index = normalized,
+                label = normalized == "KSE100" ? "KSE 100" : "KSE 30",
+                source = preset.Source,
+                sourceUrl = preset.SourceUrl,
+                count = members.Count,
+                alreadyWatched = members.Count(watched.Contains),
+                missing = members.Count(symbol => !watched.Contains(symbol)),
+                outsideIndex = watched.Count(symbol => !members.Contains(symbol)),
+                projectedMergeCount = watched.Union(members, StringComparer.OrdinalIgnoreCase).Count(),
+                maxSymbols = Math.Max(1, options.Value.Watchlist.MaxSymbols),
+                grantsTradingPermission =
+                    options.Value.ExecutionUniverseSource == TradingExecutionUniverseSource.Watchlist,
+                warning = preset.Warning
+            });
+        });
+
+        trading.MapPost("/watchlist/presets/{index}", async (
+            string index,
+            WatchlistPresetRequest body,
+            MonitoredUniverse universe,
+            ITradingRepository repository,
+            PsxDataClient dataClient,
+            AhlAnalyticsClient analytics,
+            AhkPortalClient brokerPortal,
+            IOptions<TradingAgentOptions> options,
+            ILogger<TradingCoreEndpoints> logger,
+            CancellationToken ct) =>
+        {
+            var normalized = NormalizeWatchlistPreset(index);
+            if (normalized is null)
+                return Results.BadRequest(new
+                {
+                    error = "unknown_watchlist_preset",
+                    message = "Choose KSE100 or KSE30."
+                });
+
+            var mode = body.Mode?.Trim().ToLowerInvariant();
+            if (mode is not ("merge" or "replace"))
+                return Results.BadRequest(new
+                {
+                    error = "invalid_watchlist_preset_mode",
+                    message = "Mode must be 'merge' (add missing) or 'replace'."
+                });
+
+            var preset = await LoadWatchlistPresetAsync(
+                normalized, dataClient, analytics, brokerPortal, ct);
+            if (preset.Symbols.Count == 0)
+                return Results.Json(new
+                {
+                    error = "watchlist_preset_unavailable",
+                    message = preset.Error ?? $"No {normalized} constituents are currently available."
+                }, statusCode: StatusCodes.Status503ServiceUnavailable);
+
+            await universe.SeedIfNeededAsync(ct: ct);
+            var current = await repository.GetWatchlistAsync(ct);
+            var currentSymbols = current.Entries.Select(entry => entry.Symbol)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var projectedCount = mode == "replace"
+                ? preset.Symbols.Count
+                : currentSymbols.Union(preset.Symbols, StringComparer.OrdinalIgnoreCase).Count();
+            var limit = Math.Max(1, options.Value.Watchlist.MaxSymbols);
+            if (projectedCount > limit)
+                return Results.BadRequest(new
+                {
+                    error = "watchlist_full",
+                    message = $"This would create a {projectedCount}-symbol watchlist, above the {limit}-symbol limit. "
+                            + "Use Replace, remove symbols, or raise Plugins:TradingAgent:Watchlist:MaxSymbols."
+                });
+
+            var result = await repository.ApplyWatchlistSymbolsAsync(
+                preset.Symbols, mode == "replace", $"index:{normalized}", ct);
+            universe.Invalidate();
+            logger.LogInformation(
+                "[Watchlist] Applied {Index} in {Mode} mode via {Source}: {Added} added, {Removed} removed, {Preserved} preserved.",
+                normalized, mode, preset.Source, result.Added, result.Removed, result.Preserved);
+
+            return Results.Ok(new
+            {
+                index = normalized,
+                mode,
+                source = preset.Source,
+                sourceUrl = preset.SourceUrl,
+                total = result.Total,
+                added = result.Added,
+                removed = result.Removed,
+                preserved = result.Preserved,
+                warning = preset.Warning,
+                message = $"{(mode == "replace" ? "Replaced the watchlist with" : "Added missing members from")} "
+                        + $"{(normalized == "KSE100" ? "KSE 100" : "KSE 30")}. "
+                        + (options.Value.ExecutionUniverseSource == TradingExecutionUniverseSource.Watchlist
+                            ? "The watchlist is the selected execution universe, so its members are tradable subject to every risk control."
+                            : "This changes monitoring only; AllowedSymbols and trading permissions were not changed.")
             });
         }).RequireAuthorization("TradingAnalyst");
 
@@ -292,7 +426,7 @@ public sealed partial class TradingCoreEndpoints
         {
             // Explicitly discards the user's edits — which is the point of a reset, and why it is a
             // separate endpoint from the automatic first-run seeding.
-            var seed = universe.ForExecution();
+            var seed = universe.ConfiguredAllowedSymbols();
             var count = await repository.ResetWatchlistAsync(seed, MonitoredUniverse.SeedHash(seed), ct);
             universe.Invalidate();
             logger.LogInformation("[Watchlist] Reset to AllowedSymbols ({Count}) via web API.", count);
@@ -300,4 +434,50 @@ public sealed partial class TradingCoreEndpoints
         }).RequireAuthorization("TradingAnalyst");
 
     }
+
+    private static string? NormalizeWatchlistPreset(string index) =>
+        index.Trim().Replace("-", "").Replace(" ", "").ToUpperInvariant() switch
+        {
+            "KSE100" => "KSE100",
+            "KSE30" => "KSE30",
+            _ => null
+        };
+
+    private static async Task<WatchlistPresetMembers> LoadWatchlistPresetAsync(
+        string index,
+        PsxDataClient dataClient,
+        AhlAnalyticsClient analytics,
+        AhkPortalClient brokerPortal,
+        CancellationToken ct)
+    {
+        var official = await dataClient.GetIndexConstituentsAsync(index, ct);
+        if (official.Symbols.Count > 0)
+            return new(official.Symbols, "Official PSX", official.SourceUrl);
+
+        // Market Movers already receives this same AHL whole-market snapshot. It is a fallback only:
+        // index membership should not require a broker login when the public exchange page works.
+        var snapshot = await analytics.GetMarketSnapshotAsync(
+            allowHandshake: brokerPortal.HasSession, ct: ct);
+        var fromAhl = snapshot?.Equities?
+            .Where(pair => pair.Value.ListedIn?.Contains(index, StringComparer.OrdinalIgnoreCase) == true)
+            .Select(pair => pair.Key.Trim().ToUpperInvariant())
+            .Where(symbol => symbol.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(symbol => symbol, StringComparer.OrdinalIgnoreCase)
+            .ToList() ?? [];
+
+        return fromAhl.Count > 0
+            ? new(fromAhl, "AHL Market Movers", null,
+                "The official PSX page was unavailable, so membership came from the cached Market Movers source.")
+            : new([], "Unavailable", official.SourceUrl, null,
+                $"{official.Error ?? "The official PSX page returned no members."} "
+                + $"The Market Movers fallback is also unavailable: {analytics.LastError ?? "no AHL snapshot"}");
+    }
+
+    private sealed record WatchlistPresetMembers(
+        IReadOnlyList<string> Symbols,
+        string Source,
+        string? SourceUrl,
+        string? Warning = null,
+        string? Error = null);
 }

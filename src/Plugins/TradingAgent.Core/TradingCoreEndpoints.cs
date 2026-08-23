@@ -171,6 +171,9 @@ public sealed record WatchlistUpdateRequest(
 
 public sealed record WatchlistReorderRequest(IReadOnlyList<string>? Symbols);
 
+/// <summary>How an official index universe should be applied to the monitoring watchlist.</summary>
+public sealed record WatchlistPresetRequest(string? Mode);
+
 /// <summary>Optional depth override for a manually triggered backfill; null uses the configured years.</summary>
 /// <summary>
 /// A backfill trigger. <paramref name="Symbols"/> scopes which dates count as missing — the dates those

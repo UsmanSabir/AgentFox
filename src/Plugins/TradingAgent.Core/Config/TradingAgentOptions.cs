@@ -1,5 +1,11 @@
 namespace TradingAgent.Config;
 
+public enum TradingExecutionUniverseSource
+{
+    AllowedSymbols,
+    Watchlist
+}
+
 public class TradingAgentOptions
 {
     public const string SectionName = "TradingAgent";
@@ -124,10 +130,17 @@ public class TradingAgentOptions
     /// <summary>Emergency execution stop independent of AutoExecute and the LLM.</summary>
     public bool KillSwitch { get; set; }
 
-    /// <summary>Only these PSX symbols may pass deterministic risk validation.</summary>
+    /// <summary>Configured execution universe when <see cref="ExecutionUniverseSource"/> is AllowedSymbols.</summary>
     public List<string> AllowedSymbols { get; set; } = [];
 
-    /// <summary>Fail closed when AllowedSymbols is empty (recommended).</summary>
+    /// <summary>
+    /// Selects the authoritative execution universe. AllowedSymbols preserves the configuration-only
+    /// default; Watchlist makes the editable watchlist the set that may pass risk validation.
+    /// </summary>
+    public TradingExecutionUniverseSource ExecutionUniverseSource { get; set; } =
+        TradingExecutionUniverseSource.AllowedSymbols;
+
+    /// <summary>Fail closed when the selected execution universe is empty (recommended).</summary>
     public bool RequireConfiguredSymbols { get; set; } = true;
 
     /// <summary>
@@ -253,7 +266,7 @@ public class TradingAgentOptions
 ///
 /// <para>
 /// This layer decides only whether a HUMAN CONFIRMATION is required. It can never bypass the risk
-/// engine: the kill switch, <see cref="TradingAgentOptions.AllowedSymbols"/>, the market calendar,
+/// engine: the kill switch, selected execution universe, the market calendar,
 /// reconciliation health and the value caps apply to a pre-approved order exactly as they do to a
 /// confirmed one. Every auto-redeemed approval records WHICH rule redeemed it, so a bypassed order is
 /// as traceable as one someone clicked.
@@ -425,8 +438,8 @@ public sealed class TradingMonitorOptions
 }
 
 /// <summary>
-/// Settings for the editable watchlist — what is WATCHED. Nothing here can widen what may be TRADED:
-/// that stays <see cref="TradingAgentOptions.AllowedSymbols"/>, which the risk engine reads directly.
+/// Settings for the editable watchlist. It is always monitored and may also be the execution universe
+/// when <see cref="TradingAgentOptions.ExecutionUniverseSource"/> selects it.
 /// </summary>
 public sealed class TradingWatchlistOptions
 {

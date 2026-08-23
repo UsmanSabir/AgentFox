@@ -126,7 +126,7 @@ public sealed partial class TradingCoreEndpoints
                         rsiOversold = technical.RsiOversold,
                         rsiOverbought = technical.RsiOverbought
                     },
-                    tradable = universe.IsTradable(result.Symbol),
+                    tradable = await universe.IsTradableAsync(result.Symbol, ct),
                     barsAnalyzed = candles.Count,
                     sessionsAvailable = result.SessionsAvailable,
                     // The last bar may still be forming; the chart labels it so a half-formed candle is

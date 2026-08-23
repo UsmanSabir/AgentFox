@@ -193,21 +193,21 @@ Details that matter:
 
 ---
 
-## Watchlist vs AllowedSymbols — two different universes
+## Watchlist and AllowedSymbols — explicit execution source
 
-These are deliberately separate, and the distinction is the difference between "what am I watching"
-and "what am I allowed to trade":
+Monitoring always includes the watchlist. Execution chooses one authoritative source with
+`ExecutionUniverseSource` (`AllowedSymbols` by default, or `Watchlist`):
 
 | | Source | Used for | Editable at runtime |
 | --- | --- | --- | --- |
-| **Watchlist** | `watchlist` table (seeded once from `AllowedSymbols`) | charting, scanning, monitoring, alerts, archived history | **yes** — Trading page, `/api/trading/watchlist` |
-| **AllowedSymbols** | `appsettings.json` | what an order may be placed for (`TradingRiskEngine`) | no — config + restart |
+| **Watchlist** | `watchlist` table (seeded once from `AllowedSymbols`) | charting, scanning, monitoring, alerts, archived history; execution when selected | **yes** — Trading page, `/api/trading/watchlist` |
+| **AllowedSymbols** | `appsettings.json` | execution when selected; also the seed/reset baseline | no — config + restart |
 | **Manual-only** | `ManualOnlySymbols` in config, ∪ the per-symbol watchlist toggle | symbols *only you* may order — automation may not | **partly** — the toggle is, config is not |
 
 `MonitoredUniverse` is the single place that answers "which symbols":
 
-- `ForExecution()` → `AllowedSymbols` only. **No watchlist edit can widen this** — otherwise the web
-  UI would have become an order-permission editor.
+- `ForExecutionAsync()` → the selected execution source. Watchlist reads fail closed and are resolved
+  again at the execution boundary so removals are effective immediately.
 - `ForMonitoringAsync()` → watchlist ∪ `AllowedSymbols`. Charts, `scan_watchlist`, alerts.
 - `ForArchiveAsync()` → same as monitoring by default, so a watched symbol accumulates the daily
   history its weekly levels need. Costs no extra portal requests (a session fetch already returns
@@ -217,8 +217,8 @@ and "what am I allowed to trade":
 
 Consequences the UI states explicitly rather than leaving to be discovered at order time:
 
-- A watched symbol outside `AllowedSymbols` is badged **monitor-only**; `scan_watchlist` results carry
-  `tradable`, and the specialist must not present a non-tradable candidate as actionable.
+- A watched symbol outside the selected source is badged **monitor-only**; `scan_watchlist` results
+  carry `tradable`, and the specialist must not present a non-tradable candidate as actionable.
 - A newly added symbol is badged **no weekly** until roughly two years of daily bars are archived —
   until then there is no weekly confirmation to quote.
 - The watchlist is seeded from `AllowedSymbols` **once**. If the configured list changes later, the
@@ -410,6 +410,7 @@ Add the following sections to `appsettings.json`.
     "MemoryMode":             "Shared",
     "DuplicateWindowMinutes": 60,
     "DatabasePath":           "trading/trading.db",
+    "ExecutionUniverseSource": "AllowedSymbols",
     "AllowedSymbols":         ["OGDC", "PPL"],
     "ManualOnlySymbols":      [],
     "RequireConfiguredSymbols": true,
@@ -457,7 +458,9 @@ Add the following sections to `appsettings.json`.
 | `AutoExecute` | `false` | Set to `true` to allow the agent to call `place_order`. When `false` the agent logs signals but never trades. |
 | `ExecutionMode` | `Disabled` | `Disabled`, `Paper`, `Shadow`, `ApprovalRequired`, or `BoundedAuto`. `AutoExecute` remains an additional hard off-switch. |
 | `DatabasePath` | `trading/trading.db` | SQLite operational ledger. WAL mode and durable idempotency are enabled automatically. |
-| `AllowedSymbols` | `[]` | Explicit execution universe. Empty fails closed when `RequireConfiguredSymbols=true`. |
+| `ExecutionUniverseSource` | `AllowedSymbols` | `AllowedSymbols` or `Watchlist`; selects the authoritative execution universe. |
+| `AllowedSymbols` | `[]` | Configured execution universe and watchlist seed/reset baseline. |
+| `RequireConfiguredSymbols` | `true` | Fail closed when the selected execution universe is empty. |
 | `MarketHolidays` | `[]` | Operator-maintained closed dates in `yyyy-MM-dd` form. |
 | `ResearchWebEnabled` | `true` | Expose the provider-backed, read-only `research_web` tool when a provider is configured. |
 | `ResearchWebMaxResults` | `5` | Maximum provider results returned to the specialist. |
