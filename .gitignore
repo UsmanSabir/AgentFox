@@ -75,3 +75,12 @@ staging/
 
 src/Plugins/TradingAgent/ui/node_modules/
 src/Plugins/TradingAgent/wwwroot/
+
+.codex/
+.agents/
+.claude/
+.github/
+# Standalone marketing website build and dependency output.
+/website/node_modules/
+/website/.svelte-kit/
+/website/build/

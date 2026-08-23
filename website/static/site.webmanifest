@@ -1,0 +1,17 @@
+{
+  "name": "AgentFox",
+  "short_name": "AgentFox",
+  "description": "A local-first AI agent for explainable trading decisions and guarded automation.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#07100d",
+  "theme_color": "#07100d",
+  "icons": [
+    {
+      "src": "favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
