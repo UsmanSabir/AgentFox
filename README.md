@@ -7,6 +7,8 @@ managing files, running scheduled tasks, and more. No coding required to use it.
 *(Built in C#, if you're into that — see [Features](#features) and the
 [Developer Guide](docs/DEVELOPMENT.md) below.)*
 
+> ⭐ If AgentFox helps you build, automate, or trade with more discipline, please star the repository. It helps others discover the project and supports its continued development.
+
 ## Features
 
 - 🤖 **Multi-agent system** — main agents, sub-agents with inherited capabilities, hierarchical management
