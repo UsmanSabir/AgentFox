@@ -88,7 +88,7 @@ if (-not $SkipUi) {
           npm run build; if ($LASTEXITCODE) { throw 'npm run build failed' } }
     finally { Pop-Location }
 
-    Step 'Building Trading plugin UI (src/Plugins/TradingAgent/ui -> .../TradingAgent/wwwroot)'
+    Step 'Building Trading plugin UI (src/Plugins/TradingAgent/ui -> .../TradingAgent.Core/wwwroot)'
     Push-Location "$PSScriptRoot\src\Plugins\TradingAgent\ui"
     try { npm ci; if ($LASTEXITCODE) { throw 'npm ci failed' }
           npm run build; if ($LASTEXITCODE) { throw 'npm run build failed' } }

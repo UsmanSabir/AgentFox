@@ -7,6 +7,10 @@ host (backend or frontend)**.
 
 Written against the code as of `dev` @ `12614b9`.
 
+> Historical design record: execution-universe behavior has since changed. Runtime policy now uses
+> `ExecutionUniverseSource = AllowedSymbols | Watchlist`; consult the README and `MonitoredUniverse`
+> rather than the original “watchlist never widens execution” assumptions below.
+
 ---
 
 ## 0. Where we stand today

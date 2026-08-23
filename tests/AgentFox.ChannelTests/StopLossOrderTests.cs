@@ -75,7 +75,7 @@ public sealed class StopLossOrderTests
         var result = Validate(order);
 
         Assert.IsFalse(result.Allowed);
-        Assert.IsTrue(result.Violations.Any(v => v.Contains("AllowedSymbols", StringComparison.Ordinal)),
+        Assert.IsTrue(result.Violations.Any(v => v.Contains("selected execution universe", StringComparison.Ordinal)),
             "A stop order is still an order: it cannot bypass the tradable universe.");
     }
 
@@ -100,6 +100,40 @@ public sealed class StopLossOrderTests
         Assert.IsTrue(Validate(order).Allowed, string.Join(" | ", Validate(order).Violations));
     }
 
+    [TestMethod]
+    public void WatchlistSource_UsesResolvedSymbolsInsteadOfAllowedSymbols()
+    {
+        var engine = CreateEngine(new TradingAgentOptions
+        {
+            AllowedSymbols = ["OGDC"],
+            ExecutionUniverseSource = TradingExecutionUniverseSource.Watchlist
+        });
+        var hbl = Stop("SELL", trigger: 300m, limit: 297m);
+        hbl.Symbol = "HBL";
+
+        Assert.IsTrue(engine.Validate([[hbl]], executionUniverseOverride: ["HBL"]).Allowed);
+        Assert.IsFalse(engine.Validate([[Stop("SELL", 300m, 297m)]],
+            executionUniverseOverride: ["HBL"]).Allowed,
+            "AllowedSymbols must not leak into Watchlist mode.");
+    }
+
+    [TestMethod]
+    public void WatchlistSource_EmptyOrUnresolvedNeverBecomesUnrestricted()
+    {
+        var engine = CreateEngine(new TradingAgentOptions
+        {
+            AllowedSymbols = ["OGDC"],
+            ExecutionUniverseSource = TradingExecutionUniverseSource.Watchlist,
+            RequireConfiguredSymbols = false
+        });
+
+        Assert.IsFalse(engine.Validate([[Stop("SELL", 300m, 297m)]]).Allowed,
+            "A missing authoritative watchlist must fail closed.");
+        Assert.IsFalse(engine.Validate([[Stop("SELL", 300m, 297m)]],
+            executionUniverseOverride: []).Allowed,
+            "An explicitly empty watchlist is an empty set, not a wildcard.");
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private static TradingSignal Stop(string action, decimal? trigger, decimal? limit) => new()
@@ -114,14 +148,16 @@ public sealed class StopLossOrderTests
 
     private static RiskValidationResult Validate(TradingSignal order)
     {
-        var engine = new TradingRiskEngine(
-            Options.Create(new AhkConfig { MaxOrderValuePkr = 50_000m }),
-            Options.Create(new TradingAgentOptions
-            {
-                AllowedSymbols = ["OGDC"],
-                MaxBatchValuePkr = 250_000m
-            }));
+        var engine = CreateEngine(new TradingAgentOptions
+        {
+            AllowedSymbols = ["OGDC"],
+            MaxBatchValuePkr = 250_000m
+        });
 
         return engine.Validate([[order]]);
     }
+
+    private static TradingRiskEngine CreateEngine(TradingAgentOptions options) => new(
+        Options.Create(new AhkConfig { MaxOrderValuePkr = 50_000m }),
+        Options.Create(options));
 }

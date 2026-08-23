@@ -249,8 +249,13 @@
   {#if liveBarCount > 0}
     <p class="live-bar-note">
       <AlertTriangle size={13} />
-      <span><b>Today’s daily candle is still open.</b> During market hours, daily alerts use the live
-      candle so they arrive promptly; the signal can change or disappear by the closing bell.</span>
+      {#if status?.marketOpen}
+        <span><b>Today’s daily candle is still open.</b> During market hours, daily alerts use the live
+        candle so they arrive promptly; the signal can change or disappear by the closing bell.</span>
+      {:else}
+        <span><b>Some alerts were raised from a forming candle.</b> The market is now closed; these
+        records keep their original context and the chart is showing settled prices.</span>
+      {/if}
     </p>
   {/if}
 

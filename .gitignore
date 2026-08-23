@@ -72,3 +72,6 @@ appsettings.*.json
 # Local release packaging output (pack-local.ps1). Mirrors the CI staging layout.
 dist/
 staging/
+
+src/Plugins/TradingAgent/ui/node_modules/
+src/Plugins/TradingAgent/wwwroot/

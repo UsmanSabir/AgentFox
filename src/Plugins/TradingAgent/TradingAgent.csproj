@@ -1,9 +1,25 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <!-- ── The community trading plugin: an ENTRY plugin, and nothing more ──────
+       This project exists to be discovered. The host's loader scans plugins/ and treats a DLL with
+       a sibling .deps.json as an entry assembly (see Agent/Program.cs), and it registers a plugin's
+       IChannelProvider types only when their assembly matches an enabled module's assembly — which
+       is why the channel PROVIDER must live here even though the channel implementation lives in
+       TradingAgent.Core.
+
+       Everything else — broker, market data, analysis, risk, TradingManager, persistence, tools,
+       workers, endpoints, and the dashboard bundle — is in TradingAgent.Core, which a separately
+       licensed premium entry plugin composes exactly the way TradingAgentModule does. The two entry
+       plugins are mutually exclusive deployment artifacts; TradingAgentRuntime.AddCore fails startup
+       if both are installed. See EDITION_SPLIT_PLAN.md. -->
+
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- The whole dependency closure must sit beside this DLL: the loader resolves a plugin's
+         dependencies through its own .deps.json, and a missing transitive assembly surfaces as a
+         runtime FileNotFoundException on first use, not as a build error. -->
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
     <!-- Deploy the plugin (and its dependencies, via CopyLocalLockFileAssemblies) directly into
          the host's plugins/ folder, which PluginLoader scans at AppContext.BaseDirectory/plugins.
@@ -11,49 +27,29 @@
     <OutputPath>..\..\Agent\bin\$(Configuration)\$(TargetFramework)\plugins\</OutputPath>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <AppendConfigurationToOutputPath>false</AppendConfigurationToOutputPath>
-    <!-- Required for ManifestEmbeddedFileProvider to serve the plugin's own wwwroot from inside
-         TradingAgent.dll (see the UI ItemGroup below). -->
-    <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
   </PropertyGroup>
 
   <!-- ── Plugin web UI ──────────────────────────────────────────────────────
        The trading UI is a SEPARATE npm project (ui/) so its dependencies — charting in
-       particular — never enter the host frontend's package.json. It builds to wwwroot/ and is
-       embedded here, so the UI travels inside the plugin DLL exactly as the host's SPA travels
-       inside the host assembly. TradingAgentModule serves it via IPluginUiContributor, and the
-       host mounts it at /ext/trading.
+       particular — never enter the host frontend's package.json.
+
+       It builds to ../TradingAgent.Core/wwwroot and is embedded in the CORE assembly, not this one.
+       That is deliberate: the dashboard then travels with the engine, so the community entry and a
+       premium entry serve the identical bundle and premium extends this UI through data rather than
+       by shipping a second page. The EmbeddedResource item and GenerateEmbeddedFilesManifest
+       therefore live in TradingAgent.Core.csproj.
 
        Build with: cd ui && npm ci && npm run build
-       The condition means a build without a compiled UI still succeeds — the plugin then simply
+       A build without a compiled UI still succeeds — TradingAgentRuntime.GetCorePages() then
        contributes no page, and the backend is unaffected. -->
-  <ItemGroup Condition="Exists('$(MSBuildProjectDirectory)\wwwroot')">
-    <EmbeddedResource Include="wwwroot\**\*" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <PackageReference Include="Microsoft.Agents.AI.Harness" />
-    <PackageReference Include="PuppeteerSharp" />
-    <!-- Must match the version the HOST resolves (currently 10.6.0). PluginLoadContext delegates
-         all Microsoft.Extensions.* assemblies to the host's default load context so plugin and host
-         share one IChatClient type; .NET roll-forward only binds UP, so a plugin built against a
-         HIGHER version than the host ships fails with FileNotFoundException at OnAgentReadyAsync. -->
-    <PackageReference Include="Microsoft.Extensions.AI.Abstractions" />
-    <!-- BackgroundService / IHostedService for the take-profit retry worker. Pinned to the host's
-         Microsoft.Extensions.* version (10.0.9); PluginLoadContext delegates these to the host's load
-         context at runtime, and roll-forward only binds UP, so never build against a higher version. -->
-    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" />
-    <!-- ManifestEmbeddedFileProvider, for serving the embedded plugin UI. Same pinning rule as the
-         other Microsoft.Extensions.* references above: PluginLoadContext delegates these to the
-         host's load context, so never build against a higher version than the host ships. -->
-    <PackageReference Include="Microsoft.Extensions.FileProviders.Embedded" />
-    <PackageReference Include="Microsoft.Data.Sqlite" />
-    <!-- Override Microsoft.Data.Sqlite's minimum native bundle with the maintained release;
-         2.1.11 is deprecated and affected by GHSA-2m69-gcr7-jv3q. -->
-    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" />
-  </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\AgentFox.Plugins\AgentFox.Plugins.csproj" />
+    <ProjectReference Include="..\TradingAgent.Core\TradingAgent.Core.csproj" />
   </ItemGroup>
+
+  <!-- No PackageReference of its own: the shim compiles against AgentFox.Plugins and the shared
+       framework only, and every package the engine needs arrives transitively from
+       TradingAgent.Core. Adding one here would pin a version for the engine from the wrong project. -->
 
 </Project>

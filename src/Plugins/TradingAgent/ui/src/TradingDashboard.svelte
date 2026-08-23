@@ -668,7 +668,7 @@
   /* Expanded: the chart takes the full width and the watchlist STACKS BENEATH it rather than being
      hidden — losing the ability to switch symbols would be a poor trade for the extra width. */
   .watch-row.expanded { grid-template-columns:minmax(0,1fr); }
-  .watch-row.expanded :global(> section:first-child) { order:2; height:auto; }
+  .watch-row.expanded :global(> section:first-child) { order:2; height:auto; contain:none; overflow:visible; }
   .watch-row.expanded :global(> section:first-child .rows) { flex:none; max-height:min(52vh,420px); }
   .archive-head { display:flex; justify-content:space-between; align-items:stretch; gap:.5rem; }
   .archive-toggle { flex:1 1 auto; width:auto; }
