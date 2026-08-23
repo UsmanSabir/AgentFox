@@ -75,3 +75,8 @@ staging/
 
 src/Plugins/TradingAgent/ui/node_modules/
 src/Plugins/TradingAgent/wwwroot/
+
+.codex/
+.agents/
+.claude/
+.github/
