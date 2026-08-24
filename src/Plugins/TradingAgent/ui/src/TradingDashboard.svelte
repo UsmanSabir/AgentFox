@@ -171,9 +171,9 @@
 
   /**
    * The page's single clock. One interval here rather than one per component: it refreshes the cheap
-   * status (which carries the market-open flag the chart's refresh is gated on) and ticks a counter the
-   * chart watches. The status call is what keeps that flag current, so a market that opens while the
-   * page is left open is noticed within a minute instead of never.
+   * status (which carries the market-open flag that live refreshes are gated on) and ticks a counter
+   * the chart, watchlist, and order panels watch. The status call is what keeps that flag current, so
+   * a market that opens while the page is left open is noticed within a minute instead of never.
    */
   const MARKET_TICK_MS = 60_000;
   let marketTick = 0;
@@ -377,6 +377,8 @@
         bind:selected={selectedSymbol}
         bind:selectedCompany
         bind:compact={watchlistCompact}
+        refreshTick={marketTick}
+        marketOpen={status.market.isOpen}
       />
       <ChartPane
         symbol={selectedSymbol}

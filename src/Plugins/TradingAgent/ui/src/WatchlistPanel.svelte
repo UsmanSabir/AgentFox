@@ -16,6 +16,10 @@
   export let selectedCompany: string | null = null;
   /** Collapses the panel horizontally so the chart receives most of the workspace width. */
   export let compact = false;
+  /** Shared dashboard clock; used to refresh live session moves without adding another timer. */
+  export let refreshTick = 0;
+  /** Session gate supplied by the dashboard status endpoint. Closed-market moves do not change. */
+  export let marketOpen = false;
 
   let data: WatchlistResponse | null = null;
   /**
@@ -37,6 +41,7 @@
   let dragOverSymbol: string | null = null;
   let preset: WatchlistPresetPreview | null = null;
   let presetLoading = false;
+  let refreshingEntries = false;
   let executionSourceNoteDismissed = false;
   const executionSourceNoteStorageKey = 'trading-watchlist-execution-source-note-dismissed-v1';
 
@@ -124,6 +129,25 @@
       loading = false;
     }
     await loadArchive();
+  }
+
+  /**
+   * Silently refreshes the list's live fields. The dashboard calls this once a minute while the
+   * market is open; keeping it separate from load() avoids flashing the initial spinner and from
+   * loadArchive() avoids an unrelated archive-status request on every market tick.
+   */
+  async function refreshEntries() {
+    if (loading || busy || refreshingEntries) return;
+    refreshingEntries = true;
+    try {
+      data = await trading.watchlist.list();
+      if (selected && !data.entries.some(entry => entry.symbol === selected)) selected = null;
+      if (!selected && data.entries.length) selected = data.entries[0].symbol;
+    } catch {
+      /* transient: keep the last successful values and retry on the next dashboard tick */
+    } finally {
+      refreshingEntries = false;
+    }
   }
 
   /** Never fatal: a missing archive status costs the badge its detail, not the list. */
@@ -334,11 +358,7 @@
    */
   export async function refresh() {
     if (busy) return;
-    try {
-      data = await trading.watchlist.list();
-    } catch {
-      /* transient: the next refresh or the panel's own actions will retry */
-    }
+    await refreshEntries();
     await loadArchive();
   }
 
@@ -347,6 +367,14 @@
     executionSourceNoteDismissed = localStorage.getItem(executionSourceNoteStorageKey) === 'true';
     load();
   });
+
+  // The parent does not advance this clock in a hidden tab. Keep the local visibility check as a
+  // guard in case the component is reused under a different parent later.
+  let lastRefreshTick = refreshTick;
+  $: if (refreshTick !== lastRefreshTick) {
+    lastRefreshTick = refreshTick;
+    if (marketOpen && typeof document !== 'undefined' && !document.hidden) refreshEntries();
+  }
 
   $: gapBySymbol = new Map(
     (archive?.symbolsShortOfWeekly ?? []).map(gap => [gap.symbol, gap]));
