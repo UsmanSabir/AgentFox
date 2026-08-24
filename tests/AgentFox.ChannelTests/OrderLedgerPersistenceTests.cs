@@ -199,6 +199,42 @@ public sealed class OrderLedgerPersistenceTests
         Assert.AreEqual(1, (await repository.GetPersistentOrderPlacementsAsync(intent.IntentId)).Count);
     }
 
+    [TestMethod]
+    public async Task PersistentOrder_OperatorRetry_ClaimsOnlyAfterLatestKnownFailure()
+    {
+        var repository = NewRepository();
+        var intent = new PersistentOrderIntent
+        {
+            IntentId = "persistent-retry",
+            Symbol = "FFC",
+            Action = "BUY",
+            Quantity = 10,
+            OrderType = "LIMIT",
+            Price = 550m,
+            ExpiresUtc = DateTime.UtcNow.AddDays(30)
+        };
+        await repository.SavePersistentOrderAsync(intent);
+
+        var date = new DateOnly(2026, 8, 24);
+        var first = await repository.TryClaimPersistentOrderAttemptAsync(intent.IntentId, date);
+        await repository.RecordPersistentOrderPlacementAsync(new PersistentOrderPlacement
+        {
+            PlacementId = "failed-1",
+            IntentId = intent.IntentId,
+            SessionDate = date,
+            Attempt = first.Attempt,
+            Quantity = 10,
+            State = "failed"
+        }, "active", "known not placed");
+
+        Assert.IsFalse((await repository.TryClaimPersistentOrderAttemptAsync(intent.IntentId, date)).Acquired);
+        var retry = await repository.TryClaimPersistentOrderRetryAsync(intent.IntentId, date);
+        Assert.IsTrue(retry.Acquired);
+        Assert.AreEqual(2, retry.Attempt);
+        Assert.IsFalse((await repository.TryClaimPersistentOrderRetryAsync(intent.IntentId, date)).Acquired,
+            "a second click must not claim while the first retry is placing");
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private SqliteTradingRepository NewRepository()

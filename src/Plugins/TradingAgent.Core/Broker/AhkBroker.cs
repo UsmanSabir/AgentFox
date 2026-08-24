@@ -870,15 +870,22 @@ public sealed class AhkBroker : IAsyncDisposable
     /// </summary>
     private async Task<decimal?> ReadLastTradePriceAsync(string symbol)
     {
+        await ResetPriceBandAsync();
         await FillFieldAsync("#buysymbol", symbol);
 
         // Bounded wait for the portal to resolve the symbol and populate #buyprice — a fixed sleep
         // reads an empty field on a slow machine and reports the symbol as unpriceable.
-        var price = await ResolveSymbolAsync("buy");
-        if (price is > 0m)
+        if (await ResolveSymbolAsync("buy"))
         {
-            _logger.LogInformation("[AhkBroker] Live price for {Symbol}: {Price}.", symbol, price);
-            return price;
+            var raw = await _page!.EvaluateFunctionAsync<string>(
+                "() => document.querySelector('#buyprice')?.value || ''") ?? "";
+            var cleaned = Regex.Replace(raw, @"[^0-9.]", "");
+            if (decimal.TryParse(cleaned, NumberStyles.Any, CultureInfo.InvariantCulture, out var price)
+                && price > 0m)
+            {
+                _logger.LogInformation("[AhkBroker] Live price for {Symbol}: {Price}.", symbol, price);
+                return price;
+            }
         }
 
         _logger.LogWarning("[AhkBroker] Could not read a live price for {Symbol}.", symbol);
@@ -1604,9 +1611,10 @@ public sealed class AhkBroker : IAsyncDisposable
     /// lock (PSX rejects anything outside the band). Returns the (possibly unchanged) price and a note
     /// describing any clamp, or null. ASSUMES the dialog is open and the symbol resolved.
     /// </summary>
-    private async Task<(decimal price, string? note)> ResolveLimitPriceAsync(decimal requested, string side)
+    private async Task<(decimal price, string? note)> ResolveLimitPriceAsync(
+        decimal requested, string side, bool hasFreshBand)
     {
-        if (!_config.Current.ClampPriceToBand)
+        if (!_config.Current.ClampPriceToBand || !hasFreshBand)
             return (requested, null);
 
         var (lowerLock, upperCap) = await ReadPriceBandAsync(side);
@@ -2045,8 +2053,9 @@ public sealed class AhkBroker : IAsyncDisposable
         // Set order type explicitly so a stale "Market"/"Limit" from a prior order can't misroute this one.
         await SelectByVisibleTextAsync("#buyordertype", isStop ? "Stop Loss" : isLimit ? "Limit" : "Market");
 
+        await ResetPriceBandAsync();
         await FillFieldAsync("#buysymbol", signal.Symbol);
-        await ResolveSymbolAsync("buy");
+        var hasFreshBand = await ResolveSymbolAsync("buy");
 
         await FillFieldAsync("#buyvolume", qty.ToString());
 
@@ -2056,7 +2065,8 @@ public sealed class AhkBroker : IAsyncDisposable
         if (isLimit && signal.EntryPrice.HasValue)
         {
             requestedPrice = signal.EntryPrice.Value;
-            (var finalPrice, priceAdjustment) = await ResolveLimitPriceAsync(requestedPrice.Value, "buy");
+            (var finalPrice, priceAdjustment) = await ResolveLimitPriceAsync(
+                requestedPrice.Value, "buy", hasFreshBand);
             submittedPrice = finalPrice;
 
             if (isStop)
@@ -2065,7 +2075,7 @@ public sealed class AhkBroker : IAsyncDisposable
                 var limit = signal.LimitPrice
                     ?? decimal.Round(finalPrice * (1m + Math.Clamp(
                         cfg.StopLimitSlippagePercent, 0m, 20m) / 100m), 2);
-                (limit, _) = await ResolveLimitPriceAsync(limit, "buy");
+                (limit, _) = await ResolveLimitPriceAsync(limit, "buy", hasFreshBand);
                 submittedLimitPrice = limit;
             }
 
@@ -2147,8 +2157,9 @@ public sealed class AhkBroker : IAsyncDisposable
         // along and turn a protective exit into a short.
         await SelectByVisibleTextAsync("#selltradetype", "SEL");
 
+        await ResetPriceBandAsync();
         await FillFieldAsync("#sellsymbol", signal.Symbol);
-        await ResolveSymbolAsync("sell");
+        var hasFreshBand = await ResolveSymbolAsync("sell");
 
         await FillFieldAsync("#sellvolume", qty.ToString());
 
@@ -2158,7 +2169,8 @@ public sealed class AhkBroker : IAsyncDisposable
         if (isLimit && signal.EntryPrice.HasValue)
         {
             requestedPrice = signal.EntryPrice.Value;
-            (var finalPrice, priceAdjustment) = await ResolveLimitPriceAsync(requestedPrice.Value, "sell");
+            (var finalPrice, priceAdjustment) = await ResolveLimitPriceAsync(
+                requestedPrice.Value, "sell", hasFreshBand);
             submittedPrice = finalPrice;
 
             // #sellprice is the TRIGGER for a stop order and the limit for an ordinary one; the portal
@@ -2177,7 +2189,7 @@ public sealed class AhkBroker : IAsyncDisposable
                 // triggered it, so the limit sits a slippage allowance BELOW it for a sell.
                 var limit = signal.LimitPrice
                     ?? decimal.Round(finalPrice * (1m - Math.Clamp(cfg.StopLimitSlippagePercent, 0m, 20m) / 100m), 2);
-                (limit, _) = await ResolveLimitPriceAsync(limit, "sell");
+                (limit, _) = await ResolveLimitPriceAsync(limit, "sell", hasFreshBand);
                 submittedLimitPrice = limit;
 
                 if (PriceIntentRule.Validate(signal, finalPrice, submittedLimitPrice) is { } priceProblem)
@@ -2275,17 +2287,26 @@ public sealed class AhkBroker : IAsyncDisposable
     }
 
     /// <summary>
-    /// Completes symbol entry in the open order dialog: lets the autocomplete dropdown render, accepts
-    /// it with Tab, then waits — bounded by SymbolResolveTimeoutMs — for the portal to auto-fill the
-    /// price field from the last trade. Returns that price, or null if it never appeared.
-    ///
-    /// Waiting for the auto-fill rather than sleeping a fixed interval matters twice over on a slow
-    /// machine: the price band we clamp against is only rendered once the symbol resolves, and a
-    /// populate that lands after we have typed our own limit price silently overwrites it.
+    /// Clears the portal's page-global price band before resolving a new symbol. The live portal leaves
+    /// these globals unchanged when a lookup fails; without this reset, a failed lookup can look like a
+    /// successful resolution carrying the PREVIOUS symbol's band.
     /// </summary>
-    private async Task<decimal?> ResolveSymbolAsync(string side)
+    private async Task ResetPriceBandAsync()
     {
-        var priceField = side == "sell" ? "#sellprice" : "#buyprice";
+        await _page!.EvaluateFunctionAsync(
+            "() => { window.lowerCap = 0; window.upperCap = 0; }");
+    }
+
+    /// <summary>
+    /// Completes symbol entry in the open order dialog: lets the autocomplete dropdown render, accepts
+    /// it with Tab, then waits — bounded by SymbolResolveTimeoutMs — for a fresh price band for this
+    /// symbol. Returns false when the current symbol never produced one.
+    ///
+    /// Waiting for the band rather than sleeping a fixed interval matters on a slow machine: the band
+    /// is rendered only after the symbol resolves, and a fixed delay can observe the stale prior value.
+    /// </summary>
+    private async Task<bool> ResolveSymbolAsync(string side)
+    {
         var timeout    = Math.Max(1_000, _config.Current.SymbolResolveTimeoutMs);
 
         await Task.Delay(800); // autocomplete dropdown must be rendered before Tab can accept it
@@ -2302,26 +2323,19 @@ public sealed class AhkBroker : IAsyncDisposable
             // waiting on the price alone burned this entire timeout on every sell.
             var band = await ReadPriceBandAsync();
             if (band is { Upper: > 0m })
-            {
-                var raw = await _page.EvaluateFunctionAsync<string>(
-                    "(sel) => { const e = document.querySelector(sel); return e ? (e.value || '') : ''; }",
-                    priceField) ?? "";
-                var cleaned = Regex.Replace(raw, @"[^0-9.]", "");
-                return decimal.TryParse(cleaned, NumberStyles.Any, CultureInfo.InvariantCulture, out var price)
-                    && price > 0m ? price : null;
-            }
+                return true;
 
             if (DateTime.UtcNow >= deadline) break;
             await Task.Delay(150);
         }
 
-        // Not fatal on its own, but it is the signature of an unresolved symbol — and the portal's own
-        // submit handler refuses silently when the band is missing, so this is worth shouting about.
+        // Missing band data is not proof that the order is invalid. Keep the stale values cleared and
+        // continue with the operator's requested price; the portal/broker remains the authority.
         _logger.LogWarning(
             "[AhkBroker] No price band appeared within {Timeout}ms after entering the symbol. The portal "
-            + "may not have resolved it; submission would be rejected client-side without an error.",
+            + "will receive the requested price unchanged and decide whether to accept it.",
             timeout);
-        return null;
+        return false;
     }
 
     /// <summary>
@@ -2980,6 +2994,7 @@ public sealed class AhkBroker : IAsyncDisposable
     [
         "error", "invalid", "insufficient", "failed", "incorrect", "rejected",
         "not allowed", "exceeds", "market is closed", "session expired", "try again",
+        "unable to connect feed server",
         "should be between", "price should", "volume should", "quantity should",
         "out of range", "not in range", "not enough", "cannot be"
     ];

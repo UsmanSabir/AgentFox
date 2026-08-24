@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { RefreshCw, Repeat2, Trash2, AlertTriangle, CheckCircle2 } from 'lucide-svelte';
+  import { RefreshCw, Repeat2, Trash2, AlertTriangle, CheckCircle2, RotateCcw } from 'lucide-svelte';
   import { trading, type PersistentOrder } from './api';
 
   export let refreshTick = 0;
@@ -36,6 +36,28 @@
     notice = null;
     try {
       const result = await trading.persistentOrders.cancel(order.intentId);
+      notice = result.message;
+      await load();
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = null;
+    }
+  }
+
+  async function retry(order: PersistentOrder) {
+    if (busy || !order.canRetry) return;
+    if (!confirm(
+      `Check the broker and retry this order?\n\n${order.action} ${order.remainingQuantity} `
+      + `${order.symbol} ${order.orderType} @ ${order.price ?? '—'}.\n\n`
+      + `The retry is sent only if today's outstanding orders and activity show no matching order or fill.`
+    )) return;
+
+    busy = order.intentId;
+    notice = null;
+    error = null;
+    try {
+      const result = await trading.persistentOrders.retry(order.intentId);
       notice = result.message;
       await load();
     } catch (e) {
@@ -97,9 +119,18 @@
           </div>
           {#if order.stateReason}<p class="reason">{order.stateReason}</p>{/if}
           {#if !terminal(order.state)}
-            <button class="cancel" on:click={() => cancel(order)} disabled={busy != null}>
-              <Trash2 size={12} /> {busy === order.intentId ? 'Cancelling…' : 'Stop & cancel remainder'}
-            </button>
+            <div class="order-actions">
+              {#if order.canRetry}
+                <button class="retry" on:click={() => retry(order)} disabled={busy != null}
+                        title={order.retryReason}>
+                  <RotateCcw size={12} />
+                  {busy === order.intentId ? 'Checking broker…' : 'Check broker & retry'}
+                </button>
+              {/if}
+              <button class="cancel" on:click={() => cancel(order)} disabled={busy != null}>
+                <Trash2 size={12} /> {busy === order.intentId ? 'Working…' : 'Stop & cancel remainder'}
+              </button>
+            </div>
           {/if}
         </article>
       {/each}
@@ -132,6 +163,7 @@
   .progress { height:4px; margin:.55rem 0; background:var(--surface-3); border-radius:3px; overflow:hidden; }
   .progress span { display:block; height:100%; background:var(--success); }
   .reason { margin:.45rem 0 0; color:var(--text-2); font-size:.67rem; line-height:1.35; }
-  .cancel { margin-top:.55rem; color:var(--danger); }.notice,.empty { margin:0; padding:.65rem .9rem; color:var(--text-3); font-size:.69rem; }
+  .order-actions { display:flex; flex-wrap:wrap; gap:.4rem; margin-top:.55rem; }
+  .retry { color:var(--primary); }.cancel { color:var(--danger); }.notice,.empty { margin:0; padding:.65rem .9rem; color:var(--text-3); font-size:.69rem; }
   .notice { display:flex; align-items:center; gap:.35rem; border-bottom:1px solid var(--border); }.notice.bad { color:var(--danger); }
 </style>

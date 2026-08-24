@@ -269,6 +269,8 @@ public sealed partial class TradingCoreEndpoints
             foreach (var order in orders)
             {
                 var placements = await repository.GetPersistentOrderPlacementsAsync(order.IntentId, ct);
+                var canRetry = PersistentOrderDecisions.CanRetryFailedToday(
+                    order, placements.LastOrDefault(), DateTime.UtcNow, PsxTime.Today(), out var retryReason);
                 rows.Add(new
                 {
                     order.IntentId,
@@ -291,11 +293,35 @@ public sealed partial class TradingCoreEndpoints
                     order.CreatedUtc,
                     order.UpdatedUtc,
                     order.TerminalUtc,
+                    canRetry,
+                    retryReason,
                     placements
                 });
             }
             return Results.Ok(new { orders = rows });
         }).RequireAuthorization("TradingAnalyst");
+
+        trading.MapPost("/persistent-orders/{intentId}/retry", async (
+            string intentId,
+            PersistentOrderWorker worker,
+            HttpContext http,
+            CancellationToken ct) =>
+        {
+            var result = await worker.RetryFailedTodayAsync(
+                intentId,
+                http.User.Identity?.Name ?? "trading-dashboard",
+                ct);
+            return !result.Found
+                ? Results.NotFound(new { error = "not_found", message = result.Message })
+                : Results.Ok(new
+                {
+                    intentId,
+                    placed = result.Placed,
+                    state = result.State,
+                    message = result.Message,
+                    executionId = result.ExecutionId
+                });
+        }).RequireAuthorization("TradingTrader");
 
         trading.MapDelete("/persistent-orders/{intentId}", async (
             string intentId,
