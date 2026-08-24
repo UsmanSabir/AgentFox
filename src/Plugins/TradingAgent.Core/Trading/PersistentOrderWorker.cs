@@ -241,49 +241,24 @@ public sealed class PersistentOrderWorker : BackgroundService
                 return new(true, false, "fulfilled", "The broker already reports the requested quantity filled.");
             }
 
-            var quantity = intent.RemainingQuantity;
-            var ownNumbers = placements
-                .Select(p => p.BrokerOrderNo?.Trim())
-                .Where(number => !string.IsNullOrWhiteSpace(number))
-                .Select(number => number!)
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            if (intent.Action.Equals("SELL", StringComparison.OrdinalIgnoreCase))
+            var prep = await PrepareRetryAsync(intent, placements, latest!, snapshot, ct);
+            if (!prep.Ready)
             {
-                var availability = SellQuantityRule.Available(
-                    snapshot,
-                    intent.Symbol,
-                    DateTime.UtcNow,
-                    TimeSpan.FromSeconds(Math.Max(10, _options.Value.ReconciliationMaxAgeSeconds)),
-                    ownNumbers);
-                if (!availability.Known)
-                    return new(true, false, intent.State, availability.Reason + " Nothing was retried.");
-                quantity = PersistentOrderDecisions.QuantityToPlace(
-                    intent, intent.FilledQuantity, availability.AvailableQuantity);
-                if (quantity <= 0)
-                    return new(true, false, intent.State,
-                        $"The broker check found no uncommitted {intent.Symbol} holding available to sell.");
-            }
+                if (!prep.RequiresAttention)
+                    return new(true, false, intent.State, prep.Reason!);
 
-            if (PersistentOrderDecisions.FindPossibleBrokerMatch(
-                    intent, latest!, quantity, snapshot) is { } brokerEvidence)
-            {
-                var reason = brokerEvidence + " The retry was stopped to avoid a duplicate order.";
                 await _repository.SetPersistentOrderProgressAsync(
-                    intentId, intent.FilledQuantity, "attention", reason, ct);
-                _activity?.Warn("Orders", $"{intent.Symbol}: retry stopped by broker evidence", reason);
-                return new(true, false, "attention", reason);
+                    intentId, intent.FilledQuantity, "attention", prep.Reason!, ct);
+                _activity?.Warn("Orders", $"{intent.Symbol}: retry stopped by broker evidence", prep.Reason!);
+                return new(true, false, "attention", prep.Reason!);
             }
-
-            var window = _orderWindow.Evaluate();
-            if (!window.Allowed)
-                return new(true, false, intent.State, "Nothing was retried: " + window.Reason);
 
             var claim = await _repository.TryClaimPersistentOrderRetryAsync(intentId, today, ct);
             if (!claim.Acquired)
                 return new(true, false, intent.State,
                     "The failed attempt changed while the broker was being checked; refresh before retrying.");
 
-            var signal = intent.ToSignal(quantity);
+            var signal = intent.ToSignal(prep.Quantity);
             IReadOnlyList<IReadOnlyList<TradingSignal>> groups = [[signal]];
             var source = BuildSource(intent.IntentId, today, claim.Attempt);
             var policy = _policyProvider.Current();
@@ -294,7 +269,7 @@ public sealed class PersistentOrderWorker : BackgroundService
             var authorization = ExecutionAuthorization.HostToolGate(approvedBy, approvalIntent);
 
             var result = await ExecuteClaimedAsync(
-                intent, today, claim, authorization, ct, quantity);
+                intent, today, claim, authorization, ct, prep.Quantity);
             var saved = await _repository.GetPersistentOrderAsync(intentId, ct) ?? intent;
             return new(true, result.Accepted, saved.State, result.Reason, result.Execution?.ExecutionId);
         }
@@ -302,6 +277,109 @@ public sealed class PersistentOrderWorker : BackgroundService
         {
             _runGate.Release();
         }
+    }
+
+    private readonly record struct RetryPreparation(
+        bool Ready, bool RequiresAttention, string? Reason, int Quantity);
+
+    /// <summary>
+    /// The safety checks a retry of today's failed attempt must pass before it may claim a new attempt:
+    /// current SELL availability, no broker-side evidence the order already exists (duplicate guard),
+    /// and the order window still accepting orders. Shared by the operator-triggered
+    /// <see cref="RetryFailedTodayAsync"/> and the unattended <see cref="TryAutoRetryFailedTodayAsync"/>
+    /// so the two paths can never drift on what counts as safe to retry.
+    /// </summary>
+    private async Task<RetryPreparation> PrepareRetryAsync(
+        PersistentOrderIntent intent,
+        IReadOnlyList<PersistentOrderPlacement> placements,
+        PersistentOrderPlacement latestPlacement,
+        BrokerReconciliationSnapshot snapshot,
+        CancellationToken ct)
+    {
+        var quantity = intent.RemainingQuantity;
+        if (intent.Action.Equals("SELL", StringComparison.OrdinalIgnoreCase))
+        {
+            var ownNumbers = placements
+                .Select(p => p.BrokerOrderNo?.Trim())
+                .Where(number => !string.IsNullOrWhiteSpace(number))
+                .Select(number => number!)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var availability = SellQuantityRule.Available(
+                snapshot,
+                intent.Symbol,
+                DateTime.UtcNow,
+                TimeSpan.FromSeconds(Math.Max(10, _options.Value.ReconciliationMaxAgeSeconds)),
+                ownNumbers);
+            if (!availability.Known)
+                return new(false, false, availability.Reason + " Nothing was retried.", 0);
+            quantity = PersistentOrderDecisions.QuantityToPlace(
+                intent, intent.FilledQuantity, availability.AvailableQuantity);
+            if (quantity <= 0)
+                return new(false, false,
+                    $"The broker check found no uncommitted {intent.Symbol} holding available to sell.", 0);
+        }
+
+        if (PersistentOrderDecisions.FindPossibleBrokerMatch(
+                intent, latestPlacement, quantity, snapshot) is { } brokerEvidence)
+        {
+            return new(false, true,
+                brokerEvidence + " The retry was stopped to avoid a duplicate order.", 0);
+        }
+
+        var window = _orderWindow.Evaluate();
+        if (!window.Allowed)
+            return new(false, false, "Nothing was retried: " + window.Reason, 0);
+
+        return new(true, false, null, quantity);
+    }
+
+    /// <summary>
+    /// Unattended counterpart to <see cref="RetryFailedTodayAsync"/>, called once per poll cycle from
+    /// <see cref="MaintainAsync"/> for a persistent order whose latest attempt today definitively
+    /// failed. Retries ONLY when the policy ladder already authorises unattended execution for this
+    /// order — the same <see cref="ApprovalGate.Decide"/> check a fresh attempt goes through. In any
+    /// other mode this declines without acting, exactly as if nobody had asked, and the order is left
+    /// for a human to retry by hand or for the next trading date — an unattended background loop must
+    /// never grant itself the authority a human-clicked retry claims via HostToolGate.
+    /// Returns true when it recorded a terminal-for-this-pass outcome (a retry attempt, or an
+    /// "attention" state from duplicate broker evidence) so the caller must not overwrite it with the
+    /// generic "waits for next date" message.
+    /// </summary>
+    private async Task<bool> TryAutoRetryFailedTodayAsync(
+        PersistentOrderIntent intent,
+        IReadOnlyList<PersistentOrderPlacement> placements,
+        PersistentOrderPlacement latestPlacement,
+        BrokerReconciliationSnapshot snapshot,
+        DateOnly today,
+        CancellationToken ct)
+    {
+        if (!PersistentOrderDecisions.CanRetryFailedToday(
+                intent, latestPlacement, DateTime.UtcNow, today, out _))
+            return false;
+
+        var prep = await PrepareRetryAsync(intent, placements, latestPlacement, snapshot, ct);
+        if (!prep.Ready)
+        {
+            if (!prep.RequiresAttention) return false;
+
+            await _repository.SetPersistentOrderProgressAsync(
+                intent.IntentId, intent.FilledQuantity, "attention", prep.Reason!, ct);
+            _activity?.Warn("Orders", $"{intent.Symbol}: retry stopped by broker evidence", prep.Reason!);
+            return true;
+        }
+
+        var signal = intent.ToSignal(prep.Quantity);
+        IReadOnlyList<IReadOnlyList<TradingSignal>> groups = [[signal]];
+        var source = BuildSource(intent.IntentId, today, intent.AttemptCount + 1);
+        var approval = _approvals.Decide(
+            groups, source, new ApprovalContext(null, "persistent-order-retry"));
+        if (!approval.MayProceed) return false;
+
+        var claim = await _repository.TryClaimPersistentOrderRetryAsync(intent.IntentId, today, ct);
+        if (!claim.Acquired) return false;
+
+        await ExecuteClaimedAsync(intent, today, claim, approval.Authorization, ct, prep.Quantity);
+        return true;
     }
 
     private async Task MaintainAsync(
@@ -433,14 +511,21 @@ public sealed class PersistentOrderWorker : BackgroundService
         if (intent.LastAttemptSessionDate == today)
         {
             var marketNow = _calendar.GetStatus();
-            if (!marketNow.IsOpen
-                && marketNow.NextOpenPkt is null
-                && latestPlacement?.State == "accepted")
+            var dayEnded = !marketNow.IsOpen && marketNow.NextOpenPkt is null;
+
+            if (latestPlacement?.State == "accepted" && dayEnded)
             {
                 await _repository.SetPersistentOrderPlacementStateAsync(
                     latestPlacement.PlacementId, "lapsed",
                     "The trading date ended with no native order outstanding; its unfilled remainder lapsed.", ct);
             }
+            else if (string.Equals(latestPlacement?.State, "failed", StringComparison.OrdinalIgnoreCase)
+                     && !dayEnded
+                     && await TryAutoRetryFailedTodayAsync(intent, placements, latestPlacement!, snapshot, today, ct))
+            {
+                return;
+            }
+
             await _repository.SetPersistentOrderProgressAsync(intent.IntentId,
                 intent.FilledQuantity,
                 intent.FilledQuantity > 0 ? "partial" : "active",
