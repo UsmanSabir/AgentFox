@@ -1,5 +1,7 @@
 namespace TradingAgent.Trading;
 
+using TradingAgent.Reconciliation;
+
 /// <summary>
 /// A local good-until-expiry intent. The venue only accepts DAY orders, so one native order is
 /// materialised per trading date until the requested quantity has filled or the intent expires.
@@ -155,4 +157,112 @@ public static class PersistentOrderDecisions
         intent.LastAttemptSessionDate is { } priorDate
         && priorDate < today
         && latestPlacement?.State == "accepted";
+
+    public static bool CanRetryFailedToday(
+        PersistentOrderIntent intent,
+        PersistentOrderPlacement? latestPlacement,
+        DateTime nowUtc,
+        DateOnly today,
+        out string reason)
+    {
+        if (intent.IsTerminal || intent.State is not ("active" or "partial"))
+        {
+            reason = $"The intent is {intent.State}, so it cannot be retried.";
+            return false;
+        }
+
+        if (nowUtc >= intent.ExpiresUtc || intent.RemainingQuantity <= 0)
+        {
+            reason = nowUtc >= intent.ExpiresUtc
+                ? "The intent has expired."
+                : "The requested quantity is already filled.";
+            return false;
+        }
+
+        if (intent.LastAttemptSessionDate != today
+            || latestPlacement?.SessionDate != today
+            || !string.Equals(latestPlacement.State, "failed", StringComparison.OrdinalIgnoreCase))
+        {
+            reason = "Only the latest definitively failed attempt from today can be retried.";
+            return false;
+        }
+
+        reason = "The latest attempt definitively failed and is eligible for a broker check and retry.";
+        return true;
+    }
+
+    /// <summary>
+    /// Returns conservative evidence that the supposedly failed order may already exist at the broker.
+    /// The caller must stop rather than duplicate it. Fills are restricted to the failed attempt's time
+    /// window so an unrelated earlier trade in the same symbol does not block a retry all day.
+    /// </summary>
+    public static string? FindPossibleBrokerMatch(
+        PersistentOrderIntent intent,
+        PersistentOrderPlacement latestPlacement,
+        int quantity,
+        BrokerReconciliationSnapshot snapshot)
+    {
+        var open = snapshot.OpenOrders.FirstOrDefault(order =>
+            SameSymbolAndSide(intent, order.Symbol, order.Side)
+            && CompatiblePrice(intent, latestPlacement, order.Price)
+            && CompatibleQuantity(order.RemainingQuantity, quantity));
+        if (open is not null)
+            return $"Today's outstanding book contains possibly matching broker order #{open.OrderNo}.";
+
+        var notBeforeUtc = latestPlacement.CreatedUtc.AddMinutes(-1);
+        var activeEvent = snapshot.OrderEvents
+            .Where(row => row.ObservedUtc >= notBeforeUtc
+                       && SameSymbolAndSide(intent, row.Symbol, row.Side)
+                       && CompatiblePrice(intent, latestPlacement, row.Price)
+                       && CompatibleQuantity(row.Quantity, quantity))
+            .GroupBy(row => row.OrderNo, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.OrderBy(row => row.ObservedUtc).Last())
+            .FirstOrDefault(row => !IsDeadAction(row.Action));
+        if (activeEvent is not null)
+            return $"Today's broker activity contains possibly matching order #{activeEvent.OrderNo} "
+                 + $"in state {activeEvent.Action ?? "unknown"}.";
+
+        var fill = snapshot.Fills.FirstOrDefault(row =>
+            row.FilledUtc >= notBeforeUtc
+            && SameSymbolAndSide(intent, row.Symbol, row.Side)
+            && CompatiblePrice(intent, latestPlacement, row.Price)
+            && row.Quantity > 0
+            && row.Quantity <= quantity);
+        return fill is null
+            ? null
+            : $"Today's broker activity contains a possibly matching fill for order #{fill.OrderNo}.";
+    }
+
+    private static bool SameSymbolAndSide(PersistentOrderIntent intent, string? symbol, string? side)
+    {
+        if (!string.Equals(intent.Symbol.Trim(), symbol?.Trim(), StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        var brokerSide = side?.Trim().ToUpperInvariant();
+        return intent.Action.Equals("BUY", StringComparison.OrdinalIgnoreCase)
+            ? brokerSide == "BUY"
+            : brokerSide is "SEL" or "SELL";
+    }
+
+    private static bool CompatiblePrice(
+        PersistentOrderIntent intent,
+        PersistentOrderPlacement placement,
+        decimal? brokerPrice)
+    {
+        if (brokerPrice is null) return true; // unknown cannot safely prove a mismatch
+
+        return new[] { placement.SubmittedPrice, placement.RequestedPrice, intent.Price, intent.LimitPrice }
+            .Where(price => price is > 0m)
+            .Any(price => Math.Abs(price!.Value - brokerPrice.Value) <= 0.01m);
+    }
+
+    private static bool CompatibleQuantity(long? brokerRemaining, int intendedQuantity) =>
+        brokerRemaining is null || brokerRemaining is > 0 && brokerRemaining <= intendedQuantity;
+
+    private static bool CompatibleQuantity(int? brokerQuantity, int intendedQuantity) =>
+        brokerQuantity is null || brokerQuantity is > 0 && brokerQuantity <= intendedQuantity;
+
+    private static bool IsDeadAction(string? action) =>
+        string.Equals(action, "REJ", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(action, "CLX", StringComparison.OrdinalIgnoreCase);
 }

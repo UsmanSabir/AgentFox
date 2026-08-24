@@ -19,6 +19,13 @@ public sealed record PersistentOrderSubmissionResult(
     TradingExecutionResult? Execution,
     string Reason);
 
+public sealed record PersistentOrderRetryResult(
+    bool Found,
+    bool Placed,
+    string State,
+    string Message,
+    string? ExecutionId = null);
+
 /// <summary>
 /// Re-materialises eligible DAY orders once per trading date until exact broker fills satisfy the
 /// requested quantity. A failed read, unknown submission, or ambiguous order identity always stops
@@ -32,7 +39,10 @@ public sealed class PersistentOrderWorker : BackgroundService
     private readonly OrderWindow _orderWindow;
     private readonly IMarketCalendar _calendar;
     private readonly TradingReconciliationState _reconciliation;
+    private readonly IBrokerStateReader _brokerStateReader;
     private readonly BrokerOrderCancellationService _cancellations;
+    private readonly TradingPolicyProvider _policyProvider;
+    private readonly ApprovalIntentRegistry _intentRegistry;
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly TradingActivityLog? _activity;
     private readonly ILogger<PersistentOrderWorker> _logger;
@@ -45,7 +55,10 @@ public sealed class PersistentOrderWorker : BackgroundService
         OrderWindow orderWindow,
         IMarketCalendar calendar,
         TradingReconciliationState reconciliation,
+        IBrokerStateReader brokerStateReader,
         BrokerOrderCancellationService cancellations,
+        TradingPolicyProvider policyProvider,
+        ApprovalIntentRegistry intentRegistry,
         IOptions<TradingAgentOptions> options,
         ILogger<PersistentOrderWorker> logger,
         TradingActivityLog? activity = null)
@@ -56,7 +69,10 @@ public sealed class PersistentOrderWorker : BackgroundService
         _orderWindow = orderWindow;
         _calendar = calendar;
         _reconciliation = reconciliation;
+        _brokerStateReader = brokerStateReader;
         _cancellations = cancellations;
+        _policyProvider = policyProvider;
+        _intentRegistry = intentRegistry;
         _options = options;
         _logger = logger;
         _activity = activity;
@@ -179,6 +195,108 @@ public sealed class PersistentOrderWorker : BackgroundService
                 intentId, intent.FilledQuantity, "cancelled",
                 "Cancelled by the operator; no broker order remains outstanding.", ct);
             return (true, "cancelled", "Persistent order cancelled and outstanding placements verified gone.");
+        }
+        finally
+        {
+            _runGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Explicit operator recovery for a definitively failed attempt. A fresh, complete broker snapshot
+    /// is mandatory and is searched for a matching resting order or fill before a second claim is made.
+    /// Unknown/ambiguous outcomes never enter this path.
+    /// </summary>
+    public async Task<PersistentOrderRetryResult> RetryFailedTodayAsync(
+        string intentId, string approvedBy, CancellationToken ct = default)
+    {
+        await _runGate.WaitAsync(ct);
+        try
+        {
+            var intent = await _repository.GetPersistentOrderAsync(intentId, ct);
+            if (intent is null)
+                return new(false, false, "missing", "Persistent order was not found.");
+
+            var today = DateOnly.FromDateTime(_calendar.GetStatus().PktNow);
+            var placements = await _repository.GetPersistentOrderPlacementsAsync(intentId, ct);
+            var latest = placements.LastOrDefault();
+            if (!PersistentOrderDecisions.CanRetryFailedToday(
+                    intent, latest, DateTime.UtcNow, today, out var eligibilityReason))
+                return new(true, false, intent.State, eligibilityReason);
+
+            var snapshot = await _brokerStateReader.ReadSnapshotAsync(ct);
+            _reconciliation.Update(snapshot);
+            if (!snapshot.Supported || !snapshot.Healthy)
+            {
+                return new(true, false, intent.State,
+                    "The broker check was incomplete, so nothing was retried: " + snapshot.Reason);
+            }
+
+            intent = await _repository.GetPersistentOrderAsync(intentId, ct) ?? intent;
+            if (intent.RemainingQuantity <= 0)
+            {
+                await _repository.SetPersistentOrderProgressAsync(
+                    intentId, intent.FilledQuantity, "fulfilled",
+                    $"Broker recheck confirmed the full {intent.Quantity} share(s) filled; no retry was sent.", ct);
+                return new(true, false, "fulfilled", "The broker already reports the requested quantity filled.");
+            }
+
+            var quantity = intent.RemainingQuantity;
+            var ownNumbers = placements
+                .Select(p => p.BrokerOrderNo?.Trim())
+                .Where(number => !string.IsNullOrWhiteSpace(number))
+                .Select(number => number!)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (intent.Action.Equals("SELL", StringComparison.OrdinalIgnoreCase))
+            {
+                var availability = SellQuantityRule.Available(
+                    snapshot,
+                    intent.Symbol,
+                    DateTime.UtcNow,
+                    TimeSpan.FromSeconds(Math.Max(10, _options.Value.ReconciliationMaxAgeSeconds)),
+                    ownNumbers);
+                if (!availability.Known)
+                    return new(true, false, intent.State, availability.Reason + " Nothing was retried.");
+                quantity = PersistentOrderDecisions.QuantityToPlace(
+                    intent, intent.FilledQuantity, availability.AvailableQuantity);
+                if (quantity <= 0)
+                    return new(true, false, intent.State,
+                        $"The broker check found no uncommitted {intent.Symbol} holding available to sell.");
+            }
+
+            if (PersistentOrderDecisions.FindPossibleBrokerMatch(
+                    intent, latest!, quantity, snapshot) is { } brokerEvidence)
+            {
+                var reason = brokerEvidence + " The retry was stopped to avoid a duplicate order.";
+                await _repository.SetPersistentOrderProgressAsync(
+                    intentId, intent.FilledQuantity, "attention", reason, ct);
+                _activity?.Warn("Orders", $"{intent.Symbol}: retry stopped by broker evidence", reason);
+                return new(true, false, "attention", reason);
+            }
+
+            var window = _orderWindow.Evaluate();
+            if (!window.Allowed)
+                return new(true, false, intent.State, "Nothing was retried: " + window.Reason);
+
+            var claim = await _repository.TryClaimPersistentOrderRetryAsync(intentId, today, ct);
+            if (!claim.Acquired)
+                return new(true, false, intent.State,
+                    "The failed attempt changed while the broker was being checked; refresh before retrying.");
+
+            var signal = intent.ToSignal(quantity);
+            IReadOnlyList<IReadOnlyList<TradingSignal>> groups = [[signal]];
+            var source = BuildSource(intent.IntentId, today, claim.Attempt);
+            var policy = _policyProvider.Current();
+            var approvalIntent = ApprovalIntent.Create(
+                groups, source, policy.Version,
+                TimeSpan.FromSeconds(Math.Max(10, _options.Value.ApprovalIntentTtlSeconds)));
+            _intentRegistry.Register(approvalIntent);
+            var authorization = ExecutionAuthorization.HostToolGate(approvedBy, approvalIntent);
+
+            var result = await ExecuteClaimedAsync(
+                intent, today, claim, authorization, ct, quantity);
+            var saved = await _repository.GetPersistentOrderAsync(intentId, ct) ?? intent;
+            return new(true, result.Accepted, saved.State, result.Reason, result.Execution?.ExecutionId);
         }
         finally
         {
@@ -403,6 +521,19 @@ public sealed class PersistentOrderWorker : BackgroundService
         if (!claim.Acquired)
             return new(false, intent, null,
                 $"A placement was already claimed for {sessionDate:yyyy-MM-dd}.");
+
+        return await ExecuteClaimedAsync(
+            intent, sessionDate, claim, authorization, ct, quantity);
+    }
+
+    private async Task<PersistentOrderSubmissionResult> ExecuteClaimedAsync(
+        PersistentOrderIntent intent,
+        DateOnly sessionDate,
+        PersistentOrderAttemptClaim claim,
+        ExecutionAuthorization? authorization,
+        CancellationToken ct,
+        int quantity)
+    {
 
         var signal = intent.ToSignal(quantity);
         IReadOnlyList<IReadOnlyList<TradingSignal>> groups = [[signal]];

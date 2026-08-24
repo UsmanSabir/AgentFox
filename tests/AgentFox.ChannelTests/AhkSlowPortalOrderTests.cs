@@ -64,10 +64,27 @@ public sealed class AhkSlowPortalOrderTests
         await RunSlowPortalOrderAsync(confirmPromptTimeoutMs: 2_000);
     }
 
+    /// <summary>
+    /// The live portal leaves lowerCap/upperCap unchanged when a symbol lookup fails. A prior symbol's
+    /// band must never be applied to the new symbol. Missing band data is not itself an order veto:
+    /// submit the requested price unchanged and let the broker decide.
+    /// </summary>
+    [TestMethod]
+    [TestCategory("External")]
+    [TestCategory("AhkBrowser")]
+    public async Task MissingPriceBand_DoesNotReuseStaleBand_AndStillSubmitsRequestedPrice()
+    {
+        await RunSlowPortalOrderAsync(
+            confirmPromptTimeoutMs: 2_000,
+            delays: "?toolbar=0&bind=0&modal=0&price=100&submit=0&band=missing");
+    }
+
     /// <param name="delays">
     /// Optional query string overriding the mock's per-step delays, e.g. "?toolbar=0&amp;prompt=9000".
     /// </param>
-    private static async Task RunSlowPortalOrderAsync(int confirmPromptTimeoutMs, string delays = "")
+    private static async Task RunSlowPortalOrderAsync(
+        int confirmPromptTimeoutMs,
+        string delays = "")
     {
         var chrome = ResolveChrome();
         if (chrome is null)
@@ -180,8 +197,11 @@ public sealed class AhkSlowPortalOrderTests
             window.__submitClicks = 0;
             // The real portal exposes the tradable band as globals, and the broker now waits for them
             // instead of for a price field that never populates on the sell path.
+            // Start with a stale band to reproduce the live portal's failed-lookup behaviour. The broker
+            // must clear it before typing the requested symbol. Successful mock lookups repopulate it.
             window.lowerCap = 40.00;
             window.upperCap = 60.00;
+            window.__resolveBand = new URLSearchParams(location.search).get('band') !== 'missing';
 
             // 1. The toolbar renders seconds after the page reports "loaded".
             setTimeout(function () {
@@ -221,6 +241,10 @@ public sealed class AhkSlowPortalOrderTests
               document.getElementById('buysymbol').addEventListener('input', function () {
                 clearTimeout(window.__priceTimer);
                 window.__priceTimer = setTimeout(function () {
+                  if (window.__resolveBand) {
+                    window.lowerCap = 40.00;
+                    window.upperCap = 60.00;
+                  }
                   document.getElementById('buyprice').value = '52.10';
                 }, D.price);
               });

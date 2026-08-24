@@ -129,25 +129,28 @@ public sealed class AhkBrowserBrokerAdapter : IBrokerAdapter, IBrokerStateReader
             string.Equals(b.Symbol?.Trim(), symbol, StringComparison.OrdinalIgnoreCase)
             && string.Equals(b.Market?.Trim(), "REG", StringComparison.OrdinalIgnoreCase));
 
-        // No band means no safe price. The portal's own dialog is worse than useless here — its band
-        // lookup leaves the previous symbol's values in place on a miss, so it validates against the wrong
-        // numbers — and a direct caller has nothing to validate against at all.
+        // A missing band disables our optional local clamp; it does not prove the order itself is bad.
+        // Submit the operator's unchanged price and let the broker/exchange apply the authoritative rule.
+        // Crucially, this is NOT allowed to reuse a different symbol's band.
+        var price = signal.EntryPrice!.Value;
+        string? adjustment = null;
         if (band is null)
         {
             _logger.LogWarning(
-                "[BrokerAdapter] No REG price band for {Symbol}; the JSON API cannot price it safely. "
-                + "Using the browser.", symbol);
-            return await PlaceViaBrowserAsync(signal);
+                "[BrokerAdapter] No fresh REG price band for {Symbol}; submitting the requested price "
+                + "unchanged for broker/exchange validation.", symbol);
         }
-
-        var (price, adjustment) = ClampToBand(signal.EntryPrice!.Value, band);
+        else
+        {
+            (price, adjustment) = ClampToBand(price, band);
+        }
 
         decimal? limitPrice = null;
         if (isStop)
         {
             var raw = signal.LimitPrice
                 ?? decimal.Round(price * (1m - Math.Clamp(cfg.StopLimitSlippagePercent, 0m, 20m) / 100m), 2);
-            (limitPrice, _) = ClampToBand(raw, band);
+            limitPrice = band is null ? raw : ClampToBand(raw, band).Price;
         }
 
         if (PriceIntentRule.Validate(signal, price, limitPrice) is { } priceProblem)
@@ -371,6 +374,18 @@ public sealed class AhkBrowserBrokerAdapter : IBrokerAdapter, IBrokerStateReader
                 .ToList()
             : [];
 
+        var structuredOrderEvents = activity?
+            .Where(row => !string.IsNullOrWhiteSpace(row.OrderNo))
+            .Select(row => new BrokerOrderEvent(
+                row.OrderNo!.Trim(),
+                row.Scrip?.Trim().ToUpperInvariant() ?? "",
+                row.Type?.Trim(),
+                row.Action?.Trim().ToUpperInvariant(),
+                ActivityQuantity(row),
+                row.Price,
+                ParseActivityTimeUtc(row.Time, checkedUtc)))
+            .ToList() ?? [];
+
         var structuredPositions = holdings?
             .Where(h => !string.IsNullOrWhiteSpace(h.Symbol) && h.QuantityTotal is not null)
             .Select(h => new BrokerPosition(
@@ -429,6 +444,7 @@ public sealed class AhkBrowserBrokerAdapter : IBrokerAdapter, IBrokerStateReader
             {
                 Fills = structuredFills,
                 OpenOrders = structuredOpenOrders,
+                OrderEvents = structuredOrderEvents,
                 Positions = structuredPositions,
                 AvailableCashPkr = balance
             };
@@ -444,6 +460,7 @@ public sealed class AhkBrowserBrokerAdapter : IBrokerAdapter, IBrokerStateReader
         {
             Fills = structuredFills,
             OpenOrders = structuredOpenOrders,
+            OrderEvents = structuredOrderEvents,
             Positions = structuredPositions,
             AvailableCashPkr = balance
         };
@@ -470,6 +487,14 @@ public sealed class AhkBrowserBrokerAdapter : IBrokerAdapter, IBrokerStateReader
         action is not null
         && (action.Equals("REJ", StringComparison.OrdinalIgnoreCase)
          || action.Equals("CLX", StringComparison.OrdinalIgnoreCase));
+
+    private static int? ActivityQuantity(AhkActivityLogEntry row)
+    {
+        var quantity = row.Value ?? row.TotalVolume ?? row.Remaining;
+        return quantity is > 0m
+            ? (int)Math.Round(quantity.Value, MidpointRounding.AwayFromZero)
+            : null;
+    }
 
     /// <summary>
     /// Turns the activity log's local wall-clock time ("12:18:13") into UTC, on the PSX trading day the

@@ -23,6 +23,13 @@ public sealed record BrokerReconciliationSnapshot(
     /// <summary>Exact native orders currently resting at the broker.</summary>
     public IReadOnlyList<BrokerWorkingOrder> OpenOrders { get; init; } = [];
 
+    /// <summary>
+    /// Today's order lifecycle rows, including queued, accepted, rejected, and cancelled events.
+    /// These close the short propagation gap where an accepted order is visible in activity before it
+    /// appears in the outstanding book.
+    /// </summary>
+    public IReadOnlyList<BrokerOrderEvent> OrderEvents { get; init; } = [];
+
     /// <summary>Current custody positions used to keep recurring SELLs within available holdings.</summary>
     public IReadOnlyList<BrokerPosition> Positions { get; init; } = [];
 
@@ -50,6 +57,15 @@ public sealed record BrokerWorkingOrder(
     string? Side,
     long? RemainingQuantity,
     decimal? Price);
+
+public sealed record BrokerOrderEvent(
+    string OrderNo,
+    string Symbol,
+    string? Side,
+    string? Action,
+    int? Quantity,
+    decimal? Price,
+    DateTime ObservedUtc);
 
 public sealed record BrokerPosition(string Symbol, decimal Quantity);
 

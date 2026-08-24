@@ -138,6 +138,15 @@ public interface ITradingRepository
         DateOnly sessionDate,
         CancellationToken ct = default);
 
+    /// <summary>
+    /// Claims an additional same-day attempt only when the latest recorded attempt is definitively
+    /// failed. This is reserved for an explicit operator retry after a fresh broker-book check.
+    /// </summary>
+    Task<TradingAgent.Trading.PersistentOrderAttemptClaim> TryClaimPersistentOrderRetryAsync(
+        string intentId,
+        DateOnly sessionDate,
+        CancellationToken ct = default);
+
     Task RecordPersistentOrderPlacementAsync(
         TradingAgent.Trading.PersistentOrderPlacement placement,
         string intentState,

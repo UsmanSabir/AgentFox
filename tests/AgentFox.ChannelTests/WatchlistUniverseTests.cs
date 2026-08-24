@@ -506,6 +506,8 @@ public sealed class WatchlistUniverseTests
             string id, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<TradingAgent.Trading.PersistentOrderAttemptClaim> TryClaimPersistentOrderAttemptAsync(
             string id, DateOnly date, CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<TradingAgent.Trading.PersistentOrderAttemptClaim> TryClaimPersistentOrderRetryAsync(
+            string id, DateOnly date, CancellationToken ct = default) => throw new NotSupportedException();
         public Task RecordPersistentOrderPlacementAsync(
             TradingAgent.Trading.PersistentOrderPlacement placement, string state, string? reason,
             CancellationToken ct = default) => throw new NotSupportedException();

@@ -504,6 +504,44 @@ public sealed class SqliteTradingRepository : ITradingRepository
             : new PersistentOrderAttemptClaim(true, Convert.ToInt32(value, CultureInfo.InvariantCulture));
     }
 
+    public async Task<PersistentOrderAttemptClaim> TryClaimPersistentOrderRetryAsync(
+        string intentId, DateOnly sessionDate, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE persistent_order_intents
+               SET state = 'placing',
+                   attempt_count = attempt_count + 1,
+                   state_reason = 'Operator retry claimed for ' || $date || '.',
+                   updated_utc = $now
+             WHERE intent_id = $id
+               AND state IN ('active','partial')
+               AND expires_utc > $now
+               AND last_attempt_date = $date
+               AND EXISTS (
+                    SELECT 1
+                      FROM persistent_order_placements p
+                     WHERE p.intent_id = persistent_order_intents.intent_id
+                       AND p.session_date = $date
+                       AND p.state = 'failed'
+                       AND p.attempt = (
+                            SELECT MAX(latest.attempt)
+                              FROM persistent_order_placements latest
+                             WHERE latest.intent_id = persistent_order_intents.intent_id
+                               AND latest.session_date = $date))
+            RETURNING attempt_count
+            """;
+        command.Parameters.AddWithValue("$id", intentId);
+        command.Parameters.AddWithValue("$date", sessionDate.ToString("yyyy-MM-dd"));
+        command.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("O"));
+        var value = await command.ExecuteScalarAsync(ct);
+        return value is null
+            ? new PersistentOrderAttemptClaim(false, 0)
+            : new PersistentOrderAttemptClaim(true, Convert.ToInt32(value, CultureInfo.InvariantCulture));
+    }
+
     public async Task RecordPersistentOrderPlacementAsync(
         PersistentOrderPlacement placement,
         string intentState,

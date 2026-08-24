@@ -212,6 +212,8 @@ export interface PersistentOrder {
   createdUtc: string;
   updatedUtc: string;
   terminalUtc: string | null;
+  canRetry: boolean;
+  retryReason: string;
   placements: PersistentOrderPlacement[];
 }
 
@@ -1020,7 +1022,10 @@ export const trading = {
       get<PersistentOrdersResponse>(`/trading/persistent-orders?all=${all}`),
     cancel: (intentId: string) =>
       del<{ intentId: string; completed: boolean; state: string; message: string }>(
-        `/trading/persistent-orders/${encodeURIComponent(intentId)}`)
+        `/trading/persistent-orders/${encodeURIComponent(intentId)}`),
+    retry: (intentId: string) =>
+      post<{ intentId: string; placed: boolean; state: string; message: string; executionId: string | null }>(
+        `/trading/persistent-orders/${encodeURIComponent(intentId)}/retry`, undefined, 60_000)
   },
   // Open-only by default: an empty inbox is the normal state, and a list dominated by last month's
   // resolved proposals is exactly what made this feel like a log rather than a queue.

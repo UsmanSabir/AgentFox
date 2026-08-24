@@ -129,6 +129,54 @@ public sealed class PersistentOrderTests
     }
 
     [TestMethod]
+    public void Retry_IsOfferedOnlyForLatestKnownFailureToday()
+    {
+        var intent = Intent(10) with { LastAttemptSessionDate = Today };
+        var failed = Placement("failed");
+
+        Assert.IsTrue(PersistentOrderDecisions.CanRetryFailedToday(
+            intent, failed, Now, Today, out _));
+        Assert.IsFalse(PersistentOrderDecisions.CanRetryFailedToday(
+            intent, failed with { State = "unknown" }, Now, Today, out _));
+        Assert.IsFalse(PersistentOrderDecisions.CanRetryFailedToday(
+            intent, failed, Now, Tomorrow, out _));
+    }
+
+    [TestMethod]
+    public void Retry_BrokerCheckStopsForMatchingRestingOrderOrRecentFill()
+    {
+        var intent = Intent(10) with { LastAttemptSessionDate = Today };
+        var failed = Placement("failed");
+        var resting = Snapshot(openOrders: [new("O-1", "FFC", "BUY", 10, 550m)]);
+        var fill = Snapshot() with
+        {
+            Fills = [new("O-2", "FFC", "BUY", 10, 550m, failed.CreatedUtc)]
+        };
+        var queued = Snapshot() with
+        {
+            OrderEvents = [new("O-4", "FFC", "BUY", "QUE", 10, 550m, failed.CreatedUtc)]
+        };
+
+        StringAssert.Contains(PersistentOrderDecisions.FindPossibleBrokerMatch(
+            intent, failed, 10, resting), "O-1");
+        StringAssert.Contains(PersistentOrderDecisions.FindPossibleBrokerMatch(
+            intent, failed, 10, fill), "O-2");
+        StringAssert.Contains(PersistentOrderDecisions.FindPossibleBrokerMatch(
+            intent, failed, 10, queued), "O-4");
+        Assert.IsNull(PersistentOrderDecisions.FindPossibleBrokerMatch(
+            intent, failed, 10, queued with
+            {
+                OrderEvents =
+                [
+                    new("O-4", "FFC", "BUY", "QUE", 10, 550m, failed.CreatedUtc),
+                    new("O-4", "FFC", "BUY", "REJ", 10, 550m, failed.CreatedUtc.AddSeconds(1))
+                ]
+            }));
+        Assert.IsNull(PersistentOrderDecisions.FindPossibleBrokerMatch(
+            intent, failed, 10, Snapshot(openOrders: [new("O-3", "FFC", "SEL", 10, 550m)])));
+    }
+
+    [TestMethod]
     public void PriceIntent_NeverMakesALimitWorse()
     {
         var buy = Signal("BUY", "LIMIT", 100m);
@@ -159,6 +207,18 @@ public sealed class PersistentOrderTests
         OrderType = "LIMIT",
         Price = 550m,
         ExpiresUtc = Now.AddDays(30)
+    };
+
+    private static PersistentOrderPlacement Placement(string state) => new()
+    {
+        PlacementId = "placement-1",
+        IntentId = "intent-1",
+        SessionDate = Today,
+        Attempt = 1,
+        Quantity = 10,
+        State = state,
+        RequestedPrice = 550m,
+        CreatedUtc = Now
     };
 
     private static TradingSignal Signal(string action, string type, decimal price) => new()
