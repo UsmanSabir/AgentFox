@@ -1686,6 +1686,63 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                     ON automation_campaign_events(campaign_id, sequence DESC);
                 CREATE INDEX IF NOT EXISTS ix_automation_campaign_events_symbol
                     ON automation_campaign_events(symbol, sequence DESC);
+                -- How finished campaigns actually turned out. Pruned by age AND row count; the two
+                -- aggregates below are written as each outcome lands so that pruning these rows
+                -- never destroys the longer-run record. See SqliteTradingRepository.Outcomes.cs.
+                CREATE TABLE IF NOT EXISTS automation_outcomes (
+                    campaign_id            TEXT PRIMARY KEY,
+                    symbol                 TEXT NOT NULL,
+                    profile_id             TEXT NOT NULL,
+                    entry_strategy_id      TEXT NULL,
+                    exit_plan_id           TEXT NULL,
+                    mode                   TEXT NOT NULL,
+                    simulated              INTEGER NOT NULL,
+                    opened_utc             TEXT NOT NULL,
+                    closed_utc             TEXT NOT NULL,
+                    sessions_held          INTEGER NOT NULL,
+                    planned_entry          TEXT NULL,
+                    planned_stop           TEXT NULL,
+                    planned_target         TEXT NULL,
+                    initial_risk_per_share TEXT NULL,
+                    quantity               INTEGER NOT NULL,
+                    deployed_pkr           TEXT NOT NULL,
+                    average_cost           TEXT NULL,
+                    realised_net_pkr       TEXT NULL,
+                    realised_r             TEXT NULL,
+                    close_reason           TEXT NOT NULL,
+                    regime_at_entry        TEXT NULL,
+                    recorded_utc           TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS ix_automation_outcomes_closed
+                    ON automation_outcomes(closed_utc DESC);
+                CREATE INDEX IF NOT EXISTS ix_automation_outcomes_symbol
+                    ON automation_outcomes(symbol, closed_utc DESC);
+                -- Small by construction: a few rows per trading day, so it is kept far longer than
+                -- the outcomes it summarises. `measured` is the honest denominator for an average —
+                -- `trades` counts campaigns that closed, and some close with no computable result.
+                CREATE TABLE IF NOT EXISTS automation_outcome_daily (
+                    day         TEXT NOT NULL,
+                    profile_id  TEXT NOT NULL,
+                    mode        TEXT NOT NULL,
+                    trades      INTEGER NOT NULL,
+                    wins        INTEGER NOT NULL,
+                    losses      INTEGER NOT NULL,
+                    measured    INTEGER NOT NULL,
+                    sum_r       TEXT NOT NULL,
+                    sum_net_pkr TEXT NOT NULL,
+                    updated_utc TEXT NOT NULL,
+                    PRIMARY KEY (day, profile_id, mode)
+                );
+                -- Counted per gate CODE, never per message: a message carries the candidate's own
+                -- numbers and so never repeats, which would report every rejection as unique.
+                CREATE TABLE IF NOT EXISTS automation_gate_rejections (
+                    day         TEXT NOT NULL,
+                    strategy_id TEXT NOT NULL,
+                    gate_code   TEXT NOT NULL,
+                    count       INTEGER NOT NULL,
+                    updated_utc TEXT NOT NULL,
+                    PRIMARY KEY (day, strategy_id, gate_code)
+                );
                 CREATE INDEX IF NOT EXISTS ix_watchlist_alerts_raised
                     ON watchlist_alerts(raised_utc DESC);
                 CREATE INDEX IF NOT EXISTS ix_watchlist_alerts_dedupe
