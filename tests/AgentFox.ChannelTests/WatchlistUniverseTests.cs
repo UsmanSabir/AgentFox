@@ -521,6 +521,10 @@ public sealed class WatchlistUniverseTests
             string id, IReadOnlyCollection<string> expected, string state, string? reason = null,
             CancellationToken ct = default) => throw new NotSupportedException();
 
+        public Task<decimal?> FindHoldingQuantityBeforeAsync(
+            string symbol, DateTime beforeUtc, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+
         public Task<WatchlistSnapshot> GetWatchlistAsync(CancellationToken ct = default) =>
             throw new InvalidOperationException("database unavailable");
 

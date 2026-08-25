@@ -26,6 +26,12 @@ public sealed record PersistentOrderRetryResult(
     string Message,
     string? ExecutionId = null);
 
+public sealed record PersistentOrderResolveResult(
+    bool Found,
+    bool Applied,
+    string State,
+    string Message);
+
 /// <summary>
 /// Re-materialises eligible DAY orders once per trading date until exact broker fills satisfy the
 /// requested quantity. A failed read, unknown submission, or ambiguous order identity always stops
@@ -279,6 +285,125 @@ public sealed class PersistentOrderWorker : BackgroundService
         }
     }
 
+    /// <summary>
+    /// Explicit, attended resolution for an intent stuck in "attention" over a broker outcome from a
+    /// PRIOR trading date. The broker's own activity API only reports the CURRENT trading day (see
+    /// <c>AhkPortalClient.GetActivityLogAsync</c>), so once the day has turned over there is no
+    /// evidence left for AgentFox to check itself — a live recheck of "today's" book proves nothing
+    /// about what happened yesterday. Only a human who has checked the broker's own order
+    /// history/statement outside the app can say what actually happened, so this method never
+    /// infers an outcome; it only records what the operator attests to having verified. That
+    /// attendance requirement mirrors the manual-only-symbol gate elsewhere in this manager.
+    /// </summary>
+    public async Task<PersistentOrderResolveResult> ResolveAttentionAsync(
+        string intentId, string? resolution, int? filledQuantity, string note, string approvedBy,
+        CancellationToken ct = default)
+    {
+        await _runGate.WaitAsync(ct);
+        try
+        {
+            var intent = await _repository.GetPersistentOrderAsync(intentId, ct);
+            if (intent is null)
+                return new(false, false, "missing", "Persistent order was not found.");
+            if (intent.State != "attention")
+                return new(true, false, intent.State,
+                    $"Only an intent in 'attention' can be resolved this way; this one is '{intent.State}'.");
+
+            int confirmed;
+            string newState;
+            switch (resolution)
+            {
+                case "not_filled":
+                    confirmed = intent.FilledQuantity;
+                    newState = "active";
+                    break;
+                case "filled":
+                    confirmed = intent.Quantity;
+                    newState = "fulfilled";
+                    break;
+                case "partial":
+                    if (filledQuantity is not { } q || q <= 0 || q >= intent.Quantity)
+                        return new(true, false, intent.State,
+                            $"A partial resolution needs a filled quantity between 1 and {intent.Quantity - 1}.");
+                    confirmed = q;
+                    newState = "partial";
+                    break;
+                default:
+                    return new(true, false, intent.State,
+                        "Resolution must be one of: not_filled, partial, filled.");
+            }
+
+            var reason = $"Operator {approvedBy} resolved the unobserved "
+                + $"{intent.LastAttemptSessionDate:yyyy-MM-dd} outcome from a broker check outside the "
+                + $"app: {resolution} ({confirmed}/{intent.Quantity} share(s)). Note: {note}";
+
+            var applied = await _repository.SetPersistentOrderProgressAsync(
+                intentId, confirmed, newState, reason, ct);
+            if (!applied)
+                return new(true, false, intent.State,
+                    "The intent changed while resolving; refresh and retry.");
+
+            _activity?.Info("Orders",
+                $"{intent.Symbol}: attention resolved by {approvedBy} ({resolution})", reason);
+            return new(true, true, newState, reason);
+        }
+        finally
+        {
+            _runGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Settles a persistent order's "attention" state left over from a PRIOR trading date using the
+    /// account's own custody position as ground truth. Returns false (leaving the intent in
+    /// "attention") only when no reconciliation snapshot exists from before the ambiguous placement —
+    /// there is then genuinely no evidence to reason from, and only an operator who checks the
+    /// broker's own history can resolve it (<see cref="ResolveAttentionAsync"/>).
+    /// </summary>
+    private async Task<bool> TryResolveAttentionFromHoldingsAsync(
+        PersistentOrderIntent intent,
+        PersistentOrderPlacement latestPlacement,
+        BrokerReconciliationSnapshot snapshot,
+        CancellationToken ct)
+    {
+        var baseline = await _repository.FindHoldingQuantityBeforeAsync(
+            intent.Symbol, latestPlacement.CreatedUtc, ct);
+        if (baseline is null) return false;
+
+        var current = snapshot.Positions
+            .FirstOrDefault(p => string.Equals(p.Symbol, intent.Symbol, StringComparison.OrdinalIgnoreCase))
+            ?.Quantity ?? 0m;
+
+        // BUY should only ever raise the position, SELL only ever lower it. A move the wrong way (an
+        // unrelated trade in between) is treated the same as no move — it is not evidence THIS order
+        // filled, and the conservative reading is "not filled".
+        var delta = intent.Action.Equals("BUY", StringComparison.OrdinalIgnoreCase)
+            ? current - baseline.Value
+            : baseline.Value - current;
+
+        if (delta <= 0)
+        {
+            var unchanged = $"Holdings for {intent.Symbol} are unchanged since before the "
+                + $"{latestPlacement.SessionDate:yyyy-MM-dd} placement ({baseline.Value:0.##} -> "
+                + $"{current:0.##} share(s)); treating that attempt as not filled and resuming daily retries.";
+            await _repository.SetPersistentOrderProgressAsync(
+                intent.IntentId, intent.FilledQuantity, "active", unchanged, ct);
+            _activity?.Info("Orders", $"{intent.Symbol}: attention auto-resolved (holdings unchanged)", unchanged);
+            return true;
+        }
+
+        var filled = (int)Math.Min(delta, intent.RemainingQuantity);
+        var newFilled = intent.FilledQuantity + filled;
+        var newState = newFilled >= intent.Quantity ? "fulfilled" : "partial";
+        var moved = $"Holdings for {intent.Symbol} moved from {baseline.Value:0.##} to {current:0.##} "
+            + $"share(s) since the {latestPlacement.SessionDate:yyyy-MM-dd} placement — consistent with "
+            + $"{filled} share(s) filling.";
+        await _repository.SetPersistentOrderProgressAsync(intent.IntentId, newFilled, newState, moved, ct);
+        _activity?.Warn("Orders",
+            $"{intent.Symbol}: attention auto-resolved from holdings evidence ({filled} filled)", moved);
+        return true;
+    }
+
     private readonly record struct RetryPreparation(
         bool Ready, bool RequiresAttention, string? Reason, int Quantity);
 
@@ -480,9 +605,26 @@ public sealed class PersistentOrderWorker : BackgroundService
         {
             // Exact evidence can safely settle an earlier unknown outcome; absence cannot.
             if (ownOpen.Count > 0)
+            {
                 await _repository.SetPersistentOrderProgressAsync(intent.IntentId,
                     intent.FilledQuantity, intent.FilledQuantity > 0 ? "partial" : "resting",
                     "The previously unknown placement is now visible in the outstanding book.", ct);
+                return;
+            }
+
+            // The broker's own activity log only ever reports TODAY (see
+            // AhkPortalClient.GetActivityLogAsync), so once the ambiguous trading date has passed there
+            // is nothing left there to check. Custody holdings are a different, independent signal that
+            // does not expire overnight: comparing what the account holds now against what it held right
+            // before the ambiguous placement is ground truth about whether that order actually moved a
+            // position, without guessing from silence. This is what keeps a persistent order genuinely
+            // unattended day to day — ResolveAttentionAsync (an explicit operator action) remains the
+            // fallback for the rare case where no reconciliation snapshot exists that far back at all.
+            if (intent.LastAttemptSessionDate is { } priorDate && priorDate < today
+                && placements.LastOrDefault(p => p.SessionDate == priorDate) is { } attentionPlacement)
+            {
+                await TryResolveAttentionFromHoldingsAsync(intent, attentionPlacement, snapshot, ct);
+            }
             return;
         }
 

@@ -86,6 +86,13 @@ public sealed record ProposalRejectRequest(string? Reason = null);
 
 public sealed record ResolveUnknownExecutionRequest(string? Resolution, string? Note);
 
+/// <summary>
+/// Operator resolution for a persistent order stuck in "attention" from a prior trading date.
+/// <paramref name="FilledQuantity"/> is required only when <paramref name="Resolution"/> is "partial".
+/// </summary>
+public sealed record ResolvePersistentAttentionRequest(
+    string? Resolution, int? FilledQuantity, string? Note);
+
 /// <summary>An order to hold until a price level is reached or an alert kind fires.</summary>
 /// <param name="TriggerPercent">
 /// Size of the move, in percent, for a PercentDrop/PercentRise trigger. Ignored by every other kind.
