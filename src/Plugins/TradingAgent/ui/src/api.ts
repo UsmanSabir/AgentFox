@@ -1025,7 +1025,16 @@ export const trading = {
         `/trading/persistent-orders/${encodeURIComponent(intentId)}`),
     retry: (intentId: string) =>
       post<{ intentId: string; placed: boolean; state: string; message: string; executionId: string | null }>(
-        `/trading/persistent-orders/${encodeURIComponent(intentId)}/retry`, undefined, 60_000)
+        `/trading/persistent-orders/${encodeURIComponent(intentId)}/retry`, undefined, 60_000),
+    resolveAttention: (
+      intentId: string,
+      resolution: 'not_filled' | 'partial' | 'filled',
+      filledQuantity: number | null,
+      note: string
+    ) =>
+      post<{ intentId: string; applied: boolean; state: string; message: string }>(
+        `/trading/persistent-orders/${encodeURIComponent(intentId)}/resolve-attention`,
+        { resolution, filledQuantity, note })
   },
   // Open-only by default: an empty inbox is the normal state, and a list dominated by last month's
   // resolved proposals is exactly what made this feel like a log rather than a queue.

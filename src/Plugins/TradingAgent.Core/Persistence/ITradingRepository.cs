@@ -173,6 +173,18 @@ public interface ITradingRepository
         string? reason = null,
         CancellationToken ct = default);
 
+    /// <summary>
+    /// The account's custody position for <paramref name="symbol"/> as of the most recent HEALTHY
+    /// reconciliation run strictly before <paramref name="beforeUtc"/> — 0 if that snapshot held none,
+    /// null if no healthy run exists that far back at all (no evidence to reason from). Used to settle
+    /// a persistent order's "attention" state left over from a prior trading date: the broker's
+    /// activity log only ever covers today, but a persisted reconciliation snapshot does not expire.
+    /// </summary>
+    Task<decimal?> FindHoldingQuantityBeforeAsync(
+        string symbol,
+        DateTime beforeUtc,
+        CancellationToken ct = default);
+
     Task AppendEventAsync(
         string executionId,
         string eventType,

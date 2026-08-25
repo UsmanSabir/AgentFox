@@ -323,6 +323,44 @@ public sealed partial class TradingCoreEndpoints
                 });
         }).RequireAuthorization("TradingTrader");
 
+        trading.MapPost("/persistent-orders/{intentId}/resolve-attention", async (
+            string intentId,
+            ResolvePersistentAttentionRequest body,
+            PersistentOrderWorker worker,
+            HttpContext http,
+            CancellationToken ct) =>
+        {
+            var resolution = body.Resolution?.Trim().ToLowerInvariant();
+            if (resolution is not ("not_filled" or "partial" or "filled"))
+                return Results.BadRequest(new
+                {
+                    error = "invalid_resolution",
+                    message = "Choose not_filled, partial, or filled after checking the broker's own "
+                        + "order history or statement for that trading date."
+                });
+
+            var note = body.Note?.Trim();
+            if (string.IsNullOrWhiteSpace(note))
+                return Results.BadRequest(new
+                {
+                    error = "resolution_note_required",
+                    message = "Record what you checked at the broker before resolving an unobserved outcome."
+                });
+
+            var result = await worker.ResolveAttentionAsync(
+                intentId, resolution, body.FilledQuantity, note,
+                http.User.Identity?.Name ?? "trading-dashboard", ct);
+            return !result.Found
+                ? Results.NotFound(new { error = "not_found", message = result.Message })
+                : Results.Ok(new
+                {
+                    intentId,
+                    applied = result.Applied,
+                    state = result.State,
+                    message = result.Message
+                });
+        }).RequireAuthorization("TradingTrader");
+
         trading.MapDelete("/persistent-orders/{intentId}", async (
             string intentId,
             PersistentOrderWorker worker,

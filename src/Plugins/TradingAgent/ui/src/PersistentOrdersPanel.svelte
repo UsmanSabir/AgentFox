@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { RefreshCw, Repeat2, Trash2, AlertTriangle, CheckCircle2, RotateCcw } from 'lucide-svelte';
+  import { RefreshCw, Repeat2, Trash2, AlertTriangle, CheckCircle2, RotateCcw, ShieldQuestion } from 'lucide-svelte';
   import { trading, type PersistentOrder } from './api';
 
   export let refreshTick = 0;
@@ -58,6 +58,62 @@
     error = null;
     try {
       const result = await trading.persistentOrders.retry(order.intentId);
+      notice = result.message;
+      await load();
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = null;
+    }
+  }
+
+  async function resolveAttention(order: PersistentOrder) {
+    if (busy) return;
+
+    const choice = prompt(
+      `Resolve ${order.symbol} ${order.action} — the broker's own order history only covers TODAY, `
+      + `so AgentFox cannot check what happened on ${order.lastAttemptSessionDate ?? 'the prior attempt date'} `
+      + `itself. Check the broker's own order book or statement for that date yourself, then type exactly `
+      + `what you found:\n\n`
+      + `  not_filled — no fill occurred; resume daily retries\n`
+      + `  partial — some of the ${order.quantity} share(s) filled\n`
+      + `  filled — the full ${order.quantity} share(s) filled\n\n`
+      + `Type: not_filled, partial, or filled`
+    )?.trim().toLowerCase();
+    if (!choice) return;
+    if (!['not_filled', 'partial', 'filled'].includes(choice)) {
+      error = `"${choice}" is not one of not_filled, partial, filled.`;
+      return;
+    }
+    const resolution = choice as 'not_filled' | 'partial' | 'filled';
+
+    let filledQuantity: number | null = null;
+    if (resolution === 'partial') {
+      const qtyText = prompt(
+        `How many of the ${order.quantity} total share(s) actually filled (1-${order.quantity - 1})?`
+      );
+      if (!qtyText) return;
+      filledQuantity = Number(qtyText);
+      if (!Number.isFinite(filledQuantity) || filledQuantity <= 0 || filledQuantity >= order.quantity) {
+        error = `Enter a whole number between 1 and ${order.quantity - 1}.`;
+        return;
+      }
+    }
+
+    const note = prompt(
+      'What did you check at the broker (order book, activity log, statement) to confirm this? Required.'
+    )?.trim();
+    if (!note) {
+      error = 'A note describing what you checked at the broker is required.';
+      return;
+    }
+
+    busy = order.intentId;
+    notice = null;
+    error = null;
+    try {
+      const result = await trading.persistentOrders.resolveAttention(
+        order.intentId, resolution, filledQuantity, note);
       notice = result.message;
       await load();
     } catch (e) {
@@ -127,6 +183,13 @@
                   {busy === order.intentId ? 'Checking broker…' : 'Check broker & retry'}
                 </button>
               {/if}
+              {#if order.state === 'attention'}
+                <button class="resolve" on:click={() => resolveAttention(order)} disabled={busy != null}
+                        title="Only you can say what happened on a prior trading date — the broker's own history API only covers today.">
+                  <ShieldQuestion size={12} />
+                  {busy === order.intentId ? 'Resolving…' : 'Resolve from broker check'}
+                </button>
+              {/if}
               <button class="cancel" on:click={() => cancel(order)} disabled={busy != null}>
                 <Trash2 size={12} /> {busy === order.intentId ? 'Working…' : 'Stop & cancel remainder'}
               </button>
@@ -164,6 +227,6 @@
   .progress span { display:block; height:100%; background:var(--success); }
   .reason { margin:.45rem 0 0; color:var(--text-2); font-size:.67rem; line-height:1.35; }
   .order-actions { display:flex; flex-wrap:wrap; gap:.4rem; margin-top:.55rem; }
-  .retry { color:var(--primary); }.cancel { color:var(--danger); }.notice,.empty { margin:0; padding:.65rem .9rem; color:var(--text-3); font-size:.69rem; }
+  .retry { color:var(--primary); }.resolve { color:var(--warning); }.cancel { color:var(--danger); }.notice,.empty { margin:0; padding:.65rem .9rem; color:var(--text-3); font-size:.69rem; }
   .notice { display:flex; align-items:center; gap:.35rem; border-bottom:1px solid var(--border); }.notice.bad { color:var(--danger); }
 </style>

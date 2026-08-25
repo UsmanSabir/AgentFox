@@ -672,6 +672,43 @@ public sealed class SqliteTradingRepository : ITradingRepository
         return await command.ExecuteNonQueryAsync(ct) == 1;
     }
 
+    public async Task<decimal?> FindHoldingQuantityBeforeAsync(
+        string symbol, DateTime beforeUtc, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT details_json FROM reconciliation_runs
+             WHERE state = 'healthy' AND started_utc < $before
+             ORDER BY started_utc DESC
+             LIMIT 1
+            """;
+        command.Parameters.AddWithValue("$before", beforeUtc.ToString("O"));
+        var raw = await command.ExecuteScalarAsync(ct) as string;
+        if (raw is null) return null;
+
+        // Written by RecordReconciliationAsync: {"supported":..,"healthy":..,"reason":..,
+        // "brokerSnapshot":{...,"positions":[{"symbol":..,"quantity":..},...]}} — brokerSnapshot is an
+        // already-serialized JsonElement embedded as-is, so its own keys keep ReadSnapshotAsync's literal
+        // (lowercase, non-Web-cased) casing rather than the outer wrapper's.
+        using var doc = JsonDocument.Parse(raw);
+        if (!doc.RootElement.TryGetProperty("brokerSnapshot", out var brokerSnapshot)
+            || !brokerSnapshot.TryGetProperty("positions", out var positions)
+            || positions.ValueKind != JsonValueKind.Array)
+            return 0m;
+
+        foreach (var position in positions.EnumerateArray())
+        {
+            if (position.TryGetProperty("symbol", out var symbolProp)
+                && string.Equals(symbolProp.GetString(), symbol, StringComparison.OrdinalIgnoreCase)
+                && position.TryGetProperty("quantity", out var qtyProp)
+                && qtyProp.TryGetDecimal(out var qty))
+                return qty;
+        }
+        return 0m; // a healthy snapshot exists but did not hold this symbol at that time
+    }
+
     private const string PersistentOrderSelect = """
         SELECT i.intent_id, i.symbol, i.action, i.quantity, i.order_type, i.price, i.limit_price,
                i.expires_utc, i.state,
