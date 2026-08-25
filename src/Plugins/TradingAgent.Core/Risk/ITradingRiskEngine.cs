@@ -18,8 +18,14 @@ public interface ITradingRiskEngine
     /// Authoritative symbols resolved by the execution boundary. Required for Watchlist mode; when
     /// omitted in that mode validation fails closed. AllowedSymbols mode may use configuration.
     /// </param>
+    /// <param name="liquidationUniverseOverride">
+    /// Symbols with broker-confirmed positive custody. A SELL may reduce one of these positions even
+    /// when the symbol is outside the entry universe; BUYs remain restricted to the selected universe.
+    /// Null means no extra liquidation symbols are known.
+    /// </param>
     RiskValidationResult Validate(
         IReadOnlyList<IReadOnlyList<TradingSignal>> groups,
         bool? killSwitchOverride = null,
-        IReadOnlyCollection<string>? executionUniverseOverride = null);
+        IReadOnlyCollection<string>? executionUniverseOverride = null,
+        IReadOnlyCollection<string>? liquidationUniverseOverride = null);
 }

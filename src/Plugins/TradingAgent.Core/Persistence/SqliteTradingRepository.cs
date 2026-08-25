@@ -17,7 +17,7 @@ namespace TradingAgent.Persistence;
 /// Transactional operational ledger. A unique idempotency key is claimed before broker access;
 /// the recorded result is returned on replay instead of submitting another order.
 /// </summary>
-public sealed class SqliteTradingRepository : ITradingRepository
+public sealed partial class SqliteTradingRepository : ITradingRepository, IAutomationCampaignRepository
 {
     private readonly string _connectionString;
     private readonly ILogger<SqliteTradingRepository> _logger;
@@ -1633,6 +1633,52 @@ public sealed class SqliteTradingRepository : ITradingRepository
                     ON protective_stops(state, symbol);
                 CREATE INDEX IF NOT EXISTS ix_protective_stops_parent
                     ON protective_stops(parent_armed_id);
+                -- Edition-neutral strategy lifecycle state. Profile JSON is opaque to core: a plugin
+                -- owns its rules while core supplies one durable, auditable storage seam.
+                CREATE TABLE IF NOT EXISTS automation_strategy_assignments (
+                    symbol         TEXT PRIMARY KEY,
+                    profile_id     TEXT NOT NULL,
+                    overrides_json TEXT NULL,
+                    updated_utc    TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS automation_campaigns (
+                    campaign_id       TEXT PRIMARY KEY,
+                    symbol            TEXT NOT NULL,
+                    profile_id        TEXT NOT NULL,
+                    profile_json      TEXT NOT NULL,
+                    state             TEXT NOT NULL,
+                    origin            TEXT NOT NULL,
+                    planned_budget_pkr TEXT NULL,
+                    deployed_pkr      TEXT NOT NULL,
+                    max_legs          INTEGER NOT NULL,
+                    completed_legs    INTEGER NOT NULL,
+                    quantity          INTEGER NOT NULL,
+                    average_price     TEXT NULL,
+                    last_fill_price   TEXT NULL,
+                    current_stop      TEXT NULL,
+                    high_water_price  TEXT NULL,
+                    next_add_price    TEXT NULL,
+                    status_message    TEXT NULL,
+                    started_utc       TEXT NOT NULL,
+                    updated_utc       TEXT NOT NULL,
+                    closed_utc        TEXT NULL,
+                    version           INTEGER NOT NULL DEFAULT 1
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_automation_campaigns_open_symbol
+                    ON automation_campaigns(symbol) WHERE closed_utc IS NULL;
+                CREATE TABLE IF NOT EXISTS automation_campaign_events (
+                    sequence    INTEGER PRIMARY KEY AUTOINCREMENT,
+                    campaign_id TEXT NOT NULL,
+                    symbol      TEXT NOT NULL,
+                    kind        TEXT NOT NULL,
+                    message     TEXT NOT NULL,
+                    detail_json TEXT NULL,
+                    utc         TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS ix_automation_campaign_events_campaign
+                    ON automation_campaign_events(campaign_id, sequence DESC);
+                CREATE INDEX IF NOT EXISTS ix_automation_campaign_events_symbol
+                    ON automation_campaign_events(symbol, sequence DESC);
                 CREATE INDEX IF NOT EXISTS ix_watchlist_alerts_raised
                     ON watchlist_alerts(raised_utc DESC);
                 CREATE INDEX IF NOT EXISTS ix_watchlist_alerts_dedupe

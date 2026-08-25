@@ -210,7 +210,10 @@ public sealed class TradingAgentRuntime
         services.AddHostedService(sp => sp.GetRequiredService<AssessmentJobCoordinator>());
         services.AddSingleton<TradingPolicyProvider>();
         services.AddSingleton<IPluginConfigDefinitionProvider, TradingPluginConfigDefinitionProvider>();
-        services.AddSingleton<ITradingRepository, SqliteTradingRepository>();
+        services.AddSingleton<SqliteTradingRepository>();
+        services.AddSingleton<ITradingRepository>(sp => sp.GetRequiredService<SqliteTradingRepository>());
+        services.AddSingleton<IAutomationCampaignRepository>(
+            sp => sp.GetRequiredService<SqliteTradingRepository>());
         services.AddSingleton<ITradingRiskEngine, TradingRiskEngine>();
         services.AddSingleton<TradingReconciliationState>();
         services.AddSingleton<ApprovalIntentRegistry>();
