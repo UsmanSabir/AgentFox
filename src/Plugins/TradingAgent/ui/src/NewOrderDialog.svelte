@@ -36,12 +36,24 @@
   onMount(async () => {
     dialogElement.focus();
     try {
-      const [intentData, watchlist] = await Promise.all([
+      // Independent failure domains: the watchlist is a symbol-picker convenience, while the
+      // order-intent registry is what actually renders the "choose what you want to happen" grid.
+      // A slow/failed watchlist (e.g. a cold dashboard load contending for the same DB and an
+      // uncached upstream quote fetch) must not block order placement entirely — only degrade the
+      // symbol datalist to free-text entry.
+      const [intentResult, watchlistResult] = await Promise.allSettled([
         trading.orderIntents(), trading.watchlist.list()
       ]);
-      registry = intentData;
-      symbols = watchlist.entries.filter(entry => entry.tradable);
-      if (!symbol) symbol = symbols[0]?.symbol ?? '';
+      if (intentResult.status === 'rejected') throw intentResult.reason;
+      registry = intentResult.value;
+      if (watchlistResult.status === 'fulfilled') {
+        symbols = watchlistResult.value.entries.filter(entry => entry.tradable);
+        if (!symbol) symbol = symbols[0]?.symbol ?? '';
+      } else {
+        error = `Watchlist unavailable (symbol picker has no suggestions): ${
+          watchlistResult.reason instanceof Error ? watchlistResult.reason.message : String(watchlistResult.reason)
+        }`;
+      }
       if (symbol) await refreshQuote();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
