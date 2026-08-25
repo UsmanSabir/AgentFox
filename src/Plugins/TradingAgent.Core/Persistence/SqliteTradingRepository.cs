@@ -387,6 +387,49 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         return inserted;
     }
 
+    public async Task<IReadOnlyList<RecordedFill>> GetFillsForSymbolAsync(
+        string symbol,
+        DateTime sinceUtc,
+        CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+
+        // Symbol and side live in the parent row's JSON, in one of two shapes — an OrderResult for an
+        // order this system placed, or a BrokerFill for one reconciliation observed. Both carry
+        // Symbol; the side is Action on the first and Side on the second.
+        command.CommandText = """
+            SELECT
+                json_extract(o.order_json, '$.Symbol') AS symbol,
+                COALESCE(json_extract(o.order_json, '$.Side'),
+                         json_extract(o.order_json, '$.Action')) AS side,
+                f.quantity, f.price, f.filled_utc
+            FROM fills f
+            JOIN broker_orders o ON o.broker_order_id = f.broker_order_id
+            WHERE UPPER(json_extract(o.order_json, '$.Symbol')) = $symbol
+              AND f.filled_utc >= $since
+            ORDER BY f.filled_utc
+            """;
+        command.Parameters.AddWithValue("$symbol", symbol.Trim().ToUpperInvariant());
+        command.Parameters.AddWithValue(
+            "$since", sinceUtc.ToString("O", CultureInfo.InvariantCulture));
+
+        var rows = new List<RecordedFill>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            if (reader.IsDBNull(0)) continue;
+            rows.Add(new RecordedFill(
+                reader.GetString(0),
+                reader.IsDBNull(1) ? null : reader.GetString(1).Trim().ToUpperInvariant(),
+                reader.GetInt32(2),
+                ParseDecimal(reader, 3) ?? 0m,
+                ParseUtc(reader.GetString(4))));
+        }
+        return rows;
+    }
+
     // ── Persistent DAY orders ────────────────────────────────────────────────
 
     public async Task<string> SavePersistentOrderAsync(

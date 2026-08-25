@@ -114,6 +114,28 @@ public interface ITradingRepository
         IReadOnlyList<TradingAgent.Reconciliation.BrokerFill> fills,
         CancellationToken ct = default);
 
+    /// <summary>
+    /// Recorded fills for one symbol from <paramref name="sinceUtc"/> onward, newest last.
+    ///
+    /// <para>
+    /// <b>Why this needs a join.</b> The <c>fills</c> table carries only quantity, price and time —
+    /// the symbol and the side live on the parent <c>broker_orders</c> row, inside its JSON. That
+    /// JSON is one of two shapes: an <c>OrderResult</c> for an order this system placed (side under
+    /// <c>Action</c>) or a <c>BrokerFill</c> for one reconciliation observed (side under
+    /// <c>Side</c>). Both carry <c>Symbol</c>, and the query reads whichever side field is present.
+    /// </para>
+    ///
+    /// <para>
+    /// This is the only honest source of what a position actually sold for. Custody reaching zero
+    /// says the shares are gone; it never says at what price, and inferring one from a resting stop
+    /// or the day's close would produce an authoritative-looking number that is not what happened.
+    /// </para>
+    /// </summary>
+    Task<IReadOnlyList<RecordedFill>> GetFillsForSymbolAsync(
+        string symbol,
+        DateTime sinceUtc,
+        CancellationToken ct = default);
+
     // ── Persistent DAY orders ────────────────────────────────────────────────
 
     Task<string> SavePersistentOrderAsync(
@@ -620,6 +642,21 @@ public sealed record TradeProposalRecord(
     /// <summary>Why it was rejected or expired — recorded so a terminal state is explicable.</summary>
     public string? StateReason { get; init; }
 }
+
+/// <summary>
+/// One fill as it was actually recorded, with the symbol and side recovered from its parent order.
+/// </summary>
+/// <param name="Side">
+/// <c>BUY</c> or <c>SELL</c> as the broker or the placement reported it, upper-cased. Null when the
+/// parent row carried neither field — a fill that cannot be attributed to a side is reported rather
+/// than guessed, because guessing turns a purchase into a sale.
+/// </param>
+public sealed record RecordedFill(
+    string Symbol,
+    string? Side,
+    int Quantity,
+    decimal Price,
+    DateTime FilledUtc);
 
 public sealed record TradingExecutionRecord(
     string ExecutionId,

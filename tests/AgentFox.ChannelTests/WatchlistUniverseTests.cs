@@ -495,6 +495,11 @@ public sealed class WatchlistUniverseTests
             IReadOnlyList<TradingAgent.Reconciliation.BrokerFill> fills,
             CancellationToken ct = default) => throw new NotSupportedException();
 
+        public Task<IReadOnlyList<RecordedFill>> GetFillsForSymbolAsync(
+            string symbol,
+            DateTime sinceUtc,
+            CancellationToken ct = default) => throw new NotSupportedException();
+
         public Task<string> SavePersistentOrderAsync(
             TradingAgent.Trading.PersistentOrderIntent intent, CancellationToken ct = default) =>
             throw new NotSupportedException();
