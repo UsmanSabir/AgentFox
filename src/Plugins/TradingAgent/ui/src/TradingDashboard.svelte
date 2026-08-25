@@ -20,6 +20,14 @@
   import NewOrderDialog from './NewOrderDialog.svelte';
   import PortfolioPanel from './PortfolioPanel.svelte';
   import PersistentOrdersPanel from './PersistentOrdersPanel.svelte';
+  import type { SymbolExtension } from './symbolExtensions';
+
+  /**
+   * Optional per-symbol contributions from whatever is composing this dashboard. Null in a community
+   * build, which is why nothing below assumes any of the three components exists. See
+   * `symbolExtensions.ts` for the contract and the reasoning behind it.
+   */
+  export let symbolExtension: SymbolExtension | null = null;
 
   /**
    * Non-null while the arming dialog is open. Both entry points — a chart level and an alert — raise the
@@ -362,7 +370,7 @@
       {/if}
     </section>
 
-    <PortfolioPanel />
+    <PortfolioPanel holdingStatus={symbolExtension?.holdingStatus ?? null} />
 
     <div class="section-heading">
       <div><span class="eyebrow">Workspace</span><h2>Market overview</h2></div>
@@ -379,6 +387,7 @@
         bind:compact={watchlistCompact}
         refreshTick={marketTick}
         marketOpen={status.market.isOpen}
+        rowStatus={symbolExtension?.rowStatus ?? null}
       />
       <ChartPane
         symbol={selectedSymbol}
@@ -389,6 +398,16 @@
         on:arm={(e) => armContext = e.detail}
       />
     </div>
+
+    <!-- Whatever is composing this dashboard may add a fuller view of the selected symbol here,
+         directly under the chart it refers to. Nothing in a community build. -->
+    {#if symbolExtension?.plan && selectedSymbol}
+      <svelte:component
+        this={symbolExtension.plan}
+        symbol={selectedSymbol}
+        companyName={selectedCompany}
+      />
+    {/if}
 
     <!-- Directly under the status grid: this answers "what is it doing", which is the question the
          metrics above raise and none of them answers. Collapsed, so it costs a row of chips. -->
