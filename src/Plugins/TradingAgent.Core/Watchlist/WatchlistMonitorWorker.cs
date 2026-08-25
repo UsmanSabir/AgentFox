@@ -32,8 +32,11 @@ namespace TradingAgent.Watchlist;
 /// component.
 /// </para>
 /// </summary>
-public sealed class WatchlistMonitorWorker : BackgroundService
+public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOpenParticipant
 {
+    public string Name => "watchlist and armed orders";
+    public int Order => 400;
+
     /// <summary>Let the app finish starting before the first pass; monitoring is never urgent at t=0.</summary>
     private static readonly TimeSpan StartupDelay = TimeSpan.FromSeconds(20);
 
@@ -57,6 +60,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService
     private readonly TradingActivityLog? _activity;
 
     private readonly object _statusLock = new();
+    private readonly SemaphoreSlim _runGate = new(1, 1);
     private MonitorStatus _status;
 
     public WatchlistMonitorWorker(
@@ -177,6 +181,16 @@ public sealed class WatchlistMonitorWorker : BackgroundService
 
     /// <summary>Runs one detection pass. Public so the API can trigger it on demand.</summary>
     public async Task<MonitorStatus> RunPassAsync(string trigger, CancellationToken ct = default)
+    {
+        await _runGate.WaitAsync(ct);
+        try { return await RunPassCoreAsync(trigger, ct); }
+        finally { _runGate.Release(); }
+    }
+
+    public async Task RunAtMarketOpenAsync(MarketSessionOpenContext context, CancellationToken ct) =>
+        await RunPassAsync("market-open", ct);
+
+    private async Task<MonitorStatus> RunPassCoreAsync(string trigger, CancellationToken ct)
     {
         var started = DateTime.UtcNow;
         var options = _options.Value.Monitor;

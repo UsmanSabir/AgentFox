@@ -71,19 +71,23 @@ public sealed class PsxMarketCalendar : IMarketCalendar
             {
                 if (dayOverride.Closed)
                     return new(false, pktNow, $"PSX is closed by configured override on {date:yyyy-MM-dd}.",
+                        NextOpenPkt: FindNextOpen(pktNow, holidays, overrides),
                         ScheduleSource: "override");
 
-                return Evaluate(pktNow, dayOverride.Sessions, "override");
+                return WithFutureOpen(
+                    Evaluate(pktNow, dayOverride.Sessions, "override"), holidays, overrides);
             }
 
             if (holidays.Contains(date))
                 return new(false, pktNow, $"PSX is closed for configured holiday {date:yyyy-MM-dd}.",
+                    NextOpenPkt: FindNextOpen(pktNow, holidays, overrides),
                     ScheduleSource: "holiday");
 
             var sessions = RegularSessions(pktNow.DayOfWeek);
-            return sessions.Count == 0
+            var status = sessions.Count == 0
                 ? new(false, pktNow, $"PSX is closed on {pktNow.DayOfWeek}s.")
                 : Evaluate(pktNow, sessions, "regular");
+            return WithFutureOpen(status, holidays, overrides);
         }
         catch (Exception ex)
         {
@@ -92,8 +96,75 @@ public sealed class PsxMarketCalendar : IMarketCalendar
                 return new(false, pktNow, $"Market calendar unavailable: {ex.Message}",
                     ScheduleSource: "error");
 
-            return Evaluate(pktNow, RegularSessions(pktNow.DayOfWeek), "regular-fallback");
+            var fallback = Evaluate(pktNow, RegularSessions(pktNow.DayOfWeek), "regular-fallback");
+            return fallback.IsOpen || fallback.NextOpenPkt is not null
+                ? fallback
+                : fallback with { NextOpenPkt = FindNextRegularOpen(pktNow) };
         }
+    }
+
+    /// <summary>
+    /// Completes the calendar status with the next real session opening after today's final bell.
+    /// Same-day breaks are already handled by <see cref="Evaluate"/>; this path crosses dates and
+    /// applies the same override/holiday precedence as <see cref="GetStatus"/>.
+    /// </summary>
+    private static MarketStatus WithFutureOpen(
+        MarketStatus status,
+        IReadOnlySet<DateOnly> holidays,
+        IReadOnlyDictionary<DateOnly,
+            (bool Closed, IReadOnlyList<(TimeOnly Start, TimeOnly End)> Sessions)> overrides) =>
+        status.IsOpen || status.NextOpenPkt is not null
+            ? status
+            : status with { NextOpenPkt = FindNextOpen(status.PktNow, holidays, overrides) };
+
+    private static DateTime? FindNextOpen(
+        DateTime pktNow,
+        IReadOnlySet<DateOnly> holidays,
+        IReadOnlyDictionary<DateOnly,
+            (bool Closed, IReadOnlyList<(TimeOnly Start, TimeOnly End)> Sessions)> overrides)
+    {
+        // Ten years is deliberately finite: malformed configuration must not turn a status read into
+        // an unbounded search, while still allowing an unusually long configured closure.
+        for (var offset = 0; offset < 3_660; offset++)
+        {
+            var date = DateOnly.FromDateTime(pktNow).AddDays(offset);
+            var sessions = SessionsFor(date, holidays, overrides);
+            foreach (var session in sessions)
+            {
+                var opening = date.ToDateTime(session.Start);
+                if (opening > pktNow) return opening;
+            }
+        }
+
+        return null;
+    }
+
+    private static IReadOnlyList<(TimeOnly Start, TimeOnly End)> SessionsFor(
+        DateOnly date,
+        IReadOnlySet<DateOnly> holidays,
+        IReadOnlyDictionary<DateOnly,
+            (bool Closed, IReadOnlyList<(TimeOnly Start, TimeOnly End)> Sessions)> overrides)
+    {
+        if (overrides.TryGetValue(date, out var dayOverride))
+            return dayOverride.Closed ? [] : dayOverride.Sessions;
+
+        if (holidays.Contains(date)) return [];
+        return RegularSessions(date.DayOfWeek);
+    }
+
+    private static DateTime? FindNextRegularOpen(DateTime pktNow)
+    {
+        for (var offset = 0; offset < 14; offset++)
+        {
+            var date = DateOnly.FromDateTime(pktNow).AddDays(offset);
+            foreach (var session in RegularSessions(date.DayOfWeek))
+            {
+                var opening = date.ToDateTime(session.Start);
+                if (opening > pktNow) return opening;
+            }
+        }
+
+        return null;
     }
 
     private static MarketStatus Evaluate(
@@ -107,7 +178,8 @@ public sealed class PsxMarketCalendar : IMarketCalendar
             if (now >= session.Start && now < session.End)
                 return new(true, pktNow,
                     $"PSX regular market is open until {session.End:HH:mm} PKT.",
-                    ScheduleSource: source);
+                    ScheduleSource: source,
+                    SessionOpenPkt: pktNow.Date.Add(session.Start.ToTimeSpan()));
 
             if (now < session.Start)
             {

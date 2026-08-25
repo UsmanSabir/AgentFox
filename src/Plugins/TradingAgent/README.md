@@ -153,6 +153,28 @@ Notes:
 
 ---
 
+## Market-open processing
+
+Periodic workers remain the recovery path, but the first pass of a session is coordinated at the
+calendar's exact opening edge instead of waiting for whichever timer happens to wake next. The
+ordered pass is reconciliation → protective stops → persistent orders → watchlist monitoring;
+premium strategy processing joins after those when the premium plugin is installed. A participant
+failure is isolated, so a broker read that is temporarily unavailable does not prevent local
+protection and monitoring from starting.
+
+`MarketStatus.NextOpenPkt` is the next real session across lunch breaks, weekends, configured
+holidays and date overrides. After the final bell it therefore points to the next trading day rather
+than becoming null. The coordinator claims each session before invoking participants, so concurrent
+or repeated calls in one process cannot run the opening edge twice. After a process restart during
+an open session it deliberately performs one recovery opening pass. Every order still passes the
+market calendar again immediately before execution.
+
+Durable armed orders, protective stops and premium campaigns remain open when the market closes.
+Nothing is submitted while closed; processing resumes at the next opening and reconciles broker
+custody before advancing the work.
+
+---
+
 ## Proposals — the signal inbox
 
 A proposal is what the specialist produced from a signal that arrived **while nobody was watching**

@@ -5,7 +5,8 @@ public readonly record struct MarketStatus(
     DateTime PktNow,
     string Reason,
     DateTime? NextOpenPkt = null,
-    string ScheduleSource = "regular");
+    string ScheduleSource = "regular",
+    DateTime? SessionOpenPkt = null);
 
 public interface IMarketCalendar
 {

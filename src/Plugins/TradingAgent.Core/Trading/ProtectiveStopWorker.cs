@@ -33,8 +33,11 @@ namespace TradingAgent.Trading;
 /// stop sells the position twice — and this broker exposes no way to cancel a resting order.
 /// </para>
 /// </summary>
-public sealed class ProtectiveStopWorker : BackgroundService
+public sealed class ProtectiveStopWorker : BackgroundService, IMarketSessionOpenParticipant
 {
+    public string Name => "protective stops";
+    public int Order => 200;
+
     private readonly IServiceScopeFactory _scopes;
     private readonly AhkBroker _broker;
     private readonly PortfolioReader _portfolio;
@@ -58,6 +61,7 @@ public sealed class ProtectiveStopWorker : BackgroundService
 
     /// <summary>Serialises ad-hoc baseline captures and guards the shared snapshot below.</summary>
     private readonly SemaphoreSlim _baselineGate = new(1, 1);
+    private readonly SemaphoreSlim _runGate = new(1, 1);
 
     /// <summary>
     /// The last holdings read, reused for a few seconds so that arming several stops in a row costs
@@ -108,7 +112,7 @@ public sealed class ProtectiveStopWorker : BackgroundService
             try { await Task.Delay(interval, stoppingToken); }
             catch (OperationCanceledException) { break; }
 
-            try { await RunPassAsync(stoppingToken); }
+            try { await RunNowAsync(stoppingToken); }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 _logger.LogError(ex, "[ProtectiveStops] Pass failed.");
@@ -215,7 +219,17 @@ public sealed class ProtectiveStopWorker : BackgroundService
         return holdings;
     }
 
-    private async Task RunPassAsync(CancellationToken ct)
+    public async Task RunNowAsync(CancellationToken ct = default)
+    {
+        await _runGate.WaitAsync(ct);
+        try { await RunPassCoreAsync(ct); }
+        finally { _runGate.Release(); }
+    }
+
+    public Task RunAtMarketOpenAsync(MarketSessionOpenContext context, CancellationToken ct) =>
+        RunNowAsync(ct);
+
+    private async Task RunPassCoreAsync(CancellationToken ct)
     {
         using var scope = _scopes.CreateScope();
         var repository = scope.ServiceProvider.GetRequiredService<ITradingRepository>();

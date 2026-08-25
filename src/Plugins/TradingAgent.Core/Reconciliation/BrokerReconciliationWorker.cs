@@ -2,6 +2,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using TradingAgent.Config;
+using TradingAgent.Market;
 using TradingAgent.Persistence;
 
 namespace TradingAgent.Reconciliation;
@@ -10,8 +11,11 @@ namespace TradingAgent.Reconciliation;
 /// Maintains the reconciliation health gate. Unsupported broker read APIs remain unhealthy and
 /// therefore block live execution when RequireReconciliationHealthy is enabled.
 /// </summary>
-public sealed class BrokerReconciliationWorker : BackgroundService
+public sealed class BrokerReconciliationWorker : BackgroundService, IMarketSessionOpenParticipant
 {
+    public string Name => "broker reconciliation";
+    public int Order => 100;
+
     private readonly IBrokerStateReader _reader;
     private readonly TradingReconciliationState _state;
     private readonly ITradingRepository _repository;
@@ -92,4 +96,7 @@ public sealed class BrokerReconciliationWorker : BackgroundService
             _runGate.Release();
         }
     }
+
+    public async Task RunAtMarketOpenAsync(MarketSessionOpenContext context, CancellationToken ct) =>
+        await RunNowAsync(ct);
 }
