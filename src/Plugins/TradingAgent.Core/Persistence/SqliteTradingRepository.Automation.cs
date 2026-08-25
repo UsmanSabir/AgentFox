@@ -207,6 +207,35 @@ public sealed partial class SqliteTradingRepository
         ParseUtc(reader.GetString(18)), reader.IsDBNull(19) ? null : ParseUtc(reader.GetString(19)),
         reader.GetInt64(20));
 
+    public async Task<string?> GetAutomationStateAsync(string key, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = "SELECT value_json FROM automation_runtime_state WHERE key = $key";
+        command.Parameters.AddWithValue("$key", key);
+        return await command.ExecuteScalarAsync(ct) as string;
+    }
+
+    public async Task SaveAutomationStateAsync(
+        string key, string valueJson, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO automation_runtime_state (key, value_json, updated_utc)
+            VALUES ($key, $value, $updated)
+            ON CONFLICT(key) DO UPDATE SET
+                value_json = excluded.value_json, updated_utc = excluded.updated_utc
+            """;
+        command.Parameters.AddWithValue("$key", key);
+        command.Parameters.AddWithValue("$value", valueJson);
+        command.Parameters.AddWithValue(
+            "$updated", DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
     private static void BindCampaign(SqliteCommand command, AutomationCampaignRecord campaign)
     {
         static object DecimalValue(decimal? value) =>

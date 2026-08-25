@@ -77,4 +77,18 @@ public interface IAutomationCampaignRepository
         CancellationToken ct = default);
 
     Task DeleteAutomationStrategyAssignmentAsync(string symbol, CancellationToken ct = default);
+
+    /// <summary>
+    /// Reads one opaque plugin-owned state blob, or null when it was never written.
+    ///
+    /// <para>
+    /// Core stores the string and interprets nothing — the same contract as <c>ProfileJson</c>. It
+    /// exists so a strategy plugin can survive a restart without inventing its own file or table, and
+    /// so operational state lands in the same database as the orders it governs, and is therefore
+    /// backed up and copied as one thing.
+    /// </para>
+    /// </summary>
+    Task<string?> GetAutomationStateAsync(string key, CancellationToken ct = default);
+
+    Task SaveAutomationStateAsync(string key, string valueJson, CancellationToken ct = default);
 }

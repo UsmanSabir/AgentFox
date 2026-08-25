@@ -1666,6 +1666,13 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS ux_automation_campaigns_open_symbol
                     ON automation_campaigns(symbol) WHERE closed_utc IS NULL;
+                -- Opaque plugin-owned blobs. Core never parses value_json; see
+                -- IAutomationCampaignRepository.GetAutomationStateAsync for the reasoning.
+                CREATE TABLE IF NOT EXISTS automation_runtime_state (
+                    key         TEXT PRIMARY KEY,
+                    value_json  TEXT NOT NULL,
+                    updated_utc TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS automation_campaign_events (
                     sequence    INTEGER PRIMARY KEY AUTOINCREMENT,
                     campaign_id TEXT NOT NULL,
