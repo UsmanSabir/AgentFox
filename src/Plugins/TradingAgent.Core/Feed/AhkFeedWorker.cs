@@ -66,6 +66,13 @@ public sealed class AhkFeedWorker : BackgroundService
     private int _consecutiveFailures;
     private DateTime? _lastSeenOpenPkt;
 
+    /// <summary>
+    /// Whether the "no broker credentials configured" line has already been logged for the current
+    /// gap, so a config re-read every poll does not repeat it every <see cref="IdlePoll"/>. Reset the
+    /// moment credentials are present, so the message logs again if they are cleared a second time.
+    /// </summary>
+    private bool _loggedMissingCredentials;
+
     /// <summary>Decides when a lost subscription has to be re-sent. See <see cref="FeedSubscriptionGuard"/>.</summary>
     private readonly FeedSubscriptionGuard _subscriptionGuard = new();
 
@@ -175,27 +182,18 @@ public sealed class AhkFeedWorker : BackgroundService
             return;
         }
 
-        // Credentials are checked BEFORE anything else, because the feed is now enabled by default.
-        // Without them every pass would launch Chromium, fail the positional-password login and back
-        // off — up to six browser launches an hour, against a broker, for a deployment that simply has
-        // not been configured yet. Refusing to start is both cheaper and clearer than retrying.
-        var broker = _brokerConfig.Current;
-        if (string.IsNullOrWhiteSpace(broker.Username) || string.IsNullOrWhiteSpace(broker.Password))
-        {
-            _logger.LogInformation(
-                "[AhkFeed] No broker credentials configured (Plugins:Ahk:Username/Password), so the "
-                + "live quote feed will not start. Prices come from the PSX market watch.");
-            return;
-        }
-
         try { await Task.Delay(StartupDelay, stoppingToken); }
         catch (OperationCanceledException) { return; }
 
-        _logger.LogInformation("[AhkFeed] Starting live quote feed against the broker portal.");
+        _logger.LogInformation("[AhkFeed] Started; polling the broker portal once credentials and market hours allow.");
 
         while (!stoppingToken.IsCancellationRequested)
         {
             var cfg = _config.Current;
+            var broker = _brokerConfig.Current;
+            var hasCredentials = !string.IsNullOrWhiteSpace(broker.Username) && !string.IsNullOrWhiteSpace(broker.Password);
+            if (hasCredentials) _loggedMissingCredentials = false;
+
             var delay = TimeSpan.FromSeconds(Math.Max(2.0, cfg.PollSeconds));
 
             try
@@ -205,6 +203,24 @@ public sealed class AhkFeedWorker : BackgroundService
                 // to reclaim in a hurry.
                 if (!cfg.Enabled)
                 {
+                    delay = IdlePoll;
+                }
+                else if (!hasCredentials)
+                {
+                    // Re-checked every pass, not only at startup, so credentials added later via the
+                    // settings panel take effect without a host restart — the same reason cfg.Enabled
+                    // above is re-read here rather than only once before the loop. Without a session,
+                    // establishing one would launch Chromium and submit blank credentials to the live
+                    // portal, only failing after the full login timeout chain; refusing here is both
+                    // cheaper and clearer than retrying (see AhkBroker.PrepareSessionWithRetryAsync,
+                    // which refuses the same way for every other broker caller).
+                    if (!_loggedMissingCredentials)
+                    {
+                        _logger.LogInformation(
+                            "[AhkFeed] No broker credentials configured (Plugins:Ahk:Username/Password); "
+                            + "prices come from the PSX market watch until they are set.");
+                        _loggedMissingCredentials = true;
+                    }
                     delay = IdlePoll;
                 }
                 else if (!ShouldPollNow(cfg))

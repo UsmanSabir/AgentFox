@@ -1738,6 +1738,18 @@ public sealed class AhkBroker : IAsyncDisposable
 
                 if (!await IsLoggedInAsync())
                 {
+                    // A persisted profile may still be authenticated with no credentials configured
+                    // (cookies survive a browser close), so this only refuses when a REAL login would
+                    // be required. Without this check, every caller here — order placement, the
+                    // portfolio read, cookie harvesting for the direct API — would otherwise launch
+                    // Chromium and submit blank username/password fields to the live portal, only
+                    // failing after the full page-ready/dialog/confirm timeout chain. AhkFeedWorker
+                    // already refuses this fast; this is the same refusal for every other caller.
+                    var cfg = _config.Current;
+                    if (string.IsNullOrWhiteSpace(cfg.Username) || string.IsNullOrWhiteSpace(cfg.Password))
+                        throw new InvalidOperationException(
+                            "AHK Username and Password are required when no authenticated session exists.");
+
                     _activity?.Info("Broker", "Logging in to the broker portal");
                     await LoginAsync();
                 }
