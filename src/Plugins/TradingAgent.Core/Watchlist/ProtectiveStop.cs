@@ -46,8 +46,34 @@ public sealed record ProtectiveStop
     /// </summary>
     public bool Recurring { get; init; } = true;
 
-    /// <summary><c>pending_fill</c> | <c>active</c> | <c>closed</c>.</summary>
+    /// <summary>
+    /// <c>pending_fill</c> | <c>active</c> | <c>superseded_pending_cancel</c> | <c>closed</c>.
+    ///
+    /// <para>
+    /// <c>superseded_pending_cancel</c> sits between <c>active</c> and <c>closed</c>: a newer stop
+    /// (see <see cref="SupersedesStopId"/> on that newer row) has been confirmed resting at the
+    /// broker in this one's place, but this row's own native order has not yet been verified cancelled.
+    /// It stays in this state — retried every pass — until the cancel is confirmed, so a network
+    /// failure or crash between "new stop placed" and "old stop cancelled" never gets silently
+    /// dropped. See <c>ProtectiveStopWorker.RetireSupersededAsync</c>.
+    /// </para>
+    /// </summary>
     public string State { get; init; } = "pending_fill";
+
+    /// <summary>
+    /// The stop this one replaces, when it was raised (break-even, ATR trail, ...) rather than newly
+    /// armed. Set once, at creation, by whoever raised it — never by the worker.
+    ///
+    /// <para>
+    /// This is deliberately a hand-off, not an action: the writer must never cancel or close the
+    /// predecessor itself, because it has no way to confirm the new stop actually reached the broker
+    /// first. <c>ProtectiveStopWorker</c> owns the whole supersede lifecycle — it moves the
+    /// predecessor to <c>superseded_pending_cancel</c> only once THIS row's native order is confirmed
+    /// resting, and only then attempts to cancel the predecessor's own order. See
+    /// <c>ProtectiveStopWorker.PlaceNativeStopAsync</c>.
+    /// </para>
+    /// </summary>
+    public string? SupersedesStopId { get; init; }
 
     /// <summary>
     /// Holding quantity before the entry went in — the datum the fill is measured against.

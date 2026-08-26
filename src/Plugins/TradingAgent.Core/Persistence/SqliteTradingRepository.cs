@@ -1670,7 +1670,8 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                     fill_confirmed_utc TEXT NULL,
                     closed_utc        TEXT NULL,
                     state_reason      TEXT NULL,
-                    note              TEXT NULL
+                    note              TEXT NULL,
+                    supersedes_stop_id TEXT NULL
                 );
                 CREATE INDEX IF NOT EXISTS ix_protective_stops_state
                     ON protective_stops(state, symbol);
@@ -1837,6 +1838,8 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
             // every watched symbol would be the same bug in the other direction.
             await AddColumnIfMissingAsync(
                 connection, "watchlist", "auto_trade_enabled", "INTEGER NOT NULL DEFAULT 1", ct);
+            await AddColumnIfMissingAsync(
+                connection, "protective_stops", "supersedes_stop_id", "TEXT NULL", ct);
             await SeedPerSymbolCoverageAsync(connection, ct);
 
             _initialized = true;
@@ -2615,9 +2618,10 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         command.CommandText = """
             INSERT INTO protective_stops
                 (stop_id, symbol, parent_armed_id, stop_trigger, stop_limit, desired_qty, recurring,
-                 state, baseline_qty, placed_qty, backstop_armed_id, created_utc, state_reason, note)
+                 state, baseline_qty, placed_qty, backstop_armed_id, created_utc, state_reason, note,
+                 supersedes_stop_id)
             VALUES ($id, $symbol, $parent, $trigger, $limit, $desired, $recurring,
-                    $state, $baseline, $placed, $backstop, $created, $reason, $note)
+                    $state, $baseline, $placed, $backstop, $created, $reason, $note, $supersedes)
             """;
         command.Parameters.AddWithValue("$id", stop.StopId);
         command.Parameters.AddWithValue("$symbol", stop.Symbol);
@@ -2634,6 +2638,7 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         command.Parameters.AddWithValue("$created", stop.CreatedUtc.ToString("O"));
         command.Parameters.AddWithValue("$reason", stop.StateReason ?? (object)DBNull.Value);
         command.Parameters.AddWithValue("$note", stop.Note ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$supersedes", stop.SupersedesStopId ?? (object)DBNull.Value);
         await command.ExecuteNonQueryAsync(ct);
         return stop.StopId;
     }
@@ -2647,7 +2652,7 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         command.CommandText = $"""
             SELECT stop_id, symbol, parent_armed_id, stop_trigger, stop_limit, desired_qty, recurring,
                    state, baseline_qty, placed_qty, last_placed_date, last_order_no, backstop_armed_id,
-                   created_utc, fill_confirmed_utc, closed_utc, state_reason, note
+                   created_utc, fill_confirmed_utc, closed_utc, state_reason, note, supersedes_stop_id
             FROM protective_stops
             {(openOnly ? "WHERE state <> 'closed'" : "")}
             ORDER BY created_utc DESC
@@ -2799,7 +2804,8 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         FillConfirmedUtc     = reader.IsDBNull(14) ? null : ParseUtc(reader.GetString(14)),
         ClosedUtc            = reader.IsDBNull(15) ? null : ParseUtc(reader.GetString(15)),
         StateReason          = reader.IsDBNull(16) ? null : reader.GetString(16),
-        Note                 = reader.IsDBNull(17) ? null : reader.GetString(17)
+        Note                 = reader.IsDBNull(17) ? null : reader.GetString(17),
+        SupersedesStopId     = reader.IsDBNull(18) ? null : reader.GetString(18)
     };
 
     private static object Money(decimal? value) => value is null
