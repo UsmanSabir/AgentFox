@@ -20,7 +20,7 @@
   } from './api';
   import {
     LineChart, AlertTriangle, Eye, RefreshCw, Brain, Maximize2, Minimize2,
-    Activity, Crosshair, BarChart3, TrendingDown
+    Activity, Crosshair, BarChart3, TrendingDown, CalendarClock, Download
   } from 'lucide-svelte';
   import AssessmentCard from './AssessmentCard.svelte';
 
@@ -201,6 +201,34 @@
   $: historyPercent = archive?.targetTradingDays
     ? Math.min(100, Math.round(historyCheckedSessions / archive.targetTradingDays * 100))
     : 0;
+  /**
+   * A ticker that listed last week is not waiting for a download — the sessions it is short of have
+   * not happened yet. It gets a plain statement of that instead of a progress bar, which in this
+   * state would tick along toward a completeness the symbol can never reach and read as stuck.
+   */
+  $: newListing = historyGap?.noEarlierHistory ?? false;
+  $: sessionsUntilWeekly = historyGap && archive?.dailyBarsForWeekly
+    ? Math.max(0, archive.dailyBarsForWeekly - historyGap.archivedBars)
+    : 0;
+
+  /** Starts the targeted backfill from here, so a chart sitting on a stalled history is not a dead end. */
+  let fetchingHistory = false;
+  let fetchNotice: string | null = null;
+  async function fetchHistory() {
+    if (!symbol || fetchingHistory) return;
+    fetchingHistory = true;
+    fetchNotice = null;
+    try {
+      const result = await trading.startBackfill(undefined, [symbol]);
+      fetchNotice = result.started
+        ? 'Fetching the sessions this symbol was never requested for. The chart grows as they arrive.'
+        : 'A backfill pass is already running; this symbol is fetched once it finishes.';
+    } catch (e) {
+      fetchNotice = e instanceof Error ? e.message : String(e);
+    } finally {
+      fetchingHistory = false;
+    }
+  }
 
   let container: HTMLDivElement | null = null;
   let chart: IChartApi | null = null;
@@ -659,6 +687,9 @@
   let lastLoaded: string | null = null;
   $: if (symbol && symbol !== lastLoaded) {
     lastLoaded = symbol;
+    // The backfill notice is about the symbol it was raised for; carrying it to the next one would
+    // report a fetch that was never started for it.
+    fetchNotice = null;
     load();
   }
 
@@ -806,30 +837,66 @@
   </header>
 
   {#if symbol && historyGap}
-    <div class="history-status" role="status" aria-live="polite">
+    <div class="history-status" class:new-listing={newListing} role="status" aria-live="polite">
       <div class="history-copy">
-        <RefreshCw size={14} class={archive?.progress.isRunning ? 'spinning' : ''} aria-hidden="true" />
+        {#if newListing}
+          <CalendarClock size={14} aria-hidden="true" />
+        {:else}
+          <RefreshCw size={14} class={archive?.progress.isRunning ? 'spinning' : ''} aria-hidden="true" />
+        {/if}
         <div>
-          <b>{archive?.progress.isRunning ? `Building ${symbol} history` : `${symbol} history is still limited`}</b>
+          <b>
+            {#if newListing}
+              {symbol} has only {historyGap.archivedBars} session{historyGap.archivedBars === 1 ? '' : 's'} of history
+            {:else if archive?.progress.isRunning}
+              Building {symbol} history
+            {:else}
+              {symbol} history is still limited
+            {/if}
+          </b>
           <span>
-            {historyGap.archivedBars} daily bar{historyGap.archivedBars === 1 ? '' : 's'} available
-            {#if archive?.targetTradingDays}
-              · {historyCheckedSessions} of {archive.targetTradingDays} sessions checked
+            {#if newListing}
+              {#if historyGap.firstBarDate}First traded {historyGap.firstBarDate} · {/if}
+              {historyGap.sessionsWithoutTrade} earlier session{historyGap.sessionsWithoutTrade === 1 ? '' : 's'}
+              checked, no trading
+            {:else}
+              {historyGap.archivedBars} daily bar{historyGap.archivedBars === 1 ? '' : 's'} available
+              {#if archive?.targetTradingDays}
+                · {historyCheckedSessions} of {archive.targetTradingDays} sessions checked
+              {/if}
             {/if}
           </span>
         </div>
       </div>
-      {#if archive?.targetTradingDays}
+      <!-- No progress bar for a new listing: there is nothing left to download, so a bar could only
+           promise history that does not exist. -->
+      {#if !newListing && archive?.targetTradingDays}
         <div class="history-progress">
           <progress max={archive.targetTradingDays} value={historyCheckedSessions}
             aria-label={`${symbol} history backfill progress`}></progress>
           <strong>{historyPercent}%</strong>
+          {#if !archive.progress.isRunning}
+            <!-- The bar stops moving when no pass is running, which is indistinguishable from stuck.
+                 Offer the thing that would move it rather than leaving it to be watched. -->
+            <button class="fetch" type="button" on:click={fetchHistory} disabled={fetchingHistory}>
+              <Download size={12} aria-hidden="true" /> Fetch history
+            </button>
+          {/if}
         </div>
       {/if}
       <small>
-        {archive?.progress.isRunning
-          ? 'Showing available candles now; this chart updates automatically as more history arrives.'
-          : 'The chart is usable, but weekly levels remain provisional until more history is archived.'}
+        {#if newListing}
+          There is no earlier history to download — this ticker had not started trading. Weekly levels
+          need {archive?.dailyBarsForWeekly ?? 0} sessions and become available after about
+          {sessionsUntilWeekly} more trading day{sessionsUntilWeekly === 1 ? '' : 's'}. Daily levels
+          and the plan below are drawn from what it has.
+        {:else if fetchNotice}
+          {fetchNotice}
+        {:else if archive?.progress.isRunning}
+          Showing available candles now; this chart updates automatically as more history arrives.
+        {:else}
+          The chart is usable, but weekly levels remain provisional until more history is archived.
+        {/if}
       </small>
     </div>
   {/if}
@@ -843,7 +910,14 @@
     </div>
   {:else if chartError && !data}
     <p class:danger={!historyGap} class="msg">
-      {historyGap ? 'The first chart point is not available yet. History is continuing in the background.' : chartError}
+      {#if newListing}
+        This ticker has no settled session on record yet. Its first candle appears after its first
+        full trading day.
+      {:else if historyGap}
+        The first chart point is not available yet. History is continuing in the background.
+      {:else}
+        {chartError}
+      {/if}
       <button class="retry" on:click={() => load()}>Retry</button>
     </p>
   {:else}
@@ -1041,6 +1115,18 @@
   .history-progress { display:flex; align-items:center; gap:.45rem; }
   .history-progress progress { width:100%; height:.42rem; accent-color:var(--primary); }
   .history-progress strong { color:var(--text-2); font-size:.68rem; font-variant-numeric:tabular-nums; }
+  .history-progress .fetch {
+    display:inline-flex; align-items:center; gap:.25rem; white-space:nowrap;
+    border:1px solid var(--border-md); background:var(--surface-2); color:var(--text-2);
+    border-radius:var(--radius-sm); padding:.2rem .45rem; font:inherit; font-size:.66rem; cursor:pointer;
+  }
+  .history-progress .fetch:hover:not(:disabled) {
+    color:var(--primary); border-color:color-mix(in srgb, var(--primary) 45%, var(--border));
+  }
+  .history-progress .fetch:disabled { opacity:.5; cursor:wait; }
+  /* Not a warm-up in progress, so it does not borrow the primary colour that means "working on it". */
+  .history-status.new-listing { border-color:var(--border-md); background:var(--surface-2); }
+  .history-status.new-listing .history-copy { color:var(--text-3); }
   :global(.spinning) { animation:history-spin 1s linear infinite; }
   @keyframes history-spin { to { transform:rotate(360deg); } }
 

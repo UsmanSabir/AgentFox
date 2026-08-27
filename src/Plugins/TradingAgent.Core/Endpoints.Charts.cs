@@ -95,7 +95,13 @@ public sealed partial class TradingCoreEndpoints
                 // A newly watched ticker often has only a handful of archived sessions while its
                 // targeted backfill is running. Never put the visible chart behind the portal's
                 // historical top-up in that state: return what is available now and let the UI grow it.
+                //
+                // Requires at least one archived bar. With none there is no "available now" to show,
+                // and preferring it left a symbol added seconds ago with a permanently empty chart;
+                // CandleHistoryProvider.ShouldTopUpArchiveFromPortal takes the portal path in that
+                // case, and this flag says so rather than claiming a warm-up that is not happening.
                 var preferAvailableHistory = archiveBacked
+                    && archivedBars > 0
                     && archivedBars < CandleHistoryProvider.MinimumArchivedBarsBeforePortalFallbackStops;
 
                 var result = await analysis.AnalyzeAsync(

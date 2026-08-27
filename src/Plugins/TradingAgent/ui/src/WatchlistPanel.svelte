@@ -7,7 +7,7 @@
   import {
     Plus, RotateCcw, Trash2, Bell, BellOff, Eye, AlertTriangle, Clock, Search,
     Download, Pin, PinOff, GripVertical, PanelLeftClose, PanelLeftOpen,
-    ArrowUpRight, ArrowDownRight, Minus, Bot, Hand, Lock, ListPlus, X
+    ArrowUpRight, ArrowDownRight, Minus, Bot, Hand, Lock, ListPlus, X, Sparkles
   } from 'lucide-svelte';
   import type { SymbolExtensionComponent } from './symbolExtensions';
 
@@ -34,7 +34,10 @@
    * still works without it, the offer just loses its numbers.
    */
   let archive: CandleArchiveStatus | null = null;
+  /** True only while the FIRST paint is waiting for the symbol list; see load(). */
   let loading = true;
+  /** True while the portal metadata pass (company names, live moves) is still in flight. */
+  let enriching = false;
   let error: string | null = null;
   let notice: string | null = null;
   let input = '';
@@ -123,19 +126,51 @@
     }
   }
 
+  /** Adopts a response without losing the selection when the list it was made against changed. */
+  function apply(next: WatchlistResponse) {
+    data = next;
+    if (selected && !next.entries.some(entry => entry.symbol === selected)) selected = null;
+    if (!selected && next.entries.length) selected = next.entries[0].symbol;
+  }
+
+  /**
+   * Loads the list in TWO passes, because the two halves of it have wildly different costs.
+   *
+   * The symbols, their tags and their settings come from the local database and return in
+   * milliseconds. Company names and the live session move come from the PSX portal, which on a cold
+   * start — exactly the state a restart leaves the process in — can take ten seconds or fail. Asking
+   * for both at once is what made the panel sit empty after every restart: the whole list waited on
+   * the slowest field in it. So paint from the database first, then merge the portal metadata in.
+   *
+   * The spinner is shown only when there is nothing to keep. Every action in this panel reloads
+   * through here, and blanking a hundred rows on each pin, mute or add is what made adding a symbol
+   * look like it had emptied the watchlist.
+   */
   async function load() {
-    loading = true;
+    loading = data === null;
     error = null;
     try {
-      data = await trading.watchlist.list();
-      if (selected && !data.entries.some(entry => entry.symbol === selected)) selected = null;
-      if (!selected && data.entries.length) selected = data.entries[0].symbol;
+      apply(await trading.watchlist.list(false));
+      loading = false;
+      await enrich();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
       loading = false;
     }
     await loadArchive();
+  }
+
+  /** Never fatal: names and live moves are presentation metadata, and the list stands without them. */
+  async function enrich() {
+    enriching = true;
+    try {
+      apply(await trading.watchlist.list(true));
+    } catch {
+      /* keep the database-only rows; the next dashboard tick tries again */
+    } finally {
+      enriching = false;
+    }
   }
 
   /**
@@ -147,9 +182,7 @@
     if (loading || busy || refreshingEntries) return;
     refreshingEntries = true;
     try {
-      data = await trading.watchlist.list();
-      if (selected && !data.entries.some(entry => entry.symbol === selected)) selected = null;
-      if (!selected && data.entries.length) selected = data.entries[0].symbol;
+      apply(await trading.watchlist.list());
     } catch {
       /* transient: keep the last successful values and retry on the next dashboard tick */
     } finally {
@@ -449,6 +482,9 @@
       <span>
         {#if data}
           {data.entries.length} / {data.maxSymbols} watched · {data.tradableSymbols} tradable{manualOnlyCount > 0 ? ` · ${manualOnlyCount} manual` : ''}
+          <!-- Said out loud because the rows are already on screen without their names and moves. A
+               row showing only its ticker for a second is a load in progress, not a broken row. -->
+          {#if enriching} · names and prices loading…{/if}
         {:else}Symbols monitored for trend, support, and resistance{/if}
       </span>
     </div>
@@ -555,7 +591,15 @@
   {#if notice}<p class="note">{notice}</p>{/if}
 
   {#if loading}
-    <p class="note">Loading watchlist…</p>
+    <!-- Rows rather than a line of text. The panel is stretched to the chart card's height by the
+         grid, so a single centred note can land below the fold and read as "the list is empty" —
+         which is the exact wrong answer while it is still loading. -->
+    <ul class="rows skeleton" aria-hidden="true">
+      {#each Array(7) as _}
+        <li><span class="bar wide"></span><span class="bar narrow"></span></li>
+      {/each}
+    </ul>
+    <p class="note" role="status" aria-live="polite">Loading watchlist…</p>
   {:else if !data?.entries.length}
     <p class="note">
       No symbols are being watched. Add a ticker above, or Reset to seed from the configured
@@ -690,12 +734,24 @@
                 </span>
               {/if}
               {#if !entry.hasWeeklyHistory}
-                <span
-                  class="tag pending"
-                  title="{entry.archivedBars} daily bars archived{archive ? ` of the ${archive.dailyBarsForWeekly} needed` : ''} — weekly support/resistance is not confirmed for this symbol yet.{gapBySymbol.get(entry.symbol)?.missingSessions ? ` ${gapBySymbol.get(entry.symbol)?.missingSessions} session(s) were never requested for it; use the download action to fetch them.` : ''}"
-                >
-                  <Clock size={11} /> no weekly
-                </span>
+                <!-- Two different situations wear the same badge otherwise: history nobody has
+                     fetched yet, and history that does not exist because the ticker is new. Only the
+                     first one is worth acting on, so they are named apart. -->
+                {#if gapBySymbol.get(entry.symbol)?.noEarlierHistory}
+                  <span
+                    class="tag new-listing"
+                    title="{entry.symbol} has {entry.archivedBars} archived session(s) and no earlier history — it had not started trading. Weekly support/resistance needs {archive?.dailyBarsForWeekly ?? 0} sessions and arrives as it trades; there is nothing to download."
+                  >
+                    <Sparkles size={11} /> new listing
+                  </span>
+                {:else}
+                  <span
+                    class="tag pending"
+                    title="{entry.archivedBars} daily bars archived{archive ? ` of the ${archive.dailyBarsForWeekly} needed` : ''} — weekly support/resistance is not confirmed for this symbol yet.{gapBySymbol.get(entry.symbol)?.missingSessions ? ` ${gapBySymbol.get(entry.symbol)?.missingSessions} session(s) were never requested for it; use the download action to fetch them.` : ''}"
+                  >
+                    <Clock size={11} /> no weekly
+                  </span>
+                {/if}
               {/if}
             </span>
           </button>
@@ -718,7 +774,9 @@
             >
               {#if entry.pinned}<PinOff size={13} />{:else}<Pin size={13} />{/if}
             </button>
-            {#if !entry.hasWeeklyHistory}
+            <!-- Hidden for a new listing: the pass would run and find nothing, because the sessions it
+                 is short of have not been traded yet. -->
+            {#if !entry.hasWeeklyHistory && !gapBySymbol.get(entry.symbol)?.noEarlierHistory}
               <button
                 class="icon"
                 title="Fetch the daily sessions this symbol was never requested for, so weekly levels can be computed"
@@ -930,6 +988,8 @@
     width:100%; box-sizing:border-box;
     border-radius:var(--radius-sm); padding:.1rem .2rem .1rem .05rem;
     border:1px solid transparent;
+    /* Anchors the picker's full-row hit area below. */
+    position:relative;
   }
   .rows li:hover { background:var(--surface-2); }
   .rows li.selected { background:var(--primary-dim); }
@@ -938,15 +998,40 @@
   .rows li.dragging { opacity:.45; }
   .rows li.muted .symbol { color:var(--text-3); }
 
+  .rows.skeleton li { display:flex; flex-direction:column; align-items:flex-start; gap:.25rem; padding:.5rem; }
+  .rows.skeleton .bar {
+    height:.55rem; border-radius:999px; background:var(--surface-3);
+    animation:watchlist-skeleton 1.2s ease-in-out infinite;
+  }
+  .rows.skeleton .wide { width:42%; }
+  .rows.skeleton .narrow { width:68%; opacity:.6; }
+  @keyframes watchlist-skeleton { 0%,100% { opacity:.45; } 50% { opacity:.9; } }
+  @media (prefers-reduced-motion: reduce) {
+    .rows.skeleton .bar { animation:none; }
+  }
+
   .drag-handle { color:var(--text-3); display:flex; cursor:grab; opacity:.55; }
   .drag-handle:active { cursor:grabbing; }
 
   .pick {
     min-width:0; width:100%; display:flex; flex-direction:column;
     align-items:flex-start; gap:.28rem;
-    background:none; border:0; cursor:pointer; padding:.4rem .5rem; text-align:left;
+    background:none; border:0; cursor:pointer; padding:.5rem; text-align:left;
     font:inherit; color:var(--text);
   }
+  /*
+   * Selecting a stock is the thing this list is for, and it used to be the smallest target on the
+   * row: the picker column is squeezed by the actions and any row extension beside it, so on a row
+   * carrying several tags the only reliably clickable pixels were the ticker itself. This stretches
+   * the button's hit area over the WHOLE row without nesting anything inside it — the pseudo-element
+   * carries no content, so the button keeps its accessible name and its keyboard behaviour.
+   */
+  .pick::after { content:''; position:absolute; inset:0; border-radius:inherit; }
+  /* Everything genuinely interactive, plus the extension slot, stays above that overlay. */
+  .rows li .drag-handle,
+  .rows li .row-extension,
+  .rows li .row-actions { position:relative; z-index:1; }
+  .rows li:hover .pick::after { cursor:pointer; }
   .identity { display:flex; width:100%; min-width:0; overflow:hidden; flex-direction:column; gap:.08rem; }
   .symbol-line { display:flex; align-items:center; gap:.4rem; min-width:0; }
   .symbol { font-weight:600; font-size:.8rem; font-family:ui-monospace, monospace; }
@@ -972,6 +1057,8 @@
     background:color-mix(in srgb, var(--text-3) 10%, transparent);
   }
   .tag.pending { color:var(--warning); border-color:color-mix(in srgb, var(--warning) 35%, transparent); }
+  /* A fact about the stock, not a shortfall to chase — so it reads informational, not warning. */
+  .tag.new-listing { color:var(--info); border-color:color-mix(in srgb, var(--info) 35%, transparent); }
   .tag.alert {
     color:var(--danger); border-color:color-mix(in srgb, var(--danger) 45%, transparent);
     background:color-mix(in srgb, var(--danger) 12%, transparent); font-weight:600;

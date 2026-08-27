@@ -257,10 +257,23 @@ public sealed class CandleHistoryProvider
         };
     }
 
-    /// <summary>Pure policy seam for the archive warm-up path; pinned independently of portal I/O.</summary>
+    /// <summary>
+    /// Pure policy seam for the archive warm-up path; pinned independently of portal I/O.
+    ///
+    /// <para>
+    /// The progressive path (<paramref name="allowPortalFallback"/> false) exists so an interactive
+    /// chart renders the bars already on hand instead of waiting on dozens of historical requests. It
+    /// has one degenerate case: an archive holding NOTHING for the symbol has nothing to render
+    /// progressively, so the trade it makes — a shallow chart now over a deep chart later — collapses
+    /// into no chart at all, for as long as it takes a background backfill to reach that ticker. A
+    /// symbol just added to the watchlist is exactly that case, so zero archived bars overrides the
+    /// preference and takes the portal top-up once. Settled dates are cached market-wide for the
+    /// process lifetime, so in steady state this is served from memory rather than re-fetched.
+    /// </para>
+    /// </summary>
     internal static bool ShouldTopUpArchiveFromPortal(
         int archivedBars, int requestedSessions, bool allowPortalFallback) =>
-        allowPortalFallback
+        (allowPortalFallback || archivedBars == 0)
         && archivedBars < Math.Min(requestedSessions, MinimumArchivedBarsBeforePortalFallbackStops);
 
     /// <summary>

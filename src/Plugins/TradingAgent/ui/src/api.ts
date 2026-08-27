@@ -250,6 +250,18 @@ export interface CandleArchiveStatus {
     archivedBars: number;
     /** Sessions a backfill scoped to this symbol would fetch. */
     missingSessions: number;
+    /** Trading sessions already requested for it. Market holidays are excluded. */
+    sessionsChecked: number;
+    /** Of those, the ones it published no bar on — sessions it did not trade. */
+    sessionsWithoutTrade: number;
+    /** Earliest archived bar; for a recent listing, close to the day it started trading. */
+    firstBarDate?: string;
+    /**
+     * The shortfall is the symbol's age, not the archive's reach: enough requested sessions came back
+     * empty that there is no earlier history to fetch. A backfill cannot clear it and a progress bar
+     * must not be shown for it — what it is waiting for is more sessions to be traded.
+     */
+    noEarlierHistory: boolean;
   }[];
   progress: {
     isRunning: boolean;

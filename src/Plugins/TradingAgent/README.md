@@ -243,6 +243,10 @@ Consequences the UI states explicitly rather than leaving to be discovered at or
   carry `tradable`, and the specialist must not present a non-tradable candidate as actionable.
 - A newly added symbol is badged **no weekly** until roughly two years of daily bars are archived —
   until then there is no weekly confirmation to quote.
+- A symbol that has been *asked for* on 15 or more trading sessions and did not trade on them is badged
+  **new listing** instead, and loses the fetch action: the sessions it is short of were never traded,
+  so no backfill can produce them. The chart says the same thing in words and shows no progress bar,
+  because a bar there would be promising history the exchange does not hold.
 - The watchlist is seeded from `AllowedSymbols` **once**. If the configured list changes later, the
   watchlist is *not* updated (that would discard your edits); the API reports
   `configuredListChanged: true` and the UI offers **Reset**, which is the only thing that re-seeds.
@@ -998,7 +1002,8 @@ Set `Scan.BackfillYears` to `0` to disable it and stay on the shallower on-deman
 structure). The backfill archives `MonitoredUniverse.ForArchiveAsync()` — the watchlist plus
 `AllowedSymbols` — so **a symbol added to the watchlist gets its history on the next pass** (within 6
 hours automatically, or immediately from the UI button or the `manage_candle_archive` tool). Until then
-the UI badges it *no weekly*. The portal answers bursts with empty tables, so an empty date is retried
+the UI badges it *no weekly* — or *new listing*, once enough requested sessions have come back empty to
+show the shortfall is the ticker's age rather than the archive's reach. The portal answers bursts with empty tables, so an empty date is retried
 once and a pass aborts after four empty weekdays in a row rather than recording that stretch as if the
 market had been closed (the UI shows that outcome in amber).
 

@@ -41,8 +41,29 @@ public sealed record CandleBackfillProgress
 /// the archive can be complete market-wide while an individual symbol is starved: coverage is per
 /// (date, symbol), and a symbol added to the universe after a date was fetched was never requested for
 /// it. <c>MissingSessions</c> is what a backfill targeting this symbol would have to fetch.
+///
+/// <para>
+/// <c>NoEarlierHistory</c> is the case a progress bar cannot express: a ticker listed last week is not
+/// waiting for a download, it is waiting for the exchange to hold more sessions. Showing it "42 of 523
+/// sessions" promises 481 sessions of history that will never arrive, and no amount of backfilling
+/// clears it. When it is true, <c>MissingSessions</c> is still the honest size of a targeted pass —
+/// the pass would simply find nothing, which is why the caller should stop offering one.
+/// </para>
 /// </summary>
-public sealed record SymbolArchiveGap(string Symbol, int ArchivedBars, int MissingSessions);
+public sealed record SymbolArchiveGap(
+    string Symbol,
+    int ArchivedBars,
+    int MissingSessions,
+    // Trading sessions this symbol has actually been requested for. Excludes market holidays, which
+    // are covered for everyone and so say nothing about any one symbol.
+    int SessionsChecked = 0,
+    // Of those, the ones the exchange published no row for — sessions it did not trade.
+    int SessionsWithoutTrade = 0,
+    // Earliest archived bar. For a new listing this is close to its listing date.
+    DateOnly? FirstBarDate = null,
+    // True once enough checked sessions came back empty that the shortfall is the symbol's age rather
+    // than the archive's reach. See the remarks on this type.
+    bool NoEarlierHistory = false);
 
 /// <summary>Archive coverage plus whatever the backfill is currently doing.</summary>
 public sealed record CandleArchiveStatus(
@@ -69,6 +90,19 @@ public sealed class CandleBackfillRunner
 {
     /// <summary>Empty weekdays in a row before a pass assumes throttling rather than holidays.</summary>
     private const int SuspiciousEmptyStreak = 4;
+
+    /// <summary>
+    /// Checked-and-empty sessions before a symbol's missing history is called absent rather than
+    /// unfetched. Three trading weeks: long enough that a suspension or a data hiccup does not trip
+    /// it, short enough that a new listing is recognised within days of being watched.
+    ///
+    /// <para>
+    /// A documented constant rather than a setting, deliberately. It gates nothing — it only changes
+    /// which sentence the chart shows — and a threshold behind a switch nobody enables is not
+    /// configurable, it is invisible.
+    /// </para>
+    /// </summary>
+    public const int SessionsToConcludeNoEarlierHistory = 15;
 
     private static readonly TimeSpan BetweenDates = TimeSpan.FromMilliseconds(400);
     private static readonly TimeSpan AfterEmpty = TimeSpan.FromSeconds(2);
@@ -209,15 +243,29 @@ public sealed class CandleBackfillRunner
             var perSymbol = await _repository.GetCoveredDailyDateCountsAsync(
                 from, settledThrough, symbols, ct);
 
-            foreach (var symbol in symbols)
+            var shortOfWeekly = symbols
+                .Where(s => barCounts.GetValueOrDefault(s) < MultiTimeframeAnalyzer.MinimumDailyBarsForWeekly)
+                .ToList();
+
+            // Asked only for the symbols that are actually short, so a healthy watchlist pays nothing
+            // for it: this is a page-load path.
+            var evidence = await _repository.GetDailySessionCoverageAsync(
+                from, settledThrough, shortOfWeekly, ct);
+
+            foreach (var symbol in shortOfWeekly)
             {
                 var bars = barCounts.GetValueOrDefault(symbol);
-                if (bars >= MultiTimeframeAnalyzer.MinimumDailyBarsForWeekly) continue;
+                var seen = evidence.GetValueOrDefault(symbol);
 
                 gaps.Add(new SymbolArchiveGap(
                     Symbol: symbol,
                     ArchivedBars: bars,
-                    MissingSessions: Math.Max(0, target - perSymbol.GetValueOrDefault(symbol))));
+                    MissingSessions: Math.Max(0, target - perSymbol.GetValueOrDefault(symbol)),
+                    SessionsChecked: seen?.SessionsRequested ?? 0,
+                    SessionsWithoutTrade: seen?.SessionsWithoutTrade ?? 0,
+                    FirstBarDate: seen?.FirstBarDate,
+                    NoEarlierHistory:
+                        (seen?.SessionsWithoutTrade ?? 0) >= SessionsToConcludeNoEarlierHistory));
             }
 
             gaps.Sort((a, b) => a.ArchivedBars.CompareTo(b.ArchivedBars));
