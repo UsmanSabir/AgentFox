@@ -4,6 +4,18 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+
+    <!-- Binding identity for the plugin contract. This is the version a plugin's reference to
+         AgentFox.Plugins records at compile time, and the host loads this assembly on the plugin's
+         behalf (see PluginLoadContext) — so every host build MUST provide an AgentFox.Plugins whose
+         AssemblyVersion is >= what the plugin was built against, or the plugin's module/provider
+         types fail to load and are silently dropped.
+
+         Pinned on purpose and decoupled from Version/FileVersion: a release build that passes
+         -p:Version=1.2.3 (as the premium edition's CI does) must NOT move the binding identity,
+         or every host built with a lower/default version stops loading the plugin. Bump this ONLY
+         on a breaking change to the public plugin API surface. -->
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
   </PropertyGroup>
 
   <ItemGroup>
