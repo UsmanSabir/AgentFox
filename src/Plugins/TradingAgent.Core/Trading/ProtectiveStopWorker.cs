@@ -57,6 +57,7 @@ public sealed class ProtectiveStopWorker : BackgroundService, IMarketSessionOpen
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly ILogger<ProtectiveStopWorker> _logger;
     private readonly IUserNotifier? _notifier;
+    private readonly IReadOnlyList<IStopReplacementObserver> _replacementObservers;
     private readonly TradingActivityLog? _activity;
 
     /// <summary>
@@ -95,10 +96,12 @@ public sealed class ProtectiveStopWorker : BackgroundService, IMarketSessionOpen
         IOptions<TradingAgentOptions> options,
         ILogger<ProtectiveStopWorker> logger,
         TradingActivityLog? activity = null,
-        IUserNotifier? notifier = null)
+        IUserNotifier? notifier = null,
+        IEnumerable<IStopReplacementObserver>? replacementObservers = null)
     {
         _activity    = activity;
         _notifier    = notifier;
+        _replacementObservers = replacementObservers?.ToArray() ?? [];
         _scopes      = scopes;
         _stateReader = stateReader;
         _canceller   = canceller;
@@ -670,8 +673,29 @@ public sealed class ProtectiveStopWorker : BackgroundService, IMarketSessionOpen
                 return true;
             });
 
+        // Announced BEFORE the cancel goes out, because the fact worth telling an operator is that
+        // their position is about to be briefly uncovered — after the fact it is history. Both sides
+        // are named so the outgoing order can be found in a broker terminal by its own number.
+        var plan = new StopReplacementPlan(
+            successor.Symbol,
+            Outgoing: new(predecessor.StopTrigger, predecessor.StopLimit,
+                predecessor.DesiredQuantity, predecessor.LastOrderNo),
+            Incoming: new(successor.StopTrigger, successor.StopLimit,
+                successor.DesiredQuantity, null),
+            Reason: why);
+
+        await NotifyReplacementAsync(
+            o => o.ReplacementPlannedAsync(plan, ct), successor, "planned");
+
         var result = await StopReplacement.OpenWindowAsync(
             successor, predecessor, held, why, ports, ct);
+
+        // Always paired with the announcement above: "we are about to remove your protection" followed
+        // by silence would be worse than never having said anything.
+        await NotifyReplacementAsync(
+            o => o.ReplacementResolvedAsync(
+                plan, result.Outcome == StopReplacementOutcome.PlaceReplacement, result.Reason, ct),
+            successor, "resolved");
 
         if (result.Outcome == StopReplacementOutcome.PlaceReplacement)
         {
@@ -694,6 +718,38 @@ public sealed class ProtectiveStopWorker : BackgroundService, IMarketSessionOpen
                 + "broker", result.Reason);
 
         return false;
+    }
+
+    /// <summary>
+    /// Runs one notification across every registered observer, and refuses to let any of them affect
+    /// the replacement.
+    ///
+    /// <para>
+    /// A stop raise must not be delayed, let alone prevented, because a channel is slow or an edition's
+    /// formatter threw. Each observer gets a bounded slice of time and its own try/catch; a failure is
+    /// logged and the sequence continues. Observers are told in registration order and are not run
+    /// concurrently, so a single edition's messages arrive in the order they were generated.
+    /// </para>
+    /// </summary>
+    private async Task NotifyReplacementAsync(
+        Func<IStopReplacementObserver, Task> notify, ProtectiveStop stop, string stage)
+    {
+        if (_replacementObservers.Count == 0) return;
+
+        foreach (var observer in _replacementObservers)
+        {
+            try
+            {
+                await notify(observer).WaitAsync(IStopReplacementObserver.Budget);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "[ProtectiveStops] {StopId} ({Symbol}): the {Stage} replacement notification failed "
+                    + "in {Observer}; the replacement itself is unaffected.",
+                    stop.StopId, stop.Symbol, stage, observer.GetType().Name);
+            }
+        }
     }
 
     /// <summary>

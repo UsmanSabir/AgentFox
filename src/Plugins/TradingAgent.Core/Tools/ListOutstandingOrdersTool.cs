@@ -1,7 +1,7 @@
 using System.Text.Json;
 using AgentFox.Plugins.Interfaces;
 using Microsoft.Extensions.Logging;
-using TradingAgent.Feed;
+using TradingAgent.Broker;
 
 namespace TradingAgent.Tools;
 
@@ -14,6 +14,13 @@ namespace TradingAgent.Tools;
 /// which the plugin previously could only approximate by scraping the Outstanding Log tab in a
 /// browser.
 /// </para>
+///
+/// <para>
+/// Backed by <see cref="IBrokerOutstandingOrdersReader"/> rather than a concrete client, so which
+/// broker answers depends on which adapter is active. Previously this took <c>AhkPortalClient</c>
+/// directly, which meant a premium account running the AHL SOAP integration would still need the
+/// AHK browser-cookie session for this one read.
+/// </para>
 /// </summary>
 public sealed class ListOutstandingOrdersTool : BaseTool
 {
@@ -22,12 +29,13 @@ public sealed class ListOutstandingOrdersTool : BaseTool
         PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
     };
 
-    private readonly AhkPortalClient _portal;
+    private readonly IBrokerOutstandingOrdersReader _reader;
     private readonly ILogger<ListOutstandingOrdersTool> _logger;
 
-    public ListOutstandingOrdersTool(AhkPortalClient portal, ILogger<ListOutstandingOrdersTool> logger)
+    public ListOutstandingOrdersTool(
+        IBrokerOutstandingOrdersReader reader, ILogger<ListOutstandingOrdersTool> logger)
     {
-        _portal = portal;
+        _reader = reader;
         _logger = logger;
     }
 
@@ -63,33 +71,21 @@ public sealed class ListOutstandingOrdersTool : BaseTool
 
         try
         {
-            var read = await _portal.GetOutstandingAsync(symbol, side);
-            if (!read.Ok)
-            {
-                // Reporting "0 orders" here would be a lie with consequences: an operator told the
-                // account is flat may leave a live order running, or place a duplicate.
-                return ToolResult.Fail(
-                    $"{read.Error} Do NOT tell the user they have no working orders — the book could " +
-                    "not be read. Check the broker portal directly.");
-            }
-
-            var orders = read.Orders;
+            var book = await _reader.GetOutstandingOrdersAsync(symbol.Length == 0 ? null : symbol);
+            var orders = book.Where(o => AhkOrderSide.Matches(o.Side, side)).ToList();
 
             return ToolResult.Ok(JsonSerializer.Serialize(new
             {
-                account = _portal.AccountCode,
                 filter = new { symbol = symbol.Length == 0 ? null : symbol, side },
                 count = orders.Count,
                 orders = orders.Select(o => new
                 {
-                    order_no       = o.OrderNo,
-                    house_order_no = o.HOrderNo,
-                    side           = o.Type,
-                    symbol         = o.Scrip,
-                    market         = o.Market,
-                    price          = o.Price,
-                    remaining_qty  = o.Remaining,
-                    placed_at      = o.Time
+                    order_no      = o.OrderNo,
+                    side          = o.Side,
+                    order_type    = o.OrderType,
+                    symbol        = o.Symbol,
+                    price         = o.Price,
+                    remaining_qty = o.Quantity
                 }),
                 note = orders.Count == 0
                     ? "The account has no resting orders matching this filter."
@@ -98,10 +94,13 @@ public sealed class ListOutstandingOrdersTool : BaseTool
         }
         catch (Exception ex)
         {
+            // Reporting "0 orders" here would be a lie with consequences: an operator told the
+            // account is flat may leave a live order running, or place a duplicate.
             _logger.LogError(ex, "[ListOutstandingOrders] Read failed.");
             return ToolResult.Fail(
                 $"Could not read the outstanding order book from the broker: {ex.Message}. " +
-                "Do not guess what orders are working — tell the user the live read failed.");
+                "Do NOT tell the user they have no working orders — the book could not be read. " +
+                "Check the broker portal directly.");
         }
     }
 }

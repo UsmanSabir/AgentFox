@@ -34,9 +34,10 @@ public interface IBrokerOrderCanceller
 }
 
 /// <summary>
-/// Reads the broker's resting (outstanding) order book for one symbol — broker-neutral so a caller
-/// that needs a live "what's resting right now" answer (e.g. a protective stop's local backstop
-/// deciding whether to stand down) never has to reach for a specific adapter's concrete type.
+/// Reads the broker's resting (outstanding) order book — broker-neutral so a caller that needs a live
+/// "what's resting right now" answer (e.g. a protective stop's local backstop deciding whether to stand
+/// down, or the <c>list_outstanding_orders</c>/<c>cancel_order</c> tools) never has to reach for a
+/// specific adapter's concrete type. <paramref name="symbol"/> null or empty means every symbol.
 ///
 /// <para>
 /// Unknown is never zero: a failed read throws rather than returning an empty list, so a caller
@@ -47,7 +48,8 @@ public interface IBrokerOrderCanceller
 /// </summary>
 public interface IBrokerOutstandingOrdersReader
 {
-    Task<IReadOnlyList<RestingOrder>> GetOutstandingOrdersAsync(string symbol, CancellationToken ct = default);
+    Task<IReadOnlyList<RestingOrder>> GetOutstandingOrdersAsync(
+        string? symbol = null, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -101,7 +103,7 @@ public sealed class AhkBrowserBrokerAdapter :
     /// <summary>Delegates to the browser's own outstanding-book read (a DOM scrape) — unchanged
     /// behaviour from before this interface existed, just reached through it instead of directly.</summary>
     public Task<IReadOnlyList<RestingOrder>> GetOutstandingOrdersAsync(
-        string symbol, CancellationToken ct = default) =>
+        string? symbol = null, CancellationToken ct = default) =>
         _broker.GetOutstandingOrdersAsync(symbol);
 
     /// <summary>Delegates to the portal client's own session bootstrap — unchanged behaviour, just

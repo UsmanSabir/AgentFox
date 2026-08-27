@@ -397,7 +397,7 @@ public sealed class TradingAgentRuntime
             new CreateTradeProposalTool(repository, policy),
             new GetTradingStatusTool(repository, policy, calendar, reconciliation),
             new GetPortfolioTool(
-                services.GetRequiredService<PortfolioReader>(),
+                services.GetRequiredService<IBrokerAccountReader>(),
                 loggers.CreateLogger<GetPortfolioTool>()),
             new ResearchStockTool(
                 services.GetRequiredService<PsxDataClient>(),
@@ -421,15 +421,15 @@ public sealed class TradingAgentRuntime
             new ManageCandleArchiveTool(
                 services.GetRequiredService<CandleBackfillRunner>(),
                 loggers.CreateLogger<ManageCandleArchiveTool>()),
-            // Order-book read and cancel, over the portal's JSON API rather than the browser. Both
-            // are registered unconditionally: cancelling is risk-REDUCING, so unlike placement it is
-            // not gated behind AutoExecute or the kill switch (see CancelOrderTool).
+            // Order-book read and cancel, broker-neutral. Both are registered unconditionally:
+            // cancelling is risk-REDUCING, so unlike placement it is not gated behind AutoExecute or
+            // the kill switch (see CancelOrderTool).
             new ListOutstandingOrdersTool(
-                services.GetRequiredService<AhkPortalClient>(),
+                services.GetRequiredService<IBrokerOutstandingOrdersReader>(),
                 loggers.CreateLogger<ListOutstandingOrdersTool>()),
             new CancelOrderTool(
-                services.GetRequiredService<AhkPortalClient>(),
-                services.GetRequiredService<IRuntimePluginOptions<AhkConfig>>(),
+                services.GetRequiredService<IBrokerOutstandingOrdersReader>(),
+                services.GetRequiredService<IBrokerOrderCanceller>(),
                 loggers.CreateLogger<CancelOrderTool>()),
             // Analytics-portal reads. Registered unconditionally so the agent can explain that the
             // portal is switched off rather than silently lacking the capability — both tools check

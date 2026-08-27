@@ -21,6 +21,17 @@ namespace TradingAgent.AhlAnalytics;
 public interface IAnalyticsSsoUrlProvider
 {
     Task<(string? Url, string? Error)> GetAnalyticsSsoUrlAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Whether a passive caller (a dashboard poll, a watchlist-preset read) may let this hop proceed
+    /// RIGHT NOW without the caller opting in explicitly — true when establishing the underlying
+    /// session is itself an ordinary authenticated call, false when it can cost a full broker LOGIN the
+    /// caller must consent to. The AHK browser-cookie provider mirrors
+    /// <see cref="AhkPortalClient.HasSession"/> so a passive poller can never itself launch Chromium;
+    /// the AHL SOAP provider is always true, since establishing that session is the same class of call
+    /// as every other AHL SOAP read this repo already runs passively.
+    /// </summary>
+    bool CanHandshakeSafely { get; }
 }
 
 /// <summary>
@@ -35,6 +46,8 @@ public sealed class AhkPortalAnalyticsSsoUrlProvider : IAnalyticsSsoUrlProvider
 
     public Task<(string? Url, string? Error)> GetAnalyticsSsoUrlAsync(CancellationToken ct = default) =>
         _portal.GetAnalyticsUrlAsync(ct);
+
+    public bool CanHandshakeSafely => _portal.HasSession;
 }
 
 /// <summary>
