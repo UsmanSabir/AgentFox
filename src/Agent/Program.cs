@@ -1061,8 +1061,24 @@ class Program
             catch (ReflectionTypeLoadException ex)
             {
                 types = ex.Types.Where(t => t != null).ToArray()!;
+
+                // Do NOT swallow this. The usual cause is a plugin built against a NEWER host
+                // contract than this build ships (e.g. a release-stamped AgentFox.Plugins the host
+                // cannot bind): the plugin's own module/provider types are exactly the ones that
+                // fail here, so the plugin then loads "successfully" yet contributes nothing, and
+                // the reason is invisible. Surface the distinct binding failures.
+                foreach (var reason in ex.LoaderExceptions
+                             .Where(e => e is not null)
+                             .Select(e => e!.Message)
+                             .Distinct()
+                             .Take(5))
+                {
+                    AnsiConsole.MarkupLineInterpolated(
+                        $"[yellow]⚠ {Path.GetFileName(dll)}: type load error — {reason}[/]");
+                }
             }
 
+            var contributedBefore = pluginModules.Count + providerTypes.Count;
             foreach (var type in types.Where(t => t is { IsAbstract: false, IsInterface: false }))
             {
                 if (typeof(IAppModule).IsAssignableFrom(type))
@@ -1071,6 +1087,13 @@ class Program
                     providerTypes.Add(type);
             }
             loadedPlugins.Add(Path.GetFileNameWithoutExtension(dll));
+
+            // A DLL that shipped a .deps.json (so it is an entry assembly) but yielded no module or
+            // channel provider is almost always a version/contract mismatch, not a valid payload.
+            // "Loaded a plugin that does nothing" must never be silent.
+            if (pluginModules.Count + providerTypes.Count == contributedBefore)
+                AnsiConsole.MarkupLineInterpolated(
+                    $"[yellow]⚠ {Path.GetFileName(dll)} loaded but contributed no modules or channel providers — it may be built against a newer host contract than this build provides.[/]");
         }
 
         // Surface discovery results — this method was previously silent, so a mis-copied plugin
