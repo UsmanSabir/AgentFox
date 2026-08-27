@@ -221,7 +221,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
         var sessions = Math.Max(
             _options.Value.Scan.LookbackDays,
             Math.Clamp(_options.Value.Scan.WeeklyLookbackWeeks, 12, 600) * 6);
-        var history = await _history.GetDailyAsync(symbols, sessions, includeLive: true, ct);
+        var history = await _history.GetDailyAsync(symbols, sessions, includeLive: true, ct: ct);
 
         var states = await _repository.GetMonitorStatesAsync(ct);
         var cooldownStart = options.CooldownMinutes > 0

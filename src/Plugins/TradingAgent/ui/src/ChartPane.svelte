@@ -15,7 +15,8 @@
   } from 'lightweight-charts';
   import {
     trading, CHART_INTERVALS,
-    type ArmOrderDialogContext, type ChartData, type ChartInterval, type StockAssessment
+    type ArmOrderDialogContext, type CandleArchiveStatus, type ChartData, type ChartInterval,
+    type StockAssessment
   } from './api';
   import {
     LineChart, AlertTriangle, Eye, RefreshCw, Brain, Maximize2, Minimize2,
@@ -37,6 +38,12 @@
    * for the page rather than one per component, and so the market-open flag driving it stays fresh.
    */
   export let refreshTick = 0;
+
+  /** Archive progress from the dashboard's existing poll — no second status request from this pane. */
+  export let archive: CandleArchiveStatus | null = null;
+
+  /** Advances whenever that poll returns, allowing a chart to grow while a backfill is running. */
+  export let historyRefreshTick = 0;
 
   /** Whether the market is currently open — a closed market has nothing new to fetch. */
   export let marketOpen = false;
@@ -181,6 +188,19 @@
   let loading = false;
   let chartError: string | null = null;
   let loadGeneration = 0;
+  let historyGap: CandleArchiveStatus['symbolsShortOfWeekly'][number] | null = null;
+  let historyCheckedSessions = 0;
+  let historyPercent = 0;
+
+  $: historyGap = symbol
+    ? archive?.symbolsShortOfWeekly.find(gap => gap.symbol === symbol) ?? null
+    : null;
+  $: historyCheckedSessions = historyGap && archive
+    ? Math.max(0, archive.targetTradingDays - historyGap.missingSessions)
+    : 0;
+  $: historyPercent = archive?.targetTradingDays
+    ? Math.min(100, Math.round(historyCheckedSessions / archive.targetTradingDays * 100))
+    : 0;
 
   let container: HTMLDivElement | null = null;
   let chart: IChartApi | null = null;
@@ -588,6 +608,7 @@
     const requestedInterval = interval;
     const sameChart = data?.symbol === requestedSymbol && data.interval === requestedInterval;
     const generation = ++loadGeneration;
+    lastHistoryReloadAt = Date.now();
     loading = true;
     chartError = null;
     // A verdict belongs to the symbol and interval it was produced for; carrying it across a change
@@ -652,6 +673,27 @@
   $: if (refreshTick !== lastTick) {
     lastTick = refreshTick;
     if (symbol && marketOpen && !loading && typeof document !== 'undefined' && !document.hidden) {
+      load(true);
+    }
+  }
+
+  /**
+   * Grow a newly-added symbol in place as its archive fills. The dashboard already polls progress
+   * every four seconds; this pane deliberately refreshes at most every 12 seconds so a historical
+   * download cannot turn into a chart-request storm. One final refresh runs when the pass ends.
+   */
+  const HISTORY_REFRESH_MS = 12_000;
+  let lastHistoryTick = historyRefreshTick;
+  let lastHistoryReloadAt = 0;
+  let historyWasRunning = false;
+  $: if (historyRefreshTick !== lastHistoryTick) {
+    lastHistoryTick = historyRefreshTick;
+    const runningForSymbol = Boolean(symbol && historyGap && archive?.progress.isRunning);
+    const justFinished = historyWasRunning && !runningForSymbol;
+    historyWasRunning = runningForSymbol;
+    const visible = typeof document === 'undefined' || !document.hidden;
+    const refreshDue = Date.now() - lastHistoryReloadAt >= HISTORY_REFRESH_MS;
+    if (symbol && !loading && visible && (justFinished || (runningForSymbol && refreshDue))) {
       load(true);
     }
   }
@@ -763,10 +805,47 @@
     </div>
   </header>
 
+  {#if symbol && historyGap}
+    <div class="history-status" role="status" aria-live="polite">
+      <div class="history-copy">
+        <RefreshCw size={14} class={archive?.progress.isRunning ? 'spinning' : ''} aria-hidden="true" />
+        <div>
+          <b>{archive?.progress.isRunning ? `Building ${symbol} history` : `${symbol} history is still limited`}</b>
+          <span>
+            {historyGap.archivedBars} daily bar{historyGap.archivedBars === 1 ? '' : 's'} available
+            {#if archive?.targetTradingDays}
+              · {historyCheckedSessions} of {archive.targetTradingDays} sessions checked
+            {/if}
+          </span>
+        </div>
+      </div>
+      {#if archive?.targetTradingDays}
+        <div class="history-progress">
+          <progress max={archive.targetTradingDays} value={historyCheckedSessions}
+            aria-label={`${symbol} history backfill progress`}></progress>
+          <strong>{historyPercent}%</strong>
+        </div>
+      {/if}
+      <small>
+        {archive?.progress.isRunning
+          ? 'Showing available candles now; this chart updates automatically as more history arrives.'
+          : 'The chart is usable, but weekly levels remain provisional until more history is archived.'}
+      </small>
+    </div>
+  {/if}
+
   {#if !symbol}
     <p class="msg">Select a symbol from the watchlist.</p>
+  {:else if loading && !data}
+    <div class="plot loading-state" role="status" aria-live="polite">
+      <RefreshCw size={18} class="spinning" aria-hidden="true" />
+      <span>Loading available candles…</span>
+    </div>
   {:else if chartError && !data}
-    <p class="msg danger">{chartError} <button class="retry" on:click={() => load()}>Retry</button></p>
+    <p class:danger={!historyGap} class="msg">
+      {historyGap ? 'The first chart point is not available yet. History is continuing in the background.' : chartError}
+      <button class="retry" on:click={() => load()}>Retry</button>
+    </p>
   {:else}
     <div class="plot" class:loading class:tall={expanded} bind:this={container}></div>
 
@@ -942,6 +1021,28 @@
      gained width but almost no height. The page scrolls, so a definite 680px is the honest choice. */
   .plot.tall { height:740px; }
   .plot.loading { opacity:.5; }
+  .loading-state {
+    display:flex; align-items:center; justify-content:center; gap:.5rem;
+    color:var(--text-3); font-size:.75rem; background:var(--surface-2); border-radius:var(--radius-sm);
+  }
+
+  .history-status {
+    display:grid; grid-template-columns:minmax(0,1fr) minmax(150px,240px); align-items:center;
+    gap:.35rem .8rem; padding:.55rem .65rem; border-radius:var(--radius-sm);
+    border:1px solid color-mix(in srgb, var(--primary) 28%, var(--border));
+    background:color-mix(in srgb, var(--primary) 7%, var(--surface-2));
+    color:var(--text-2); font-size:.7rem;
+  }
+  .history-copy { display:flex; align-items:center; gap:.5rem; min-width:0; color:var(--primary); }
+  .history-copy > div { display:flex; flex-direction:column; gap:.1rem; min-width:0; }
+  .history-copy b { color:var(--text); font-size:.73rem; }
+  .history-copy span, .history-status small { color:var(--text-3); line-height:1.4; }
+  .history-status small { grid-column:1 / -1; }
+  .history-progress { display:flex; align-items:center; gap:.45rem; }
+  .history-progress progress { width:100%; height:.42rem; accent-color:var(--primary); }
+  .history-progress strong { color:var(--text-2); font-size:.68rem; font-variant-numeric:tabular-nums; }
+  :global(.spinning) { animation:history-spin 1s linear infinite; }
+  @keyframes history-spin { to { transform:rotate(360deg); } }
 
   .view-controls { display:flex; gap:.25rem; }
   .view-controls button {
@@ -1034,5 +1135,11 @@
     .plot, .plot.tall { height:clamp(300px, 88vw, 420px); }
     .metrics { grid-template-columns:repeat(auto-fit,minmax(90px,1fr)); }
     .levels { grid-template-columns:minmax(0,1fr); }
+    .history-status { grid-template-columns:minmax(0,1fr); }
+    .history-status small { grid-column:auto; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    :global(.spinning) { animation:none; }
   }
 </style>

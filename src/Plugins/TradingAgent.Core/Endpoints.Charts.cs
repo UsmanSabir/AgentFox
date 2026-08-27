@@ -64,6 +64,7 @@ public sealed partial class TradingCoreEndpoints
             bool? includeLive,
             CandleAnalysisService analysis,
             MonitoredUniverse universe,
+            ITradingRepository repository,
             ChartOverlayCollector overlayCollector,
             IOptions<TradingAgentOptions> options,
             ILogger<TradingCoreEndpoints> logger,
@@ -80,8 +81,26 @@ public sealed partial class TradingCoreEndpoints
 
             try
             {
+                var normalizedSymbol = PsxDataClient.NormalizeStockSymbol(symbol);
+                var archiveUniverse = await universe.ForArchiveAsync(ct);
+                var archiveBacked = archiveUniverse.Contains(
+                    normalizedSymbol, StringComparer.OrdinalIgnoreCase);
+                var archivedBars = 0;
+                if (archiveBacked)
+                {
+                    var counts = await repository.GetDailyBarCountsAsync([normalizedSymbol], ct);
+                    archivedBars = counts.GetValueOrDefault(normalizedSymbol);
+                }
+
+                // A newly watched ticker often has only a handful of archived sessions while its
+                // targeted backfill is running. Never put the visible chart behind the portal's
+                // historical top-up in that state: return what is available now and let the UI grow it.
+                var preferAvailableHistory = archiveBacked
+                    && archivedBars < CandleHistoryProvider.MinimumArchivedBarsBeforePortalFallbackStops;
+
                 var result = await analysis.AnalyzeAsync(
-                    symbol, minutes.Value, bars, includeLive ?? true, ct);
+                    normalizedSymbol, minutes.Value, bars, includeLive ?? true,
+                    preferAvailableHistory, ct);
 
                 var candles = result.Candles;
                 var closes = IndicatorSeries.Closes(candles);
@@ -129,6 +148,8 @@ public sealed partial class TradingCoreEndpoints
                     tradable = await universe.IsTradableAsync(result.Symbol, ct),
                     barsAnalyzed = candles.Count,
                     sessionsAvailable = result.SessionsAvailable,
+                    historyBuilding = preferAvailableHistory,
+                    archivedBars,
                     // The last bar may still be forming; the chart labels it so a half-formed candle is
                     // never read as a settled close.
                     usesLiveBar = snapshot.UsesLiveBar,

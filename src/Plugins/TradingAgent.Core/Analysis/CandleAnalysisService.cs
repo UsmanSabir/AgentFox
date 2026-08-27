@@ -58,6 +58,7 @@ public sealed class CandleAnalysisService
         int intervalMinutes = PsxCandle.DailyIntervalMinutes,
         int? lookbackBars = null,
         bool includeLive = true,
+        bool preferAvailableHistory = false,
         CancellationToken ct = default)
     {
         symbol = PsxDataClient.NormalizeStockSymbol(symbol);
@@ -77,8 +78,16 @@ public sealed class CandleAnalysisService
         };
         var sessionsWanted = Math.Max(requestedSessions, weeklySessions);
 
-        var historyTask = _history.GetDailyAsync([symbol], sessionsWanted, includeLive, ct);
-        var quoteTask = _dataClient.GetQuoteSummaryAsync(symbol, ct);
+        var historyTask = _history.GetDailyAsync(
+            [symbol], sessionsWanted, includeLive,
+            allowPortalFallback: !preferAvailableHistory,
+            ct: ct);
+        // During the first few archived bars, the interactive chart values responsiveness over
+        // 52-week portal annotations. The forming/live candle and every deterministic indicator are
+        // still computed; only the two optional long-range extrema wait for the normal path.
+        var quoteTask = preferAvailableHistory
+            ? Task.FromResult(new PsxQuoteSummary { Symbol = symbol })
+            : _dataClient.GetQuoteSummaryAsync(symbol, ct);
         await Task.WhenAll(historyTask, quoteTask);
 
         var history = await historyTask;

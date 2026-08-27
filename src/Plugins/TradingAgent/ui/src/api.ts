@@ -478,6 +478,10 @@ export interface ChartData {
   tradable: boolean;
   barsAnalyzed: number;
   sessionsAvailable: number;
+  /** True while a newly archived symbol is being rendered from the bars already available locally. */
+  historyBuilding: boolean;
+  /** Settled daily bars currently stored for this symbol. */
+  archivedBars: number;
   /** The last bar is still forming — not a settled close. */
   usesLiveBar: boolean;
   /** RSI bands this analysis classified against (config, not the textbook 30/70). */

@@ -114,6 +114,8 @@
   let reconciliation: ReconciliationRun[] = [];
   let tab: 'proposals' | 'executions' | 'reconciliation' | 'events' = 'proposals';
   let archivePoll: ReturnType<typeof setInterval> | null = null;
+  /** Advances only when the archive poll returns fresh progress; the chart uses it to grow in place. */
+  let archiveTick = 0;
 
   // Keep the decision surfaces open and tuck away dense operational detail. Every collapsed header
   // still carries its important state, so closing a panel never hides a warning or waiting work.
@@ -145,6 +147,7 @@
       archivePoll = setInterval(async () => {
         try {
           archive = await trading.candleArchive();
+          archiveTick += 1;
           if (!archive.progress.isRunning) syncArchivePolling();
         } catch { /* transient: the next tick retries */ }
       }, 4000);
@@ -168,6 +171,7 @@
     try {
       const result = await trading.startBackfill();
       archive = result.status;
+      archiveTick += 1;
       syncArchivePolling();
       if (!result.started) error = 'A backfill pass is already running.';
     } catch (e) {
@@ -394,6 +398,8 @@
         companyName={selectedCompany}
         bind:expanded={chartExpanded}
         refreshTick={marketTick}
+        historyRefreshTick={archiveTick}
+        {archive}
         marketOpen={status.market.isOpen}
         on:arm={(e) => armContext = e.detail}
       />
