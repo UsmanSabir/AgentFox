@@ -22,7 +22,8 @@ public sealed partial class TradingRiskEngine : ITradingRiskEngine
     public RiskValidationResult Validate(
         IReadOnlyList<IReadOnlyList<TradingSignal>> groups,
         bool? killSwitchOverride = null,
-        IReadOnlyCollection<string>? executionUniverseOverride = null)
+        IReadOnlyCollection<string>? executionUniverseOverride = null,
+        IReadOnlyCollection<string>? liquidationUniverseOverride = null)
     {
         var cfg = _options.Value;
         var agent = _agentOptions.Value;
@@ -41,6 +42,10 @@ public sealed partial class TradingRiskEngine : ITradingRiskEngine
 
         var universe = executionUniverseOverride ?? agent.AllowedSymbols;
         var allowed = universe
+            .Select(x => x.Trim().ToUpperInvariant())
+            .Where(x => x.Length > 0)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var liquidatable = (liquidationUniverseOverride ?? [])
             .Select(x => x.Trim().ToUpperInvariant())
             .Where(x => x.Length > 0)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -64,7 +69,9 @@ public sealed partial class TradingRiskEngine : ITradingRiskEngine
                 violations.Add($"{label}: action must be BUY or SELL.");
             if (!SymbolPattern().IsMatch(symbol))
                 violations.Add($"{label}: symbol '{symbol}' is invalid.");
-            else if (restrictToSelectedUniverse && !allowed.Contains(symbol))
+            else if (restrictToSelectedUniverse
+                     && !allowed.Contains(symbol)
+                     && !(action == "SELL" && liquidatable.Contains(symbol)))
                 violations.Add($"{label}: symbol '{symbol}' is not in the selected execution universe.");
             if (order.Quantity is not > 0)
                 violations.Add($"{label}: quantity must be a positive integer.");

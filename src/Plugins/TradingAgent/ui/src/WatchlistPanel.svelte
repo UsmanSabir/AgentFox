@@ -9,6 +9,7 @@
     Download, Pin, PinOff, GripVertical, PanelLeftClose, PanelLeftOpen,
     ArrowUpRight, ArrowDownRight, Minus, Bot, Hand, Lock, ListPlus, X
   } from 'lucide-svelte';
+  import type { SymbolExtensionComponent } from './symbolExtensions';
 
   /** Selected symbol, so the chart pane (Phase 2) can follow the list. */
   export let selected: string | null = null;
@@ -20,6 +21,11 @@
   export let refreshTick = 0;
   /** Session gate supplied by the dashboard status endpoint. Closed-market moves do not change. */
   export let marketOpen = false;
+  /**
+   * Optional component rendered in each row after the tags. Null in a community build. It receives
+   * only `symbol` and must render nothing when it has nothing to say — see `symbolExtensions.ts`.
+   */
+  export let rowStatus: SymbolExtensionComponent | null = null;
 
   let data: WatchlistResponse | null = null;
   /**
@@ -631,6 +637,13 @@
               {/if}
             </span>
           </button>
+          <!-- Outside the picker button on purpose: an extension may render its own controls, and
+               nesting an interactive element inside a button is invalid and breaks keyboard use. -->
+          {#if rowStatus}
+            <span class="row-extension">
+              <svelte:component this={rowStatus} symbol={entry.symbol} />
+            </span>
+          {/if}
           <div class="row-actions">
             <button
               class="icon pin"
@@ -817,8 +830,10 @@
     flex:1 1 0; min-height:0; max-height:none; overflow-y:auto; overflow-x:hidden;
     scrollbar-gutter:stable; overscroll-behavior:contain;
   }
+  /* Four columns: handle, picker, optional extension, actions. With no extension the third column
+     has no content and collapses to zero, so a community build is unchanged. */
   .rows li {
-    display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:.3rem;
+    display:grid; grid-template-columns:auto minmax(0,1fr) auto auto; align-items:center; gap:.3rem;
     width:100%; box-sizing:border-box;
     border-radius:var(--radius-sm); padding:.1rem .2rem .1rem .05rem;
     border:1px solid transparent;
@@ -870,6 +885,7 @@
   }
 
   .row-actions { display:flex; align-items:center; gap:.05rem; flex:0 0 auto; }
+  .row-extension { display:flex; align-items:center; min-width:0; }
   .icon {
     background:none; border:0; cursor:pointer; color:var(--text-3);
     width:26px; height:26px; padding:0; box-sizing:border-box;
@@ -908,7 +924,7 @@
   .watchlist.compact .note { display:none; }
   .watchlist.compact .header-actions { flex:0 0 auto; }
   .watchlist.compact .rows { gap:0; }
-  .watchlist.compact .rows li { grid-template-columns:auto minmax(0,1fr) auto; gap:.15rem; padding:0 .1rem 0 0; }
+  .watchlist.compact .rows li { grid-template-columns:auto minmax(0,1fr) auto auto; gap:.15rem; padding:0 .1rem 0 0; }
   .watchlist.compact .drag-handle { flex:0 0 auto; }
   .watchlist.compact .pick { min-width:0; padding:.34rem .1rem; gap:.2rem; }
   .watchlist.compact .identity { min-width:0; }

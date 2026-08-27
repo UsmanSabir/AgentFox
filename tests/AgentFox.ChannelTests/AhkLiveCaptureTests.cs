@@ -484,8 +484,10 @@ public sealed class AhkLiveCaptureTests
         Assert.IsTrue(await portal.EnsureSessionAsync(), "no broker session, so nothing can be exercised");
         Report("SESSION", $"account={portal.AccountCode} hasSession={portal.HasSession}");
 
+        var cancellation = new BrokerOrderCancellationService(
+            portal, options, NullLogger<BrokerOrderCancellationService>.Instance);
         var adapter = new AhkBrowserBrokerAdapter(
-            broker, portal, options, NullLogger<AhkBrowserBrokerAdapter>.Instance);
+            broker, portal, cancellation, options, NullLogger<AhkBrowserBrokerAdapter>.Instance);
 
         var signal = new TradingSignal
         {

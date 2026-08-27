@@ -116,6 +116,7 @@ export interface TradingStatus {
     reason: string;
     nextOpenPkt?: string;
     scheduleSource: string;
+    sessionOpenPkt?: string;
   };
   reconciliation: {
     supported: boolean;

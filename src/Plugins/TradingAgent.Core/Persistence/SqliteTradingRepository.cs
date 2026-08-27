@@ -17,7 +17,7 @@ namespace TradingAgent.Persistence;
 /// Transactional operational ledger. A unique idempotency key is claimed before broker access;
 /// the recorded result is returned on replay instead of submitting another order.
 /// </summary>
-public sealed class SqliteTradingRepository : ITradingRepository
+public sealed partial class SqliteTradingRepository : ITradingRepository, IAutomationCampaignRepository
 {
     private readonly string _connectionString;
     private readonly ILogger<SqliteTradingRepository> _logger;
@@ -385,6 +385,49 @@ public sealed class SqliteTradingRepository : ITradingRepository
 
         await transaction.CommitAsync(ct);
         return inserted;
+    }
+
+    public async Task<IReadOnlyList<RecordedFill>> GetFillsForSymbolAsync(
+        string symbol,
+        DateTime sinceUtc,
+        CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+
+        // Symbol and side live in the parent row's JSON, in one of two shapes — an OrderResult for an
+        // order this system placed, or a BrokerFill for one reconciliation observed. Both carry
+        // Symbol; the side is Action on the first and Side on the second.
+        command.CommandText = """
+            SELECT
+                json_extract(o.order_json, '$.Symbol') AS symbol,
+                COALESCE(json_extract(o.order_json, '$.Side'),
+                         json_extract(o.order_json, '$.Action')) AS side,
+                f.quantity, f.price, f.filled_utc
+            FROM fills f
+            JOIN broker_orders o ON o.broker_order_id = f.broker_order_id
+            WHERE UPPER(json_extract(o.order_json, '$.Symbol')) = $symbol
+              AND f.filled_utc >= $since
+            ORDER BY f.filled_utc
+            """;
+        command.Parameters.AddWithValue("$symbol", symbol.Trim().ToUpperInvariant());
+        command.Parameters.AddWithValue(
+            "$since", sinceUtc.ToString("O", CultureInfo.InvariantCulture));
+
+        var rows = new List<RecordedFill>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            if (reader.IsDBNull(0)) continue;
+            rows.Add(new RecordedFill(
+                reader.GetString(0),
+                reader.IsDBNull(1) ? null : reader.GetString(1).Trim().ToUpperInvariant(),
+                reader.GetInt32(2),
+                ParseDecimal(reader, 3) ?? 0m,
+                ParseUtc(reader.GetString(4))));
+        }
+        return rows;
     }
 
     // ── Persistent DAY orders ────────────────────────────────────────────────
@@ -1627,12 +1670,123 @@ public sealed class SqliteTradingRepository : ITradingRepository
                     fill_confirmed_utc TEXT NULL,
                     closed_utc        TEXT NULL,
                     state_reason      TEXT NULL,
-                    note              TEXT NULL
+                    note              TEXT NULL,
+                    supersedes_stop_id TEXT NULL
                 );
                 CREATE INDEX IF NOT EXISTS ix_protective_stops_state
                     ON protective_stops(state, symbol);
                 CREATE INDEX IF NOT EXISTS ix_protective_stops_parent
                     ON protective_stops(parent_armed_id);
+                -- Edition-neutral strategy lifecycle state. Profile JSON is opaque to core: a plugin
+                -- owns its rules while core supplies one durable, auditable storage seam.
+                CREATE TABLE IF NOT EXISTS automation_strategy_assignments (
+                    symbol         TEXT PRIMARY KEY,
+                    profile_id     TEXT NOT NULL,
+                    overrides_json TEXT NULL,
+                    updated_utc    TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS automation_campaigns (
+                    campaign_id       TEXT PRIMARY KEY,
+                    symbol            TEXT NOT NULL,
+                    profile_id        TEXT NOT NULL,
+                    profile_json      TEXT NOT NULL,
+                    state             TEXT NOT NULL,
+                    origin            TEXT NOT NULL,
+                    planned_budget_pkr TEXT NULL,
+                    deployed_pkr      TEXT NOT NULL,
+                    max_legs          INTEGER NOT NULL,
+                    completed_legs    INTEGER NOT NULL,
+                    quantity          INTEGER NOT NULL,
+                    average_price     TEXT NULL,
+                    last_fill_price   TEXT NULL,
+                    current_stop      TEXT NULL,
+                    high_water_price  TEXT NULL,
+                    next_add_price    TEXT NULL,
+                    status_message    TEXT NULL,
+                    started_utc       TEXT NOT NULL,
+                    updated_utc       TEXT NOT NULL,
+                    closed_utc        TEXT NULL,
+                    version           INTEGER NOT NULL DEFAULT 1
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_automation_campaigns_open_symbol
+                    ON automation_campaigns(symbol) WHERE closed_utc IS NULL;
+                -- Opaque plugin-owned blobs. Core never parses value_json; see
+                -- IAutomationCampaignRepository.GetAutomationStateAsync for the reasoning.
+                CREATE TABLE IF NOT EXISTS automation_runtime_state (
+                    key         TEXT PRIMARY KEY,
+                    value_json  TEXT NOT NULL,
+                    updated_utc TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS automation_campaign_events (
+                    sequence    INTEGER PRIMARY KEY AUTOINCREMENT,
+                    campaign_id TEXT NOT NULL,
+                    symbol      TEXT NOT NULL,
+                    kind        TEXT NOT NULL,
+                    message     TEXT NOT NULL,
+                    detail_json TEXT NULL,
+                    utc         TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS ix_automation_campaign_events_campaign
+                    ON automation_campaign_events(campaign_id, sequence DESC);
+                CREATE INDEX IF NOT EXISTS ix_automation_campaign_events_symbol
+                    ON automation_campaign_events(symbol, sequence DESC);
+                -- How finished campaigns actually turned out. Pruned by age AND row count; the two
+                -- aggregates below are written as each outcome lands so that pruning these rows
+                -- never destroys the longer-run record. See SqliteTradingRepository.Outcomes.cs.
+                CREATE TABLE IF NOT EXISTS automation_outcomes (
+                    campaign_id            TEXT PRIMARY KEY,
+                    symbol                 TEXT NOT NULL,
+                    profile_id             TEXT NOT NULL,
+                    entry_strategy_id      TEXT NULL,
+                    exit_plan_id           TEXT NULL,
+                    mode                   TEXT NOT NULL,
+                    simulated              INTEGER NOT NULL,
+                    opened_utc             TEXT NOT NULL,
+                    closed_utc             TEXT NOT NULL,
+                    sessions_held          INTEGER NOT NULL,
+                    planned_entry          TEXT NULL,
+                    planned_stop           TEXT NULL,
+                    planned_target         TEXT NULL,
+                    initial_risk_per_share TEXT NULL,
+                    quantity               INTEGER NOT NULL,
+                    deployed_pkr           TEXT NOT NULL,
+                    average_cost           TEXT NULL,
+                    realised_net_pkr       TEXT NULL,
+                    realised_r             TEXT NULL,
+                    close_reason           TEXT NOT NULL,
+                    regime_at_entry        TEXT NULL,
+                    recorded_utc           TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS ix_automation_outcomes_closed
+                    ON automation_outcomes(closed_utc DESC);
+                CREATE INDEX IF NOT EXISTS ix_automation_outcomes_symbol
+                    ON automation_outcomes(symbol, closed_utc DESC);
+                -- Small by construction: a few rows per trading day, so it is kept far longer than
+                -- the outcomes it summarises. `measured` is the honest denominator for an average —
+                -- `trades` counts campaigns that closed, and some close with no computable result.
+                CREATE TABLE IF NOT EXISTS automation_outcome_daily (
+                    day         TEXT NOT NULL,
+                    profile_id  TEXT NOT NULL,
+                    mode        TEXT NOT NULL,
+                    trades      INTEGER NOT NULL,
+                    wins        INTEGER NOT NULL,
+                    losses      INTEGER NOT NULL,
+                    measured    INTEGER NOT NULL,
+                    sum_r       TEXT NOT NULL,
+                    sum_net_pkr TEXT NOT NULL,
+                    updated_utc TEXT NOT NULL,
+                    PRIMARY KEY (day, profile_id, mode)
+                );
+                -- Counted per gate CODE, never per message: a message carries the candidate's own
+                -- numbers and so never repeats, which would report every rejection as unique.
+                CREATE TABLE IF NOT EXISTS automation_gate_rejections (
+                    day         TEXT NOT NULL,
+                    strategy_id TEXT NOT NULL,
+                    gate_code   TEXT NOT NULL,
+                    count       INTEGER NOT NULL,
+                    updated_utc TEXT NOT NULL,
+                    PRIMARY KEY (day, strategy_id, gate_code)
+                );
                 CREATE INDEX IF NOT EXISTS ix_watchlist_alerts_raised
                     ON watchlist_alerts(raised_utc DESC);
                 CREATE INDEX IF NOT EXISTS ix_watchlist_alerts_dedupe
@@ -1684,6 +1838,8 @@ public sealed class SqliteTradingRepository : ITradingRepository
             // every watched symbol would be the same bug in the other direction.
             await AddColumnIfMissingAsync(
                 connection, "watchlist", "auto_trade_enabled", "INTEGER NOT NULL DEFAULT 1", ct);
+            await AddColumnIfMissingAsync(
+                connection, "protective_stops", "supersedes_stop_id", "TEXT NULL", ct);
             await SeedPerSymbolCoverageAsync(connection, ct);
 
             _initialized = true;
@@ -2462,9 +2618,10 @@ public sealed class SqliteTradingRepository : ITradingRepository
         command.CommandText = """
             INSERT INTO protective_stops
                 (stop_id, symbol, parent_armed_id, stop_trigger, stop_limit, desired_qty, recurring,
-                 state, baseline_qty, placed_qty, backstop_armed_id, created_utc, state_reason, note)
+                 state, baseline_qty, placed_qty, backstop_armed_id, created_utc, state_reason, note,
+                 supersedes_stop_id)
             VALUES ($id, $symbol, $parent, $trigger, $limit, $desired, $recurring,
-                    $state, $baseline, $placed, $backstop, $created, $reason, $note)
+                    $state, $baseline, $placed, $backstop, $created, $reason, $note, $supersedes)
             """;
         command.Parameters.AddWithValue("$id", stop.StopId);
         command.Parameters.AddWithValue("$symbol", stop.Symbol);
@@ -2481,6 +2638,7 @@ public sealed class SqliteTradingRepository : ITradingRepository
         command.Parameters.AddWithValue("$created", stop.CreatedUtc.ToString("O"));
         command.Parameters.AddWithValue("$reason", stop.StateReason ?? (object)DBNull.Value);
         command.Parameters.AddWithValue("$note", stop.Note ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$supersedes", stop.SupersedesStopId ?? (object)DBNull.Value);
         await command.ExecuteNonQueryAsync(ct);
         return stop.StopId;
     }
@@ -2494,7 +2652,7 @@ public sealed class SqliteTradingRepository : ITradingRepository
         command.CommandText = $"""
             SELECT stop_id, symbol, parent_armed_id, stop_trigger, stop_limit, desired_qty, recurring,
                    state, baseline_qty, placed_qty, last_placed_date, last_order_no, backstop_armed_id,
-                   created_utc, fill_confirmed_utc, closed_utc, state_reason, note
+                   created_utc, fill_confirmed_utc, closed_utc, state_reason, note, supersedes_stop_id
             FROM protective_stops
             {(openOnly ? "WHERE state <> 'closed'" : "")}
             ORDER BY created_utc DESC
@@ -2646,7 +2804,8 @@ public sealed class SqliteTradingRepository : ITradingRepository
         FillConfirmedUtc     = reader.IsDBNull(14) ? null : ParseUtc(reader.GetString(14)),
         ClosedUtc            = reader.IsDBNull(15) ? null : ParseUtc(reader.GetString(15)),
         StateReason          = reader.IsDBNull(16) ? null : reader.GetString(16),
-        Note                 = reader.IsDBNull(17) ? null : reader.GetString(17)
+        Note                 = reader.IsDBNull(17) ? null : reader.GetString(17),
+        SupersedesStopId     = reader.IsDBNull(18) ? null : reader.GetString(18)
     };
 
     private static object Money(decimal? value) => value is null

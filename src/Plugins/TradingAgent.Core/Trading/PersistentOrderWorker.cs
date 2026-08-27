@@ -37,8 +37,11 @@ public sealed record PersistentOrderResolveResult(
 /// requested quantity. A failed read, unknown submission, or ambiguous order identity always stops
 /// automation instead of risking a duplicate trade.
 /// </summary>
-public sealed class PersistentOrderWorker : BackgroundService
+public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpenParticipant
 {
+    public string Name => "persistent DAY orders";
+    public int Order => 300;
+
     private readonly ITradingRepository _repository;
     private readonly TradingAgent.Manager.TradingManager _manager;
     private readonly ApprovalGate _approvals;
@@ -166,6 +169,9 @@ public sealed class PersistentOrderWorker : BackgroundService
             _runGate.Release();
         }
     }
+
+    public Task RunAtMarketOpenAsync(MarketSessionOpenContext context, CancellationToken ct) =>
+        RunNowAsync(ct);
 
     public async Task<(bool Completed, string State, string Message)> CancelAsync(
         string intentId, CancellationToken ct = default)
@@ -653,7 +659,12 @@ public sealed class PersistentOrderWorker : BackgroundService
         if (intent.LastAttemptSessionDate == today)
         {
             var marketNow = _calendar.GetStatus();
-            var dayEnded = !marketNow.IsOpen && marketNow.NextOpenPkt is null;
+            // NextOpenPkt now projects across weekends and holidays. Today's session has ended when
+            // the next opening belongs to a later trading date; a same-day opening is Friday's lunch
+            // break and the native order may still be relevant to today's lifecycle.
+            var dayEnded = !marketNow.IsOpen
+                && (marketNow.NextOpenPkt is null
+                    || DateOnly.FromDateTime(marketNow.NextOpenPkt.Value) > today);
 
             if (latestPlacement?.State == "accepted" && dayEnded)
             {

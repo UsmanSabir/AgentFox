@@ -8,6 +8,14 @@
     WalletCards, ChevronDown, ChevronRight, RefreshCw, Eye, EyeOff,
     AlertTriangle, BriefcaseBusiness, BookOpen
   } from 'lucide-svelte';
+  import type { SymbolExtensionComponent } from './symbolExtensions';
+
+  /**
+   * Optional component rendered under each holding's instrument name. Null in a community build. It
+   * receives only `symbol` and must render nothing when it has nothing to say — see
+   * `symbolExtensions.ts`.
+   */
+  export let holdingStatus: SymbolExtensionComponent | null = null;
 
   let open = false;
   let showValues = false;
@@ -132,7 +140,7 @@
               <thead><tr><th>Instrument</th><th>Quantity</th><th>Average cost</th><th>Market price</th><th>Market value</th><th>Unrealized P/L</th></tr></thead>
               <tbody>{#each account.holdings as holding}
                 <tr>
-                  <td><b>{text(holding.symbol ?? holding.instrumentId)}</b><small>{text(holding.exchange)} · {text(holding.assetType)}</small>{#if extras(holding.attributes).length}<details class="broker-details"><summary>Details</summary><dl>{#each extras(holding.attributes) as [label, value]}<dt>{label}</dt><dd>{attributeValue(value)}</dd>{/each}</dl></details>{/if}</td>
+                  <td><b>{text(holding.symbol ?? holding.instrumentId)}</b><small>{text(holding.exchange)} · {text(holding.assetType)}</small>{#if holdingStatus && holding.symbol}<div class="holding-extension"><svelte:component this={holdingStatus} symbol={holding.symbol} /></div>{/if}{#if extras(holding.attributes).length}<details class="broker-details"><summary>Details</summary><dl>{#each extras(holding.attributes) as [label, value]}<dt>{label}</dt><dd>{attributeValue(value)}</dd>{/each}</dl></details>{/if}</td>
                   <td>{quantity(holding.quantity)}</td>
                   <td>{money(holding.averageCost, holding.currency)}</td>
                   <td>{money(holding.marketPrice, holding.currency)}</td>
@@ -193,6 +201,7 @@
   .table-wrap { overflow-x:auto; border:1px solid var(--border); border-radius:var(--radius-sm); }
   table { width:100%; border-collapse:collapse; min-width:760px; font-size:.7rem; } th { padding:.55rem .65rem; color:var(--text-3); text-align:left; font-weight:600; background:var(--surface-2); border-bottom:1px solid var(--border); } td { padding:.6rem .65rem; color:var(--text-2); border-bottom:1px solid var(--border); } tbody tr:last-child td { border-bottom:0; } td b { color:var(--text); } td small { display:block; margin-top:.18rem; color:var(--text-3); font-size:.62rem; }
   .positive,.buy { color:var(--success)!important; }.negative,.sell { color:var(--danger)!important; }.empty { padding:.8rem; border:1px dashed var(--border); border-radius:var(--radius-sm); color:var(--text-3); font-size:.72rem; text-align:center; }
+  .holding-extension { margin-top:.3rem; }
   .broker-details { margin-top:.3rem; color:var(--text-3); font-size:.62rem; }.broker-details summary { cursor:pointer; color:var(--text-3); }.broker-details dl { display:grid; grid-template-columns:max-content 1fr; gap:.2rem .45rem; margin:.35rem 0 0; }.broker-details dt { color:var(--text-3); }.broker-details dd { margin:0; color:var(--text-2); overflow-wrap:anywhere; }
   @media (max-width:720px) { header { align-items:stretch; flex-direction:column; padding:0; }.header-actions { padding:0 .8rem .7rem; }.action { flex:1; justify-content:center; } }
 </style>

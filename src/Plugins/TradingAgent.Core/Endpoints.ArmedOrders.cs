@@ -129,8 +129,10 @@ public sealed partial class TradingCoreEndpoints
                     s.StateReason,
                     s.Note,
                     // Whether a native stop is resting at the broker RIGHT NOW, which is the only
-                    // form of protection that survives this process being down.
-                    restingToday = s.State == "active"
+                    // form of protection that survives this process being down. A superseded row can
+                    // still have its OLD native order resting until the worker confirms the cancel —
+                    // see ProtectiveStopWorker.RetireSupersededAsync — so it counts here too.
+                    restingToday = s.State is "active" or "superseded_pending_cancel"
                                    && s.LastPlacedSessionDate == DateOnly.FromDateTime(pktNow)
                                    && s.PlacedQuantity > 0
                 }),
@@ -503,6 +505,7 @@ public sealed partial class TradingCoreEndpoints
             string stopId,
             ITradingRepository repository,
             IMarketCalendar calendar,
+            IBrokerOrderCanceller canceller,
             ILogger<TradingCoreEndpoints> logger,
             CancellationToken ct) =>
         {
@@ -516,6 +519,39 @@ public sealed partial class TradingCoreEndpoints
                     message = "No open protective stop with that id."
                 });
 
+            var restingToday = stop.State == "active"
+                               && stop.LastPlacedSessionDate == DateOnly.FromDateTime(calendar.GetStatus().PktNow)
+                               && stop.PlacedQuantity > 0;
+
+            // Best-effort broker-side cancel before closing the row. Unlike an automated supersede,
+            // this never blocks on the result: the operator asked to disarm, and refusing that because
+            // a cancel could not be confirmed would trap them with a stop they explicitly want gone.
+            string? cancelNote = null;
+            if (restingToday && stop.LastOrderNo is { Length: > 0 } orderNo)
+            {
+                try
+                {
+                    var result = await canceller.CancelOrderAsync(orderNo, ct);
+                    cancelNote = result.Gone
+                        ? $"Broker order {orderNo} confirmed cancelled."
+                        : $"Broker order {orderNo} could NOT be confirmed cancelled: {result.Message} " +
+                          "It may still be resting until the exchange clears it at the close.";
+                    if (!result.Gone)
+                        logger.LogWarning(
+                            "[ProtectiveStops] {StopId} ({Symbol}) disarmed but broker order {OrderNo} " +
+                            "was not confirmed cancelled: {Message}",
+                            stopId, stop.Symbol, orderNo, result.Message);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    cancelNote = $"Broker order {orderNo} cancel attempt failed: {ex.Message} " +
+                                 "It may still be resting until the exchange clears it at the close.";
+                    logger.LogWarning(ex,
+                        "[ProtectiveStops] {StopId} ({Symbol}) disarmed but cancelling broker order " +
+                        "{OrderNo} threw.", stopId, stop.Symbol, orderNo);
+                }
+            }
+
             await repository.TrySetProtectiveStopStateAsync(
                 stopId, stop.State, "closed", "Disarmed by the operator.", ct);
 
@@ -523,10 +559,6 @@ public sealed partial class TradingCoreEndpoints
                 await repository.TrySetArmedOrderStateAsync(
                     backstopId, "armed", "cancelled",
                     "The protective stop it backed was disarmed by the operator.", ct: ct);
-
-            var restingToday = stop.State == "active"
-                               && stop.LastPlacedSessionDate == DateOnly.FromDateTime(calendar.GetStatus().PktNow)
-                               && stop.PlacedQuantity > 0;
 
             logger.LogWarning(
                 "[ProtectiveStops] {StopId} ({Symbol}) disarmed. Native order resting today: {Resting}.",
@@ -537,10 +569,8 @@ public sealed partial class TradingCoreEndpoints
                 stopId,
                 state = "closed",
                 brokerOrderStillResting = restingToday,
-                message = restingToday
-                    ? $"This system will no longer manage the stop, but a native SELL stop for "
-                    + $"{stop.PlacedQuantity} {stop.Symbol} was placed at the broker today and CANNOT be "
-                    + "cancelled from here. Cancel it in the portal if you do not want it to fire."
+                message = cancelNote is not null
+                    ? $"This system will no longer manage the stop. {cancelNote}"
                     : "Disarmed. No native stop was resting at the broker for this session."
             });
         }).RequireAuthorization("TradingAnalyst");

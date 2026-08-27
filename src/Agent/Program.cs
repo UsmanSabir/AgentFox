@@ -567,7 +567,38 @@ class Program
                 app.UseStaticFiles(new StaticFileOptions
                 {
                     FileProvider = page.Assets,
-                    RequestPath  = assetPath
+                    RequestPath  = assetPath,
+
+                    // Without an explicit Cache-Control, a browser falls back to HEURISTIC caching:
+                    // it may reuse the plugin's index.html — and the bundle that file names — without
+                    // ever revalidating. A redeployed plugin UI then keeps rendering its PREVIOUS
+                    // version in any tab that had already loaded it, and nothing on screen says so;
+                    // the server is serving the new build and the browser simply never asks for it.
+                    // The page is framed in an iframe, so reloading the host page does not
+                    // necessarily refetch it either, which makes the staleness harder to shake off
+                    // than an ordinary cached page.
+                    //
+                    // There is a nastier variant. Evicting the hashed bundle while keeping the old
+                    // HTML leaves the iframe asking for an asset that no longer exists, and the panel
+                    // comes up blank rather than merely out of date.
+                    //
+                    // The split below is what makes both halves correct:
+                    //   * the entry document is revalidated every time, because its content changes
+                    //     in place and its URL does not;
+                    //   * everything under /assets/ is content-hashed by the bundler, so a new build
+                    //     is always a new URL and the old one can be cached indefinitely without ever
+                    //     being served in place of newer code.
+                    //
+                    // "no-cache" does not mean "do not store" — it stores and revalidates, which with
+                    // the ETag these files already carry costs a 304 rather than a full download.
+                    OnPrepareResponse = ctx =>
+                    {
+                        var path = ctx.Context.Request.Path.Value ?? "";
+                        ctx.Context.Response.Headers.CacheControl =
+                            path.Contains("/assets/", StringComparison.OrdinalIgnoreCase)
+                                ? "public, max-age=31536000, immutable"
+                                : "no-cache";
+                    }
                 });
             }
 

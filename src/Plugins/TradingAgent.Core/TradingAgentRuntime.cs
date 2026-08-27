@@ -128,7 +128,9 @@ public sealed class TradingAgentRuntime
         services.AddSingleton<AhkBrowserBrokerAdapter>();
         services.AddSingleton<IBrokerAdapter>(sp => sp.GetRequiredService<AhkBrowserBrokerAdapter>());
         services.AddSingleton<IBrokerStateReader>(sp => sp.GetRequiredService<AhkBrowserBrokerAdapter>());
+        services.AddSingleton<IBrokerOrderCanceller>(sp => sp.GetRequiredService<AhkBrowserBrokerAdapter>());
         services.AddSingleton<IMarketCalendar, PsxMarketCalendar>();
+        services.AddSingleton(TimeProvider.System);
         // Decides whether the VENUE is accepting orders, preferring the broker's own reported state
         // over the local calendar so the pre-open (OHO) order window is not silently forfeited.
         services.AddSingleton<OrderWindow>();
@@ -210,7 +212,10 @@ public sealed class TradingAgentRuntime
         services.AddHostedService(sp => sp.GetRequiredService<AssessmentJobCoordinator>());
         services.AddSingleton<TradingPolicyProvider>();
         services.AddSingleton<IPluginConfigDefinitionProvider, TradingPluginConfigDefinitionProvider>();
-        services.AddSingleton<ITradingRepository, SqliteTradingRepository>();
+        services.AddSingleton<SqliteTradingRepository>();
+        services.AddSingleton<ITradingRepository>(sp => sp.GetRequiredService<SqliteTradingRepository>());
+        services.AddSingleton<IAutomationCampaignRepository>(
+            sp => sp.GetRequiredService<SqliteTradingRepository>());
         services.AddSingleton<ITradingRiskEngine, TradingRiskEngine>();
         services.AddSingleton<TradingReconciliationState>();
         services.AddSingleton<ApprovalIntentRegistry>();
@@ -236,18 +241,30 @@ public sealed class TradingAgentRuntime
         // Registered as a singleton AND as the hosted service, so the API can read its live status and
         // trigger a pass on the same instance the timer drives.
         services.AddSingleton<WatchlistMonitorWorker>();
+        services.AddSingleton<IMarketSessionOpenParticipant>(
+            sp => sp.GetRequiredService<WatchlistMonitorWorker>());
         services.AddHostedService(sp => sp.GetRequiredService<WatchlistMonitorWorker>());
         services.AddHostedService<TradingSafetyStartupValidator>();
         services.AddSingleton<BrokerReconciliationWorker>();
+        services.AddSingleton<IMarketSessionOpenParticipant>(
+            sp => sp.GetRequiredService<BrokerReconciliationWorker>());
         services.AddHostedService(sp => sp.GetRequiredService<BrokerReconciliationWorker>());
         services.AddHostedService<TradingRetentionWorker>();
         services.AddHostedService<TakeProfitRetryWorker>();
         // Singleton AND hosted service, so the arm endpoint can kick an immediate baseline capture on
         // the same instance the timer drives.
         services.AddSingleton<ProtectiveStopWorker>();
+        services.AddSingleton<IMarketSessionOpenParticipant>(
+            sp => sp.GetRequiredService<ProtectiveStopWorker>());
         services.AddHostedService(sp => sp.GetRequiredService<ProtectiveStopWorker>());
         services.AddSingleton<PersistentOrderWorker>();
+        services.AddSingleton<IMarketSessionOpenParticipant>(
+            sp => sp.GetRequiredService<PersistentOrderWorker>());
         services.AddHostedService(sp => sp.GetRequiredService<PersistentOrderWorker>());
+        // Registered last so its participant enumeration includes every core worker above and any
+        // edition-specific participant added after AddCore returns.
+        services.AddSingleton<MarketSessionOpenCoordinator>();
+        services.AddHostedService(sp => sp.GetRequiredService<MarketSessionOpenCoordinator>());
         services.AddHostedService<DailyCandleBackfillWorker>();
     }
 

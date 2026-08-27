@@ -143,6 +143,7 @@ public sealed class TradingManager
         // cannot disagree. Risk limits below are evaluated against the quantity that can actually be
         // submitted, while the immutable approval above remains bound to the requested maximum.
         IReadOnlyList<SellQuantityAdjustment> sellAdjustments = [];
+        IReadOnlyCollection<string> liquidationUniverse = [];
         if (mode is not ("PAPER" or "SHADOW"))
         {
             var maxAge = TimeSpan.FromSeconds(
@@ -168,13 +169,22 @@ public sealed class TradingManager
 
             groups = sizing.Groups;
             sellAdjustments = sizing.Adjustments;
+            if (brokerState.Healthy)
+            {
+                liquidationUniverse = brokerState.Positions
+                    .Where(position => position.Quantity > 0)
+                    .Select(position => position.Symbol)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+            }
         }
 
         IReadOnlyList<string>? executionUniverse = null;
         if (_universe is not null)
             executionUniverse = await _universe.ForExecutionAsync(ct);
 
-        var risk = _riskEngine.Validate(groups, policy.KillSwitch, executionUniverse);
+        var risk = _riskEngine.Validate(
+            groups, policy.KillSwitch, executionUniverse, liquidationUniverse);
         if (!risk.Allowed)
             return Reject(policy.Version,
                 "Pre-trade risk validation failed: " + string.Join(" ", risk.Violations));

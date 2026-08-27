@@ -20,10 +20,23 @@ public interface IBrokerAdapter
         IReadOnlyList<IReadOnlyList<TradingSignal>> groups);
 }
 
-public sealed class AhkBrowserBrokerAdapter : IBrokerAdapter, IBrokerStateReader
+/// <summary>
+/// Cancels one resting order by the broker's own order number, and PROVES it — accepting a cancel
+/// request is not the same as the order actually leaving the book. Registered alongside
+/// <see cref="IBrokerAdapter"/>/<see cref="IBrokerStateReader"/> for every broker this codebase
+/// supports (see <c>AhkBrowserBrokerAdapter</c> below and premium's <c>AhlBrokerAdapter</c>), so a
+/// consumer can take it as a required dependency rather than probing for one.
+/// </summary>
+public interface IBrokerOrderCanceller
+{
+    Task<BrokerCancellationResult> CancelOrderAsync(string orderNo, CancellationToken ct = default);
+}
+
+public sealed class AhkBrowserBrokerAdapter : IBrokerAdapter, IBrokerStateReader, IBrokerOrderCanceller
 {
     private readonly AhkBroker _broker;
     private readonly AhkPortalClient _portal;
+    private readonly BrokerOrderCancellationService _cancellation;
     private readonly IRuntimePluginOptions<AhkConfig> _config;
     private readonly ILogger<AhkBrowserBrokerAdapter> _logger;
     private readonly TradingActivityLog? _activity;
@@ -31,16 +44,23 @@ public sealed class AhkBrowserBrokerAdapter : IBrokerAdapter, IBrokerStateReader
     public AhkBrowserBrokerAdapter(
         AhkBroker broker,
         AhkPortalClient portal,
+        BrokerOrderCancellationService cancellation,
         IRuntimePluginOptions<AhkConfig> config,
         ILogger<AhkBrowserBrokerAdapter> logger,
         TradingActivityLog? activity = null)
     {
         _broker = broker;
         _portal = portal;
+        _cancellation = cancellation;
         _config = config;
         _logger = logger;
         _activity = activity;
     }
+
+    /// <summary>Delegates to the existing verified-cancel service — over the JSON API, proven against
+    /// the outstanding book rather than trusting the HTTP response.</summary>
+    public Task<BrokerCancellationResult> CancelOrderAsync(string orderNo, CancellationToken ct = default) =>
+        _cancellation.CancelExactAsync(orderNo, ct);
 
     public Task<IReadOnlyDictionary<string, decimal?>> GetMarketPricesAsync(IReadOnlyList<string> symbols) =>
         _broker.GetMarketPricesAsync(symbols);

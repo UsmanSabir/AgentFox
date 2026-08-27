@@ -10,34 +10,45 @@ using TradingAgent.Market;
 using TradingAgent.Models;
 using TradingAgent.Observability;
 using TradingAgent.Persistence;
+using TradingAgent.Reconciliation;
 using TradingAgent.Watchlist;
 
 namespace TradingAgent.Trading;
 
 /// <summary>
-/// Keeps protective stops honest: confirms the entry actually filled, places the native stop, and
-/// re-places it every session for as long as the position exists.
+/// Keeps protective stops honest: confirms the entry actually filled, places the native stop,
+/// re-places it every session for as long as the position exists, and — when a newer stop supersedes
+/// this one (a break-even lift, an ATR trail) — retires its native order at the broker once, and only
+/// once, the replacement is confirmed resting.
 ///
 /// <para>
-/// <b>Why a separate worker rather than the monitor pass.</b> Both of this worker's readings —
-/// holdings and the outstanding book — drive the real browser, and every broker action serialises on
-/// one semaphore inside <see cref="AhkBroker"/>. Running them on the monitor's 30-second cadence
-/// would put a multi-second page scrape in front of every order submission. So this runs on its own
-/// slower clock, and does nothing at all — not even waking the browser — when no stop is open.
+/// <b>Why a separate worker rather than the monitor pass.</b> Reads and placements go through
+/// <see cref="IBrokerStateReader"/>/<see cref="TradingManager"/> rather than this class talking to a
+/// broker directly, so the cost here depends on which adapter is active — a browser-driven one pays
+/// for a page scrape, an API/socket-driven one does not. Either way this runs on its own slower clock
+/// rather than the monitor's 30-second cadence, and does nothing at all when no stop is open — see
+/// <see cref="TriggerSoon"/> for the on-demand path that shortens the wait after a stop is raised
+/// without changing that cadence for everything else.
 /// </para>
 ///
 /// <para>
 /// <b>The bias throughout is inaction.</b> Every unreadable value is treated as unknown rather than
 /// as zero, and every ambiguity resolves to "do not place". The two mistakes are not symmetric: a
 /// stop that failed to go in is visible in the panel and can be placed by hand, whereas a duplicate
-/// stop sells the position twice — and this broker exposes no way to cancel a resting order.
+/// stop sells the position twice. Where a broker DOES expose a verified cancel
+/// (<see cref="IBrokerOrderCanceller"/>), a superseded stop's old order is retired through it — but
+/// only after its replacement is confirmed live, and only ever forward: a cancel that fails or cannot
+/// be confirmed leaves the old order resting and the row retried next pass, never the reverse.
 /// </para>
 /// </summary>
-public sealed class ProtectiveStopWorker : BackgroundService
+public sealed class ProtectiveStopWorker : BackgroundService, IMarketSessionOpenParticipant
 {
+    public string Name => "protective stops";
+    public int Order => 200;
+
     private readonly IServiceScopeFactory _scopes;
-    private readonly AhkBroker _broker;
-    private readonly PortfolioReader _portfolio;
+    private readonly IBrokerStateReader _stateReader;
+    private readonly IBrokerOrderCanceller _canceller;
     private readonly TradingManager _manager;
     private readonly ApprovalGate _approvals;
     private readonly IMarketCalendar _calendar;
@@ -58,22 +69,23 @@ public sealed class ProtectiveStopWorker : BackgroundService
 
     /// <summary>Serialises ad-hoc baseline captures and guards the shared snapshot below.</summary>
     private readonly SemaphoreSlim _baselineGate = new(1, 1);
+    private readonly SemaphoreSlim _runGate = new(1, 1);
 
     /// <summary>
-    /// The last holdings read, reused for a few seconds so that arming several stops in a row costs
-    /// one page scrape rather than one each. Holdings cannot change between two reads that close
+    /// The last account snapshot read, reused for a few seconds so that arming several stops in a row
+    /// costs one broker read rather than one each. Holdings cannot change between two reads that close
     /// together without an order of ours in between, and an order of ours would move the baseline
     /// out of scope anyway.
     /// </summary>
-    private IReadOnlyDictionary<string, decimal?>? _recentHoldings;
-    private DateTime _recentHoldingsUtc = DateTime.MinValue;
+    private BrokerReconciliationSnapshot? _recentSnapshot;
+    private DateTime _recentSnapshotUtc = DateTime.MinValue;
 
     private static readonly TimeSpan HoldingsReuseWindow = TimeSpan.FromSeconds(30);
 
     public ProtectiveStopWorker(
         IServiceScopeFactory scopes,
-        AhkBroker broker,
-        PortfolioReader portfolio,
+        IBrokerStateReader stateReader,
+        IBrokerOrderCanceller canceller,
         TradingManager manager,
         ApprovalGate approvals,
         IMarketCalendar calendar,
@@ -83,17 +95,17 @@ public sealed class ProtectiveStopWorker : BackgroundService
         TradingActivityLog? activity = null,
         IUserNotifier? notifier = null)
     {
-        _activity  = activity;
-        _notifier  = notifier;
-        _scopes    = scopes;
-        _broker    = broker;
-        _portfolio = portfolio;
-        _manager   = manager;
-        _approvals = approvals;
-        _calendar  = calendar;
-        _policy    = policy;
-        _options   = options;
-        _logger    = logger;
+        _activity    = activity;
+        _notifier    = notifier;
+        _scopes      = scopes;
+        _stateReader = stateReader;
+        _canceller   = canceller;
+        _manager     = manager;
+        _approvals   = approvals;
+        _calendar    = calendar;
+        _policy      = policy;
+        _options     = options;
+        _logger      = logger;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -108,7 +120,7 @@ public sealed class ProtectiveStopWorker : BackgroundService
             try { await Task.Delay(interval, stoppingToken); }
             catch (OperationCanceledException) { break; }
 
-            try { await RunPassAsync(stoppingToken); }
+            try { await RunNowAsync(stoppingToken); }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 _logger.LogError(ex, "[ProtectiveStops] Pass failed.");
@@ -178,10 +190,10 @@ public sealed class ProtectiveStopWorker : BackgroundService
                 return;
             }
 
-            var holdings = await HoldingsForBaselineAsync();
-            if (holdings is null) return;
+            var snapshot = await SnapshotForBaselineAsync();
+            if (snapshot is not { Healthy: true }) return;
 
-            var held = TryHeld(holdings, stop.Symbol);
+            var held = TryHeld(HoldingsFrom(snapshot), stop.Symbol);
             if (held is not { } quantity) return;
 
             if (await repository.RecordProtectiveStopBaselineAsync(stopId, (int)Math.Floor(quantity)))
@@ -200,22 +212,50 @@ public sealed class ProtectiveStopWorker : BackgroundService
         }
     }
 
-    /// <summary>Reads holdings, reusing a very recent read. ASSUMES the baseline gate is held.</summary>
-    private async Task<IReadOnlyDictionary<string, decimal?>?> HoldingsForBaselineAsync()
+    /// <summary>Reads the account snapshot, reusing a very recent read. ASSUMES the baseline gate is held.</summary>
+    private async Task<BrokerReconciliationSnapshot?> SnapshotForBaselineAsync()
     {
-        if (_recentHoldings is not null && DateTime.UtcNow - _recentHoldingsUtc < HoldingsReuseWindow)
-            return _recentHoldings;
+        if (_recentSnapshot is not null && DateTime.UtcNow - _recentSnapshotUtc < HoldingsReuseWindow)
+            return _recentSnapshot;
 
-        var holdings = await ReadHoldingsAsync();
-        if (holdings is not null)
+        var snapshot = await ReadAccountSnapshotAsync();
+        if (snapshot is { Healthy: true })
         {
-            _recentHoldings = holdings;
-            _recentHoldingsUtc = DateTime.UtcNow;
+            _recentSnapshot = snapshot;
+            _recentSnapshotUtc = DateTime.UtcNow;
         }
-        return holdings;
+        return snapshot;
     }
 
-    private async Task RunPassAsync(CancellationToken ct)
+    public async Task RunNowAsync(CancellationToken ct = default)
+    {
+        await _runGate.WaitAsync(ct);
+        try { await RunPassCoreAsync(ct); }
+        finally { _runGate.Release(); }
+    }
+
+    /// <summary>
+    /// Fire-and-forget on-demand pass, for a caller that just wrote a stop (raised or newly armed) and
+    /// wants it acted on sooner than the periodic clock — mirroring <see cref="CaptureBaselineSoon"/>'s
+    /// reasoning. Not awaited by design: the caller (e.g. a strategy's exit evaluation) must not be
+    /// blocked on a broker round trip, and the periodic pass remains the durable fallback if this one
+    /// is skipped, races another, or fails outright.
+    /// </summary>
+    public void TriggerSoon() =>
+        _ = Task.Run(async () =>
+        {
+            try { await RunNowAsync(); }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "[ProtectiveStops] On-demand pass failed; the periodic pass will try again.");
+            }
+        });
+
+    public Task RunAtMarketOpenAsync(MarketSessionOpenContext context, CancellationToken ct) =>
+        RunNowAsync(ct);
+
+    private async Task RunPassCoreAsync(CancellationToken ct)
     {
         using var scope = _scopes.CreateScope();
         var repository = scope.ServiceProvider.GetRequiredService<ITradingRepository>();
@@ -235,47 +275,80 @@ public sealed class ProtectiveStopWorker : BackgroundService
         var market = _calendar.GetStatus();
         if (!market.IsOpen) return;
 
-        // ONE browser session for the whole pass. Both reads and any stop this pass places drive the
-        // same portal, and the broker's on-demand lifecycle would otherwise launch, log in and close
-        // Chromium separately for each of them — the visible symptom being a browser window that pops
-        // up two or three times every few minutes.
-        await using var session = _broker.LeaseSession();
-
         _activity?.Info("Stops", $"Checking {stops.Count} protective stop(s)");
 
-        // One holdings read and one book read serve every stop in the pass. Reading per-stop would
-        // multiply the most expensive thing this worker does by the number of positions held.
+        // One account read serves every stop in the pass. Reading per-stop would multiply the most
+        // expensive thing this worker does by the number of positions held. Cost here depends on the
+        // active IBrokerStateReader implementation — a browser-driven adapter pays for a page scrape,
+        // an API/socket-driven one does not; this worker no longer knows or cares which.
         //
-        // The book read is also what makes overnight correctness work, and the reason is not obvious:
-        // PSX orders are DAY orders, and the broker cancels every resting order at the close — confirmed
-        // live on 2026-08-19, where a protective sell that had rested since 10:00 was gone minutes after
-        // the bell along with the whole book. So a stop this worker placed yesterday does not exist today,
-        // whatever the ledger remembers about placing it. Nothing here needs to special-case that as long
-        // as the decision is driven by what is ACTUALLY resting rather than by what was recorded: the
-        // first pass after the open sees an unprotected position and places the stop again. Anything that
-        // starts trusting the stored state instead would leave positions unprotected every morning while
-        // reporting them protected.
-        var holdings = await ReadHoldingsAsync();
-        var resting  = await ReadRestingAsync();
+        // The resting-book read is also what makes overnight correctness work, and the reason is not
+        // obvious: PSX orders are DAY orders, and the broker cancels every resting order at the close —
+        // confirmed live on 2026-08-19, where a protective sell that had rested since 10:00 was gone
+        // minutes after the bell along with the whole book. So a stop this worker placed yesterday does
+        // not exist today, whatever the ledger remembers about placing it. Nothing here needs to
+        // special-case that as long as the decision is driven by what is ACTUALLY resting rather than by
+        // what was recorded: the first pass after the open sees an unprotected position and places the
+        // stop again. Anything that starts trusting the stored state instead would leave positions
+        // unprotected every morning while reporting them protected.
+        var snapshot = await ReadAccountSnapshotAsync();
+
+        // Unknown is never zero: a snapshot that is not fully healthy could mean holdings specifically
+        // failed to read, and an empty Positions list from THAT would look identical to "you hold
+        // nothing" — which would close a stop still protecting a real position. So an unhealthy snapshot
+        // is treated as holdings AND resting-book unknown together, not per-field, even though a failure
+        // may really have been narrower than that. Coarser than the old per-field reads, but never wrong
+        // in the dangerous direction.
+        var holdings = snapshot is { Healthy: true } ? HoldingsFrom(snapshot) : null;
+        var resting  = snapshot is { Healthy: true } ? RestingFrom(snapshot) : null;
         var today    = DateOnly.FromDateTime(market.PktNow);
 
+        if (snapshot is not { Healthy: true })
+            _logger.LogWarning(
+                "[ProtectiveStops] Account snapshot unhealthy this pass ({Reason}); holdings and the " +
+                "resting book are treated as unknown, so nothing will be placed or cancelled.",
+                snapshot?.Reason ?? "no snapshot");
+
         // Share this read with any baseline capture that lands in the next few seconds, so arming a
-        // stop just after a pass does not scrape the same page twice.
-        if (holdings is not null)
+        // stop just after a pass does not re-read the account twice.
+        if (snapshot is { Healthy: true })
         {
-            _recentHoldings = holdings;
-            _recentHoldingsUtc = DateTime.UtcNow;
+            _recentSnapshot = snapshot;
+            _recentSnapshotUtc = DateTime.UtcNow;
         }
 
-        foreach (var stop in stops)
+        // Superseded rows first: a stop here has already lost its place to a newer one, so retiring its
+        // broker order is retried before anything else this pass — including a fresh supersede that
+        // MaintainAsync below may itself create and immediately retire in the same pass.
+        foreach (var stop in stops.Where(s => s.State == "superseded_pending_cancel"))
+        {
+            ct.ThrowIfCancellationRequested();
+            try { await RetireSupersededAsync(repository, stop, resting, ct); }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogError(ex, "[ProtectiveStops] {StopId} ({Symbol}) failed to retire this pass.",
+                    stop.StopId, stop.Symbol);
+            }
+        }
+
+        // A predecessor superseded mid-loop (see the hook in PlaceNativeStopAsync) is transitioned in
+        // the DATABASE immediately, but the in-memory `stops` snapshot taken at the top of this pass
+        // still shows it "active" — the newest-first ordering means the new stop it lost its place to
+        // is visited BEFORE it. Without this set, reaching its stale entry later in this same loop
+        // would call MaintainAsync on a row already headed for retirement. Empty in the ordinary case;
+        // populated only when a supersede actually happens during this pass.
+        var retiredThisPass = new HashSet<string>();
+
+        foreach (var stop in stops.Where(s => s.State is "pending_fill" or "active"
+                                            && !retiredThisPass.Contains(s.StopId)))
         {
             ct.ThrowIfCancellationRequested();
             try
             {
                 if (stop.State == "pending_fill")
                     await WatchForFillAsync(repository, stop, holdings, resting, ct);
-                else if (stop.State == "active")
-                    await MaintainAsync(repository, stop, holdings, resting, today, ct);
+                else
+                    await MaintainAsync(repository, stop, holdings, resting, today, stops, retiredThisPass, ct);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -419,6 +492,8 @@ public sealed class ProtectiveStopWorker : BackgroundService
         IReadOnlyDictionary<string, decimal?>? holdings,
         IReadOnlyList<RestingOrder>? resting,
         DateOnly today,
+        IReadOnlyList<ProtectiveStop> allStops,
+        HashSet<string> retiredThisPass,
         CancellationToken ct)
     {
         if (stop.ParentArmedId is { } parentId)
@@ -469,7 +544,7 @@ public sealed class ProtectiveStopWorker : BackgroundService
                 return;
         }
 
-        await PlaceNativeStopAsync(repository, stop, decision, today, ct);
+        await PlaceNativeStopAsync(repository, stop, decision, today, allStops, resting, retiredThisPass, ct);
     }
 
     /// <summary>
@@ -487,6 +562,9 @@ public sealed class ProtectiveStopWorker : BackgroundService
         ProtectiveStop stop,
         PlacementDecision decision,
         DateOnly today,
+        IReadOnlyList<ProtectiveStop> allStops,
+        IReadOnlyList<RestingOrder>? resting,
+        HashSet<string> retiredThisPass,
         CancellationToken ct)
     {
         var signal = new TradingSignal
@@ -539,6 +617,34 @@ public sealed class ProtectiveStopWorker : BackgroundService
             _activity?.Info("Stops",
                 $"{stop.Symbol}: stop placed at the broker — SELL {decision.Quantity:N0} "
                 + $"trigger {stop.StopTrigger:0.##} limit {stop.StopLimit:0.##}");
+
+            // This row supersedes an earlier stop (a break-even lift, an ATR trail) — and this is the
+            // exact moment its replacement was confirmed live. Only NOW does the predecessor move
+            // toward retirement; see ProtectiveStop.SupersedesStopId and RetireSupersededAsync for why
+            // this ordering — never the reverse — is what guarantees the position is never briefly
+            // covered by zero stops.
+            if (stop.SupersedesStopId is { Length: > 0 } supersededId)
+            {
+                var predecessor = allStops.FirstOrDefault(s => s.StopId == supersededId);
+                if (predecessor is not null)
+                {
+                    var transitioned = await repository.TrySetProtectiveStopStateAsync(
+                        predecessor.StopId, "active", "superseded_pending_cancel",
+                        $"Superseded by {stop.StopId} (new trigger {stop.StopTrigger}), now confirmed " +
+                        "resting at the broker.", ct);
+                    if (transitioned)
+                    {
+                        // The predecessor's entry in this pass's `stops` snapshot is now stale (still
+                        // shows "active" in memory) — mark it so the main loop's later pass over that
+                        // snapshot skips it instead of re-running MaintainAsync on a row already headed
+                        // for retirement.
+                        retiredThisPass.Add(predecessor.StopId);
+                        await RetireSupersededAsync(
+                            repository, predecessor with { State = "superseded_pending_cancel" },
+                            resting, ct);
+                    }
+                }
+            }
             return;
         }
 
@@ -558,6 +664,100 @@ public sealed class ProtectiveStopWorker : BackgroundService
             + $"• {order?.Message ?? result.Reason}\n"
             + "_Retrying next pass. Until it succeeds the position is covered only by the local "
             + "backstop, which needs AgentFox running._");
+    }
+
+    // ── Supersession ────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Retires a stop that has already lost its place to a newer one — cancels its native order at the
+    /// broker if it still has one resting, then closes the row. Never the other way around.
+    ///
+    /// <para>
+    /// <b>Reached from two paths, deliberately.</b> <see cref="PlaceNativeStopAsync"/> calls this the
+    /// moment a replacement is confirmed live, for low latency. The per-pass sweep in
+    /// <see cref="RunPassCoreAsync"/> calls it for every row still in this state, which is what makes a
+    /// failed or unconfirmed cancel — a network error, a crash mid-call, anything — self-heal: the row
+    /// stays <c>superseded_pending_cancel</c> in the durable ledger rather than in memory, so the very
+    /// next pass (periodic, or the next <see cref="TriggerSoon"/>) picks up exactly where it left off.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>The failure mode this exists to avoid is zero stops resting, never two.</b> If the cancel
+    /// cannot be verified, the row is left exactly as it is — <c>superseded_pending_cancel</c>, its
+    /// native order (if any) still resting — so the position stays covered by BOTH the old and the new
+    /// stop until the cancel actually succeeds. That is the same "briefly covered twice" state this
+    /// codebase already accepts for a locally-superseded stop; core sizes every sell against custody
+    /// minus resting sells, so two resting stops cannot oversell the position between them.
+    /// </para>
+    /// </summary>
+    private async Task RetireSupersededAsync(
+        ITradingRepository repository,
+        ProtectiveStop stop,
+        IReadOnlyList<RestingOrder>? resting,
+        CancellationToken ct)
+    {
+        if (stop.LastOrderNo is not { Length: > 0 } orderNo)
+        {
+            // No native order was ever placed for this row — there is nothing at the broker to cancel.
+            await repository.TrySetProtectiveStopStateAsync(
+                stop.StopId, "superseded_pending_cancel", "closed",
+                "Superseded before any native order was placed for it; nothing to cancel.", ct);
+            return;
+        }
+
+        // Already gone from the book — fired, expired, or cancelled some other way. A resting-book read
+        // that itself failed this pass (resting == null) is NOT evidence of anything, so it falls
+        // through to attempting the cancel below rather than assuming the order is already gone.
+        if (resting is not null
+            && !resting.Any(r => string.Equals(r.OrderNo?.Trim(), orderNo, StringComparison.OrdinalIgnoreCase)))
+        {
+            await repository.TrySetProtectiveStopStateAsync(
+                stop.StopId, "superseded_pending_cancel", "closed",
+                $"Order {orderNo} is no longer in the outstanding book; nothing left to cancel.", ct);
+            return;
+        }
+
+        BrokerCancellationResult result;
+        try
+        {
+            result = await _canceller.CancelOrderAsync(orderNo, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "[ProtectiveStops] {StopId} ({Symbol}): cancel of superseded order {OrderNo} threw; " +
+                "left resting, retried next pass.", stop.StopId, stop.Symbol, orderNo);
+            return;
+        }
+
+        if (result.Gone)
+        {
+            await repository.TrySetProtectiveStopStateAsync(
+                stop.StopId, "superseded_pending_cancel", "closed",
+                $"Superseded order {orderNo} confirmed cancelled: {result.Message}", ct);
+            _logger.LogInformation(
+                "[ProtectiveStops] {StopId} ({Symbol}): superseded order {OrderNo} cancelled and " +
+                "confirmed gone.", stop.StopId, stop.Symbol, orderNo);
+            _activity?.Info("Stops", $"{stop.Symbol}: superseded stop {orderNo} cancelled", result.Message);
+            return;
+        }
+
+        // Not verified gone. The row stays superseded_pending_cancel — retried next pass — and the old
+        // order stays resting, so the position remains covered rather than briefly protected by nothing.
+        _logger.LogWarning(
+            "[ProtectiveStops] {StopId} ({Symbol}): cancel NOT verified for superseded order {OrderNo}: " +
+            "{Message}. Left resting; the position is covered by both the old and new stop meanwhile.",
+            stop.StopId, stop.Symbol, orderNo, result.Message);
+        _activity?.Warn("Stops",
+            $"{stop.Symbol}: could not confirm cancellation of superseded stop {orderNo}", result.Message);
+
+        await AlertOnceAsync(stop, "cancel-unconfirmed", DateOnly.FromDateTime(_calendar.GetStatus().PktNow),
+            $"⚠️ **Superseded stop could not be cancelled — {stop.Symbol}**\n"
+            + $"• Old order #{orderNo} is still resting at the broker after a newer stop replaced it\n"
+            + $"• {result.Message}\n"
+            + "_The position is protected by both stops meanwhile — retrying automatically. If this "
+            + "persists, cancel the old order manually._");
     }
 
     // ── Local backstop ────────────────────────────────────────────────────────
@@ -624,35 +824,36 @@ public sealed class ProtectiveStopWorker : BackgroundService
     }
 
     /// <summary>
-    /// Holdings by symbol, or null when the grid could not be read at all. The distinction is the
-    /// point: an empty dictionary would mean "you hold nothing", which is a very different claim.
+    /// The account snapshot behind this worker's holdings and resting-book reads — whichever
+    /// <see cref="IBrokerStateReader"/> is active for this edition/broker. Null only when the read
+    /// itself threw; an unhealthy-but-present snapshot is handled by the caller (see the "Unknown is
+    /// never zero" note in <see cref="RunPassCoreAsync"/>), not here.
     /// </summary>
-    private async Task<IReadOnlyDictionary<string, decimal?>?> ReadHoldingsAsync()
+    private async Task<BrokerReconciliationSnapshot?> ReadAccountSnapshotAsync()
     {
-        try
-        {
-            var snapshot = await _portfolio.GetPortfolioAsync();
-            return snapshot.Holdings.ToDictionary(
-                h => h.Symbol, h => h.Quantity, StringComparer.OrdinalIgnoreCase);
-        }
+        try { return await _stateReader.ReadSnapshotAsync(); }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "[ProtectiveStops] Holdings could not be read this pass.");
-            _activity?.Warn("Stops", "Holdings could not be read this pass", ex.Message);
+            _logger.LogWarning(ex, "[ProtectiveStops] The account snapshot could not be read this pass.");
+            _activity?.Warn("Stops", "The account snapshot could not be read this pass", ex.Message);
             return null;
         }
     }
 
-    private async Task<IReadOnlyList<RestingOrder>?> ReadRestingAsync()
-    {
-        try { return await _broker.GetOutstandingOrdersAsync(); }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "[ProtectiveStops] The outstanding book could not be read this pass.");
-            _activity?.Warn("Stops", "The outstanding order book could not be read this pass", ex.Message);
-            return null;
-        }
-    }
+    private static IReadOnlyDictionary<string, decimal?> HoldingsFrom(BrokerReconciliationSnapshot snapshot) =>
+        snapshot.Positions.ToDictionary(
+            p => p.Symbol, p => (decimal?)p.Quantity, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Maps the broker-neutral working-order shape onto the RestingOrder shape
+    /// <see cref="ProtectiveStopDecisions"/> was written against. OrderType and the raw row text have no
+    /// equivalent in <see cref="BrokerWorkingOrder"/> and are left null/empty — neither is read by any
+    /// decision in that type, only Symbol/Side/Price/OrderNo/Quantity are.
+    /// </summary>
+    private static IReadOnlyList<RestingOrder> RestingFrom(BrokerReconciliationSnapshot snapshot) =>
+        snapshot.OpenOrders.Select(o => new RestingOrder(
+            o.Symbol, o.Side, null, o.RemainingQuantity is { } q ? (int)q : null, o.Price, o.OrderNo, ""))
+            .ToList();
 
     // ── Alerts ────────────────────────────────────────────────────────────────
 
