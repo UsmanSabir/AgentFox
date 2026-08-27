@@ -54,7 +54,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
     private readonly TradingAgent.Manager.TradingManager _manager;
     private readonly PersistentOrderWorker _persistentOrders;
     private readonly TradingReconciliationState _reconciliation;
-    private readonly TradingAgent.Broker.AhkBroker _broker;
+    private readonly TradingAgent.Broker.IBrokerOutstandingOrdersReader _outstandingReader;
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly ILogger<WatchlistMonitorWorker> _logger;
     private readonly TradingActivityLog? _activity;
@@ -75,7 +75,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
         TradingAgent.Manager.TradingManager manager,
         PersistentOrderWorker persistentOrders,
         TradingReconciliationState reconciliation,
-        TradingAgent.Broker.AhkBroker broker,
+        TradingAgent.Broker.IBrokerOutstandingOrdersReader outstandingReader,
         IOptions<TradingAgentOptions> options,
         ILogger<WatchlistMonitorWorker> logger,
         TradingActivityLog? activity = null)
@@ -92,7 +92,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
         _manager = manager;
         _persistentOrders = persistentOrders;
         _reconciliation = reconciliation;
-        _broker = broker;
+        _outstandingReader = outstandingReader;
         _options = options;
         _logger = logger;
 
@@ -406,12 +406,6 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                 continue;
             }
 
-            // One browser session for this order's whole fire path. A backstop reads the outstanding
-            // book and then submits, and without this the broker's on-demand lifecycle closes the
-            // browser between the two — launching, logging in and tearing down Chromium twice to
-            // place one order.
-            await using var session = _broker.LeaseSession();
-
             // A backstop is not an ordinary armed order: it exists to cover the window where the
             // native stop does not, and must stand down the moment that stop is resting. Skipping
             // this check is exactly how "native plus a local backstop" becomes two orders selling
@@ -641,8 +635,8 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
     ///
     /// <para>
     /// The outstanding book is read only at this point — when a backstop has actually reached its
-    /// trigger — rather than every pass, because it drives the real browser. That is a rare event, and
-    /// paying one page read to avoid selling a position twice is the right trade.
+    /// trigger — rather than every pass, because it is a live broker read. That is a rare event, and
+    /// paying one read to avoid selling a position twice is the right trade.
     /// </para>
     /// </summary>
     private async Task<string?> BackstopMustStandDownAsync(ArmedOrder order, CancellationToken ct)
@@ -657,7 +651,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
             return $"the protective stop it backs is closed ({stop.StateReason})";
 
         IReadOnlyList<RestingOrder>? resting;
-        try { resting = await _broker.GetOutstandingOrdersAsync(order.Symbol); }
+        try { resting = await _outstandingReader.GetOutstandingOrdersAsync(order.Symbol, ct); }
         catch (Exception ex)
         {
             _logger.LogWarning(ex,

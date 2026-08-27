@@ -129,6 +129,7 @@ public sealed class TradingAgentRuntime
         services.AddSingleton<IBrokerAdapter>(sp => sp.GetRequiredService<AhkBrowserBrokerAdapter>());
         services.AddSingleton<IBrokerStateReader>(sp => sp.GetRequiredService<AhkBrowserBrokerAdapter>());
         services.AddSingleton<IBrokerOrderCanceller>(sp => sp.GetRequiredService<AhkBrowserBrokerAdapter>());
+        services.AddSingleton<IBrokerOutstandingOrdersReader>(sp => sp.GetRequiredService<AhkBrowserBrokerAdapter>());
         services.AddSingleton<IMarketCalendar, PsxMarketCalendar>();
         services.AddSingleton(TimeProvider.System);
         // Decides whether the VENUE is accepting orders, preferring the broker's own reported state
