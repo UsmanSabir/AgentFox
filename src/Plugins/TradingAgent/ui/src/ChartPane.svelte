@@ -15,11 +15,12 @@
   } from 'lightweight-charts';
   import {
     trading, CHART_INTERVALS,
-    type ArmOrderDialogContext, type ChartData, type ChartInterval, type StockAssessment
+    type ArmOrderDialogContext, type CandleArchiveStatus, type ChartData, type ChartInterval,
+    type StockAssessment
   } from './api';
   import {
     LineChart, AlertTriangle, Eye, RefreshCw, Brain, Maximize2, Minimize2,
-    Activity, Crosshair, BarChart3, TrendingDown
+    Activity, Crosshair, BarChart3, TrendingDown, CalendarClock, Download
   } from 'lucide-svelte';
   import AssessmentCard from './AssessmentCard.svelte';
 
@@ -37,6 +38,12 @@
    * for the page rather than one per component, and so the market-open flag driving it stays fresh.
    */
   export let refreshTick = 0;
+
+  /** Archive progress from the dashboard's existing poll — no second status request from this pane. */
+  export let archive: CandleArchiveStatus | null = null;
+
+  /** Advances whenever that poll returns, allowing a chart to grow while a backfill is running. */
+  export let historyRefreshTick = 0;
 
   /** Whether the market is currently open — a closed market has nothing new to fetch. */
   export let marketOpen = false;
@@ -181,6 +188,47 @@
   let loading = false;
   let chartError: string | null = null;
   let loadGeneration = 0;
+  let historyGap: CandleArchiveStatus['symbolsShortOfWeekly'][number] | null = null;
+  let historyCheckedSessions = 0;
+  let historyPercent = 0;
+
+  $: historyGap = symbol
+    ? archive?.symbolsShortOfWeekly.find(gap => gap.symbol === symbol) ?? null
+    : null;
+  $: historyCheckedSessions = historyGap && archive
+    ? Math.max(0, archive.targetTradingDays - historyGap.missingSessions)
+    : 0;
+  $: historyPercent = archive?.targetTradingDays
+    ? Math.min(100, Math.round(historyCheckedSessions / archive.targetTradingDays * 100))
+    : 0;
+  /**
+   * A ticker that listed last week is not waiting for a download — the sessions it is short of have
+   * not happened yet. It gets a plain statement of that instead of a progress bar, which in this
+   * state would tick along toward a completeness the symbol can never reach and read as stuck.
+   */
+  $: newListing = historyGap?.noEarlierHistory ?? false;
+  $: sessionsUntilWeekly = historyGap && archive?.dailyBarsForWeekly
+    ? Math.max(0, archive.dailyBarsForWeekly - historyGap.archivedBars)
+    : 0;
+
+  /** Starts the targeted backfill from here, so a chart sitting on a stalled history is not a dead end. */
+  let fetchingHistory = false;
+  let fetchNotice: string | null = null;
+  async function fetchHistory() {
+    if (!symbol || fetchingHistory) return;
+    fetchingHistory = true;
+    fetchNotice = null;
+    try {
+      const result = await trading.startBackfill(undefined, [symbol]);
+      fetchNotice = result.started
+        ? 'Fetching the sessions this symbol was never requested for. The chart grows as they arrive.'
+        : 'A backfill pass is already running; this symbol is fetched once it finishes.';
+    } catch (e) {
+      fetchNotice = e instanceof Error ? e.message : String(e);
+    } finally {
+      fetchingHistory = false;
+    }
+  }
 
   let container: HTMLDivElement | null = null;
   let chart: IChartApi | null = null;
@@ -588,6 +636,7 @@
     const requestedInterval = interval;
     const sameChart = data?.symbol === requestedSymbol && data.interval === requestedInterval;
     const generation = ++loadGeneration;
+    lastHistoryReloadAt = Date.now();
     loading = true;
     chartError = null;
     // A verdict belongs to the symbol and interval it was produced for; carrying it across a change
@@ -638,6 +687,9 @@
   let lastLoaded: string | null = null;
   $: if (symbol && symbol !== lastLoaded) {
     lastLoaded = symbol;
+    // The backfill notice is about the symbol it was raised for; carrying it to the next one would
+    // report a fetch that was never started for it.
+    fetchNotice = null;
     load();
   }
 
@@ -652,6 +704,27 @@
   $: if (refreshTick !== lastTick) {
     lastTick = refreshTick;
     if (symbol && marketOpen && !loading && typeof document !== 'undefined' && !document.hidden) {
+      load(true);
+    }
+  }
+
+  /**
+   * Grow a newly-added symbol in place as its archive fills. The dashboard already polls progress
+   * every four seconds; this pane deliberately refreshes at most every 12 seconds so a historical
+   * download cannot turn into a chart-request storm. One final refresh runs when the pass ends.
+   */
+  const HISTORY_REFRESH_MS = 12_000;
+  let lastHistoryTick = historyRefreshTick;
+  let lastHistoryReloadAt = 0;
+  let historyWasRunning = false;
+  $: if (historyRefreshTick !== lastHistoryTick) {
+    lastHistoryTick = historyRefreshTick;
+    const runningForSymbol = Boolean(symbol && historyGap && archive?.progress.isRunning);
+    const justFinished = historyWasRunning && !runningForSymbol;
+    historyWasRunning = runningForSymbol;
+    const visible = typeof document === 'undefined' || !document.hidden;
+    const refreshDue = Date.now() - lastHistoryReloadAt >= HISTORY_REFRESH_MS;
+    if (symbol && !loading && visible && (justFinished || (runningForSymbol && refreshDue))) {
       load(true);
     }
   }
@@ -763,10 +836,90 @@
     </div>
   </header>
 
+  {#if symbol && historyGap}
+    <div class="history-status" class:new-listing={newListing} role="status" aria-live="polite">
+      <div class="history-copy">
+        {#if newListing}
+          <CalendarClock size={14} aria-hidden="true" />
+        {:else}
+          <RefreshCw size={14} class={archive?.progress.isRunning ? 'spinning' : ''} aria-hidden="true" />
+        {/if}
+        <div>
+          <b>
+            {#if newListing}
+              {symbol} has only {historyGap.archivedBars} session{historyGap.archivedBars === 1 ? '' : 's'} of history
+            {:else if archive?.progress.isRunning}
+              Building {symbol} history
+            {:else}
+              {symbol} history is still limited
+            {/if}
+          </b>
+          <span>
+            {#if newListing}
+              {#if historyGap.firstBarDate}First traded {historyGap.firstBarDate} · {/if}
+              {historyGap.sessionsWithoutTrade} earlier session{historyGap.sessionsWithoutTrade === 1 ? '' : 's'}
+              checked, no trading
+            {:else}
+              {historyGap.archivedBars} daily bar{historyGap.archivedBars === 1 ? '' : 's'} available
+              {#if archive?.targetTradingDays}
+                · {historyCheckedSessions} of {archive.targetTradingDays} sessions checked
+              {/if}
+            {/if}
+          </span>
+        </div>
+      </div>
+      <!-- No progress bar for a new listing: there is nothing left to download, so a bar could only
+           promise history that does not exist. -->
+      {#if !newListing && archive?.targetTradingDays}
+        <div class="history-progress">
+          <progress max={archive.targetTradingDays} value={historyCheckedSessions}
+            aria-label={`${symbol} history backfill progress`}></progress>
+          <strong>{historyPercent}%</strong>
+          {#if !archive.progress.isRunning}
+            <!-- The bar stops moving when no pass is running, which is indistinguishable from stuck.
+                 Offer the thing that would move it rather than leaving it to be watched. -->
+            <button class="fetch" type="button" on:click={fetchHistory} disabled={fetchingHistory}>
+              <Download size={12} aria-hidden="true" /> Fetch history
+            </button>
+          {/if}
+        </div>
+      {/if}
+      <small>
+        {#if newListing}
+          There is no earlier history to download — this ticker had not started trading. Weekly levels
+          need {archive?.dailyBarsForWeekly ?? 0} sessions and become available after about
+          {sessionsUntilWeekly} more trading day{sessionsUntilWeekly === 1 ? '' : 's'}. Daily levels
+          and the plan below are drawn from what it has.
+        {:else if fetchNotice}
+          {fetchNotice}
+        {:else if archive?.progress.isRunning}
+          Showing available candles now; this chart updates automatically as more history arrives.
+        {:else}
+          The chart is usable, but weekly levels remain provisional until more history is archived.
+        {/if}
+      </small>
+    </div>
+  {/if}
+
   {#if !symbol}
     <p class="msg">Select a symbol from the watchlist.</p>
+  {:else if loading && !data}
+    <div class="plot loading-state" role="status" aria-live="polite">
+      <RefreshCw size={18} class="spinning" aria-hidden="true" />
+      <span>Loading available candles…</span>
+    </div>
   {:else if chartError && !data}
-    <p class="msg danger">{chartError} <button class="retry" on:click={() => load()}>Retry</button></p>
+    <p class:danger={!historyGap} class="msg">
+      {#if newListing}
+        This ticker has no settled session on record yet. Its first candle appears after its first
+        full trading day.
+      {:else if historyGap}
+        The first chart point is not available yet. History is continuing in the background.
+      {:else}
+        {chartError}
+      {/if}
+      <button class="retry" on:click={() => load()}>Retry</button>
+    </p>
   {:else}
     <div class="plot" class:loading class:tall={expanded} bind:this={container}></div>
 
@@ -942,6 +1095,40 @@
      gained width but almost no height. The page scrolls, so a definite 680px is the honest choice. */
   .plot.tall { height:740px; }
   .plot.loading { opacity:.5; }
+  .loading-state {
+    display:flex; align-items:center; justify-content:center; gap:.5rem;
+    color:var(--text-3); font-size:.75rem; background:var(--surface-2); border-radius:var(--radius-sm);
+  }
+
+  .history-status {
+    display:grid; grid-template-columns:minmax(0,1fr) minmax(150px,240px); align-items:center;
+    gap:.35rem .8rem; padding:.55rem .65rem; border-radius:var(--radius-sm);
+    border:1px solid color-mix(in srgb, var(--primary) 28%, var(--border));
+    background:color-mix(in srgb, var(--primary) 7%, var(--surface-2));
+    color:var(--text-2); font-size:.7rem;
+  }
+  .history-copy { display:flex; align-items:center; gap:.5rem; min-width:0; color:var(--primary); }
+  .history-copy > div { display:flex; flex-direction:column; gap:.1rem; min-width:0; }
+  .history-copy b { color:var(--text); font-size:.73rem; }
+  .history-copy span, .history-status small { color:var(--text-3); line-height:1.4; }
+  .history-status small { grid-column:1 / -1; }
+  .history-progress { display:flex; align-items:center; gap:.45rem; }
+  .history-progress progress { width:100%; height:.42rem; accent-color:var(--primary); }
+  .history-progress strong { color:var(--text-2); font-size:.68rem; font-variant-numeric:tabular-nums; }
+  .history-progress .fetch {
+    display:inline-flex; align-items:center; gap:.25rem; white-space:nowrap;
+    border:1px solid var(--border-md); background:var(--surface-2); color:var(--text-2);
+    border-radius:var(--radius-sm); padding:.2rem .45rem; font:inherit; font-size:.66rem; cursor:pointer;
+  }
+  .history-progress .fetch:hover:not(:disabled) {
+    color:var(--primary); border-color:color-mix(in srgb, var(--primary) 45%, var(--border));
+  }
+  .history-progress .fetch:disabled { opacity:.5; cursor:wait; }
+  /* Not a warm-up in progress, so it does not borrow the primary colour that means "working on it". */
+  .history-status.new-listing { border-color:var(--border-md); background:var(--surface-2); }
+  .history-status.new-listing .history-copy { color:var(--text-3); }
+  :global(.spinning) { animation:history-spin 1s linear infinite; }
+  @keyframes history-spin { to { transform:rotate(360deg); } }
 
   .view-controls { display:flex; gap:.25rem; }
   .view-controls button {
@@ -1034,5 +1221,11 @@
     .plot, .plot.tall { height:clamp(300px, 88vw, 420px); }
     .metrics { grid-template-columns:repeat(auto-fit,minmax(90px,1fr)); }
     .levels { grid-template-columns:minmax(0,1fr); }
+    .history-status { grid-template-columns:minmax(0,1fr); }
+    .history-status small { grid-column:auto; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    :global(.spinning) { animation:none; }
   }
 </style>

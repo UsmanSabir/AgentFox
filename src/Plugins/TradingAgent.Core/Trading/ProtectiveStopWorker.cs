@@ -52,6 +52,7 @@ public sealed class ProtectiveStopWorker : BackgroundService, IMarketSessionOpen
     private readonly TradingManager _manager;
     private readonly ApprovalGate _approvals;
     private readonly IMarketCalendar _calendar;
+    private readonly OrderWindow _orderWindow;
     private readonly TradingPolicyProvider _policy;
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly ILogger<ProtectiveStopWorker> _logger;
@@ -89,6 +90,7 @@ public sealed class ProtectiveStopWorker : BackgroundService, IMarketSessionOpen
         TradingManager manager,
         ApprovalGate approvals,
         IMarketCalendar calendar,
+        OrderWindow orderWindow,
         TradingPolicyProvider policy,
         IOptions<TradingAgentOptions> options,
         ILogger<ProtectiveStopWorker> logger,
@@ -103,6 +105,7 @@ public sealed class ProtectiveStopWorker : BackgroundService, IMarketSessionOpen
         _manager     = manager;
         _approvals   = approvals;
         _calendar    = calendar;
+        _orderWindow = orderWindow;
         _policy      = policy;
         _options     = options;
         _logger      = logger;
@@ -522,8 +525,84 @@ public sealed class ProtectiveStopWorker : BackgroundService, IMarketSessionOpen
         }
 
         var held = holdings is null ? null : TryHeld(holdings, stop.Symbol);
+
+        // ── A raise has to settle its predecessor before it can be placed at all ─────────────────
+        // The broker sizes every SELL against custody MINUS quantity already committed to resting
+        // SELLs, so a predecessor holding the whole position makes the replacement unplaceable — the
+        // "make" of make-before-break cannot succeed until the "break" has happened. Deciding that
+        // here, rather than discovering it as a placement failure, is what stops a raise retrying
+        // forever while the operator is told it succeeded.
+        var excluded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (stop.SupersedesStopId is { Length: > 0 } predecessorId)
+        {
+            var predecessor = allStops.FirstOrDefault(s => s.StopId == predecessorId);
+
+            // Cancelling the old order is only worth the gap it opens if a replacement can actually go
+            // out afterwards. If the window is shut, waiting is not merely safer — it is CORRECT: the
+            // venue clears the book at the close, so the raise is placed clean next session with
+            // nothing cancelled and no gap at all.
+            var window = _orderWindow.Evaluate();
+            var supersede = ProtectiveStopDecisions.DecideSupersede(
+                stop, predecessor, held, resting, replacementWindowAllowed: window.Allowed);
+
+            switch (supersede.Action)
+            {
+                case SupersedeAction.CancelPredecessorThenPlace when predecessor is not null:
+                    if (!await OpenReplacementWindowAsync(
+                            repository, stop, predecessor, held, supersede.Reason,
+                            retiredThisPass, resting, today, ct))
+                        return;
+                    // The cancel is CONFIRMED gone, but `resting` is this pass's snapshot and still
+                    // lists it. Without excluding it, a raise inside the price-match tolerance would
+                    // be skipped as "already protected" by an order that no longer exists — and the
+                    // placement below would size against a book that has moved on.
+                    if (predecessor.LastOrderNo is { Length: > 0 } cancelled)
+                        excluded.Add(cancelled.Trim());
+                    break;
+
+                case SupersedeAction.Wait:
+                    // Visible, not LogDebug: "the raise you asked for has not reached the broker" is
+                    // precisely the state this whole change exists to stop hiding. Once per stop per
+                    // day, because it persists all session by design and re-reporting it every pass is
+                    // how a channel becomes noise.
+                    _logger.LogInformation(
+                        "[ProtectiveStops] {StopId} ({Symbol}): raise to {Trigger} is PENDING — {Why}",
+                        stop.StopId, stop.Symbol, stop.StopTrigger, supersede.Reason);
+                    if (MarkAlerted(stop, "supersede-pending", today))
+                        _activity?.Warn("Stops",
+                            $"{stop.Symbol}: the stop raise to {stop.StopTrigger:0.##} has NOT reached "
+                            + "the broker yet", supersede.Reason);
+                    return;
+
+                case SupersedeAction.RetirePredecessorFirst when predecessor is not null:
+                    // Its order is already gone, so there is nothing to cancel and nothing to lose by
+                    // retiring it now — and retiring it BEFORE placing is what keeps both rows from
+                    // placing an order each next session.
+                    if (await repository.TrySetProtectiveStopStateAsync(
+                            predecessor.StopId, predecessor.State, "superseded_pending_cancel",
+                            $"Superseded by {stop.StopId}; its own order is no longer resting.", ct))
+                    {
+                        retiredThisPass.Add(predecessor.StopId);
+                        await RetireSupersededAsync(
+                            repository, predecessor with { State = "superseded_pending_cancel" },
+                            resting, ct);
+                        _logger.LogInformation(
+                            "[ProtectiveStops] {StopId} ({Symbol}): retired predecessor {Predecessor} " +
+                            "before placing — {Why}",
+                            stop.StopId, stop.Symbol, predecessor.StopId, supersede.Reason);
+                    }
+                    break;
+
+                case SupersedeAction.Proceed when predecessor?.LastOrderNo is { Length: > 0 } resting1:
+                    // Room for both. Exclude the predecessor's order so a small raise is not mistaken
+                    // for "already protected at this level" by the price match below.
+                    excluded.Add(resting1.Trim());
+                    break;
+            }
+        }
+
         var decision = ProtectiveStopDecisions.DecidePlacement(
-            stop, held, today, resting ?? []);
+            stop, held, today, resting ?? [], excluded);
 
         switch (decision.Action)
         {
@@ -545,6 +624,76 @@ public sealed class ProtectiveStopWorker : BackgroundService, IMarketSessionOpen
         }
 
         await PlaceNativeStopAsync(repository, stop, decision, today, allStops, resting, retiredThisPass, ct);
+    }
+
+    /// <summary>
+    /// Wires <see cref="StopReplacement"/> to this worker's real repository, canceller and retirement
+    /// path, and reports whatever it concluded. The sequencing rules, and the reasons for them, live in
+    /// that class so they can be tested without standing up a <see cref="TradingManager"/>.
+    /// </summary>
+    /// <returns>True when the caller should go on to place the replacement this pass.</returns>
+    private async Task<bool> OpenReplacementWindowAsync(
+        ITradingRepository repository,
+        ProtectiveStop successor,
+        ProtectiveStop predecessor,
+        decimal? held,
+        string why,
+        HashSet<string> retiredThisPass,
+        IReadOnlyList<RestingOrder>? resting,
+        DateOnly today,
+        CancellationToken ct)
+    {
+        if (predecessor.LastOrderNo is { Length: > 0 } about)
+            _logger.LogWarning(
+                "[ProtectiveStops] {StopId} ({Symbol}): cancelling predecessor order {OrderNo} to make "
+                + "room for the raise to {Trigger}. {Why}",
+                successor.StopId, successor.Symbol, about, successor.StopTrigger, why);
+
+        var ports = new StopReplacementPorts(
+            ArmCoverAsync: (stop, quantity, token) => ArmBackstopAsync(repository, stop, quantity, token),
+
+            ReloadStopAsync: async (stopId, token) =>
+                (await repository.GetProtectiveStopsAsync(openOnly: true, token))
+                    .FirstOrDefault(s => s.StopId == stopId),
+
+            CancelOrderAsync: (orderNo, token) => _canceller.CancelOrderAsync(orderNo, token),
+
+            RetirePredecessorAsync: async (stop, reason, token) =>
+            {
+                if (!await repository.TrySetProtectiveStopStateAsync(
+                        stop.StopId, stop.State, "superseded_pending_cancel", reason, token))
+                    return false;
+
+                retiredThisPass.Add(stop.StopId);
+                await RetireSupersededAsync(
+                    repository, stop with { State = "superseded_pending_cancel" }, resting, token);
+                return true;
+            });
+
+        var result = await StopReplacement.OpenWindowAsync(
+            successor, predecessor, held, why, ports, ct);
+
+        if (result.Outcome == StopReplacementOutcome.PlaceReplacement)
+        {
+            _activity?.Info("Stops",
+                $"{successor.Symbol}: room made for the stop raise to {successor.StopTrigger:0.##}",
+                result.Reason);
+            return true;
+        }
+
+        // Held. The old order is still resting, so the position is no less protected than before — but
+        // the operator asked for a raise that has not happened, and that must be visible.
+        _logger.LogWarning(
+            "[ProtectiveStops] {StopId} ({Symbol}): the raise to {Trigger} did NOT proceed — {Why}",
+            successor.StopId, successor.Symbol, successor.StopTrigger, result.Reason);
+
+        var key = result.CancelAttempted ? "replacement-cancel-unverified" : "replacement-no-cover";
+        if (MarkAlerted(successor, key, today))
+            _activity?.Warn("Stops",
+                $"{successor.Symbol}: the stop raise to {successor.StopTrigger:0.##} has not reached the "
+                + "broker", result.Reason);
+
+        return false;
     }
 
     /// <summary>
@@ -867,10 +1016,14 @@ public sealed class ProtectiveStopWorker : BackgroundService, IMarketSessionOpen
     /// operator is left believing a stop exists. This covers exactly that hole.
     /// </para>
     /// </summary>
-    private async Task AlertOnceAsync(ProtectiveStop stop, string reasonKey, DateOnly today, string message)
+    /// <summary>
+    /// Claims the once-per-session slot for one (stop, reason) pair, so a condition that persists all
+    /// session is reported once rather than every few minutes. Returns false when it has already been
+    /// reported today. Shared by the notifier path and by activity-log lines that need the same
+    /// restraint for the same reason.
+    /// </summary>
+    private bool MarkAlerted(ProtectiveStop stop, string reasonKey, DateOnly today)
     {
-        if (_notifier is null) return;
-
         if (_alertedFor != today)
         {
             // A new session is a new chance for the same condition to matter, and a stop that failed
@@ -879,7 +1032,13 @@ public sealed class ProtectiveStopWorker : BackgroundService, IMarketSessionOpen
             _alertedFor = today;
         }
 
-        if (!_alerted.Add($"{stop.StopId}:{reasonKey}")) return;
+        return _alerted.Add($"{stop.StopId}:{reasonKey}");
+    }
+
+    private async Task AlertOnceAsync(ProtectiveStop stop, string reasonKey, DateOnly today, string message)
+    {
+        if (_notifier is null) return;
+        if (!MarkAlerted(stop, reasonKey, today)) return;
 
         try { await _notifier.NotifyAsync(message, TradingTopics.Stop(reasonKey)); }
         catch (Exception ex)

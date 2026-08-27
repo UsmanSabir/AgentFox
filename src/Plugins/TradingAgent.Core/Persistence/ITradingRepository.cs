@@ -279,6 +279,28 @@ public interface ITradingRepository
         CancellationToken ct = default);
 
     /// <summary>
+    /// What the archive actually LEARNED about each symbol from the sessions it has already fetched
+    /// for it: how many trading sessions it was requested for, how many of those it did not trade on,
+    /// and the span its bars cover.
+    ///
+    /// <para>
+    /// The one question <see cref="GetCoveredDailyDateCountsAsync"/> cannot answer is whether a short
+    /// history is short because nobody has fetched it yet, or because it does not exist. A session
+    /// fetch records the symbol as requested whether or not the exchange published a row for it, so a
+    /// symbol requested for thirty sessions and holding two bars did not trade on twenty-eight of them
+    /// — which for a newly listed ticker is the whole truth about it, and the reason showing that
+    /// ticker a backfill progress bar is a promise the archive can never keep.
+    /// </para>
+    ///
+    /// <para>Non-trading days are excluded: they say nothing about any one symbol.</para>
+    /// </summary>
+    Task<IReadOnlyDictionary<string, SymbolSessionCoverage>> GetDailySessionCoverageAsync(
+        DateOnly fromInclusive,
+        DateOnly toInclusive,
+        IReadOnlyCollection<string> symbols,
+        CancellationToken ct = default);
+
+    /// <summary>
     /// Forgets coverage for dates after <paramref name="settledThrough"/> so they are fetched again.
     ///
     /// <para>
@@ -370,6 +392,15 @@ public interface ITradingRepository
         string? notes,
         bool? pinned = null,
         bool? autoTradeEnabled = null,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Sets the runtime automation preference for every watched symbol in one transaction. Returns
+    /// the number of rows affected. Configured <c>ManualOnlySymbols</c> remain an independent floor
+    /// and cannot be lifted by setting this value to true.
+    /// </summary>
+    Task<int> SetWatchlistAutoTradeEnabledAsync(
+        bool autoTradeEnabled,
         CancellationToken ct = default);
 
     /// <summary>Persists the complete display order after a drag operation.</summary>
@@ -615,6 +646,22 @@ public sealed record DailyArchiveStatus(
     int CoveredDates,
     DateOnly? EarliestSession,
     DateOnly? LatestSession);
+
+/// <summary>
+/// One symbol's evidence from the sessions the archive has already fetched for it.
+///
+/// <para>
+/// <see cref="SessionsWithoutTrade"/> is the load-bearing field: a trading session the symbol was
+/// requested for and produced no bar on is a session it did not trade. Enough of those, and the
+/// missing history is not missing — it never existed.
+/// </para>
+/// </summary>
+public sealed record SymbolSessionCoverage(
+    string Symbol,
+    int SessionsRequested,
+    int SessionsWithoutTrade,
+    DateOnly? FirstBarDate,
+    DateOnly? LastBarDate);
 
 public sealed record TradingLedgerStatus(
     int PendingProposals,

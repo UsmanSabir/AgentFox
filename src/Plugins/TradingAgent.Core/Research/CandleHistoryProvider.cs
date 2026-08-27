@@ -24,6 +24,13 @@ namespace TradingAgent.Research;
 /// </summary>
 public sealed class CandleHistoryProvider
 {
+    /// <summary>
+    /// Archive depth at which a normal read no longer needs an interactive portal top-up. Kept in
+    /// one place because the chart uses the same boundary to decide whether it is in its progressive
+    /// warm-up path.
+    /// </summary>
+    public const int MinimumArchivedBarsBeforePortalFallbackStops = 20;
+
     private readonly PsxDataClient _dataClient;
     private readonly CompositeLiveQuoteSource _quotes;
     private readonly ITradingRepository _repository;
@@ -72,6 +79,7 @@ public sealed class CandleHistoryProvider
         IReadOnlyList<string> symbols,
         int sessions,
         bool includeLive = true,
+        bool allowPortalFallback = true,
         CancellationToken ct = default)
     {
         sessions = Math.Clamp(sessions, 5, 5000);
@@ -101,7 +109,7 @@ public sealed class CandleHistoryProvider
                 var bars = await _ahl.GetDailyAsync(symbol, sessions, ct);
                 // Require a usable depth before displacing the PSX path, so a symbol the portal
                 // barely covers does not end up with a shorter series than PSX would have given.
-                if (bars.Count >= Math.Min(sessions, 20))
+                if (bars.Count >= Math.Min(sessions, MinimumArchivedBarsBeforePortalFallbackStops))
                 {
                     fromAhl[symbol] = bars;
                     sources[symbol] = CandleSource.AhlAnalytics;
@@ -133,12 +141,23 @@ public sealed class CandleHistoryProvider
             }
         }
 
-        // Any archive-backed symbol still short of the requested window (or absent entirely, e.g. the
-        // backfill has not run) has to come from the portal like everything else.
+        // A normal analytical read tops up a shallow archive from the portal. An interactive chart may
+        // explicitly choose the progressive path instead: render the archive/live data already on hand
+        // while the background backfill grows it, rather than holding the whole chart behind dozens of
+        // historical HTTP requests.
         foreach (var symbol in fromArchive)
         {
-            if (!archived.TryGetValue(symbol, out var bars) || bars.Count < Math.Min(sessions, 20))
+            var archivedBars = archived.GetValueOrDefault(symbol)?.Count ?? 0;
+            if (ShouldTopUpArchiveFromPortal(archivedBars, sessions, allowPortalFallback))
+            {
                 fromPortal.Add(symbol);
+            }
+            else if (archivedBars < Math.Min(sessions, MinimumArchivedBarsBeforePortalFallbackStops))
+            {
+                warnings.Add(
+                    $"{symbol}: historical candles are still building; showing {archivedBars} " +
+                    "archived bar(s) plus the live forming bar when available.");
+            }
         }
 
         // A market-watch row has no session date. Outside an open exchange session it can be Friday's
@@ -202,17 +221,18 @@ public sealed class CandleHistoryProvider
                 }
             }
 
+            if (live.TryGetValue(symbol, out var quote) && quote.ToCandle(today) is { } forming)
+            {
+                if (bars.Count == 0) bars.Add(forming);
+                else if (bars[^1].Date == forming.Date) bars[^1] = forming;
+                else if (bars[^1].Date < forming.Date) bars.Add(forming);
+            }
+
             if (bars.Count == 0)
             {
                 if (!warnings.Any(w => w.StartsWith($"{symbol}:", StringComparison.OrdinalIgnoreCase)))
                     warnings.Add($"{symbol}: no daily candles are available from the archive or the portal.");
                 continue;
-            }
-
-            if (live.TryGetValue(symbol, out var quote) && quote.ToCandle(today) is { } forming)
-            {
-                if (bars[^1].Date == forming.Date) bars[^1] = forming;
-                else if (bars[^1].Date < forming.Date) bars.Add(forming);
             }
 
             series[symbol] = bars.OrderBy(b => b.SortKeyUtc).TakeLast(sessions).ToList();
@@ -236,6 +256,25 @@ public sealed class CandleHistoryProvider
             Warnings       = warnings
         };
     }
+
+    /// <summary>
+    /// Pure policy seam for the archive warm-up path; pinned independently of portal I/O.
+    ///
+    /// <para>
+    /// The progressive path (<paramref name="allowPortalFallback"/> false) exists so an interactive
+    /// chart renders the bars already on hand instead of waiting on dozens of historical requests. It
+    /// has one degenerate case: an archive holding NOTHING for the symbol has nothing to render
+    /// progressively, so the trade it makes — a shallow chart now over a deep chart later — collapses
+    /// into no chart at all, for as long as it takes a background backfill to reach that ticker. A
+    /// symbol just added to the watchlist is exactly that case, so zero archived bars overrides the
+    /// preference and takes the portal top-up once. Settled dates are cached market-wide for the
+    /// process lifetime, so in steady state this is served from memory rather than re-fetched.
+    /// </para>
+    /// </summary>
+    internal static bool ShouldTopUpArchiveFromPortal(
+        int archivedBars, int requestedSessions, bool allowPortalFallback) =>
+        (allowPortalFallback || archivedBars == 0)
+        && archivedBars < Math.Min(requestedSessions, MinimumArchivedBarsBeforePortalFallbackStops);
 
     /// <summary>
     /// Posts the source mix to the activity log, once per change.
@@ -314,7 +353,7 @@ public sealed class CandleHistoryProvider
     {
         // Ask for enough sessions to form the requested weeks with room for holidays.
         var sessions = Math.Clamp(weeks * 6, 30, 5000);
-        var history = await GetDailyAsync([symbol], sessions, includeLive: true, ct);
+        var history = await GetDailyAsync([symbol], sessions, includeLive: true, ct: ct);
 
         return history.Series.TryGetValue(symbol, out var daily)
             ? CandleResampler.ToWeekly(daily).TakeLast(weeks).ToList()

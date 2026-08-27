@@ -250,6 +250,18 @@ export interface CandleArchiveStatus {
     archivedBars: number;
     /** Sessions a backfill scoped to this symbol would fetch. */
     missingSessions: number;
+    /** Trading sessions already requested for it. Market holidays are excluded. */
+    sessionsChecked: number;
+    /** Of those, the ones it published no bar on — sessions it did not trade. */
+    sessionsWithoutTrade: number;
+    /** Earliest archived bar; for a recent listing, close to the day it started trading. */
+    firstBarDate?: string;
+    /**
+     * The shortfall is the symbol's age, not the archive's reach: enough requested sessions came back
+     * empty that there is no earlier history to fetch. A backfill cannot clear it and a progress bar
+     * must not be shown for it — what it is waiting for is more sessions to be traded.
+     */
+    noEarlierHistory: boolean;
   }[];
   progress: {
     isRunning: boolean;
@@ -478,6 +490,10 @@ export interface ChartData {
   tradable: boolean;
   barsAnalyzed: number;
   sessionsAvailable: number;
+  /** True while a newly archived symbol is being rendered from the bars already available locally. */
+  historyBuilding: boolean;
+  /** Settled daily bars currently stored for this symbol. */
+  archivedBars: number;
   /** The last bar is still forming — not a settled close. */
   usesLiveBar: boolean;
   /** RSI bands this analysis classified against (config, not the textbook 30/70). */
@@ -1274,7 +1290,9 @@ export const trading = {
   },
 
   watchlist: {
-    list:   ()               => get<WatchlistResponse>('/trading/watchlist'),
+    /** Skip portal metadata for the first paint; a follow-up refresh can merge names and live moves. */
+    list:   (includeMarketData = true) => get<WatchlistResponse>(
+      `/trading/watchlist?includeMarketData=${includeMarketData}`),
     add:    (symbol: string) => post<{
                                   symbol: string;
                                   added: boolean;
@@ -1301,6 +1319,13 @@ export const trading = {
         manualOnly?: boolean;
         message?: string | null;
       }>(`/trading/watchlist/${encodeURIComponent(symbol)}`, changes),
+    setAutoTrading: (autoTradeEnabled: boolean) =>
+      patch<{
+        autoTradeEnabled: boolean;
+        updated: number;
+        manualOnlyLocked: number;
+        message?: string | null;
+      }>('/trading/watchlist/automation', { autoTradeEnabled }),
     reorder: (symbols: string[]) =>
       post<{ reordered: boolean; symbols: number }>('/trading/watchlist/reorder', { symbols }),
     reset:  ()               => post<{ symbols: number }>('/trading/watchlist/reset'),

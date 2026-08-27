@@ -144,6 +144,27 @@ public sealed class WatchlistUniverseTests
     }
 
     [TestMethod]
+    public async Task BulkAutoTradingUpdateChangesEveryRowAndPreservesOtherPreferences()
+    {
+        using var env = TestEnv.Create(["OGDC", "LUCK", "HBL"]);
+        await env.Universe.SeedIfNeededAsync();
+        await env.Repository.UpdateWatchlistSymbolAsync(
+            "HBL", alertsEnabled: false, notes: "keep me", pinned: true);
+
+        Assert.AreEqual(3, await env.Repository.SetWatchlistAutoTradeEnabledAsync(false));
+        var manual = (await env.Repository.GetWatchlistAsync()).Entries;
+        Assert.IsTrue(manual.All(entry => !entry.AutoTradeEnabled));
+        var hbl = manual.Single(entry => entry.Symbol == "HBL");
+        Assert.IsFalse(hbl.AlertsEnabled);
+        Assert.IsTrue(hbl.Pinned);
+        Assert.AreEqual("keep me", hbl.Notes);
+
+        Assert.AreEqual(3, await env.Repository.SetWatchlistAutoTradeEnabledAsync(true));
+        Assert.IsTrue((await env.Repository.GetWatchlistAsync()).Entries
+            .All(entry => entry.AutoTradeEnabled));
+    }
+
+    [TestMethod]
     public async Task IndexMerge_AddsOnlyMissingMembersAndNeverWidensExecution()
     {
         using var env = TestEnv.Create(["OGDC"]);
@@ -353,6 +374,62 @@ public sealed class WatchlistUniverseTests
         Assert.AreEqual(1, counts["GHNI"],
             "GHNI was only in the universe for the second session, so it is one session short — the "
             + "number a targeted backfill has to fetch.");
+    }
+
+    [TestMethod]
+    public async Task SessionCoverage_SeparatesAnUnfetchedHistoryFromOneThatDoesNotExist()
+    {
+        using var env = TestEnv.Create(["OGDC", "NEWCO"]);
+
+        // Ten sessions the whole universe was requested for. NEWCO listed on the last two, so the
+        // exchange published no row for it on the first eight — which is the only evidence available
+        // that those eight sessions are not waiting to be downloaded.
+        var sessions = Enumerable.Range(0, 10)
+            .Select(i => new DateOnly(2026, 8, 3).AddDays(i))
+            .ToList();
+
+        for (var i = 0; i < sessions.Count; i++)
+        {
+            var bars = new List<TradingAgent.Research.PsxCandle> { Candle("OGDC", sessions[i]) };
+            if (i >= 8) bars.Add(Candle("NEWCO", sessions[i]));
+            await env.Repository.SaveDailySessionAsync(sessions[i], bars, ["OGDC", "NEWCO"]);
+        }
+
+        var coverage = await env.Repository.GetDailySessionCoverageAsync(
+            sessions[0], sessions[^1], ["OGDC", "NEWCO", "UNASKED"]);
+
+        Assert.AreEqual(10, coverage["OGDC"].SessionsRequested);
+        Assert.AreEqual(0, coverage["OGDC"].SessionsWithoutTrade,
+            "OGDC traded on every session it was requested for.");
+
+        Assert.AreEqual(10, coverage["NEWCO"].SessionsRequested);
+        Assert.AreEqual(8, coverage["NEWCO"].SessionsWithoutTrade,
+            "Eight requested sessions produced no bar for NEWCO, so eight sessions of its 'missing' "
+            + "history are missing because it was not listed, not because nobody fetched them.");
+        Assert.AreEqual(sessions[8], coverage["NEWCO"].FirstBarDate);
+        Assert.AreEqual(sessions[^1], coverage["NEWCO"].LastBarDate);
+
+        // Present with zeros rather than absent: "never asked" and "asked, and it did not trade" are
+        // different answers, and only the first one is worth running a backfill for.
+        Assert.AreEqual(0, coverage["UNASKED"].SessionsRequested);
+        Assert.AreEqual(0, coverage["UNASKED"].SessionsWithoutTrade);
+        Assert.IsNull(coverage["UNASKED"].FirstBarDate);
+    }
+
+    [TestMethod]
+    public async Task SessionCoverage_IgnoresMarketHolidays()
+    {
+        using var env = TestEnv.Create(["OGDC"]);
+        var holiday = new DateOnly(2026, 8, 14);
+
+        await env.Repository.SaveNonTradingDayAsync(holiday);
+
+        var coverage = await env.Repository.GetDailySessionCoverageAsync(holiday, holiday, ["OGDC"]);
+
+        // A shut exchange says nothing about any one symbol. Counting it as a session OGDC did not
+        // trade on is how a healthy symbol would eventually be reported as a new listing.
+        Assert.AreEqual(0, coverage["OGDC"].SessionsRequested);
+        Assert.AreEqual(0, coverage["OGDC"].SessionsWithoutTrade);
     }
 
     [TestMethod]
@@ -575,6 +652,9 @@ public sealed class WatchlistUniverseTests
         public Task<IReadOnlyDictionary<string, int>> GetCoveredDailyDateCountsAsync(
             DateOnly f, DateOnly t, IReadOnlyCollection<string> y, CancellationToken ct = default) =>
             throw new NotSupportedException();
+        public Task<IReadOnlyDictionary<string, SymbolSessionCoverage>> GetDailySessionCoverageAsync(
+            DateOnly f, DateOnly t, IReadOnlyCollection<string> y, CancellationToken ct = default) =>
+            throw new NotSupportedException();
         public Task<int> ClearDailyCoverageAfterAsync(DateOnly t, CancellationToken ct = default) =>
             throw new NotSupportedException();
         public Task<DailyArchiveStatus> GetDailyArchiveStatusAsync(CancellationToken ct = default) =>
@@ -595,6 +675,9 @@ public sealed class WatchlistUniverseTests
         public Task<bool> UpdateWatchlistSymbolAsync(
             string s, bool? a, string? n, bool? p = null, bool? autoTrade = null,
             CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<int> SetWatchlistAutoTradeEnabledAsync(
+            bool autoTradeEnabled, CancellationToken ct = default) =>
             throw new NotSupportedException();
         public Task<bool> ReorderWatchlistAsync(
             IReadOnlyList<string> symbols, CancellationToken ct = default) => throw new NotSupportedException();

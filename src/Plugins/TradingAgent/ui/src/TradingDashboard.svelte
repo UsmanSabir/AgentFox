@@ -114,6 +114,8 @@
   let reconciliation: ReconciliationRun[] = [];
   let tab: 'proposals' | 'executions' | 'reconciliation' | 'events' = 'proposals';
   let archivePoll: ReturnType<typeof setInterval> | null = null;
+  /** Advances only when the archive poll returns fresh progress; the chart uses it to grow in place. */
+  let archiveTick = 0;
 
   // Keep the decision surfaces open and tuck away dense operational detail. Every collapsed header
   // still carries its important state, so closing a panel never hides a warning or waiting work.
@@ -145,6 +147,7 @@
       archivePoll = setInterval(async () => {
         try {
           archive = await trading.candleArchive();
+          archiveTick += 1;
           if (!archive.progress.isRunning) syncArchivePolling();
         } catch { /* transient: the next tick retries */ }
       }, 4000);
@@ -168,6 +171,7 @@
     try {
       const result = await trading.startBackfill();
       archive = result.status;
+      archiveTick += 1;
       syncArchivePolling();
       if (!result.started) error = 'A backfill pass is already running.';
     } catch (e) {
@@ -394,6 +398,8 @@
         companyName={selectedCompany}
         bind:expanded={chartExpanded}
         refreshTick={marketTick}
+        historyRefreshTick={archiveTick}
+        {archive}
         marketOpen={status.market.isOpen}
         on:arm={(e) => armContext = e.detail}
       />
@@ -678,11 +684,20 @@
   .eyebrow { color:var(--primary); font-size:.6rem; font-weight:700; letter-spacing:.09em; text-transform:uppercase; }
   /* minmax(0,1fr) not 1fr: the chart column must be allowed to shrink, or the canvas keeps its
      widest measured size and pushes the grid wider on every re-render. */
-  .watch-row { display:grid; grid-template-columns:minmax(260px,320px) minmax(0,1fr); gap:.75rem; margin-bottom:.75rem; align-items:stretch; }
+  /* min-height, because the watchlist deliberately ignores its own content height (contain:size) and
+     takes this row's instead. Without a floor the row is sized by whatever the chart card happens to
+     be showing, so on first load — chart empty, watchlist still fetching — the row collapsed to two
+     lines and CLIPPED the watchlist's own loading state, which read as an empty watchlist. */
+  .watch-row {
+    display:grid; grid-template-columns:minmax(260px,320px) minmax(0,1fr); gap:.75rem;
+    margin-bottom:.75rem; align-items:stretch; min-height:22rem;
+  }
   .watch-row.watchlist-compact:not(.expanded) { grid-template-columns:minmax(100px,116px) minmax(0,1fr); }
   .alerts-row { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:.75rem; margin-bottom:1.25rem; align-items:start; }
   @media (max-width: 900px) {
+    /* Stacked: each card carries its own height again, so the floor would only add dead space. */
     .watch-row, .alerts-row { grid-template-columns:minmax(0,1fr); }
+    .watch-row { min-height:0; }
     .watch-row.watchlist-compact:not(.expanded) { grid-template-columns:minmax(0,1fr); }
   }
 

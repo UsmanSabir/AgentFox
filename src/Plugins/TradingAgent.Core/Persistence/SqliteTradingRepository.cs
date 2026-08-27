@@ -1195,6 +1195,93 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         return counts;
     }
 
+    public async Task<IReadOnlyDictionary<string, SymbolSessionCoverage>> GetDailySessionCoverageAsync(
+        DateOnly fromInclusive,
+        DateOnly toInclusive,
+        IReadOnlyCollection<string> symbols,
+        CancellationToken ct = default)
+    {
+        var coverage = new Dictionary<string, SymbolSessionCoverage>(StringComparer.OrdinalIgnoreCase);
+        var wanted = Normalize(symbols);
+        if (wanted.Count == 0) return coverage;
+
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+
+        var from = fromInclusive.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        var to = toInclusive.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+
+        var names = new List<string>(wanted.Count);
+        var command = connection.CreateCommand();
+        for (var i = 0; i < wanted.Count; i++)
+        {
+            var name = $"$s{i}";
+            names.Add(name);
+            command.Parameters.AddWithValue(name, wanted[i]);
+        }
+        var inList = string.Join(",", names);
+
+        // LEFT JOIN, not a count difference: a session the symbol was requested for and has no bar on
+        // is the only direct evidence that it did not trade that day. market_closed rows are excluded
+        // because a shut exchange says nothing about any one symbol.
+        command.CommandText = $"""
+            SELECT s.symbol,
+                   COUNT(*),
+                   SUM(CASE WHEN b.symbol IS NULL THEN 1 ELSE 0 END)
+            FROM daily_bar_coverage_symbols s
+            JOIN daily_bar_coverage c ON c.session_date = s.session_date AND c.market_closed = 0
+            LEFT JOIN daily_bars b ON b.symbol = s.symbol AND b.session_date = s.session_date
+            WHERE s.session_date >= $from AND s.session_date <= $to
+              AND s.symbol IN ({inList})
+            GROUP BY s.symbol
+            """;
+        command.Parameters.AddWithValue("$from", from);
+        command.Parameters.AddWithValue("$to", to);
+
+        var requested = new Dictionary<string, (int Requested, int Blank)>(StringComparer.OrdinalIgnoreCase);
+        await using (var reader = await command.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+                requested[reader.GetString(0)] = (reader.GetInt32(1), reader.GetInt32(2));
+        }
+
+        var span = connection.CreateCommand();
+        for (var i = 0; i < wanted.Count; i++)
+            span.Parameters.AddWithValue($"$s{i}", wanted[i]);
+        span.CommandText = $"""
+            SELECT symbol, MIN(session_date), MAX(session_date)
+            FROM daily_bars
+            WHERE symbol IN ({inList})
+            GROUP BY symbol
+            """;
+
+        var spans = new Dictionary<string, (DateOnly First, DateOnly Last)>(StringComparer.OrdinalIgnoreCase);
+        await using (var reader = await span.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+                spans[reader.GetString(0)] = (
+                    DateOnly.ParseExact(reader.GetString(1), "yyyy-MM-dd", CultureInfo.InvariantCulture),
+                    DateOnly.ParseExact(reader.GetString(2), "yyyy-MM-dd", CultureInfo.InvariantCulture));
+        }
+
+        // Every requested symbol is present, including ones with nothing on record: "never asked" is a
+        // distinct answer from "asked and it did not trade", and a caller must be able to tell them
+        // apart to decide whether a backfill would help.
+        foreach (var symbol in wanted)
+        {
+            var counts = requested.GetValueOrDefault(symbol);
+            var found = spans.TryGetValue(symbol, out var range);
+            coverage[symbol] = new SymbolSessionCoverage(
+                Symbol: symbol,
+                SessionsRequested: counts.Requested,
+                SessionsWithoutTrade: counts.Blank,
+                FirstBarDate: found ? range.First : null,
+                LastBarDate: found ? range.Last : null);
+        }
+
+        return coverage;
+    }
+
     public async Task<int> ClearDailyCoverageAfterAsync(
         DateOnly settledThrough, CancellationToken ct = default)
     {
@@ -2066,6 +2153,17 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         command.Parameters.AddWithValue("$autoTrade",
             autoTradeEnabled is null ? DBNull.Value : autoTradeEnabled.Value ? 1 : 0);
         return await command.ExecuteNonQueryAsync(ct) == 1;
+    }
+
+    public async Task<int> SetWatchlistAutoTradeEnabledAsync(
+        bool autoTradeEnabled, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = "UPDATE watchlist SET auto_trade_enabled = $enabled";
+        command.Parameters.AddWithValue("$enabled", autoTradeEnabled ? 1 : 0);
+        return await command.ExecuteNonQueryAsync(ct);
     }
 
     public async Task<bool> ReorderWatchlistAsync(

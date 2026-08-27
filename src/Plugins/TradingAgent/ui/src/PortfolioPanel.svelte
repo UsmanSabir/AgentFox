@@ -45,11 +45,17 @@
 
   const hidden = '••••••';
   const text = (value?: string | null) => value?.trim() || '—';
-  const quantity = (value?: number | null) => !showValues
+  // Visibility is an explicit argument rather than a closure over `showValues`. Svelte can then see
+  // the template dependency and re-run these formatters immediately when the privacy toggle changes.
+  const quantity = (value: number | null | undefined, visible: boolean) => !visible
     ? hidden
     : value == null ? 'Unknown' : new Intl.NumberFormat('en-PK', { maximumFractionDigits: 4 }).format(value);
-  const money = (value?: number | null, currency?: string | null) => {
-    if (!showValues) return hidden;
+  const money = (
+    value: number | null | undefined,
+    currency: string | null | undefined,
+    visible: boolean
+  ) => {
+    if (!visible) return hidden;
     if (value == null) return 'Unknown';
     try {
       return new Intl.NumberFormat('en-PK', {
@@ -59,17 +65,17 @@
       return `${new Intl.NumberFormat('en-PK', { maximumFractionDigits: 2 }).format(value)} ${currency ?? ''}`.trim();
     }
   };
-  const percent = (value?: number | null) => !showValues
+  const percent = (value: number | null | undefined, visible: boolean) => !visible
     ? hidden
     : value == null ? 'Unknown' : `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`;
-  const pnlTone = (holding: BrokerAccountHolding) => !showValues || holding.unrealizedProfitLoss == null
+  const pnlTone = (holding: BrokerAccountHolding, visible: boolean) => !visible || holding.unrealizedProfitLoss == null
     ? '' : holding.unrealizedProfitLoss > 0 ? 'positive' : holding.unrealizedProfitLoss < 0 ? 'negative' : '';
   const when = (value?: string | null) => value ? new Date(value).toLocaleString() : '—';
   const countLabel = (available: boolean, count: number, label: string) =>
     available ? `${count} ${label}` : `${label} unavailable`;
   const extras = (attributes?: Record<string, string | null>) => Object.entries(attributes ?? {})
     .filter(([, value]) => value != null && value.trim().length > 0);
-  const attributeValue = (value: string | null) => showValues ? text(value) : hidden;
+  const attributeValue = (value: string | null, visible: boolean) => visible ? text(value) : hidden;
 </script>
 
 <section class="portfolio" class:open>
@@ -89,7 +95,7 @@
       </span>
     </button>
     <div class="header-actions">
-      <button class="action" on:click={() => showValues = !showValues} title={showValues ? 'Hide financial values' : 'Show financial values'}>
+      <button class="action" on:click={() => showValues = !showValues} aria-pressed={showValues} title={showValues ? 'Hide financial values' : 'Show financial values'}>
         {#if showValues}<EyeOff size={14}/> Hide values{:else}<Eye size={14}/> Show values{/if}
       </button>
       <button class="action" on:click={load} disabled={loading} title="Read the latest account data from the broker">
@@ -110,7 +116,7 @@
           <span>Updated {when(account.retrievedAtUtc)}</span>
         </div>
         {#if extras(account.attributes).length}
-          <details class="broker-details"><summary>Broker details</summary><dl>{#each extras(account.attributes) as [label, value]}<dt>{label}</dt><dd>{attributeValue(value)}</dd>{/each}</dl></details>
+          <details class="broker-details"><summary>Broker details</summary><dl>{#each extras(account.attributes) as [label, value]}<dt>{label}</dt><dd>{attributeValue(value, showValues)}</dd>{/each}</dl></details>
         {/if}
 
         {#if account.warnings.length}
@@ -122,7 +128,7 @@
         <div class="balances">
           {#if account.balancesAvailable}
             {#each account.balances as balance}
-              <div class="balance"><span>{balance.label}</span><b>{money(balance.value, balance.currency)}</b>{#if extras(balance.attributes).length}<details class="broker-details"><summary>Details</summary><dl>{#each extras(balance.attributes) as [label, value]}<dt>{label}</dt><dd>{attributeValue(value)}</dd>{/each}</dl></details>{/if}</div>
+              <div class="balance"><span>{balance.label}</span><b>{money(balance.value, balance.currency, showValues)}</b>{#if extras(balance.attributes).length}<details class="broker-details"><summary>Details</summary><dl>{#each extras(balance.attributes) as [label, value]}<dt>{label}</dt><dd>{attributeValue(value, showValues)}</dd>{/each}</dl></details>{/if}</div>
             {/each}
           {:else}
             <div class="unavailable"><b>Balances unavailable</b><span>The broker did not return a reliable balance.</span></div>
@@ -140,12 +146,12 @@
               <thead><tr><th>Instrument</th><th>Quantity</th><th>Average cost</th><th>Market price</th><th>Market value</th><th>Unrealized P/L</th></tr></thead>
               <tbody>{#each account.holdings as holding}
                 <tr>
-                  <td><b>{text(holding.symbol ?? holding.instrumentId)}</b><small>{text(holding.exchange)} · {text(holding.assetType)}</small>{#if holdingStatus && holding.symbol}<div class="holding-extension"><svelte:component this={holdingStatus} symbol={holding.symbol} /></div>{/if}{#if extras(holding.attributes).length}<details class="broker-details"><summary>Details</summary><dl>{#each extras(holding.attributes) as [label, value]}<dt>{label}</dt><dd>{attributeValue(value)}</dd>{/each}</dl></details>{/if}</td>
-                  <td>{quantity(holding.quantity)}</td>
-                  <td>{money(holding.averageCost, holding.currency)}</td>
-                  <td>{money(holding.marketPrice, holding.currency)}</td>
-                  <td>{money(holding.marketValue, holding.currency)}</td>
-                  <td class={pnlTone(holding)}>{money(holding.unrealizedProfitLoss, holding.currency)}<small>{percent(holding.unrealizedProfitLossPercent)}</small></td>
+                  <td><b>{text(holding.symbol ?? holding.instrumentId)}</b><small>{text(holding.exchange)} · {text(holding.assetType)}</small>{#if holdingStatus && holding.symbol}<div class="holding-extension"><svelte:component this={holdingStatus} symbol={holding.symbol} /></div>{/if}{#if extras(holding.attributes).length}<details class="broker-details"><summary>Details</summary><dl>{#each extras(holding.attributes) as [label, value]}<dt>{label}</dt><dd>{attributeValue(value, showValues)}</dd>{/each}</dl></details>{/if}</td>
+                  <td>{quantity(holding.quantity, showValues)}</td>
+                  <td>{money(holding.averageCost, holding.currency, showValues)}</td>
+                  <td>{money(holding.marketPrice, holding.currency, showValues)}</td>
+                  <td>{money(holding.marketValue, holding.currency, showValues)}</td>
+                  <td class={pnlTone(holding, showValues)}>{money(holding.unrealizedProfitLoss, holding.currency, showValues)}<small>{percent(holding.unrealizedProfitLossPercent, showValues)}</small></td>
                 </tr>
               {/each}</tbody>
             </table></div>
@@ -163,11 +169,11 @@
               <thead><tr><th>Instrument</th><th>Side</th><th>Type / status</th><th>Remaining</th><th>Price</th><th>Placed</th></tr></thead>
               <tbody>{#each account.orders as order}
                 <tr>
-                  <td><b>{text(order.symbol ?? order.instrumentId)}</b><small>{showValues ? `#${text(order.orderId)}` : `#${hidden}`}</small>{#if extras(order.attributes).length}<details class="broker-details"><summary>Details</summary><dl>{#each extras(order.attributes) as [label, value]}<dt>{label}</dt><dd>{attributeValue(value)}</dd>{/each}</dl></details>{/if}</td>
+                  <td><b>{text(order.symbol ?? order.instrumentId)}</b><small>{showValues ? `#${text(order.orderId)}` : `#${hidden}`}</small>{#if extras(order.attributes).length}<details class="broker-details"><summary>Details</summary><dl>{#each extras(order.attributes) as [label, value]}<dt>{label}</dt><dd>{attributeValue(value, showValues)}</dd>{/each}</dl></details>{/if}</td>
                   <td><span class:buy={order.side === 'BUY'} class:sell={order.side === 'SELL'}>{text(order.side)}</span></td>
                   <td>{text(order.orderType)}<small>{text(order.status)}</small></td>
-                  <td>{quantity(order.remainingQuantity ?? order.quantity)}</td>
-                  <td>{money(order.price, order.currency)}{#if order.triggerPrice != null}<small>Trigger {money(order.triggerPrice, order.currency)}</small>{/if}</td>
+                  <td>{quantity(order.remainingQuantity ?? order.quantity, showValues)}</td>
+                  <td>{money(order.price, order.currency, showValues)}{#if order.triggerPrice != null}<small>Trigger {money(order.triggerPrice, order.currency, showValues)}</small>{/if}</td>
                   <td>{text(order.placedAt)}</td>
                 </tr>
               {/each}</tbody>

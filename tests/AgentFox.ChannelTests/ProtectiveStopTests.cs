@@ -9,8 +9,7 @@ namespace AgentFox.ChannelTests;
 /// Every rule here can put a real SELL order into the market, so the tests lean on the readings where
 /// acting would be WRONG: an unreadable holdings grid, a baseline that was never captured, a stop
 /// already resting, a session that has not rolled. The asymmetry is the whole point — a stop that
-/// failed to go in is visible and fixable by hand, whereas a duplicate stop sells the position twice
-/// and this broker offers no way to cancel it.
+/// failed to go in is visible and fixable by hand, whereas a duplicate stop sells the position twice.
 /// </para>
 /// </summary>
 [TestClass]
@@ -294,4 +293,184 @@ public sealed class ProtectiveStopTests
     private static RestingOrder Resting(
         decimal? price, string? side = null, string? orderNo = null) =>
         new("FFC", side, null, null, price, orderNo, "row");
+
+    private static RestingOrder Sized(decimal price, int quantity, string orderNo) =>
+        new("FFC", "SEL", "SLO", quantity, price, orderNo, "row");
+
+    // ── Supersession under a free-quantity broker ────────────────────────────
+    //
+    // CONFIRMED live 2026-08-27 against AHL: a SELL is sized against custody MINUS the quantity
+    // already committed to resting SELL orders ("You cannot sell more than 0 shares of SYS"), and two
+    // stop orders DO rest simultaneously on one symbol when free shares cover both. So the constraint
+    // is quantity, never symbol — and a raise over a fully committed holding is unplaceable until the
+    // order it replaces is cancelled.
+
+    private static ProtectiveStop Predecessor(string? orderNo, int desired = 100) => Stop(baseline: 0) with
+    {
+        StopId = "old", State = "active", DesiredQuantity = desired,
+        StopTrigger = 120m, StopLimit = 118.8m, LastOrderNo = orderNo
+    };
+
+    private static ProtectiveStop Successor(int desired = 100) => Stop(baseline: 0) with
+    {
+        StopId = "new", State = "active", DesiredQuantity = desired,
+        StopTrigger = 125m, StopLimit = 123.75m, SupersedesStopId = "old"
+    };
+
+    [TestMethod]
+    public void Supersede_WaitsWhileThePredecessorStillHoldsEveryShare()
+    {
+        var decision = ProtectiveStopDecisions.DecideSupersede(
+            Successor(), Predecessor("OLD-120"), heldQuantity: 100m,
+            resting: [Sized(120m, 100, "OLD-120")]);
+
+        Assert.AreEqual(SupersedeAction.Wait, decision.Action, decision.Reason);
+        StringAssert.Contains(decision.Reason, "still holds 100 of 100");
+    }
+
+    [TestMethod]
+    public void Supersede_ProceedsWhenFreeSharesCoverTheReplacement()
+    {
+        // 150 held, 100 committed to the predecessor, so 50 are free — and the replacement wants 50.
+        // Both may rest at once; the predecessor is retired afterwards by the existing path.
+        var decision = ProtectiveStopDecisions.DecideSupersede(
+            Successor(desired: 50), Predecessor("OLD-120"), heldQuantity: 150m,
+            resting: [Sized(120m, 100, "OLD-120")]);
+
+        Assert.AreEqual(SupersedeAction.Proceed, decision.Action, decision.Reason);
+    }
+
+    [TestMethod]
+    public void Supersede_RetiresThePredecessorOnceItsOrderHasLeftTheBook()
+    {
+        // The overnight path: PSX clears the book at the close, so the next session finds nothing
+        // holding the shares and the raise can go in clean.
+        var decision = ProtectiveStopDecisions.DecideSupersede(
+            Successor(), Predecessor("OLD-120"), heldQuantity: 100m, resting: []);
+
+        Assert.AreEqual(SupersedeAction.RetirePredecessorFirst, decision.Action, decision.Reason);
+    }
+
+    [TestMethod]
+    public void Supersede_RetiresAPredecessorThatNeverPlacedAnOrder()
+    {
+        var decision = ProtectiveStopDecisions.DecideSupersede(
+            Successor(), Predecessor(orderNo: null), heldQuantity: 100m, resting: []);
+
+        Assert.AreEqual(SupersedeAction.RetirePredecessorFirst, decision.Action, decision.Reason);
+    }
+
+    [TestMethod]
+    public void Supersede_AnUnreadableBookWaits_RatherThanAssumingTheSharesAreFree()
+    {
+        var decision = ProtectiveStopDecisions.DecideSupersede(
+            Successor(), Predecessor("OLD-120"), heldQuantity: 100m, resting: null);
+
+        Assert.AreEqual(SupersedeAction.Wait, decision.Action, decision.Reason);
+    }
+
+    [TestMethod]
+    public void Supersede_AnUnreadableRestingQuantityWaits_RatherThanGuessingTheFreeCount()
+    {
+        var decision = ProtectiveStopDecisions.DecideSupersede(
+            Successor(), Predecessor("OLD-120"), heldQuantity: 100m,
+            resting: [Resting(120m, "SEL", "OLD-120")]);   // quantity null — unknown, never zero
+
+        Assert.AreEqual(SupersedeAction.Wait, decision.Action, decision.Reason);
+    }
+
+    [TestMethod]
+    public void Supersede_UnreadableHoldingsWait()
+    {
+        var decision = ProtectiveStopDecisions.DecideSupersede(
+            Successor(), Predecessor("OLD-120"), heldQuantity: null,
+            resting: [Sized(120m, 100, "OLD-120")]);
+
+        Assert.AreEqual(SupersedeAction.Wait, decision.Action, decision.Reason);
+    }
+
+    [TestMethod]
+    public void Supersede_CancelsThePredecessorWhenTheWindowIsOpen()
+    {
+        // The intraday path. Make-before-break cannot complete against a free-quantity broker, so the
+        // only route is to cancel first — and saying so as a named decision is what lets the worker
+        // arm cover BEFORE it opens the gap.
+        var decision = ProtectiveStopDecisions.DecideSupersede(
+            Successor(), Predecessor("OLD-120"), heldQuantity: 100m,
+            resting: [Sized(120m, 100, "OLD-120")], replacementWindowAllowed: true);
+
+        Assert.AreEqual(SupersedeAction.CancelPredecessorThenPlace, decision.Action, decision.Reason);
+        StringAssert.Contains(decision.Reason, "local backstop");
+    }
+
+    [TestMethod]
+    public void Supersede_WaitsRatherThanCancellingWhenNoReplacementCouldBePlaced()
+    {
+        // Same inputs, window shut. Cancelling here would open a gap for no benefit — and waiting is
+        // not a compromise: the venue clears the book at the close, so the raise goes in clean next
+        // session with nothing cancelled at all.
+        var decision = ProtectiveStopDecisions.DecideSupersede(
+            Successor(), Predecessor("OLD-120"), heldQuantity: 100m,
+            resting: [Sized(120m, 100, "OLD-120")], replacementWindowAllowed: false);
+
+        Assert.AreEqual(SupersedeAction.Wait, decision.Action, decision.Reason);
+        StringAssert.Contains(decision.Reason, "next session");
+    }
+
+    [TestMethod]
+    public void Supersede_AnOpenWindowDoesNotOverrideAnUnknown()
+    {
+        // The window says "you could act"; the book says "you do not know what you would be acting on".
+        // Unknown has to win, or an unreadable read becomes a licence to cancel real protection.
+        var decision = ProtectiveStopDecisions.DecideSupersede(
+            Successor(), Predecessor("OLD-120"), heldQuantity: 100m,
+            resting: null, replacementWindowAllowed: true);
+
+        Assert.AreEqual(SupersedeAction.Wait, decision.Action, decision.Reason);
+    }
+
+    [TestMethod]
+    public void Supersede_AnOpenWindowStillPrefersRestingAlongsideWhenSharesAreFree()
+    {
+        // Free shares mean no gap is needed at all, so an open window must not turn a harmless
+        // side-by-side placement into a cancellation.
+        var decision = ProtectiveStopDecisions.DecideSupersede(
+            Successor(desired: 50), Predecessor("OLD-120"), heldQuantity: 150m,
+            resting: [Sized(120m, 100, "OLD-120")], replacementWindowAllowed: true);
+
+        Assert.AreEqual(SupersedeAction.Proceed, decision.Action, decision.Reason);
+    }
+
+    [TestMethod]
+    public void Supersede_AStopThatReplacesNothingProceeds()
+    {
+        var decision = ProtectiveStopDecisions.DecideSupersede(
+            Active(desired: 45), predecessor: null, heldQuantity: 45m, resting: []);
+
+        Assert.AreEqual(SupersedeAction.Proceed, decision.Action, decision.Reason);
+    }
+
+    // ── The quiet failure: a small raise matched to the order it is replacing ──
+
+    [TestMethod]
+    public void Placement_ASmallRaiseIsNotMistakenForItsOwnPredecessor()
+    {
+        // A lift of 1.25% falls inside the 2% price-match tolerance, so without excluding the
+        // predecessor's order number the raise matches the very order it is replacing and is skipped
+        // silently — forever. This is the bug the exclusion set exists for.
+        var raised = Successor() with { StopTrigger = 121.5m, StopLimit = 120.3m };
+        RestingOrder[] resting = [Sized(120m, 100, "OLD-120")];
+
+        var withoutExclusion = ProtectiveStopDecisions.DecidePlacement(
+            raised, heldQuantity: 100m, Today, resting);
+        Assert.AreEqual(PlacementAction.Skip, withoutExclusion.Action,
+            "documents the old behaviour the exclusion set corrects");
+
+        var withExclusion = ProtectiveStopDecisions.DecidePlacement(
+            raised, heldQuantity: 100m, Today, resting,
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "OLD-120" });
+
+        Assert.AreEqual(PlacementAction.Place, withExclusion.Action, withExclusion.Reason);
+        Assert.AreEqual(100, withExclusion.Quantity);
+    }
 }
