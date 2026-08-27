@@ -3,9 +3,11 @@
   import {
     trading, percentTriggerLevel,
     type OrderIntentDefinition, type OrderIntentRegistryResponse, type WatchlistEntry,
-    type TriggerKind, type ArmOrderRequest
+    type TriggerKind, type ArmOrderRequest, type BrokerAccountSnapshot
   } from './api';
-  import { ShoppingCart, X, AlertTriangle, RefreshCw, CheckCircle2, Clock3 } from 'lucide-svelte';
+  import {
+    ShoppingCart, X, AlertTriangle, RefreshCw, CheckCircle2, Clock3, BriefcaseBusiness
+  } from 'lucide-svelte';
 
   export let selectedSymbol: string | null = null;
 
@@ -27,12 +29,17 @@
   let persistentUntilFilled = false;
   let loading = true;
   let quoteBusy = false;
+  let holdingBusy = false;
+  let holdingLoaded = false;
+  let account: BrokerAccountSnapshot | null = null;
+  let holdingError: string | null = null;
   let busy = false;
   let error: string | null = null;
   let result: { ok: boolean; title: string; detail: string; executionId?: string } | null = null;
   let clientRequestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
   const money = (value: number) => value.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  const when = (value: string) => new Date(value).toLocaleString();
   $: categories = [...new Set((registry?.intents ?? []).map(item => item.category))];
 
   onMount(async () => {
@@ -113,6 +120,33 @@
     }
   }
 
+  const sameSymbol = (candidate: string | null | undefined, ticker: string) =>
+    candidate?.trim().toUpperCase() === ticker;
+
+  async function loadHolding() {
+    if (holdingBusy) return;
+    holdingBusy = true;
+    holdingError = null;
+    try {
+      account = await trading.account();
+      holdingLoaded = true;
+    } catch (e) {
+      holdingError = e instanceof Error ? e.message : String(e);
+    } finally {
+      holdingBusy = false;
+    }
+  }
+
+  function sellFraction(fraction: number) {
+    if (availableSellQuantity == null || availableSellQuantity <= 0) return;
+    const shares = fraction >= 1
+      ? availableSellQuantity
+      : Math.floor(availableSellQuantity * fraction);
+    if (shares <= 0) return;
+    sizeMode = 'shares';
+    quantity = shares;
+  }
+
   $: conditionalLevel = choice?.submission === 'conditional' && choice.triggerKind
     ? percentTriggerLevel(choice.triggerKind, currentPrice, triggerPercent)
     : null;
@@ -120,14 +154,38 @@
     && registry != null && !registry.capabilities.marketOrdersEnabled;
   $: persistable = choice != null && choice.orderType !== 'MARKET';
   $: if (!persistable) persistentUntilFilled = false;
+  $: selectedTicker = symbol.trim().toUpperCase();
+  $: matchingHoldings = account?.holdings.filter(
+    holding => sameSymbol(holding.symbol ?? holding.instrumentId, selectedTicker)) ?? [];
+  $: matchingSellOrders = account?.orders.filter(order =>
+    sameSymbol(order.symbol ?? order.instrumentId, selectedTicker)
+    && (order.side?.toUpperCase() === 'SELL' || order.side?.toUpperCase() === 'SEL')) ?? [];
+  $: heldQuantity = holdingLoaded && account?.holdingsAvailable
+    && matchingHoldings.every(holding => holding.quantity != null)
+      ? Math.floor(matchingHoldings.reduce((sum, holding) => sum + Math.max(0, holding.quantity ?? 0), 0))
+      : null;
+  $: committedSellQuantity = holdingLoaded && account?.ordersAvailable
+    && matchingSellOrders.every(order => order.remainingQuantity != null)
+      ? Math.floor(matchingSellOrders.reduce(
+          (sum, order) => sum + Math.max(0, order.remainingQuantity ?? 0), 0))
+      : null;
+  $: availableSellQuantity = heldQuantity != null && committedSellQuantity != null
+    ? Math.max(0, heldQuantity - committedSellQuantity)
+    : null;
   $: estimatedPrice = choice?.orderType === 'MARKET' ? currentPrice
     : choice?.orderType === 'STOPLOSS' ? triggerPrice
     : choice?.submission === 'conditional' ? conditionalLevel : price;
+  $: availableSellValue = availableSellQuantity != null && estimatedPrice && estimatedPrice > 0
+    ? availableSellQuantity * estimatedPrice
+    : null;
   $: valueSizedQuantity = sizeMode === 'value' && orderValue && orderValue > 0 && estimatedPrice && estimatedPrice > 0
     ? Math.round(orderValue / estimatedPrice)
     : null;
   $: effectiveQuantity = sizeMode === 'value' ? valueSizedQuantity : quantity;
   $: estimatedValue = effectiveQuantity && estimatedPrice ? effectiveQuantity * estimatedPrice : null;
+  $: sellExceedsAvailable = choice?.action === 'SELL'
+    && effectiveQuantity != null && availableSellQuantity != null
+    && effectiveQuantity > availableSellQuantity;
   $: sizingDifference = sizeMode === 'value' && orderValue && estimatedValue != null
     ? estimatedValue - orderValue
     : null;
@@ -303,6 +361,56 @@
       {#if choice}
         <div class="form-card">
           <div class="form-head"><div><b>{choice.label}</b><span>{choice.action} · {choice.orderType}</span></div></div>
+          {#if choice.action === 'SELL'}
+            <section class="holding-card" aria-live="polite">
+              <div class="holding-head">
+                <div class="holding-title">
+                  <BriefcaseBusiness size={15} />
+                  <span>
+                    <b>Your {symbol.trim().toUpperCase() || 'selected'} holding</b>
+                    <small>{holdingLoaded && account ? `Updated ${when(account.retrievedAtUtc)}` : 'Read holdings and working orders from the broker'}</small>
+                  </span>
+                </div>
+                <button type="button" class="holding-refresh" on:click={loadHolding} disabled={holdingBusy}>
+                  <span class:spin={holdingBusy}><RefreshCw size={13} /></span>
+                  {holdingBusy ? 'Checking…' : holdingLoaded ? 'Refresh' : 'Check holding'}
+                </button>
+              </div>
+
+              {#if holdingError}
+                <p class="holding-warning"><AlertTriangle size={13} /> {holdingError}</p>
+              {/if}
+              {#if holdingBusy && !account}
+                <p class="holding-empty">Reading current holdings and working orders…</p>
+              {:else if !holdingLoaded}
+                <p class="holding-empty">Check the broker to see what is owned, already committed, and available to sell.</p>
+              {:else if account && !account.holdingsAvailable}
+                <p class="holding-warning"><AlertTriangle size={13} /> Holdings are unavailable, so this is not being treated as an empty position.</p>
+              {:else if account}
+                <div class="holding-stats">
+                  <div><span>Owned</span><b>{heldQuantity == null ? 'Unknown' : `${money(heldQuantity)} shares`}</b></div>
+                  <div><span>In working SELLs</span><b>{committedSellQuantity == null ? 'Unknown' : `${money(committedSellQuantity)} shares`}</b></div>
+                  <div><span>Available now</span><b>{availableSellQuantity == null ? 'Unknown' : `${money(availableSellQuantity)} shares`}</b></div>
+                </div>
+
+                {#if !account.ordersAvailable}
+                  <p class="holding-warning"><AlertTriangle size={13} /> The working-order book is unavailable. Sell-all shortcuts stay disabled rather than assuming no shares are committed.</p>
+                {:else if matchingSellOrders.some(order => order.remainingQuantity == null)}
+                  <p class="holding-warning"><AlertTriangle size={13} /> A working SELL has an unknown remaining quantity, so available shares cannot be calculated safely.</p>
+                {:else if availableSellQuantity != null}
+                  <div class="holding-actions" aria-label="Quick sell quantities">
+                    <button type="button" on:click={() => sellFraction(.25)} disabled={Math.floor(availableSellQuantity * .25) < 1}>25%</button>
+                    <button type="button" on:click={() => sellFraction(.5)} disabled={Math.floor(availableSellQuantity * .5) < 1}>50%</button>
+                    <button type="button" class="sell-all" on:click={() => sellFraction(1)} disabled={availableSellQuantity < 1}>Sell all available</button>
+                  </div>
+                  <p class="holding-note">
+                    {#if availableSellValue != null}Available value at this order price is about <b>{money(availableSellValue)} PKR</b>. {/if}
+                    Availability is checked again when the order reaches the broker.
+                  </p>
+                {/if}
+              {/if}
+            </section>
+          {/if}
           <div class="grid">
             <div class="size-control">
               <span class="field-label">Order size</span>
@@ -360,6 +468,9 @@
               ({sizingDifference === 0 ? 'exactly your value' : `${money(Math.abs(sizingDifference))} PKR ${sizingDifference > 0 ? 'above' : 'below'} your value`}).
             </p>
           {/if}
+          {#if sellExceedsAvailable && effectiveQuantity != null && availableSellQuantity != null}
+            <p class="warning"><AlertTriangle size={13} /> You entered {money(effectiveQuantity)} shares, but the broker snapshot shows only {money(availableSellQuantity)} available now. Use “Sell all available” or reduce the size; final availability is checked again on submission.</p>
+          {/if}
           {#if summary}<p class="summary">{summary}</p>{/if}
           {#if estimatedValue}<p class="estimate">Estimated value: <b>{money(estimatedValue)} PKR</b>{choice.orderType === 'MARKET' ? ' at the latest price; actual value can move.' : ''}</p>{/if}
         </div>
@@ -414,6 +525,38 @@
   .form-card { margin:0 1rem 1rem; padding:.8rem; background:var(--surface-2); border:1px solid var(--border-md); border-radius:var(--radius-sm); }
   .form-head { display:flex; justify-content:space-between; margin-bottom:.65rem; }.form-head div { display:flex; align-items:center; gap:.5rem; }
   .form-head b { font-size:.82rem; }.form-head span { color:var(--text-3); font-size:.65rem; }
+  .holding-card { margin-bottom:.75rem; padding:.7rem; border:1px solid var(--border); border-radius:var(--radius-sm);
+                  background:var(--surface); }
+  .holding-head { display:flex; align-items:center; justify-content:space-between; gap:.7rem; }
+  .holding-title { display:flex; align-items:center; gap:.45rem; color:var(--primary); min-width:0; }
+  .holding-title span { display:flex; flex-direction:column; gap:.12rem; min-width:0; }
+  .holding-title b { color:var(--text); font-size:.75rem; }
+  .holding-title small { color:var(--text-3); font-size:.62rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .holding-refresh { display:flex; align-items:center; gap:.3rem; flex:none; border:1px solid var(--border-md);
+                     border-radius:var(--radius-sm); padding:.35rem .5rem; background:var(--surface-2);
+                     color:var(--text-2); font:inherit; font-size:.65rem; cursor:pointer; }
+  .holding-refresh:hover { color:var(--text); border-color:var(--border-hover); }
+  .holding-refresh:disabled { opacity:.6; cursor:wait; }
+  .spin { display:flex; animation:spin 1s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .holding-empty { margin:.6rem 0 0; color:var(--text-3); font-size:.67rem; line-height:1.45; }
+  .holding-warning { margin:.6rem 0 0; display:flex; align-items:flex-start; gap:.35rem; color:var(--warning);
+                     font-size:.67rem; line-height:1.45; }
+  .holding-warning :global(svg) { flex:none; margin-top:.1rem; }
+  .holding-stats { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:.45rem; margin-top:.65rem; }
+  .holding-stats div { display:flex; flex-direction:column; gap:.18rem; padding:.5rem .55rem;
+                       border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--surface-2); }
+  .holding-stats span { color:var(--text-3); font-size:.61rem; }
+  .holding-stats b { color:var(--text); font-size:.72rem; }
+  .holding-actions { display:flex; flex-wrap:wrap; gap:.35rem; margin-top:.6rem; }
+  .holding-actions button { border:1px solid var(--border-md); border-radius:var(--radius-sm); padding:.35rem .55rem;
+                            background:var(--surface-2); color:var(--text-2); font:inherit; font-size:.65rem; cursor:pointer; }
+  .holding-actions button:hover:not(:disabled) { color:var(--text); border-color:var(--primary); }
+  .holding-actions button:focus-visible,.holding-refresh:focus-visible { outline:2px solid var(--primary); outline-offset:2px; }
+  .holding-actions button:disabled { opacity:.45; cursor:not-allowed; }
+  .holding-actions .sell-all { color:var(--danger); border-color:color-mix(in srgb,var(--danger) 40%,var(--border)); }
+  .holding-note { margin:.45rem 0 0; color:var(--text-3); font-size:.63rem; line-height:1.45; }
+  .holding-note b { color:var(--text-2); }
   .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:.6rem; }.grid input { width:100%; box-sizing:border-box; }
   .size-control { display:flex; flex-direction:column; gap:.4rem; }
   .field-label { color:var(--text-3); font-size:.68rem; }
@@ -439,5 +582,9 @@
   .outcome.ok { color:var(--success); border-color:color-mix(in srgb,var(--success) 35%,transparent); background:color-mix(in srgb,var(--success) 7%,transparent); }
   .outcome div { display:flex; flex-direction:column; gap:.3rem; }.outcome p { margin:0; color:var(--text-2); font-size:.75rem; line-height:1.5; }.outcome small { color:var(--text-3); }
   @media(max-width:760px) { .choice-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
-  @media(max-width:480px) { .choice-grid,.grid { grid-template-columns:1fr; } }
+  @media(max-width:480px) {
+    .choice-grid,.grid,.holding-stats { grid-template-columns:1fr; }
+    .holding-head { align-items:flex-start; }
+    .holding-refresh { padding:.35rem; }
+  }
 </style>

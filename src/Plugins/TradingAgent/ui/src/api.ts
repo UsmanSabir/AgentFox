@@ -1278,7 +1278,9 @@ export const trading = {
   },
 
   watchlist: {
-    list:   ()               => get<WatchlistResponse>('/trading/watchlist'),
+    /** Skip portal metadata for the first paint; a follow-up refresh can merge names and live moves. */
+    list:   (includeMarketData = true) => get<WatchlistResponse>(
+      `/trading/watchlist?includeMarketData=${includeMarketData}`),
     add:    (symbol: string) => post<{
                                   symbol: string;
                                   added: boolean;

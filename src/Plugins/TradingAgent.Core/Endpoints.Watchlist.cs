@@ -61,6 +61,7 @@ public sealed partial class TradingCoreEndpoints
         // order still crosses the same deterministic risk, calendar, sizing, and reconciliation gates.
 
         trading.MapGet("/watchlist", async (
+            bool? includeMarketData,
             MonitoredUniverse universe,
             ITradingRepository repository,
             PsxDataClient dataClient,
@@ -78,13 +79,17 @@ public sealed partial class TradingCoreEndpoints
             var symbols = snapshot.Entries.Select(e => e.Symbol).ToList();
             var barCounts = await repository.GetDailyBarCountsAsync(symbols, ct);
             var openAlerts = await repository.GetOpenAlertCountsAsync(ct);
-            IReadOnlyDictionary<string, PsxLiveQuote> marketWatch;
-            try { marketWatch = await dataClient.GetMarketWatchAsync(ct); }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            IReadOnlyDictionary<string, PsxLiveQuote> marketWatch =
+                new Dictionary<string, PsxLiveQuote>(StringComparer.OrdinalIgnoreCase);
+            if (includeMarketData ?? true)
             {
-                // Company names are presentation metadata. A portal outage must not take down the
-                // user's watchlist, chart access, or trading controls.
-                marketWatch = new Dictionary<string, PsxLiveQuote>(StringComparer.OrdinalIgnoreCase);
+                try { marketWatch = await dataClient.GetMarketWatchAsync(ct); }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // Company names are presentation metadata. A portal outage must not take down the
+                    // user's watchlist, chart access, or trading controls.
+                    marketWatch = new Dictionary<string, PsxLiveQuote>(StringComparer.OrdinalIgnoreCase);
+                }
             }
 
             // Reported per symbol because a freshly added symbol has no deep history until a backfill
