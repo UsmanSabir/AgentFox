@@ -130,6 +130,7 @@ public sealed class TradingAgentRuntime
         services.AddSingleton<IBrokerStateReader>(sp => sp.GetRequiredService<AhkBrowserBrokerAdapter>());
         services.AddSingleton<IBrokerOrderCanceller>(sp => sp.GetRequiredService<AhkBrowserBrokerAdapter>());
         services.AddSingleton<IBrokerOutstandingOrdersReader>(sp => sp.GetRequiredService<AhkBrowserBrokerAdapter>());
+        services.AddSingleton<IActiveSessionEstablisher>(sp => sp.GetRequiredService<AhkBrowserBrokerAdapter>());
         services.AddSingleton<IMarketCalendar, PsxMarketCalendar>();
         services.AddSingleton(TimeProvider.System);
         // Decides whether the VENUE is accepting orders, preferring the broker's own reported state
@@ -163,6 +164,10 @@ public sealed class TradingAgentRuntime
             config.GetSection($"Plugins:{AhlAnalyticsConfig.SectionName}"));
         services.AddRuntimePluginOptions<AhlAnalyticsConfig>(
             TradingPluginConfigDefinitionProvider.BrokerPluginName);
+        // Hop ① of the SSO handshake (see IAnalyticsSsoUrlProvider's own doc comment). Community's
+        // default goes through the AHK browser-cookie session; premium overrides this to its own SOAP
+        // session in RegisterAhlBroker so the analytics handshake never opens a browser under BrokerId: ahl.
+        services.AddSingleton<IAnalyticsSsoUrlProvider, AhkPortalAnalyticsSsoUrlProvider>();
         services.AddSingleton<AhlAnalyticsClient>();
         // Candle history prefers this over the PSX scrape when a token is already held — one request
         // for five years instead of ~1235, and an ADJUSTED series, which is the correct input for

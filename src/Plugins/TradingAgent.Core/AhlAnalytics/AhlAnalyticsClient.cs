@@ -9,6 +9,35 @@ using TradingAgent.Feed;
 namespace TradingAgent.AhlAnalytics;
 
 /// <summary>
+/// Hop ① of the AHL Analytics SSO handshake: mints the pre-signed URL that authenticates the caller
+/// into the research portal. <see cref="AhlAnalyticsClient"/> depends on this rather than on any one
+/// broker integration directly, so which session mints the link is a composition choice rather than a
+/// hardcoded one — the community edition wires the AHK browser-cookie session
+/// (<see cref="AhkPortalAnalyticsSsoUrlProvider"/>); premium wires its own SOAP session instead
+/// (<c>AhlCapitalAnalyticsSsoUrlProvider</c>), so this hop never has to open a browser under
+/// <c>BrokerId: ahl</c>. Hops ②/③ below are anonymous HTTP against the token this mints, and never
+/// change regardless of which provider is active.
+/// </summary>
+public interface IAnalyticsSsoUrlProvider
+{
+    Task<(string? Url, string? Error)> GetAnalyticsSsoUrlAsync(CancellationToken ct = default);
+}
+
+/// <summary>
+/// Default provider: the AHK browser-cookie session's own <c>GetAnalyticsURL</c> endpoint. This is the
+/// ONLY thing that can make this hop cost a login — see <see cref="AhkPortalClient.GetAnalyticsUrlAsync"/>.
+/// </summary>
+public sealed class AhkPortalAnalyticsSsoUrlProvider : IAnalyticsSsoUrlProvider
+{
+    private readonly AhkPortalClient _portal;
+
+    public AhkPortalAnalyticsSsoUrlProvider(AhkPortalClient portal) => _portal = portal;
+
+    public Task<(string? Url, string? Error)> GetAnalyticsSsoUrlAsync(CancellationToken ct = default) =>
+        _portal.GetAnalyticsUrlAsync(ct);
+}
+
+/// <summary>
 /// Talks to the AHL Analytics research portal (<c>data.arifhabibltd.com</c>) over plain HTTP.
 /// See <c>docs/ahl-analytics-api.md</c> for the captured protocol.
 ///
@@ -80,7 +109,7 @@ public sealed class AhlAnalyticsClient : IDisposable
         """<meta\s+name=["']csrf-token["']\s+content=["']([^"']+)["']""",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
-    private readonly AhkPortalClient _portal;
+    private readonly IAnalyticsSsoUrlProvider _ssoProvider;
     private readonly IRuntimePluginOptions<AhlAnalyticsConfig> _config;
     private readonly ILogger<AhlAnalyticsClient> _logger;
 
@@ -147,11 +176,11 @@ public sealed class AhlAnalyticsClient : IDisposable
     private readonly AhlDailyCandleCache _dailyCandleCache = new();
 
     public AhlAnalyticsClient(
-        AhkPortalClient portal,
+        IAnalyticsSsoUrlProvider ssoProvider,
         IRuntimePluginOptions<AhlAnalyticsConfig> config,
         ILogger<AhlAnalyticsClient> logger)
     {
-        _portal = portal;
+        _ssoProvider = ssoProvider;
         _config = config;
         _logger = logger;
 
@@ -226,9 +255,9 @@ public sealed class AhlAnalyticsClient : IDisposable
             if (!force && HasToken) return _bearer;
             if (HandshakeInCooldown) { LastError = _handshakeError; return null; }
 
-            // Hop ①: the broker portal mints the SSO URL. This is the only hop needing the broker
-            // session, and the only one that can cost a login.
-            var (ssoUrl, hopOneError) = await _portal.GetAnalyticsUrlAsync(ct);
+            // Hop ①: mint the SSO URL. This is the only hop needing a live broker session, and the
+            // only one that can cost a login — see IAnalyticsSsoUrlProvider for which session that is.
+            var (ssoUrl, hopOneError) = await _ssoProvider.GetAnalyticsSsoUrlAsync(ct);
             if (ssoUrl is null)
             {
                 RecordHandshakeFailure(hopOneError ?? "Could not obtain the analytics SSO URL.");

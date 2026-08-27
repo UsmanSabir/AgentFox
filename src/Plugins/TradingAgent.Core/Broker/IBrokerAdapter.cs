@@ -50,8 +50,22 @@ public interface IBrokerOutstandingOrdersReader
     Task<IReadOnlyList<RestingOrder>> GetOutstandingOrdersAsync(string symbol, CancellationToken ct = default);
 }
 
+/// <summary>
+/// Actively (re)establishes a broker session RIGHT NOW. The ONE caller allowed to force this is the
+/// dashboard's "Check broker now" button (<c>POST /trading/reconciliation/run</c>) — every other
+/// <see cref="IBrokerStateReader"/> caller must stay passive (see
+/// <see cref="AhkBrowserBrokerAdapter.ReadSnapshotAsync"/>'s own remarks) so a health-check timer can
+/// never itself cause a login. Broker-neutral so that button never has to know which adapter is active,
+/// or reach for the browser-cookie session when a different one is.
+/// </summary>
+public interface IActiveSessionEstablisher
+{
+    Task<bool> EstablishSessionAsync(CancellationToken ct = default);
+}
+
 public sealed class AhkBrowserBrokerAdapter :
-    IBrokerAdapter, IBrokerStateReader, IBrokerOrderCanceller, IBrokerOutstandingOrdersReader
+    IBrokerAdapter, IBrokerStateReader, IBrokerOrderCanceller, IBrokerOutstandingOrdersReader,
+    IActiveSessionEstablisher
 {
     private readonly AhkBroker _broker;
     private readonly AhkPortalClient _portal;
@@ -89,6 +103,11 @@ public sealed class AhkBrowserBrokerAdapter :
     public Task<IReadOnlyList<RestingOrder>> GetOutstandingOrdersAsync(
         string symbol, CancellationToken ct = default) =>
         _broker.GetOutstandingOrdersAsync(symbol);
+
+    /// <summary>Delegates to the portal client's own session bootstrap — unchanged behaviour, just
+    /// reached through the broker-neutral interface instead of directly.</summary>
+    public Task<bool> EstablishSessionAsync(CancellationToken ct = default) =>
+        _portal.EnsureSessionAsync(ct);
 
     /// <summary>
     /// Places every group, over the JSON API when <see cref="AhkConfig.PreferDirectApiForPlacement"/> is on
