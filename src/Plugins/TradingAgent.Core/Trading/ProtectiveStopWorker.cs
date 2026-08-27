@@ -522,8 +522,64 @@ public sealed class ProtectiveStopWorker : BackgroundService, IMarketSessionOpen
         }
 
         var held = holdings is null ? null : TryHeld(holdings, stop.Symbol);
+
+        // ── A raise has to settle its predecessor before it can be placed at all ─────────────────
+        // The broker sizes every SELL against custody MINUS quantity already committed to resting
+        // SELLs, so a predecessor holding the whole position makes the replacement unplaceable — the
+        // "make" of make-before-break cannot succeed until the "break" has happened. Deciding that
+        // here, rather than discovering it as a placement failure, is what stops a raise retrying
+        // forever while the operator is told it succeeded.
+        var excluded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (stop.SupersedesStopId is { Length: > 0 } predecessorId)
+        {
+            var predecessor = allStops.FirstOrDefault(s => s.StopId == predecessorId);
+            var supersede = ProtectiveStopDecisions.DecideSupersede(stop, predecessor, held, resting);
+
+            switch (supersede.Action)
+            {
+                case SupersedeAction.Wait:
+                    // Visible, not LogDebug: "the raise you asked for has not reached the broker" is
+                    // precisely the state this whole change exists to stop hiding. Once per stop per
+                    // day, because it persists all session by design and re-reporting it every pass is
+                    // how a channel becomes noise.
+                    _logger.LogInformation(
+                        "[ProtectiveStops] {StopId} ({Symbol}): raise to {Trigger} is PENDING — {Why}",
+                        stop.StopId, stop.Symbol, stop.StopTrigger, supersede.Reason);
+                    if (MarkAlerted(stop, "supersede-pending", today))
+                        _activity?.Warn("Stops",
+                            $"{stop.Symbol}: the stop raise to {stop.StopTrigger:0.##} has NOT reached "
+                            + "the broker yet", supersede.Reason);
+                    return;
+
+                case SupersedeAction.RetirePredecessorFirst when predecessor is not null:
+                    // Its order is already gone, so there is nothing to cancel and nothing to lose by
+                    // retiring it now — and retiring it BEFORE placing is what keeps both rows from
+                    // placing an order each next session.
+                    if (await repository.TrySetProtectiveStopStateAsync(
+                            predecessor.StopId, predecessor.State, "superseded_pending_cancel",
+                            $"Superseded by {stop.StopId}; its own order is no longer resting.", ct))
+                    {
+                        retiredThisPass.Add(predecessor.StopId);
+                        await RetireSupersededAsync(
+                            repository, predecessor with { State = "superseded_pending_cancel" },
+                            resting, ct);
+                        _logger.LogInformation(
+                            "[ProtectiveStops] {StopId} ({Symbol}): retired predecessor {Predecessor} " +
+                            "before placing — {Why}",
+                            stop.StopId, stop.Symbol, predecessor.StopId, supersede.Reason);
+                    }
+                    break;
+
+                case SupersedeAction.Proceed when predecessor?.LastOrderNo is { Length: > 0 } resting1:
+                    // Room for both. Exclude the predecessor's order so a small raise is not mistaken
+                    // for "already protected at this level" by the price match below.
+                    excluded.Add(resting1.Trim());
+                    break;
+            }
+        }
+
         var decision = ProtectiveStopDecisions.DecidePlacement(
-            stop, held, today, resting ?? []);
+            stop, held, today, resting ?? [], excluded);
 
         switch (decision.Action)
         {
@@ -867,10 +923,14 @@ public sealed class ProtectiveStopWorker : BackgroundService, IMarketSessionOpen
     /// operator is left believing a stop exists. This covers exactly that hole.
     /// </para>
     /// </summary>
-    private async Task AlertOnceAsync(ProtectiveStop stop, string reasonKey, DateOnly today, string message)
+    /// <summary>
+    /// Claims the once-per-session slot for one (stop, reason) pair, so a condition that persists all
+    /// session is reported once rather than every few minutes. Returns false when it has already been
+    /// reported today. Shared by the notifier path and by activity-log lines that need the same
+    /// restraint for the same reason.
+    /// </summary>
+    private bool MarkAlerted(ProtectiveStop stop, string reasonKey, DateOnly today)
     {
-        if (_notifier is null) return;
-
         if (_alertedFor != today)
         {
             // A new session is a new chance for the same condition to matter, and a stop that failed
@@ -879,7 +939,13 @@ public sealed class ProtectiveStopWorker : BackgroundService, IMarketSessionOpen
             _alertedFor = today;
         }
 
-        if (!_alerted.Add($"{stop.StopId}:{reasonKey}")) return;
+        return _alerted.Add($"{stop.StopId}:{reasonKey}");
+    }
+
+    private async Task AlertOnceAsync(ProtectiveStop stop, string reasonKey, DateOnly today, string message)
+    {
+        if (_notifier is null) return;
+        if (!MarkAlerted(stop, reasonKey, today)) return;
 
         try { await _notifier.NotifyAsync(message, TradingTopics.Stop(reasonKey)); }
         catch (Exception ex)

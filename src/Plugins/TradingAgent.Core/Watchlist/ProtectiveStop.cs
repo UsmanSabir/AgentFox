@@ -90,8 +90,10 @@ public sealed record ProtectiveStop
     /// <summary>
     /// Shares covered by native placements made <i>during</i>
     /// <see cref="LastPlacedSessionDate"/> — a running total for that session, not the size of the
-    /// last order. A top-up adds to it, because with no cancel at this broker the only way to raise
-    /// coverage is to rest a second order for the shortfall alongside the first.
+    /// last order. A top-up adds to it: raising coverage rests a second order for the shortfall
+    /// alongside the first, which is legitimate because the broker's limit is on the QUANTITY
+    /// committed to resting SELLs, not on how many orders carry it — confirmed live 2026-08-27, two
+    /// stop orders resting simultaneously on one symbol.
     /// </summary>
     public int PlacedQuantity { get; init; }
 
@@ -161,6 +163,31 @@ public sealed record FillVerdict(FillOutcome Outcome, int Quantity, string Reaso
 
 /// <summary>What the recurring pass should do with one stop this session.</summary>
 public enum PlacementAction { Skip, Place, Close }
+
+/// <summary>
+/// What a raised stop must settle about the predecessor it replaces before it can be placed at all.
+/// </summary>
+public enum SupersedeAction
+{
+    /// <summary>Nothing is in the way — place normally.</summary>
+    Proceed,
+
+    /// <summary>
+    /// The predecessor's native order is already gone from the book (the venue cleared it overnight,
+    /// it was cancelled elsewhere, or it never existed), so the predecessor row can be retired now and
+    /// the replacement placed against a clean book.
+    /// </summary>
+    RetirePredecessorFirst,
+
+    /// <summary>
+    /// The predecessor's order is still resting and still holds the shares. The replacement cannot be
+    /// placed until it is cancelled, and this decision will not cancel it — the position stays covered
+    /// at the old level meanwhile.
+    /// </summary>
+    Wait
+}
+
+public sealed record SupersedeDecision(SupersedeAction Action, string Reason);
 
 public sealed record PlacementDecision(PlacementAction Action, int Quantity, string Reason);
 
@@ -235,15 +262,23 @@ public static class ProtectiveStopDecisions
     /// <para>
     /// <b>The bias is to do nothing.</b> Every ambiguous reading returns <see cref="PlacementAction.Skip"/>,
     /// because the two mistakes are not symmetric: a stop that failed to go in is visible in the
-    /// panel and can be placed by hand, whereas a duplicate stop sells the position twice — and with
-    /// no cancel available at this broker, the second sale cannot be called back.
+    /// panel and can be placed by hand, whereas a duplicate stop sells the position twice.
     /// </para>
     /// </summary>
+    /// <param name="excludedOrderNumbers">
+    /// Broker order numbers that must NOT be read as protection this stop can rely on — in practice,
+    /// the predecessor this stop is replacing. Without it, a raise smaller than
+    /// <see cref="PriceMatchTolerance"/> matches the very order it is trying to supersede and is
+    /// skipped forever, because "a stop is already resting near this price" is trivially true of the
+    /// order being replaced. Mirrors <c>SellQuantityRule.Available</c>'s parameter of the same name,
+    /// for the same reason.
+    /// </param>
     public static PlacementDecision DecidePlacement(
         ProtectiveStop stop,
         decimal? heldQuantity,
         DateOnly today,
-        IReadOnlyList<RestingOrder> resting)
+        IReadOnlyList<RestingOrder> resting,
+        IReadOnlySet<string>? excludedOrderNumbers = null)
     {
         if (stop.State != "active")
             return new PlacementDecision(PlacementAction.Skip, 0, $"Not active (state: {stop.State}).");
@@ -271,7 +306,7 @@ public static class ProtectiveStopDecisions
             return new PlacementDecision(PlacementAction.Skip, 0,
                 $"Already placed for {today:yyyy-MM-dd}, covering {coveredThisSession} share(s).");
 
-        var match = FindOwnResting(stop, resting);
+        var match = FindOwnResting(stop, resting, excludedOrderNumbers);
         if (match.Ambiguous)
             return new PlacementDecision(PlacementAction.Skip, 0,
                 $"An order for {stop.Symbol} is resting but could not be identified "
@@ -281,7 +316,8 @@ public static class ProtectiveStopDecisions
             // Something is resting at this level that this system did not place today — a manual
             // stop, or one of ours from a placement that was never recorded. Either way the position
             // is protected at the level asked for, and adding a second order to an unknown one is how
-            // a holding gets sold twice with no way to call it back.
+            // a holding gets sold twice. A predecessor being deliberately superseded is NOT this case
+            // and is excluded by order number — see excludedOrderNumbers.
             return new PlacementDecision(PlacementAction.Skip, 0,
                 $"A stop for {stop.Symbol} is already resting"
                 + (mine.OrderNo is not null ? $" (order no {mine.OrderNo})" : "")
@@ -295,6 +331,102 @@ public static class ProtectiveStopDecisions
                     ? $"No stop is resting for {stop.Symbol}; placing for {shortfall} share(s)."
                     : $"Session rolled over (last placed {stop.LastPlacedSessionDate:yyyy-MM-dd}); "
                       + $"re-placing for {shortfall} share(s).");
+    }
+
+    /// <summary>
+    /// Decides what a raised stop must do about the predecessor it replaces, before
+    /// <see cref="DecidePlacement"/> is even asked.
+    ///
+    /// <para>
+    /// <b>Why this exists.</b> This broker sizes every SELL against custody MINUS the quantity already
+    /// committed to resting SELL orders — confirmed live on 2026-08-27, both by the rejection text
+    /// ("You cannot sell more than 0 shares of SYS") and by its own <c>PendingSellQuantity</c> field.
+    /// So when a predecessor stop holds the whole position, the replacement cannot be placed at all,
+    /// and the make-before-break ordering the supersede design depends on is simply unavailable: the
+    /// "make" step can never succeed while the "break" step has not happened. Left unhandled, the raise
+    /// retries every pass forever and the position silently stays on its old trigger while the panel
+    /// reports it raised.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Two stops for one symbol are fine; two stops for shares that do not exist are not.</b> Also
+    /// confirmed live the same day: two <c>SLO</c> SELLs rested simultaneously on one symbol once free
+    /// shares covered both. So the constraint is quantity, never symbol, and a replacement that FITS in
+    /// the free quantity proceeds normally — the existing make-before-break path still applies to it.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>What this deliberately does not do.</b> It never cancels anything. <see cref="SupersedeAction.Wait"/>
+    /// leaves the position covered at the old level, which is the whole point: the failure this design
+    /// must never reach is zero stops resting, and an unreadable book or an unknown quantity resolves
+    /// to Wait for exactly that reason.
+    /// </para>
+    /// </summary>
+    public static SupersedeDecision DecideSupersede(
+        ProtectiveStop successor,
+        ProtectiveStop? predecessor,
+        decimal? heldQuantity,
+        IReadOnlyList<RestingOrder>? resting)
+    {
+        if (successor.SupersedesStopId is not { Length: > 0 })
+            return new(SupersedeAction.Proceed, "This stop replaces nothing.");
+
+        if (predecessor is null || predecessor.State is "closed")
+            return new(SupersedeAction.Proceed,
+                "The stop this one replaces is already closed; nothing is holding the shares.");
+
+        if (resting is null)
+            return new(SupersedeAction.Wait,
+                "The outstanding book could not be read, so whether the previous stop still holds the "
+                + "shares is unknown. The position stays covered at the old level.");
+
+        var predecessorOrder = predecessor.LastOrderNo is { Length: > 0 } no
+            ? resting.FirstOrDefault(r => string.Equals(
+                r.OrderNo?.Trim(), no.Trim(), StringComparison.OrdinalIgnoreCase))
+            : null;
+
+        if (predecessorOrder is null)
+            return new(SupersedeAction.RetirePredecessorFirst,
+                predecessor.LastOrderNo is { Length: > 0 } gone
+                    ? $"The previous stop's order {gone} is no longer in the outstanding book — the "
+                      + "venue cleared it at the close, or it was cancelled elsewhere. Retiring it "
+                      + "now leaves the replacement a clean book to place against."
+                    : "No native order was ever placed for the stop this one replaces, so nothing is "
+                      + "holding the shares.");
+
+        // The predecessor IS resting. Whether the replacement can go in alongside it comes down to
+        // free quantity, and every unknown in that sum resolves to Wait.
+        if (heldQuantity is not { } held)
+            return new(SupersedeAction.Wait,
+                "Holdings could not be read, so the free quantity behind the previous stop is unknown.");
+
+        var sells = resting
+            .Where(r => r.Symbol.Equals(successor.Symbol, StringComparison.OrdinalIgnoreCase)
+                     && !(r.Side is { Length: > 0 } side
+                          && side.Contains("BUY", StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+
+        if (sells.Any(r => r.Quantity is null))
+            return new(SupersedeAction.Wait,
+                $"A resting {successor.Symbol} SELL has no readable quantity, so the free quantity "
+                + "cannot be computed. Refusing to guess.");
+
+        var committed = sells.Sum(r => r.Quantity!.Value);
+        var free = (int)Math.Floor(held) - committed;
+        var wanted = Math.Min(successor.DesiredQuantity, (int)Math.Floor(held));
+
+        return free >= wanted && wanted > 0
+            ? new(SupersedeAction.Proceed,
+                $"{free} {successor.Symbol} share(s) are free of resting SELLs, which covers the "
+                + $"{wanted} this stop needs — it can rest alongside the one it replaces until that "
+                + "one is retired.")
+            : new(SupersedeAction.Wait,
+                $"The previous stop (order {predecessor.LastOrderNo}) still holds {committed} of "
+                + $"{(int)Math.Floor(held)} {successor.Symbol} share(s), leaving {free} free — not "
+                + $"enough for the {wanted} this raise needs. The broker sizes every SELL against "
+                + "custody minus resting SELLs, so this cannot be placed until the old order is "
+                + "cancelled. The position stays protected at the old trigger meanwhile, and the raise "
+                + "takes effect at the next session, when the venue clears the book.");
     }
 
     /// <summary>
@@ -353,10 +485,12 @@ public static class ProtectiveStopDecisions
     /// </summary>
     private static (RestingOrder? Order, bool Ambiguous, string Reason) FindOwnResting(
         ProtectiveStop stop,
-        IReadOnlyList<RestingOrder> resting)
+        IReadOnlyList<RestingOrder> resting,
+        IReadOnlySet<string>? excludedOrderNumbers = null)
     {
         var forSymbol = resting
-            .Where(r => r.Symbol.Equals(stop.Symbol, StringComparison.OrdinalIgnoreCase))
+            .Where(r => r.Symbol.Equals(stop.Symbol, StringComparison.OrdinalIgnoreCase)
+                     && !(excludedOrderNumbers?.Contains((r.OrderNo ?? "").Trim()) ?? false))
             .ToList();
 
         if (forSymbol.Count == 0) return (null, false, "nothing resting");
