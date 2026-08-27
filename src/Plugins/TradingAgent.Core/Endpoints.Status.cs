@@ -100,11 +100,11 @@ public sealed partial class TradingCoreEndpoints
         // establishment, but it still obeys the SAME global login cooldown/backoff as background
         // recovery. It can never create one login per click during a portal outage.
         trading.MapPost("/reconciliation/run", async (
-            AhkPortalClient brokerPortal,
+            IActiveSessionEstablisher establisher,
             BrokerReconciliationWorker worker,
             CancellationToken ct) =>
         {
-            var sessionEstablished = await brokerPortal.EnsureSessionAsync(ct);
+            var sessionEstablished = await establisher.EstablishSessionAsync(ct);
             var snapshot = await worker.RunNowAsync(ct);
             return Results.Ok(new { sessionEstablished, reconciliation = snapshot });
         }).RequireAuthorization("TradingTrader");

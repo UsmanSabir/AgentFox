@@ -145,7 +145,7 @@ public sealed partial class TradingCoreEndpoints
         // multiplying upstream traffic — AhlAnalyticsClient caches the snapshot for its configured TTL.
         trading.MapGet("/movers", async (
             AhlAnalyticsClient analytics,
-            AhkPortalClient brokerPortal,
+            IAnalyticsSsoUrlProvider ssoProvider,
             string? screen,
             string? index,
             string? sectorCode,
@@ -165,7 +165,7 @@ public sealed partial class TradingCoreEndpoints
             // however, the SSO hop is just an authenticated GET and cannot cost another login. This
             // closes the gap where the screen claimed "no portal session" beside a healthy live feed.
             var snapshot = await analytics.GetMarketSnapshotAsync(
-                allowHandshake: brokerPortal.HasSession, ct: ct);
+                allowHandshake: ssoProvider.CanHandshakeSafely, ct: ct);
             if (snapshot is null)
             {
                 // Report WHY. "Could not be reached" covers no-session, a throttle and a rejected
@@ -176,7 +176,7 @@ public sealed partial class TradingCoreEndpoints
                     enabled = true,
                     available = false,
                     hasToken = analytics.HasToken,
-                    brokerSessionAvailable = brokerPortal.HasSession,
+                    brokerSessionAvailable = ssoProvider.CanHandshakeSafely,
                     handshakeCoolingDown = analytics.HandshakeInCooldown,
                     error = analytics.LastError,
                     rows = Array.Empty<object>()
@@ -199,7 +199,7 @@ public sealed partial class TradingCoreEndpoints
         // Sector rotation for the same session, from the same cached snapshot.
         trading.MapGet("/movers/sectors", async (
             AhlAnalyticsClient analytics,
-            AhkPortalClient brokerPortal,
+            IAnalyticsSsoUrlProvider ssoProvider,
             string? index,
             CancellationToken ct) =>
         {
@@ -207,14 +207,14 @@ public sealed partial class TradingCoreEndpoints
                 return Results.Ok(new { enabled = false, sectors = Array.Empty<object>() });
 
             var snapshot = await analytics.GetMarketSnapshotAsync(
-                allowHandshake: brokerPortal.HasSession, ct: ct);
+                allowHandshake: ssoProvider.CanHandshakeSafely, ct: ct);
             if (snapshot is null)
                 return Results.Ok(new
                 {
                     enabled = true,
                     available = false,
                     hasToken = analytics.HasToken,
-                    brokerSessionAvailable = brokerPortal.HasSession,
+                    brokerSessionAvailable = ssoProvider.CanHandshakeSafely,
                     handshakeCoolingDown = analytics.HandshakeInCooldown,
                     error = analytics.LastError,
                     sectors = Array.Empty<object>()

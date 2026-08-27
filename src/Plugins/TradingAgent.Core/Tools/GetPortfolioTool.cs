@@ -8,13 +8,20 @@ namespace TradingAgent.Tools;
 /// <summary>
 /// Read-only account snapshot for the agent: available cash plus every current holding with
 /// share count, cost basis, and live market value. Backed by real broker data via
-/// <see cref="PortfolioReader"/> — the agent is told to NEVER invent balances,
+/// <see cref="IBrokerAccountReader"/> — the agent is told to NEVER invent balances,
 /// and this tool is how it gets the real numbers. Any extraction gap is surfaced in
 /// <c>warnings</c> so the agent reports "unknown" rather than a guess.
+///
+/// <para>
+/// Broker-neutral by construction: previously this took the concrete <c>PortfolioReader</c>, which
+/// falls back to a browser scrape and requires the AHK browser-cookie session regardless of which
+/// broker adapter a premium account actually uses. The output JSON shape here is unchanged from
+/// before — only the source moved.
+/// </para>
 /// </summary>
 public sealed class GetPortfolioTool : BaseTool
 {
-    private readonly PortfolioReader _portfolio;
+    private readonly IBrokerAccountReader _reader;
     private readonly ILogger<GetPortfolioTool> _logger;
 
     private static readonly JsonSerializerOptions _snakeOptions = new()
@@ -22,9 +29,9 @@ public sealed class GetPortfolioTool : BaseTool
         PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
     };
 
-    public GetPortfolioTool(PortfolioReader portfolio, ILogger<GetPortfolioTool> logger)
+    public GetPortfolioTool(IBrokerAccountReader reader, ILogger<GetPortfolioTool> logger)
     {
-        _portfolio = portfolio;
+        _reader = reader;
         _logger = logger;
     }
 
@@ -43,26 +50,28 @@ public sealed class GetPortfolioTool : BaseTool
     {
         try
         {
-            var snapshot = await _portfolio.GetPortfolioAsync();
+            var snapshot = await _reader.ReadAccountAsync();
+
+            var balance = snapshot.Balances.FirstOrDefault(b => b.Key == "available_cash");
 
             return ToolResult.Ok(JsonSerializer.Serialize(new
             {
-                available_balance_pkr = snapshot.AvailableBalancePkr,
-                balance_source        = snapshot.BalanceSource,
+                available_balance_pkr = balance?.Value,
+                balance_source        = balance?.Attributes?.GetValueOrDefault("source"),
                 holdings = snapshot.Holdings.Select(h => new
                 {
                     symbol              = h.Symbol,
                     shares              = h.Quantity,
-                    average_buy_price   = h.AverageBuyPrice,
-                    invested_pkr        = h.InvestmentValue,
-                    current_price       = h.CurrentPrice,
-                    current_value_pkr   = h.CurrentValue,
-                    profit_loss_pkr     = h.ProfitLoss,
-                    profit_loss_percent = h.ProfitLossPercent
+                    average_buy_price   = h.AverageCost,
+                    invested_pkr        = h.CostValue,
+                    current_price       = h.MarketPrice,
+                    current_value_pkr   = h.MarketValue,
+                    profit_loss_pkr     = h.UnrealizedProfitLoss,
+                    profit_loss_percent = h.UnrealizedProfitLossPercent
                 }),
                 holdings_count       = snapshot.Holdings.Count,
-                total_invested_pkr   = snapshot.TotalInvestment,
-                total_value_pkr      = snapshot.TotalCurrentValue,
+                total_invested_pkr   = SumOrNull(snapshot.Holdings.Select(h => h.CostValue)),
+                total_value_pkr      = SumOrNull(snapshot.Holdings.Select(h => h.MarketValue)),
                 retrieved_at_utc     = snapshot.RetrievedAtUtc,
                 warnings             = snapshot.Warnings
             }, _snakeOptions));
@@ -74,5 +83,24 @@ public sealed class GetPortfolioTool : BaseTool
                 $"Could not read the portfolio from the broker portal: {ex.Message}. " +
                 "Do not guess balances or holdings — tell the user the live read failed.");
         }
+    }
+
+    /// <summary>
+    /// Sums only when every part is known. A total built by skipping the unknown rows would look
+    /// like a complete figure while understating the account.
+    /// </summary>
+    private static decimal? SumOrNull(IEnumerable<decimal?> values)
+    {
+        decimal total = 0m;
+        var any = false;
+
+        foreach (var v in values)
+        {
+            if (v is null) return null;
+            total += v.Value;
+            any = true;
+        }
+
+        return any ? total : null;
     }
 }

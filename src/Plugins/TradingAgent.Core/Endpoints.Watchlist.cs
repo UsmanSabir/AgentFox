@@ -232,7 +232,7 @@ public sealed partial class TradingCoreEndpoints
             ITradingRepository repository,
             PsxDataClient dataClient,
             AhlAnalyticsClient analytics,
-            AhkPortalClient brokerPortal,
+            IAnalyticsSsoUrlProvider ssoProvider,
             IOptions<TradingAgentOptions> options,
             CancellationToken ct) =>
         {
@@ -245,7 +245,7 @@ public sealed partial class TradingCoreEndpoints
                 });
 
             var preset = await LoadWatchlistPresetAsync(
-                normalized, dataClient, analytics, brokerPortal, ct);
+                normalized, dataClient, analytics, ssoProvider, ct);
             if (preset.Symbols.Count == 0)
                 return Results.Json(new
                 {
@@ -284,7 +284,7 @@ public sealed partial class TradingCoreEndpoints
             ITradingRepository repository,
             PsxDataClient dataClient,
             AhlAnalyticsClient analytics,
-            AhkPortalClient brokerPortal,
+            IAnalyticsSsoUrlProvider ssoProvider,
             IOptions<TradingAgentOptions> options,
             ILogger<TradingCoreEndpoints> logger,
             CancellationToken ct) =>
@@ -306,7 +306,7 @@ public sealed partial class TradingCoreEndpoints
                 });
 
             var preset = await LoadWatchlistPresetAsync(
-                normalized, dataClient, analytics, brokerPortal, ct);
+                normalized, dataClient, analytics, ssoProvider, ct);
             if (preset.Symbols.Count == 0)
                 return Results.Json(new
                 {
@@ -492,7 +492,7 @@ public sealed partial class TradingCoreEndpoints
         string index,
         PsxDataClient dataClient,
         AhlAnalyticsClient analytics,
-        AhkPortalClient brokerPortal,
+        IAnalyticsSsoUrlProvider ssoProvider,
         CancellationToken ct)
     {
         var official = await dataClient.GetIndexConstituentsAsync(index, ct);
@@ -502,7 +502,7 @@ public sealed partial class TradingCoreEndpoints
         // Market Movers already receives this same AHL whole-market snapshot. It is a fallback only:
         // index membership should not require a broker login when the public exchange page works.
         var snapshot = await analytics.GetMarketSnapshotAsync(
-            allowHandshake: brokerPortal.HasSession, ct: ct);
+            allowHandshake: ssoProvider.CanHandshakeSafely, ct: ct);
         var fromAhl = snapshot?.Equities?
             .Where(pair => pair.Value.ListedIn?.Contains(index, StringComparer.OrdinalIgnoreCase) == true)
             .Select(pair => pair.Key.Trim().ToUpperInvariant())

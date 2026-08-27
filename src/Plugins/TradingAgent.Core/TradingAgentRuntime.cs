@@ -129,6 +129,8 @@ public sealed class TradingAgentRuntime
         services.AddSingleton<IBrokerAdapter>(sp => sp.GetRequiredService<AhkBrowserBrokerAdapter>());
         services.AddSingleton<IBrokerStateReader>(sp => sp.GetRequiredService<AhkBrowserBrokerAdapter>());
         services.AddSingleton<IBrokerOrderCanceller>(sp => sp.GetRequiredService<AhkBrowserBrokerAdapter>());
+        services.AddSingleton<IBrokerOutstandingOrdersReader>(sp => sp.GetRequiredService<AhkBrowserBrokerAdapter>());
+        services.AddSingleton<IActiveSessionEstablisher>(sp => sp.GetRequiredService<AhkBrowserBrokerAdapter>());
         services.AddSingleton<IMarketCalendar, PsxMarketCalendar>();
         services.AddSingleton(TimeProvider.System);
         // Decides whether the VENUE is accepting orders, preferring the broker's own reported state
@@ -162,6 +164,10 @@ public sealed class TradingAgentRuntime
             config.GetSection($"Plugins:{AhlAnalyticsConfig.SectionName}"));
         services.AddRuntimePluginOptions<AhlAnalyticsConfig>(
             TradingPluginConfigDefinitionProvider.BrokerPluginName);
+        // Hop ① of the SSO handshake (see IAnalyticsSsoUrlProvider's own doc comment). Community's
+        // default goes through the AHK browser-cookie session; premium overrides this to its own SOAP
+        // session in RegisterAhlBroker so the analytics handshake never opens a browser under BrokerId: ahl.
+        services.AddSingleton<IAnalyticsSsoUrlProvider, AhkPortalAnalyticsSsoUrlProvider>();
         services.AddSingleton<AhlAnalyticsClient>();
         // Candle history prefers this over the PSX scrape when a token is already held — one request
         // for five years instead of ~1235, and an ADJUSTED series, which is the correct input for
@@ -391,7 +397,7 @@ public sealed class TradingAgentRuntime
             new CreateTradeProposalTool(repository, policy),
             new GetTradingStatusTool(repository, policy, calendar, reconciliation),
             new GetPortfolioTool(
-                services.GetRequiredService<PortfolioReader>(),
+                services.GetRequiredService<IBrokerAccountReader>(),
                 loggers.CreateLogger<GetPortfolioTool>()),
             new ResearchStockTool(
                 services.GetRequiredService<PsxDataClient>(),
@@ -415,15 +421,15 @@ public sealed class TradingAgentRuntime
             new ManageCandleArchiveTool(
                 services.GetRequiredService<CandleBackfillRunner>(),
                 loggers.CreateLogger<ManageCandleArchiveTool>()),
-            // Order-book read and cancel, over the portal's JSON API rather than the browser. Both
-            // are registered unconditionally: cancelling is risk-REDUCING, so unlike placement it is
-            // not gated behind AutoExecute or the kill switch (see CancelOrderTool).
+            // Order-book read and cancel, broker-neutral. Both are registered unconditionally:
+            // cancelling is risk-REDUCING, so unlike placement it is not gated behind AutoExecute or
+            // the kill switch (see CancelOrderTool).
             new ListOutstandingOrdersTool(
-                services.GetRequiredService<AhkPortalClient>(),
+                services.GetRequiredService<IBrokerOutstandingOrdersReader>(),
                 loggers.CreateLogger<ListOutstandingOrdersTool>()),
             new CancelOrderTool(
-                services.GetRequiredService<AhkPortalClient>(),
-                services.GetRequiredService<IRuntimePluginOptions<AhkConfig>>(),
+                services.GetRequiredService<IBrokerOutstandingOrdersReader>(),
+                services.GetRequiredService<IBrokerOrderCanceller>(),
                 loggers.CreateLogger<CancelOrderTool>()),
             // Analytics-portal reads. Registered unconditionally so the agent can explain that the
             // portal is switched off rather than silently lacking the capability — both tools check
