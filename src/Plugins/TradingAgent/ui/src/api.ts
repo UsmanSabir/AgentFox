@@ -1301,6 +1301,13 @@ export const trading = {
         manualOnly?: boolean;
         message?: string | null;
       }>(`/trading/watchlist/${encodeURIComponent(symbol)}`, changes),
+    setAutoTrading: (autoTradeEnabled: boolean) =>
+      patch<{
+        autoTradeEnabled: boolean;
+        updated: number;
+        manualOnlyLocked: number;
+        message?: string | null;
+      }>('/trading/watchlist/automation', { autoTradeEnabled }),
     reorder: (symbols: string[]) =>
       post<{ reordered: boolean; symbols: number }>('/trading/watchlist/reorder', { symbols }),
     reset:  ()               => post<{ symbols: number }>('/trading/watchlist/reset'),

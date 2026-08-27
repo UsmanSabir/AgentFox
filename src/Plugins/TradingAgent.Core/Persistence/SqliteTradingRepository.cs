@@ -2068,6 +2068,17 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         return await command.ExecuteNonQueryAsync(ct) == 1;
     }
 
+    public async Task<int> SetWatchlistAutoTradeEnabledAsync(
+        bool autoTradeEnabled, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = "UPDATE watchlist SET auto_trade_enabled = $enabled";
+        command.Parameters.AddWithValue("$enabled", autoTradeEnabled ? 1 : 0);
+        return await command.ExecuteNonQueryAsync(ct);
+    }
+
     public async Task<bool> ReorderWatchlistAsync(
         IReadOnlyList<string> symbols, CancellationToken ct = default)
     {

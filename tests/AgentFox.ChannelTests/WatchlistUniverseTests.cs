@@ -144,6 +144,27 @@ public sealed class WatchlistUniverseTests
     }
 
     [TestMethod]
+    public async Task BulkAutoTradingUpdateChangesEveryRowAndPreservesOtherPreferences()
+    {
+        using var env = TestEnv.Create(["OGDC", "LUCK", "HBL"]);
+        await env.Universe.SeedIfNeededAsync();
+        await env.Repository.UpdateWatchlistSymbolAsync(
+            "HBL", alertsEnabled: false, notes: "keep me", pinned: true);
+
+        Assert.AreEqual(3, await env.Repository.SetWatchlistAutoTradeEnabledAsync(false));
+        var manual = (await env.Repository.GetWatchlistAsync()).Entries;
+        Assert.IsTrue(manual.All(entry => !entry.AutoTradeEnabled));
+        var hbl = manual.Single(entry => entry.Symbol == "HBL");
+        Assert.IsFalse(hbl.AlertsEnabled);
+        Assert.IsTrue(hbl.Pinned);
+        Assert.AreEqual("keep me", hbl.Notes);
+
+        Assert.AreEqual(3, await env.Repository.SetWatchlistAutoTradeEnabledAsync(true));
+        Assert.IsTrue((await env.Repository.GetWatchlistAsync()).Entries
+            .All(entry => entry.AutoTradeEnabled));
+    }
+
+    [TestMethod]
     public async Task IndexMerge_AddsOnlyMissingMembersAndNeverWidensExecution()
     {
         using var env = TestEnv.Create(["OGDC"]);
@@ -595,6 +616,9 @@ public sealed class WatchlistUniverseTests
         public Task<bool> UpdateWatchlistSymbolAsync(
             string s, bool? a, string? n, bool? p = null, bool? autoTrade = null,
             CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<int> SetWatchlistAutoTradeEnabledAsync(
+            bool autoTradeEnabled, CancellationToken ct = default) =>
             throw new NotSupportedException();
         public Task<bool> ReorderWatchlistAsync(
             IReadOnlyList<string> symbols, CancellationToken ct = default) => throw new NotSupportedException();

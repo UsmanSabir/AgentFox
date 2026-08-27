@@ -41,6 +41,7 @@
   let busy = false;
   /** Narrows the rows below by symbol — separate from `input`, which is for adding a new ticker. */
   let search = '';
+  let searchInput: HTMLInputElement;
   /** When active, show only symbols that currently have one or more unacknowledged alerts. */
   let alertsOnly = false;
   let draggedSymbol: string | null = null;
@@ -329,6 +330,41 @@
     }
   }
 
+  async function setAllAutoTrading(enabled: boolean) {
+    if (busy || !data?.entries.length) return;
+    const total = data.entries.length;
+    const action = enabled ? 'allow automation for' : 'set to manual-only';
+    const consequence = enabled
+      ? `Automation may place entry and exit orders for them again, subject to every global policy and risk control.`
+      : `No automation will place entries, protective stops, or take-profits for them. You place every order yourself.`;
+    if (!confirm(
+      `${enabled ? 'Allow automation for all watched symbols' : 'Set all watched symbols to manual-only'}?\n\n` +
+      `This will ${action} ${total} watched symbol(s). ${consequence}\n\n` +
+      `You can still change individual symbols afterwards.`
+    )) return;
+
+    busy = true;
+    error = null;
+    notice = null;
+    try {
+      const result = await trading.watchlist.setAutoTrading(enabled);
+      notice = enabled
+        ? `Automation allowed for ${result.updated} watched symbol(s).`
+        : `${result.updated} watched symbol(s) set to manual-only.`;
+      if (result.message) notice += ` ${result.message}`;
+      await load();
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  function clearSearch() {
+    search = '';
+    searchInput?.focus();
+  }
+
   async function reset() {
     if (busy) return;
     const userAdded = data?.entries.filter(e => e.source === 'user').length ?? 0;
@@ -528,13 +564,24 @@
   {:else}
     <div class="filter-row">
       <div class="search-row">
-        <Search size={13} />
+        <Search size={13} aria-hidden="true" />
         <input
+          bind:this={searchInput}
           class="search-input"
           placeholder="Search watched symbols…"
           bind:value={search}
           spellcheck="false"
+          aria-label="Search watched symbols"
         />
+        {#if search}
+          <button
+            class="search-clear"
+            type="button"
+            on:click={clearSearch}
+            aria-label="Clear watchlist search"
+            title="Clear search"
+          ><X size={13} /></button>
+        {/if}
       </div>
       <button
         class="alerts-filter"
@@ -546,6 +593,21 @@
       >
         <Bell size={13} /> Alerts only
       </button>
+    </div>
+    <div class="automation-actions" aria-label="Bulk auto-trading actions">
+      <span><Bot size={13} aria-hidden="true" /> Auto trading</span>
+      <button
+        type="button"
+        on:click={() => setAllAutoTrading(true)}
+        disabled={busy || data.entries.every(entry => entry.autoTradeEnabled)}
+        title="Allow automation for every watched symbol"
+      ><Bot size={13} aria-hidden="true" /> Allow all</button>
+      <button
+        type="button"
+        on:click={() => setAllAutoTrading(false)}
+        disabled={busy || data.entries.every(entry => !entry.autoTradeEnabled)}
+        title="Set every watched symbol to manual-only"
+      ><Hand size={13} aria-hidden="true" /> Manual-only all</button>
     </div>
     {#if !filteredEntries.length}
       <p class="note">
@@ -787,11 +849,22 @@
     background:var(--surface-2); border:1px solid var(--border-md);
     border-radius:var(--radius-sm); padding:.4rem .6rem; color:var(--text-3);
   }
+  .search-row:focus-within {
+    border-color:var(--primary);
+    box-shadow:0 0 0 2px color-mix(in srgb, var(--primary) 16%, transparent);
+  }
   .search-input {
     flex:1; min-width:0; background:none; border:0; color:var(--text); font:inherit; font-size:.78rem;
   }
   .search-input::placeholder { color:var(--text-3); }
   .search-input:focus { outline:none; }
+  .search-clear {
+    flex:0 0 auto; display:grid; place-items:center; width:22px; height:22px; padding:0;
+    border:0; border-radius:var(--radius-sm); background:transparent; color:var(--text-3);
+    cursor:pointer;
+  }
+  .search-clear:hover { color:var(--text); background:var(--surface-3); }
+  .search-clear:focus-visible { outline:2px solid var(--primary); outline-offset:1px; }
   .alerts-filter {
     display:flex; align-items:center; gap:.3rem; white-space:nowrap;
     background:var(--surface-2); border:1px solid var(--border-md);
@@ -803,6 +876,26 @@
     color:var(--danger); border-color:color-mix(in srgb, var(--danger) 55%, transparent);
     background:color-mix(in srgb, var(--danger) 12%, transparent);
   }
+  .automation-actions {
+    display:flex; align-items:center; gap:.35rem; flex-wrap:wrap;
+  }
+  .automation-actions > span {
+    display:flex; align-items:center; gap:.3rem; margin-right:auto;
+    color:var(--text-3); font-size:.68rem; font-weight:600;
+  }
+  .automation-actions button {
+    display:flex; align-items:center; gap:.28rem; white-space:nowrap;
+    background:var(--surface-2); border:1px solid var(--border-md);
+    border-radius:var(--radius-sm); padding:.34rem .5rem; color:var(--text-2);
+    font:inherit; font-size:.68rem; cursor:pointer;
+    transition:color 160ms ease, border-color 160ms ease, background 160ms ease;
+  }
+  .automation-actions button:hover:not(:disabled) {
+    color:var(--text); border-color:color-mix(in srgb, var(--primary) 45%, var(--border));
+    background:var(--surface-3);
+  }
+  .automation-actions button:focus-visible { outline:2px solid var(--primary); outline-offset:1px; }
+  .automation-actions button:disabled { opacity:.45; cursor:not-allowed; }
 
   .note {
     margin:0; color:var(--text-2); font-size:.72rem;
@@ -921,6 +1014,7 @@
   .watchlist.compact .preset-row,
   .watchlist.compact .preset-card,
   .watchlist.compact .filter-row,
+  .watchlist.compact .automation-actions,
   .watchlist.compact .note { display:none; }
   .watchlist.compact .header-actions { flex:0 0 auto; }
   .watchlist.compact .rows { gap:0; }

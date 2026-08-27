@@ -176,6 +176,9 @@ public sealed record WatchlistUpdateRequest(
     bool? Pinned = null,
     bool? AutoTradeEnabled = null);
 
+/// <summary>Sets the runtime automation preference for every watched symbol.</summary>
+public sealed record WatchlistAutomationRequest(bool? AutoTradeEnabled = null);
+
 public sealed record WatchlistReorderRequest(IReadOnlyList<string>? Symbols);
 
 /// <summary>How an official index universe should be applied to the monitoring watchlist.</summary>

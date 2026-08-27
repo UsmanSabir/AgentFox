@@ -406,6 +406,7 @@ the audit trail.
 | POST | `/api/trading/watchlist` — `{ symbol }`, validated against the live market watch | TradingAnalyst |
 | DELETE | `/api/trading/watchlist/{symbol}` — keeps archived bars | TradingAnalyst |
 | PATCH | `/api/trading/watchlist/{symbol}` — `{ alertsEnabled?, notes?, pinned?, autoTradeEnabled? }` (`autoTradeEnabled: false` = manual-only) | TradingAnalyst |
+| PATCH | `/api/trading/watchlist/automation` — `{ autoTradeEnabled }` for every watched symbol | TradingAnalyst |
 | POST | `/api/trading/watchlist/reset` — reseed from `AllowedSymbols` | TradingAnalyst |
 
 ---

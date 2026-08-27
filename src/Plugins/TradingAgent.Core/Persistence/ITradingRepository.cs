@@ -372,6 +372,15 @@ public interface ITradingRepository
         bool? autoTradeEnabled = null,
         CancellationToken ct = default);
 
+    /// <summary>
+    /// Sets the runtime automation preference for every watched symbol in one transaction. Returns
+    /// the number of rows affected. Configured <c>ManualOnlySymbols</c> remain an independent floor
+    /// and cannot be lifted by setting this value to true.
+    /// </summary>
+    Task<int> SetWatchlistAutoTradeEnabledAsync(
+        bool autoTradeEnabled,
+        CancellationToken ct = default);
+
     /// <summary>Persists the complete display order after a drag operation.</summary>
     Task<bool> ReorderWatchlistAsync(
         IReadOnlyList<string> symbols,

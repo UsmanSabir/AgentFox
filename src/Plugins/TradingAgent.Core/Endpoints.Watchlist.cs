@@ -45,6 +45,7 @@ namespace TradingAgent;
 /// <para>Routes here:</para>
 /// <list type="bullet">
 ///   <item><description><c>/watchlist</c></description></item>
+///   <item><description><c>/watchlist/automation</c></description></item>
 ///   <item><description><c>/watchlist/reorder</c></description></item>
 ///   <item><description><c>/watchlist/reset</c></description></item>
 ///   <item><description><c>/watchlist/{symbol}</c></description></item>
@@ -395,6 +396,45 @@ public sealed partial class TradingCoreEndpoints
                     ? $"'{normalized}' stays manual-only: it is listed in "
                       + "Plugins:TradingAgent:ManualOnlySymbols, which the API cannot override. "
                       + "Remove it there and restart to let automation trade it."
+                    : null
+            });
+        }).RequireAuthorization("TradingAnalyst");
+
+        trading.MapPatch("/watchlist/automation", async (
+            WatchlistAutomationRequest body,
+            MonitoredUniverse universe,
+            ITradingRepository repository,
+            ILogger<TradingCoreEndpoints> logger,
+            CancellationToken ct) =>
+        {
+            if (body.AutoTradeEnabled is null)
+                return Results.BadRequest(new
+                {
+                    error = "auto_trade_enabled_required",
+                    message = "autoTradeEnabled must be true or false."
+                });
+
+            var updated = await repository.SetWatchlistAutoTradeEnabledAsync(
+                body.AutoTradeEnabled.Value, ct);
+            universe.Invalidate();
+            var configuredManualOnly = universe.ConfiguredManualOnly()
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var locked = body.AutoTradeEnabled.Value
+                ? (await repository.GetWatchlistAsync(ct)).Entries.Count(entry =>
+                    configuredManualOnly.Contains(entry.Symbol))
+                : 0;
+            logger.LogInformation(
+                "[Watchlist] Set auto trading {State} for {Count} watched symbols via web API; {Locked} remain config-locked.",
+                body.AutoTradeEnabled.Value ? "on" : "off", updated, locked);
+
+            return Results.Ok(new
+            {
+                autoTradeEnabled = body.AutoTradeEnabled.Value,
+                updated,
+                manualOnlyLocked = locked,
+                message = locked > 0
+                    ? $"{locked} symbol(s) remain manual-only because they are listed in "
+                      + "Plugins:TradingAgent:ManualOnlySymbols."
                     : null
             });
         }).RequireAuthorization("TradingAnalyst");
