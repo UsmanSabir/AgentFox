@@ -52,6 +52,7 @@ public sealed class ProtectiveStopWorker : BackgroundService, IMarketSessionOpen
     private readonly TradingManager _manager;
     private readonly ApprovalGate _approvals;
     private readonly IMarketCalendar _calendar;
+    private readonly OrderWindow _orderWindow;
     private readonly TradingPolicyProvider _policy;
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly ILogger<ProtectiveStopWorker> _logger;
@@ -89,6 +90,7 @@ public sealed class ProtectiveStopWorker : BackgroundService, IMarketSessionOpen
         TradingManager manager,
         ApprovalGate approvals,
         IMarketCalendar calendar,
+        OrderWindow orderWindow,
         TradingPolicyProvider policy,
         IOptions<TradingAgentOptions> options,
         ILogger<ProtectiveStopWorker> logger,
@@ -103,6 +105,7 @@ public sealed class ProtectiveStopWorker : BackgroundService, IMarketSessionOpen
         _manager     = manager;
         _approvals   = approvals;
         _calendar    = calendar;
+        _orderWindow = orderWindow;
         _policy      = policy;
         _options     = options;
         _logger      = logger;
@@ -533,10 +536,30 @@ public sealed class ProtectiveStopWorker : BackgroundService, IMarketSessionOpen
         if (stop.SupersedesStopId is { Length: > 0 } predecessorId)
         {
             var predecessor = allStops.FirstOrDefault(s => s.StopId == predecessorId);
-            var supersede = ProtectiveStopDecisions.DecideSupersede(stop, predecessor, held, resting);
+
+            // Cancelling the old order is only worth the gap it opens if a replacement can actually go
+            // out afterwards. If the window is shut, waiting is not merely safer — it is CORRECT: the
+            // venue clears the book at the close, so the raise is placed clean next session with
+            // nothing cancelled and no gap at all.
+            var window = _orderWindow.Evaluate();
+            var supersede = ProtectiveStopDecisions.DecideSupersede(
+                stop, predecessor, held, resting, replacementWindowAllowed: window.Allowed);
 
             switch (supersede.Action)
             {
+                case SupersedeAction.CancelPredecessorThenPlace when predecessor is not null:
+                    if (!await OpenReplacementWindowAsync(
+                            repository, stop, predecessor, held, supersede.Reason,
+                            retiredThisPass, resting, today, ct))
+                        return;
+                    // The cancel is CONFIRMED gone, but `resting` is this pass's snapshot and still
+                    // lists it. Without excluding it, a raise inside the price-match tolerance would
+                    // be skipped as "already protected" by an order that no longer exists — and the
+                    // placement below would size against a book that has moved on.
+                    if (predecessor.LastOrderNo is { Length: > 0 } cancelled)
+                        excluded.Add(cancelled.Trim());
+                    break;
+
                 case SupersedeAction.Wait:
                     // Visible, not LogDebug: "the raise you asked for has not reached the broker" is
                     // precisely the state this whole change exists to stop hiding. Once per stop per
@@ -601,6 +624,146 @@ public sealed class ProtectiveStopWorker : BackgroundService, IMarketSessionOpen
         }
 
         await PlaceNativeStopAsync(repository, stop, decision, today, allStops, resting, retiredThisPass, ct);
+    }
+
+    /// <summary>
+    /// Break-before-make: covers the position locally, cancels the predecessor's native order, retires
+    /// its row, and hands back to the caller to place the replacement in the same pass.
+    ///
+    /// <para>
+    /// <b>Why the ordering is not negotiable.</b> This broker sizes every SELL against custody MINUS
+    /// the quantity committed to resting SELLs, so while the predecessor rests there is nothing to place
+    /// the replacement against — make-before-break cannot complete, and no amount of retrying changes
+    /// that. Cancelling first is the only route, which means deliberately opening a moment with no
+    /// native stop at the broker. The local backstop is armed BEFORE the cancel goes out so that moment
+    /// is covered rather than merely short.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Every failure leaves more protection, never less.</b> The backstop cannot be armed → nothing
+    /// is cancelled. The cancel cannot be VERIFIED against the book → nothing is cancelled and the row
+    /// is retried next pass, with the old order still resting. Only a cancel proven gone advances the
+    /// state, and it advances it durably: the predecessor is closed in the ledger before the placement
+    /// is attempted, so a crash in between resumes correctly — the next pass sees a closed predecessor,
+    /// <see cref="ProtectiveStopDecisions.DecideSupersede"/> returns Proceed, and the replacement is
+    /// placed against a free holding.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>There is no rollback, deliberately.</b> Once the cancel is confirmed the shares are free, so a
+    /// placement failure is transient (a socket, a refused approval) rather than structural, and the
+    /// right response is the retry the next pass already performs — not re-placing the OLD, lower stop
+    /// and having to supersede it all over again. The honest cost is that between the cancel and a
+    /// successful placement the position is covered only by the local backstop, which needs this process
+    /// running. That is the same caveat the existing "stop was not placed" path already carries.
+    /// </para>
+    /// </summary>
+    /// <returns>True when the caller should go on to place the replacement this pass.</returns>
+    private async Task<bool> OpenReplacementWindowAsync(
+        ITradingRepository repository,
+        ProtectiveStop successor,
+        ProtectiveStop predecessor,
+        decimal? held,
+        string why,
+        HashSet<string> retiredThisPass,
+        IReadOnlyList<RestingOrder>? resting,
+        DateOnly today,
+        CancellationToken ct)
+    {
+        if (predecessor.LastOrderNo is not { Length: > 0 } orderNo)
+            return true;   // nothing at the broker to cancel; DecideSupersede would not have sent us here
+
+        // ── Cover first ──────────────────────────────────────────────────────
+        // A raised stop is written straight to "active" by whoever raised it, so unlike a stop that grew
+        // out of a pending fill it has never been through ArmBackstopAsync and has no local cover at
+        // all. Arming it here is what makes the coming gap survivable.
+        if (successor.LocalBackstopArmedId is null)
+        {
+            var quantity = held is { } h
+                ? Math.Min(successor.DesiredQuantity, (int)Math.Floor(h))
+                : 0;
+            if (quantity <= 0)
+            {
+                _logger.LogWarning(
+                    "[ProtectiveStops] {StopId} ({Symbol}): cannot size a backstop to cover the "
+                    + "replacement window, so the old order stays. {Why}",
+                    successor.StopId, successor.Symbol, why);
+                return false;
+            }
+
+            await ArmBackstopAsync(repository, successor, quantity, ct);
+
+            var armed = (await repository.GetProtectiveStopsAsync(openOnly: true, ct))
+                .FirstOrDefault(s => s.StopId == successor.StopId);
+            if (armed?.LocalBackstopArmedId is null)
+            {
+                // Unconfirmed cover is no cover. Leave the predecessor resting.
+                _logger.LogError(
+                    "[ProtectiveStops] {StopId} ({Symbol}): the local backstop could not be confirmed "
+                    + "armed, so the predecessor's order was NOT cancelled. The position stays "
+                    + "protected at the old trigger.", successor.StopId, successor.Symbol);
+                _activity?.Warn("Stops",
+                    $"{successor.Symbol}: the stop raise is still waiting — local cover for the "
+                    + "changeover could not be armed",
+                    "Nothing was cancelled; the old stop is still resting at the broker.");
+                return false;
+            }
+            successor = armed;
+        }
+
+        _logger.LogWarning(
+            "[ProtectiveStops] {StopId} ({Symbol}): cancelling predecessor order {OrderNo} to make room "
+            + "for the raise to {Trigger}. {Why}",
+            successor.StopId, successor.Symbol, orderNo, successor.StopTrigger, why);
+
+        BrokerCancellationResult cancellation;
+        try
+        {
+            cancellation = await _canceller.CancelOrderAsync(orderNo, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "[ProtectiveStops] {StopId} ({Symbol}): the cancel of predecessor order {OrderNo} threw; "
+                + "it stays resting and the raise is retried next pass.",
+                successor.StopId, successor.Symbol, orderNo);
+            return false;
+        }
+
+        if (!cancellation.Gone)
+        {
+            // Not PROVEN gone. The book is the only authority here — an accepted request that cannot be
+            // verified is exactly the case where assuming success would leave the position bare.
+            _logger.LogWarning(
+                "[ProtectiveStops] {StopId} ({Symbol}): predecessor order {OrderNo} is not confirmed "
+                + "cancelled ({Message}); the raise waits and the old stop still protects the position.",
+                successor.StopId, successor.Symbol, orderNo, cancellation.Message);
+            if (MarkAlerted(successor, "replacement-cancel-unverified", today))
+                _activity?.Warn("Stops",
+                    $"{successor.Symbol}: the stop raise to {successor.StopTrigger:0.##} is waiting on a "
+                    + "cancellation that could not be confirmed", cancellation.Message);
+            return false;
+        }
+
+        // Confirmed gone. Close the predecessor BEFORE placing, so the durable state can only ever say
+        // "the old order is gone" once it actually is — and so a crash here resumes rather than
+        // re-cancelling something already cancelled.
+        if (await repository.TrySetProtectiveStopStateAsync(
+                predecessor.StopId, predecessor.State, "superseded_pending_cancel",
+                $"Superseded by {successor.StopId}; its order {orderNo} was cancelled to free the "
+                + "shares for the replacement.", ct))
+        {
+            retiredThisPass.Add(predecessor.StopId);
+            await RetireSupersededAsync(
+                repository, predecessor with { State = "superseded_pending_cancel" }, resting, ct);
+        }
+
+        _activity?.Info("Stops",
+            $"{successor.Symbol}: old stop {orderNo} cancelled to make room for the raise to "
+            + $"{successor.StopTrigger:0.##}",
+            "The local backstop covers the position until the new stop is resting at the broker.");
+        return true;
     }
 
     /// <summary>

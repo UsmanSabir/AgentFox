@@ -15,7 +15,9 @@
   let symbols: WatchlistEntry[] = [];
   let choice: OrderIntentDefinition | null = null;
   let symbol = selectedSymbol ?? '';
+  let sizeMode: 'shares' | 'value' = 'shares';
   let quantity: number | null = null;
+  let orderValue: number | null = null;
   let currentPrice: number | null = null;
   let price: number | null = null;
   let triggerPrice: number | null = null;
@@ -121,30 +123,49 @@
   $: estimatedPrice = choice?.orderType === 'MARKET' ? currentPrice
     : choice?.orderType === 'STOPLOSS' ? triggerPrice
     : choice?.submission === 'conditional' ? conditionalLevel : price;
-  $: estimatedValue = quantity && estimatedPrice ? quantity * estimatedPrice : null;
+  $: valueSizedQuantity = sizeMode === 'value' && orderValue && orderValue > 0 && estimatedPrice && estimatedPrice > 0
+    ? Math.round(orderValue / estimatedPrice)
+    : null;
+  $: effectiveQuantity = sizeMode === 'value' ? valueSizedQuantity : quantity;
+  $: estimatedValue = effectiveQuantity && estimatedPrice ? effectiveQuantity * estimatedPrice : null;
+  $: sizingDifference = sizeMode === 'value' && orderValue && estimatedValue != null
+    ? estimatedValue - orderValue
+    : null;
 
   $: summary = (() => {
-    if (!choice || !symbol || !quantity) return null;
+    if (!choice || !symbol || !effectiveQuantity) return null;
     const side = choice.action === 'BUY' ? 'Buy' : 'Sell';
     if (choice.submission === 'conditional' && conditionalLevel != null) {
       const move = choice.triggerKind === 'PercentDrop' ? 'falls' : 'rises';
       const trail = choice.trailing ? ' from the highest price seen after arming' : '';
-      return `${side} ${quantity} ${symbol} if it ${move} ${triggerPercent}%${trail} `
+      return `${side} ${effectiveQuantity} ${symbol} if it ${move} ${triggerPercent}%${trail} `
         + `(currently ${money(conditionalLevel)}).`;
     }
     if (choice.orderType === 'MARKET')
-      return `${side} ${quantity} ${symbol} now at the best available price.`;
+      return `${side} ${effectiveQuantity} ${symbol} now at the best available price.`;
     if (choice.orderType === 'STOPLOSS')
-      return `${side} ${quantity} ${symbol} when it reaches ${triggerPrice ?? '—'}; `
+      return `${side} ${effectiveQuantity} ${symbol} when it reaches ${triggerPrice ?? '—'}; `
         + `once triggered, accept no worse than ${limitPrice ?? '—'}.`;
-    return `${side} ${quantity} ${symbol} at ${price ?? '—'} or better.`;
+    return `${side} ${effectiveQuantity} ${symbol} at ${price ?? '—'} or better.`;
   })();
 
   async function submit() {
     if (!choice || busy) return;
     error = null;
     if (!symbol.trim()) { error = 'Choose a symbol.'; return; }
-    if (!quantity || quantity <= 0) { error = 'Enter a positive quantity.'; return; }
+    if (sizeMode === 'value') {
+      if (!orderValue || orderValue <= 0) { error = 'Enter a positive order value.'; return; }
+      if (!estimatedPrice || estimatedPrice <= 0) {
+        error = 'A current or order price is required to convert PKR value into shares.'; return;
+      }
+      if (!valueSizedQuantity || valueSizedQuantity <= 0) {
+        error = `${money(orderValue)} PKR is too small for one share at ${money(estimatedPrice)} PKR.`; return;
+      }
+    } else if (!quantity || quantity <= 0 || !Number.isInteger(quantity)) {
+      error = 'Enter a positive whole-share quantity.'; return;
+    }
+    const submittedQuantity = effectiveQuantity;
+    if (!submittedQuantity || submittedQuantity <= 0) { error = 'Enter a valid order size.'; return; }
     if (marketDisabled) { error = 'Market orders are disabled in broker settings.'; return; }
     if (choice.submission === 'conditional') {
       if (!choice.triggerKind || !triggerPercent || triggerPercent <= 0 || triggerPercent > 50) {
@@ -181,7 +202,7 @@
         const placed = await trading.placeOrder({
           orderIntentId: choice.id,
           symbol: symbol.trim().toUpperCase(),
-          quantity,
+          quantity: submittedQuantity,
           price,
           triggerPrice,
           limitPrice,
@@ -210,7 +231,7 @@
         const request: ArmOrderRequest = {
           symbol: symbol.trim().toUpperCase(),
           action: choice.action,
-          quantity,
+          quantity: submittedQuantity,
           triggerKind: choice.triggerKind as TriggerKind,
           triggerPercent,
           referencePrice: currentPrice,
@@ -283,7 +304,20 @@
         <div class="form-card">
           <div class="form-head"><div><b>{choice.label}</b><span>{choice.action} · {choice.orderType}</span></div></div>
           <div class="grid">
-            <label><span>Quantity (shares)</span><input type="number" min="1" bind:value={quantity} /></label>
+            <div class="size-control">
+              <span class="field-label">Order size</span>
+              <div class="size-tabs" role="group" aria-label="Choose how to size the order">
+                <button type="button" class:active={sizeMode === 'shares'} aria-pressed={sizeMode === 'shares'}
+                        on:click={() => sizeMode = 'shares'}>Shares</button>
+                <button type="button" class:active={sizeMode === 'value'} aria-pressed={sizeMode === 'value'}
+                        on:click={() => sizeMode = 'value'}>Value (PKR)</button>
+              </div>
+              {#if sizeMode === 'shares'}
+                <label><span>Quantity (shares)</span><input type="number" min="1" step="1" bind:value={quantity} /></label>
+              {:else}
+                <label><span>Order value (PKR)</span><input type="number" min="1" step="1" bind:value={orderValue} /></label>
+              {/if}
+            </div>
             {#if choice.priceField === 'limit' || choice.priceField === 'target'}
               <label><span>{choice.priceField === 'target' ? 'Target sell price' : 'Limit price'}</span><input type="number" min="0.01" step="0.01" bind:value={price} /></label>
             {/if}
@@ -318,6 +352,13 @@
 
           {#if marketDisabled}
             <p class="warning"><AlertTriangle size={13} /> Market orders are disabled in broker settings. Choose a limit-price option or enable them deliberately.</p>
+          {/if}
+          {#if sizeMode === 'value' && valueSizedQuantity && estimatedPrice && estimatedValue != null && sizingDifference != null}
+            <p class="sizing-note">
+              Nearest whole-share quantity: <b>{valueSizedQuantity} shares</b> at {money(estimatedPrice)} PKR
+              = {money(estimatedValue)} PKR
+              ({sizingDifference === 0 ? 'exactly your value' : `${money(Math.abs(sizingDifference))} PKR ${sizingDifference > 0 ? 'above' : 'below'} your value`}).
+            </p>
           {/if}
           {#if summary}<p class="summary">{summary}</p>{/if}
           {#if estimatedValue}<p class="estimate">Estimated value: <b>{money(estimatedValue)} PKR</b>{choice.orderType === 'MARKET' ? ' at the latest price; actual value can move.' : ''}</p>{/if}
@@ -374,6 +415,19 @@
   .form-head { display:flex; justify-content:space-between; margin-bottom:.65rem; }.form-head div { display:flex; align-items:center; gap:.5rem; }
   .form-head b { font-size:.82rem; }.form-head span { color:var(--text-3); font-size:.65rem; }
   .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:.6rem; }.grid input { width:100%; box-sizing:border-box; }
+  .size-control { display:flex; flex-direction:column; gap:.4rem; }
+  .field-label { color:var(--text-3); font-size:.68rem; }
+  .size-tabs { align-self:flex-start; display:flex; padding:2px; border:1px solid var(--border-md);
+               border-radius:var(--radius-sm); background:var(--surface); }
+  .size-tabs button { border:0; border-radius:calc(var(--radius-sm) - 2px); padding:.3rem .55rem;
+                      background:transparent; color:var(--text-3); font:inherit; font-size:.66rem; cursor:pointer; }
+  .size-tabs button:hover { color:var(--text); background:var(--surface-3); }
+  .size-tabs button.active { color:var(--text); background:var(--surface-3); box-shadow:0 0 0 1px var(--border-md); }
+  .size-tabs button:focus-visible { outline:2px solid var(--primary); outline-offset:2px; }
+  .sizing-note { margin:.7rem 0 0; padding:.5rem .6rem; border-left:2px solid var(--primary);
+                 background:color-mix(in srgb,var(--primary) 7%,transparent); color:var(--text-2);
+                 font-size:.7rem; line-height:1.45; }
+  .sizing-note b { color:var(--text); }
   .summary { margin:.7rem 0 0; color:var(--text); font-size:.75rem; line-height:1.5; font-weight:600; }
   .estimate { margin:.3rem 0 0; color:var(--text-3); font-size:.68rem; }.estimate b { color:var(--text-2); }
   .warning,.error { margin:.65rem 1rem; padding:.55rem .65rem; border-radius:var(--radius-sm); display:flex; gap:.35rem;

@@ -390,6 +390,58 @@ public sealed class ProtectiveStopTests
     }
 
     [TestMethod]
+    public void Supersede_CancelsThePredecessorWhenTheWindowIsOpen()
+    {
+        // The intraday path. Make-before-break cannot complete against a free-quantity broker, so the
+        // only route is to cancel first — and saying so as a named decision is what lets the worker
+        // arm cover BEFORE it opens the gap.
+        var decision = ProtectiveStopDecisions.DecideSupersede(
+            Successor(), Predecessor("OLD-120"), heldQuantity: 100m,
+            resting: [Sized(120m, 100, "OLD-120")], replacementWindowAllowed: true);
+
+        Assert.AreEqual(SupersedeAction.CancelPredecessorThenPlace, decision.Action, decision.Reason);
+        StringAssert.Contains(decision.Reason, "local backstop");
+    }
+
+    [TestMethod]
+    public void Supersede_WaitsRatherThanCancellingWhenNoReplacementCouldBePlaced()
+    {
+        // Same inputs, window shut. Cancelling here would open a gap for no benefit — and waiting is
+        // not a compromise: the venue clears the book at the close, so the raise goes in clean next
+        // session with nothing cancelled at all.
+        var decision = ProtectiveStopDecisions.DecideSupersede(
+            Successor(), Predecessor("OLD-120"), heldQuantity: 100m,
+            resting: [Sized(120m, 100, "OLD-120")], replacementWindowAllowed: false);
+
+        Assert.AreEqual(SupersedeAction.Wait, decision.Action, decision.Reason);
+        StringAssert.Contains(decision.Reason, "next session");
+    }
+
+    [TestMethod]
+    public void Supersede_AnOpenWindowDoesNotOverrideAnUnknown()
+    {
+        // The window says "you could act"; the book says "you do not know what you would be acting on".
+        // Unknown has to win, or an unreadable read becomes a licence to cancel real protection.
+        var decision = ProtectiveStopDecisions.DecideSupersede(
+            Successor(), Predecessor("OLD-120"), heldQuantity: 100m,
+            resting: null, replacementWindowAllowed: true);
+
+        Assert.AreEqual(SupersedeAction.Wait, decision.Action, decision.Reason);
+    }
+
+    [TestMethod]
+    public void Supersede_AnOpenWindowStillPrefersRestingAlongsideWhenSharesAreFree()
+    {
+        // Free shares mean no gap is needed at all, so an open window must not turn a harmless
+        // side-by-side placement into a cancellation.
+        var decision = ProtectiveStopDecisions.DecideSupersede(
+            Successor(desired: 50), Predecessor("OLD-120"), heldQuantity: 150m,
+            resting: [Sized(120m, 100, "OLD-120")], replacementWindowAllowed: true);
+
+        Assert.AreEqual(SupersedeAction.Proceed, decision.Action, decision.Reason);
+    }
+
+    [TestMethod]
     public void Supersede_AStopThatReplacesNothingProceeds()
     {
         var decision = ProtectiveStopDecisions.DecideSupersede(

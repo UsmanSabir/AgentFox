@@ -180,9 +180,22 @@ public enum SupersedeAction
     RetirePredecessorFirst,
 
     /// <summary>
-    /// The predecessor's order is still resting and still holds the shares. The replacement cannot be
-    /// placed until it is cancelled, and this decision will not cancel it — the position stays covered
-    /// at the old level meanwhile.
+    /// The predecessor's order still holds the shares and there is room to act now: cancel it (verified
+    /// against the book), then place the replacement. Break-before-make, deliberately, because
+    /// make-before-break is impossible at a broker that sizes SELLs against free quantity.
+    ///
+    /// <para>
+    /// The caller must have the position covered by something else before it cancels — see
+    /// <c>ProtectiveStopWorker</c>, which arms the local backstop first. The gap between the two orders
+    /// is the one moment no native stop rests, and it is why this action exists as a named decision
+    /// rather than as a side effect of a placement failure.
+    /// </para>
+    /// </summary>
+    CancelPredecessorThenPlace,
+
+    /// <summary>
+    /// The predecessor's order is still resting and still holds the shares, and now is not the moment to
+    /// cancel it. The replacement waits; the position stays covered at the old level meanwhile.
     /// </summary>
     Wait
 }
@@ -356,17 +369,26 @@ public static class ProtectiveStopDecisions
     /// </para>
     ///
     /// <para>
-    /// <b>What this deliberately does not do.</b> It never cancels anything. <see cref="SupersedeAction.Wait"/>
-    /// leaves the position covered at the old level, which is the whole point: the failure this design
-    /// must never reach is zero stops resting, and an unreadable book or an unknown quantity resolves
-    /// to Wait for exactly that reason.
+    /// <b>What this deliberately does not do.</b> It never cancels anything itself — it only ever says
+    /// that cancelling is now the way forward. Every unknown (an unreadable book, an unreadable holding,
+    /// a resting row with no quantity) resolves to <see cref="SupersedeAction.Wait"/>, which leaves the
+    /// position covered at the old level. The failure this design must never reach is zero stops
+    /// resting; two is survivable, and none is not.
     /// </para>
     /// </summary>
+    /// <param name="replacementWindowAllowed">
+    /// Whether the caller is in a position to cancel and immediately re-place — in practice, whether the
+    /// order window is open and the position has other cover for the gap. False collapses the
+    /// break-before-make case to <see cref="SupersedeAction.Wait"/>, which is correct rather than merely
+    /// safe: PSX clears the book at the close, so a raise that waits is placed clean at the next
+    /// session without anyone cancelling anything.
+    /// </param>
     public static SupersedeDecision DecideSupersede(
         ProtectiveStop successor,
         ProtectiveStop? predecessor,
         decimal? heldQuantity,
-        IReadOnlyList<RestingOrder>? resting)
+        IReadOnlyList<RestingOrder>? resting,
+        bool replacementWindowAllowed = false)
     {
         if (successor.SupersedesStopId is not { Length: > 0 })
             return new(SupersedeAction.Proceed, "This stop replaces nothing.");
@@ -415,18 +437,24 @@ public static class ProtectiveStopDecisions
         var free = (int)Math.Floor(held) - committed;
         var wanted = Math.Min(successor.DesiredQuantity, (int)Math.Floor(held));
 
-        return free >= wanted && wanted > 0
-            ? new(SupersedeAction.Proceed,
+        if (free >= wanted && wanted > 0)
+            return new(SupersedeAction.Proceed,
                 $"{free} {successor.Symbol} share(s) are free of resting SELLs, which covers the "
                 + $"{wanted} this stop needs — it can rest alongside the one it replaces until that "
-                + "one is retired.")
+                + "one is retired.");
+
+        var blocked = $"The previous stop (order {predecessor.LastOrderNo}) still holds {committed} of "
+            + $"{(int)Math.Floor(held)} {successor.Symbol} share(s), leaving {free} free — not enough "
+            + $"for the {wanted} this raise needs. The broker sizes every SELL against custody minus "
+            + "resting SELLs, so the replacement cannot be placed while that order stands.";
+
+        return replacementWindowAllowed
+            ? new(SupersedeAction.CancelPredecessorThenPlace,
+                blocked + " Cancelling it first is the only way through, so the position is covered by "
+                + "the local backstop for the moment between the two orders.")
             : new(SupersedeAction.Wait,
-                $"The previous stop (order {predecessor.LastOrderNo}) still holds {committed} of "
-                + $"{(int)Math.Floor(held)} {successor.Symbol} share(s), leaving {free} free — not "
-                + $"enough for the {wanted} this raise needs. The broker sizes every SELL against "
-                + "custody minus resting SELLs, so this cannot be placed until the old order is "
-                + "cancelled. The position stays protected at the old trigger meanwhile, and the raise "
-                + "takes effect at the next session, when the venue clears the book.");
+                blocked + " The position stays protected at the old trigger, and the raise takes effect "
+                + "at the next session, when the venue clears the book.");
     }
 
     /// <summary>
