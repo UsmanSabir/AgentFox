@@ -684,31 +684,36 @@ public sealed class ProtectiveStopWorker
                 await RetireSupersededAsync(
                     repository, stop with { State = "superseded_pending_cancel" }, bookWithoutIt, token);
                 return true;
+            },
+
+            // Both sides are named so the outgoing order can be found in a broker terminal by its own
+            // number. StopReplacement decides WHEN these fire — before anything is cancelled, and
+            // exactly once more with the outcome — because that ordering is the guarantee, and keeping
+            // it inside the sequence is what lets it be tested without a broker.
+            AnnounceAsync: async (planned, result, token) =>
+            {
+                var plan = new StopReplacementPlan(
+                    successor.Symbol,
+                    Outgoing: new(predecessor.StopTrigger, predecessor.StopLimit,
+                        predecessor.DesiredQuantity, predecessor.LastOrderNo),
+                    Incoming: new(successor.StopTrigger, successor.StopLimit,
+                        successor.DesiredQuantity, null),
+                    Reason: why);
+
+                if (planned)
+                    await NotifyReplacementAsync(
+                        o => o.ReplacementPlannedAsync(plan, token), successor, "planned");
+                else
+                    await NotifyReplacementAsync(
+                        o => o.ReplacementResolvedAsync(
+                            plan,
+                            result!.Outcome == StopReplacementOutcome.PlaceReplacement,
+                            result.Reason, token),
+                        successor, "resolved");
             });
-
-        // Announced BEFORE the cancel goes out, because the fact worth telling an operator is that
-        // their position is about to be briefly uncovered — after the fact it is history. Both sides
-        // are named so the outgoing order can be found in a broker terminal by its own number.
-        var plan = new StopReplacementPlan(
-            successor.Symbol,
-            Outgoing: new(predecessor.StopTrigger, predecessor.StopLimit,
-                predecessor.DesiredQuantity, predecessor.LastOrderNo),
-            Incoming: new(successor.StopTrigger, successor.StopLimit,
-                successor.DesiredQuantity, null),
-            Reason: why);
-
-        await NotifyReplacementAsync(
-            o => o.ReplacementPlannedAsync(plan, ct), successor, "planned");
 
         var result = await StopReplacement.OpenWindowAsync(
             successor, predecessor, held, why, ports, ct);
-
-        // Always paired with the announcement above: "we are about to remove your protection" followed
-        // by silence would be worse than never having said anything.
-        await NotifyReplacementAsync(
-            o => o.ReplacementResolvedAsync(
-                plan, result.Outcome == StopReplacementOutcome.PlaceReplacement, result.Reason, ct),
-            successor, "resolved");
 
         if (result.Outcome == StopReplacementOutcome.PlaceReplacement)
         {

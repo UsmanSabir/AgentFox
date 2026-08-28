@@ -51,11 +51,17 @@ public sealed record StopReplacementResult(
 /// Moves the predecessor to its terminal state now that its order is gone. Returns false when the
 /// transition did not apply (someone else already moved it), which is not an error.
 /// </param>
+/// <param name="AnnounceAsync">
+/// Reports the replacement to whoever is watching — <c>planned: true</c> BEFORE anything is cancelled,
+/// then exactly once more with the outcome. Part of the sequence rather than of the caller's wiring,
+/// because "announce before you open the gap" is a rule about ORDER, and the order lives here.
+/// </param>
 public sealed record StopReplacementPorts(
     Func<ProtectiveStop, int, CancellationToken, Task> ArmCoverAsync,
     Func<string, CancellationToken, Task<ProtectiveStop?>> ReloadStopAsync,
     Func<string, CancellationToken, Task<BrokerCancellationResult>> CancelOrderAsync,
-    Func<ProtectiveStop, string, CancellationToken, Task<bool>> RetirePredecessorAsync);
+    Func<ProtectiveStop, string, CancellationToken, Task<bool>> RetirePredecessorAsync,
+    Func<bool, StopReplacementResult?, CancellationToken, Task>? AnnounceAsync = null);
 
 /// <summary>
 /// Break-before-make: cover the position locally, cancel the predecessor's native order, retire its
@@ -97,11 +103,37 @@ public static class StopReplacement
         StopReplacementPorts ports,
         CancellationToken ct)
     {
-        if (predecessor.LastOrderNo is not { Length: > 0 } orderNo)
+        if (predecessor.LastOrderNo is not { Length: > 0 })
             // DecideSupersede would not route here, but if it ever does there is nothing at the broker
-            // holding the shares — so there is nothing to cancel and nothing to wait for.
+            // holding the shares — so there is nothing to cancel, no gap to open, and nothing worth
+            // announcing.
             return new(StopReplacementOutcome.PlaceReplacement,
                 "The stop being replaced has no broker order, so nothing is holding the shares.");
+
+        // Announced BEFORE any port that could cancel, and paired with exactly one resolution on every
+        // path below — including the ones where nothing is cancelled. "We are about to remove your
+        // protection" followed by silence is the worst message this system could send, so the pairing
+        // is structural rather than something each branch has to remember.
+        if (ports.AnnounceAsync is not null)
+            await ports.AnnounceAsync(true, null, ct);
+
+        var result = await RunAsync(successor, predecessor, heldQuantity, why, ports, ct);
+
+        if (ports.AnnounceAsync is not null)
+            await ports.AnnounceAsync(false, result, ct);
+
+        return result;
+    }
+
+    private static async Task<StopReplacementResult> RunAsync(
+        ProtectiveStop successor,
+        ProtectiveStop predecessor,
+        decimal? heldQuantity,
+        string why,
+        StopReplacementPorts ports,
+        CancellationToken ct)
+    {
+        var orderNo = predecessor.LastOrderNo!;
 
         // ── Cover first ──────────────────────────────────────────────────────
         // A raised stop is written straight to "active" by whoever raised it, so unlike a stop that grew
