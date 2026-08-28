@@ -272,6 +272,19 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
     /// indistinguishable from a real order number to every later reader. The prefix says plainly that the
     /// broker never gave us one, and the row is still there to be found.
     /// </para>
+    ///
+    /// <para>
+    /// <b>A broker order number is NOT a unique identity, and this method must survive that.</b>
+    /// CONFIRMED live 2026-08-28 against AHL: order numbers are formed <c>{connection}11XK{seq}</c> and
+    /// the sequence restarts on every new connection, so one number names several unrelated orders on
+    /// the same account on the same day — a real capture had <c>0411XK1</c> as a MARI buy, a QTECH stop
+    /// and a SELECT stop within six hours. Because <c>broker_order_id</c> is this table's primary key,
+    /// the second such order threw <c>UNIQUE constraint failed</c>, the persist failed, and
+    /// <see cref="TradingAgent.Manager.TradingManager"/> reported the BROKER OUTCOME as unknown — when
+    /// the broker had in fact answered and only the bookkeeping had failed. A colliding number is now
+    /// stored under a qualified id instead, so the row is always written and the collision is visible
+    /// rather than fatal. The raw number is preserved inside <c>order_json</c> either way.
+    /// </para>
     /// </summary>
     public async Task RecordBrokerOrdersAsync(
         string executionId,
@@ -292,6 +305,29 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
             var brokerOrderId = string.IsNullOrWhiteSpace(order.OrderId)
                 ? $"pending:{clientOrderId}"
                 : order.OrderId!.Trim();
+
+            // Is that number already taken by a DIFFERENT attempt? Re-recording the same attempt is
+            // normal and handled by the ON CONFLICT below; a different one means the broker has reused
+            // the number, and keeping it as the primary key would throw.
+            var taken = connection.CreateCommand();
+            taken.Transaction = (Microsoft.Data.Sqlite.SqliteTransaction)transaction;
+            taken.CommandText =
+                "SELECT client_order_id FROM broker_orders WHERE broker_order_id = $brokerId";
+            taken.Parameters.AddWithValue("$brokerId", brokerOrderId);
+            var owner = await taken.ExecuteScalarAsync(ct) as string;
+
+            if (owner is not null && !string.Equals(owner, clientOrderId, StringComparison.Ordinal))
+            {
+                // Qualified with the attempt that actually produced it. The raw number stays at the
+                // front so a human scanning the table still recognises it, and order_json keeps it
+                // verbatim for anything matching on the broker's own value.
+                brokerOrderId = $"{brokerOrderId}#{clientOrderId}";
+                _logger.LogWarning(
+                    "[Ledger] Broker order number {OrderNo} was already recorded for attempt {Owner}; "
+                    + "storing {Symbol} attempt {ClientId} as {Qualified}. This broker reuses order "
+                    + "numbers across connections, so the number alone does not identify an order.",
+                    order.OrderId, owner, order.Symbol, clientOrderId, brokerOrderId);
+            }
 
             var command = connection.CreateCommand();
             command.Transaction = (Microsoft.Data.Sqlite.SqliteTransaction)transaction;

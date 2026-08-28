@@ -313,17 +313,65 @@ public sealed class TradingManager
                     success ? "Broker accepted all attempted orders." : "One or more broker orders failed.",
                     sellAdjustments),
                 brokerResults);
-            await PersistResultAsync(result, success ? "accepted" : "failed", ct);
+
+            // ── Recording the answer is NOT part of getting it ──────────────────────────────────
+            // The broker has replied and `result` holds what it said. A failure to write that down is
+            // a bookkeeping problem, and reporting it as "broker outcome unknown" would be a lie in
+            // the most expensive direction: it discards an answer we have, tells the operator to go
+            // reconcile something that is not actually uncertain, and — because the write never
+            // landed — makes it genuinely unknown afterwards. CONFIRMED live 2026-08-28, where a
+            // UNIQUE-constraint violation on a REUSED broker order number did exactly that.
+            try
+            {
+                await PersistResultAsync(result, success ? "accepted" : "failed", ct);
+            }
+            catch (Exception persistEx)
+            {
+                _logger.LogError(persistEx,
+                    "[TradingManager] The broker ANSWERED for {ExecutionId} but the ledger write failed. "
+                    + "The outcome below is accurate; the audit trail for it is not.", claim.ExecutionId);
+
+                // Best effort, and deliberately a different event type: a reader must be able to find
+                // executions whose orders are real but whose rows are missing.
+                try
+                {
+                    await _repository.AppendEventAsync(claim.ExecutionId, "ledger_write_failed",
+                        JsonSerializer.Serialize(new { error = persistEx.Message, result }), ct);
+                }
+                catch (Exception ex2)
+                {
+                    _logger.LogError(ex2,
+                        "[TradingManager] {ExecutionId}: the ledger could not even record its own "
+                        + "write failure.", claim.ExecutionId);
+                }
+
+                return result with
+                {
+                    Reason = result.Reason
+                        + $" NOTE: the broker's answer could not be written to the ledger "
+                        + $"({persistEx.Message}). The orders above are what actually happened — the "
+                        + "AUDIT TRAIL needs reconciling, not the position."
+                };
+            }
+
             return result;
         }
         catch (Exception ex)
         {
-            // Unknown is deliberately terminal for automatic retry. Reconciliation must resolve it.
+            // Reached only when the BROKER call itself failed in a way that leaves the outcome genuinely
+            // undetermined. Unknown is deliberately terminal for automatic retry; reconciliation must
+            // resolve it.
             _logger.LogError(ex, "[TradingManager] Broker outcome unknown for {ExecutionId}.", claim.ExecutionId);
             var result = new TradingExecutionResult(false, false, claim.ExecutionId,
                 policy.Version, $"Broker outcome unknown; manual reconciliation required: {ex.Message}",
                 Array.Empty<IReadOnlyList<OrderResult>>());
-            await PersistResultAsync(result, "unknown", ct);
+            try { await PersistResultAsync(result, "unknown", ct); }
+            catch (Exception persistEx)
+            {
+                _logger.LogError(persistEx,
+                    "[TradingManager] {ExecutionId}: an unknown broker outcome could not be persisted "
+                    + "either. This execution has no durable record at all.", claim.ExecutionId);
+            }
             return result;
         }
         }
