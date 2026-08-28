@@ -67,6 +67,14 @@
   }
 
   $: issues = (feed?.warnings ?? 0) + (feed?.errors ?? 0);
+  $: feedDegraded = feed
+    ? (feed.now.feedDegraded ?? !feed.now.feedHealthy)
+    : false;
+  $: feedProvider = (feed?.now.feedProvider ?? 'live').toLowerCase();
+  $: feedLabel = feedProvider === 'ahl'
+    ? 'AHL push'
+    : `${feedProvider.toUpperCase()} feed`;
+  $: feedReason = feed?.now.feedReason ?? 'Live quotes are falling back to the PSX market watch.';
 </script>
 
 <section class="activity" class:open>
@@ -84,9 +92,9 @@
           <Chrome size={11} /> broker portal open
         </span>
       {/if}
-      {#if feed && !feed.now.feedHealthy}
-        <span class="chip warn" title="Live quotes are falling back to the PSX market watch">
-          feed degraded
+      {#if feedDegraded}
+        <span class="chip warn" title={feedReason}>
+          {feedLabel} degraded
         </span>
       {/if}
       {#if feed?.errors}
@@ -95,7 +103,7 @@
       {#if feed?.warnings}
         <span class="chip warn"><AlertTriangle size={11} /> {feed.warnings}</span>
       {/if}
-      {#if feed && issues === 0 && !loading}
+      {#if feed && issues === 0 && !feedDegraded && !loading}
         <span class="chip ok">no issues</span>
       {/if}
       {#if loading}<span class="chip"><Loader size={11} /> …</span>{/if}
@@ -112,6 +120,9 @@
         Market {feed.now.marketOpen ? 'open' : 'closed'} — {feed.now.marketReason}.
         {#if feed.now.browserBusy}
           A broker browser session is <b>in use right now</b>.
+        {/if}
+        {#if feedDegraded}
+          <b>{feedReason}</b>
         {/if}
       </p>
     {/if}

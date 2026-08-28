@@ -402,9 +402,15 @@ public static class ProtectiveStopDecisions
                 "The outstanding book could not be read, so whether the previous stop still holds the "
                 + "shares is unknown. The position stays covered at the old level.");
 
+        // Order number AND symbol. CONFIRMED live 2026-08-28: this broker's order numbers are only
+        // unique within a connection — the format is {connection}11XK{seq}, and a fresh connection
+        // restarts the sequence — so one number names different orders on different symbols. A real
+        // capture had `0411XK1` as both a MARI BUY and a PAEL stop on the same day. Matching on the
+        // number alone would read someone else's live order as this stop's own.
         var predecessorOrder = predecessor.LastOrderNo is { Length: > 0 } no
-            ? resting.FirstOrDefault(r => string.Equals(
-                r.OrderNo?.Trim(), no.Trim(), StringComparison.OrdinalIgnoreCase))
+            ? resting.FirstOrDefault(r =>
+                r.Symbol.Equals(predecessor.Symbol, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(r.OrderNo?.Trim(), no.Trim(), StringComparison.OrdinalIgnoreCase))
             : null;
 
         if (predecessorOrder is null)
@@ -455,6 +461,82 @@ public static class ProtectiveStopDecisions
             : new(SupersedeAction.Wait,
                 blocked + " The position stays protected at the old trigger, and the raise takes effect "
                 + "at the next session, when the venue clears the book.");
+    }
+
+    /// <summary>
+    /// Picks which protective stop, if any, should stand down so a SELL that REDUCES the position can
+    /// get through — a target scale-out, most often.
+    ///
+    /// <para>
+    /// <b>Why a reduction can be blocked at all.</b> The broker sizes every SELL against custody minus
+    /// resting SELLs, so a stop covering 100% of a holding leaves nothing free for a take-profit on
+    /// part of that same holding. The stop has to give up its shares first; there is no arrangement in
+    /// which both rest over the whole position.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>It will only ever stand down a stop this system placed and can identify by order number.</b>
+    /// An order matched by price alone, or a book that could not be read, returns
+    /// <see cref="StopReleaseAction.CannotRelease"/> — cancelling something unidentified to make room
+    /// for a sell would be trading away protection nobody asked about.
+    /// </para>
+    /// </summary>
+    public static StopReleaseDecision DecideRelease(
+        string symbol,
+        int quantityNeeded,
+        decimal? heldQuantity,
+        IReadOnlyList<RestingOrder>? resting,
+        IReadOnlyList<ProtectiveStop> stops)
+    {
+        if (quantityNeeded <= 0)
+            return new(StopReleaseAction.NotNeeded, null, null, "Nothing was asked for.");
+
+        if (resting is null || heldQuantity is not { } held)
+            return new(StopReleaseAction.CannotRelease, null, null,
+                "Holdings or the outstanding book could not be read, so what is holding these shares "
+                + "is unknown. Nothing was cancelled.");
+
+        var sells = resting
+            .Where(r => r.Symbol.Equals(symbol, StringComparison.OrdinalIgnoreCase)
+                     && !(r.Side is { Length: > 0 } side
+                          && side.Contains("BUY", StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+
+        if (sells.Any(r => r.Quantity is null))
+            return new(StopReleaseAction.CannotRelease, null, null,
+                $"A resting {symbol} SELL has no readable quantity, so the free quantity cannot be "
+                + "computed. Refusing to guess.");
+
+        var committed = sells.Sum(r => r.Quantity!.Value);
+        var free = (int)Math.Floor(held) - committed;
+        if (free >= quantityNeeded)
+            return new(StopReleaseAction.NotNeeded, null, null,
+                $"{free} {symbol} share(s) are already free, which covers the {quantityNeeded} needed.");
+
+        // Only our own stops, identified the exact way — by the order number we recorded when we placed
+        // it. Releasing the largest frees the most shares for one cancellation.
+        var ours = stops
+            .Where(s => s.State == "active"
+                     && s.Symbol.Equals(symbol, StringComparison.OrdinalIgnoreCase)
+                     && s.LastOrderNo is { Length: > 0 })
+            .Select(s => (Stop: s, Row: sells.FirstOrDefault(r => string.Equals(
+                r.OrderNo?.Trim(), s.LastOrderNo!.Trim(), StringComparison.OrdinalIgnoreCase))))
+            .Where(x => x.Row is not null)
+            .OrderByDescending(x => x.Row!.Quantity!.Value)
+            .ToList();
+
+        if (ours.Count == 0)
+            return new(StopReleaseAction.CannotRelease, null, null,
+                $"{free} {symbol} share(s) are free but {quantityNeeded} are needed, and no protective "
+                + "stop this system placed is holding the rest. Whatever is holding them was not placed "
+                + "here, so it is left alone.");
+
+        var chosen = ours[0];
+        return new(StopReleaseAction.ReleaseStop, chosen.Stop.StopId, chosen.Stop.LastOrderNo,
+            $"Only {free} {symbol} share(s) are free but {quantityNeeded} are needed. Standing down "
+            + $"protective stop {chosen.Stop.StopId} (order {chosen.Stop.LastOrderNo}, "
+            + $"{chosen.Row!.Quantity} share(s) at {chosen.Stop.StopTrigger}) to make room; it is "
+            + "re-placed over what remains once the sell is through.");
     }
 
     /// <summary>

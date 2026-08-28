@@ -41,7 +41,8 @@ namespace TradingAgent.Trading;
 /// be confirmed leaves the old order resting and the row retried next pass, never the reverse.
 /// </para>
 /// </summary>
-public sealed class ProtectiveStopWorker : BackgroundService, IMarketSessionOpenParticipant
+public sealed class ProtectiveStopWorker
+    : BackgroundService, IMarketSessionOpenParticipant, IProtectiveStopReleaser
 {
     public string Name => "protective stops";
     public int Order => 200;
@@ -668,8 +669,20 @@ public sealed class ProtectiveStopWorker : BackgroundService, IMarketSessionOpen
                     return false;
 
                 retiredThisPass.Add(stop.StopId);
+
+                // `resting` is this pass's snapshot, taken BEFORE the cancel, so it still lists the
+                // order we have just PROVEN gone. Handing it over unfiltered makes RetireSupersededAsync
+                // miss its "already absent from the book" shortcut and cancel the same order a second
+                // time — which fails, because it no longer exists, leaving the row stuck in
+                // superseded_pending_cancel and warning that a cancel could not be confirmed on an
+                // operation that in fact succeeded. Found by the live host run, 2026-08-28.
+                var bookWithoutIt = resting
+                    ?.Where(r => !string.Equals(
+                        r.OrderNo?.Trim(), stop.LastOrderNo?.Trim(), StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+
                 await RetireSupersededAsync(
-                    repository, stop with { State = "superseded_pending_cancel" }, resting, token);
+                    repository, stop with { State = "superseded_pending_cancel" }, bookWithoutIt, token);
                 return true;
             });
 
@@ -812,8 +825,20 @@ public sealed class ProtectiveStopWorker : BackgroundService, IMarketSessionOpen
 
         if (result.Executed && order is { Success: true })
         {
+            // What was SUBMITTED, not what was asked for. Core sizes a SELL down to the free quantity
+            // at the execution boundary, so recording the requested figure would credit the stop with
+            // coverage that never reached the broker — and DecidePlacement would then see no shortfall
+            // and never top it up. Matters most right after a release, where the free quantity is
+            // deliberately smaller than the intent.
+            var actuallyPlaced = order.Quantity is > 0 ? order.Quantity.Value : decision.Quantity;
+            if (actuallyPlaced != decision.Quantity)
+                _logger.LogWarning(
+                    "[ProtectiveStops] {StopId} ({Symbol}): asked for {Asked} share(s) but only {Placed} "
+                    + "were submitted — the rest of the position is not covered by this order.",
+                    stop.StopId, stop.Symbol, decision.Quantity, actuallyPlaced);
+
             await repository.RecordProtectiveStopPlacementAsync(
-                stop.StopId, today, decision.Quantity, order.OrderId, ct);
+                stop.StopId, today, actuallyPlaced, order.OrderId, ct);
             _logger.LogWarning(
                 "[ProtectiveStops] {StopId}: native stop PLACED — SELL {Qty} {Symbol} "
                 + "trigger {Trigger} limit {Limit}. {Why}",
@@ -913,12 +938,22 @@ public sealed class ProtectiveStopWorker : BackgroundService, IMarketSessionOpen
         // Already gone from the book — fired, expired, or cancelled some other way. A resting-book read
         // that itself failed this pass (resting == null) is NOT evidence of anything, so it falls
         // through to attempting the cancel below rather than assuming the order is already gone.
-        if (resting is not null
-            && !resting.Any(r => string.Equals(r.OrderNo?.Trim(), orderNo, StringComparison.OrdinalIgnoreCase)))
+        //
+        // The symbol is part of the test, and that is not defensive coding. CONFIRMED live 2026-08-28:
+        // this broker's order numbers are unique only within a connection ({connection}11XK{seq}, the
+        // sequence restarting on each new connection), so one number names different orders on
+        // different symbols — a real capture had `0411XK1` as both a MARI BUY and a PAEL stop the same
+        // day. Without the symbol this would read an unrelated live order as this stop's own, refuse to
+        // close a row whose order really had gone, and then CANCEL THAT UNRELATED ORDER below.
+        var stillResting = resting?.FirstOrDefault(r =>
+            r.Symbol.Equals(stop.Symbol, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(r.OrderNo?.Trim(), orderNo, StringComparison.OrdinalIgnoreCase));
+
+        if (resting is not null && stillResting is null)
         {
             await repository.TrySetProtectiveStopStateAsync(
                 stop.StopId, "superseded_pending_cancel", "closed",
-                $"Order {orderNo} is no longer in the outstanding book; nothing left to cancel.", ct);
+                $"Order {orderNo} is no longer in {stop.Symbol}'s outstanding book; nothing left to cancel.", ct);
             return;
         }
 
@@ -963,6 +998,93 @@ public sealed class ProtectiveStopWorker : BackgroundService, IMarketSessionOpen
             + $"• {result.Message}\n"
             + "_The position is protected by both stops meanwhile — retrying automatically. If this "
             + "persists, cancel the old order manually._");
+    }
+
+    // ── Releasing shares for a reducing SELL ──────────────────────────────────
+
+    /// <summary>
+    /// Stands a protective stop down so a SELL that only REDUCES the position can get through — see
+    /// <see cref="IProtectiveStopReleaser"/>.
+    ///
+    /// <para>
+    /// <b>The stop's intent survives.</b> Only the native order is cancelled, and this session's
+    /// placement record is cleared so the recurring pass re-places it over whatever remains once the
+    /// sell is through. What the operator loses is coverage on the slice being sold, for as long as
+    /// that sell rests — which is the trade the broker forces, since a stop over 100% of a holding and
+    /// a take-profit on part of it cannot both exist.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Nothing is cancelled on a guess.</b> The stop is matched by the order number this system
+    /// recorded when it placed it; an unreadable book, an unreadable quantity, or shares held by an
+    /// order from somewhere else all return "not released" with the reason, and the caller leaves its
+    /// sell armed rather than forcing anything.
+    /// </para>
+    /// </summary>
+    public async Task<StopReleaseResult> ReleaseForSellAsync(
+        string symbol, int quantityNeeded, CancellationToken ct = default)
+    {
+        using var scope = _scopes.CreateScope();
+        var repository = scope.ServiceProvider.GetRequiredService<ITradingRepository>();
+
+        var snapshot = await ReadAccountSnapshotAsync();
+        var holdings = snapshot is { Healthy: true } ? HoldingsFrom(snapshot) : null;
+        var resting  = snapshot is { Healthy: true } ? RestingFrom(snapshot) : null;
+        var stops    = await repository.GetProtectiveStopsAsync(openOnly: true, ct);
+
+        var decision = ProtectiveStopDecisions.DecideRelease(
+            symbol, quantityNeeded,
+            holdings is null ? null : TryHeld(holdings, symbol),
+            resting, stops);
+
+        if (decision.Action != StopReleaseAction.ReleaseStop)
+        {
+            _logger.LogInformation(
+                "[ProtectiveStops] Release for a {Symbol} SELL of {Qty}: {Action} — {Why}",
+                symbol, quantityNeeded, decision.Action, decision.Reason);
+            return new(decision.Action == StopReleaseAction.NotNeeded, decision.Reason);
+        }
+
+        var orderNo = decision.OrderNo!;
+        _logger.LogWarning(
+            "[ProtectiveStops] Standing down {Symbol} stop order {OrderNo} so a SELL of {Qty} can go "
+            + "through. {Why}", symbol, orderNo, quantityNeeded, decision.Reason);
+
+        BrokerCancellationResult cancellation;
+        try
+        {
+            cancellation = await _canceller.CancelOrderAsync(orderNo, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex,
+                "[ProtectiveStops] The cancel of {Symbol} stop order {OrderNo} threw; nothing was "
+                + "released.", symbol, orderNo);
+            return new(false, $"The stop's order could not be cancelled ({ex.Message}); nothing was released.");
+        }
+
+        if (!cancellation.Gone)
+        {
+            _logger.LogWarning(
+                "[ProtectiveStops] {Symbol} stop order {OrderNo} is not confirmed cancelled ({Message}); "
+                + "nothing was released.", symbol, orderNo, cancellation.Message);
+            return new(false,
+                $"The stop's order is not confirmed cancelled ({cancellation.Message}); the shares are "
+                + "still committed and the position is still protected.");
+        }
+
+        // The order is gone, so the record of it must go too — otherwise the recurring pass believes
+        // the position is still covered this session and never re-places.
+        await repository.ClearProtectiveStopPlacementAsync(decision.StopId!, ct);
+
+        _activity?.Warn("Stops",
+            $"{symbol}: protective stop stood down so a reducing SELL could go through",
+            $"Order {orderNo} cancelled. The stop is re-placed over what remains once the sell is "
+            + "through; until then that slice is covered only by the local backstop.");
+
+        return new(true,
+            $"Stop order {orderNo} is confirmed cancelled, freeing shares for the sell. The stop is "
+            + "re-placed over the remaining position on the next pass.");
     }
 
     // ── Local backstop ────────────────────────────────────────────────────────

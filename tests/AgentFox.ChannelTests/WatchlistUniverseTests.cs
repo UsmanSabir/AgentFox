@@ -752,5 +752,9 @@ public sealed class WatchlistUniverseTests
         public Task<bool> SetProtectiveStopBackstopAsync(
             string id, string? backstopArmedId, CancellationToken ct = default) =>
             throw new NotSupportedException();
+
+        public Task<bool> ClearProtectiveStopPlacementAsync(
+            string id, CancellationToken ct = default) =>
+            throw new NotSupportedException();
     }
 }

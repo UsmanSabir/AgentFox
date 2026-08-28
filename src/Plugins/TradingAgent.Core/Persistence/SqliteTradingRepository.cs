@@ -2820,6 +2820,26 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
     /// rolls, mirroring the venue: yesterday's resting order was cleared at the close and protects
     /// nothing today, so carrying its quantity forward would report protection that does not exist.
     /// </summary>
+    public async Task<bool> ClearProtectiveStopPlacementAsync(
+        string stopId,
+        CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        // The order number goes too: keeping it would leave later passes trying to cancel an order
+        // that is already gone, and FindOwnResting matching a row that no longer exists.
+        command.CommandText = """
+            UPDATE protective_stops
+               SET placed_qty = 0,
+                   last_placed_date = NULL,
+                   last_order_no = NULL
+             WHERE stop_id = $id AND state = 'active'
+            """;
+        command.Parameters.AddWithValue("$id", stopId);
+        return await command.ExecuteNonQueryAsync(ct) > 0;
+    }
+
     public async Task<bool> RecordProtectiveStopPlacementAsync(
         string stopId,
         DateOnly sessionDate,

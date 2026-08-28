@@ -52,8 +52,15 @@
   let preset: WatchlistPresetPreview | null = null;
   let presetLoading = false;
   let refreshingEntries = false;
+  let configuredListNoteDismissed = false;
   let executionSourceNoteDismissed = false;
+  const configuredListNoteStorageKey = 'trading-watchlist-configured-list-note-dismissed-v1';
   const executionSourceNoteStorageKey = 'trading-watchlist-execution-source-note-dismissed-v1';
+
+  function dismissConfiguredListNote() {
+    configuredListNoteDismissed = true;
+    localStorage.setItem(configuredListNoteStorageKey, 'true');
+  }
 
   function dismissExecutionSourceNote() {
     executionSourceNoteDismissed = true;
@@ -439,9 +446,17 @@
 
   onMount(() => {
     compact = localStorage.getItem('trading-watchlist-density') === 'compact';
+    configuredListNoteDismissed = localStorage.getItem(configuredListNoteStorageKey) === 'true';
     executionSourceNoteDismissed = localStorage.getItem(executionSourceNoteStorageKey) === 'true';
     load();
   });
+
+  // Resetting adopts the configured list and clears the server flag. Clear the local dismissal at
+  // the same point so a genuinely later configuration change is visible again.
+  $: if (data && !data.configuredListChanged && configuredListNoteDismissed) {
+    configuredListNoteDismissed = false;
+    localStorage.removeItem(configuredListNoteStorageKey);
+  }
 
   // The parent does not advance this clock in a hidden tab. Keep the local visibility check as a
   // guard in case the component is reused under a different parent later.
@@ -563,12 +578,21 @@
     </div>
   {/if}
 
-  {#if data?.configuredListChanged}
-    <p class="note warn">
+  {#if data?.configuredListChanged && !configuredListNoteDismissed}
+    <div class="note warn configured-list" role="note">
       <AlertTriangle size={13} />
-      The configured allowed-symbols list has changed since this watchlist was seeded. It is not
-      updated automatically — that would discard your edits. Use Reset to adopt the new list.
-    </p>
+      <span>
+        The configured allowed-symbols list has changed since this watchlist was seeded. It is not
+        updated automatically — that would discard your edits. Use Reset to adopt the new list.
+      </span>
+      <button
+        class="note-close"
+        type="button"
+        on:click={dismissConfiguredListNote}
+        aria-label="Dismiss configured symbols note"
+        title="Dismiss this note"
+      ><X size={13} /></button>
+    </div>
   {/if}
 
   {#if watchlistControlsExecution && !executionSourceNoteDismissed}
@@ -961,6 +985,7 @@
   }
   .note.warn { color:var(--warning); }
   .note.danger { color:var(--danger); }
+  .configured-list > span { flex:1; min-width:0; }
   .note.execution-source {
     color:var(--info); padding:.42rem .52rem; border-radius:var(--radius-sm);
     border:1px solid color-mix(in srgb, var(--info) 28%, var(--border));
@@ -972,8 +997,8 @@
     margin:-.18rem -.25rem 0 0; border:0; border-radius:var(--radius-sm);
     background:transparent; color:currentColor; cursor:pointer; opacity:.72;
   }
-  .note-close:hover { opacity:1; background:color-mix(in srgb, var(--info) 12%, transparent); }
-  .note-close:focus-visible { opacity:1; outline:2px solid var(--info); outline-offset:1px; }
+  .note-close:hover { opacity:1; background:color-mix(in srgb, currentColor 12%, transparent); }
+  .note-close:focus-visible { opacity:1; outline:2px solid currentColor; outline-offset:1px; }
 
   /* Scrolls internally: a 150-symbol watchlist must not push the rest of the page off-screen. */
   .rows {
