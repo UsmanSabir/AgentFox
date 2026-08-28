@@ -70,6 +70,14 @@ public sealed class ProtectiveStopWorker
     private readonly HashSet<string> _alerted = [];
     private DateOnly _alertedFor;
 
+    /// <summary>
+    /// Set when the broker refuses on TIMING rather than on the order. Account-wide, because that is
+    /// how the broker states it, and growing, because the condition is re-armed by every attempt —
+    /// see <see cref="OrderResult.TransientRejection"/>. Reset by any successful placement.
+    /// </summary>
+    private DateTime _placementsBlockedUntilUtc = DateTime.MinValue;
+    private TimeSpan _transientBackoff = TimeSpan.Zero;
+
     /// <summary>Serialises ad-hoc baseline captures and guards the shared snapshot below.</summary>
     private readonly SemaphoreSlim _baselineGate = new(1, 1);
     private readonly SemaphoreSlim _runGate = new(1, 1);
@@ -790,6 +798,27 @@ public sealed class ProtectiveStopWorker
         HashSet<string> retiredThisPass,
         CancellationToken ct)
     {
+        // The broker last refused on TIMING, and every attempt re-arms that condition — so attempting
+        // now would extend it rather than resolve it. The stop's intent is untouched and the position is
+        // no less covered than it was a second ago; this only stops the worker from arguing with a
+        // broker that has already said "not yet".
+        if (DateTime.UtcNow < _placementsBlockedUntilUtc)
+        {
+            var waitFor = _placementsBlockedUntilUtc - DateTime.UtcNow;
+            _logger.LogInformation(
+                "[ProtectiveStops] {StopId} ({Symbol}): holding off — the broker refused the last "
+                + "placement on timing, and retrying keeps that alive. {Wait:mm\\:ss} to go.",
+                stop.StopId, stop.Symbol, waitFor);
+
+            if (MarkAlerted(stop, "transient-backoff", today))
+                _activity?.Warn("Stops",
+                    $"{stop.Symbol}: waiting {waitFor.TotalMinutes:0} min before retrying the stop",
+                    "The broker refused the last placement because a previous order request was still "
+                    + "in progress. Retrying immediately re-arms that condition, so the worker backs "
+                    + "off. The position is covered by the local backstop meanwhile.");
+            return;
+        }
+
         var signal = new TradingSignal
         {
             IsSignal   = true,
@@ -830,6 +859,10 @@ public sealed class ProtectiveStopWorker
 
         if (result.Executed && order is { Success: true })
         {
+            // Something got through, so whatever the broker was holding has cleared.
+            _placementsBlockedUntilUtc = DateTime.MinValue;
+            _transientBackoff = TimeSpan.Zero;
+
             // What was SUBMITTED, not what was asked for. Core sizes a SELL down to the free quantity
             // at the execution boundary, so recording the requested figure would credit the stop with
             // coverage that never reached the broker — and DecidePlacement would then see no shortfall
@@ -883,7 +916,29 @@ public sealed class ProtectiveStopWorker
             return;
         }
 
-        // Not placed. The intent stays active so the next pass retries; the position is meanwhile
+        // A rejection about TIMING is re-armed by every attempt, so retrying on the ordinary cadence is
+        // what keeps it alive — CONFIRMED live 2026-08-28, where a stop retried every 60s failed for
+        // hours while the only orders that reached the market were each the first attempt after a quiet
+        // gap. Back off, doubling, so the condition gets room to expire and the worker still recovers on
+        // its own. Account-wide rather than per stop, because the broker states it account-wide.
+        if (order is { TransientRejection: true })
+        {
+            _transientBackoff = _transientBackoff == TimeSpan.Zero
+                ? TimeSpan.FromMinutes(5)
+                : TimeSpan.FromTicks(Math.Min(_transientBackoff.Ticks * 2, TimeSpan.FromMinutes(30).Ticks));
+            _placementsBlockedUntilUtc = DateTime.UtcNow + _transientBackoff;
+
+            // Local time, because every other line in this log is local and an operator reading a
+            // stop-placement failure should not have to convert timezones to work out when it retries.
+            _logger.LogWarning(
+                "[ProtectiveStops] {StopId} ({Symbol}): the broker refused on TIMING — {Reason} "
+                + "Pausing placements for {Backoff} (until {Until:HH:mm:ss} local); retrying sooner is "
+                + "what keeps this condition alive.",
+                stop.StopId, stop.Symbol, order.Message, _transientBackoff,
+                _placementsBlockedUntilUtc.ToLocalTime());
+        }
+
+        // Not placed. The intent stays active so a later pass retries; the position is meanwhile
         // covered only by the local backstop, and only while this process is running.
         _logger.LogError(
             "[ProtectiveStops] {StopId} ({Symbol}): the native stop was NOT placed — {Reason}. "
