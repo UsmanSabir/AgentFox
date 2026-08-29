@@ -48,20 +48,20 @@ public class OrderResult
     /// it would likely be accepted later, unchanged.
     ///
     /// <para>
-    /// The distinction is not academic, and it is not about politeness to the broker. CONFIRMED live
-    /// 2026-08-28 against AHL: "Order Rej: Last order request not Complete" is stated account-wide, it
-    /// expires on its own, and each new attempt RE-ARMS it. A caller retrying on a fixed interval
-    /// therefore holds itself out indefinitely — a protective stop retried every 60 seconds failed for
-    /// hours, while the only two orders that reached the market all day were each the first attempt
-    /// after a quiet gap. A caller that cannot tell this apart from "you cannot sell more than 0 shares"
-    /// will either hammer something that can never succeed, or give up on something that would have
-    /// worked in ten minutes.
+    /// The distinction is not academic. CONFIRMED 2026-08-28 from a packet capture of AHL's OWN desktop
+    /// client: "Order Rej: Last order request not Complete" is that broker's wording for <i>this board
+    /// is not accepting orders</i>. It says nothing about a previous order — the official client
+    /// received it twice for its own orders while the server had just pushed
+    /// <c>ORDER_MST|...|REG|Break</c>, and displayed the text verbatim in an error dialog. An earlier
+    /// reading of this comment claimed the condition was account-wide and re-armed by each attempt;
+    /// that theory fitted the timings and the capture disproved it.
     /// </para>
     ///
     /// <para>
     /// Nothing retries automatically on the strength of this flag. It exists so a caller can BACK OFF —
-    /// see <c>ProtectiveStopWorker</c>, which stops attempting for a growing interval rather than
-    /// re-arming the condition every pass.
+    /// see <c>ProtectiveStopWorker</c>. Backing off is still the right response, for the plainer reason
+    /// that a shut board will refuse every attempt until it reopens, so retrying on the ordinary cadence
+    /// buys nothing and fills the operator's channels with identical failures.
     /// </para>
     /// </summary>
     public bool TransientRejection { get; set; }

@@ -71,9 +71,10 @@ public sealed class ProtectiveStopWorker
     private DateOnly _alertedFor;
 
     /// <summary>
-    /// Set when the broker refuses on TIMING rather than on the order. Account-wide, because that is
-    /// how the broker states it, and growing, because the condition is re-armed by every attempt —
-    /// see <see cref="OrderResult.TransientRejection"/>. Reset by any successful placement.
+    /// Set when the broker refuses on TIMING rather than on the order — most often because the venue's
+    /// board is shut, see <see cref="OrderResult.TransientRejection"/>. Account-wide, because that is how
+    /// the broker states it, and growing, because a shut board stays shut for a while and each retry
+    /// only reproduces the same refusal. Reset by any successful placement.
     /// </summary>
     private DateTime _placementsBlockedUntilUtc = DateTime.MinValue;
     private TimeSpan _transientBackoff = TimeSpan.Zero;
@@ -798,24 +799,25 @@ public sealed class ProtectiveStopWorker
         HashSet<string> retiredThisPass,
         CancellationToken ct)
     {
-        // The broker last refused on TIMING, and every attempt re-arms that condition — so attempting
-        // now would extend it rather than resolve it. The stop's intent is untouched and the position is
-        // no less covered than it was a second ago; this only stops the worker from arguing with a
-        // broker that has already said "not yet".
+        // The broker last refused on TIMING — typically a board that is not accepting orders — so
+        // attempting now would collect the identical refusal. The stop's intent is untouched and the
+        // position is no less covered than it was a second ago; this only stops the worker from arguing
+        // with a broker that has already said "not yet".
         if (DateTime.UtcNow < _placementsBlockedUntilUtc)
         {
             var waitFor = _placementsBlockedUntilUtc - DateTime.UtcNow;
             _logger.LogInformation(
                 "[ProtectiveStops] {StopId} ({Symbol}): holding off — the broker refused the last "
-                + "placement on timing, and retrying keeps that alive. {Wait:mm\\:ss} to go.",
+                + "placement on timing, and will refuse the next one the same way. {Wait:mm\\:ss} to go.",
                 stop.StopId, stop.Symbol, waitFor);
 
             if (MarkAlerted(stop, "transient-backoff", today))
                 _activity?.Warn("Stops",
                     $"{stop.Symbol}: waiting {waitFor.TotalMinutes:0} min before retrying the stop",
-                    "The broker refused the last placement because a previous order request was still "
-                    + "in progress. Retrying immediately re-arms that condition, so the worker backs "
-                    + "off. The position is covered by the local backstop meanwhile.");
+                    "The broker refused the last placement on timing rather than on the order itself — "
+                    + "usually a board that is not accepting orders. Retrying now would collect the same "
+                    + "refusal, so the worker backs off. The position is covered by the local backstop "
+                    + "meanwhile.");
             return;
         }
 
@@ -916,11 +918,15 @@ public sealed class ProtectiveStopWorker
             return;
         }
 
-        // A rejection about TIMING is re-armed by every attempt, so retrying on the ordinary cadence is
-        // what keeps it alive — CONFIRMED live 2026-08-28, where a stop retried every 60s failed for
-        // hours while the only orders that reached the market were each the first attempt after a quiet
-        // gap. Back off, doubling, so the condition gets room to expire and the worker still recovers on
-        // its own. Account-wide rather than per stop, because the broker states it account-wide.
+        // A rejection about TIMING will be repeated identically until whatever caused it clears —
+        // CONFIRMED 2026-08-28 from a capture of AHL's own desktop client, whose orders were refused the
+        // same way while the venue had just announced the REG board was in Break. So back off, doubling,
+        // rather than re-asking a closed venue every 60 seconds and alerting each time. Account-wide
+        // rather than per stop, because the broker states it account-wide.
+        //
+        // (An earlier version of this comment claimed each attempt RE-ARMED the condition and that the
+        // retry loop was holding itself out. The timings fitted; the capture disproved it. The back-off
+        // is unchanged — it was right for the wrong reason.)
         if (order is { TransientRejection: true })
         {
             _transientBackoff = _transientBackoff == TimeSpan.Zero
