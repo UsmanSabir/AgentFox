@@ -7,6 +7,14 @@
   export let label = 'Page sections';
 
   let activeId = items[0]?.id ?? '';
+  let syncVisibleSections = () => {};
+
+  // A composing edition can add contextual destinations (for example, a selected stock's plan)
+  // after mount. Re-evaluate against the current item list instead of freezing the first render.
+  $: {
+    void items;
+    syncVisibleSections();
+  }
 
   function activateVisibleSection(elements: HTMLElement[]) {
     const marker = Math.min(180, window.innerHeight * 0.28);
@@ -26,19 +34,20 @@
   }
 
   onMount(() => {
-    const elements = items
-      .map(item => document.getElementById(item.id))
-      .filter((element): element is HTMLElement => element != null);
-    if (!elements.length) return;
-
-    const sync = () => activateVisibleSection(elements);
-    sync();
-    window.addEventListener('scroll', sync, { passive: true });
-    window.addEventListener('resize', sync);
+    syncVisibleSections = () => {
+      const elements = items
+        .map(item => document.getElementById(item.id))
+        .filter((element): element is HTMLElement => element != null);
+      if (elements.length) activateVisibleSection(elements);
+    };
+    syncVisibleSections();
+    window.addEventListener('scroll', syncVisibleSections, { passive: true });
+    window.addEventListener('resize', syncVisibleSections);
 
     return () => {
-      window.removeEventListener('scroll', sync);
-      window.removeEventListener('resize', sync);
+      window.removeEventListener('scroll', syncVisibleSections);
+      window.removeEventListener('resize', syncVisibleSections);
+      syncVisibleSections = () => {};
     };
   });
 </script>
@@ -70,8 +79,9 @@
 <style>
   nav {
     position: sticky;
-    top: .75rem;
+    top: 50vh;
     z-index: 30;
+    flex: none;
     width: 3.45rem;
     max-height: calc(100vh - 1.5rem);
     padding: .42rem;
@@ -81,6 +91,7 @@
     background: color-mix(in srgb, var(--surface) 88%, transparent);
     box-shadow: 0 16px 38px rgba(0, 0, 0, .18), inset 0 1px 0 color-mix(in srgb, white 8%, transparent);
     backdrop-filter: blur(14px) saturate(130%);
+    transform: translateY(-50%);
     transition: width .24s cubic-bezier(.2, .8, .2, 1), border-color .2s ease, box-shadow .2s ease;
   }
   nav:hover, nav:focus-within {
@@ -88,7 +99,14 @@
     border-color: color-mix(in srgb, var(--primary) 38%, var(--border-md));
     box-shadow: 0 18px 44px rgba(0, 0, 0, .24), 0 0 28px color-mix(in srgb, var(--primary) 10%, transparent);
   }
-  .navigation-title, a { display:flex; align-items:center; min-width:10.75rem; }
+  .navigation-title, a {
+    display:flex;
+    flex-direction:row-reverse;
+    justify-content:flex-start;
+    align-items:center;
+    width:100%;
+    min-width:0;
+  }
   .navigation-title {
     height: 2.45rem;
     gap: .72rem;
@@ -97,12 +115,13 @@
   }
   .navigation-title span {
     opacity:0;
-    transform:translateX(-.35rem);
+    transform:translateX(.35rem);
     color: var(--text-3);
     font-size: .61rem;
     font-weight: 750;
     letter-spacing: .11em;
     text-transform: uppercase;
+    white-space:nowrap;
     transition:opacity .16s ease .03s, transform .2s cubic-bezier(.2, .8, .2, 1);
   }
   .navigation-items { display:flex; flex-direction:column; gap:.22rem; }
@@ -121,7 +140,7 @@
   a::before {
     content: '';
     position: absolute;
-    inset: 50% auto auto 0;
+    inset: 50% 0 auto auto;
     width: 2px;
     height: 0;
     border-radius: 999px;
@@ -134,13 +153,13 @@
   a:focus-visible { outline:2px solid var(--primary); outline-offset:-2px; }
   a.active {
     color:var(--primary);
-    background:linear-gradient(90deg, color-mix(in srgb, var(--primary) 15%, transparent), transparent);
+    background:linear-gradient(270deg, color-mix(in srgb, var(--primary) 15%, transparent), transparent);
   }
   a.active::before { height:1.35rem; }
   .icon { width:1.55rem; display:grid; place-items:center; flex:none; }
   .label {
     opacity: 0;
-    transform: translateX(-.35rem);
+    transform: translateX(.35rem);
     color: inherit;
     font-size: .72rem;
     font-weight: 650;
@@ -157,11 +176,15 @@
       max-width: 100%;
       padding: .3rem;
       border-radius: 12px;
+      transform: none;
     }
     .navigation-title { display:none; }
     .navigation-items { flex-direction:row; overflow-x:auto; scrollbar-width:none; }
     .navigation-items::-webkit-scrollbar { display:none; }
-    a { min-width:2.5rem; width:2.5rem; height:2.4rem; padding:0 .46rem; gap:0; flex:none; }
+    a {
+      min-width:2.5rem; width:2.5rem; height:2.4rem; padding:0 .46rem; gap:0; flex:none;
+      flex-direction:row; justify-content:flex-start;
+    }
     .label { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
     a::before { inset:auto auto 0 50%; width:0; height:2px; transform:translateX(-50%); transition:width .2s ease; }
     a.active::before { width:1.25rem; height:2px; }

@@ -8,7 +8,7 @@
   import {
     RefreshCw, ShieldAlert, Activity, FileText, ListChecks, Scale, History, Power,
     Database, Download, Play, XCircle, ChevronDown, ChevronRight, LayoutDashboard,
-    BellRing, ShoppingCart, AlertTriangle, BriefcaseBusiness, TrendingUp
+    BellRing, ShoppingCart, AlertTriangle, BriefcaseBusiness, TrendingUp, ChartCandlestick
   } from 'lucide-svelte';
   import WatchlistPanel from './WatchlistPanel.svelte';
   import ChartPane from './ChartPane.svelte';
@@ -38,7 +38,8 @@
   const defaultNavigationItems: SectionNavigationItem[] = [
     { id: 'trading-overview', label: 'Overview', icon: LayoutDashboard },
     { id: 'trading-portfolio', label: 'Portfolio', icon: BriefcaseBusiness },
-    { id: 'trading-market', label: 'Market workspace', icon: Activity },
+    { id: 'trading-market', label: 'Market workspace', icon: ChartCandlestick },
+    { id: 'trading-activity', label: 'Activity', icon: Activity },
     { id: 'trading-movers', label: 'Market movers', icon: TrendingUp },
     { id: 'trading-automation', label: 'Orders & signals', icon: BellRing },
     { id: 'trading-ledger', label: 'Decisions & ledger', icon: History }
@@ -57,7 +58,7 @@
   let newOrderOpen = false;
 
   /** Symbol the watchlist has selected; drives the chart pane. */
-  let selectedSymbol: string | null = null;
+  export let selectedSymbol: string | null = null;
   let selectedCompany: string | null = null;
   let watchlistCompact = false;
 
@@ -434,16 +435,20 @@
     <!-- Whatever is composing this dashboard may add a fuller view of the selected symbol here,
          directly under the chart it refers to. Nothing in a community build. -->
     {#if symbolExtension?.plan && selectedSymbol}
-      <svelte:component
-        this={symbolExtension.plan}
-        symbol={selectedSymbol}
-        companyName={selectedCompany}
-      />
+      <div id="trading-stock-plan" class="section-anchor">
+        <svelte:component
+          this={symbolExtension.plan}
+          symbol={selectedSymbol}
+          companyName={selectedCompany}
+        />
+      </div>
     {/if}
 
     <!-- Directly under the status grid: this answers "what is it doing", which is the question the
          metrics above raise and none of them answers. Collapsed, so it costs a row of chips. -->
-    <ActivityPanel />
+    <div id="trading-activity" class="section-anchor">
+      <ActivityPanel />
+    </div>
 
     <div class="section-heading compact section-anchor" id="trading-movers">
       <div><span class="eyebrow">Market</span><h2>Today&#39;s movers</h2></div>
@@ -661,9 +666,14 @@
 </div>
 
 <style>
-  .dashboard-shell { display:grid; grid-template-columns:4.2rem minmax(0,1fr); align-items:stretch; }
+  .dashboard-shell { display:grid; grid-template-columns:minmax(0,1fr) 4.2rem; align-items:stretch; }
   .dashboard-shell.without-navigation { display:block; }
-  .side-navigation-slot { min-width:0; padding:.75rem 0 .75rem .75rem; }
+  .side-navigation-slot {
+    grid-column:2; grid-row:1; min-width:0;
+    display:flex; align-items:flex-start; justify-content:flex-end;
+    padding:.75rem .75rem .75rem 0;
+  }
+  .page-wrap { grid-column:1; grid-row:1; }
   .section-anchor, #trading-overview { scroll-margin-top:1rem; }
   .page-header-row { display:flex; justify-content:space-between; align-items:flex-start; gap:1rem; margin-bottom:1.25rem; }
   .header-actions { display:flex; gap:.6rem; align-items:center; }
@@ -797,6 +807,7 @@
     .dashboard-shell { display:block; }
     .side-navigation-slot {
       position:sticky; top:0; z-index:40;
+      display:block;
       padding:.5rem .75rem 0;
       background:linear-gradient(var(--bg) 72%, transparent);
     }
