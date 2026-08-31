@@ -1,4 +1,4 @@
-using AgentFox.Plugins.Interfaces;
+﻿using AgentFox.Plugins.Interfaces;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -538,6 +538,59 @@ public sealed class ProtectiveStopWorker
         }
 
         var held = holdings is null ? null : TryHeld(holdings, stop.Symbol);
+
+        // ── The resting stop no longer matches what is actually held ─────────────────────────────
+        // A manual sell at the broker's own client, a partial exit executed outside this system —
+        // held has shrunk below what this stop already has resting. Corrected the same way a
+        // break-even or ATR raise is corrected: a same-price successor sized to what remains,
+        // pointed at this row via SupersedesStopId. The successor is picked up on a LATER pass by the
+        // ordinary supersede block below (via ITS OWN MaintainAsync call), which cancels this order
+        // before placing the smaller one — never by touching the resting order directly here. The
+        // `allStops` check stops a second successor being minted every pass while the first is still
+        // working its way through that sequencing.
+        // "This row supersedes something" is not the same as "that something is still open" — the field
+        // is set by every raise and never cleared, so only an OPEN predecessor means a supersede is
+        // genuinely in flight.
+        var supersedeInFlight = stop.SupersedesStopId is { Length: > 0 } pendingPredecessorId
+                             && allStops.Any(s => s.StopId == pendingPredecessorId);
+
+        if (held is { } heldForShrink
+            && ProtectiveStopDecisions.ShrinkTo(
+                   stop, heldForShrink, resting, supersedeInFlight, today) is { } ceiling
+            && !allStops.Any(s => s.SupersedesStopId == stop.StopId))
+        {
+            var successor = new ProtectiveStop
+            {
+                StopId            = Guid.NewGuid().ToString("N"),
+                Symbol            = stop.Symbol,
+                ParentArmedId     = stop.ParentArmedId,
+                StopTrigger       = stop.StopTrigger,
+                StopLimit         = stop.StopLimit,
+                DesiredQuantity   = ceiling,
+                Recurring         = stop.Recurring,
+                State             = "active",
+                SupersedesStopId  = stop.StopId,
+                BaselineQuantity  = stop.BaselineQuantity,
+                OperatorOriginated = stop.OperatorOriginated,
+                Note = $"Auto-shrunk from {stop.StopId}: holding is {heldForShrink:0.##}, less than "
+                     + $"the {stop.PlacedQuantity} share(s) already resting under it."
+            };
+            await repository.SaveProtectiveStopAsync(successor, ct);
+
+            _logger.LogWarning(
+                "[ProtectiveStops] {StopId} ({Symbol}): resting stop covers {Placed} but only {Held} "
+                + "is held — created {SuccessorId} to shrink coverage to {Ceiling}.",
+                stop.StopId, stop.Symbol, stop.PlacedQuantity, heldForShrink, successor.StopId, ceiling);
+            await AlertOnceAsync(stop, "shrink-needed", today,
+                $"🛡️ **Stop resized down — {stop.Symbol}**\n"
+                + $"• The resting stop was covering {stop.PlacedQuantity} share(s), but only "
+                + $"{heldForShrink:0.##} is now held\n"
+                + $"• A replacement for {ceiling} share(s) will take its place once the venue allows\n"
+                + "_The old order stays resting until the replacement is confirmed. What the venue does "
+                + "with an oversized stop when it triggers has never been observed here — it may fill "
+                + "what is held, or refuse the order outright._");
+            return;
+        }
 
         // ── A raise has to settle its predecessor before it can be placed at all ─────────────────
         // The broker sizes every SELL against custody MINUS quantity already committed to resting

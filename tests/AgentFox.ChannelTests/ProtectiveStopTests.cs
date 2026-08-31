@@ -1,4 +1,4 @@
-using TradingAgent.Watchlist;
+﻿using TradingAgent.Watchlist;
 
 namespace AgentFox.ChannelTests;
 
@@ -222,6 +222,157 @@ public sealed class ProtectiveStopTests
             stop, heldQuantity: 45m, Today, [Resting(price: 610m, orderNo: "a-9931")]);
 
         Assert.AreEqual(PlacementAction.Skip, decision.Action, decision.Reason);
+    }
+
+    // ── Shrinking a stop that now covers more than is held ──────────────────────
+    //
+    // DecidePlacement only ever ADDS coverage — its shortfall math going negative reads as "already
+    // placed" and stops, saying nothing about the resting order now being oversized. ShrinkTo is the
+    // other half: it returns what the coverage SHOULD be so the worker can correct it via a same-price
+    // successor, run through the same cancel-before-place sequencing a break-even or ATR raise uses.
+    //
+    // The hard part is not the arithmetic. It is telling an external sell apart from this stop's own
+    // partial fill, which look identical from custody alone.
+
+    /// <summary>An armed stop appears in NO broker read, so an empty book is the external-sell case.</summary>
+    private static readonly RestingOrder[] BookWithNothingOfOurs = [];
+
+    [TestMethod]
+    public void Shrink_ReportsTheNewCeilingWhenTheHoldingFellBelowWhatIsResting()
+    {
+        // 100 was placed today; a manual sell outside this system left only 40. The stop is still armed,
+        // so nothing of ours is in the outstanding book.
+        var stop = Active(desired: 100) with { LastPlacedSessionDate = Today, PlacedQuantity = 100 };
+
+        Assert.AreEqual(40, ProtectiveStopDecisions.ShrinkTo(
+            stop, 40m, BookWithNothingOfOurs, supersedeInFlight: false, Today));
+    }
+
+    [TestMethod]
+    public void Shrink_IsNotNeededWhenCoverageStillFitsTheHolding()
+    {
+        var stop = Active(desired: 100) with { LastPlacedSessionDate = Today, PlacedQuantity = 40 };
+
+        Assert.IsNull(ProtectiveStopDecisions.ShrinkTo(
+            stop, 100m, BookWithNothingOfOurs, supersedeInFlight: false, Today));
+    }
+
+    [TestMethod]
+    public void Shrink_NeverFiresWhileOurOwnStopIsRestingAtTheBroker()
+    {
+        // THE case this has to refuse. Hold 100 with a stop resting for 100; it triggers and 60 fill.
+        // Custody now reads 40 against a PlacedQuantity of 100 — arithmetically identical to someone
+        // having sold 60 elsewhere. But nothing is oversized: the venue already reduced the order. An
+        // armed stop is invisible to the outstanding book, so an order of OURS being listed is proof
+        // this stop has fired, and cancelling it would pull the remainder of a live stop-out.
+        var stop = Active(desired: 100) with
+        {
+            LastPlacedSessionDate = Today, PlacedQuantity = 100, LastOrderNo = "0411XK67"
+        };
+
+        Assert.IsNull(ProtectiveStopDecisions.ShrinkTo(
+            stop, 40m, [Sized(554m, 40, "0411XK67")], supersedeInFlight: false, Today));
+    }
+
+    [TestMethod]
+    public void Shrink_NeverFiresOnARestingOrderThatCannotBeAttributed()
+    {
+        // A row for this symbol with no readable price is ambiguous, not absent. Unknown is never zero.
+        var stop = Active(desired: 100) with { LastPlacedSessionDate = Today, PlacedQuantity = 100 };
+
+        Assert.IsNull(ProtectiveStopDecisions.ShrinkTo(
+            stop, 40m, [Resting(price: null, side: "SEL")], supersedeInFlight: false, Today));
+    }
+
+    [TestMethod]
+    public void Shrink_NeverFiresWhenTheOutstandingBookCouldNotBeRead()
+    {
+        var stop = Active(desired: 100) with { LastPlacedSessionDate = Today, PlacedQuantity = 100 };
+
+        Assert.IsNull(ProtectiveStopDecisions.ShrinkTo(
+            stop, 40m, resting: null, supersedeInFlight: false, Today));
+    }
+
+    [TestMethod]
+    public void Shrink_IsNotNeededWhenNothingWasPlacedToday()
+    {
+        // Yesterday's placement does not exist at the broker any more — the ordinary session-rollover
+        // path in DecidePlacement handles this, not a shrink.
+        var stop = Active(desired: 100) with { LastPlacedSessionDate = Yesterday, PlacedQuantity = 100 };
+
+        Assert.IsNull(ProtectiveStopDecisions.ShrinkTo(
+            stop, 40m, BookWithNothingOfOurs, supersedeInFlight: false, Today));
+    }
+
+    [TestMethod]
+    public void Shrink_NeverFiresOnAnUnreadableHolding()
+    {
+        // Unknown is never zero: an unreadable holding must never be read as "shrink to nothing," or
+        // one bad broker read cancels real protection on a guess.
+        var stop = Active(desired: 100) with { LastPlacedSessionDate = Today, PlacedQuantity = 100 };
+
+        Assert.IsNull(ProtectiveStopDecisions.ShrinkTo(
+            stop, null, BookWithNothingOfOurs, supersedeInFlight: false, Today));
+    }
+
+    [TestMethod]
+    public void Shrink_IsNotTheJobWhenThePositionIsGone()
+    {
+        // held <= 0 is DecidePlacement's Close — there is nothing left to resize down to.
+        var stop = Active(desired: 100) with { LastPlacedSessionDate = Today, PlacedQuantity = 100 };
+
+        Assert.IsNull(ProtectiveStopDecisions.ShrinkTo(
+            stop, 0m, BookWithNothingOfOurs, supersedeInFlight: false, Today));
+    }
+
+    [TestMethod]
+    public void Shrink_WaitsWhileASupersedeIsStillInFlight()
+    {
+        // A raise is part-way through its cancel-before-place sequencing; minting a shrink on top would
+        // chain successors instead of letting the one in progress finish.
+        var stop = Active(desired: 40) with { LastPlacedSessionDate = Today, PlacedQuantity = 40 };
+
+        Assert.IsNull(ProtectiveStopDecisions.ShrinkTo(
+            stop, 10m, BookWithNothingOfOurs, supersedeInFlight: true, Today));
+    }
+
+    [TestMethod]
+    public void Shrink_StillWorksOnAStopThatWasItselfARaise()
+    {
+        // The distinction the parameter exists for. SupersedesStopId is set by EVERY raise and never
+        // cleared, so a stop that has been lifted to break-even carries it forever. Testing the FIELD
+        // instead of whether the predecessor is still open would permanently exempt every managed
+        // position — which is very nearly all of them — and this path would fire almost nowhere.
+        var raised = Active(desired: 40) with
+        {
+            LastPlacedSessionDate = Today, PlacedQuantity = 40, SupersedesStopId = "retired-predecessor"
+        };
+
+        Assert.AreEqual(10, ProtectiveStopDecisions.ShrinkTo(
+            raised, 10m, BookWithNothingOfOurs, supersedeInFlight: false, Today));
+    }
+
+    [TestMethod]
+    public void Shrink_OnlyAppliesToAnActiveStop()
+    {
+        var stop = Active(desired: 100) with
+        {
+            State = "pending_fill", LastPlacedSessionDate = Today, PlacedQuantity = 100
+        };
+
+        Assert.IsNull(ProtectiveStopDecisions.ShrinkTo(
+            stop, 40m, BookWithNothingOfOurs, supersedeInFlight: false, Today));
+    }
+
+    [TestMethod]
+    public void Shrink_CeilingNeverExceedsWhatTheStopWasAskedToCover()
+    {
+        // Desired 25 with 90 held: the stop was only ever meant to protect 25, so a shrink cannot use
+        // the holding as its ceiling and quietly widen coverage.
+        var stop = Active(desired: 25) with { LastPlacedSessionDate = Today, PlacedQuantity = 40 };
+
+        Assert.AreEqual(25, ProtectiveStopDecisions.ShrinkTo(
+            stop, 90m, BookWithNothingOfOurs, supersedeInFlight: false, Today));
     }
 
     // ── The local backstop ───────────────────────────────────────────────────
