@@ -38,13 +38,34 @@ public sealed record ExecutionClaim(
 /// a new automated caller is denied a manual-only symbol by omission rather than admitted by it.
 /// </para>
 /// </param>
+/// <param name="OperatorOriginated">
+/// True when a HUMAN wrote this order's instruction, even though nobody is watching it execute: an
+/// armed order they armed by hand, the protective stop they attached to it, the persistent day-order
+/// lifecycle re-placing what they asked to keep working.
+///
+/// <para>
+/// It answers the same question as <see cref="Attended"/> — operator or machine — at a different
+/// moment. Attendance asks who is present at submission; origination asks who wrote the instruction.
+/// A manual-only symbol cares about the second: "I manage this name myself" refuses a strategy or a
+/// plan, and must not also refuse the operator's own standing instructions, which is the whole reason
+/// they armed them in advance. Defaults to FALSE, so origination is claimed and never inferred.
+/// </para>
+/// </param>
 public sealed record ExecutionAuthorization(
     string Method,
     string Actor,
     DateTime AuthorizedUtc,
     ApprovalIntent? Intent = null,
-    bool Attended = false)
+    bool Attended = false,
+    bool OperatorOriginated = false)
 {
+    /// <summary>
+    /// Whether this authorization may act on a manual-only symbol: someone was watching, or someone
+    /// wrote the instruction being carried out. One place, so the boundary and the early gate cannot
+    /// come to different answers.
+    /// </summary>
+    public bool MayTradeManualOnly => Attended || OperatorOriginated;
+
     /// <summary>
     /// A human confirmation carried by the host tool-approval gate (or the dashboard, which IS the
     /// approval event for a <c>TradingTrader</c> request). This is the only authorization
@@ -70,4 +91,15 @@ public sealed record ExecutionAuthorization(
     /// </summary>
     public static ExecutionAuthorization PreAuthorized(string actor, ApprovalIntent? intent = null) =>
         new("host-tool-gate", actor, DateTime.UtcNow, intent, Attended: false);
+
+    /// <summary>
+    /// A standing instruction a person wrote earlier, executing now with nobody watching — an armed
+    /// order firing, a protective stop being re-placed, a persistent day order carried into the next
+    /// session. Unattended, and deliberately NOT a <c>host-tool-gate</c> method, so
+    /// <c>ApprovalRequired</c> mode still refuses it exactly as before; the only rule this changes is
+    /// the manual-only one.
+    /// </summary>
+    public static ExecutionAuthorization StandingInstruction(string actor) =>
+        new("standing-instruction", actor, DateTime.UtcNow, null,
+            Attended: false, OperatorOriginated: true);
 }

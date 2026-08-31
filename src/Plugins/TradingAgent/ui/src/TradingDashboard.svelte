@@ -46,6 +46,26 @@
   ];
   export let showSideNavigation = true;
   export let navigationItems: SectionNavigationItem[] = defaultNavigationItems;
+  export let archiveAvailable = false;
+
+  const archiveNavigationItem: SectionNavigationItem = {
+    id: 'trading-candle-archive', label: 'Candle archive', icon: Database
+  };
+
+  function navigationWithArchive(items: SectionNavigationItem[], available: boolean) {
+    const withoutArchive = items.filter(item => item.id !== archiveNavigationItem.id);
+    if (!available) return withoutArchive;
+
+    const ledgerIndex = withoutArchive.findIndex(item => item.id === 'trading-ledger');
+    if (ledgerIndex < 0) return [...withoutArchive, archiveNavigationItem];
+    return [
+      ...withoutArchive.slice(0, ledgerIndex),
+      archiveNavigationItem,
+      ...withoutArchive.slice(ledgerIndex)
+    ];
+  }
+
+  $: resolvedNavigationItems = navigationWithArchive(navigationItems, archiveAvailable);
 
   /**
    * Non-null while the arming dialog is open. Both entry points — a chart level and an alert — raise the
@@ -134,6 +154,10 @@
   let archivePoll: ReturnType<typeof setInterval> | null = null;
   /** Advances only when the archive poll returns fresh progress; the chart uses it to grow in place. */
   let archiveTick = 0;
+
+  // Keep the navigation contract as narrow as possible: composers only need to know whether the
+  // conditional panel exists, not receive or understand the community-owned archive payload.
+  $: archiveAvailable = archive != null;
 
   // Keep the decision surfaces open and tuck away dense operational detail. Every collapsed header
   // still carries its important state, so closing a panel never hides a warning or waiting work.
@@ -335,7 +359,7 @@
 <div class="dashboard-shell" class:without-navigation={!showSideNavigation}>
   {#if showSideNavigation}
     <aside class="side-navigation-slot">
-      <SideNavigation items={navigationItems} label="Trading Manager sections" />
+      <SideNavigation items={resolvedNavigationItems} label="Trading Manager sections" />
     </aside>
   {/if}
 
@@ -477,7 +501,11 @@
     </div>
 
     {#if archive}
-      <section class="disclosure-card archive-card" class:open={archiveOpen}>
+      <section
+        class="disclosure-card archive-card section-anchor"
+        class:open={archiveOpen}
+        id="trading-candle-archive"
+      >
         <div class="archive-head">
           <button
             class="disclosure-toggle archive-toggle"

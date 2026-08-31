@@ -22,8 +22,9 @@ namespace TradingAgent.Manager;
 /// <para>
 /// It can never widen risk: the kill switch, selected execution universe, market calendar, reconciliation
 /// health, and the value caps all live in the risk engine and the manager, and none of them consult
-/// this class. This decides confirmation only — and, in one direction only, refuses: a manual-only
-/// symbol is denied here as early as possible, but the binding refusal is <see cref="TradingManager"/>'s.
+/// this class. This decides confirmation only — and, in one direction only, refuses: a strategy's
+/// order for a manual-only symbol is denied here as early as possible, but the binding refusal is
+/// <see cref="TradingManager"/>'s.
 /// </para>
 /// </summary>
 public sealed class ApprovalGate
@@ -180,6 +181,26 @@ public sealed class ApprovalGate
         string? sourceMessage,
         ApprovalContext context)
     {
+        var decision = Evaluate(groups, sourceMessage, context);
+        if (!context.OperatorOriginated || !decision.MayProceed) return decision;
+
+        // The caller is carrying out an instruction a person wrote. Say so on the authorization, so
+        // the execution boundary can tell it apart from a strategy acting on its own — it is the only
+        // gate that needs the difference, and it is downstream of every rule above. BoundedAuto
+        // returns NotRequired with no authorization at all, so one is minted here purely to carry the
+        // flag; it grants nothing on its own, and its method is not one ApprovalRequired accepts.
+        var authorization = decision.Authorization is { } existing
+            ? existing with { OperatorOriginated = true }
+            : ExecutionAuthorization.StandingInstruction(context.Source ?? "operator");
+
+        return ApprovalDecision.Authorized(authorization, decision.Reason);
+    }
+
+    private ApprovalDecision Evaluate(
+        IReadOnlyList<IReadOnlyList<TradingSignal>> groups,
+        string? sourceMessage,
+        ApprovalContext context)
+    {
         var policy = _policy.Current();
         var approval = _options.Value.Approval;
 
@@ -195,15 +216,22 @@ public sealed class ApprovalGate
         // BoundedAuto exit below — which returns "no approval needed" and would otherwise wave through
         // the one mode where an unattended order is most likely. See TradingAgentOptions.ManualOnlySymbols.
         //
+        // It refuses AUTOMATION, not the operator. Manual-only means "I manage this name myself", and
+        // an order the operator armed by hand IS them managing it — refusing that made the flag mean
+        // "you may not use armed orders on this symbol", which is a hurdle nobody asked for. An
+        // operator-originated caller therefore passes here and at the execution boundary; a strategy
+        // acting on its own still does not.
+        //
         // Best-effort by necessity: this method is synchronous and the watchlist half of the deny set
         // lives in the database. A symbol switched to manual-only seconds ago can still be missed here
         // and is then refused at the execution boundary instead, which is the authoritative check.
-        if (_universe?.FirstManualOnlySnapshot(
+        if (!context.OperatorOriginated
+            && _universe?.FirstManualOnlySnapshot(
                 groups.SelectMany(g => g).Select(o => o.Symbol)) is { } manualSymbol)
         {
             return ApprovalDecision.Denied(
-                $"{manualSymbol} is set to manual-only: unattended execution is not available for it, "
-                + "so this order waits for you to place it by hand.");
+                $"{manualSymbol} is set to manual-only: no strategy or plan may originate an order "
+                + "for it, so this one waits for you to place it by hand.");
         }
 
         // BoundedAuto is itself the operator saying "act within the configured bounds". TradingManager
@@ -370,7 +398,17 @@ public sealed class ApprovalGate
 }
 
 /// <summary>What is known about why an order is being placed, for the auto-approval caps.</summary>
-public sealed record ApprovalContext(string? AlertSeverity = null, string? Source = null);
+/// <param name="OperatorOriginated">
+/// True when the order being weighed carries out an instruction a person wrote — an armed order they
+/// armed, its attached protective stop, the persistent lifecycle re-placing what they asked to keep
+/// working. It lifts the manual-only refusal and nothing else: every other rule here (kill switch,
+/// approval mode, auto-approval caps) applies unchanged. Defaults to FALSE so a caller that has not
+/// claimed origination is weighed as automation.
+/// </param>
+public sealed record ApprovalContext(
+    string? AlertSeverity = null,
+    string? Source = null,
+    bool OperatorOriginated = false);
 
 /// <summary>
 /// Whether an order may be submitted unattended, and why.

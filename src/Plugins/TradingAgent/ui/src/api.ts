@@ -403,8 +403,9 @@ export interface WatchlistEntry {
   notes?: string | null;
   tradable: boolean;
   /**
-   * The stored per-symbol toggle. False = manual-only: no automation may originate an order for the
-   * symbol, entry or exit, while you still can. Distinct from `alertsEnabled`, which only mutes.
+   * The stored per-symbol toggle. False = manual-only: no strategy or plan may originate an order for
+   * the symbol, entry or exit, while you still can — orders you place or arm yourself are unaffected.
+   * Distinct from `alertsEnabled`, which only mutes.
    */
   autoTradeEnabled: boolean;
   /** Effective answer, after `ManualOnlySymbols` from configuration is folded in. */
@@ -884,7 +885,7 @@ export interface WatchlistResponse {
   maxSymbols: number;
   /**
    * Symbols pinned manual-only in configuration. Includes any that are not on the watchlist at all —
-   * they still block automation, so they have to be visible somewhere.
+   * they still block a strategy, so they have to be visible somewhere.
    */
   configuredManualOnly: string[];
 }

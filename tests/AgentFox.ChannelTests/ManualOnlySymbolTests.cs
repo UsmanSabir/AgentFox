@@ -15,7 +15,7 @@ using TradingAgent.Watchlist;
 namespace AgentFox.ChannelTests;
 
 /// <summary>
-/// Covers the manual-only deny set: symbols the operator trades BY HAND, which no automation may
+/// Covers the manual-only deny set: symbols the operator trades BY HAND, which no strategy or plan may
 /// originate an order for.
 ///
 /// <para>
@@ -24,7 +24,16 @@ namespace AgentFox.ChannelTests;
 /// gives the same answer to everyone, so it cannot express "only I may trade this" — removing a symbol
 /// from it bans the operator too. Manual-only therefore lives at the automation boundary, and these
 /// tests pin both halves of that: the symbol stays fully tradable and fully monitored, while an
-/// unattended caller is refused.
+/// automated caller is refused.
+/// </para>
+///
+/// <para>
+/// "Automated" means ORIGINATION, not attendance, and the two tests at the bottom are the pair that
+/// pins it. An armed order, a protective stop and a persistent day order all execute with nobody
+/// watching, yet a person wrote every one of them; refusing those made the flag mean "you may not use
+/// armed orders on this symbol", which is not what it is for. So an authorization that is either
+/// attended or operator-originated passes, and one that is neither — a strategy acting on its own —
+/// still does not.
 /// </para>
 /// </summary>
 [TestClass]
@@ -121,6 +130,30 @@ public sealed class ManualOnlySymbolTests
     }
 
     [TestMethod]
+    public async Task ApprovalGate_AllowsAnOperatorsOwnStandingInstruction_AndSaysSoOnTheAuthorization()
+    {
+        using var env = Env.Create(allowed: ["OGDC"], manualOnly: ["OGDC"], mode: "BoundedAuto");
+        await env.Universe.ForMonitoringAsync();   // warms the synchronous snapshot
+
+        var decision = env.CreateApprovalGate().Decide(
+            Groups("OGDC"), "armed-order:test",
+            new ApprovalContext(null, "armed-order", OperatorOriginated: true));
+
+        Assert.IsTrue(decision.MayProceed, decision.Reason);
+
+        // BoundedAuto answers NotRequired with no authorization at all, so the gate has to mint one
+        // purely to carry the fact onward — without it the execution boundary sees "nobody said yes"
+        // and refuses the very order the operator armed.
+        Assert.IsNotNull(decision.Authorization);
+        Assert.IsTrue(decision.Authorization.OperatorOriginated);
+        Assert.IsFalse(decision.Authorization.Attended,
+            "Nobody is watching an armed order fire. Origination is not attendance.");
+        Assert.AreNotEqual("host-tool-gate", decision.Authorization.Method,
+            "It must not become an authorization ApprovalRequired mode would accept; the only rule "
+            + "origination lifts is the manual-only one.");
+    }
+
+    [TestMethod]
     public async Task TradingManager_RefusesUnattendedOrder_ForConfiguredManualOnlySymbol()
     {
         using var env = Env.Create(allowed: ["OGDC"], manualOnly: ["OGDC"]);
@@ -151,6 +184,20 @@ public sealed class ManualOnlySymbolTests
             Groups("OGDC"), "dashboard-order:test",
             ExecutionAuthorization.Attendant("operator"));
         Assert.IsTrue(byHand.Executed, byHand.Reason);
+    }
+
+    [TestMethod]
+    public async Task TradingManager_AllowsAStandingOperatorInstruction_ForAManualOnlySymbol()
+    {
+        using var env = Env.Create(allowed: ["OGDC"], manualOnly: ["OGDC"]);
+
+        // The armed order / protective stop / persistent day-order case: unattended, but the operator
+        // wrote it. Manual-only is about who ORIGINATES an order, and this one is theirs.
+        var fired = await env.CreateManager().ExecuteGroupsAsync(
+            Groups("OGDC"), "armed:test",
+            ExecutionAuthorization.StandingInstruction("armed-order"));
+
+        Assert.IsTrue(fired.Executed, fired.Reason);
     }
 
     [TestMethod]

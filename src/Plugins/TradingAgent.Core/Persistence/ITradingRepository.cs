@@ -382,9 +382,10 @@ public interface ITradingRepository
 
     /// <summary>Updates the per-symbol fields the user controls. False when the symbol is unknown.</summary>
     /// <param name="autoTradeEnabled">
-    /// False makes the symbol manual-only: automation may no longer originate an order for it, while
-    /// the operator still can. Editable at runtime because it only ever NARROWS what automation may
-    /// do. It is independent of which universe supplies base execution eligibility.
+    /// False makes the symbol manual-only: no strategy or plan may originate an order for it, while
+    /// the operator still can — including the orders they arm in advance, which keep firing. Editable
+    /// at runtime because it only ever NARROWS what automation may do. It is independent of which
+    /// universe supplies base execution eligibility.
     /// </param>
     Task<bool> UpdateWatchlistSymbolAsync(
         string symbol,
@@ -612,8 +613,9 @@ public interface ITradingRepository
 /// False MUTES the symbol: it is still analyzed and its state still advances, nothing is raised.
 /// </param>
 /// <param name="AutoTradeEnabled">
-/// False makes the symbol MANUAL-ONLY: no automation may originate an order for it, entry or exit,
-/// while the operator still can. Orthogonal to <paramref name="AlertsEnabled"/> — a manual-only symbol
+/// False makes the symbol MANUAL-ONLY: no strategy or plan may originate an order for it, entry or
+/// exit, while the operator still can — an armed order or protective stop they set up themselves keeps
+/// firing. Orthogonal to <paramref name="AlertsEnabled"/> — a manual-only symbol
 /// normally wants its alerts louder, not quieter, since you are the one acting on them.
 /// Defaults to true, so an existing database keeps behaving exactly as it did.
 /// </param>

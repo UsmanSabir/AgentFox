@@ -42,6 +42,19 @@ public sealed record PersistentOrderIntent
     public DateTime UpdatedUtc { get; init; } = DateTime.UtcNow;
     public DateTime? TerminalUtc { get; init; }
 
+    /// <summary>
+    /// A person created this standing instruction — a dashboard order kept working, or an armed order
+    /// they armed themselves handing over at fire time — rather than a strategy creating it.
+    ///
+    /// <para>
+    /// Only a manual-only symbol reads it: that flag stops a strategy or plan originating an order,
+    /// and leaves the operator's own instructions working. Defaults to FALSE, so an intent that has
+    /// not claimed origination is treated as automation. See
+    /// <see cref="TradingAgent.Watchlist.ArmedOrder.OperatorOriginated"/>.
+    /// </para>
+    /// </summary>
+    public bool OperatorOriginated { get; init; }
+
     public int RemainingQuantity => Math.Max(0, Quantity - FilledQuantity);
     public bool IsTerminal => State is "fulfilled" or "expired" or "cancelled";
 

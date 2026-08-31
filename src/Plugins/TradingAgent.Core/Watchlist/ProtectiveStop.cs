@@ -118,6 +118,20 @@ public sealed record ProtectiveStop
     public string? StateReason { get; init; }
 
     public string? Note { get; init; }
+
+    /// <summary>
+    /// A person set this stop up by hand — attached to an entry they armed themselves, say — rather
+    /// than a strategy attaching it as part of a plan.
+    ///
+    /// <para>
+    /// Carried for one reason: a manual-only symbol. That flag stops strategies and plans originating
+    /// orders, not the operator's own standing instructions, and a stop the operator placed is one of
+    /// those. Defaults to FALSE so a stop written by anything that has not claimed origination — a
+    /// strategy, a row from before this column existed — stays refused on a manual-only symbol.
+    /// See <see cref="ArmedOrder.OperatorOriginated"/>.
+    /// </para>
+    /// </summary>
+    public bool OperatorOriginated { get; init; }
 }
 
 /// <summary>One row read from the broker's outstanding (resting) order book.</summary>

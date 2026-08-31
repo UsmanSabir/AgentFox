@@ -199,7 +199,11 @@ public sealed partial class TradingCoreEndpoints
                     Price = entryPrice,
                     LimitPrice = stopLimit,
                     ExpiresUtc = expires,
-                    Note = $"New Order: {intent.Label}"
+                    Note = $"New Order: {intent.Label}",
+                    // Submitted from the dashboard by a person: the re-placements this intent makes on
+                    // later sessions are still their instruction, so they keep working on a
+                    // manual-only symbol. See PersistentOrderIntent.OperatorOriginated.
+                    OperatorOriginated = true
                 };
                 signal = persistent.ToSignal(effectiveQuantity);
                 groups = [[signal]];
