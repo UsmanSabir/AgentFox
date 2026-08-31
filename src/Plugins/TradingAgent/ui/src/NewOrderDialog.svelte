@@ -71,14 +71,6 @@
     }
   });
 
-  function closeOnBackdrop(event: MouseEvent) {
-    if (event.target === event.currentTarget && !busy) dispatch('close');
-  }
-
-  function closeOnEscape(event: KeyboardEvent) {
-    if (event.key === 'Escape' && !busy) dispatch('close');
-  }
-
   async function refreshQuote() {
     if (!symbol.trim() || quoteBusy) return;
     quoteBusy = true;
@@ -316,9 +308,11 @@
   }
 </script>
 
-<div class="backdrop" on:click={closeOnBackdrop} role="presentation">
+<!-- Order intent must not disappear because of a stray backdrop click or Escape press. The visible
+     Close, Cancel and Done controls are the only dismissal paths. -->
+<div class="backdrop" role="presentation">
   <div class="dialog" bind:this={dialogElement} role="dialog" aria-modal="true" aria-label="New order"
-       tabindex="-1" on:keydown={closeOnEscape}>
+       tabindex="-1">
     <header>
       <div class="title"><ShoppingCart size={17} /><div><b>New Order</b><span>Choose what you want to happen</span></div></div>
       <button class="icon" on:click={() => dispatch('close')} aria-label="Close" disabled={busy}><X size={15} /></button>

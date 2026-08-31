@@ -847,6 +847,11 @@ export interface TradingActivityFeed {
     marketOpen: boolean;
     marketReason: string;
     feedHealthy: boolean;
+    /** Provider-neutral fields added by newer hosts; optional keeps an older deployed API usable. */
+    feedDegraded?: boolean;
+    feedProvider?: string;
+    feedState?: string;
+    feedReason?: string;
     monitorLastPassUtc: string | null;
   };
   activities: TradingActivity[];

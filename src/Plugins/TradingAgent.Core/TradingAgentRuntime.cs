@@ -260,6 +260,11 @@ public sealed class TradingAgentRuntime
         // Singleton AND hosted service, so the arm endpoint can kick an immediate baseline capture on
         // the same instance the timer drives.
         services.AddSingleton<ProtectiveStopWorker>();
+        // The worker is also how a reducing SELL gets shares a protective stop is holding — see
+        // IProtectiveStopReleaser. Registered against the interface so WatchlistMonitorWorker can take
+        // it as an optional dependency without depending on the worker itself.
+        services.AddSingleton<IProtectiveStopReleaser>(
+            sp => sp.GetRequiredService<ProtectiveStopWorker>());
         services.AddSingleton<IMarketSessionOpenParticipant>(
             sp => sp.GetRequiredService<ProtectiveStopWorker>());
         services.AddHostedService(sp => sp.GetRequiredService<ProtectiveStopWorker>());

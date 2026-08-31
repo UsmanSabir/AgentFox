@@ -8,7 +8,7 @@
   import {
     RefreshCw, ShieldAlert, Activity, FileText, ListChecks, Scale, History, Power,
     Database, Download, Play, XCircle, ChevronDown, ChevronRight, LayoutDashboard,
-    BellRing, ShoppingCart, AlertTriangle
+    BellRing, ShoppingCart, AlertTriangle, BriefcaseBusiness, TrendingUp, ChartCandlestick
   } from 'lucide-svelte';
   import WatchlistPanel from './WatchlistPanel.svelte';
   import ChartPane from './ChartPane.svelte';
@@ -20,6 +20,8 @@
   import NewOrderDialog from './NewOrderDialog.svelte';
   import PortfolioPanel from './PortfolioPanel.svelte';
   import PersistentOrdersPanel from './PersistentOrdersPanel.svelte';
+  import SideNavigation from './SideNavigation.svelte';
+  import type { SectionNavigationItem } from './sectionNavigation';
   import type { SymbolExtension } from './symbolExtensions';
 
   /**
@@ -28,6 +30,22 @@
    * `symbolExtensions.ts` for the contract and the reasoning behind it.
    */
   export let symbolExtension: SymbolExtension | null = null;
+
+  /**
+   * The community page owns the default destinations. A composing edition may hide this rail and
+   * render the same neutral SideNavigation around a larger page that also has edition-owned panels.
+   */
+  const defaultNavigationItems: SectionNavigationItem[] = [
+    { id: 'trading-overview', label: 'Overview', icon: LayoutDashboard },
+    { id: 'trading-portfolio', label: 'Portfolio', icon: BriefcaseBusiness },
+    { id: 'trading-market', label: 'Market workspace', icon: ChartCandlestick },
+    { id: 'trading-activity', label: 'Activity', icon: Activity },
+    { id: 'trading-movers', label: 'Market movers', icon: TrendingUp },
+    { id: 'trading-automation', label: 'Orders & signals', icon: BellRing },
+    { id: 'trading-ledger', label: 'Decisions & ledger', icon: History }
+  ];
+  export let showSideNavigation = true;
+  export let navigationItems: SectionNavigationItem[] = defaultNavigationItems;
 
   /**
    * Non-null while the arming dialog is open. Both entry points — a chart level and an alert — raise the
@@ -40,7 +58,7 @@
   let newOrderOpen = false;
 
   /** Symbol the watchlist has selected; drives the chart pane. */
-  let selectedSymbol: string | null = null;
+  export let selectedSymbol: string | null = null;
   let selectedCompany: string | null = null;
   let watchlistCompact = false;
 
@@ -314,8 +332,15 @@
   />
 {/if}
 
+<div class="dashboard-shell" class:without-navigation={!showSideNavigation}>
+  {#if showSideNavigation}
+    <aside class="side-navigation-slot">
+      <SideNavigation items={navigationItems} label="Trading Manager sections" />
+    </aside>
+  {/if}
+
 <div class="page-wrap fade-in">
-  <div class="page-header-row">
+  <div class="page-header-row" id="trading-overview">
     <div><h1 class="page-title">Trading Manager</h1><p class="page-sub">Monitor PSX signals, prepare conditional orders, and review execution history</p></div>
     <div class="header-actions">
       <button class="btn btn-primary new-order-btn" on:click={() => newOrderOpen = true}>
@@ -374,9 +399,11 @@
       {/if}
     </section>
 
-    <PortfolioPanel holdingStatus={symbolExtension?.holdingStatus ?? null} />
+    <div id="trading-portfolio" class="section-anchor">
+      <PortfolioPanel holdingStatus={symbolExtension?.holdingStatus ?? null} />
+    </div>
 
-    <div class="section-heading">
+    <div class="section-heading section-anchor" id="trading-market">
       <div><span class="eyebrow">Workspace</span><h2>Market overview</h2></div>
       <p>Choose a symbol, inspect its levels, and arm a plan from the chart.</p>
     </div>
@@ -408,18 +435,22 @@
     <!-- Whatever is composing this dashboard may add a fuller view of the selected symbol here,
          directly under the chart it refers to. Nothing in a community build. -->
     {#if symbolExtension?.plan && selectedSymbol}
-      <svelte:component
-        this={symbolExtension.plan}
-        symbol={selectedSymbol}
-        companyName={selectedCompany}
-      />
+      <div id="trading-stock-plan" class="section-anchor">
+        <svelte:component
+          this={symbolExtension.plan}
+          symbol={selectedSymbol}
+          companyName={selectedCompany}
+        />
+      </div>
     {/if}
 
     <!-- Directly under the status grid: this answers "what is it doing", which is the question the
          metrics above raise and none of them answers. Collapsed, so it costs a row of chips. -->
-    <ActivityPanel />
+    <div id="trading-activity" class="section-anchor">
+      <ActivityPanel />
+    </div>
 
-    <div class="section-heading compact">
+    <div class="section-heading compact section-anchor" id="trading-movers">
       <div><span class="eyebrow">Market</span><h2>Today&#39;s movers</h2></div>
       <p>Whole-market screens from the AHL analytics snapshot. Click a row to chart it.</p>
     </div>
@@ -429,7 +460,7 @@
          watchlist and chart already share, so the screen feeds the chart without extra wiring. -->
     <MoversPanel bind:selected={selectedSymbol} />
 
-    <div class="section-heading compact">
+    <div class="section-heading compact section-anchor" id="trading-automation">
       <div><span class="eyebrow">Automation</span><h2>Orders &amp; signals</h2></div>
       <p>Review waiting triggers and new market alerts.</p>
     </div>
@@ -534,7 +565,7 @@
       </section>
     {/if}
 
-    <section class="disclosure-card ledger-card" class:open={ledgerOpen}>
+    <section class="disclosure-card ledger-card section-anchor" class:open={ledgerOpen} id="trading-ledger">
       <button
         class="disclosure-toggle"
         on:click={() => ledgerOpen = !ledgerOpen}
@@ -632,8 +663,18 @@
     </section>
   {/if}
 </div>
+</div>
 
 <style>
+  .dashboard-shell { display:grid; grid-template-columns:minmax(0,1fr) 4.2rem; align-items:stretch; }
+  .dashboard-shell.without-navigation { display:block; }
+  .side-navigation-slot {
+    grid-column:2; grid-row:1; min-width:0;
+    display:flex; align-items:flex-start; justify-content:flex-end;
+    padding:.75rem .75rem .75rem 0;
+  }
+  .page-wrap { grid-column:1; grid-row:1; }
+  .section-anchor, #trading-overview { scroll-margin-top:1rem; }
   .page-header-row { display:flex; justify-content:space-between; align-items:flex-start; gap:1rem; margin-bottom:1.25rem; }
   .header-actions { display:flex; gap:.6rem; align-items:center; }
   .new-order-btn { display:flex; align-items:center; gap:.4rem; white-space:nowrap; font-weight:700; }
@@ -760,6 +801,17 @@
     .archive-stats { grid-template-columns:repeat(auto-fit,minmax(125px,1fr)); }
     .tabs { flex-wrap:nowrap; overflow-x:auto; }
     .tabs button { flex:0 0 auto; padding-inline:.6rem; }
+  }
+
+  @media (max-width: 980px) {
+    .dashboard-shell { display:block; }
+    .side-navigation-slot {
+      position:sticky; top:0; z-index:40;
+      display:block;
+      padding:.5rem .75rem 0;
+      background:linear-gradient(var(--bg) 72%, transparent);
+    }
+    .section-anchor, #trading-overview { scroll-margin-top:4.75rem; }
   }
 
   @media (max-width: 420px) {

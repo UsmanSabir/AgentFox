@@ -591,6 +591,15 @@ public interface ITradingRepository
         int baselineQuantity,
         CancellationToken ct = default);
 
+    /// <summary>
+    /// Forgets this session's native placement for a stop whose order has just been cancelled, so the
+    /// recurring pass re-places it instead of believing it is still covered. Deliberately separate from
+    /// closing the stop: the INTENT survives, only the evidence of a live order goes.
+    /// </summary>
+    Task<bool> ClearProtectiveStopPlacementAsync(
+        string stopId,
+        CancellationToken ct = default);
+
     /// <summary>Links (or unlinks) the locally-armed SELL that covers the gaps the native stop cannot.</summary>
     Task<bool> SetProtectiveStopBackstopAsync(
         string stopId,

@@ -72,3 +72,57 @@ public interface IStopReplacementObserver
     Task ReplacementResolvedAsync(
         StopReplacementPlan plan, bool cancelled, string detail, CancellationToken ct = default);
 }
+
+/// <summary>What must happen before a SELL can use shares a protective stop is holding.</summary>
+public enum StopReleaseAction
+{
+    /// <summary>Enough shares are already free. Nothing to do.</summary>
+    NotNeeded,
+
+    /// <summary>One of this system's protective stops is holding them and can be stood down.</summary>
+    ReleaseStop,
+
+    /// <summary>
+    /// The shares are held by something this system cannot safely stand down — an order it did not
+    /// place, or a book it could not read. Doing nothing is the only safe answer.
+    /// </summary>
+    CannotRelease
+}
+
+public sealed record StopReleaseDecision(
+    StopReleaseAction Action,
+    string? StopId,
+    string? OrderNo,
+    string Reason);
+
+/// <summary>Whether shares were actually freed, and what it cost.</summary>
+public sealed record StopReleaseResult(bool Released, string Reason);
+
+/// <summary>
+/// Stands a protective stop down so a SELL that only REDUCES the position can get through.
+///
+/// <para>
+/// <b>Why this exists.</b> This broker sizes a SELL against custody minus resting SELLs, so a
+/// protective stop covering the whole position blocks a target scale-out — an order that takes profit
+/// and makes the position smaller. Without a way to release, the target's trigger is proved right and
+/// nothing happens.
+/// </para>
+///
+/// <para>
+/// <b>Implemented by the protective-stop worker, called by whoever fires armed orders.</b> A seam
+/// rather than a direct reference because the two run on different clocks and neither owns the other:
+/// the monitor knows a sell needs shares, the stop worker knows which stop is holding them and how to
+/// put it back.
+/// </para>
+/// </summary>
+public interface IProtectiveStopReleaser
+{
+    /// <summary>
+    /// Frees up to <paramref name="quantityNeeded"/> shares of <paramref name="symbol"/> by cancelling
+    /// a protective stop's native order, VERIFIED against the outstanding book. The stop's intent is
+    /// left active and re-placed on a later pass against whatever remains, so this shrinks coverage
+    /// temporarily rather than removing protection.
+    /// </summary>
+    Task<StopReleaseResult> ReleaseForSellAsync(
+        string symbol, int quantityNeeded, CancellationToken ct = default);
+}

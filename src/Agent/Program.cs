@@ -514,6 +514,14 @@ class Program
             builder.Services.AddSingleton(typeof(IChannelProvider), providerType);
         }
 
+        // The generic host defaults to a 30s shutdown timeout: it awaits every hosted service's
+        // StopAsync (in reverse start order) before /exit actually returns, and a background worker
+        // mid-await on non-cancelable I/O (a broker call, a browser session) blocks all of them behind
+        // it for up to that long. 5s matches the precedent already set for MCP servers
+        // (ShutdownTimeoutSeconds in appsettings.json) — long enough for a clean stop, short enough
+        // that a stuck worker can no longer make /exit feel hung.
+        builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(5));
+
         // ── Build and configure the web application ───────────────────────────
         var app = builder.Build();
 

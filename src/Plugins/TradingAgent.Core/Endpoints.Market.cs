@@ -93,8 +93,15 @@ public sealed partial class TradingCoreEndpoints
 
         // Live broker-feed health. Every failure mode of the feed is silent — a lost subscription, a
         // dead session and a quiet market all look like "no quotes" — so this is the surface that
-        // tells them apart without reading Debug logs.
-        trading.MapGet("/feed/status", (AhkFeedWorker feed) => Results.Ok(feed.GetStatus()));
+        // tells them apart without reading Debug logs. Premium contributes its AHL status through the
+        // provider seam; community retains the established AHK payload unchanged.
+        trading.MapGet("/feed/status", (
+            AhkFeedWorker ahkFeed,
+            IEnumerable<ILiveFeedStatusProvider> feedProviders) =>
+        {
+            var status = ResolveLiveFeedStatus(ahkFeed, feedProviders);
+            return Results.Ok(status.Details);
+        });
 
         // Depth for the currently followed symbol. GET never changes the subscription. The explicit
         // POST below delegates to the same get_market_depth tool used by chat, which keeps one
@@ -244,7 +251,8 @@ public sealed partial class TradingCoreEndpoints
         trading.MapGet("/activity", (
             TradingActivityLog activity,
             AhkBroker broker,
-            AhkFeedWorker feed,
+            AhkFeedWorker ahkFeed,
+            IEnumerable<ILiveFeedStatusProvider> feedProviders,
             WatchlistMonitorWorker monitor,
             IMarketCalendar calendar,
             long? afterSeq,
@@ -252,6 +260,7 @@ public sealed partial class TradingCoreEndpoints
         {
             var (warnings, errors) = activity.IssueCounts();
             var market = calendar.GetStatus();
+            var feed = ResolveLiveFeedStatus(ahkFeed, feedProviders).Health;
 
             return Results.Ok(new
             {
@@ -266,12 +275,54 @@ public sealed partial class TradingCoreEndpoints
                     browserBusy  = broker.BrowserHoldsTradingScreen,
                     marketOpen   = market.IsOpen,
                     marketReason = market.Reason,
-                    feedHealthy  = feed.GetStatus().Healthy,
+                    feedHealthy  = feed.Healthy,
+                    feedDegraded = feed.Degraded,
+                    feedProvider = feed.Provider,
+                    feedState    = feed.State,
+                    feedReason   = feed.Reason,
                     monitorLastPassUtc = monitor.Status.LastPassUtc
                 },
                 activities = activity.Snapshot(afterSeq ?? 0, limit ?? TradingActivityLog.Capacity)
             });
         });
 
+    }
+
+    /// <summary>
+    /// Prefer an enabled edition feed, but retain AHK as the community/default status source. A
+    /// deliberately disabled feed is not degraded: the quote pipeline is designed to fall through
+    /// to its next source in that case.
+    /// </summary>
+    private static LiveFeedStatusSnapshot ResolveLiveFeedStatus(
+        AhkFeedWorker ahkFeed,
+        IEnumerable<ILiveFeedStatusProvider> feedProviders)
+    {
+        var extensions = feedProviders
+            .Select(provider => (provider.Priority, Status: provider.GetStatus()))
+            .OrderByDescending(item => item.Priority)
+            .ToList();
+
+        var enabledExtension = extensions.FirstOrDefault(item => item.Status.Health.Enabled).Status;
+        if (enabledExtension is not null)
+            return enabledExtension;
+
+        var ahk = ahkFeed.GetStatus();
+        if (ahk.Enabled || extensions.Count == 0)
+        {
+            var health = new LiveFeedHealth(
+                "ahk",
+                ahk.Enabled,
+                ahk.Healthy,
+                ahk.Enabled && !ahk.Healthy,
+                !ahk.Enabled ? "disabled" : ahk.Healthy ? "healthy" : "degraded",
+                !ahk.Enabled
+                    ? "The AHK broker feed is disabled; PSX market watch supplies quotes."
+                    : ahk.Healthy
+                        ? "The AHK broker feed is operating normally."
+                        : "The AHK broker feed is unhealthy; PSX market watch is filling quote gaps.");
+            return new LiveFeedStatusSnapshot(health, ahk);
+        }
+
+        return extensions[0].Status;
     }
 }

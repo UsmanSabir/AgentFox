@@ -58,6 +58,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly ILogger<WatchlistMonitorWorker> _logger;
     private readonly TradingActivityLog? _activity;
+    private readonly IProtectiveStopReleaser? _stopReleaser;
 
     private readonly object _statusLock = new();
     private readonly SemaphoreSlim _runGate = new(1, 1);
@@ -78,9 +79,11 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
         TradingAgent.Broker.IBrokerOutstandingOrdersReader outstandingReader,
         IOptions<TradingAgentOptions> options,
         ILogger<WatchlistMonitorWorker> logger,
-        TradingActivityLog? activity = null)
+        TradingActivityLog? activity = null,
+        IProtectiveStopReleaser? stopReleaser = null)
     {
         _activity = activity;
+        _stopReleaser = stopReleaser;
         _universe = universe;
         _history = history;
         _dataClient = dataClient;
@@ -461,11 +464,51 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                                 ct: ct);
                             continue;
                         }
+                        if (availability.AvailableQuantity <= 0 && _stopReleaser is not null)
+                        {
+                            // A reducing SELL blocked by our OWN protective stop is the one case worth
+                            // acting on rather than waiting out: the trigger has been proved right, and
+                            // the only thing in the way is protection this system placed and can put
+                            // back. Everything else — an unreadable book, someone else's order — comes
+                            // back "not released" and falls through to staying armed.
+                            var release = await _stopReleaser.ReleaseForSellAsync(
+                                order.Symbol, order.Quantity, ct);
+                            _logger.LogInformation(
+                                "[ArmedOrders] {ArmedId} ({Symbol}) asked for shares held by a "
+                                + "protective stop: released={Released} — {Why}",
+                                order.ArmedId, order.Symbol, release.Released, release.Reason);
+
+                            if (release.Released)
+                            {
+                                // The local snapshot still shows the stop's order resting, so
+                                // re-checking against it here would read 0 again. Fall through with the
+                                // full quantity instead and let TradingManager decide: it re-reads the
+                                // broker book for exactly this reason, and it is the single execution
+                                // boundary every other caller is already sized by.
+                                availability = new SellAvailabilityDecision(
+                                    true, order.Quantity,
+                                    "A protective stop was stood down to free these shares; the final "
+                                    + "size is set at the execution boundary against a fresh book.");
+                                _activity?.Warn("Armed",
+                                    $"{order.Symbol}: a protective stop stood down so this sell could "
+                                    + "go through", release.Reason);
+                            }
+                        }
+
                         if (availability.AvailableQuantity <= 0)
                         {
+                            // Back to "armed", NOT "failed". Zero free quantity is a transient fact
+                            // about the order book, not a verdict on this order: at this broker a SELL
+                            // is sized against custody minus resting SELLs, so a protective stop
+                            // covering the whole position leaves nothing free — and that clears the
+                            // moment the stop is superseded, or at the close, when the venue clears the
+                            // book. Marking it failed destroys a live thesis at the exact moment it was
+                            // proved right, which is why the unknown branch above already returns here.
                             await _repository.TrySetArmedOrderStateAsync(
-                                order.ArmedId, "firing", "failed",
-                                $"Trigger met, but no uncommitted {order.Symbol} shares were available to sell.",
+                                order.ArmedId, "firing", "armed",
+                                $"Trigger met, but every {order.Symbol} share is committed to a resting "
+                                + $"SELL — {availability.Reason} Still armed; it retries while the "
+                                + "trigger holds.",
                                 ct: ct);
                             continue;
                         }

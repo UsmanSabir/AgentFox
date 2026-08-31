@@ -450,6 +450,166 @@ public sealed class ProtectiveStopTests
         Assert.AreEqual(SupersedeAction.Proceed, decision.Action, decision.Reason);
     }
 
+    // ── Releasing shares so a REDUCING sell can get through ──────────────────
+    //
+    // A target scale-out takes profit on part of a position, so it makes the position smaller — and it
+    // is still refused when a protective stop covers the whole holding, because the broker sizes a
+    // SELL against custody minus resting SELLs. The stop has to give up its shares first.
+
+    private static ProtectiveStop Holder(string orderNo, int quantity = 100) => Stop(baseline: 0) with
+    {
+        StopId = "holder", State = "active", DesiredQuantity = quantity,
+        StopTrigger = 120m, StopLimit = 118.8m, LastOrderNo = orderNo
+    };
+
+    [TestMethod]
+    public void Release_StandsDownOurOwnStopWhenItIsBlockingAReduction()
+    {
+        var decision = ProtectiveStopDecisions.DecideRelease(
+            "FFC", quantityNeeded: 40, heldQuantity: 100m,
+            resting: [Sized(120m, 100, "STOP-1")], stops: [Holder("STOP-1")]);
+
+        Assert.AreEqual(StopReleaseAction.ReleaseStop, decision.Action, decision.Reason);
+        Assert.AreEqual("holder", decision.StopId);
+        Assert.AreEqual("STOP-1", decision.OrderNo);
+    }
+
+    [TestMethod]
+    public void Release_DoesNothingWhenEnoughSharesAreAlreadyFree()
+    {
+        var decision = ProtectiveStopDecisions.DecideRelease(
+            "FFC", quantityNeeded: 40, heldQuantity: 150m,
+            resting: [Sized(120m, 100, "STOP-1")], stops: [Holder("STOP-1")]);
+
+        Assert.AreEqual(StopReleaseAction.NotNeeded, decision.Action, decision.Reason);
+    }
+
+    [TestMethod]
+    public void Release_RefusesToTouchAnOrderThisSystemDidNotPlace()
+    {
+        // The shares are committed to something with no protective stop behind it — a manual order, or
+        // one from another tool. Cancelling it to make room would be trading away protection nobody
+        // asked about.
+        var decision = ProtectiveStopDecisions.DecideRelease(
+            "FFC", quantityNeeded: 40, heldQuantity: 100m,
+            resting: [Sized(120m, 100, "SOMEONE-ELSE")], stops: [Holder("STOP-1")]);
+
+        Assert.AreEqual(StopReleaseAction.CannotRelease, decision.Action, decision.Reason);
+        StringAssert.Contains(decision.Reason, "not placed here");
+    }
+
+    [TestMethod]
+    public void Release_MatchesTheStopByOrderNumberOnly_NeverByPrice()
+    {
+        // A stop whose recorded order number is absent from the book is NOT the row sitting at a
+        // similar price. Matching on price here would cancel an unrelated order.
+        var decision = ProtectiveStopDecisions.DecideRelease(
+            "FFC", quantityNeeded: 40, heldQuantity: 100m,
+            resting: [Sized(120m, 100, "UNKNOWN-ROW")], stops: [Holder("STALE-NO")]);
+
+        Assert.AreEqual(StopReleaseAction.CannotRelease, decision.Action, decision.Reason);
+    }
+
+    [TestMethod]
+    public void Release_AnUnreadableBookReleasesNothing()
+    {
+        var decision = ProtectiveStopDecisions.DecideRelease(
+            "FFC", quantityNeeded: 40, heldQuantity: 100m,
+            resting: null, stops: [Holder("STOP-1")]);
+
+        Assert.AreEqual(StopReleaseAction.CannotRelease, decision.Action, decision.Reason);
+    }
+
+    [TestMethod]
+    public void Release_AnUnreadableRestingQuantityReleasesNothing()
+    {
+        var decision = ProtectiveStopDecisions.DecideRelease(
+            "FFC", quantityNeeded: 40, heldQuantity: 100m,
+            resting: [Resting(120m, "SEL", "STOP-1")], stops: [Holder("STOP-1")]);
+
+        Assert.AreEqual(StopReleaseAction.CannotRelease, decision.Action, decision.Reason);
+    }
+
+    [TestMethod]
+    public void Release_PicksTheStopThatFreesTheMostShares()
+    {
+        var decision = ProtectiveStopDecisions.DecideRelease(
+            "FFC", quantityNeeded: 40, heldQuantity: 100m,
+            resting: [Sized(120m, 30, "SMALL"), Sized(121m, 70, "BIG")],
+            stops:
+            [
+                Holder("SMALL") with { StopId = "small" },
+                Holder("BIG") with { StopId = "big" }
+            ]);
+
+        Assert.AreEqual(StopReleaseAction.ReleaseStop, decision.Action, decision.Reason);
+        Assert.AreEqual("big", decision.StopId, "one cancellation should free as much as possible");
+    }
+
+    [TestMethod]
+    public void Release_IgnoresRestingBuys()
+    {
+        // A resting BUY commits cash, not shares, and must not count against what can be sold.
+        var decision = ProtectiveStopDecisions.DecideRelease(
+            "FFC", quantityNeeded: 40, heldQuantity: 100m,
+            resting: [new RestingOrder("FFC", "BUY", "NOR", 100, 119m, "BUY-1", "row")],
+            stops: [Holder("STOP-1")]);
+
+        Assert.AreEqual(StopReleaseAction.NotNeeded, decision.Action, decision.Reason);
+    }
+
+    // ── Order numbers are NOT unique across symbols ──────────────────────────
+    //
+    // CONFIRMED live 2026-08-28. This broker numbers orders {connection}11XK{seq}, and the sequence
+    // restarts on every new connection — so the same string names different orders on different
+    // symbols. A real capture had `0411XK1` as both a MARI BUY (10:38) and a PAEL protective stop
+    // (11:28) on one account, one day. Anything matching a stop to a resting order by number alone
+    // will eventually match somebody else's live order — and the supersede path CANCELS what it
+    // matches.
+
+    [TestMethod]
+    public void Supersede_DoesNotMatchAnotherSymbolsOrderWithTheSameNumber()
+    {
+        // The book holds no FFC order at all — only an unrelated symbol reusing the number. The
+        // predecessor's order is therefore genuinely gone and the row should be retired, NOT treated
+        // as still resting (which would then try to cancel the other symbol's order).
+        var foreign = new RestingOrder("MARI", "BUY", "NOR", 38, 662m, "0411XK1", "row");
+
+        var decision = ProtectiveStopDecisions.DecideSupersede(
+            Successor(), Predecessor("0411XK1"), heldQuantity: 100m,
+            resting: [foreign], replacementWindowAllowed: true);
+
+        Assert.AreEqual(SupersedeAction.RetirePredecessorFirst, decision.Action, decision.Reason);
+    }
+
+    [TestMethod]
+    public void Release_DoesNotMatchAnotherSymbolsOrderWithTheSameNumber()
+    {
+        // Same collision, on the release path: FFC has no resting SELL, so the shares are free and
+        // nothing needs standing down.
+        var foreign = new RestingOrder("MARI", "BUY", "NOR", 38, 662m, "STOP-1", "row");
+
+        var decision = ProtectiveStopDecisions.DecideRelease(
+            "FFC", quantityNeeded: 40, heldQuantity: 100m,
+            resting: [foreign], stops: [Holder("STOP-1")]);
+
+        Assert.AreEqual(StopReleaseAction.NotNeeded, decision.Action, decision.Reason);
+    }
+
+    [TestMethod]
+    public void Supersede_StillMatchesTheRightOrderWhenAnotherSymbolSharesTheNumber()
+    {
+        // The discriminating case: BOTH exist. The stop's own symbol must win.
+        var foreign = new RestingOrder("MARI", "BUY", "NOR", 38, 662m, "SHARED", "row");
+        var mine = Sized(120m, 100, "SHARED");
+
+        var decision = ProtectiveStopDecisions.DecideSupersede(
+            Successor(), Predecessor("SHARED"), heldQuantity: 100m,
+            resting: [foreign, mine], replacementWindowAllowed: true);
+
+        Assert.AreEqual(SupersedeAction.CancelPredecessorThenPlace, decision.Action, decision.Reason);
+    }
+
     // ── The quiet failure: a small raise matched to the order it is replacing ──
 
     [TestMethod]

@@ -52,6 +52,11 @@ public sealed class StopReplacementTests
             {
                 Calls.Add($"retire:{stop.StopId}");
                 return Task.FromResult(RetireApplies);
+            },
+            AnnounceAsync: (planned, result, _) =>
+            {
+                Calls.Add(planned ? "announce:planned" : $"announce:resolved:{result!.Outcome}");
+                return Task.CompletedTask;
             });
     }
 
@@ -86,9 +91,93 @@ public sealed class StopReplacementTests
 
         Assert.AreEqual(StopReplacementOutcome.PlaceReplacement, result.Outcome, result.Reason);
         CollectionAssert.AreEqual(
-            new[] { "cover:new:100", "reload:new", "cancel:OLD-120", "retire:old" },
+            new[]
+            {
+                "announce:planned", "cover:new:100", "reload:new", "cancel:OLD-120", "retire:old",
+                "announce:resolved:PlaceReplacement"
+            },
             ports.Calls,
-            "cover before cancel, cancel before retire — the whole point of the sequence");
+            "announce before anything is touched, cover before cancel, cancel before retire, "
+            + "resolution last — the whole point of the sequence");
+    }
+
+    // ── The announcement contract ────────────────────────────────────────────
+    //
+    // This is the half that used to live in the worker's wiring, where no test could reach it and
+    // only a live broker run could prove it. The guarantee is about ORDER and PAIRING, so it belongs
+    // with the sequence that opens the gap.
+
+    [TestMethod]
+    public async Task TheGapIsAnnouncedBeforeANYPortThatCouldCancel()
+    {
+        var ports = new Ports();
+
+        await RunAsync(ports);
+
+        Assert.AreEqual("announce:planned", ports.Calls[0],
+            "nothing may be armed, cancelled or retired before the operator has been told");
+    }
+
+    [TestMethod]
+    public async Task EveryHeldOutcomeStillGetsItsResolution()
+    {
+        // The branch that matters most: nothing was cancelled, so the reader must be told the raise
+        // did not happen rather than being left holding the alarming half of the story.
+        foreach (var ports in new[]
+        {
+            new Ports { CoverWriteSucceeds = false },
+            new Ports { CancelThrows = new InvalidOperationException("socket died") },
+            new Ports { Cancellation = new(false, true, false, "accepted, still outstanding") }
+        })
+        {
+            var result = await RunAsync(ports);
+
+            Assert.AreEqual(StopReplacementOutcome.HoldOldOrderIntact, result.Outcome);
+            Assert.AreEqual("announce:planned", ports.Calls.First());
+            Assert.AreEqual("announce:resolved:HoldOldOrderIntact", ports.Calls.Last(),
+                "a plan announced must always be resolved, whatever went wrong");
+        }
+    }
+
+    [TestMethod]
+    public async Task AnUnreadableHoldingIsStillAnnouncedAndResolved()
+    {
+        var ports = new Ports();
+
+        await RunAsync(ports, held: null);
+
+        CollectionAssert.AreEqual(
+            new[] { "announce:planned", "announce:resolved:HoldOldOrderIntact" }, ports.Calls,
+            "nothing was touched, but the pairing still holds");
+    }
+
+    [TestMethod]
+    public async Task NothingIsAnnouncedWhenThereIsNoGapToOpen()
+    {
+        // No broker order behind the predecessor means no cancellation and no uncovered moment —
+        // announcing one would be reporting an event that never happens.
+        var ports = new Ports();
+
+        await StopReplacement.OpenWindowAsync(
+            Successor, Predecessor with { LastOrderNo = null }, 100m, "test",
+            ports.Build(Successor), CancellationToken.None);
+
+        Assert.AreEqual(0, ports.Calls.Count);
+    }
+
+    [TestMethod]
+    public async Task TheSequenceWorksWithNoObserverAtAll()
+    {
+        // The community edition registers none. An absent announcer must not change the outcome.
+        var ports = new Ports();
+        var silent = ports.Build(Successor) with { AnnounceAsync = null };
+
+        var result = await StopReplacement.OpenWindowAsync(
+            Successor, Predecessor, 100m, "test", silent, CancellationToken.None);
+
+        Assert.AreEqual(StopReplacementOutcome.PlaceReplacement, result.Outcome, result.Reason);
+        CollectionAssert.AreEqual(
+            new[] { "cover:new:100", "reload:new", "cancel:OLD-120", "retire:old" }, ports.Calls);
     }
 
     [TestMethod]
@@ -99,7 +188,7 @@ public sealed class StopReplacementTests
 
         await RunAsync(ports, held: 40m);
 
-        Assert.AreEqual("cover:new:40", ports.Calls[0]);
+        Assert.AreEqual("cover:new:40", ports.Calls[1], "after the announcement");
     }
 
     [TestMethod]
@@ -111,7 +200,13 @@ public sealed class StopReplacementTests
         var result = await RunAsync(ports, covered);
 
         Assert.AreEqual(StopReplacementOutcome.PlaceReplacement, result.Outcome, result.Reason);
-        CollectionAssert.AreEqual(new[] { "cancel:OLD-120", "retire:old" }, ports.Calls);
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                "announce:planned", "cancel:OLD-120", "retire:old",
+                "announce:resolved:PlaceReplacement"
+            },
+            ports.Calls);
     }
 
     // ── Failures. Each one must leave the old order resting ──────────────────
@@ -140,7 +235,9 @@ public sealed class StopReplacementTests
         var result = await RunAsync(ports, held: null);
 
         Assert.AreEqual(StopReplacementOutcome.HoldOldOrderIntact, result.Outcome);
-        Assert.AreEqual(0, ports.Calls.Count, "not even the cover write should be attempted");
+        CollectionAssert.AreEqual(
+            new[] { "announce:planned", "announce:resolved:HoldOldOrderIntact" }, ports.Calls,
+            "the gap is announced and resolved, but not even the cover write should be attempted");
     }
 
     [TestMethod]
@@ -151,7 +248,8 @@ public sealed class StopReplacementTests
         var result = await RunAsync(ports, held: 0m);
 
         Assert.AreEqual(StopReplacementOutcome.HoldOldOrderIntact, result.Outcome);
-        Assert.AreEqual(0, ports.Calls.Count);
+        CollectionAssert.AreEqual(
+            new[] { "announce:planned", "announce:resolved:HoldOldOrderIntact" }, ports.Calls);
     }
 
     [TestMethod]
