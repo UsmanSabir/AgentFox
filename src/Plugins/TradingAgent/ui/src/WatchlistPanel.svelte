@@ -345,16 +345,19 @@
   /**
    * Hands the symbol to you, or back to the machine. Confirmed on the way IN because it silently
    * stops protective stops being raised and take-profits being armed for the position — hand-managing
-   * the exit is the point, but it is not something to discover later. The server's reply carries the
-   * one case the toggle cannot satisfy: a symbol pinned manual-only in appsettings.
+   * the exit is the point, but it is not something to discover later. It does NOT switch off the
+   * orders you place or arm yourself; those keep working, which is what makes hand-managing possible.
+   * The server's reply carries the one case the toggle cannot satisfy: a symbol pinned manual-only in
+   * appsettings.
    */
   async function toggleAutoTrade(entry: WatchlistEntry) {
     if (busy || entry.manualOnlyLocked) return;
     if (entry.autoTradeEnabled && !confirm(
       `Set ${entry.symbol} to manual-only?\n\n` +
-      `No automation will place an order for it again — no armed triggers, no strategy entries, and ` +
-      `no protective stops or take-profits on the way out. You place every order for it yourself.\n\n` +
-      `It stays charted, scanned and alerted on.`
+      `No strategy will trade it again — no automatic entries, and no protective stops or ` +
+      `take-profits on the way out. The decisions become yours.\n\n` +
+      `Your own orders still work, including ones you arm to fire on a level. It stays charted, ` +
+      `scanned and alerted on.`
     )) return;
 
     busy = true;
@@ -375,8 +378,8 @@
     const total = data.entries.length;
     const action = enabled ? 'allow automation for' : 'set to manual-only';
     const consequence = enabled
-      ? `Automation may place entry and exit orders for them again, subject to every global policy and risk control.`
-      : `No automation will place entries, protective stops, or take-profits for them. You place every order yourself.`;
+      ? `A strategy may place entry and exit orders for them again, subject to every global policy and risk control.`
+      : `No strategy will place entries, protective stops, or take-profits for them. The decisions become yours; your own orders, armed ones included, still work.`;
     if (!confirm(
       `${enabled ? 'Allow automation for all watched symbols' : 'Set all watched symbols to manual-only'}?\n\n` +
       `This will ${action} ${total} watched symbol(s). ${consequence}\n\n` +
@@ -416,7 +419,7 @@
         : `Any mute settings and notes will be discarded.`) +
       // Called out separately: the others are cosmetic, this one hands symbols back to automation.
       (manual > 0
-        ? `\n\n${manual} symbol(s) are currently manual-only. Resetting clears that, and automation ` +
+        ? `\n\n${manual} symbol(s) are currently manual-only. Resetting clears that, and a strategy ` +
           `will be free to trade them again — unless they are also listed in ManualOnlySymbols.`
         : ``)
     )) return;
@@ -751,8 +754,8 @@
                 <span
                   class="tag manual"
                   title={entry.manualOnlyLocked
-                    ? 'Pinned manual-only in appsettings (ManualOnlySymbols) — you place every order for it; no automation will, in either direction.'
-                    : 'Manual-only — you place every order for it. No armed triggers, no strategy entries, no automatic stops or take-profits.'}
+                    ? 'Pinned manual-only in appsettings (ManualOnlySymbols) — no strategy will trade it, in either direction. Your own orders, armed ones included, still work.'
+                    : 'Manual-only — no strategy entries, no automatic stops or take-profits. Your own orders, armed ones included, still work.'}
                 >
                   {#if entry.manualOnlyLocked}<Lock size={11} />{:else}<Hand size={11} />{/if} manual
                 </span>
@@ -829,8 +832,8 @@
                 title={entry.manualOnlyLocked
                   ? 'Pinned manual-only in appsettings — remove it from ManualOnlySymbols and restart to change this'
                   : entry.autoTradeEnabled
-                    ? 'Hand this symbol to yourself: no automation will trade it, entry or exit'
-                    : 'Let automation trade this symbol again'}
+                    ? 'Hand this symbol to yourself: no strategy will trade it, entry or exit. Your own orders still work.'
+                    : 'Let a strategy trade this symbol again'}
                 data-tooltip={entry.manualOnlyLocked
                   ? 'Manual-only locked'
                   : entry.autoTradeEnabled ? 'Set manual-only' : 'Allow automation'}

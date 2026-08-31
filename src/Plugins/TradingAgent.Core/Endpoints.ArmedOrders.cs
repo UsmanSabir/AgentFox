@@ -274,18 +274,11 @@ public sealed partial class TradingCoreEndpoints
                             + "by the risk engine. Arming one would be protection in name only."
                 });
 
-            // Identical reasoning, different reason: an armed order exists precisely to fire while
-            // nobody is watching, and that is what a manual-only symbol has switched off. Arming one
-            // would leave a trigger that gets refused at the boundary the moment it mattered.
-            if (await universe.IsManualOnlyAsync(symbol, ct))
-                return Results.BadRequest(new
-                {
-                    error = "manual_only",
-                    message = $"'{symbol}' is set to manual-only, so nothing may fire for it unattended — "
-                            + "an armed order would be refused at the moment it triggered. Place the order "
-                            + "yourself when the level comes, or switch automation back on for the symbol "
-                            + "on the watchlist."
-                });
+            // A manual-only symbol is deliberately NOT refused here. Manual means "I manage this
+            // name myself, no strategy or plan does" — and arming an order by hand is the operator
+            // managing it. The order below claims OperatorOriginated, which carries that fact to the
+            // execution boundary so it fires like any other. What manual-only still refuses is a
+            // strategy originating an order on its own; see TradingManager.
 
             // Same reasoning as the tradability check above, applied to the stop's own geometry: an
             // armed stop whose limit sits on the wrong side of its trigger is refused by the risk
@@ -335,6 +328,9 @@ public sealed partial class TradingCoreEndpoints
                 Price            = body.Price,
                 LimitPrice       = body.LimitPrice,
                 PersistentUntilFilled = body.PersistentUntilFilled,
+                // Someone is standing at the dashboard arming this. That is what lets it fire on a
+                // manual-only symbol — see ArmedOrder.OperatorOriginated.
+                OperatorOriginated = true,
                 // Default an expiry: an entry trigger left open indefinitely can fire months later
                 // against a thesis nobody remembers forming.
                 ExpiresUtc       = body.ExpiresUtc
@@ -397,7 +393,9 @@ public sealed partial class TradingCoreEndpoints
                     State         = "pending_fill",
                     Note          = attach.Quantity is { } wanted
                                         ? $"Requested cover: {wanted} share(s)."
-                                        : null
+                                        : null,
+                    // Attached by hand to an entry armed by hand; it inherits the entry's origination.
+                    OperatorOriginated = true
                 };
             }
 

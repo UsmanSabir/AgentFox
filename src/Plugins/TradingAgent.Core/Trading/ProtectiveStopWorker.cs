@@ -837,7 +837,8 @@ public sealed class ProtectiveStopWorker
         var groups = new[] { (IReadOnlyList<TradingSignal>)[signal] };
         var key    = $"protective-stop:{stop.StopId}:{today:yyyyMMdd}:{decision.Quantity}";
 
-        var approval = _approvals.Decide(groups, key, new ApprovalContext(null, "protective-stop"));
+        var approval = _approvals.Decide(
+            groups, key, new ApprovalContext(null, "protective-stop", stop.OperatorOriginated));
         if (!approval.MayProceed)
         {
             _logger.LogWarning(
@@ -1188,7 +1189,11 @@ public sealed class ProtectiveStopWorker
             ExpiresUtc    = null,   // it lives as long as the intent does
             Note          = $"Local backstop for protective stop {stop.StopId}. Stands down while a "
                           + "native stop is resting at the broker.",
-            ProtectiveStopId = stop.StopId
+            ProtectiveStopId = stop.StopId,
+            // A backstop is the stop it covers, expressed locally. It inherits the stop's origination
+            // so a hand-placed stop keeps working on a manual-only symbol in the gap where the native
+            // order is not resting, and a strategy's stop still does not.
+            OperatorOriginated = stop.OperatorOriginated
         };
 
         await repository.SaveArmedOrderAsync(backstop, ct);

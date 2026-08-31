@@ -47,8 +47,9 @@ public sealed class TradingManager
     /// not register <see cref="IUserNotifier"/> (and in tests); alerts are simply skipped then.
     /// </param>
     /// <param name="universe">
-    /// Supplies the manual-only deny set. Defaulted for the same reason as the others; a manager built
-    /// without it enforces every other gate and simply has no hand-managed symbols.
+    /// Supplies the manual-only deny set — the symbols no strategy or plan may originate an order for.
+    /// Defaulted for the same reason as the others; a manager built without it enforces every other gate
+    /// and simply has no hand-managed symbols.
     /// </param>
     public TradingManager(
         IBrokerAdapter broker,
@@ -197,30 +198,39 @@ public sealed class TradingManager
         //
         // Placed at the single execution boundary on purpose. ApprovalGate refuses earlier and with a
         // better message, but only paths that ASK it are covered — and a strategy, retry worker, or a
-        // future caller that submits without asking would otherwise sail past. Attendance is the test:
-        // an authorization is required, and it must be one a human gave for THIS order. Absent
-        // authorization (every unattended worker) and pre-authorized policy both fail it, which is the
-        // direction a new caller should fail in.
+        // future caller that submits without asking would otherwise sail past.
+        //
+        // The test is WHO, in either of the two ways a person can be behind an order: attended (a human
+        // said yes to this one, now) or operator-originated (a human wrote the instruction being carried
+        // out — an armed order they armed, its attached stop, the persistent lifecycle re-placing what
+        // they asked to keep working). Manual-only means "I manage this name myself"; a standing
+        // instruction the operator wrote IS them managing it, and refusing it turned the flag into a ban
+        // on using armed orders for the symbol. What stays refused is what the flag is actually for: a
+        // strategy or plan originating an order on its own. Both fields default to FALSE, so a caller
+        // that claims neither is still denied by omission — the direction a new caller should fail in.
         if (_universe is not null)
         {
             var symbols = groups.SelectMany(g => g).Select(o => o.Symbol);
             if (await _universe.FirstManualOnlyAsync(symbols, ct) is { } manualSymbol)
             {
-                if (authorization is not { Attended: true })
+                if (authorization is not { MayTradeManualOnly: true })
                 {
                     _logger.LogWarning(
-                        "[TradingManager] Refused an unattended order for {Symbol}: the symbol is "
+                        "[TradingManager] Refused an automated order for {Symbol}: the symbol is "
                         + "manual-only. Authorization was {Method}.",
                         manualSymbol, authorization?.Method ?? "none");
                     return Reject(policy.Version,
-                        $"{manualSymbol} is manual-only: automation may not place orders for it, "
-                        + "entries or exits. Place this one yourself, or turn automation back on for "
-                        + "the symbol on the watchlist (or remove it from ManualOnlySymbols).");
+                        $"{manualSymbol} is manual-only: no strategy or plan may originate an order "
+                        + "for it, entries or exits. Place this one yourself, or turn automation back "
+                        + "on for the symbol on the watchlist (or remove it from ManualOnlySymbols).");
                 }
 
-                // Attended and allowed — but recorded, because "who traded a hand-managed name" is
-                // exactly the question this flag makes worth asking later.
-                _activity?.Info("Orders", $"Manual-only {manualSymbol} traded by hand",
+                // Allowed — but recorded, because "what traded a hand-managed name, and on whose
+                // instruction" is exactly the question this flag makes worth asking later.
+                _activity?.Info("Orders",
+                    authorization.Attended
+                        ? $"Manual-only {manualSymbol} traded by hand"
+                        : $"Manual-only {manualSymbol} traded on a standing instruction",
                     $"Authorized by {authorization.Actor} via {authorization.Method}.");
             }
         }

@@ -158,11 +158,21 @@ public class TradingAgentOptions
     ///
     /// <para>
     /// A manual-only symbol is still charted, scanned, alerted on, and archived exactly as before —
-    /// muting it is what <c>alerts_enabled</c> is for. What it loses is unattended EXECUTION: armed
-    /// order triggers, protective-stop raises, take-profit retries, monitor-fired orders and strategy
-    /// passes are all refused for it, entries and exits alike. That means nothing raises a stop for you
-    /// on these names; hand-managing the exit is the whole point of the flag, and is why it is not the
-    /// default.
+    /// muting it is what <c>alerts_enabled</c> is for. What it loses is AUTOMATED ORIGINATION: a
+    /// strategy pass will not enter, exit, pyramid or raise a stop on it, and the agent's order tools
+    /// decline it. Nothing decides to trade these names for you; that is the whole point of the flag,
+    /// and is why it is not the default.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>It does not disable the operator's own orders, including the ones that fire while nobody is
+    /// watching.</b> An armed order the operator armed by hand, the protective stop they attached to
+    /// it, and the persistent day-order lifecycle re-placing what they asked to keep working are all
+    /// their instruction, written in advance — refusing those turned "I manage this name myself" into
+    /// "I may not use armed orders on this name", which is a hurdle rather than a safeguard. The
+    /// carrier of that distinction is <c>ExecutionAuthorization.OperatorOriginated</c>, claimed by the
+    /// arming path and stored with the order; a caller that does not claim it is treated as automation
+    /// and refused.
     /// </para>
     ///
     /// <para>

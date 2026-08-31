@@ -534,6 +534,8 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                         LimitPrice = order.LimitPrice,
                         ExpiresUtc = order.ExpiresUtc ?? DateTime.UtcNow.AddDays(30),
                         SourceArmedId = order.ArmedId,
+                        // The handover changes the lifecycle, not whose instruction it is.
+                        OperatorOriginated = order.OperatorOriginated,
                         Note = quantityAdjustment is null
                             ? order.Note
                             : string.Join(" ", new[] { order.Note, quantityAdjustment }
@@ -558,7 +560,9 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
 
                 var decision = _approvals.Decide(
                     groups, source,
-                    new ApprovalContext(severity, "armed-order"));
+                    // An order the operator armed by hand still fires on a manual-only symbol; one a
+                    // strategy armed does not. Everything else the gate weighs is unaffected.
+                    new ApprovalContext(severity, "armed-order", order.OperatorOriginated));
                 var approvalReason = decision.Reason;
 
                 if (!decision.MayProceed)

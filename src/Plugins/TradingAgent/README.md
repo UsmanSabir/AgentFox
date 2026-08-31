@@ -235,7 +235,8 @@ Monitoring always includes the watchlist. Execution chooses one authoritative so
   history its weekly levels need. Costs no extra portal requests (a session fetch already returns
   every symbol in the market), only rows.
 - `ManualOnlyAsync()` → the deny set. Subtracted from none of the above: a manual-only symbol is still
-  charted, scanned, alerted on and archived. What it loses is unattended execution.
+  charted, scanned, alerted on and archived. What it loses is *automated origination* — a strategy
+  deciding to trade it.
 
 Consequences the UI states explicitly rather than leaving to be discovered at order time:
 
@@ -255,8 +256,8 @@ Consequences the UI states explicitly rather than leaving to be discovered at or
 
 For a name you intend to trade by hand. `AllowedSymbols` cannot express this: it answers *"may this
 order exist"*, every path crosses it, and removing a symbol from it stops **you** ordering it too.
-Manual-only answers the orthogonal question — *"may a robot originate this order"* — which is why it is
-deliberately **not** in `TradingRiskEngine`, and lives at the automation boundary instead:
+Manual-only answers the orthogonal question — *"may a robot **originate** this order"* — which is why
+it is deliberately **not** in `TradingRiskEngine`, and lives at the automation boundary instead:
 
 ```jsonc
 "ManualOnlySymbols": ["NETSOL"]     // durable floor; the web API cannot lift it
@@ -272,24 +273,34 @@ What a manual-only symbol loses:
 | Path | Manual-only |
 | --- | --- |
 | Dashboard order, approving a proposal | **allowed** — that is the point |
-| Armed order triggers, `PersistentOrderWorker` | refused (and arming one is refused up front) |
-| `ProtectiveStopWorker` stop raises, take-profit retries | refused — **you** manage the exit |
-| Strategy passes (premium edition) | refused at the boundary |
+| An armed order *you* armed, its attached stop, its `PersistentOrderWorker` re-placements | **allowed** — your instruction, written in advance |
+| An armed order or protective stop a *strategy* created | refused |
+| Strategy passes (premium edition): entries, exits, pyramiding, stop raises | refused — **you** manage this name |
 | `place_order` / `place_orders` agent tools | declined, with a message telling the agent to hand it over |
 | Charting, scanning, `scan_watchlist`, alerts, archive | unchanged — a hand-managed name usually wants *louder* alerts |
+
+The line is **origination, not attendance** — who wrote the instruction, not who is present when it
+executes. Attendance alone was the original test, and it read "manual-only" as "nothing may fire for
+this symbol unattended", which refused armed orders at arm time and made the flag mean *you may not use
+armed orders on this name*. That is a hurdle, not a safeguard: arming an order by hand **is** the
+operator managing the symbol. So an order carries `OperatorOriginated` from whoever created it —
+claimed by the arm endpoint and the dashboard, stored on the row, and never inferred, so anything that
+does not claim it (a strategy, a caller added later) is still refused.
 
 Enforced in two places on purpose. `ApprovalGate.Decide` refuses early (before its `BoundedAuto`
 short-circuit, which would otherwise wave through the very mode most likely to fire unattended) and
 names the symbol in the reason; `TradingManager.ExecuteGroupsAsync` then re-asks authoritatively at the
 single execution boundary, so a caller that submits **without** asking the gate — a retry worker, a
-strategy, anything added later — is still refused. The test there is attendance:
-`ExecutionAuthorization.Attended`, true only when a human said yes to *that* order. A null
-authorization and a pre-authorized trigger both fail it, which is the direction a new caller should
-fail in.
+strategy, anything added later — is still refused. The test there is
+`ExecutionAuthorization.MayTradeManualOnly`: attended (a human said yes to *that* order) **or**
+operator-originated (a human wrote the standing instruction being carried out). Both default to false,
+so a null authorization and a pre-authorized strategy trigger still fail it — the direction a new
+caller should fail in.
 
 The trade-off, stated because it is the one that bites: **nothing raises a stop for you on these
-names.** Hand-managing the exit is what was asked for, and it is why manual-only is opt-in per symbol
-rather than a mode.
+names.** Whatever stop you want is one you place or arm yourself — those work — but no strategy will
+move it for you. Hand-managing the exit is what was asked for, and it is why manual-only is opt-in per
+symbol rather than a mode.
 
 ---
 

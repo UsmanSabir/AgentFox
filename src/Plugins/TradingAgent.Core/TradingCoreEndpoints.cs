@@ -166,8 +166,9 @@ public sealed record ArmApprovalRequest(int? Minutes = null);
 
 /// <summary>Per-symbol watchlist fields the user controls. Null means "leave unchanged".</summary>
 /// <param name="AutoTradeEnabled">
-/// False makes the symbol manual-only — no automation may originate an order for it, entry or exit,
-/// while the operator still can. Setting it true does not lift a pin from
+/// False makes the symbol manual-only — no strategy or plan may originate an order for it, entry or
+/// exit, while the operator still can, and the orders they arm by hand keep firing. Setting it true
+/// does not lift a pin from
 /// <c>Plugins:TradingAgent:ManualOnlySymbols</c>; config is the floor the API cannot raise.
 /// </param>
 public sealed record WatchlistUpdateRequest(

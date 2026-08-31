@@ -82,6 +82,27 @@ public sealed class ArmedOrderTrailPersistenceTests
         Assert.IsFalse(legacy.Trailing,
             "A row written before trailing existed is not trailing — the column defaults, it does not "
             + "opt every historical order into a ratchet.");
+        Assert.IsFalse(legacy.OperatorOriginated,
+            "Origination is claimed, never inferred: a migrated row must not be promoted to \"the "
+            + "operator armed this\", which is what lets an order fire on a manual-only symbol.");
+    }
+
+    [TestMethod]
+    public async Task Origination_RoundTripsBothWays()
+    {
+        var repository = NewRepository();
+        await repository.SaveArmedOrderAsync(TrailingDrop());
+        await repository.SaveArmedOrderAsync(TrailingDrop() with
+        {
+            ArmedId = "byhand", OperatorOriginated = true
+        });
+
+        var orders = await repository.GetArmedOrdersAsync();
+        Assert.IsTrue(orders.Single(o => o.ArmedId == "byhand").OperatorOriginated,
+            "An order armed from the dashboard has to still be the operator's instruction after a "
+            + "restart, or a manual-only symbol would stop firing the moment the process bounced.");
+        Assert.IsFalse(orders.Single(o => o.ArmedId == "trail1").OperatorOriginated,
+            "And a strategy's order must not acquire origination on the way through storage.");
     }
 
     // ── The one-way ratchet ───────────────────────────────────────────────────

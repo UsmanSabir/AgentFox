@@ -190,6 +190,26 @@ public sealed record ArmedOrder
     public bool PersistentUntilFilled { get; init; }
 
     /// <summary>
+    /// A person armed this order by hand, rather than a strategy arming it as part of a plan.
+    ///
+    /// <para>
+    /// The one thing that separates them at fire time is a manual-only symbol. "Manual" means the
+    /// operator manages that name themselves — no strategy or plan may originate an order for it —
+    /// and it deliberately does NOT mean the operator's own standing instructions stop working. An
+    /// armed order carrying this flag is the operator's instruction, given in advance, so it fires on
+    /// a manual-only symbol exactly as it fires anywhere else. See <c>TradingManager</c>, which is the
+    /// boundary that enforces the distinction.
+    /// </para>
+    ///
+    /// <para>
+    /// Defaults to FALSE, so an order armed by anything that has not said otherwise — a strategy, a
+    /// row written before this column existed — is treated as automation and stays refused on a
+    /// manual-only symbol. Origination is claimed, never inferred.
+    /// </para>
+    /// </summary>
+    public bool OperatorOriginated { get; init; }
+
+    /// <summary>
     /// The level this order fires at as of right now: recomputed for a percent trigger, the stored
     /// level for a fixed one, null for an event.
     /// </summary>

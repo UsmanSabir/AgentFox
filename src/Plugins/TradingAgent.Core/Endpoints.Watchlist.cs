@@ -220,7 +220,8 @@ public sealed partial class TradingCoreEndpoints
                       + "order for it would be rejected by the risk engine."
                     : isManualOnly
                         ? $"'{symbol}' is set to manual-only: it will be monitored, charted and alerted "
-                          + "on, but no automation will trade it — you place its orders yourself."
+                          + "on, but no strategy or plan will trade it — the orders are yours to place. "
+                          + "Your own orders, including ones you arm to fire on a level, work normally."
                         : null,
                 warning
             });
@@ -400,7 +401,7 @@ public sealed partial class TradingCoreEndpoints
                 message = lockedByConfig
                     ? $"'{normalized}' stays manual-only: it is listed in "
                       + "Plugins:TradingAgent:ManualOnlySymbols, which the API cannot override. "
-                      + "Remove it there and restart to let automation trade it."
+                      + "Remove it there and restart to let a strategy trade it."
                     : null
             });
         }).RequireAuthorization("TradingAnalyst");

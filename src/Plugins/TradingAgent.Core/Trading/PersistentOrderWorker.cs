@@ -298,8 +298,7 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
     /// evidence left for AgentFox to check itself — a live recheck of "today's" book proves nothing
     /// about what happened yesterday. Only a human who has checked the broker's own order
     /// history/statement outside the app can say what actually happened, so this method never
-    /// infers an outcome; it only records what the operator attests to having verified. That
-    /// attendance requirement mirrors the manual-only-symbol gate elsewhere in this manager.
+    /// infers an outcome; it only records what the operator attests to having verified.
     /// </summary>
     public async Task<PersistentOrderResolveResult> ResolveAttentionAsync(
         string intentId, string? resolution, int? filledQuantity, string note, string approvedBy,
@@ -503,7 +502,8 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
         IReadOnlyList<IReadOnlyList<TradingSignal>> groups = [[signal]];
         var source = BuildSource(intent.IntentId, today, intent.AttemptCount + 1);
         var approval = _approvals.Decide(
-            groups, source, new ApprovalContext(null, "persistent-order-retry"));
+            groups, source,
+            new ApprovalContext(null, "persistent-order-retry", intent.OperatorOriginated));
         if (!approval.MayProceed) return false;
 
         var claim = await _repository.TryClaimPersistentOrderRetryAsync(intent.IntentId, today, ct);
@@ -730,7 +730,7 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
         IReadOnlyList<IReadOnlyList<TradingSignal>> groups = [[signal]];
         var source = BuildSource(intent.IntentId, today, intent.AttemptCount + 1);
         var approval = _approvals.Decide(groups, source,
-            new ApprovalContext(null, "persistent-order"));
+            new ApprovalContext(null, "persistent-order", intent.OperatorOriginated));
         if (!approval.MayProceed)
         {
             await _repository.SetPersistentOrderProgressAsync(intent.IntentId,
