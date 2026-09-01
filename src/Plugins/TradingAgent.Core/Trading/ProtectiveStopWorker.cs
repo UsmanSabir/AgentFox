@@ -910,7 +910,16 @@ public sealed class ProtectiveStopWorker
             return;
         }
 
+        // Timed because the gap between the VENUE's timestamp on an order and this method's own "PLACED"
+        // line has been measured at ~78s twice (2026-09-01: QTECH accepted 09:30:43 logged 09:32:02,
+        // PAEL accepted 11:10:20 logged 11:11:38) and nobody could say where it went. It is NOT clock
+        // skew — the agent host is within a second of the venue, verified against the order socket's own
+        // heartbeat. The broker call itself is bounded well below that, so the remainder is in this
+        // pipeline: risk engine, order window, idempotency, reconciliation, ledger and audit. Reported
+        // rather than guessed at.
+        var submissionClock = System.Diagnostics.Stopwatch.StartNew();
         var result = await _manager.ExecuteGroupsAsync(groups, key, approval.Authorization, ct);
+        submissionClock.Stop();
         var order  = result.Groups.FirstOrDefault()?.FirstOrDefault();
 
         if (result.Executed && order is { Success: true })
@@ -935,9 +944,9 @@ public sealed class ProtectiveStopWorker
                 stop.StopId, today, actuallyPlaced, order.OrderId, ct);
             _logger.LogWarning(
                 "[ProtectiveStops] {StopId}: native stop PLACED — SELL {Qty} {Symbol} "
-                + "trigger {Trigger} limit {Limit}. {Why}",
+                + "trigger {Trigger} limit {Limit}, submission took {ElapsedMs}ms. {Why}",
                 stop.StopId, decision.Quantity, stop.Symbol, stop.StopTrigger, stop.StopLimit,
-                decision.Reason);
+                submissionClock.ElapsedMilliseconds, decision.Reason);
             _activity?.Info("Stops",
                 $"{stop.Symbol}: stop placed at the broker — SELL {decision.Quantity:N0} "
                 + $"trigger {stop.StopTrigger:0.##} limit {stop.StopLimit:0.##}");

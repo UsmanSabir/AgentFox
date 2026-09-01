@@ -5,7 +5,7 @@
     type MoverScreen, type MoversResponse, type SectorsResponse, type MoverRow
   } from './api';
   import {
-    TrendingUp, TrendingDown, Activity, AlertTriangle, Lock, RefreshCw, Layers
+    TrendingUp, TrendingDown, Activity, AlertTriangle, Lock, RefreshCw, Layers, ChevronRight
   } from 'lucide-svelte';
 
   /** Clicking a row selects that symbol, so the chart pane follows the screen. */
@@ -21,9 +21,23 @@
   let limit = 15;
   let showSectors = false;
 
+  /**
+   * Collapsed until asked for.
+   *
+   * This is a market-wide screen, not a decision surface: it answers "what is moving" rather than
+   * "what should I do", and it is the tallest thing on the page. Collapsed by default it stops pushing
+   * the panels an operator actually acts on below the fold.
+   *
+   * A collapsed panel also stops POLLING — it refreshes every 30s and drives two backend calls per
+   * refresh (movers plus sectors), both of which reach the analytics portal. Keeping that running for a
+   * panel nobody is looking at spends the broker's session on nothing.
+   */
+  let open = false;
+  let loadedOnce = false;
+
   let data: MoversResponse | null = null;
   let sectors: SectorsResponse | null = null;
-  let loading = true;
+  let loading = false;
   let error: string | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let requestInFlight = false;
@@ -79,7 +93,7 @@
   }
 
   function scheduleNext() {
-    if (disposed) return;
+    if (disposed || !open) return;
     if (timer) clearTimeout(timer);
 
     const waitingForBroker = data?.available === false
@@ -95,6 +109,26 @@
     }, waitingForBroker ? WAITING_FOR_BROKER_MS : READY_REFRESH_MS);
   }
 
+  function toggle() {
+    open = !open;
+    if (!open) {
+      // Stop the refresh loop rather than let it keep firing behind a closed panel.
+      if (timer) clearTimeout(timer);
+      timer = null;
+      return;
+    }
+    if (loadedOnce) {
+      // Reopening shows the last snapshot immediately and refreshes behind it, so the panel is never
+      // blank on a re-open.
+      scheduleNext();
+      load();
+      return;
+    }
+    loadedOnce = true;
+    loading = true;
+    load();
+  }
+
   function pick(newScreen: MoverScreen) {
     if (newScreen === screen) return;
     screen = newScreen;
@@ -102,9 +136,8 @@
     load();
   }
 
-  onMount(() => {
-    load();
-  });
+  // Deliberately does NOT load on mount: see `open`. The first fetch happens when someone opens it.
+  onMount(() => {});
 
   onDestroy(() => {
     disposed = true;
@@ -168,21 +201,29 @@
   $: isClosed = data?.marketState != null && data.marketState !== 'OPN';
 </script>
 
-<div class="panel">
+<div class="panel" class:collapsed={!open}>
   <header>
-    <h3><Activity size={16} /> Market Movers</h3>
+    <button class="disclose" on:click={toggle} aria-expanded={open}
+            title={open ? 'Collapse Market Movers' : 'Expand Market Movers'}>
+      <ChevronRight size={14} class={open ? 'turned' : ''} />
+      <h3><Activity size={16} /> Market Movers</h3>
+    </button>
     <div class="meta">
-      {#if data?.marketState}
+      {#if open && data?.marketState}
         <span class="state" class:closed={isClosed}>
           {isClosed ? 'Closed' : 'Open'}
         </span>
       {/if}
-      {#if data?.asOf}<span class="as-of">as of {data.asOf}</span>{/if}
-      <button class="icon" title="Refresh" on:click={load} disabled={loading}>
-        <RefreshCw size={14} class={loading ? 'spin' : ''} />
-      </button>
+      {#if open && data?.asOf}<span class="as-of">as of {data.asOf}</span>{/if}
+      {#if open}
+        <button class="icon" title="Refresh" on:click={load} disabled={loading}>
+          <RefreshCw size={14} class={loading ? 'spin' : ''} />
+        </button>
+      {/if}
     </div>
   </header>
+
+{#if open}
 
   {#if data && !data.enabled}
     <p class="notice">
@@ -309,10 +350,17 @@
       </table>
     {/if}
   {/if}
+{/if}
 </div>
 
 <style>
   .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; }
+  /* A collapsed panel is just its header, so the generous padding would leave it floating in space. */
+  .panel.collapsed { padding-bottom: .55rem; }
+  .disclose { display: flex; align-items: center; gap: .4rem; background: none; border: 0; padding: 0;
+    cursor: pointer; color: inherit; font: inherit; }
+  .disclose :global(svg.turned) { transform: rotate(90deg); }
+  .disclose :global(svg) { transition: transform .12s ease; flex: none; }
   header { display: flex; justify-content: space-between; align-items: center; gap: .5rem; flex-wrap: wrap; }
   h3 { display: flex; align-items: center; gap: .4rem; margin: 0; font-size: .95rem; }
   .meta { display: flex; align-items: center; gap: .5rem; font-size: .75rem; color: var(--text-2); }
