@@ -258,13 +258,16 @@ public sealed class ProtectiveStopTests
     }
 
     [TestMethod]
-    public void Shrink_NeverFiresWhileOurOwnStopIsRestingAtTheBroker()
+    public void Shrink_NeverFiresWhenTheVenueHasAlreadyResizedOurOrder()
     {
         // THE case this has to refuse. Hold 100 with a stop resting for 100; it triggers and 60 fill.
         // Custody now reads 40 against a PlacedQuantity of 100 — arithmetically identical to someone
-        // having sold 60 elsewhere. But nothing is oversized: the venue already reduced the order. An
-        // armed stop is invisible to the outstanding book, so an order of OURS being listed is proof
-        // this stop has fired, and cancelling it would pull the remainder of a live stop-out.
+        // having sold 60 elsewhere. But nothing is oversized: the venue already reduced the order, and
+        // cancelling it would pull the remainder of a live stop-out.
+        //
+        // The book's own quantity is what separates them. NOT its presence — an armed stop is listed
+        // too (CONFIRMED 2026-09-01, status APT, committing its full quantity as PENDING SELL), so a
+        // presence check would refuse every shrink there has ever been.
         var stop = Active(desired: 100) with
         {
             LastPlacedSessionDate = Today, PlacedQuantity = 100, LastOrderNo = "0411XK67"
@@ -272,6 +275,22 @@ public sealed class ProtectiveStopTests
 
         Assert.IsNull(ProtectiveStopDecisions.ShrinkTo(
             stop, 40m, [Sized(554m, 40, "0411XK67")], supersedeInFlight: false, Today));
+    }
+
+    [TestMethod]
+    public void Shrink_StillFiresWhenTheBookShowsOurArmedStopCoveringMoreThanIsHeld()
+    {
+        // The regression the 2026-09-01 measurement created. An armed stop IS in the outstanding book,
+        // so the earlier "any order of ours is listed means it fired" rule made this method return null
+        // for every real stop that had ever been placed — the feature was dead on arrival and no test
+        // said so, because every case was written against a book with nothing of ours in it.
+        var stop = Active(desired: 100) with
+        {
+            LastPlacedSessionDate = Today, PlacedQuantity = 100, LastOrderNo = "0411XK1"
+        };
+
+        Assert.AreEqual(40, ProtectiveStopDecisions.ShrinkTo(
+            stop, 40m, [Sized(554m, 100, "0411XK1")], supersedeInFlight: false, Today));
     }
 
     [TestMethod]

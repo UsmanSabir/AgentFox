@@ -379,15 +379,30 @@ public static class ProtectiveStopDecisions
     /// </para>
     ///
     /// <para>
-    /// <b>The case this must refuse, and the reason it needs the outstanding book.</b> A stop of ours
-    /// that TRIGGERED and part-filled looks identical to an external sell from custody alone: hold 100
-    /// with a stop resting for 100, 60 fill, and custody reads 40 against a
-    /// <see cref="ProtectiveStop.PlacedQuantity"/> of 100. Nothing is oversized — the venue already
-    /// reduced the order — and "correcting" it would cancel the remainder of a stop that is actively
-    /// executing, in exactly the market this stop exists for. The two are told apart by presence in the
-    /// book: an ARMED stop appears in no broker read at all and commits no shares, while a TRIGGERED one
-    /// has become an ordinary resting order and is listed. So any order of ours that IS listed means
-    /// this stop has fired, and its sizing is the venue's business now.
+    /// <b>The case this must refuse.</b> A stop of ours that TRIGGERED and part-filled looks identical to
+    /// an external sell from custody alone: hold 100 with a stop resting for 100, 60 fill, and custody
+    /// reads 40 against a <see cref="ProtectiveStop.PlacedQuantity"/> of 100. Nothing is oversized — the
+    /// venue already reduced the order — and "correcting" it would cancel the remainder of a stop that is
+    /// actively executing, in exactly the market this stop exists for.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>They are told apart by the book's own QUANTITY, not by presence.</b> An earlier version of this
+    /// compared presence alone, on the documented basis that an armed stop appeared in no broker read —
+    /// which was measured wrong. CONFIRMED 2026-09-01: an armed <c>SLO</c> is listed with status
+    /// <c>APT</c> and commits its full quantity as <c>PENDING SELL</c>. Presence therefore proves nothing
+    /// and that version would simply never have shrunk anything. What the book still gives is the
+    /// quantity the venue currently holds against this order, and comparing custody to THAT is the
+    /// question actually being asked: 40 held against a book showing 100 is oversized; 40 held against a
+    /// book showing 40 is a part-filled stop that the venue has already resized.
+    /// </para>
+    ///
+    /// <para>
+    /// That reasoning depends on the book reporting a part-filled order's REMAINING quantity rather than
+    /// its original, and CONFIRMED 2026-09-01 it does: a SELECT order for 83 with 51 filled showed 32 in
+    /// the outstanding book, 32 as <c>PENDING SELL</c>, and 32 held. All three agree while nothing is
+    /// oversized, which is precisely the case this has to refuse. See
+    /// <c>docs/ahl-tradecast-protocol.md</c>.
     /// </para>
     ///
     /// <para>
@@ -426,10 +441,16 @@ public static class ProtectiveStopDecisions
         if (resting is null) return null;
 
         var mine = FindOwnResting(stop, resting);
-        if (mine.Ambiguous || mine.Order is not null) return null;
+        if (mine.Ambiguous) return null;
+
+        // What the venue currently holds against this stop. Its own row when the book lists it, and
+        // otherwise what we placed — a stop the book does not show has not been reduced by anything we
+        // can see, so the placed quantity is the only figure available.
+        var committed = mine.Order?.Quantity ?? stop.PlacedQuantity;
+        if (committed <= 0) return null;
 
         var ceiling = Math.Min(stop.DesiredQuantity, (int)Math.Floor(held));
-        return stop.PlacedQuantity > ceiling ? ceiling : null;
+        return committed > ceiling ? ceiling : null;
     }
 
     /// <summary>

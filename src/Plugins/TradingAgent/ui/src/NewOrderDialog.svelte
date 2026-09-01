@@ -21,6 +21,16 @@
   let quantity: number | null = null;
   let orderValue: number | null = null;
   let currentPrice: number | null = null;
+  /**
+   * The symbol the price fields were last seeded from.
+   *
+   * `applySuggestedPrices` deliberately never chases the market once a person has typed a number, and
+   * that is right for a re-quote of the SAME instrument. It was wrong across a symbol CHANGE: the
+   * previous stock's price stayed in the limit field while the "Latest price" readout beside it updated,
+   * so the two disagreed and the stale one was the one being submitted. Reported live 2026-09-01 —
+   * a SELL limit of 104 left over from another symbol, against a SYS market around 124.
+   */
+  let pricedSymbol: string | null = null;
   let price: number | null = null;
   let triggerPrice: number | null = null;
   let limitPrice: number | null = null;
@@ -79,7 +89,13 @@
       const chart = await trading.candles(symbol.trim().toUpperCase(), '1D');
       symbol = chart.symbol;
       currentPrice = chart.snapshot.close;
-      applySuggestedPrices(false);
+      // A different instrument makes every price field stale, whoever typed it: a number that was
+      // deliberate for one stock is arbitrary for another, and on a SELL an arbitrarily low limit sells
+      // below market. Re-seeding is the safe direction. The manual refresh button lands here too, but
+      // with the same symbol, so a typed price is still left alone.
+      const changed = pricedSymbol !== null && pricedSymbol !== chart.symbol.trim().toUpperCase();
+      pricedSymbol = chart.symbol.trim().toUpperCase();
+      applySuggestedPrices(changed);
     } catch (e) {
       currentPrice = null;
       error = `Latest price unavailable: ${e instanceof Error ? e.message : String(e)}`;
@@ -100,7 +116,11 @@
     applySuggestedPrices(true);
   }
 
-  /** Starting values only. Once a person edits a number this function never chases the market. */
+  /**
+   * Starting values only. Once a person edits a number this function never chases the market — EXCEPT
+   * when `force` is set, which means the numbers on screen belong to a different order intent or a
+   * different symbol and are therefore not that person's answer to the question now being asked.
+   */
   function applySuggestedPrices(force: boolean) {
     if (!choice || !currentPrice || currentPrice <= 0) return;
     if (choice.priceField === 'limit' && (force || price == null)) price = currentPrice;

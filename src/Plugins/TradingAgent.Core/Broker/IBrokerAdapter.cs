@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using AgentFox.Plugins;
 using Microsoft.Extensions.Logging;
 using TradingAgent.Config;
@@ -32,6 +32,28 @@ public interface IBrokerOrderCanceller
 {
     Task<BrokerCancellationResult> CancelOrderAsync(string orderNo, CancellationToken ct = default);
 }
+
+/// <summary>
+/// A broker that cancels through its OWN order protocol, rather than by driving the broker's website.
+///
+/// <para>
+/// <b>Why this is a separate interface, and why <see cref="AhkBrowserBrokerAdapter"/> must never
+/// implement it.</b> <c>BrokerOrderCancellationService</c> consults this to decide whether a cancel
+/// should go to the configured broker instead of the browser portal. The browser adapter's own
+/// <see cref="IBrokerOrderCanceller.CancelOrderAsync"/> is IMPLEMENTED BY that very service, so taking
+/// the broader <see cref="IBrokerOrderCanceller"/> there would point the service back at itself: a
+/// construction cycle AND unbounded call recursion. Worse, the registration is a factory lambda, which
+/// is opaque to the container's circular-dependency detection — the failure is a
+/// <c>StackOverflowException</c> with nothing logged, not a readable error.
+/// </para>
+///
+/// <para>
+/// So the rule is structural rather than remembered: an adapter that delegates its cancel BACK to the
+/// cancellation service implements only <see cref="IBrokerOrderCanceller"/>; one that talks to the venue
+/// itself (premium's <c>AhlBrokerAdapter</c>) also implements this, and is preferred when present.
+/// </para>
+/// </summary>
+public interface IBrokerNativeOrderCanceller : IBrokerOrderCanceller;
 
 /// <summary>
 /// Reads the broker's resting (outstanding) order book — broker-neutral so a caller that needs a live
