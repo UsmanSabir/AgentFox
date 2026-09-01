@@ -6,7 +6,7 @@
     type TriggerKind, type ArmOrderRequest, type BrokerAccountSnapshot
   } from './api';
   import {
-    ShoppingCart, X, AlertTriangle, RefreshCw, CheckCircle2, Clock3, BriefcaseBusiness
+    ShoppingCart, X, AlertTriangle, RefreshCw, CheckCircle2, Clock3, BriefcaseBusiness, Wallet
   } from 'lucide-svelte';
 
   export let selectedSymbol: string | null = null;
@@ -21,6 +21,16 @@
   let quantity: number | null = null;
   let orderValue: number | null = null;
   let currentPrice: number | null = null;
+  /**
+   * The symbol the price fields were last seeded from.
+   *
+   * `applySuggestedPrices` deliberately never chases the market once a person has typed a number, and
+   * that is right for a re-quote of the SAME instrument. It was wrong across a symbol CHANGE: the
+   * previous stock's price stayed in the limit field while the "Latest price" readout beside it updated,
+   * so the two disagreed and the stale one was the one being submitted. Reported live 2026-09-01 —
+   * a SELL limit of 104 left over from another symbol, against a SYS market around 124.
+   */
+  let pricedSymbol: string | null = null;
   let price: number | null = null;
   let triggerPrice: number | null = null;
   let limitPrice: number | null = null;
@@ -79,7 +89,13 @@
       const chart = await trading.candles(symbol.trim().toUpperCase(), '1D');
       symbol = chart.symbol;
       currentPrice = chart.snapshot.close;
-      applySuggestedPrices(false);
+      // A different instrument makes every price field stale, whoever typed it: a number that was
+      // deliberate for one stock is arbitrary for another, and on a SELL an arbitrarily low limit sells
+      // below market. Re-seeding is the safe direction. The manual refresh button lands here too, but
+      // with the same symbol, so a typed price is still left alone.
+      const changed = pricedSymbol !== null && pricedSymbol !== chart.symbol.trim().toUpperCase();
+      pricedSymbol = chart.symbol.trim().toUpperCase();
+      applySuggestedPrices(changed);
     } catch (e) {
       currentPrice = null;
       error = `Latest price unavailable: ${e instanceof Error ? e.message : String(e)}`;
@@ -100,7 +116,11 @@
     applySuggestedPrices(true);
   }
 
-  /** Starting values only. Once a person edits a number this function never chases the market. */
+  /**
+   * Starting values only. Once a person edits a number this function never chases the market — EXCEPT
+   * when `force` is set, which means the numbers on screen belong to a different order intent or a
+   * different symbol and are therefore not that person's answer to the question now being asked.
+   */
   function applySuggestedPrices(force: boolean) {
     if (!choice || !currentPrice || currentPrice <= 0) return;
     if (choice.priceField === 'limit' && (force || price == null)) price = currentPrice;
@@ -139,6 +159,16 @@
     quantity = shares;
   }
 
+  function buyFraction(fraction: number) {
+    if (buyingPower == null || buyingPower <= 0) return;
+    const value = Math.floor(buyingPower * fraction);
+    if (value <= 0) return;
+    // Value mode rather than shares: buying power is money, and converting it to a share count here
+    // would have to guess a price the order may not use.
+    sizeMode = 'value';
+    orderValue = value;
+  }
+
   $: conditionalLevel = choice?.submission === 'conditional' && choice.triggerKind
     ? percentTriggerLevel(choice.triggerKind, currentPrice, triggerPercent)
     : null;
@@ -164,6 +194,18 @@
   $: availableSellQuantity = heldQuantity != null && committedSellQuantity != null
     ? Math.max(0, heldQuantity - committedSellQuantity)
     : null;
+  // The BUY-side counterpart of availableSellQuantity. `available_cash` is the broker contract's
+  // stable key for "what this account may commit right now" (see IBrokerAccountReader) — deliberately
+  // not a cash balance, which can be a very different number when unsettled sale proceeds are spendable
+  // or resting orders have already committed part of it.
+  $: buyingPowerBalance = holdingLoaded && account?.balancesAvailable
+    ? account.balances.find(entry => entry.key === 'available_cash') ?? null
+    : null;
+  $: buyingPower = buyingPowerBalance?.value ?? null;
+  // Informational, never a block: the broker and the risk engine decide, and this snapshot can be
+  // seconds stale. Telling the operator early is worth much more than refusing here would be.
+  $: buyExceedsBuyingPower = choice?.action === 'BUY' && buyingPower != null
+    && estimatedValue != null && estimatedValue > buyingPower;
   $: estimatedPrice = choice?.orderType === 'MARKET' ? currentPrice
     : choice?.orderType === 'STOPLOSS' ? triggerPrice
     : choice?.submission === 'conditional' ? conditionalLevel : price;
@@ -355,6 +397,52 @@
       {#if choice}
         <div class="form-card">
           <div class="form-head"><div><b>{choice.label}</b><span>{choice.action} · {choice.orderType}</span></div></div>
+          {#if choice.action === 'BUY'}
+            <section class="holding-card" aria-live="polite">
+              <div class="holding-head">
+                <div class="holding-title">
+                  <Wallet size={15} />
+                  <span>
+                    <b>What you can spend</b>
+                    <small>{holdingLoaded && account ? `Updated ${when(account.retrievedAtUtc)}` : 'Read buying power from the broker'}</small>
+                  </span>
+                </div>
+                <button type="button" class="holding-refresh" on:click={loadHolding} disabled={holdingBusy}>
+                  <span class:spin={holdingBusy}><RefreshCw size={13} /></span>
+                  {holdingBusy ? 'Checking…' : holdingLoaded ? 'Refresh' : 'Check buying power'}
+                </button>
+              </div>
+
+              {#if holdingError}
+                <p class="holding-warning"><AlertTriangle size={13} /> {holdingError}</p>
+              {/if}
+              {#if holdingBusy && !account}
+                <p class="holding-empty">Reading buying power from the broker…</p>
+              {:else if !holdingLoaded}
+                <p class="holding-empty">Check the broker to see what this account can commit right now.</p>
+              {:else if account && !account.balancesAvailable}
+                <p class="holding-warning"><AlertTriangle size={13} /> Balances are unavailable, so this is not being treated as an empty account.</p>
+              {:else if buyingPower == null}
+                <p class="holding-warning"><AlertTriangle size={13} /> The broker did not report a usable buying-power figure, so no limit is shown here. The order is still checked on submission.</p>
+              {:else}
+                <div class="holding-stats">
+                  <div><span>{buyingPowerBalance?.label ?? 'Buying power'}</span><b>{money(buyingPower)} PKR</b></div>
+                  {#each (account?.balances ?? []).filter(entry => entry.key !== 'available_cash' && entry.value != null) as entry}
+                    <div><span>{entry.label}</span><b>{money(entry.value ?? 0)} PKR</b></div>
+                  {/each}
+                </div>
+                <div class="holding-actions" aria-label="Quick order sizes">
+                  <button type="button" on:click={() => buyFraction(.25)} disabled={Math.floor(buyingPower * .25) < 1}>25%</button>
+                  <button type="button" on:click={() => buyFraction(.5)} disabled={Math.floor(buyingPower * .5) < 1}>50%</button>
+                  <button type="button" on:click={() => buyFraction(1)} disabled={buyingPower < 1}>Use it all</button>
+                </div>
+                <p class="holding-note">
+                  Buying power already accounts for what is committed to working orders. It is checked
+                  again when the order reaches the broker.
+                </p>
+              {/if}
+            </section>
+          {/if}
           {#if choice.action === 'SELL'}
             <section class="holding-card" aria-live="polite">
               <div class="holding-head">
@@ -462,11 +550,27 @@
               ({sizingDifference === 0 ? 'exactly your value' : `${money(Math.abs(sizingDifference))} PKR ${sizingDifference > 0 ? 'above' : 'below'} your value`}).
             </p>
           {/if}
+          {#if buyExceedsBuyingPower && estimatedValue != null && buyingPower != null}
+            <p class="warning"><AlertTriangle size={13} /> This order is about {money(estimatedValue)} PKR, above the {money(buyingPower)} PKR the broker currently reports as available. It is not blocked here — the broker decides — but it may be refused or reduced.</p>
+          {/if}
           {#if sellExceedsAvailable && effectiveQuantity != null && availableSellQuantity != null}
             <p class="warning"><AlertTriangle size={13} /> You entered {money(effectiveQuantity)} shares, but the broker snapshot shows only {money(availableSellQuantity)} available now. Use “Sell all available” or reduce the size; final availability is checked again on submission.</p>
           {/if}
           {#if summary}<p class="summary">{summary}</p>{/if}
           {#if estimatedValue}<p class="estimate">Estimated value: <b>{money(estimatedValue)} PKR</b>{choice.orderType === 'MARKET' ? ' at the latest price; actual value can move.' : ''}</p>{/if}
+          <!--
+            Extension point for whoever is hosting this dialog. Deliberately generic: it passes the
+            order being composed and takes no view on what, if anything, is rendered — this repo models
+            no fee schedule, and a host that does (a broker integration, an edition with a cost model)
+            can show one here without this component learning about it. Renders nothing when unfilled.
+          -->
+          <slot name="order-detail"
+                symbol={selectedTicker}
+                action={choice.action}
+                orderType={choice.orderType}
+                quantity={effectiveQuantity}
+                price={estimatedPrice}
+                value={estimatedValue} />
         </div>
       {/if}
 

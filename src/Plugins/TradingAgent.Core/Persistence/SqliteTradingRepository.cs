@@ -1,4 +1,4 @@
-using Microsoft.Data.Sqlite;
+﻿using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -1611,7 +1611,13 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                     submitted_price    TEXT NULL,
                     message            TEXT NULL,
                     created_utc        TEXT NOT NULL,
-                    UNIQUE(intent_id, session_date),
+                    -- One row per ATTEMPT, not per session. A same-day retry (see
+                    -- PersistentOrderWorker.TryAutoRetryFailedTodayAsync) is a new attempt with its own
+                    -- auditable row, and `attempt` exists to number them. This was UNIQUE(intent_id,
+                    -- session_date) until 2026-09-01, which predated retries and made the retry path
+                    -- throw SQLite error 19 on every pass once a placement had failed — see
+                    -- WidenPlacementUniquenessAsync.
+                    UNIQUE(intent_id, session_date, attempt),
                     FOREIGN KEY (intent_id) REFERENCES persistent_order_intents(intent_id)
                 );
                 CREATE INDEX IF NOT EXISTS ix_persistent_orders_state
@@ -1985,6 +1991,7 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
             await AddColumnIfMissingAsync(
                 connection, "persistent_order_intents", "operator_originated",
                 "INTEGER NOT NULL DEFAULT 0", ct);
+            await WidenPlacementUniquenessAsync(connection, ct);
             await SeedPerSymbolCoverageAsync(connection, ct);
 
             _initialized = true;
@@ -3082,6 +3089,94 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
     /// coverage row is written. That self-heals in a single request and cannot lose data.
     /// </para>
     /// </summary>
+    /// <summary>
+    /// Rebuilds <c>persistent_order_placements</c> so its uniqueness includes <c>attempt</c>.
+    ///
+    /// <para>
+    /// <b>The bug this fixes, observed live 2026-09-01.</b> The table was created with
+    /// <c>UNIQUE(intent_id, session_date)</c> — one placement per session, which was true before
+    /// same-day retries existed. <c>PersistentOrderWorker.TryAutoRetryFailedTodayAsync</c> now claims a
+    /// fresh attempt and records its own placement row, so the second attempt of a day hit
+    /// <c>SQLite error 19</c>, the exception aborted the intent's whole lifecycle pass, and it repeated
+    /// on every pass thereafter because the condition never cleared. A TISL intent on a manual-only
+    /// symbol produced an ERR with a stack trace every cycle and was never maintained again.
+    /// </para>
+    ///
+    /// <para>
+    /// Widening rather than making the retry overwrite: <c>attempt</c> exists precisely so each try is
+    /// separately auditable, and "what did we send, when, and what came back" is the question this table
+    /// answers. Collapsing retries onto one row would answer it worse.
+    /// </para>
+    ///
+    /// <para>
+    /// A table constraint cannot be altered in SQLite, so this is the rebuild-and-rename dance. It is
+    /// guarded on the stored DDL, so it runs once and is a no-op afterwards, and every existing row
+    /// transfers unchanged — rows unique on the narrow key are unique on the wider one by construction,
+    /// so the copy cannot fail on the new constraint.
+    /// </para>
+    /// </summary>
+    private static async Task WidenPlacementUniquenessAsync(
+        SqliteConnection connection, CancellationToken ct)
+    {
+        var check = connection.CreateCommand();
+        check.CommandText =
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'persistent_order_placements'";
+        if (await check.ExecuteScalarAsync(ct) is not string ddl
+            || !ddl.Contains("UNIQUE(intent_id, session_date)", StringComparison.Ordinal))
+            return;
+
+        // Must be outside a transaction, and restored afterwards: the rebuild drops a table another
+        // table's FK points into, and an enforced constraint would refuse it.
+        var off = connection.CreateCommand();
+        off.CommandText = "PRAGMA foreign_keys=off";
+        await off.ExecuteNonQueryAsync(ct);
+        try
+        {
+            await using var transaction = await connection.BeginTransactionAsync(ct);
+            var rebuild = connection.CreateCommand();
+            rebuild.Transaction = (SqliteTransaction)transaction;
+            rebuild.CommandText = """
+                CREATE TABLE persistent_order_placements_rebuilt (
+                    placement_id       TEXT PRIMARY KEY,
+                    intent_id          TEXT NOT NULL,
+                    session_date       TEXT NOT NULL,
+                    attempt            INTEGER NOT NULL,
+                    quantity           INTEGER NOT NULL,
+                    broker_order_no    TEXT NULL,
+                    execution_id       TEXT NULL,
+                    state              TEXT NOT NULL,
+                    requested_price    TEXT NULL,
+                    submitted_price    TEXT NULL,
+                    message            TEXT NULL,
+                    created_utc        TEXT NOT NULL,
+                    UNIQUE(intent_id, session_date, attempt),
+                    FOREIGN KEY (intent_id) REFERENCES persistent_order_intents(intent_id)
+                );
+                INSERT INTO persistent_order_placements_rebuilt
+                    (placement_id, intent_id, session_date, attempt, quantity, broker_order_no,
+                     execution_id, state, requested_price, submitted_price, message, created_utc)
+                SELECT placement_id, intent_id, session_date, attempt, quantity, broker_order_no,
+                       execution_id, state, requested_price, submitted_price, message, created_utc
+                  FROM persistent_order_placements;
+                DROP TABLE persistent_order_placements;
+                ALTER TABLE persistent_order_placements_rebuilt
+                    RENAME TO persistent_order_placements;
+                CREATE INDEX IF NOT EXISTS ix_persistent_placements_intent
+                    ON persistent_order_placements(intent_id, session_date);
+                CREATE INDEX IF NOT EXISTS ix_persistent_placements_broker
+                    ON persistent_order_placements(broker_order_no);
+                """;
+            await rebuild.ExecuteNonQueryAsync(ct);
+            await transaction.CommitAsync(ct);
+        }
+        finally
+        {
+            var on = connection.CreateCommand();
+            on.CommandText = "PRAGMA foreign_keys=ON";
+            await on.ExecuteNonQueryAsync(ct);
+        }
+    }
+
     private async Task SeedPerSymbolCoverageAsync(SqliteConnection connection, CancellationToken ct)
     {
         var probe = connection.CreateCommand();

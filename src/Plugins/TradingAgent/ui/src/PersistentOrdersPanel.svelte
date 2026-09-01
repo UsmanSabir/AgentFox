@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { RefreshCw, Repeat2, Trash2, AlertTriangle, CheckCircle2, RotateCcw, ShieldQuestion } from 'lucide-svelte';
-  import { trading, type PersistentOrder } from './api';
+  import { trading, type PersistentOrder, type BrokerOrdersView } from './api';
 
   export let refreshTick = 0;
 
@@ -12,6 +12,58 @@
   let notice: string | null = null;
   let showHistory = false;
   let lastTick = 0;
+  /**
+   * The broker's own resting orders, per intent, once someone asks for them.
+   *
+   * Cancel can only aim at order numbers the ledger wrote down. If the process stopped between the
+   * broker accepting an order and that row being written, the order exists and nothing points at it —
+   * measured 2026-09-01, when a 50-share SYS SELL rested unreachable while every further sell was
+   * refused for want of free shares. This is the way out: show what is actually there and let a person
+   * cancel the right one by number.
+   */
+  let brokerView: Record<string, BrokerOrdersView> = {};
+  let inspecting: string | null = null;
+
+  async function inspectBroker(order: PersistentOrder) {
+    if (inspecting) return;
+    inspecting = order.intentId;
+    error = null;
+    try {
+      brokerView = { ...brokerView, [order.intentId]: await trading.persistentOrders.brokerOrders(order.intentId) };
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      inspecting = null;
+    }
+  }
+
+  async function cancelBrokerOrder(order: PersistentOrder, orderNo: string) {
+    if (busy) return;
+    // Named in full, because this is the one action here that is taken on a person's identification
+    // rather than on the ledger's own record.
+    if (!confirm(
+      `Cancel broker order #${orderNo}?\n\n`
+      + `This cancels that exact order at the broker and records it against this ${order.symbol} `
+      + `${order.action}.\n\nOnly do this if you have checked the broker's own book and it is this `
+      + `order's. It cannot be undone.`
+    )) return;
+
+    busy = order.intentId;
+    notice = null;
+    try {
+      const result = await trading.persistentOrders.cancelBrokerOrder(order.intentId, orderNo);
+      notice = result.message;
+      await inspectBroker(order);
+      await load();
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = null;
+    }
+  }
+
+  const describeOrder = (o: { side: string | null; remainingQuantity: number | null; price: number | null }) =>
+    `${o.side ?? '?'} ${o.remainingQuantity ?? '?'}${o.price != null ? ` @ ${o.price}` : ''}`;
 
   export async function load() {
     try {
@@ -194,6 +246,59 @@
                 <Trash2 size={12} /> {busy === order.intentId ? 'Working…' : 'Stop & cancel remainder'}
               </button>
             </div>
+
+          {/if}
+
+          <!--
+            Reachable on a TERMINAL intent too, and that is the point. The false-terminal transition this
+            fixes (see PersistentOrderWorker's expiring/cancelling branch) leaves an intent marked
+            'cancelled' while an order it never managed to name is still resting — so the states that
+            most need a way out are exactly the ones whose action row is hidden. 'fulfilled' is excluded
+            because that path already cancels what it can name and escalates when it cannot.
+          -->
+          {#if order.state !== 'fulfilled'}
+            <div class="order-actions">
+              <button class="inspect" on:click={() => inspectBroker(order)}
+                      disabled={inspecting != null || busy != null}
+                      title="Read the broker's own outstanding orders for this symbol. Use this when a cancel could not find the order it was looking for, or when an order was marked cancelled but you suspect something is still resting.">
+                <ShieldQuestion size={12} />
+                {inspecting === order.intentId ? 'Reading broker…' : 'What is resting at the broker?'}
+              </button>
+            </div>
+
+            {#if brokerView[order.intentId]}
+              {@const view = brokerView[order.intentId]}
+              <div class="broker-view">
+                <p class="broker-message">{view.message}</p>
+
+                {#if view.ours.length > 0}
+                  <p class="broker-heading">Known to be this order's</p>
+                  {#each view.ours as resting}
+                    <div class="broker-row">
+                      <code>#{resting.orderNo}</code>
+                      <span>{describeOrder(resting)}</span>
+                    </div>
+                  {/each}
+                {/if}
+
+                {#if view.unclaimed.length > 0}
+                  <p class="broker-heading warn">
+                    <AlertTriangle size={11} /> Resting on {order.symbol}, but not recorded against this
+                    order. Shape alone cannot prove whose an order is — check the broker before cancelling.
+                  </p>
+                  {#each view.unclaimed as candidate}
+                    <div class="broker-row">
+                      <code>#{candidate.orderNo}</code>
+                      <span>{describeOrder(candidate)}</span>
+                      <button class="cancel" disabled={busy != null}
+                              on:click={() => cancelBrokerOrder(order, candidate.orderNo)}>
+                        <Trash2 size={11} /> Cancel #{candidate.orderNo}
+                      </button>
+                    </div>
+                  {/each}
+                {/if}
+              </div>
+            {/if}
           {/if}
         </article>
       {/each}
@@ -227,6 +332,16 @@
   .progress span { display:block; height:100%; background:var(--success); }
   .reason { margin:.45rem 0 0; color:var(--text-2); font-size:.67rem; line-height:1.35; }
   .order-actions { display:flex; flex-wrap:wrap; gap:.4rem; margin-top:.55rem; }
-  .retry { color:var(--primary); }.resolve { color:var(--warning); }.cancel { color:var(--danger); }.notice,.empty { margin:0; padding:.65rem .9rem; color:var(--text-3); font-size:.69rem; }
+  .retry { color:var(--primary); }.resolve { color:var(--warning); }.cancel { color:var(--danger); }
+  .inspect { color:var(--text-2); }
+  .broker-view { margin:.5rem .9rem .7rem; padding:.55rem .7rem; border:1px solid var(--border);
+    border-radius:6px; display:flex; flex-direction:column; gap:.35rem; }
+  .broker-message { margin:0; font-size:.68rem; color:var(--text-2); }
+  .broker-heading { margin:.15rem 0 0; font-size:.65rem; text-transform:uppercase;
+    letter-spacing:.04em; color:var(--text-3); display:flex; align-items:center; gap:.25rem; }
+  .broker-heading.warn { color:var(--warning); text-transform:none; letter-spacing:0; }
+  .broker-row { display:flex; align-items:center; gap:.5rem; flex-wrap:wrap; font-size:.7rem; }
+  .broker-row code { font-size:.68rem; color:var(--text-1); }
+  .broker-row span { color:var(--text-2); }.notice,.empty { margin:0; padding:.65rem .9rem; color:var(--text-3); font-size:.69rem; }
   .notice { display:flex; align-items:center; gap:.35rem; border-bottom:1px solid var(--border); }.notice.bad { color:var(--danger); }
 </style>

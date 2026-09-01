@@ -218,6 +218,28 @@ export interface PersistentOrder {
   placements: PersistentOrderPlacement[];
 }
 
+export interface BrokerRestingOrder {
+  orderNo: string;
+  symbol: string;
+  side: string | null;
+  remainingQuantity: number | null;
+  price: number | null;
+}
+
+/**
+ * The broker's resting orders for one persistent order's symbol, split by whether the ledger can name
+ * them. `unclaimed` is a list of CANDIDATES, never a conclusion: shape is not identity, so a person
+ * decides. See PersistentOrderDecisions.FindUnclaimedBrokerOrders.
+ */
+export interface BrokerOrdersView {
+  intentId: string;
+  read: boolean;
+  state: string;
+  message: string;
+  ours: BrokerRestingOrder[];
+  unclaimed: BrokerRestingOrder[];
+}
+
 export interface PersistentOrdersResponse { orders: PersistentOrder[]; }
 
 /**
@@ -1057,7 +1079,16 @@ export const trading = {
     ) =>
       post<{ intentId: string; applied: boolean; state: string; message: string }>(
         `/trading/persistent-orders/${encodeURIComponent(intentId)}/resolve-attention`,
-        { resolution, filledQuantity, note })
+        { resolution, filledQuantity, note }),
+    // What the broker is actually resting for this order's symbol. `unclaimed` are orders that match
+    // this intent but that no placement record can name — the case where a cancel has nothing to aim at.
+    brokerOrders: (intentId: string) =>
+      get<BrokerOrdersView>(
+        `/trading/persistent-orders/${encodeURIComponent(intentId)}/broker-orders`, 60_000),
+    cancelBrokerOrder: (intentId: string, orderNo: string) =>
+      post<{ intentId: string; applied: boolean; state: string; message: string }>(
+        `/trading/persistent-orders/${encodeURIComponent(intentId)}/cancel-broker-order`,
+        { orderNo }, 60_000)
   },
   // Open-only by default: an empty inbox is the normal state, and a list dominated by last month's
   // resolved proposals is exactly what made this feel like a log rather than a queue.

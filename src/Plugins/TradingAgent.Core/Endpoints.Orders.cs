@@ -1,4 +1,4 @@
-using AgentFox.Plugins.Interfaces;
+﻿using AgentFox.Plugins.Interfaces;
 using AgentFox.Plugins.Research;
 using AgentFox.Plugins;
 using Microsoft.AspNetCore.Routing;
@@ -365,6 +365,51 @@ public sealed partial class TradingCoreEndpoints
                 });
         }).RequireAuthorization("TradingTrader");
 
+        // Read-only: what the broker is resting for this intent's symbol, and which of those orders this
+        // ledger can actually name. The operator-facing half of the orphan problem — where the evidence
+        // cannot prove an order is ours, showing it beats cancelling it.
+        trading.MapGet("/persistent-orders/{intentId}/broker-orders", async (
+            string intentId,
+            PersistentOrderWorker worker,
+            CancellationToken ct) =>
+        {
+            var view = await worker.InspectBrokerOrdersAsync(intentId, ct);
+            return view.State == "missing"
+                ? Results.NotFound(new { error = "not_found", message = view.Message })
+                : Results.Ok(new
+                {
+                    intentId,
+                    read = view.Read,
+                    state = view.State,
+                    message = view.Message,
+                    ours = view.Ours.Select(Project),
+                    unclaimed = view.Unclaimed.Select(Project)
+                });
+        }).RequireAuthorization("TradingTrader");
+
+        // Cancel ONE broker order by number, on the instruction of a person who has looked at the
+        // broker's own book. Checked against that book before it is sent, so a mistyped number cannot
+        // cancel an unrelated position.
+        trading.MapPost("/persistent-orders/{intentId}/cancel-broker-order", async (
+            string intentId,
+            CancelBrokerOrderRequest request,
+            PersistentOrderWorker worker,
+            HttpContext http,
+            CancellationToken ct) =>
+        {
+            var result = await worker.CancelBrokerOrderAsync(
+                intentId, request.OrderNo ?? "", http.User.Identity?.Name ?? "operator", ct);
+            return result.State == "missing"
+                ? Results.NotFound(new { error = "not_found", message = result.Message })
+                : Results.Ok(new
+                {
+                    intentId,
+                    applied = result.Applied,
+                    state = result.State,
+                    message = result.Message
+                });
+        }).RequireAuthorization("TradingTrader");
+
         trading.MapDelete("/persistent-orders/{intentId}", async (
             string intentId,
             PersistentOrderWorker worker,
@@ -382,4 +427,15 @@ public sealed partial class TradingCoreEndpoints
                 });
         }).RequireAuthorization("TradingTrader");
     }
+
+    private static object Project(BrokerWorkingOrder order) => new
+    {
+        orderNo = order.OrderNo,
+        symbol = order.Symbol,
+        side = order.Side,
+        remainingQuantity = order.RemainingQuantity,
+        price = order.Price
+    };
+
+    private sealed record CancelBrokerOrderRequest(string? OrderNo);
 }

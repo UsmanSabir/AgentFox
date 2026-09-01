@@ -1,4 +1,4 @@
-namespace TradingAgent.Watchlist;
+﻿namespace TradingAgent.Watchlist;
 
 /// <summary>
 /// A standing intent to keep a position protected at a level — not a queued order.
@@ -358,6 +358,99 @@ public static class ProtectiveStopDecisions
                     ? $"No stop is resting for {stop.Symbol}; placing for {shortfall} share(s)."
                     : $"Session rolled over (last placed {stop.LastPlacedSessionDate:yyyy-MM-dd}); "
                       + $"re-placing for {shortfall} share(s).");
+    }
+
+    /// <summary>
+    /// How many shares the native stop resting for TODAY should cover, when it currently covers more
+    /// than is actually held — a manual sell at the broker's own client, a partial exit executed
+    /// outside this system, anything that shrank custody after the stop went in. Null means leave it
+    /// alone.
+    ///
+    /// <para>
+    /// <see cref="DecidePlacement"/> already caps a NEW placement at <c>Min(DesiredQuantity, held)</c>,
+    /// but it only ever ADDS coverage — a session's <c>shortfall</c> going negative just reads as
+    /// "already placed" and stops there, leaving an oversized order resting with nothing said about
+    /// it. This function is the other half: it says whether the resting order itself is now wrong AND
+    /// what it should be, so <see cref="ProtectiveStopWorker"/> can correct it the same way a
+    /// break-even or ATR raise already gets corrected — a same-price successor sized to what remains,
+    /// cancelled into and placed via <see cref="DecideSupersede"/>'s make-before-break sequencing. It
+    /// returns the ceiling rather than a bool specifically so the caller cannot compute a different
+    /// one from the same inputs.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>The case this must refuse.</b> A stop of ours that TRIGGERED and part-filled looks identical to
+    /// an external sell from custody alone: hold 100 with a stop resting for 100, 60 fill, and custody
+    /// reads 40 against a <see cref="ProtectiveStop.PlacedQuantity"/> of 100. Nothing is oversized — the
+    /// venue already reduced the order — and "correcting" it would cancel the remainder of a stop that is
+    /// actively executing, in exactly the market this stop exists for.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>They are told apart by the book's own QUANTITY, not by presence.</b> An earlier version of this
+    /// compared presence alone, on the documented basis that an armed stop appeared in no broker read —
+    /// which was measured wrong. CONFIRMED 2026-09-01: an armed <c>SLO</c> is listed with status
+    /// <c>APT</c> and commits its full quantity as <c>PENDING SELL</c>. Presence therefore proves nothing
+    /// and that version would simply never have shrunk anything. What the book still gives is the
+    /// quantity the venue currently holds against this order, and comparing custody to THAT is the
+    /// question actually being asked: 40 held against a book showing 100 is oversized; 40 held against a
+    /// book showing 40 is a part-filled stop that the venue has already resized.
+    /// </para>
+    ///
+    /// <para>
+    /// That reasoning depends on the book reporting a part-filled order's REMAINING quantity rather than
+    /// its original, and CONFIRMED 2026-09-01 it does: a SELECT order for 83 with 51 filled showed 32 in
+    /// the outstanding book, 32 as <c>PENDING SELL</c>, and 32 held. All three agree while nothing is
+    /// oversized, which is precisely the case this has to refuse. See
+    /// <c>docs/ahl-tradecast-protocol.md</c>.
+    /// </para>
+    ///
+    /// <para>
+    /// Unknown is never zero. An unreadable holding answers null, exactly as it answers Skip in
+    /// <see cref="DecidePlacement"/>; so does an unreadable outstanding book, and so does a book with a
+    /// row for this symbol that cannot be attributed. An oversized stop is a known, bounded risk;
+    /// cancelling one on a guess is not.
+    /// </para>
+    /// </summary>
+    /// <param name="supersedeInFlight">
+    /// Whether this row is a successor whose PREDECESSOR is still open. Not simply "this row has a
+    /// <see cref="ProtectiveStop.SupersedesStopId"/>": that field is set by every raise and is never
+    /// cleared afterwards, so testing it would permanently exempt every stop that has ever been lifted
+    /// to break-even or trailed on ATR — which is the normal state of a managed position, and would make
+    /// this whole path fire almost nowhere.
+    /// </param>
+    public static int? ShrinkTo(
+        ProtectiveStop stop,
+        decimal? heldQuantity,
+        IReadOnlyList<RestingOrder>? resting,
+        bool supersedeInFlight,
+        DateOnly today)
+    {
+        if (stop.State != "active" || supersedeInFlight) return null;
+
+        // Nothing resting for today means there is nothing sized wrong to correct — the ordinary
+        // DecidePlacement path handles a fresh placement or a session rollover on its own.
+        if (stop.LastPlacedSessionDate != today || stop.PlacedQuantity <= 0) return null;
+
+        if (heldQuantity is not { } held) return null;
+
+        // A position gone to zero is DecidePlacement's Close, not a shrink — there is nothing left to
+        // resize down to.
+        if (held <= 0) return null;
+
+        if (resting is null) return null;
+
+        var mine = FindOwnResting(stop, resting);
+        if (mine.Ambiguous) return null;
+
+        // What the venue currently holds against this stop. Its own row when the book lists it, and
+        // otherwise what we placed — a stop the book does not show has not been reduced by anything we
+        // can see, so the placed quantity is the only figure available.
+        var committed = mine.Order?.Quantity ?? stop.PlacedQuantity;
+        if (committed <= 0) return null;
+
+        var ceiling = Math.Min(stop.DesiredQuantity, (int)Math.Floor(held));
+        return committed > ceiling ? ceiling : null;
     }
 
     /// <summary>
