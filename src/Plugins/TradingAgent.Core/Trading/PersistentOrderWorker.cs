@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Hosting;
+﻿using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using TradingAgent.Broker;
@@ -30,6 +30,21 @@ public sealed record PersistentOrderResolveResult(
     bool Found,
     bool Applied,
     string State,
+    string Message);
+
+/// <summary>
+/// What the broker is resting for one intent's symbol, split by whether this ledger can name it.
+/// </summary>
+/// <param name="Ours">Resting orders a placement row already claims.</param>
+/// <param name="Unclaimed">
+/// Resting orders matching this intent that NO placement claims. A candidate, never a conclusion —
+/// shape is not identity, so these are shown to a person rather than acted on.
+/// </param>
+public sealed record PersistentOrderBrokerView(
+    bool Read,
+    string State,
+    IReadOnlyList<BrokerWorkingOrder> Ours,
+    IReadOnlyList<BrokerWorkingOrder> Unclaimed,
     string Message);
 
 /// <summary>
@@ -559,10 +574,16 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
 
         if (intent.State == "placing")
         {
+            // The order may well have reached the broker — this state means we stopped before learning.
+            // Try to find it before falling back to "a human must check", because the fallback used to
+            // be permanent: nothing else in this worker ever looks for an order it cannot name.
+            if (await TryAdoptOrphanAsync(intent, placements, snapshot, ct)) return;
+
             await _repository.SetPersistentOrderProgressAsync(intent.IntentId,
                 intent.FilledQuantity, "attention",
                 "A placement was claimed but no result was recorded, usually because the process "
-                + "stopped during submission. Verify the broker manually before resuming.", ct);
+                + "stopped during submission. "
+                + DescribeOrphanSearch(intent, placements, snapshot, submissionUnaccountedFor: true), ct);
             return;
         }
 
@@ -570,6 +591,27 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
         {
             if (ownOpen.Count == 0)
             {
+                // "No order remains" is a claim about the BROKER, and ownOpen only knows the numbers this
+                // ledger managed to write down. Measured 2026-09-01: a cancel was refused because the one
+                // recorded number was stale, and this branch then reported the intent "cancelled; no
+                // native order remains outstanding" while a 50-share SELL went on resting at the venue
+                // and blocking every further sell. An unrecorded order is not an absent order — the
+                // unknown-is-never-zero rule, applied to our own bookkeeping.
+                if (await TryAdoptOrphanAsync(intent, placements, snapshot, ct)) return;
+
+                var unclaimed = PersistentOrderDecisions.FindUnclaimedBrokerOrders(
+                    intent, placements, snapshot);
+                if (unclaimed.Count > 0)
+                {
+                    await _repository.SetPersistentOrderProgressAsync(intent.IntentId,
+                        intent.FilledQuantity, "attention",
+                        $"Not marked {(intent.State == "cancelling" ? "cancelled" : "expired")}: no "
+                        + "order of ours could be named, but the broker is still resting "
+                        + $"{DescribeCandidates(unclaimed)} on {intent.Symbol}. Cancel the right one by "
+                        + "its number, or confirm it is not this order's.", ct);
+                    return;
+                }
+
                 var terminal = intent.State == "cancelling" ? "cancelled" : "expired";
                 await _repository.SetPersistentOrderProgressAsync(intent.IntentId,
                     intent.FilledQuantity, terminal,
@@ -836,6 +878,227 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
                 : $"{intent.Symbol}: persistent order not placed",
             reason);
         return new(accepted, intent, execution, reason);
+    }
+
+    /// <summary>
+    /// Writes an unaccounted-for broker order onto this intent when the evidence identifies exactly one.
+    ///
+    /// <para>
+    /// The argument has two halves and BOTH are required. First, this intent is known to have sent
+    /// something whose outcome was never recorded
+    /// (<see cref="PersistentOrderDecisions.HasUnaccountedSubmission"/>) — so an order of ours is missing,
+    /// not merely imaginable. Second, exactly one resting order matches its shape and is claimed by no
+    /// placement row. One unexplained submission and one unexplained order is an identification; either
+    /// alone is a guess.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Two candidates are never resolved by picking one.</b> The caller reports them and stops. This
+    /// is the same refusal as <c>BrokerChargeKey.Resolve</c> and <c>ProtectiveStopDecisions</c>'
+    /// ambiguity handling, for the same reason: acting on the wrong order number cancels somebody else's
+    /// order, and that is not recoverable by retrying.
+    /// </para>
+    ///
+    /// <para>
+    /// What it writes is a placement row in the ordinary shape, so cancel, expiry and reconciliation all
+    /// start working on this intent again with no special cases. The row's message records that the
+    /// number was matched by shape rather than reported by the broker, because that distinction is the
+    /// difference between a measurement and an inference and must survive into the audit trail.
+    /// </para>
+    /// </summary>
+    private async Task<bool> TryAdoptOrphanAsync(
+        PersistentOrderIntent intent,
+        IReadOnlyList<PersistentOrderPlacement> placements,
+        BrokerReconciliationSnapshot snapshot,
+        CancellationToken ct)
+    {
+        var today = DateOnly.FromDateTime(_calendar.GetStatus().PktNow);
+        if (PersistentOrderDecisions.PlanAdoption(intent, placements, snapshot, today)
+            is not { } adoption)
+            return false;
+
+        // Recorded through the ordinary path so the intent's own state moves with it. The write requires
+        // the intent to be in a claimable state, so a concurrent change simply leaves the intent as it
+        // was and another pass tries again — the safe outcome.
+        await _repository.RecordPersistentOrderPlacementAsync(
+            adoption.Placement, "resting", adoption.Reason, ct);
+
+        _activity?.Warn("Orders", $"{intent.Symbol}: adopted unrecorded broker order", adoption.Reason);
+        return true;
+    }
+
+    private static string DescribeCandidates(IReadOnlyList<BrokerWorkingOrder> candidates) =>
+        string.Join(", ", candidates.Select(order =>
+            $"#{order.OrderNo} ({order.Side} {order.RemainingQuantity?.ToString() ?? "?"}"
+            + $"{(order.Price is { } price ? $" @ {price}" : "")})"));
+
+    /// <summary>
+    /// Describes the search for an order this intent cannot name.
+    ///
+    /// <para>
+    /// <b>Only meaningful when something IS unaccounted for.</b> The zero-candidate wording says the
+    /// submission never arrived, which is a real and useful conclusion for an intent stuck in
+    /// <c>placing</c> — and nonsense for a healthy one, where finding no ORPHAN is the normal, good
+    /// answer. Reported 2026-09-01: a resting, fully recorded SYS order was told "the submission most
+    /// likely never arrived" directly above the line naming the order that was resting. So the caller
+    /// states which question it is asking rather than letting this guess.
+    /// </para>
+    /// </summary>
+    private static string DescribeOrphanSearch(
+        PersistentOrderIntent intent,
+        IReadOnlyList<PersistentOrderPlacement> placements,
+        BrokerReconciliationSnapshot snapshot,
+        bool submissionUnaccountedFor)
+    {
+        var unclaimed = PersistentOrderDecisions.FindUnclaimedBrokerOrders(
+            intent, placements, snapshot);
+        return unclaimed.Count switch
+        {
+            0 when submissionUnaccountedFor =>
+                $"No unaccounted-for {intent.Symbol} order is resting at the broker, so the submission "
+                + "most likely never arrived. Verify the broker before resuming.",
+            0 => $"Nothing unexpected: every {intent.Symbol} order at the broker is accounted for by this "
+                 + "order's own records.",
+            1 when submissionUnaccountedFor =>
+                $"One possible match is resting ({DescribeCandidates(unclaimed)}) but it could not be "
+                + "adopted automatically. Check it and cancel by number if it is this order's.",
+            1 => $"One {intent.Symbol} order is resting that this order's records do not mention "
+                 + $"({DescribeCandidates(unclaimed)}). It may belong to something else entirely — check "
+                 + "the broker before cancelling it.",
+            _ => $"More than one {intent.Symbol} order matches ({DescribeCandidates(unclaimed)}), so "
+                 + "which one belongs to this intent cannot be decided here. Cancel the right one by its "
+                 + "number."
+        };
+    }
+
+    /// <summary>
+    /// What the broker is actually resting for this intent's symbol, split into what the ledger can name
+    /// and what it cannot. Read-only, and the operator-facing half of the orphan problem: where the
+    /// evidence cannot identify an order, the honest move is to show it and let a person decide rather
+    /// than cancel something we cannot prove is ours.
+    /// </summary>
+    public async Task<PersistentOrderBrokerView> InspectBrokerOrdersAsync(
+        string intentId, CancellationToken ct = default)
+    {
+        var intent = await _repository.GetPersistentOrderAsync(intentId, ct);
+        if (intent is null)
+            return new(false, "missing", [], [], "Persistent order was not found.");
+
+        var snapshot = await _brokerStateReader.ReadSnapshotAsync(ct);
+        _reconciliation.Update(snapshot);
+        if (!snapshot.Supported || !snapshot.Healthy)
+            return new(false, intent.State, [], [],
+                "The broker's order book could not be read, so nothing is being reported as absent: "
+                + snapshot.Reason);
+
+        var placements = await _repository.GetPersistentOrderPlacementsAsync(intentId, ct);
+        var claimed = placements
+            .Select(placement => placement.BrokerOrderNo?.Trim())
+            .Where(number => !string.IsNullOrWhiteSpace(number))
+            .Select(number => number!)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var ours = snapshot.OpenOrders
+            .Where(order => claimed.Contains(order.OrderNo.Trim()))
+            .ToList();
+        var unclaimed = PersistentOrderDecisions.FindUnclaimedBrokerOrders(intent, placements, snapshot);
+
+        return new(true, intent.State, ours, unclaimed,
+            ours.Count == 0 && unclaimed.Count == 0
+                ? $"Nothing is resting at the broker for {intent.Symbol}."
+                : DescribeOrphanSearch(intent, placements, snapshot,
+                    PersistentOrderDecisions.HasUnaccountedSubmission(intent, placements)));
+    }
+
+    /// <summary>
+    /// Cancels ONE broker order by number on the operator's instruction, then records it against this
+    /// intent so the two stop disagreeing.
+    ///
+    /// <para>
+    /// The number comes from a person who has looked at the broker's own book, which is the one source
+    /// this system cannot second-guess. It is still checked against that book first: an order that is not
+    /// resting, or is for a different symbol or side, is refused rather than sent — a mistyped number
+    /// must not cancel an unrelated position (CLAUDE.md §6a: never match by number alone).
+    /// </para>
+    /// </summary>
+    public async Task<(bool Applied, string State, string Message)> CancelBrokerOrderAsync(
+        string intentId, string orderNo, string approvedBy, CancellationToken ct = default)
+    {
+        orderNo = (orderNo ?? "").Trim();
+        if (orderNo.Length == 0) return (false, "invalid", "No broker order number was supplied.");
+
+        await _runGate.WaitAsync(ct);
+        try
+        {
+            var intent = await _repository.GetPersistentOrderAsync(intentId, ct);
+            if (intent is null) return (false, "missing", "Persistent order was not found.");
+
+            var snapshot = await _brokerStateReader.ReadSnapshotAsync(ct);
+            _reconciliation.Update(snapshot);
+            if (!snapshot.Supported || !snapshot.Healthy)
+                return (false, intent.State,
+                    "The broker's order book could not be read, so the order was not cancelled: "
+                    + snapshot.Reason);
+
+            var target = snapshot.OpenOrders.FirstOrDefault(order =>
+                string.Equals(order.OrderNo.Trim(), orderNo, StringComparison.OrdinalIgnoreCase));
+            if (target is null)
+                return (false, intent.State,
+                    $"No order #{orderNo} is resting at the broker, so nothing was cancelled. Refresh "
+                    + "the broker view — it may already be gone.");
+
+            if (!string.Equals(target.Symbol.Trim(), intent.Symbol.Trim(),
+                    StringComparison.OrdinalIgnoreCase))
+                return (false, intent.State,
+                    $"Order #{orderNo} is for {target.Symbol}, but this intent is for {intent.Symbol}. "
+                    + "Refusing to cancel an order on a different symbol.");
+
+            var cancelled = await _cancellations.CancelExactAsync(orderNo, ct);
+            if (!cancelled.Gone)
+                return (false, intent.State,
+                    $"The broker did not confirm order #{orderNo} as gone: {cancelled.Message}");
+
+            var reason =
+                $"Operator {approvedBy} cancelled broker order #{orderNo} ({target.Side} "
+                + $"{target.RemainingQuantity?.ToString() ?? "?"} {target.Symbol}) by number, after "
+                + "checking the broker's own book. Confirmed gone.";
+
+            var placements = await _repository.GetPersistentOrderPlacementsAsync(intentId, ct);
+            var alreadyKnown = placements.Any(placement =>
+                string.Equals(placement.BrokerOrderNo?.Trim(), orderNo, StringComparison.OrdinalIgnoreCase));
+            if (!alreadyKnown)
+            {
+                // Record it even though it is now cancelled: the audit trail should show that this order
+                // belonged to this intent, and the number must never be searched for again as an orphan.
+                await _repository.RecordPersistentOrderPlacementAsync(
+                    new PersistentOrderPlacement
+                    {
+                        PlacementId = Guid.NewGuid().ToString("N"),
+                        IntentId = intentId,
+                        SessionDate = intent.LastAttemptSessionDate
+                                      ?? DateOnly.FromDateTime(_calendar.GetStatus().PktNow),
+                        Attempt = Math.Max(1, intent.AttemptCount),
+                        Quantity = target.RemainingQuantity is { } remaining && remaining > 0
+                            ? (int)Math.Min(remaining, intent.Quantity)
+                            : intent.RemainingQuantity,
+                        BrokerOrderNo = orderNo,
+                        State = "cancelled",
+                        RequestedPrice = intent.Price,
+                        SubmittedPrice = target.Price,
+                        Message = reason
+                    },
+                    intent.State, reason, ct);
+            }
+
+            _activity?.Info("Orders", $"{intent.Symbol}: broker order #{orderNo} cancelled by operator",
+                reason);
+            var saved = await _repository.GetPersistentOrderAsync(intentId, ct) ?? intent;
+            return (true, saved.State, reason);
+        }
+        finally
+        {
+            _runGate.Release();
+        }
     }
 
     public static string BuildSource(string intentId, DateOnly sessionDate, int attempt) =>
