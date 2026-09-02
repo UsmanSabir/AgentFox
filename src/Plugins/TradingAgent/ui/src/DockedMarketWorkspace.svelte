@@ -521,6 +521,12 @@
     border: 0;
     border-radius: 0;
   }
+  /* ChartPane is a vertical flex card with a deliberately tall canvas and supporting analysis below.
+     Let it grow beyond the Dockview viewport so the panel scrolls; forcing an exact 100% height makes
+     flexbox shrink the canvas until the candles look like a flat line. */
+  .dock-shell :global(.panel-host[data-panel='chart'] > .chart-card) {
+    height: auto;
+  }
   .dock-shell :global(.panel-host[data-panel='watchlist'] > .watchlist) {
     contain: size;
   }

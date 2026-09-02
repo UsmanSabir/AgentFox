@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Chart sizing fixture</title>
+    <style>
+      html, body, #app { margin: 0; min-height: 100%; background: #0b0c10; }
+      #app { padding: 12px; box-sizing: border-box; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module">
+      import { mount } from 'svelte';
+      import './src/app.css';
+      import DockedMarketWorkspace from './src/DockedMarketWorkspace.svelte';
+
+      const now = Math.floor(Date.now() / 1000);
+      const candles = Array.from({ length: 80 }, (_, index) => {
+        const trend = index * 0.12;
+        const wave = Math.sin(index / 4) * 5.5;
+        const open = 640 + trend + wave;
+        const close = open + Math.sin(index * 1.7) * 2.8;
+        return {
+          time: now - (79 - index) * 86400,
+          date: new Date((now - (79 - index) * 86400) * 1000).toISOString().slice(0, 10),
+          open,
+          high: Math.max(open, close) + 2.1,
+          low: Math.min(open, close) - 2.2,
+          close,
+          volume: 220000 + index * 2300,
+          isLive: index === 79,
+          sma20: index < 19 ? null : 640 + trend,
+          sma50: index < 49 ? null : 639 + trend * 0.8,
+          rsi14: index < 13 ? null : 48 + Math.sin(index / 5) * 13
+        };
+      });
+      const last = candles.at(-1);
+      const watchlist = {
+        entries: [{
+          symbol: 'MARI', companyName: 'Mari Energies Limited', dayChangePercent: -0.57,
+          addedUtc: new Date().toISOString(), source: 'seed', sortOrder: 0, pinned: true,
+          alertsEnabled: true, notes: null, tradable: true, autoTradeEnabled: false,
+          manualOnly: true, manualOnlyLocked: false, archivedBars: 80,
+          hasWeeklyHistory: true, openAlerts: 6
+        }],
+        configuredListChanged: false, executionUniverseSource: 'AllowedSymbols',
+        tradableSymbols: 1, maxSymbols: 200, configuredManualOnly: []
+      };
+      const chart = {
+        symbol: 'MARI', interval: '1D', tradable: true, barsAnalyzed: 80,
+        sessionsAvailable: 80, historyBuilding: false, archivedBars: 80, usesLiveBar: true,
+        thresholds: { rsiOversold: 35, rsiOverbought: 70 }, candles,
+        levels: {
+          supports: [{ price: 642, touches: 3, origin: 'swing low', weeklyConfirmed: true, distancePercent: -1.1 }],
+          resistances: [{ price: 658, touches: 2, origin: 'swing high', weeklyConfirmed: true, distancePercent: 1.2 }]
+        },
+        overlays: { levels: [], series: [], markers: [], bands: [] },
+        plan: { entry: 648, stop: 640, target: 660, rewardRisk: 1.5, entryWeeklyConfirmed: true },
+        snapshot: {
+          close: last.close, asOf: new Date().toISOString(), dayChangePercent: -0.57,
+          zone: 'AtSupport', setup: 'pulling back', trend: 'price > SMA20 > SMA50',
+          rsi14: last.rsi14, atr14: 11.5, atrPercent: 1.74, sma20: last.sma20,
+          sma50: last.sma50, volume: last.volume, averageVolume: 310000, volumeRatio: 0.82,
+          rangeLow: 635, rangeHigh: 665, rangePosition: 0.55, nearestSupport: 642,
+          percentAboveSupport: 1.1, nearestResistance: 658, percentBelowResistance: 1.2,
+          reasons: ['Price is holding above weekly support.', 'Momentum remains neutral.']
+        },
+        weekly: {
+          bars: 24, alignment: 'Mixed', breakdown: false, entryLevelConfirmed: true,
+          zone: 'AtSupport', setup: 'pullback', nearestSupport: 642,
+          nearestResistance: 658, notes: []
+        },
+        retrievedAtUtc: new Date().toISOString(), warnings: []
+      };
+      window.fetch = async (input) => {
+        const url = String(input);
+        if (url.includes('/trading/watchlist')) return Response.json(watchlist);
+        if (url.includes('/trading/candle-archive')) return Response.json({});
+        if (url.includes('/trading/candles')) return Response.json(chart);
+        return new Response('Not found', { status: 404 });
+      };
+
+      mount(DockedMarketWorkspace, {
+        target: document.getElementById('app'),
+        props: { selectedSymbol: 'MARI', selectedCompany: 'Mari Energies Limited' }
+      });
+    </script>
+  </body>
+</html>
