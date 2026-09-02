@@ -218,11 +218,13 @@
     if (target?.matches('input, textarea, select, [contenteditable="true"]')) return;
     if (!(event.ctrlKey || event.metaKey) || !event.shiftKey || event.altKey) return;
 
-    const shortcut = event.key.toLowerCase();
-    if (shortcut === '0') resetView();
-    else if (shortcut === '1') focusPanel('watchlist');
-    else if (shortcut === '2') focusPanel('chart');
-    else if (shortcut === '3' && symbolExtension?.plan) focusPanel('plan');
+    // With Shift held, `event.key` is punctuation on most layouts (`!`, `@`, `#`, `)`). The
+    // physical code remains Digit1/Digit2/Digit3/Digit0 and is therefore the reliable shortcut.
+    const shortcut = event.code;
+    if (shortcut === 'Digit0' || shortcut === 'Numpad0') resetView();
+    else if (shortcut === 'Digit1' || shortcut === 'Numpad1') focusPanel('watchlist');
+    else if (shortcut === 'Digit2' || shortcut === 'Numpad2') focusPanel('chart');
+    else if ((shortcut === 'Digit3' || shortcut === 'Numpad3') && symbolExtension?.plan) focusPanel('plan');
     else return;
     event.preventDefault();
   }
