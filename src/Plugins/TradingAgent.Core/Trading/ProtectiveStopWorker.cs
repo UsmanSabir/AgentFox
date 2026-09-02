@@ -309,6 +309,23 @@ public sealed class ProtectiveStopWorker
         // unprotected every morning while reporting them protected.
         var snapshot = await ReadAccountSnapshotAsync();
 
+        // Publish this read so the baseline path reuses it instead of taking its own.
+        //
+        // One snapshot is FIVE SOAP calls on the account's single session (GetOutstandingLog,
+        // GetDailyActivityLog, GetTradeLog, GetPortfolioSummary, GetExposureDynamic). This pass has
+        // just paid for one, and SnapshotForBaselineAsync kept a separate cache that this read never
+        // filled — so a pass that went on to arm or raise a stop immediately bought a SECOND identical
+        // snapshot, five more calls, seconds after the first.
+        //
+        // This is not the same as deciding on stale data. The baseline path already accepts a reading
+        // up to HoldingsReuseWindow old; what it gets here is younger than that and is the very
+        // snapshot this pass is deciding from, so the two can no longer disagree with each other.
+        if (snapshot is { Healthy: true })
+        {
+            _recentSnapshot = snapshot;
+            _recentSnapshotUtc = DateTime.UtcNow;
+        }
+
         // Unknown is never zero: a snapshot that is not fully healthy could mean holdings specifically
         // failed to read, and an empty Positions list from THAT would look identical to "you hold
         // nothing" — which would close a stop still protecting a real position. So an unhealthy snapshot
