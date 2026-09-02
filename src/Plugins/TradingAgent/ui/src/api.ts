@@ -804,8 +804,9 @@ export interface AttachStopRequest {
 }
 
 /**
- * Editable values used to pre-fill the arm-order dialog from a chart level or an alert. Unlike the
- * API request, quantity is intentionally absent because the user must always choose it explicitly.
+ * Editable values used to pre-fill the arm-order dialog from a chart level or an alert. Quantity is
+ * intentionally absent: SELL stop-loss orders derive a safe default from current custody, while all
+ * other orders still ask the operator to choose a size in the dialog.
  */
 export interface ArmOrderDialogContext {
   symbol: string;

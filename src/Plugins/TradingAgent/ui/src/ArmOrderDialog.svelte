@@ -3,7 +3,7 @@
   import {
     trading, TRIGGER_KINDS, ALERT_KINDS, PERCENT_PRESETS,
     isPercentTrigger, percentTriggerLevel,
-    type ArmOrderRequest, type TriggerKind
+    type ArmOrderRequest, type TriggerKind, type BrokerAccountSnapshot
   } from './api';
   import { Crosshair, X, AlertTriangle, Zap } from 'lucide-svelte';
 
@@ -51,6 +51,11 @@
   let note = '';
   let busy = false;
   let error: string | null = null;
+  let holdingBusy = false;
+  let holdingError: string | null = null;
+  let availableShares: number | null = null;
+  let quantityWasEdited = false;
+  let autoSizeKey: string | null = null;
   let result: {
     willFireUnattended: boolean;
     note: string;
@@ -69,20 +74,29 @@
 
   onMount(() => dialogElement.focus());
 
-  function closeOnBackdrop(event: MouseEvent) {
-    if (event.target === event.currentTarget) dispatch('close');
-  }
-
-  function closeOnEscape(event: KeyboardEvent) {
-    if (event.key === 'Escape') dispatch('close');
-  }
-
   $: isEvent = triggerKind === 'Event';
   $: isPercent = isPercentTrigger(triggerKind);
   $: isStop = orderType === 'STOPLOSS';
   $: persistable = orderType !== 'MARKET';
   $: if (!persistable) persistentUntilFilled = false;
   $: fallsToTrigger = triggerKind === 'PriceBelow' || triggerKind === 'PercentDrop';
+
+  // A protective SELL normally means "cover what I can sell". Read both custody and the working
+  // order book so the default excludes shares already committed elsewhere. Unknown stays unknown.
+  $: requestedAutoSizeKey = action === 'SELL' && isStop
+    ? symbol.trim().toUpperCase()
+    : null;
+  $: if (requestedAutoSizeKey !== autoSizeKey) {
+    autoSizeKey = requestedAutoSizeKey;
+    if (requestedAutoSizeKey) {
+      quantity = null;
+      quantityWasEdited = false;
+      void loadAvailableShares(requestedAutoSizeKey);
+    } else {
+      availableShares = null;
+      holdingError = null;
+    }
+  }
 
   // Picking the percent kind without a size of move would leave the level blank; 3% is a starting
   // point to change, not a recommendation.
@@ -119,6 +133,8 @@
   }
 
   $: estimatedValue = (quantity ?? 0) * (price ?? level ?? 0);
+  $: sellExceedsAvailable = requestedAutoSizeKey != null && availableShares != null
+    && quantity != null && quantity > availableShares;
 
   // A stop only makes sense on a BUY — it protects the position this entry creates.
   $: canAttachStop = action === 'BUY';
@@ -152,6 +168,49 @@
     : null;
 
   const money = (v: number) => v.toLocaleString(undefined, { maximumFractionDigits: 2 });
+
+  const sameSymbol = (candidate: string | null | undefined, ticker: string) =>
+    candidate?.trim().toUpperCase() === ticker;
+
+  function availableToSell(snapshot: BrokerAccountSnapshot, ticker: string): number | null {
+    if (!snapshot.holdingsAvailable || !snapshot.ordersAvailable) return null;
+    const holdings = snapshot.holdings.filter(
+      holding => sameSymbol(holding.symbol ?? holding.instrumentId, ticker));
+    const sellOrders = snapshot.orders.filter(order =>
+      sameSymbol(order.symbol ?? order.instrumentId, ticker)
+      && (order.side?.toUpperCase() === 'SELL' || order.side?.toUpperCase() === 'SEL'));
+    if (holdings.some(holding => holding.quantity == null)
+        || sellOrders.some(order => order.remainingQuantity == null)) return null;
+    const held = holdings.reduce((sum, holding) => sum + Math.max(0, holding.quantity ?? 0), 0);
+    const committed = sellOrders.reduce(
+      (sum, order) => sum + Math.max(0, order.remainingQuantity ?? 0), 0);
+    return Math.floor(Math.max(0, held - committed));
+  }
+
+  async function loadAvailableShares(ticker: string) {
+    if (holdingBusy) return;
+    holdingBusy = true;
+    holdingError = null;
+    availableShares = null;
+    try {
+      const snapshot = await trading.account();
+      if (requestedAutoSizeKey !== ticker) return;
+      const available = availableToSell(snapshot, ticker);
+      availableShares = available;
+      if (available == null) {
+        holdingError = 'Holdings or working SELL orders are unavailable, so the quantity could not be filled safely.';
+      } else if (available <= 0) {
+        holdingError = `No uncommitted ${ticker} shares are available to protect.`;
+      } else if (!quantityWasEdited) {
+        quantity = available;
+      }
+    } catch (e) {
+      if (requestedAutoSizeKey === ticker)
+        holdingError = `Could not read available shares: ${e instanceof Error ? e.message : String(e)}`;
+    } finally {
+      holdingBusy = false;
+    }
+  }
 
   /**
    * The whole order as one sentence, rebuilt as the form is edited.
@@ -188,7 +247,9 @@
     if (busy) return;
     error = null;
 
-    if (!quantity || quantity <= 0) { error = 'Quantity must be a positive number.'; return; }
+    if (!quantity || quantity <= 0 || !Number.isInteger(quantity)) {
+      error = 'Quantity must be a positive whole number of shares.'; return;
+    }
     if (isEvent && !triggerAlertKind) { error = 'Choose the event to trigger on.'; return; }
     if (isPercent) {
       if (!(triggerPercent && triggerPercent > 0 && triggerPercent <= 50)) {
@@ -241,7 +302,9 @@
   }
 </script>
 
-<div class="backdrop" on:click={closeOnBackdrop} role="presentation">
+<!-- An order draft must survive stray backdrop clicks and Escape presses. Close, Cancel and Done are
+     the deliberate dismissal paths, consistent with the general New Order dialog. -->
+<div class="backdrop" role="presentation">
   <div
     class="dialog"
     bind:this={dialogElement}
@@ -249,11 +312,10 @@
     aria-modal="true"
     aria-label="Arm an order"
     tabindex="-1"
-    on:keydown={closeOnEscape}
   >
     <header>
       <div class="title"><Crosshair size={15} /> <b>Arm an order</b> <span>{symbol}</span></div>
-      <button class="icon" on:click={() => dispatch('close')} aria-label="Close"><X size={14} /></button>
+      <button class="icon" on:click={() => dispatch('close')} aria-label="Close" disabled={busy}><X size={14} /></button>
     </header>
 
     {#if context}<p class="context">{context}</p>{/if}
@@ -383,7 +445,8 @@
 
         <label>
           <span>Quantity</span>
-          <input type="number" min="1" bind:value={quantity} placeholder="shares" />
+          <input type="number" min="1" step="1" bind:value={quantity} placeholder="shares"
+                 on:input={() => quantityWasEdited = true} />
         </label>
 
         <label>
@@ -414,6 +477,27 @@
           <input type="number" min="1" max="365" bind:value={expiresInDays} />
         </label>
       </div>
+
+      {#if requestedAutoSizeKey}
+        <p class="holding-status" class:warn={holdingError != null} aria-live="polite">
+          {#if holdingBusy}
+            Reading holdings and working SELL orders…
+          {:else if holdingError}
+            <AlertTriangle size={12} /> {holdingError} Enter a quantity after checking the broker.
+          {:else if availableShares != null}
+            All <b>{availableShares.toLocaleString()} available shares</b> are selected by default;
+            working SELL orders are already excluded.
+          {/if}
+        </p>
+      {/if}
+
+      {#if sellExceedsAvailable}
+        <p class="holding-status warn">
+          <AlertTriangle size={12} /> You entered {quantity?.toLocaleString()} shares, but only
+          {availableShares?.toLocaleString()} are currently uncommitted. The broker will check again
+          when the order fires.
+        </p>
+      {/if}
 
       {#if persistable}
         <label class="check persist">
@@ -538,8 +622,9 @@
   .title { display: flex; align-items: center; gap: .45rem; color: var(--primary); }
   .title b { color: var(--text); font-size: .9rem; }
   .title span { color: var(--text-2); font-family: ui-monospace, monospace; font-size: .82rem; }
-  .icon { background: none; border: 0; color: var(--text-3); cursor: pointer; padding: .25rem; }
+  .icon { background: none; border: 0; color: var(--text-3); cursor: pointer; padding: .45rem; border-radius: var(--radius-sm); }
   .icon:hover { color: var(--text); }
+  .icon:disabled { opacity: .5; cursor: wait; }
 
   .context { margin: 0; color: var(--text-2); font-size: .74rem; background: var(--surface-2);
              padding: .45rem .6rem; border-radius: var(--radius-sm); line-height: 1.5; }
@@ -552,10 +637,16 @@
     background: var(--surface-2); border: 1px solid var(--border-md); border-radius: var(--radius-sm);
     padding: .4rem .5rem; color: var(--text); font: inherit; font-size: .8rem; width: 100%;
   }
-  input:focus, select:focus { outline: none; border-color: var(--primary); }
+  input:focus-visible, select:focus-visible, button:focus-visible {
+    outline: 2px solid var(--primary); outline-offset: 2px; border-color: var(--primary);
+  }
 
   .estimate { margin: 0; color: var(--text-2); font-size: .74rem; }
   .estimate b { color: var(--text); }
+  .holding-status { margin: 0; color: var(--text-2); font-size: .72rem; line-height: 1.5;
+                    display: flex; align-items: flex-start; gap: .35rem; }
+  .holding-status.warn { color: var(--warning); }
+  .holding-status b { color: var(--text); }
 
   /* The trigger gets its own framed block: it is a different question from the order, and the
      percent controls need room to read as one row rather than as three unrelated fields. */
