@@ -31,7 +31,9 @@
       </span>
     {/if}
     {#if view.quote && view.freshness !== 'live'}
-      <small>{view.freshness === 'closed' ? 'close' : 'stale'}</small>
+      <!-- Pre-open is not "close": the price is the last trade, but the venue is live and taking
+           orders. Labelling it "close" reads as a market that has finished for the day. -->
+      <small>{view.freshness === 'stale' ? 'stale' : view.phase === 'PreOpen' ? 'pre-open' : 'close'}</small>
     {/if}
   </span>
 {/if}

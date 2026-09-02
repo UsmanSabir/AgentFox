@@ -2,6 +2,16 @@ import { getContext, setContext } from 'svelte';
 import { writable, type Readable, type Writable } from 'svelte/store';
 
 export type LivePriceFreshness = 'live' | 'stale' | 'closed' | 'unknown';
+
+/**
+ * What the venue itself says it is doing, when a provider reports it. Distinct from `marketOpen`,
+ * which collapses this to the one question a price display needs answering: should the tape be
+ * moving? Pre-open accepts orders without matching any, so it is NOT open by that measure even
+ * though an order placed then is perfectly valid.
+ *
+ * 'unknown' means no provider reading was served and `marketOpen` came from the trading calendar.
+ */
+export type VenuePhase = 'Trading' | 'PreOpen' | 'Closed' | 'Unknown';
 export type LivePriceConnectionState =
   | 'unavailable'
   | 'connecting'
@@ -35,11 +45,20 @@ export interface LivePriceEnvelope {
   feedReason: string;
   staleAfterSeconds: number;
   quotes: LivePrice[];
+  /** Absent from providers that cannot read the venue; treated as 'Unknown'. */
+  venuePhase?: VenuePhase;
+  /** The provider's raw state token, for a tooltip. Never parsed here. */
+  venueState?: string | null;
 }
 
 export interface LivePriceView {
   quote: LivePrice | null;
   freshness: LivePriceFreshness;
+  /**
+   * Carried on the view rather than read separately so `livePriceLabel` stays a pure function of
+   * one argument. It is one page-wide fact copied onto every view, not a per-symbol reading.
+   */
+  phase: VenuePhase;
 }
 
 export interface LivePriceConnection {
@@ -47,6 +66,10 @@ export interface LivePriceConnection {
   reason: string | null;
   feedState: string | null;
   lastMessageAtUtc: string | null;
+  /** The venue's own phase, when the provider reports one. */
+  venuePhase: VenuePhase;
+  /** Its raw token, for a tooltip. */
+  venueState: string | null;
 }
 
 const CONTEXT_KEY = Symbol('trading-live-prices');
@@ -70,10 +93,12 @@ export class LivePriceBook {
   private readonly stores = new Map<string, Writable<LivePriceView>>();
   private readonly pending = new Map<string, LivePrice>();
   private readonly connectionStore = writable<LivePriceConnection>({
-    state: 'unavailable', reason: null, feedState: null, lastMessageAtUtc: null
+    state: 'unavailable', reason: null, feedState: null, lastMessageAtUtc: null,
+    venuePhase: 'Unknown', venueState: null
   });
   private connectionValue: LivePriceConnection = {
-    state: 'unavailable', reason: null, feedState: null, lastMessageAtUtc: null
+    state: 'unavailable', reason: null, feedState: null, lastMessageAtUtc: null,
+    venuePhase: 'Unknown', venueState: null
   };
   private latestSequence = 0;
   private marketOpen = false;
@@ -133,7 +158,9 @@ export class LivePriceBook {
       state: 'live',
       reason: envelope.feedReason || null,
       feedState: envelope.feedState || null,
-      lastMessageAtUtc: envelope.serverTimeUtc
+      lastMessageAtUtc: envelope.serverTimeUtc,
+      venuePhase: envelope.venuePhase ?? 'Unknown',
+      venueState: envelope.venueState ?? null
     };
     this.connectionStore.set(this.connectionValue);
 
@@ -224,8 +251,12 @@ export class LivePriceBook {
   }
 
   private view(quote: LivePrice | null): LivePriceView {
-    if (!quote) return { quote: null, freshness: 'unknown' };
-    if (!this.marketOpen) return { quote, freshness: 'closed' };
+    const phase = this.connectionValue.venuePhase;
+    if (!quote) return { quote: null, freshness: 'unknown', phase };
+    // Pre-open lands here too, via marketOpen:false. That is correct rather than a shortcut: the
+    // book is not matching, so the last traded price IS the right thing to show and calling it
+    // delayed would report a fault the venue is not having. `phase` carries the nuance to the label.
+    if (!this.marketOpen) return { quote, freshness: 'closed', phase };
     const received = Date.parse(quote.receivedAtUtc);
     const feedCurrent = !this.connectionValue.feedState
       || !['disabled', 'idle', 'waiting-for-data', 'disconnected'].includes(this.connectionValue.feedState);
@@ -233,7 +264,7 @@ export class LivePriceBook {
       && Date.now() - received <= this.staleAfterMs
       && this.connectionValue.state === 'live'
       && feedCurrent;
-    return { quote, freshness: current ? 'live' : 'stale' };
+    return { quote, freshness: current ? 'live' : 'stale', phase };
   }
 }
 
@@ -249,7 +280,10 @@ export function useLivePrices(): LivePriceBook {
 
 export function livePriceLabel(view: LivePriceView): string {
   if (!view.quote) return 'Price unavailable';
-  if (view.freshness === 'closed') return 'Last traded price';
+  if (view.freshness === 'closed')
+    return view.phase === 'PreOpen'
+      ? 'Pre-open — last traded price, orders queue until the open'
+      : 'Last traded price';
   if (view.freshness === 'stale') return 'Last received price — feed delayed';
   return 'Live price';
 }
