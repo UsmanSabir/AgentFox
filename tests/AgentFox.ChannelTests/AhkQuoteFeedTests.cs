@@ -137,6 +137,48 @@ public sealed class AhkQuoteFeedTests
     }
 
     [TestMethod]
+    public void APricelessUpdate_DoesNotRefreshThePricesAge()
+    {
+        // The portal republishes a symbol that has not traded: the message carries a bid but no last
+        // price, so Merge keeps the old Current. It must NOT also declare that old price to be new.
+        //
+        // It used to. AhkQuoteBook.Snapshot expires on RetrievedAtUtc, so a quiet symbol had its clock
+        // reset by every poll — 2s by default — and MaxQuoteAgeSeconds could never reach it. An
+        // arbitrarily old price was handed to armed-order evaluation as a current one, and the only
+        // thing that could have said otherwise (LastTradeTime) is read by no gate in the repo.
+        var book = new AhkQuoteBook();
+        book.Apply([new AhkFeedQuote { Mkt = "REG", Symbol = "OGDC", LastPrice = 100m }], Now);
+
+        // Eleven minutes of the portal saying "still here", never "it traded".
+        for (var second = 120; second <= 660; second += 120)
+            book.Apply(
+                [new AhkFeedQuote { Mkt = "REG", Symbol = "OGDC", Buy = 99.9m }],
+                Now.AddSeconds(second));
+
+        var snapshot = book.Snapshot("REG", TimeSpan.FromMinutes(10), Now.AddSeconds(661));
+
+        Assert.IsFalse(snapshot.ContainsKey("OGDC"),
+            "the price is eleven minutes old, so a ten-minute freshness bound must drop it — being "
+            + "told about the symbol is not the same as being told what it costs");
+    }
+
+    [TestMethod]
+    public void ARealTradeStillRefreshesTheAge()
+    {
+        // The other half: a message that DOES carry a price is exactly what should reset the clock,
+        // or the fix above would expire live symbols mid-session.
+        var book = new AhkQuoteBook();
+        book.Apply([new AhkFeedQuote { Mkt = "REG", Symbol = "OGDC", LastPrice = 100m }], Now);
+        book.Apply([new AhkFeedQuote { Mkt = "REG", Symbol = "OGDC", LastPrice = 101m }],
+            Now.AddSeconds(660));
+
+        var snapshot = book.Snapshot("REG", TimeSpan.FromMinutes(10), Now.AddSeconds(661));
+
+        Assert.IsTrue(snapshot.ContainsKey("OGDC"));
+        Assert.AreEqual(101m, snapshot["OGDC"].Current);
+    }
+
+    [TestMethod]
     public void Book_DropsStaleQuotes_SoADeadFeedDoesNotServeOldPrices()
     {
         var book = new AhkQuoteBook();

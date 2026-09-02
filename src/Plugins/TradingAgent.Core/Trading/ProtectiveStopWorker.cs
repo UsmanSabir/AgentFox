@@ -330,12 +330,19 @@ public sealed class ProtectiveStopWorker
         // Deliberately the CALENDAR here, not OrderWindow — unlike order placement and the take-profit
         // retry, which now also run during the pre-open OHO state.
         //
-        // Two reasons this worker must not follow them. First, it evaluates TRIGGERS against live
-        // prices, and pre-open there are none: the feed republishes reference data, so a stop would be
-        // judged against a stale number and could fire spuriously or fail to fire. Second, it does not
-        // need to: OHO accepts orders but performs no matching, so no position can be filled before
-        // the open and therefore none can need protecting during it. The first pass after the bell —
-        // within the normal interval — is soon enough, and it runs on real prices.
+        // Two reasons this worker must not follow them. First, the LOCAL BACKSTOP armed order it
+        // writes (see ArmBackstopAsync) is judged against live prices by WatchlistMonitorWorker, and
+        // pre-open there are none: the feed republishes reference data, so a backstop armed now would
+        // be judged against a stale number and could fire spuriously or fail to fire. Second, it does
+        // not need to: OHO accepts orders but performs no matching, so no position can be filled
+        // before the open and therefore none can need protecting during it. The first pass after the
+        // bell — within the normal interval — is soon enough.
+        //
+        // This comment used to say that THIS worker evaluates triggers against live prices. It does
+        // not, and never did: it takes no quote source, no PsxDataClient and no candle provider, and
+        // every decision it makes is driven by quantities and the resting order book. The gate is
+        // still right; the reason was pointing at the wrong file, which is worse than no reason for
+        // anyone trying to find where a stop's trigger is actually judged.
         var market = _calendar.GetStatus();
         if (!market.IsOpen) return;
 

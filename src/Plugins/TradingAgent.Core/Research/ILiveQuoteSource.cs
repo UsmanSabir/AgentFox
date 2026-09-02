@@ -1,4 +1,4 @@
-namespace TradingAgent.Research;
+﻿namespace TradingAgent.Research;
 
 /// <summary>
 /// A source of live quotes for the WHOLE market in one call.
@@ -22,6 +22,11 @@ namespace TradingAgent.Research;
 /// </summary>
 public interface ILiveQuoteSource
 {
+    // NOTE: there is no priority here, and the Priority on ILiveFeedStatusProvider is not one for this
+    // purpose — it orders the status display and nothing else. CompositeLiveQuoteSource takes the FIRST
+    // registered source that covers a symbol, so precedence is DI registration order, and a source
+    // registered after one that claims every symbol is never consulted.
+
     /// <summary>
     /// Short stable identifier used in warnings, logs, and each quote's <see cref="PsxLiveQuote.Source"/>
     /// tag (for example "psx" or "ahk"). Shown to operators, so it must say where a price came from.

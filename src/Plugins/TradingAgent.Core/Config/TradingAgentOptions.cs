@@ -416,6 +416,15 @@ public sealed class TradingMonitorOptions
     /// confirmed an alert on seconds of evidence instead of the interval it was configured for — see
     /// <c>SymbolMonitorState.HeldSince</c>. Raising the interval therefore still lengthens the
     /// confirmation window, exactly as it did before.
+    ///
+    /// <para>
+    /// <b>Nothing in THIS repository asks for a pass early.</b> Core is purely interval-polled: the
+    /// quote book raises no arrival event and nothing subscribes to one, so on a core-only deployment
+    /// passes are exactly <see cref="IntervalSeconds"/> apart and pass-counting would have been safe.
+    /// The uneven spacing comes from an edition that supplies the missing half — a tick watcher calling
+    /// <c>RunPassAsync</c>. Measuring the hold in time is what makes core correct under BOTH, rather
+    /// than correct only while nobody nudges it.
+    /// </para>
     /// </para>
     /// </summary>
     public int ConfirmPasses { get; set; } = 2;
