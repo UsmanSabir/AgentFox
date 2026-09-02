@@ -786,8 +786,21 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
             var drift = options.InvalidateOnDriftPercent;
 
             // One market snapshot for the whole sweep, not one per proposal.
+            //
+            // Only while the market is open, which the sweep did not check. Out of hours the quotes are
+            // yesterday's close, so a proposal stated against today's levels could be retired for
+            // "drifting" from a price that is simply the last one anybody paid — and retiring is not
+            // recoverable by waiting. The TTL rule below needs no prices and still runs, so an
+            // out-of-hours sweep keeps doing the half of its job that is sound.
             IReadOnlyDictionary<string, PsxLiveQuote> live = new Dictionary<string, PsxLiveQuote>();
-            if (drift > 0)
+            var marketOpen = _calendar.GetStatus().IsOpen;
+            if (drift > 0 && !marketOpen)
+            {
+                _logger.LogDebug(
+                    "[Proposals] Market is closed; expiring on age only, since a drift check would "
+                    + "compare today's proposals against the previous close.");
+            }
+            else if (drift > 0)
             {
                 try { live = (await _quotes.GetQuotesAsync(ct)).Quotes; }
                 catch (Exception ex) when (ex is not OperationCanceledException)

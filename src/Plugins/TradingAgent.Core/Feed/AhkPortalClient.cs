@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Net;
 using System.Text.Json;
 using AgentFox.Plugins;
@@ -41,6 +41,26 @@ public interface IBrokerMarketState
     /// not reported one — the feed being switched off, or not yet having polled.
     /// </summary>
     string? LastMarketStatus { get; }
+
+    /// <summary>
+    /// When <see cref="LastMarketStatus"/> was observed, or null when the implementation does not
+    /// record it.
+    ///
+    /// <para>
+    /// A status with no observation time cannot be told apart from a day-old one, so every
+    /// implementation had to invent its own "refresh after" and "do not serve after" rules privately —
+    /// and <see cref="Market.OrderWindow"/>, the consumer that actually gates orders on it, had no way
+    /// to apply the same rule to all of them. Reporting the time moves that judgement to the one place
+    /// that needs it.
+    /// </para>
+    ///
+    /// <para>
+    /// Null is a real answer and means "not recorded", NOT "just now". A default implementation returns
+    /// null so existing implementations compile and behave exactly as before; only an implementation
+    /// that supplies a time gets the freshness rule applied to it.
+    /// </para>
+    /// </summary>
+    DateTime? LastMarketStatusAtUtc => null;
 }
 
 public sealed class AhkPortalClient : IBrokerMarketState, IDisposable

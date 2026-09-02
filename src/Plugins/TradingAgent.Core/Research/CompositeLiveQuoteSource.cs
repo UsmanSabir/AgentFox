@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 
 namespace TradingAgent.Research;
 
@@ -37,7 +37,12 @@ public sealed class CompositeLiveQuoteSource : ILiveQuoteSource
     {
         // Guard against a composite being registered into its own source list, which would recurse
         // until the stack ran out — an easy mistake to make when adding a third source later.
-        _sources = sources.Where(s => s is not CompositeLiveQuoteSource).ToList();
+        // Highest priority first; OrderByDescending is stable, so sources that declare nothing keep
+        // their registration order and behave exactly as they did before precedence was declarable.
+        _sources = sources
+            .Where(s => s is not CompositeLiveQuoteSource)
+            .OrderByDescending(s => s.Priority)
+            .ToList();
         _logger = logger;
     }
 
@@ -78,6 +83,8 @@ public sealed class CompositeLiveQuoteSource : ILiveQuoteSource
 
             warnings.AddRange(snapshot.Warnings);
 
+            // First source to cover a symbol wins, and the ordering above is what makes "first" mean
+            // "most preferred" rather than "registered earliest".
             var added = 0;
             foreach (var (symbol, quote) in snapshot.Quotes)
             {

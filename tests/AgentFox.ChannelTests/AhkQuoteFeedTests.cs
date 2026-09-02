@@ -228,6 +228,42 @@ public sealed class AhkQuoteFeedTests
     }
 
     [TestMethod]
+    public async Task Composite_PrefersTheHigherPrioritySource_WhateverTheRegistrationOrder()
+    {
+        // Precedence used to BE registration order, which an edition cannot change: AddCore registers
+        // core's sources first, and PsxMarketWatchQuoteSource claims every symbol unconditionally, so a
+        // source registered afterwards was never consulted for anything. A push feed was dead on
+        // arrival however healthy it was.
+        var psx = new StubSource("psx", ("OGDC", 99m)) { Priority = 0 };
+        var push = new StubSource("push", ("OGDC", 101m)) { Priority = 500 };
+
+        // Registered LAST, as a plugin's source always is.
+        var composite = new CompositeLiveQuoteSource([psx, push],
+            NullLogger<CompositeLiveQuoteSource>.Instance);
+
+        var snapshot = await composite.GetQuotesAsync();
+
+        Assert.AreEqual(101m, snapshot.Quotes["OGDC"].Current);
+        Assert.AreEqual("push", snapshot.Quotes["OGDC"].Source);
+    }
+
+    [TestMethod]
+    public async Task Composite_KeepsRegistrationOrderWhenPrioritiesTie()
+    {
+        // The compatibility half: a source that declares nothing must behave exactly as it did, so
+        // equal priorities have to preserve the order they were registered in.
+        var first = new StubSource("first", ("OGDC", 100m));
+        var second = new StubSource("second", ("OGDC", 99m));
+
+        var composite = new CompositeLiveQuoteSource([first, second],
+            NullLogger<CompositeLiveQuoteSource>.Instance);
+
+        var snapshot = await composite.GetQuotesAsync();
+
+        Assert.AreEqual("first", snapshot.Quotes["OGDC"].Source);
+    }
+
+    [TestMethod]
     public async Task Composite_SkipsDisabledSources()
     {
         var ahk = new StubSource("ahk", ("OGDC", 100m)) { Enabled = false };
@@ -595,6 +631,7 @@ public sealed class AhkQuoteFeedTests
         }
 
         public string Name { get; }
+        public int Priority { get; init; }
         public bool Enabled { get; init; } = true;
         public bool Throws { get; init; }
         public bool IsEnabled => Enabled;

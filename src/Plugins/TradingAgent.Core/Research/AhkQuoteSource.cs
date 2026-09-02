@@ -1,4 +1,4 @@
-using AgentFox.Plugins;
+﻿using AgentFox.Plugins;
 using TradingAgent.Config;
 using TradingAgent.Feed;
 
@@ -18,6 +18,14 @@ namespace TradingAgent.Research;
 /// </summary>
 public sealed class AhkQuoteSource : ILiveQuoteSource
 {
+    /// <summary>
+    /// Above the PSX market watch. The broker's own feed is the venue this account trades on and is
+    /// polled in seconds, where the market watch is a market-wide scrape cached for up to a minute.
+    /// This was already the effective order — core registers this source first — so naming it changes
+    /// nothing today; it makes the intent explicit and gives an edition something to outrank.
+    /// </summary>
+    public int Priority => 100;
+
     private readonly AhkQuoteBook _book;
     private readonly AhkFeedWorker _worker;
     private readonly IRuntimePluginOptions<AhkFeedConfig> _config;

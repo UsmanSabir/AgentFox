@@ -22,10 +22,29 @@
 /// </summary>
 public interface ILiveQuoteSource
 {
-    // NOTE: there is no priority here, and the Priority on ILiveFeedStatusProvider is not one for this
-    // purpose — it orders the status display and nothing else. CompositeLiveQuoteSource takes the FIRST
-    // registered source that covers a symbol, so precedence is DI registration order, and a source
-    // registered after one that claims every symbol is never consulted.
+    /// <summary>
+    /// Which source wins when more than one can price the same symbol. Higher wins.
+    ///
+    /// <para>
+    /// <b>Not to be confused with <c>ILiveFeedStatusProvider.Priority</c>, which orders a status
+    /// display and nothing else.</b> This one decides whose price a trading decision sees.
+    /// </para>
+    ///
+    /// <para>
+    /// It exists because precedence used to be DI REGISTRATION ORDER, which an edition cannot change:
+    /// <c>AddCore</c> registers core's sources first, so a plugin's source was always consulted last —
+    /// and <c>PsxMarketWatchQuoteSource</c> returns the entire market on every call with
+    /// <c>IsEnabled</c> unconditionally true, claiming every symbol. A push feed registered by an
+    /// edition was therefore dead on arrival as a price source however healthy it was.
+    /// </para>
+    ///
+    /// <para>
+    /// Defaults to zero, and ties keep registration order, so a source that says nothing behaves
+    /// exactly as it did.
+    /// </para>
+    /// </summary>
+    int Priority => 0;
+
 
     /// <summary>
     /// Short stable identifier used in warnings, logs, and each quote's <see cref="PsxLiveQuote.Source"/>

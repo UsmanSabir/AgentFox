@@ -1,4 +1,4 @@
-using AgentFox.Plugins;
+﻿using AgentFox.Plugins;
 using Microsoft.Extensions.Logging;
 using TradingAgent.Config;
 using TradingAgent.Feed;
@@ -89,6 +89,18 @@ public sealed class OrderWindow
     /// True when an order may be submitted. Prefers the broker's reported state; falls back to the
     /// trading calendar when the broker has not reported one.
     /// </summary>
+    /// <summary>
+    /// How old a broker-reported market state may be and still gate an order.
+    ///
+    /// <para>
+    /// Ten minutes: long enough that an ordinarily quiet feed does not keep falling back to the
+    /// calendar, short enough that a board which changed state is not still being reported as it was.
+    /// Applies only where an implementation reports an observation time — see
+    /// <c>IBrokerMarketState.LastMarketStatusAtUtc</c>.
+    /// </para>
+    /// </summary>
+    internal static readonly TimeSpan MaxMarketStateAge = TimeSpan.FromMinutes(10);
+
     public OrderWindowDecision Evaluate()
     {
         var cfg = _config.Current;
@@ -101,6 +113,25 @@ public sealed class OrderWindow
         {
             // No feed running, or it has not polled yet. The calendar is all we have.
             return FromCalendar("the broker has not reported a market state");
+        }
+
+        // An old reading is not a reading. A broker's state is only meaningful for as long as the venue
+        // is likely to still be in it — a board can go into Break in seconds — so a stale one falls back
+        // to the calendar rather than being trusted or being used to refuse.
+        //
+        // Only applied to implementations that report an observation time. Where it is null the
+        // behaviour is exactly what it was, because null means "not recorded", never "just now": an
+        // implementation that keeps its own freshness rules privately (AhkPortalClient serves whatever
+        // it last saw; premium's reader stops serving after its own window) is unaffected.
+        if (_portal.LastMarketStatusAtUtc is { } observedUtc)
+        {
+            var age = DateTime.UtcNow - observedUtc;
+            if (age > MaxMarketStateAge)
+            {
+                return FromCalendar(
+                    $"the broker's market state '{reported}' was observed {age.TotalMinutes:F0} "
+                    + "minute(s) ago and is too old to act on");
+            }
         }
 
         // Empty means "use the defaults", not "accept nothing" — see AhkConfig for why the

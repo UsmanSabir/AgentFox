@@ -136,11 +136,48 @@ public sealed class OrderWindowTests
         Assert.IsTrue(Build("  OPEN  ", calendarOpen: false).Evaluate().Allowed);
     }
 
+    // ── An old reading is not a reading ──────────────────────────────────────
+
+    [TestMethod]
+    public void AStaleBrokerStateFallsBackToTheCalendar_RatherThanGatingOnIt()
+    {
+        // A board can enter Break in seconds, so a state observed long enough ago says nothing about
+        // now — in either direction. Trusting it would submit into a shut venue; refusing on it would
+        // block a whole day on one old reading. The calendar is the honest fallback for both.
+        var window = Build("OPEN", calendarOpen: false, observedAtUtc: DateTime.UtcNow.AddHours(-2));
+
+        var decision = window.Evaluate();
+
+        Assert.IsFalse(decision.Allowed, "the calendar says closed and the stale 'OPEN' must not win");
+        StringAssert.Contains(decision.Reason, "too old to act on");
+    }
+
+    [TestMethod]
+    public void AFreshBrokerStateIsStillTrusted()
+    {
+        var window = Build("OPEN", calendarOpen: false, observedAtUtc: DateTime.UtcNow.AddMinutes(-1));
+
+        Assert.IsTrue(window.Evaluate().Allowed);
+    }
+
+    [TestMethod]
+    public void AnImplementationThatReportsNoTimeIsUnaffected()
+    {
+        // The compatibility guarantee. Null means "not recorded", never "just now", so an adapter that
+        // keeps its own freshness rules privately behaves exactly as it did before the timestamp
+        // existed — AhkPortalClient serves whatever it last saw and is gated on nothing here.
+        var window = Build("OPEN", calendarOpen: false);
+
+        Assert.IsTrue(window.Evaluate().Allowed);
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    private static OrderWindow Build(string? brokerState, bool calendarOpen, AhkConfig? config = null) =>
+    private static OrderWindow Build(
+        string? brokerState, bool calendarOpen, AhkConfig? config = null,
+        DateTime? observedAtUtc = null) =>
         new(new StubCalendar(calendarOpen),
-            new StubPortalState(brokerState),
+            new StubPortalState(brokerState) { ObservedAtUtc = observedAtUtc },
             new StubOptions(config ?? new AhkConfig()),
             NullLogger<OrderWindow>.Instance);
 
@@ -159,6 +196,10 @@ public sealed class OrderWindowTests
 
     private sealed class StubPortalState(string? state) : TradingAgent.Feed.IBrokerMarketState
     {
+        /// <summary>Null keeps the pre-timestamp behaviour: "not recorded", never "just now".</summary>
+        public DateTime? ObservedAtUtc { get; init; }
+
         public string? LastMarketStatus => state;
+        public DateTime? LastMarketStatusAtUtc => ObservedAtUtc;
     }
 }
