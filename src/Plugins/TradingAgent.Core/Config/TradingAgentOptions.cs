@@ -1,4 +1,4 @@
-namespace TradingAgent.Config;
+﻿namespace TradingAgent.Config;
 
 public enum TradingExecutionUniverseSource
 {
@@ -405,8 +405,18 @@ public sealed class TradingMonitorOptions
     public int IntervalSeconds { get; set; } = 30;
 
     /// <summary>
-    /// Consecutive passes a condition must hold before it becomes an alert. 1 fires immediately and
-    /// will flicker when price sits on a level; 2 is the smallest value that filters that.
+    /// How long a condition must hold before it becomes an alert, expressed as passes: the requirement
+    /// is <c>(this - 1) x <see cref="IntervalSeconds"/></c> of continuous persistence. On the defaults
+    /// that is 30 seconds. 1 fires immediately and will flicker when price sits on a level; 2 is the
+    /// smallest value that filters that.
+    ///
+    /// <para>
+    /// It is converted to a DURATION rather than counted in passes, because passes stopped being evenly
+    /// spaced once a live price tick could ask for one immediately. Counting them meant two rapid passes
+    /// confirmed an alert on seconds of evidence instead of the interval it was configured for — see
+    /// <c>SymbolMonitorState.HeldSince</c>. Raising the interval therefore still lengthens the
+    /// confirmation window, exactly as it did before.
+    /// </para>
     /// </summary>
     public int ConfirmPasses { get; set; } = 2;
 

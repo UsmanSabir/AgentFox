@@ -1,4 +1,4 @@
-using TradingAgent.Analysis;
+﻿using TradingAgent.Analysis;
 using TradingAgent.Config;
 
 namespace TradingAgent.Watchlist;
@@ -105,9 +105,8 @@ public sealed record SymbolMonitorState
     public bool WeeklyBreakdown { get; init; }
 
     /// <summary>
-    /// Consecutive passes each candidate condition has held. A kind only fires once its streak reaches
-    /// <see cref="MonitorThresholds.ConfirmPasses"/>, which is what stops a price sitting exactly on a
-    /// level from firing on every tick.
+    /// Consecutive passes each candidate condition has held. Reported for diagnostics — "why did it not
+    /// alert" — but it is NO LONGER what decides firing; see <see cref="HeldSince"/>.
     /// </summary>
     public IReadOnlyDictionary<AlertKind, int> Streaks { get; init; } =
         new Dictionary<AlertKind, int>();
@@ -115,14 +114,48 @@ public sealed record SymbolMonitorState
     public DateTime UpdatedUtc { get; init; }
 
     /// <summary>True before the symbol has ever been seen — no transitions can be claimed yet.</summary>
+    /// <summary>
+    /// When each still-holding condition FIRST held, so confirmation can be measured in time rather than
+    /// in passes. A lapse drops the entry, which is what re-arms the condition.
+    ///
+    /// <para>
+    /// <b>Why this replaced pass-counting as the decision.</b> A streak is only as strong as the gap
+    /// between passes, and that gap stopped being fixed once a live price tick could ask for a pass
+    /// immediately (premium's <c>PriceTriggerWatcher</c>). Two nudged passes five seconds apart satisfied
+    /// <c>ConfirmPasses = 2</c> on five seconds of evidence instead of thirty — and an armed order keyed
+    /// on the resulting alert can place a real order. Reacting faster silently lowered the bar.
+    /// </para>
+    ///
+    /// <para>
+    /// Measuring the hold in time decouples the two: observing more often now improves LATENCY only. A
+    /// tick lets a condition be confirmed the moment its required duration is up, rather than at the next
+    /// scheduled pass, while a five-second blip through a level never qualifies however often it is
+    /// looked at.
+    /// </para>
+    /// </summary>
+    public IReadOnlyDictionary<AlertKind, DateTime> HeldSince { get; init; } =
+        new Dictionary<AlertKind, DateTime>();
+
     public bool IsNew { get; init; }
 }
 
 /// <summary>Detection thresholds, projected from configuration.</summary>
 public sealed record MonitorThresholds
 {
-    /// <summary>Consecutive passes a condition must hold before it fires.</summary>
+    /// <summary>
+    /// Consecutive passes a condition must hold. Kept because it is the configured value an operator
+    /// recognises and it is reported in the monitor status; <see cref="ConfirmFor"/> is derived from it
+    /// and is what actually gates an alert.
+    /// </summary>
     public int ConfirmPasses { get; init; } = 2;
+
+    /// <summary>
+    /// How long a condition must hold before it fires. Derived so that configuration keeps its existing
+    /// meaning: <c>(ConfirmPasses - 1) x IntervalSeconds</c>, which on the defaults (2 passes, 30s) is
+    /// the same 30 seconds of persistence two passes used to prove. <c>ConfirmPasses = 1</c> gives zero
+    /// and still fires on sight.
+    /// </summary>
+    public TimeSpan ConfirmFor { get; init; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
     /// How far beyond a level a close must be to count as a break rather than a wick through it.
@@ -146,6 +179,9 @@ public sealed record MonitorThresholds
     public static MonitorThresholds From(TradingAgentOptions options) => new()
     {
         ConfirmPasses              = Math.Clamp(options.Monitor.ConfirmPasses, 1, 10),
+        ConfirmFor                 = TimeSpan.FromSeconds(
+            (Math.Clamp(options.Monitor.ConfirmPasses, 1, 10) - 1)
+            * Math.Clamp(options.Monitor.IntervalSeconds, 30, 3600)),
         BreakBufferPercent         = Math.Clamp(options.Monitor.BreakBufferPercent, 0m, 10m),
         VolumeConfirmRatio         = Math.Max(0m, options.Monitor.VolumeConfirmRatio),
         RsiOversold                = Math.Clamp(options.Scan.RsiOversold, 1m, 50m),

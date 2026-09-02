@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Hosting;
+﻿using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using TradingAgent.Analysis;
@@ -251,7 +251,8 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                 symbol, candles, technicalOptions, _options.Value.Scan.ConfluenceTolerancePercent);
 
             var previous = states.GetValueOrDefault(symbol) ?? AlertDetector.Seed(symbol);
-            var detection = AlertDetector.Detect(previous, snapshot, multi, thresholds);
+            var detection = AlertDetector.Detect(
+                previous, snapshot, multi, thresholds, DateTime.UtcNow);
             await _repository.SaveMonitorStateAsync(detection.NextState, ct);
 
             if (muted.Contains(symbol)) continue;
