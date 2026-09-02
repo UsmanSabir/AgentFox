@@ -10,8 +10,7 @@
     Database, Download, Play, XCircle, ChevronDown, ChevronRight, LayoutDashboard,
     BellRing, ShoppingCart, AlertTriangle, BriefcaseBusiness, TrendingUp, ChartCandlestick
   } from 'lucide-svelte';
-  import WatchlistPanel from './WatchlistPanel.svelte';
-  import ChartPane from './ChartPane.svelte';
+  import MarketWorkspace from './MarketWorkspace.svelte';
   import AlertsPanel from './AlertsPanel.svelte';
   import ArmedOrdersPanel from './ArmedOrdersPanel.svelte';
   import ArmOrderDialog from './ArmOrderDialog.svelte';
@@ -21,7 +20,6 @@
   import PortfolioPanel from './PortfolioPanel.svelte';
   import PersistentOrdersPanel from './PersistentOrdersPanel.svelte';
   import SideNavigation from './SideNavigation.svelte';
-  import ResizableWorkspace from './ResizableWorkspace.svelte';
   import type { SectionNavigationItem } from './sectionNavigation';
   import type { SymbolExtension } from './symbolExtensions';
 
@@ -75,16 +73,11 @@
   let armContext: ArmOrderDialogContext | null = null;
   let armedPanel: ArmedOrdersPanel | null = null;
   let persistentPanel: PersistentOrdersPanel | null = null;
-  let watchlistPanel: WatchlistPanel | null = null;
+  let marketWorkspace: MarketWorkspace | null = null;
   let newOrderOpen = false;
 
   /** Symbol the watchlist has selected; drives the chart pane. */
   export let selectedSymbol: string | null = null;
-  let selectedCompany: string | null = null;
-  let watchlistCompact = false;
-
-  /** Full-width chart mode, toggled from the chart's own header. */
-  let chartExpanded = false;
 
   /** Proposal inbox: open-only by default, since a decision queue should read as empty when it is. */
   let showResolvedProposals = false;
@@ -435,53 +428,16 @@
 
     <!-- The public dashboard owns this generic workspace and its persistence. Premium inherits it
          through composition; neither edition duplicates the watchlist or chart lifecycle. -->
-    <ResizableWorkspace
-      label="Market workspace"
-      leftLabel="Watchlist"
-      rightLabel="Price chart"
-      storageKey="trading.market-workspace.split.v1"
-      defaultLeft={28}
-      minLeft={18}
-      maxLeft={48}
-      compactLeft={watchlistCompact}
-      expanded={chartExpanded}
-    >
-      <svelte:fragment slot="left">
-        <WatchlistPanel
-          bind:this={watchlistPanel}
-          bind:selected={selectedSymbol}
-          bind:selectedCompany
-          bind:compact={watchlistCompact}
-          refreshTick={marketTick}
-          marketOpen={status.market.isOpen}
-          rowStatus={symbolExtension?.rowStatus ?? null}
-        />
-      </svelte:fragment>
-      <svelte:fragment slot="right">
-        <ChartPane
-          symbol={selectedSymbol}
-          companyName={selectedCompany}
-          bind:expanded={chartExpanded}
-          refreshTick={marketTick}
-          historyRefreshTick={archiveTick}
-          {archive}
-          marketOpen={status.market.isOpen}
-          on:arm={(e) => armContext = e.detail}
-        />
-      </svelte:fragment>
-    </ResizableWorkspace>
-
-    <!-- Whatever is composing this dashboard may add a fuller view of the selected symbol here,
-         directly under the chart it refers to. Nothing in a community build. -->
-    {#if symbolExtension?.plan && selectedSymbol}
-      <div id="trading-stock-plan" class="section-anchor">
-        <svelte:component
-          this={symbolExtension.plan}
-          symbol={selectedSymbol}
-          companyName={selectedCompany}
-        />
-      </div>
-    {/if}
+    <MarketWorkspace
+      bind:this={marketWorkspace}
+      bind:selectedSymbol
+      refreshTick={marketTick}
+      historyRefreshTick={archiveTick}
+      {archive}
+      marketOpen={status.market.isOpen}
+      {symbolExtension}
+      on:arm={(event) => armContext = event.detail}
+    />
 
     <!-- Directly under the status grid: this answers "what is it doing", which is the question the
          metrics above raise and none of them answers. Collapsed, so it costs a row of chips. -->
@@ -511,7 +467,7 @@
       <AlertsPanel
         on:select={(e) => selectedSymbol = e.detail}
         on:arm={(e) => armContext = e.detail}
-        on:alertsChanged={() => watchlistPanel?.refresh()}
+        on:alertsChanged={() => marketWorkspace?.refresh()}
       />
     </div>
 

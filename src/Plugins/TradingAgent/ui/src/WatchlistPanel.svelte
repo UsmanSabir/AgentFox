@@ -18,6 +18,8 @@
   export let selectedCompany: string | null = null;
   /** Collapses the panel horizontally so the chart receives most of the workspace width. */
   export let compact = false;
+  /** A docked workspace resizes the whole panel, so its legacy narrow-rail control is not applicable. */
+  export let allowCompact = true;
   /** Shared dashboard clock; used to refresh live session moves without adding another timer. */
   export let refreshTick = 0;
   /** Session gate supplied by the dashboard status endpoint. Closed-market moves do not change. */
@@ -69,6 +71,7 @@
   }
 
   function toggleCompact() {
+    if (!allowCompact) return;
     compact = !compact;
     localStorage.setItem('trading-watchlist-density', compact ? 'compact' : 'comfortable');
   }
@@ -449,7 +452,7 @@
   }
 
   onMount(() => {
-    compact = localStorage.getItem('trading-watchlist-density') === 'compact';
+    compact = allowCompact && localStorage.getItem('trading-watchlist-density') === 'compact';
     configuredListNoteDismissed = localStorage.getItem(configuredListNoteStorageKey) === 'true';
     executionSourceNoteDismissed = localStorage.getItem(executionSourceNoteStorageKey) === 'true';
     load();
@@ -505,14 +508,16 @@
       </span>
     </div>
     <div class="header-actions">
-      <button
-        class="icon density"
-        class:active={compact}
-        on:click={toggleCompact}
-        aria-pressed={compact}
-        aria-label={compact ? 'Expand watchlist' : 'Collapse watchlist to a narrow rail'}
-        title={compact ? 'Expand watchlist' : 'Collapse watchlist to give the chart more space'}
-      >{#if compact}<PanelLeftOpen size={14} />{:else}<PanelLeftClose size={14} />{/if}</button>
+      {#if allowCompact}
+        <button
+          class="icon density"
+          class:active={compact}
+          on:click={toggleCompact}
+          aria-pressed={compact}
+          aria-label={compact ? 'Expand watchlist' : 'Collapse watchlist to a narrow rail'}
+          title={compact ? 'Expand watchlist' : 'Collapse watchlist to give the chart more space'}
+        >{#if compact}<PanelLeftOpen size={14} />{:else}<PanelLeftClose size={14} />{/if}</button>
+      {/if}
       <button class="btn btn-ghost" on:click={reset} disabled={busy || loading} title="Reset to the configured allowed-symbols list">
         <RotateCcw size={13} /> Reset
       </button>

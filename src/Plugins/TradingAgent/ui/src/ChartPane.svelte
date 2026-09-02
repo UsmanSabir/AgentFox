@@ -33,6 +33,8 @@
 
   /** Full-width mode: the chart takes the row and the watchlist stacks beneath it. Bound by the parent. */
   export let expanded = false;
+  /** Dockview owns panel sizing on desktop, so the legacy full-width toggle is hidden there. */
+  export let allowExpand = true;
 
   /**
    * Incremented by the dashboard on its own timer. The parent owns the clock so there is ONE interval
@@ -865,14 +867,16 @@
       <button class="icon" title="Refresh" on:click={() => load()} disabled={loading || !symbol}>
         <RefreshCw size={13} />
       </button>
-      <button
-        class="icon"
-        title={expanded ? 'Collapse — put the watchlist back beside the chart' : 'Expand — full width, taller, watchlist moves below'}
-        on:click={toggleExpand}
-        disabled={!symbol}
-      >
-        {#if expanded}<Minimize2 size={13} />{:else}<Maximize2 size={13} />{/if}
-      </button>
+      {#if allowExpand}
+        <button
+          class="icon"
+          title={expanded ? 'Collapse — put the watchlist back beside the chart' : 'Expand — full width, taller, watchlist moves below'}
+          on:click={toggleExpand}
+          disabled={!symbol}
+        >
+          {#if expanded}<Minimize2 size={13} />{:else}<Maximize2 size={13} />{/if}
+        </button>
+      {/if}
     </div>
   </header>
 

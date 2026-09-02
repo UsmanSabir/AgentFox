@@ -27,6 +27,9 @@
     const target = document.getElementById(item.id);
     if (!target) return;
 
+    // A section may live in an inactive workspace tab. Give its neutral owner a chance to reveal it
+    // before scrolling; ordinary document sections simply ignore this event.
+    window.dispatchEvent(new CustomEvent('agentfox:sectionnavigate', { detail: item.id }));
     const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     target.scrollIntoView({ behavior: reducedMotion ? 'auto' : 'smooth', block: 'start' });
     activeId = item.id;
