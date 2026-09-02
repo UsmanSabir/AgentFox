@@ -43,11 +43,30 @@ public readonly record struct OrderWindowDecision(bool Allowed, string Reason, s
 public sealed class OrderWindow
 {
     /// <summary>
-    /// Broker-reported states that accept orders when configuration supplies none. Covers both of the
-    /// portal's vocabularies: <c>GetFeed.marketStatus</c> uses OPEN/CLOSED/OHO, while
-    /// <c>GetMarketStates[].state</c> uses OPN/CLO/OHO/Close.
+    /// Broker-reported states that accept orders when configuration supplies none. Covers the
+    /// portal's two vocabularies — <c>GetFeed.marketStatus</c> uses OPEN/CLOSED/OHO, while
+    /// <c>GetMarketStates[].state</c> uses OPN/CLO/OHO/Close — plus AHL's own pre-open spellings.
+    ///
+    /// <para>
+    /// <b>PRE and Pre-Open are AHL's, both CONFIRMED 2026-09-02</b> — <c>PRE</c> from an
+    /// <c>ORDER_MST</c> push at 09:15:00 and <c>Pre-Open</c> from <c>MarketStatus</c> 49 seconds
+    /// later. With OHO that makes three spellings of one venue phase: PSX order handling, where
+    /// orders are queued and not yet matched. Owner's decision, unchanged since OHO was added: if the
+    /// venue will take the order, send it rather than refusing on the venue's behalf.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>This list and a broker adapter's own reading must move TOGETHER, and getting that wrong is
+    /// worse than leaving both alone.</b> A state this method does not recognise is REFUSED here — it
+    /// does not fall back to the calendar, which only happens when the broker reports NOTHING. So
+    /// teaching an adapter a new token while leaving it out of this list converts "no reading, use the
+    /// calendar" into "reading, and it says no", which refuses orders the previous version allowed.
+    /// Caught exactly that way: adding PRE to premium's <c>AhlMarketStateReader</c> alone made the
+    /// pre-open window refuse rather than fall through.
+    /// </para>
     /// </summary>
-    public static readonly IReadOnlyList<string> DefaultAcceptingStates = ["OPEN", "OPN", "OHO"];
+    public static readonly IReadOnlyList<string> DefaultAcceptingStates =
+        ["OPEN", "OPN", "OHO", "PRE", "PRE-OPEN", "PREOPEN"];
 
     private readonly IMarketCalendar _calendar;
     private readonly IBrokerMarketState _portal;

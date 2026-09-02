@@ -942,13 +942,25 @@ public sealed class ProtectiveStopWorker
 
             await repository.RecordProtectiveStopPlacementAsync(
                 stop.StopId, today, actuallyPlaced, order.OrderId, ct);
+            // The ORDER NUMBER belongs in this line. At AHL a stop is assigned a short
+            // connection-scoped number whose whole uniqueness is a sequence read at login, and a
+            // sequence read pre-open is not the account's — so a reused number is a real event, and
+            // the ledger qualifies one as {orderNo}#{clientOrderId} rather than throwing. Without the
+            // number here, the log cannot tell you which order a stop became, and a collision is
+            // invisible in the one place an operator looks first.
+            //
+            // And ACTUALLY-PLACED, not requested: core sizes a SELL down to the free quantity at the
+            // execution boundary, so printing the requested figure claims coverage that never reached
+            // the broker — the same trap the comment above guards the DB write against.
             _logger.LogWarning(
                 "[ProtectiveStops] {StopId}: native stop PLACED — SELL {Qty} {Symbol} "
-                + "trigger {Trigger} limit {Limit}, submission took {ElapsedMs}ms. {Why}",
-                stop.StopId, decision.Quantity, stop.Symbol, stop.StopTrigger, stop.StopLimit,
+                + "trigger {Trigger} limit {Limit} as order {OrderNo}, submission took {ElapsedMs}ms. "
+                + "{Why}",
+                stop.StopId, actuallyPlaced, stop.Symbol, stop.StopTrigger, stop.StopLimit,
+                string.IsNullOrWhiteSpace(order.OrderId) ? "(no number returned)" : order.OrderId,
                 submissionClock.ElapsedMilliseconds, decision.Reason);
             _activity?.Info("Stops",
-                $"{stop.Symbol}: stop placed at the broker — SELL {decision.Quantity:N0} "
+                $"{stop.Symbol}: stop placed at the broker — SELL {actuallyPlaced:N0} "
                 + $"trigger {stop.StopTrigger:0.##} limit {stop.StopLimit:0.##}");
 
             // This row supersedes an earlier stop (a break-even lift, an ATR trail) — and this is the

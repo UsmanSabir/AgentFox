@@ -438,6 +438,33 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                 string? quantityAdjustment = null;
                 TradingSignal signal;
                 string source;
+
+                // A SELL blocked by our OWN protective stop is asked for its shares HERE, before the
+                // persistence branch, because it has nothing to do with persistence.
+                //
+                // It used to live inside the PersistentUntilFilled branch only, which made whether a
+                // triggered exit could execute depend on a flag about how the order is retried. An
+                // ordinary armed trailing SELL over a fully committed holding would trigger, find zero
+                // free shares, go back to "armed", and do that for the rest of the day while the stop
+                // it was meant to tighten sat there holding every share. Nothing said why. Seen live
+                // on 2026-09-02: QTECH carried a stop at 36 and a trailing exit at 42.60 over the same
+                // 500 shares, and PRL a stop at 100 and a trailing exit at 102.92 over the same 200.
+                //
+                // Safe on both paths because the releaser matches the stop by the order number this
+                // system recorded when it placed it, not by the armed order asking: an unreadable
+                // book, an unreadable quantity, or shares held by somebody else's order all come back
+                // "not released", and the caller leaves the sell armed rather than forcing anything.
+                var releasedForThisOrder = false;
+                if (order.Action.Equals("SELL", StringComparison.OrdinalIgnoreCase)
+                    && _stopReleaser is not null
+                    && await ReleaseOwnStopIfBlockingAsync(order, ct) is { } releaseNote)
+                {
+                    releasedForThisOrder = true;
+                    _activity?.Warn("Armed",
+                        $"{order.Symbol}: a protective stop stood down so this sell could go through",
+                        releaseNote);
+                }
+
                 if (order.PersistentUntilFilled)
                 {
                     if (PersistentOrderDecisions.ValidateEligibility(order.OrderType) is { } problem)
@@ -464,36 +491,18 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                                 ct: ct);
                             continue;
                         }
-                        if (availability.AvailableQuantity <= 0 && _stopReleaser is not null)
-                        {
-                            // A reducing SELL blocked by our OWN protective stop is the one case worth
-                            // acting on rather than waiting out: the trigger has been proved right, and
-                            // the only thing in the way is protection this system placed and can put
-                            // back. Everything else — an unreadable book, someone else's order — comes
-                            // back "not released" and falls through to staying armed.
-                            var release = await _stopReleaser.ReleaseForSellAsync(
-                                order.Symbol, order.Quantity, ct);
-                            _logger.LogInformation(
-                                "[ArmedOrders] {ArmedId} ({Symbol}) asked for shares held by a "
-                                + "protective stop: released={Released} — {Why}",
-                                order.ArmedId, order.Symbol, release.Released, release.Reason);
-
-                            if (release.Released)
-                            {
-                                // The local snapshot still shows the stop's order resting, so
-                                // re-checking against it here would read 0 again. Fall through with the
-                                // full quantity instead and let TradingManager decide: it re-reads the
-                                // broker book for exactly this reason, and it is the single execution
-                                // boundary every other caller is already sized by.
-                                availability = new SellAvailabilityDecision(
-                                    true, order.Quantity,
-                                    "A protective stop was stood down to free these shares; the final "
-                                    + "size is set at the execution boundary against a fresh book.");
-                                _activity?.Warn("Armed",
-                                    $"{order.Symbol}: a protective stop stood down so this sell could "
-                                    + "go through", release.Reason);
-                            }
-                        }
+                        // The release itself has already been attempted, before this branch, for every
+                        // triggered SELL. What is left here is the consequence for SIZING, and it is
+                        // specific to the persistent path: this local snapshot still shows the released
+                        // stop's order resting, so re-reading it would answer 0 again. Carry the full
+                        // quantity and let TradingManager decide — it re-reads the broker book for
+                        // exactly this reason, and it is the single execution boundary every other
+                        // caller is already sized by.
+                        if (availability.AvailableQuantity <= 0 && releasedForThisOrder)
+                            availability = new SellAvailabilityDecision(
+                                true, order.Quantity,
+                                "A protective stop was stood down to free these shares; the final "
+                                + "size is set at the execution boundary against a fresh book.");
 
                         if (availability.AvailableQuantity <= 0)
                         {
@@ -675,6 +684,46 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                 "[ArmedOrders] Could not trail {ArmedId} ({Symbol}); its trigger stays at {Level}.",
                 order.ArmedId, order.Symbol, order.EffectiveTriggerPrice);
         }
+    }
+
+    /// <summary>
+    /// Asks a protective stop of ours to stand down when it is the thing holding the shares a
+    /// triggered SELL needs. Returns the release reason when a stop actually stood down, and null
+    /// whenever nothing needed releasing or nothing could be released safely.
+    ///
+    /// <para>
+    /// Called for every triggered SELL, persistent or not. The check that free quantity is zero stays
+    /// inside here so the caller does not have to read the snapshot twice, and so the ONE place that
+    /// decides "our own stop is in the way" is the one place that acts on it.
+    /// </para>
+    ///
+    /// <para>
+    /// Every unknown resolves to doing nothing: an unreadable book, an unreadable quantity, or shares
+    /// committed to an order this system did not place all come back not-released, and the caller
+    /// leaves the sell armed. Cancelling on a guess here would cancel a stranger's live order.
+    /// </para>
+    /// </summary>
+    private async Task<string?> ReleaseOwnStopIfBlockingAsync(ArmedOrder order, CancellationToken ct)
+    {
+        if (_stopReleaser is null) return null;
+
+        var availability = SellQuantityRule.Available(
+            _reconciliation.Current,
+            order.Symbol,
+            DateTime.UtcNow,
+            TimeSpan.FromSeconds(Math.Max(10, _options.Value.ReconciliationMaxAgeSeconds)));
+
+        // Not known is not the same as zero, and neither is a positive figure: only a confirmed
+        // "every share is committed" is worth cancelling protection over.
+        if (!availability.Known || availability.AvailableQuantity > 0) return null;
+
+        var release = await _stopReleaser.ReleaseForSellAsync(order.Symbol, order.Quantity, ct);
+        _logger.LogWarning(
+            "[ArmedOrders] {ArmedId} ({Symbol}) asked for shares held by a protective stop: "
+            + "released={Released} — {Why}",
+            order.ArmedId, order.Symbol, release.Released, release.Reason);
+
+        return release.Released ? release.Reason : null;
     }
 
     /// <summary>

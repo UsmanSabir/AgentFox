@@ -30,6 +30,35 @@ public sealed class OrderWindowTests
     }
 
     [TestMethod]
+    [DataRow("PRE")]
+    [DataRow("Pre-Open")]
+    [DataRow("PREOPEN")]
+    public void TheOtherPreOpenSpellingsAreAllowedToo(string state)
+    {
+        // AHL names the same phase differently again, and both of these are CONFIRMED readings from
+        // 2026-09-02 — PRE from an ORDER_MST push at 09:15:00, Pre-Open from MarketStatus 49 seconds
+        // later. One venue phase, three spellings, one answer.
+        Assert.IsTrue(Build(state, calendarOpen: false).Evaluate().Allowed,
+            $"'{state}' is pre-open order handling, exactly like OHO");
+    }
+
+    [TestMethod]
+    public void AnUnrecognisedStateIsRefused_NotDeferredToTheCalendar()
+    {
+        // The asymmetry that makes this list dangerous to get half-right, pinned so it stays a
+        // decision rather than a discovery. A state the broker DOES report but this list does not
+        // know is refused outright; only the ABSENCE of a reported state falls back to the calendar.
+        // So an adapter taught a new token without this list learning it too refuses orders that used
+        // to go through — which is exactly how adding PRE to premium's reader alone broke the pre-open
+        // window, on a calendar-open day at that.
+        var decision = Build("SomeNewPhase", calendarOpen: true).Evaluate();
+
+        Assert.IsFalse(decision.Allowed);
+        Assert.AreEqual("broker", decision.Source,
+            "an unrecognised reading is still a reading — it must not be reported as a calendar answer");
+    }
+
+    [TestMethod]
     public void BrokerStateOutranksTheCalendar_InBothDirections()
     {
         // Venue open while the local clock says closed — e.g. an extended session.
