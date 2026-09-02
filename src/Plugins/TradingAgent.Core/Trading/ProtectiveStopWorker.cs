@@ -94,6 +94,31 @@ public sealed class ProtectiveStopWorker
 
     private static readonly TimeSpan HoldingsReuseWindow = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// Guards the pair above. They are read and written from two different gates — the pass gate and the
+    /// baseline gate — so neither one alone makes the snapshot and its timestamp move together.
+    /// </summary>
+    private readonly Lock _snapshotCacheGate = new();
+
+    /// <summary>The cached snapshot if it is still inside <see cref="HoldingsReuseWindow"/>, else null.</summary>
+    private BrokerReconciliationSnapshot? RecentSnapshot()
+    {
+        lock (_snapshotCacheGate)
+            return _recentSnapshot is not null
+                   && DateTime.UtcNow - _recentSnapshotUtc < HoldingsReuseWindow
+                ? _recentSnapshot
+                : null;
+    }
+
+    private void PublishSnapshot(BrokerReconciliationSnapshot snapshot)
+    {
+        lock (_snapshotCacheGate)
+        {
+            _recentSnapshot = snapshot;
+            _recentSnapshotUtc = DateTime.UtcNow;
+        }
+    }
+
     public ProtectiveStopWorker(
         IServiceScopeFactory scopes,
         IBrokerStateReader stateReader,
@@ -228,25 +253,48 @@ public sealed class ProtectiveStopWorker
         }
     }
 
-    /// <summary>Reads the account snapshot, reusing a very recent read. ASSUMES the baseline gate is held.</summary>
+    /// <summary>Reads the account snapshot, reusing a very recent read.</summary>
     private async Task<BrokerReconciliationSnapshot?> SnapshotForBaselineAsync()
     {
-        if (_recentSnapshot is not null && DateTime.UtcNow - _recentSnapshotUtc < HoldingsReuseWindow)
-            return _recentSnapshot;
+        if (RecentSnapshot() is { } cached) return cached;
 
         var snapshot = await ReadAccountSnapshotAsync();
-        if (snapshot is { Healthy: true })
-        {
-            _recentSnapshot = snapshot;
-            _recentSnapshotUtc = DateTime.UtcNow;
-        }
+        if (snapshot is { Healthy: true }) PublishSnapshot(snapshot);
         return snapshot;
     }
 
-    public async Task RunNowAsync(CancellationToken ct = default)
+    /// <param name="allowRecentSnapshotReuse">
+    /// Whether this pass may decide from an account snapshot up to <see cref="HoldingsReuseWindow"/>
+    /// old instead of reading one.
+    ///
+    /// <para>
+    /// <b>Defaults to false, and the default is the important half.</b> A snapshot is five SOAP calls on
+    /// the account's single session, so reuse is worth having — but only where the caller knows the
+    /// snapshot is not the thing that changed. A price tick reaching a level is such a caller: what
+    /// changed is the PRICE, which arrives on the live feed, and custody does not move in thirty
+    /// seconds without an order behind it.
+    /// </para>
+    ///
+    /// <para>
+    /// <see cref="TriggerSoon"/> must NOT pass true, and that is the whole reason this is a parameter
+    /// rather than a constant. It is called the instant the venue pushes a fill, where custody and the
+    /// resting book are exactly what changed; a pass reusing a snapshot taken before that fill would
+    /// see the old position, conclude nothing had happened, and turn the event-driven path back into
+    /// the two-minute custody poll it was built to replace.
+    /// </para>
+    ///
+    /// <para>
+    /// The residual, accepted knowingly: a reusing pass can act on custody up to thirty seconds old, so
+    /// it may try to protect shares that have just been sold. The broker refuses that out loud
+    /// (CLAUDE.md §6a) and the ledger's <c>last_placed_date</c> remains the primary guard against a
+    /// duplicate placement, so the cost is a wasted attempt rather than a wrong position.
+    /// </para>
+    /// </param>
+    public async Task RunNowAsync(
+        CancellationToken ct = default, bool allowRecentSnapshotReuse = false)
     {
         await _runGate.WaitAsync(ct);
-        try { await RunPassCoreAsync(ct); }
+        try { await RunPassCoreAsync(ct, allowRecentSnapshotReuse); }
         finally { _runGate.Release(); }
     }
 
@@ -271,7 +319,7 @@ public sealed class ProtectiveStopWorker
     public Task RunAtMarketOpenAsync(MarketSessionOpenContext context, CancellationToken ct) =>
         RunNowAsync(ct);
 
-    private async Task RunPassCoreAsync(CancellationToken ct)
+    private async Task RunPassCoreAsync(CancellationToken ct, bool allowRecentSnapshotReuse = false)
     {
         using var scope = _scopes.CreateScope();
         var repository = scope.ServiceProvider.GetRequiredService<ITradingRepository>();
@@ -307,7 +355,10 @@ public sealed class ProtectiveStopWorker
         // what was recorded: the first pass after the open sees an unprotected position and places the
         // stop again. Anything that starts trusting the stored state instead would leave positions
         // unprotected every morning while reporting them protected.
-        var snapshot = await ReadAccountSnapshotAsync();
+        // Reuse only when the caller has said the snapshot is not what changed — see RunNowAsync's
+        // parameter. Everything else, including every fill-driven pass, reads.
+        var reused = allowRecentSnapshotReuse ? RecentSnapshot() : null;
+        var snapshot = reused ?? await ReadAccountSnapshotAsync();
 
         // Publish this read so the baseline path reuses it instead of taking its own.
         //
@@ -320,11 +371,7 @@ public sealed class ProtectiveStopWorker
         // This is not the same as deciding on stale data. The baseline path already accepts a reading
         // up to HoldingsReuseWindow old; what it gets here is younger than that and is the very
         // snapshot this pass is deciding from, so the two can no longer disagree with each other.
-        if (snapshot is { Healthy: true })
-        {
-            _recentSnapshot = snapshot;
-            _recentSnapshotUtc = DateTime.UtcNow;
-        }
+        if (reused is null && snapshot is { Healthy: true }) PublishSnapshot(snapshot);
 
         // Unknown is never zero: a snapshot that is not fully healthy could mean holdings specifically
         // failed to read, and an empty Positions list from THAT would look identical to "you hold
