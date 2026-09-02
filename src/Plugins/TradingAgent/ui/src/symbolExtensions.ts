@@ -12,8 +12,10 @@
  * A community build passes nothing and is byte-for-byte unchanged on screen.
  *
  * THE CONTRACT. Every component here receives a `symbol` prop. `plan` additionally receives
- * `companyName`. Components must render nothing at all when they have nothing to say, because they
- * sit inside layouts this repo owns and an empty box is a visual defect.
+ * `companyName` and, in the docked workspace, `allowCollapse={false}`: the tab already owns visibility,
+ * so components with a disclosure should keep their content open. The stacked layout leaves this
+ * optional prop at the component's default. Components must render nothing when they have nothing
+ * to say, because they sit inside layouts this repo owns and an empty box is a visual defect.
  */
 
 /**
@@ -32,6 +34,6 @@ export type SymbolExtension = {
   /** Rendered inside each portfolio holding row, under the instrument name. */
   holdingStatus?: SymbolExtensionComponent | null;
 
-  /** Rendered as its own workspace section beneath the chart, for the selected symbol. */
+  /** Rendered in a docked tab on desktop or beneath the chart in the stacked workspace. */
   plan?: SymbolExtensionComponent | null;
 };

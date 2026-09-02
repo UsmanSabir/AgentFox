@@ -367,6 +367,7 @@
             this={symbolExtension.plan}
             symbol={selectedSymbol}
             companyName={selectedCompany}
+            allowCollapse={false}
           />
         {/if}
       </div>
@@ -517,17 +518,15 @@
   .dock-shell :global(.dv-sash.dv-active) { background: var(--primary); }
   .dock-shell :global(.panel-host > section) {
     min-height: 100%;
-    height: 100%;
+    height: auto;
     border: 0;
     border-radius: 0;
   }
-  /* ChartPane is a vertical flex card with a deliberately tall canvas and supporting analysis below.
-     Let it grow beyond the Dockview viewport so the panel scrolls; forcing an exact 100% height makes
-     flexbox shrink the canvas until the candles look like a flat line. */
-  .dock-shell :global(.panel-host[data-panel='chart'] > .chart-card) {
-    height: auto;
-  }
+  /* Content cards grow naturally and the host owns scrolling. An exact height compresses the chart
+     and clips extension cards that use overflow:hidden. Only the watchlist fills the viewport:
+     it deliberately owns an independently scrolling list below its fixed controls. */
   .dock-shell :global(.panel-host[data-panel='watchlist'] > .watchlist) {
+    height: 100%;
     contain: size;
   }
 
