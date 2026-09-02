@@ -6,6 +6,7 @@
     type ArmOrderRequest, type TriggerKind, type BrokerAccountSnapshot
   } from './api';
   import { Crosshair, X, AlertTriangle, Zap } from 'lucide-svelte';
+  import { livePriceLabel, useLivePrices } from './livePrices';
 
   /**
    * Pre-filled context from wherever the user clicked — a chart level or an alert. Everything stays
@@ -62,6 +63,11 @@
     attachedStop: { stopTrigger: number; stopLimit: number; recurring: boolean; note: string } | null;
   } | null = null;
   let dialogElement: HTMLDivElement;
+  const livePrices = useLivePrices();
+  let livePriceStore = livePrices.quote(symbol);
+  $: livePriceStore = livePrices.quote(symbol);
+  $: livePriceView = $livePriceStore;
+  $: displayedCurrentPrice = livePriceView.quote?.current ?? currentPrice;
 
   // ── Attached protective stop (BUY only) ──────────────────────────────────
   // Exported so a caller with a stop already in hand — the chart's plan gives an entry AND the level
@@ -116,8 +122,8 @@
    * wait for anything. Worth saying out loud: it is occasionally what someone wants ("get me out, it
    * is already falling") and much more often a number typed on the wrong side of the price.
    */
-  $: alreadyPassed = !isEvent && level != null && currentPrice != null && currentPrice > 0
-    && (fallsToTrigger ? currentPrice <= level : currentPrice >= level);
+  $: alreadyPassed = !isEvent && level != null && displayedCurrentPrice != null && displayedCurrentPrice > 0
+    && (fallsToTrigger ? displayedCurrentPrice <= level : displayedCurrentPrice >= level);
 
   // A stop's limit defaults just past its trigger, mirroring the broker-side default: a stop limit set
   // exactly AT the trigger often misses the move that triggered it.
@@ -418,8 +424,9 @@
         {#if level != null}
           <p class="level-line">
             Fires at <b>{money(level)}</b>
-            {#if currentPrice != null && currentPrice > 0}
-              · {symbol} is {money(currentPrice)} now
+            {#if displayedCurrentPrice != null && displayedCurrentPrice > 0}
+              · {symbol} is {money(displayedCurrentPrice)} now
+              <small title={livePriceLabel(livePriceView)}>({livePriceView.freshness})</small>
             {/if}
           </p>
         {/if}

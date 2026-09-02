@@ -8,6 +8,7 @@
   import {
     ShoppingCart, X, AlertTriangle, RefreshCw, CheckCircle2, Clock3, BriefcaseBusiness, Wallet
   } from 'lucide-svelte';
+  import { livePriceLabel, useLivePrices } from './livePrices';
 
   export let selectedSymbol: string | null = null;
 
@@ -21,6 +22,7 @@
   let quantity: number | null = null;
   let orderValue: number | null = null;
   let currentPrice: number | null = null;
+  let triggerReferencePrice: number | null = null;
   /**
    * The symbol the price fields were last seeded from.
    *
@@ -55,6 +57,14 @@
 
   const money = (value: number) => value.toLocaleString(undefined, { maximumFractionDigits: 2 });
   const when = (value: string) => new Date(value).toLocaleString();
+  const livePrices = useLivePrices();
+  let livePriceStore = livePrices.quote(symbol);
+  $: livePriceStore = livePrices.quote(symbol);
+  $: livePriceView = $livePriceStore;
+  $: latestPrice = livePriceView.quote?.current ?? currentPrice;
+  $: latestPriceLabel = livePriceView.quote?.current != null
+    ? livePriceLabel(livePriceView)
+    : 'Latest available price';
   $: categories = [...new Set((registry?.intents ?? []).map(item => item.category))];
 
   onMount(async () => {
@@ -106,8 +116,9 @@
         quantity = null;
         orderValue = null;
         quantityWasEdited = false;
+        triggerReferencePrice = null;
       }
-      applySuggestedPrices(changed);
+      applySuggestedPrices(changed, chart.snapshot.close);
       defaultStopLossQuantity(account, chart.symbol.trim().toUpperCase());
     } catch (e) {
       currentPrice = null;
@@ -129,7 +140,8 @@
     stopTrigger = null;
     stopLimit = null;
     clientRequestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    applySuggestedPrices(true);
+    triggerReferencePrice = latestPrice;
+    applySuggestedPrices(true, latestPrice);
     // Account context is part of composing an order, not homework for the operator. In particular a
     // SELL stop-loss defaults to every uncommitted share as soon as this fresh snapshot arrives.
     if (intent.action === 'SELL' && intent.orderType === 'STOPLOSS') {
@@ -146,15 +158,22 @@
    * when `force` is set, which means the numbers on screen belong to a different order intent or a
    * different symbol and are therefore not that person's answer to the question now being asked.
    */
-  function applySuggestedPrices(force: boolean) {
-    if (!choice || !currentPrice || currentPrice <= 0) return;
-    if (choice.priceField === 'limit' && (force || price == null)) price = currentPrice;
+  function applySuggestedPrices(force: boolean, reference = latestPrice) {
+    if (!choice || !reference || reference <= 0) return;
+    if (choice.priceField === 'limit' && (force || price == null)) price = reference;
     if (choice.priceField === 'target' && (force || price == null))
-      price = Number((currentPrice * 1.05).toFixed(2));
+      price = Number((reference * 1.05).toFixed(2));
     if (choice.priceField === 'stop' && (force || triggerPrice == null)) {
-      triggerPrice = Number((currentPrice * (choice.action === 'SELL' ? .98 : 1.02)).toFixed(2));
+      triggerPrice = Number((reference * (choice.action === 'SELL' ? .98 : 1.02)).toFixed(2));
       limitPrice = Number((triggerPrice * (choice.action === 'SELL' ? .99 : 1.01)).toFixed(2));
     }
+  }
+
+  // A live quote may arrive before the slower candle fallback. Seed only blank fields and freeze the
+  // reference used by percentage triggers; subsequent ticks update the readout, never the draft.
+  $: if (choice && triggerReferencePrice == null && latestPrice && latestPrice > 0) {
+    triggerReferencePrice = latestPrice;
+    applySuggestedPrices(false, latestPrice);
   }
 
   const sameSymbol = (candidate: string | null | undefined, ticker: string) =>
@@ -214,7 +233,7 @@
   }
 
   $: conditionalLevel = choice?.submission === 'conditional' && choice.triggerKind
-    ? percentTriggerLevel(choice.triggerKind, currentPrice, triggerPercent)
+    ? percentTriggerLevel(choice.triggerKind, triggerReferencePrice, triggerPercent)
     : null;
   $: marketDisabled = choice?.orderType === 'MARKET'
     && registry != null && !registry.capabilities.marketOrdersEnabled;
@@ -250,7 +269,7 @@
   // seconds stale. Telling the operator early is worth much more than refusing here would be.
   $: buyExceedsBuyingPower = choice?.action === 'BUY' && buyingPower != null
     && estimatedValue != null && estimatedValue > buyingPower;
-  $: estimatedPrice = choice?.orderType === 'MARKET' ? currentPrice
+  $: estimatedPrice = choice?.orderType === 'MARKET' ? latestPrice
     : choice?.orderType === 'STOPLOSS' ? triggerPrice
     : choice?.submission === 'conditional' ? conditionalLevel : price;
   $: availableSellValue = availableSellQuantity != null && estimatedPrice && estimatedPrice > 0
@@ -324,7 +343,7 @@
       if (!choice.triggerKind || !triggerPercent || triggerPercent <= 0 || triggerPercent > 50) {
         error = 'Enter a trigger move between 0 and 50%.'; return;
       }
-      if (!currentPrice || !conditionalLevel) {
+      if (!triggerReferencePrice || !conditionalLevel) {
         error = 'A current price is required to arm a percentage trigger.'; return;
       }
     } else if (choice.orderType === 'STOPLOSS') {
@@ -387,7 +406,7 @@
           quantity: submittedQuantity,
           triggerKind: choice.triggerKind as TriggerKind,
           triggerPercent,
-          referencePrice: currentPrice,
+          referencePrice: triggerReferencePrice,
           trailing: choice.trailing,
           orderType: choice.orderType,
           price: choice.orderType === 'MARKET' ? null : conditionalLevel,
@@ -441,7 +460,7 @@
         <label><span>Symbol</span><input list="new-order-symbols" bind:value={symbol} on:change={refreshQuote} /></label>
         <datalist id="new-order-symbols">{#each symbols as entry}<option value={entry.symbol}>{entry.companyName ?? ''}</option>{/each}</datalist>
         <div class="quote">
-          <span>Latest price</span><b>{currentPrice != null ? money(currentPrice) : '—'}</b>
+          <span>{latestPriceLabel}</span><b>{latestPrice != null ? money(latestPrice) : '—'}</b>
           <button class="icon" on:click={refreshQuote} disabled={quoteBusy} title="Refresh latest price"><RefreshCw size={13} /></button>
         </div>
       </div>
@@ -585,7 +604,7 @@
               <label><span>Worst acceptable price after trigger</span><input type="number" min="0.01" step="0.01" bind:value={limitPrice} /></label>
             {/if}
             {#if choice.submission === 'conditional'}
-              <label><span>Move from {currentPrice ?? 'latest price'} (%)</span><input type="number" min="0.1" max="50" step="0.1" bind:value={triggerPercent} /></label>
+              <label><span>Move from {triggerReferencePrice ?? 'latest price'} (%)</span><input type="number" min="0.1" max="50" step="0.1" bind:value={triggerPercent} /></label>
             {/if}
             {#if choice.submission === 'conditional' || persistentUntilFilled}
               <label><span>Expires in (days)</span><input type="number" min="1" max="365" bind:value={expiresInDays} /></label>

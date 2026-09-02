@@ -7,9 +7,10 @@
   import {
     Plus, RotateCcw, Trash2, Bell, BellOff, Eye, AlertTriangle, Clock, Search,
     Download, Pin, PinOff, GripVertical, PanelLeftClose, PanelLeftOpen,
-    ArrowUpRight, ArrowDownRight, Minus, Bot, Hand, Lock, ListPlus, X, Sparkles
+    Bot, Hand, Lock, ListPlus, X, Sparkles
   } from 'lucide-svelte';
   import type { SymbolExtensionComponent } from './symbolExtensions';
+  import LivePriceInline from './LivePriceInline.svelte';
 
   /** Selected symbol, so the chart pane (Phase 2) can follow the list. */
   export let selected: string | null = null;
@@ -483,9 +484,6 @@
     `${entry.symbol} ${entry.companyName ?? ''}`.toLowerCase().includes(search.trim().toLowerCase())
   );
 
-  function formatDayChange(value: number) {
-    return `${value > 0 ? '+' : ''}${value.toFixed(2)}%`;
-  }
 </script>
 
 <section class="watchlist" class:compact>
@@ -716,25 +714,7 @@
             <span class="identity">
               <span class="symbol-line">
                 <span class="symbol">{entry.symbol}</span>
-                {#if entry.dayChangePercent != null}
-                  <span
-                    class="day-change"
-                    class:up={entry.dayChangePercent > 0}
-                    class:down={entry.dayChangePercent < 0}
-                    class:flat={entry.dayChangePercent === 0}
-                    title="Today's move from the previous close: {formatDayChange(entry.dayChangePercent)}"
-                    aria-label="Today's change {formatDayChange(entry.dayChangePercent)}"
-                  >
-                    {#if entry.dayChangePercent > 0}
-                      <ArrowUpRight size={11} aria-hidden="true" />
-                    {:else if entry.dayChangePercent < 0}
-                      <ArrowDownRight size={11} aria-hidden="true" />
-                    {:else}
-                      <Minus size={11} aria-hidden="true" />
-                    {/if}
-                    {formatDayChange(entry.dayChangePercent)}
-                  </span>
-                {/if}
+                <LivePriceInline symbol={entry.symbol} fallbackChange={entry.dayChangePercent} showPrice={!compact} />
               </span>
               {#if entry.companyName}<span class="company">{entry.companyName}</span>{/if}
             </span>
@@ -1063,13 +1043,6 @@
   .identity { display:flex; width:100%; min-width:0; overflow:hidden; flex-direction:column; gap:.08rem; }
   .symbol-line { display:flex; align-items:center; gap:.4rem; min-width:0; }
   .symbol { font-weight:600; font-size:.8rem; font-family:ui-monospace, monospace; }
-  .day-change {
-    display:inline-flex; align-items:center; gap:.08rem; white-space:nowrap;
-    font-size:.65rem; font-weight:700; font-variant-numeric:tabular-nums;
-  }
-  .day-change.up { color:var(--success); }
-  .day-change.down { color:var(--danger); }
-  .day-change.flat { color:var(--text-3); }
   .company { color:var(--text-3); font-size:.64rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; width:100%; }
   .tags { display:flex; justify-content:flex-start; align-items:center; gap:.3rem; flex-wrap:wrap; }
   .tags:empty { display:none; }
@@ -1139,7 +1112,6 @@
   .watchlist.compact .identity { min-width:0; }
   .watchlist.compact .symbol-line { flex-direction:column; align-items:flex-start; gap:0; }
   .watchlist.compact .symbol { font-size:.72rem; }
-  .watchlist.compact .day-change { font-size:.58rem; }
   .watchlist.compact .company { display:none; }
   .watchlist.compact .tags .tag:not(.alert),
   .watchlist.compact .row-actions .icon:not(.pin) { display:none; }

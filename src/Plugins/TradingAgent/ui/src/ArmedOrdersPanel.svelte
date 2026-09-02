@@ -4,6 +4,7 @@
   import {
     Crosshair, Trash2, RefreshCw, Zap, ShieldAlert, Clock, Shield, ShieldOff, ListChecks
   } from 'lucide-svelte';
+  import LivePriceInline from './LivePriceInline.svelte';
 
   export let refreshTick = 0;
 
@@ -308,6 +309,7 @@
                  sizing was invisible. -->
             <div class="row-1">
               <span class="symbol">{order.symbol}</span>
+              <LivePriceInline symbol={order.symbol} fallbackChange={null} />
               <span class="side {order.action.toLowerCase()}">{order.action}</span>
               <span class="qty">{order.quantity}</span>
               <span class="at" class:missing={order.price == null && order.orderType !== 'MARKET'}>
@@ -353,6 +355,7 @@
             <div class="body">
               <div class="row-1">
                 <span class="symbol">{stop.symbol}</span>
+                <LivePriceInline symbol={stop.symbol} fallbackChange={null} />
                 <span class="side sell">STOP</span>
                 {#if stop.desiredQuantity}<span class="qty">{stop.desiredQuantity}</span>{/if}
                 <span class="at">@ {num(stop.stopTrigger)}</span>

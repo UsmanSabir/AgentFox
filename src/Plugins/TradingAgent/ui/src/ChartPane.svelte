@@ -23,6 +23,7 @@
     Activity, Crosshair, BarChart3, TrendingDown, CalendarClock, Download
   } from 'lucide-svelte';
   import AssessmentCard from './AssessmentCard.svelte';
+  import { livePriceLabel, useLivePrices, type LivePrice } from './livePrices';
 
   export let symbol: string | null = null;
   export let companyName: string | null = null;
@@ -47,6 +48,13 @@
 
   /** Whether the market is currently open — a closed market has nothing new to fetch. */
   export let marketOpen = false;
+
+  const livePrices = useLivePrices();
+  let livePriceStore = livePrices.quote(symbol);
+  $: livePriceStore = livePrices.quote(symbol);
+  $: livePriceView = $livePriceStore;
+  $: displayedPrice = livePriceView.quote?.current ?? data?.snapshot.close ?? null;
+  $: displayedChange = livePriceView.quote?.changePercent ?? data?.snapshot.dayChangePercent ?? null;
 
   /**
    * How much level detail to draw. Six labelled price lines plus the axis chips is more than a small
@@ -80,6 +88,7 @@
   function armAtLevel(level: ChartData['levels']['supports'][number], side: 'support' | 'resistance') {
     if (!symbol || !data) return;
     const isSupport = side === 'support';
+    const last = displayedPrice ?? data.snapshot.close;
     dispatch('arm', {
       symbol,
       triggerKind: isSupport ? 'PriceBelow' : 'PriceAbove',
@@ -87,8 +96,9 @@
       action: isSupport ? 'BUY' : 'SELL',
       orderType: 'LIMIT',
       price: level.price,
+      currentPrice: last,
       context:
-        `${symbol} last ${data.snapshot.close} · ${side} ${level.price} `
+        `${symbol} last ${last} · ${side} ${level.price} `
         + `(${level.touches} touch${level.touches === 1 ? '' : 'es'}`
         + `${level.weeklyConfirmed ? ', weekly-confirmed' : ', no weekly confirmation'}) `
         + `· ${isSupport ? 'a BUY fires if price falls to support' : 'a SELL fires if price rises to resistance'}.`
@@ -105,7 +115,7 @@
    */
   function armPercentDrop(percent: number) {
     if (!symbol || !data) return;
-    const last = data.snapshot.close;
+    const last = displayedPrice ?? data.snapshot.close;
 
     dispatch('arm', {
       symbol,
@@ -141,6 +151,7 @@
   function armPlan() {
     if (!symbol || !data?.plan.entry) return;
     const plan = data.plan;
+    const last = displayedPrice ?? data.snapshot.close;
 
     dispatch('arm', {
       symbol,
@@ -153,8 +164,9 @@
       // dialog's generic 2%-under guess where a computed stop appears to be.
       attachStop: plan.stop != null,
       stopTrigger: plan.stop,
+      currentPrice: last,
       context:
-        `${symbol} last ${data.snapshot.close} · plan entry ${plan.entry}, stop ${plan.stop ?? '—'}, `
+        `${symbol} last ${last} · plan entry ${plan.entry}, stop ${plan.stop ?? '—'}, `
         + `target ${plan.target ?? '—'}`
         + (plan.rewardRisk ? ` (R:R ${plan.rewardRisk})` : '')
         + `. ${plan.entryWeeklyConfirmed ? 'The entry level is weekly-confirmed.' : 'The entry level has no weekly confirmation.'}`
@@ -389,7 +401,35 @@
         to: d.candles.length + Math.max(4, projectedBars + 2)
       });
     }
+    applyLiveQuote(livePriceView.quote);
   }
+
+  /**
+   * AHL publishes session OHLC, so it can safely replace only the forming DAILY bar. Intraday candle
+   * shape remains server-authored; using a session high as a five-minute high would fabricate data.
+   */
+  function applyLiveQuote(quote: LivePrice | null) {
+    if (!quote || !data || !data.usesLiveBar || !candleSeries
+        || data.interval !== '1D' || data.candles.length === 0) return;
+    if (quote.symbol !== data.symbol.trim().toUpperCase() || quote.current == null) return;
+    const last = data.candles[data.candles.length - 1];
+    const open = quote.open ?? last.open;
+    const high = Math.max(quote.high ?? last.high, quote.current, open);
+    const low = Math.min(quote.low ?? last.low, quote.current, open);
+    candleSeries.update({
+      time: last.time as UTCTimestamp,
+      open,
+      high,
+      low,
+      close: quote.current
+    });
+    if (quote.volume != null) {
+      const color = quote.current >= open ? token('--success', '#34d399') : token('--danger', '#f87171');
+      volumeSeries?.update({ time: last.time as UTCTimestamp, value: quote.volume, color: `${color}55` });
+    }
+  }
+
+  $: applyLiveQuote(livePriceView.quote);
 
   /**
    * Drops the overlay handles without touching the chart. Called wherever the chart itself is
@@ -763,12 +803,12 @@
         {#if data}
           <div class="quote-line">
             <span class="price-readout">
-              <small>{data.usesLiveBar ? 'Current price' : 'Last close'}</small>
-              <strong>{data.snapshot.close}</strong>
+              <small>{livePriceView.quote ? livePriceLabel(livePriceView) : data.usesLiveBar ? 'Current price' : 'Last close'}</small>
+              <strong>{displayedPrice ?? '—'}</strong>
             </span>
-            <span class:positive={(data.snapshot.dayChangePercent ?? 0) > 0}
-              class:negative={(data.snapshot.dayChangePercent ?? 0) < 0}>
-              {pct(data.snapshot.dayChangePercent)}
+            <span class:positive={(displayedChange ?? 0) > 0}
+              class:negative={(displayedChange ?? 0) < 0}>
+              {pct(displayedChange)}
             </span>
             <span>{data.snapshot.setup} · {data.barsAnalyzed} bars · as of {data.snapshot.asOf}</span>
             {#if data.usesLiveBar}
@@ -992,7 +1032,7 @@
               title="Arm a trailing SELL that fires if {symbol} falls {percent}% from its highest point — at market, so it fills"
             >
               −{percent}%
-              <em>{(Math.round(data.snapshot.close * (1 - percent / 100) * 100) / 100)}</em>
+              <em>{(Math.round((displayedPrice ?? data.snapshot.close) * (1 - percent / 100) * 100) / 100)}</em>
             </button>
           {/each}
           <span class="drop-hint">trailing · follows the price up</span>
