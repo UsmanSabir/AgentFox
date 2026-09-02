@@ -1120,7 +1120,7 @@
   .watchlist.compact .row-actions .icon { width:22px; height:22px; }
 
   /* In the stacked mobile layout the chart no longer establishes this panel's height. */
-  @media (max-width: 820px) {
+  @media (max-width: 900px) {
     .watchlist { height:auto; max-height:none; overflow:visible; contain:none; }
     .rows { flex:none; max-height:min(52vh, 420px); }
   }

@@ -216,6 +216,9 @@
     align-items: stretch;
   }
   .pane { min-width: 0; }
+  /* WatchlistPanel deliberately uses size containment so a long list cannot size this grid row.
+     The pane wrapper must therefore pass the chart-established row height through to its child. */
+  .left-pane { display: grid; min-height: 0; }
   .splitter {
     position: relative;
     z-index: 2;
