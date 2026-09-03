@@ -177,8 +177,8 @@
     });
   }
 
-  /** Dockview exposes the group action seam/API; its demo's header glyph is app-supplied. */
-  function drawMaximizeIcon(button: HTMLButtonElement, restoring: boolean) {
+  /** Dockview exposes the group action seam/API; its demo's header glyphs are app-supplied. */
+  function drawHeaderIcon(button: HTMLButtonElement, paths: string[]) {
     const svg = document.createElementNS('http://www.w3.org/2000/svg','svg');
     svg.setAttribute('viewBox','0 0 24 24');
     svg.setAttribute('width','14');
@@ -189,12 +189,21 @@
     svg.setAttribute('stroke-linecap','round');
     svg.setAttribute('stroke-linejoin','round');
     svg.setAttribute('aria-hidden','true');
-    const path = document.createElementNS('http://www.w3.org/2000/svg','path');
-    path.setAttribute('d',restoring
-      ? 'm14 10 7-7M20 10h-6V4M3 21l7-7M4 14h6v6'
-      : 'm15 3 6 6M21 3h-6v6M9 21l-6-6M3 21v-6h6');
-    svg.appendChild(path);
+    for (const d of paths) {
+      const path = document.createElementNS('http://www.w3.org/2000/svg','path');
+      path.setAttribute('d',d); svg.appendChild(path);
+    }
     button.replaceChildren(svg);
+  }
+
+  function drawMaximizeIcon(button: HTMLButtonElement, restoring: boolean) {
+    drawHeaderIcon(button,[restoring
+      ? 'm14 10 7-7M20 10h-6V4M3 21l7-7M4 14h6v6'
+      : 'm15 3 6 6M21 3h-6v6M9 21l-6-6M3 21v-6h6']);
+  }
+
+  function drawUnpinIcon(button: HTMLButtonElement) {
+    drawHeaderIcon(button,['M12 17v5','M15 9.34V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H7.89','m2 2 20 20','M9 9v1.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h11']);
   }
 
   function buildDefault(next: string) {
@@ -499,8 +508,10 @@
           const element = document.createElement('div');
           element.className = 'group-actions';
           const pin = document.createElement('button');
-          pin.className = 'group-control'; pin.textContent = 'Unpin'; pin.title = 'Auto-hide this bottom tool group';
-          pin.setAttribute('aria-label','Unpin this bottom group');
+          pin.className = 'group-control group-unpin';
+          pin.title = 'Auto-hide this bottom tool group';
+          pin.setAttribute('aria-label','Auto-hide this bottom tool group');
+          drawUnpinIcon(pin);
           pin.onclick = () => unpinBottom(group.id);
           const expand = document.createElement('button'); expand.className = 'group-control';
           expand.onclick = () => { group.activePanel?.api.setActive(); maximize(); };
@@ -684,7 +695,9 @@
   .workspace-dock :global([data-workspace-panel='chart'] .plot) { height:clamp(300px, calc(100cqh - 110px), 900px); }
   .workspace-dock :global(.dv-tab) { font-size:.7rem; }
   .workspace-dock :global(.group-actions) { display:flex; align-items:center; }
-  .workspace-dock :global(.group-control) { align-self:center; display:inline-flex; align-items:center; justify-content:center; cursor:pointer; margin:0 .2rem; min-width:26px; min-height:24px; padding:.2rem .3rem; border:1px solid var(--border-md); border-radius:3px; background:var(--surface); color:var(--text-2); font-size:.65rem; }
+  .workspace-dock :global(.group-control) { align-self:center; display:inline-flex; align-items:center; justify-content:center; cursor:pointer; margin:0 .05rem; min-width:26px; min-height:26px; padding:.25rem; border:1px solid transparent; border-radius:3px; background:transparent; color:var(--text-2); font-size:.65rem; transition:color 150ms ease,background-color 150ms ease; }
+  .workspace-dock :global(.group-control[hidden]) { display:none; }
+  .workspace-dock :global(.group-control:hover) { color:var(--text); background:var(--surface-3); }
   .workspace-dock :global(.group-control:focus-visible) { outline:2px solid var(--primary); outline-offset:-2px; }
   .workspace-dock :global(.group-control:disabled) { opacity:.5; cursor:default; }
   .workspace-dock :global(.dv-tab.dv-active-tab) { box-shadow:inset 0 2px var(--primary); }
