@@ -143,6 +143,50 @@ public sealed partial class TradingCoreEndpoints
             var effectiveQuantity = body.Quantity.Value;
             string? sellQuantityAdjustment = null;
             string source;
+            // ── A sell whose shares are already committed, explained rather than bounced ──────────
+            //
+            // This broker sizes every SELL against custody MINUS the quantity already committed to
+            // resting SELLs, so a protective stop covering the whole holding refuses even a sell that
+            // only REDUCES the position. The operator is then refused on shares they can plainly see
+            // they own, with nothing saying their own stop is the cause.
+            //
+            // ONLY the known-and-zero case is handled here, and the asymmetry is deliberate. A zero
+            // this system can PROVE is a sell the broker would certainly reject, so refusing locally
+            // with the reason and a remedy is strictly better than a broker rejection with neither.
+            // An UNKNOWN availability is left to fall straight through as it always has: refusing on
+            // ignorance would newly block ordinary sells whenever reconciliation is briefly stale,
+            // which is a hurdle this endpoint has never imposed and should not start imposing to
+            // improve an error message.
+            //
+            // Placed OUTSIDE the persistent branch below because the constraint is a fact about the
+            // account, not about how the order is submitted. It lived inside it until 2026-09-03, so
+            // an ordinary immediate sell — the common case — skipped the check entirely and met the
+            // broker's own refusal instead.
+            if (intent.Action.Equals("SELL", StringComparison.OrdinalIgnoreCase))
+            {
+                var committed = SellQuantityRule.Available(
+                    reconciliation.Current,
+                    symbol,
+                    DateTime.UtcNow,
+                    TimeSpan.FromSeconds(Math.Max(10, options.Value.ReconciliationMaxAgeSeconds)));
+
+                if (committed is { Known: true, AvailableQuantity: <= 0 })
+                {
+                    var blocking = await BlockingStopsAsync(repository, symbol, ct);
+                    return Results.Conflict(new
+                    {
+                        error = "no_sellable_holding",
+                        message = blocking.Count == 0
+                            ? $"No uncommitted {symbol} shares are available to sell."
+                            : $"No uncommitted {symbol} shares are available to sell: "
+                              + string.Join(" and ", blocking.Select(s => s.Describe))
+                              + ". It can stand down for this sell and go back over what remains "
+                              + "afterwards.",
+                        blockingStops = blocking
+                    });
+                }
+            }
+
             if (body.PersistentUntilFilled)
             {
                 if (PersistentOrderDecisions.ValidateEligibility(intent.OrderType) is { } persistenceProblem)
@@ -175,30 +219,10 @@ public sealed partial class TradingCoreEndpoints
                             error = "sell_availability_unknown",
                             message = availability.Reason
                         });
-                    if (availability.AvailableQuantity <= 0)
-                    {
-                        // WHAT is holding the shares, not merely that something is. This broker sizes
-                        // every SELL against custody MINUS quantity already committed to resting
-                        // SELLs, so a protective stop covering the whole holding leaves nothing free —
-                        // and the operator is refused on a position they can plainly see they own,
-                        // with no way to guess that their own stop is the cause or what to do about
-                        // it. The armed-order path already stands its own stop down for a sell it
-                        // recognises (WatchlistMonitorWorker); a human asking by hand got no such
-                        // help and no such explanation.
-                        var blocking = await BlockingStopsAsync(repository, symbol, ct);
-                        return Results.Conflict(new
-                        {
-                            error = "no_sellable_holding",
-                            message = blocking.Count == 0
-                                ? $"No uncommitted {symbol} shares are available to sell."
-                                : $"No uncommitted {symbol} shares are available to sell: "
-                                  + string.Join(" and ", blocking.Select(s => s.Describe))
-                                  + ". Disarm it from the protective stops list to free the shares, "
-                                  + "then place this sell.",
-                            blockingStops = blocking
-                        });
-                    }
-
+                    // The known-and-zero case is already refused above, for every sell rather than
+                    // only for a persistent one. What is left here is this branch's own business:
+                    // an unknown availability, which a keep-working order must not be built on, and
+                    // clamping a partly-available quantity down to what can actually be sold.
                     effectiveQuantity = Math.Min(effectiveQuantity, availability.AvailableQuantity);
                     if (effectiveQuantity != body.Quantity.Value)
                     {

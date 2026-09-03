@@ -164,6 +164,16 @@ public sealed record AttachStopRequest(
 /// <summary>How long to suspend order confirmation for.</summary>
 public sealed record ArmApprovalRequest(int? Minutes = null);
 
+/// <summary>
+/// Free shares committed to this system's own protective stop so a reducing SELL can go through.
+/// </summary>
+/// <param name="Quantity">
+/// How many shares the sell needs. Asked for rather than inferred from the holding, because a
+/// scale-out needs only its own slice freed, and releasing more than the sell requires would give up
+/// protection nobody asked to give up.
+/// </param>
+public sealed record ReleaseStopForSellRequest(string? Symbol = null, int Quantity = 0);
+
 /// <summary>Per-symbol watchlist fields the user controls. Null means "leave unchanged".</summary>
 /// <param name="AutoTradeEnabled">
 /// False makes the symbol manual-only — no strategy or plan may originate an order for it, entry or
