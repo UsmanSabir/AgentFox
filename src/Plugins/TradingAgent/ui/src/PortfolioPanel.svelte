@@ -1,14 +1,14 @@
 <script lang="ts">
   import {
     trading,
-    type BrokerAccountSnapshot,
-    type BrokerAccountHolding
+    type BrokerAccountSnapshot
   } from './api';
   import {
     WalletCards, ChevronDown, ChevronRight, RefreshCw, Eye, EyeOff,
     AlertTriangle, BriefcaseBusiness, BookOpen
   } from 'lucide-svelte';
   import type { SymbolExtensionComponent } from './symbolExtensions';
+  import LiveHoldingCells from './LiveHoldingCells.svelte';
 
   /**
    * Optional component rendered under each holding's instrument name. Null in a community build. It
@@ -65,11 +65,6 @@
       return `${new Intl.NumberFormat('en-PK', { maximumFractionDigits: 2 }).format(value)} ${currency ?? ''}`.trim();
     }
   };
-  const percent = (value: number | null | undefined, visible: boolean) => !visible
-    ? hidden
-    : value == null ? 'Unknown' : `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`;
-  const pnlTone = (holding: BrokerAccountHolding, visible: boolean) => !visible || holding.unrealizedProfitLoss == null
-    ? '' : holding.unrealizedProfitLoss > 0 ? 'positive' : holding.unrealizedProfitLoss < 0 ? 'negative' : '';
   const when = (value?: string | null) => value ? new Date(value).toLocaleString() : '—';
   const countLabel = (available: boolean, count: number, label: string) =>
     available ? `${count} ${label}` : `${label} unavailable`;
@@ -149,9 +144,7 @@
                   <td><b>{text(holding.symbol ?? holding.instrumentId)}</b><small>{text(holding.exchange)} · {text(holding.assetType)}</small>{#if holdingStatus && holding.symbol}<div class="holding-extension"><svelte:component this={holdingStatus} symbol={holding.symbol} /></div>{/if}{#if extras(holding.attributes).length}<details class="broker-details"><summary>Details</summary><dl>{#each extras(holding.attributes) as [label, value]}<dt>{label}</dt><dd>{attributeValue(value, showValues)}</dd>{/each}</dl></details>{/if}</td>
                   <td>{quantity(holding.quantity, showValues)}</td>
                   <td>{money(holding.averageCost, holding.currency, showValues)}</td>
-                  <td>{money(holding.marketPrice, holding.currency, showValues)}</td>
-                  <td>{money(holding.marketValue, holding.currency, showValues)}</td>
-                  <td class={pnlTone(holding, showValues)}>{money(holding.unrealizedProfitLoss, holding.currency, showValues)}<small>{percent(holding.unrealizedProfitLossPercent, showValues)}</small></td>
+                  <LiveHoldingCells {holding} {showValues} />
                 </tr>
               {/each}</tbody>
             </table></div>
@@ -206,7 +199,7 @@
   .account-section { display:flex; flex-direction:column; gap:.55rem; }.account-section h3 { display:flex; align-items:center; gap:.4rem; margin:0; color:var(--text); font-size:.78rem; }.account-section h3 span { color:var(--text-3); font-size:.67rem; font-weight:500; }
   .table-wrap { overflow-x:auto; border:1px solid var(--border); border-radius:var(--radius-sm); }
   table { width:100%; border-collapse:collapse; min-width:760px; font-size:.7rem; } th { padding:.55rem .65rem; color:var(--text-3); text-align:left; font-weight:600; background:var(--surface-2); border-bottom:1px solid var(--border); } td { padding:.6rem .65rem; color:var(--text-2); border-bottom:1px solid var(--border); } tbody tr:last-child td { border-bottom:0; } td b { color:var(--text); } td small { display:block; margin-top:.18rem; color:var(--text-3); font-size:.62rem; }
-  .positive,.buy { color:var(--success)!important; }.negative,.sell { color:var(--danger)!important; }.empty { padding:.8rem; border:1px dashed var(--border); border-radius:var(--radius-sm); color:var(--text-3); font-size:.72rem; text-align:center; }
+  .buy { color:var(--success)!important; }.sell { color:var(--danger)!important; }.empty { padding:.8rem; border:1px dashed var(--border); border-radius:var(--radius-sm); color:var(--text-3); font-size:.72rem; text-align:center; }
   .holding-extension { margin-top:.3rem; }
   .broker-details { margin-top:.3rem; color:var(--text-3); font-size:.62rem; }.broker-details summary { cursor:pointer; color:var(--text-3); }.broker-details dl { display:grid; grid-template-columns:max-content 1fr; gap:.2rem .45rem; margin:.35rem 0 0; }.broker-details dt { color:var(--text-3); }.broker-details dd { margin:0; color:var(--text-2); overflow-wrap:anywhere; }
   @media (max-width:720px) { header { align-items:stretch; flex-direction:column; padding:0; }.header-actions { padding:0 .8rem .7rem; }.action { flex:1; justify-content:center; } }

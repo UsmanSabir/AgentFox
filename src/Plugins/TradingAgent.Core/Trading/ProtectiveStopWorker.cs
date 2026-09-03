@@ -94,6 +94,31 @@ public sealed class ProtectiveStopWorker
 
     private static readonly TimeSpan HoldingsReuseWindow = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// Guards the pair above. They are read and written from two different gates — the pass gate and the
+    /// baseline gate — so neither one alone makes the snapshot and its timestamp move together.
+    /// </summary>
+    private readonly Lock _snapshotCacheGate = new();
+
+    /// <summary>The cached snapshot if it is still inside <see cref="HoldingsReuseWindow"/>, else null.</summary>
+    private BrokerReconciliationSnapshot? RecentSnapshot()
+    {
+        lock (_snapshotCacheGate)
+            return _recentSnapshot is not null
+                   && DateTime.UtcNow - _recentSnapshotUtc < HoldingsReuseWindow
+                ? _recentSnapshot
+                : null;
+    }
+
+    private void PublishSnapshot(BrokerReconciliationSnapshot snapshot)
+    {
+        lock (_snapshotCacheGate)
+        {
+            _recentSnapshot = snapshot;
+            _recentSnapshotUtc = DateTime.UtcNow;
+        }
+    }
+
     public ProtectiveStopWorker(
         IServiceScopeFactory scopes,
         IBrokerStateReader stateReader,
@@ -228,25 +253,48 @@ public sealed class ProtectiveStopWorker
         }
     }
 
-    /// <summary>Reads the account snapshot, reusing a very recent read. ASSUMES the baseline gate is held.</summary>
+    /// <summary>Reads the account snapshot, reusing a very recent read.</summary>
     private async Task<BrokerReconciliationSnapshot?> SnapshotForBaselineAsync()
     {
-        if (_recentSnapshot is not null && DateTime.UtcNow - _recentSnapshotUtc < HoldingsReuseWindow)
-            return _recentSnapshot;
+        if (RecentSnapshot() is { } cached) return cached;
 
         var snapshot = await ReadAccountSnapshotAsync();
-        if (snapshot is { Healthy: true })
-        {
-            _recentSnapshot = snapshot;
-            _recentSnapshotUtc = DateTime.UtcNow;
-        }
+        if (snapshot is { Healthy: true }) PublishSnapshot(snapshot);
         return snapshot;
     }
 
-    public async Task RunNowAsync(CancellationToken ct = default)
+    /// <param name="allowRecentSnapshotReuse">
+    /// Whether this pass may decide from an account snapshot up to <see cref="HoldingsReuseWindow"/>
+    /// old instead of reading one.
+    ///
+    /// <para>
+    /// <b>Defaults to false, and the default is the important half.</b> A snapshot is five SOAP calls on
+    /// the account's single session, so reuse is worth having — but only where the caller knows the
+    /// snapshot is not the thing that changed. A price tick reaching a level is such a caller: what
+    /// changed is the PRICE, which arrives on the live feed, and custody does not move in thirty
+    /// seconds without an order behind it.
+    /// </para>
+    ///
+    /// <para>
+    /// <see cref="TriggerSoon"/> must NOT pass true, and that is the whole reason this is a parameter
+    /// rather than a constant. It is called the instant the venue pushes a fill, where custody and the
+    /// resting book are exactly what changed; a pass reusing a snapshot taken before that fill would
+    /// see the old position, conclude nothing had happened, and turn the event-driven path back into
+    /// the two-minute custody poll it was built to replace.
+    /// </para>
+    ///
+    /// <para>
+    /// The residual, accepted knowingly: a reusing pass can act on custody up to thirty seconds old, so
+    /// it may try to protect shares that have just been sold. The broker refuses that out loud
+    /// (CLAUDE.md §6a) and the ledger's <c>last_placed_date</c> remains the primary guard against a
+    /// duplicate placement, so the cost is a wasted attempt rather than a wrong position.
+    /// </para>
+    /// </param>
+    public async Task RunNowAsync(
+        CancellationToken ct = default, bool allowRecentSnapshotReuse = false)
     {
         await _runGate.WaitAsync(ct);
-        try { await RunPassCoreAsync(ct); }
+        try { await RunPassCoreAsync(ct, allowRecentSnapshotReuse); }
         finally { _runGate.Release(); }
     }
 
@@ -271,7 +319,7 @@ public sealed class ProtectiveStopWorker
     public Task RunAtMarketOpenAsync(MarketSessionOpenContext context, CancellationToken ct) =>
         RunNowAsync(ct);
 
-    private async Task RunPassCoreAsync(CancellationToken ct)
+    private async Task RunPassCoreAsync(CancellationToken ct, bool allowRecentSnapshotReuse = false)
     {
         using var scope = _scopes.CreateScope();
         var repository = scope.ServiceProvider.GetRequiredService<ITradingRepository>();
@@ -282,12 +330,19 @@ public sealed class ProtectiveStopWorker
         // Deliberately the CALENDAR here, not OrderWindow — unlike order placement and the take-profit
         // retry, which now also run during the pre-open OHO state.
         //
-        // Two reasons this worker must not follow them. First, it evaluates TRIGGERS against live
-        // prices, and pre-open there are none: the feed republishes reference data, so a stop would be
-        // judged against a stale number and could fire spuriously or fail to fire. Second, it does not
-        // need to: OHO accepts orders but performs no matching, so no position can be filled before
-        // the open and therefore none can need protecting during it. The first pass after the bell —
-        // within the normal interval — is soon enough, and it runs on real prices.
+        // Two reasons this worker must not follow them. First, the LOCAL BACKSTOP armed order it
+        // writes (see ArmBackstopAsync) is judged against live prices by WatchlistMonitorWorker, and
+        // pre-open there are none: the feed republishes reference data, so a backstop armed now would
+        // be judged against a stale number and could fire spuriously or fail to fire. Second, it does
+        // not need to: OHO accepts orders but performs no matching, so no position can be filled
+        // before the open and therefore none can need protecting during it. The first pass after the
+        // bell — within the normal interval — is soon enough.
+        //
+        // This comment used to say that THIS worker evaluates triggers against live prices. It does
+        // not, and never did: it takes no quote source, no PsxDataClient and no candle provider, and
+        // every decision it makes is driven by quantities and the resting order book. The gate is
+        // still right; the reason was pointing at the wrong file, which is worse than no reason for
+        // anyone trying to find where a stop's trigger is actually judged.
         var market = _calendar.GetStatus();
         if (!market.IsOpen) return;
 
@@ -307,7 +362,23 @@ public sealed class ProtectiveStopWorker
         // what was recorded: the first pass after the open sees an unprotected position and places the
         // stop again. Anything that starts trusting the stored state instead would leave positions
         // unprotected every morning while reporting them protected.
-        var snapshot = await ReadAccountSnapshotAsync();
+        // Reuse only when the caller has said the snapshot is not what changed — see RunNowAsync's
+        // parameter. Everything else, including every fill-driven pass, reads.
+        var reused = allowRecentSnapshotReuse ? RecentSnapshot() : null;
+        var snapshot = reused ?? await ReadAccountSnapshotAsync();
+
+        // Publish this read so the baseline path reuses it instead of taking its own.
+        //
+        // One snapshot is FIVE SOAP calls on the account's single session (GetOutstandingLog,
+        // GetDailyActivityLog, GetTradeLog, GetPortfolioSummary, GetExposureDynamic). This pass has
+        // just paid for one, and SnapshotForBaselineAsync kept a separate cache that this read never
+        // filled — so a pass that went on to arm or raise a stop immediately bought a SECOND identical
+        // snapshot, five more calls, seconds after the first.
+        //
+        // This is not the same as deciding on stale data. The baseline path already accepts a reading
+        // up to HoldingsReuseWindow old; what it gets here is younger than that and is the very
+        // snapshot this pass is deciding from, so the two can no longer disagree with each other.
+        if (reused is null && snapshot is { Healthy: true }) PublishSnapshot(snapshot);
 
         // Unknown is never zero: a snapshot that is not fully healthy could mean holdings specifically
         // failed to read, and an empty Positions list from THAT would look identical to "you hold
@@ -942,13 +1013,25 @@ public sealed class ProtectiveStopWorker
 
             await repository.RecordProtectiveStopPlacementAsync(
                 stop.StopId, today, actuallyPlaced, order.OrderId, ct);
+            // The ORDER NUMBER belongs in this line. At AHL a stop is assigned a short
+            // connection-scoped number whose whole uniqueness is a sequence read at login, and a
+            // sequence read pre-open is not the account's — so a reused number is a real event, and
+            // the ledger qualifies one as {orderNo}#{clientOrderId} rather than throwing. Without the
+            // number here, the log cannot tell you which order a stop became, and a collision is
+            // invisible in the one place an operator looks first.
+            //
+            // And ACTUALLY-PLACED, not requested: core sizes a SELL down to the free quantity at the
+            // execution boundary, so printing the requested figure claims coverage that never reached
+            // the broker — the same trap the comment above guards the DB write against.
             _logger.LogWarning(
                 "[ProtectiveStops] {StopId}: native stop PLACED — SELL {Qty} {Symbol} "
-                + "trigger {Trigger} limit {Limit}, submission took {ElapsedMs}ms. {Why}",
-                stop.StopId, decision.Quantity, stop.Symbol, stop.StopTrigger, stop.StopLimit,
+                + "trigger {Trigger} limit {Limit} as order {OrderNo}, submission took {ElapsedMs}ms. "
+                + "{Why}",
+                stop.StopId, actuallyPlaced, stop.Symbol, stop.StopTrigger, stop.StopLimit,
+                string.IsNullOrWhiteSpace(order.OrderId) ? "(no number returned)" : order.OrderId,
                 submissionClock.ElapsedMilliseconds, decision.Reason);
             _activity?.Info("Stops",
-                $"{stop.Symbol}: stop placed at the broker — SELL {decision.Quantity:N0} "
+                $"{stop.Symbol}: stop placed at the broker — SELL {actuallyPlaced:N0} "
                 + $"trigger {stop.StopTrigger:0.##} limit {stop.StopLimit:0.##}");
 
             // This row supersedes an earlier stop (a break-even lift, an ATR trail) — and this is the

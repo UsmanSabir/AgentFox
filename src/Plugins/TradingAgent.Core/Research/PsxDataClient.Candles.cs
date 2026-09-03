@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net;
 using System.Text.RegularExpressions;
@@ -234,8 +234,22 @@ public sealed partial class PsxDataClient
 
             // Keep the previous snapshot if a fetch parses to nothing — a layout change should
             // degrade to a slightly stale live bar, not to no live bar at all.
+            //
+            // Said out loud, because "slightly" is doing a lot of work: _marketWatchAtUtc is
+            // deliberately not advanced, so this can go on serving the same rows for as long as the
+            // portal returns empty or changed HTML. A scrape broken by a markup change then presents
+            // as a market that has stopped moving, which is the most reassuring possible reading of it.
+            // The age is what distinguishes the two and nothing was reporting it.
             if (rows.Count == 0 && _marketWatch is { Count: > 0 } previous)
+            {
+                _logger.LogWarning(
+                    "[PsxCandles] The market watch parsed to zero symbols; serving the previous "
+                    + "snapshot of {Count} symbol(s), now {Age:F0}s old. If this repeats, the portal's "
+                    + "markup has probably changed and these prices are not moving because nothing is "
+                    + "reading them, not because the market is quiet.",
+                    previous.Count, (DateTime.UtcNow - _marketWatchAtUtc).TotalSeconds);
                 return previous;
+            }
 
             _marketWatch = rows;
             _marketWatchAtUtc = DateTime.UtcNow;

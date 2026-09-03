@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { RefreshCw, Repeat2, Trash2, AlertTriangle, CheckCircle2, RotateCcw, ShieldQuestion } from 'lucide-svelte';
   import { trading, type PersistentOrder, type BrokerOrdersView } from './api';
+  import LivePriceInline from './LivePriceInline.svelte';
 
   export let refreshTick = 0;
 
@@ -209,6 +210,7 @@
         <article class:danger={danger(order.state)} class:done={terminal(order.state)}>
           <div class="top">
             <span class="symbol">{order.symbol}</span>
+            <LivePriceInline symbol={order.symbol} fallbackChange={null} />
             <span class="side {order.action.toLowerCase()}">{order.action}</span>
             <span class="state">{order.state}</span>
             {#if terminal(order.state)}<CheckCircle2 size={13} />{/if}

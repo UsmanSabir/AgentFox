@@ -7,6 +7,7 @@
   import {
     TrendingUp, TrendingDown, Activity, AlertTriangle, Lock, RefreshCw, Layers, ChevronRight
   } from 'lucide-svelte';
+  import LivePriceInline from './LivePriceInline.svelte';
 
   /** Clicking a row selects that symbol, so the chart pane follows the screen. */
   export let selected: string | null = null;
@@ -335,10 +336,8 @@
                   </span>
                 {/if}
               </td>
-              <td class="num">{fmtNum(row.price)}</td>
-              <td class="num" class:pos={(row.changePercent ?? 0) > 0} class:neg={(row.changePercent ?? 0) < 0}>
-                {(row.changePercent ?? 0) > 0 ? '+' : ''}{fmtNum(row.changePercent)}%
-              </td>
+              <td class="num"><LivePriceInline symbol={row.symbol} fallbackPrice={row.price} fallbackChange={null} /></td>
+              <td class="num"><LivePriceInline symbol={row.symbol} showPrice={false} fallbackChange={row.changePercent} /></td>
               <td class="num">{row.volume?.toLocaleString() ?? '-'}</td>
               <td class="num strong">{metricValue(row, screen)}</td>
               <td class="num" class:hot={(row.rsi ?? 0) > 70} class:cold={row.rsi != null && row.rsi < 30}>

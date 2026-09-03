@@ -576,7 +576,7 @@ export interface ChartData {
   warnings: string[];
 }
 
-export const CHART_INTERVALS = ['1M', '1W', '1D', '60m', '30m', '15m', '5m'] as const;
+export const CHART_INTERVALS = ['1D', '60m', '30m', '15m', '5m'] as const;
 export type ChartInterval = (typeof CHART_INTERVALS)[number];
 
 /** An alert the monitor raised. Every kind is a transition, not a standing condition. */
@@ -804,8 +804,9 @@ export interface AttachStopRequest {
 }
 
 /**
- * Editable values used to pre-fill the arm-order dialog from a chart level or an alert. Unlike the
- * API request, quantity is intentionally absent because the user must always choose it explicitly.
+ * Editable values used to pre-fill the arm-order dialog from a chart level or an alert. Quantity is
+ * intentionally absent: SELL stop-loss orders derive a safe default from current custody, while all
+ * other orders still ask the operator to choose a size in the dialog.
  */
 export interface ArmOrderDialogContext {
   symbol: string;

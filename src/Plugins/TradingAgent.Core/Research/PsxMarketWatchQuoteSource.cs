@@ -1,4 +1,4 @@
-namespace TradingAgent.Research;
+﻿namespace TradingAgent.Research;
 
 /// <summary>
 /// The PSX data portal's market watch as an <see cref="ILiveQuoteSource"/>. This is the behaviour
@@ -14,6 +14,13 @@ namespace TradingAgent.Research;
 /// </summary>
 public sealed class PsxMarketWatchQuoteSource : ILiveQuoteSource
 {
+    /// <summary>
+    /// The floor. This source covers every listed symbol and is never disabled, so anything that can
+    /// price a symbol at all should outrank it — otherwise it claims the symbol first and the better
+    /// source is never asked.
+    /// </summary>
+    public int Priority => 0;
+
     public const string SourceName = "psx";
 
     private readonly PsxDataClient _dataClient;

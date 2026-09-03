@@ -1,4 +1,4 @@
-using TradingAgent.Analysis;
+﻿using TradingAgent.Analysis;
 
 namespace TradingAgent.Watchlist;
 
@@ -49,11 +49,17 @@ namespace TradingAgent.Watchlist;
 /// </summary>
 public static class AlertDetector
 {
+    /// <param name="nowUtc">
+    /// This pass's moment. Passed in rather than read from the clock so confirmation is reproducible:
+    /// the rule is now "has this held for long enough", which cannot be tested at all if the function
+    /// decides what "now" is.
+    /// </param>
     public static AlertDetection Detect(
         SymbolMonitorState previous,
         TechnicalSnapshot snapshot,
         MultiTimeframeView? multi,
-        MonitorThresholds thresholds)
+        MonitorThresholds thresholds,
+        DateTime nowUtc)
     {
         var symbol = snapshot.Symbol;
         var candidates = new Dictionary<AlertKind, Candidate>();
@@ -188,6 +194,7 @@ public static class AlertDetector
 
         // ── Fire ──────────────────────────────────────────────────────────────
         var streaks = new Dictionary<AlertKind, int>();
+        var heldSince = new Dictionary<AlertKind, DateTime>();
         var fired = new List<DetectedAlert>();
         var weeklyConfirmedSupports = multi?.ConfirmedSupports ?? [];
         var weeklyConfirmedResistances = multi?.ConfirmedResistances ?? [];
@@ -218,10 +225,26 @@ public static class AlertDetector
             var streak = previous.Streaks.GetValueOrDefault(kind) + 1;
             streaks[kind] = streak;
 
-            // Fires exactly ON reaching the threshold, not above it: while a condition keeps holding,
-            // the streak keeps climbing but the alert is not repeated. Re-arming happens when the
-            // condition lapses and the streak resets to zero.
-            if (streak == thresholds.ConfirmPasses) fired.Add(Build(kind, candidate));
+            // When this condition started holding. A lapse dropped the entry, so a returning condition
+            // starts its clock again here — that is what re-arms it.
+            var since = streak > 1 && previous.HeldSince.TryGetValue(kind, out var began)
+                ? began
+                : nowUtc;
+            heldSince[kind] = since;
+
+            // Fires exactly AS the required duration is first satisfied, not repeatedly afterwards: the
+            // threshold has to fall between the previous pass and this one. While the condition keeps
+            // holding the duration keeps growing and the alert is not repeated, which is the same
+            // once-only behaviour pass-counting had.
+            //
+            // Comparing against the PREVIOUS pass's own timestamp is what makes this robust to how often
+            // passes happen. Ten nudged passes inside the window all compute "not yet"; the first pass
+            // after the window computes "just crossed". Observing more often changes only how soon that
+            // is noticed.
+            var heldFor = nowUtc - since;
+            var heldAtLastPass = previous.UpdatedUtc - since;
+            if (heldFor >= thresholds.ConfirmFor && heldAtLastPass < thresholds.ConfirmFor)
+                fired.Add(Build(kind, candidate));
         }
 
         foreach (var (kind, candidate) in edges)
@@ -240,7 +263,8 @@ public static class AlertDetector
             // Only surviving candidates keep their streak; anything that lapsed resets to zero, which
             // is what re-arms it for next time.
             Streaks         = streaks,
-            UpdatedUtc      = DateTime.UtcNow,
+            HeldSince       = heldSince,
+            UpdatedUtc      = nowUtc,
             IsNew           = false
         };
 

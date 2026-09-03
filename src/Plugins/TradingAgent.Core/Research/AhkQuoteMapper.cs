@@ -1,4 +1,4 @@
-using TradingAgent.Feed;
+﻿using TradingAgent.Feed;
 
 namespace TradingAgent.Research;
 
@@ -69,9 +69,29 @@ public static class AhkQuoteMapper
     /// nothing. Needed because a feed message may republish only the fields that moved; overwriting
     /// wholesale would blank out a symbol's high and low the moment a message carried only a bid
     /// change.
+    ///
+    /// <para>
+    /// <b>The merged quote's age is the age of its PRICE, not of the message that produced it.</b>
+    /// Carrying a previous <see cref="PsxLiveQuote.Current"/> forward while stamping it with the new
+    /// arrival time made a stale price permanently fresh: <c>AhkQuoteBook.Snapshot</c> expires on
+    /// <c>RetrievedAtUtc</c>, so a symbol the portal republishes without trading had its clock reset
+    /// every poll (2s by default) and <c>MaxQuoteAgeSeconds</c> could never reach it. An arbitrarily
+    /// old price was then handed to armed-order evaluation as a current one.
+    /// </para>
+    ///
+    /// <para>
+    /// The consequence to expect: symbols that genuinely have not traded now age out and disappear
+    /// from the quote book, so consumers see no price rather than an old one. That is the intended
+    /// direction — the engine's rule is that an unknown value is a refusal, not a default — but it does
+    /// mean a quiet symbol stops being quotable after <c>MaxQuoteAgeSeconds</c> instead of appearing
+    /// to trade at its last known price forever.
+    /// </para>
     /// </summary>
     public static PsxLiveQuote Merge(PsxLiveQuote existing, PsxLiveQuote update) => update with
     {
+        // A message that carries no price tells us nothing about when this price formed, so it does
+        // not get to say the price is new.
+        RetrievedAtUtc = update.Current is null ? existing.RetrievedAtUtc : update.RetrievedAtUtc,
         Current       = update.Current       ?? existing.Current,
         Open          = update.Open          ?? existing.Open,
         High          = update.High          ?? existing.High,

@@ -10,8 +10,7 @@
     Database, Download, Play, XCircle, ChevronDown, ChevronRight, LayoutDashboard,
     BellRing, ShoppingCart, AlertTriangle, BriefcaseBusiness, TrendingUp, ChartCandlestick
   } from 'lucide-svelte';
-  import WatchlistPanel from './WatchlistPanel.svelte';
-  import ChartPane from './ChartPane.svelte';
+  import MarketWorkspace from './MarketWorkspace.svelte';
   import AlertsPanel from './AlertsPanel.svelte';
   import ArmedOrdersPanel from './ArmedOrdersPanel.svelte';
   import ArmOrderDialog from './ArmOrderDialog.svelte';
@@ -74,16 +73,11 @@
   let armContext: ArmOrderDialogContext | null = null;
   let armedPanel: ArmedOrdersPanel | null = null;
   let persistentPanel: PersistentOrdersPanel | null = null;
-  let watchlistPanel: WatchlistPanel | null = null;
+  let marketWorkspace: MarketWorkspace | null = null;
   let newOrderOpen = false;
 
   /** Symbol the watchlist has selected; drives the chart pane. */
   export let selectedSymbol: string | null = null;
-  let selectedCompany: string | null = null;
-  let watchlistCompact = false;
-
-  /** Full-width chart mode, toggled from the chart's own header. */
-  let chartExpanded = false;
 
   /** Proposal inbox: open-only by default, since a decision queue should read as empty when it is. */
   let showResolvedProposals = false;
@@ -432,41 +426,18 @@
       <p>Choose a symbol, inspect its levels, and arm a plan from the chart.</p>
     </div>
 
-    <!-- Watchlist beside the archive: the two are related — the archive is what gives the watched
-         symbols their weekly levels — and the panel owns its own loading and refresh. -->
-    <div class="watch-row" class:expanded={chartExpanded} class:watchlist-compact={watchlistCompact}>
-      <WatchlistPanel
-        bind:this={watchlistPanel}
-        bind:selected={selectedSymbol}
-        bind:selectedCompany
-        bind:compact={watchlistCompact}
-        refreshTick={marketTick}
-        marketOpen={status.market.isOpen}
-        rowStatus={symbolExtension?.rowStatus ?? null}
-      />
-      <ChartPane
-        symbol={selectedSymbol}
-        companyName={selectedCompany}
-        bind:expanded={chartExpanded}
-        refreshTick={marketTick}
-        historyRefreshTick={archiveTick}
-        {archive}
-        marketOpen={status.market.isOpen}
-        on:arm={(e) => armContext = e.detail}
-      />
-    </div>
-
-    <!-- Whatever is composing this dashboard may add a fuller view of the selected symbol here,
-         directly under the chart it refers to. Nothing in a community build. -->
-    {#if symbolExtension?.plan && selectedSymbol}
-      <div id="trading-stock-plan" class="section-anchor">
-        <svelte:component
-          this={symbolExtension.plan}
-          symbol={selectedSymbol}
-          companyName={selectedCompany}
-        />
-      </div>
-    {/if}
+    <!-- The public dashboard owns this generic workspace and its persistence. Premium inherits it
+         through composition; neither edition duplicates the watchlist or chart lifecycle. -->
+    <MarketWorkspace
+      bind:this={marketWorkspace}
+      bind:selectedSymbol
+      refreshTick={marketTick}
+      historyRefreshTick={archiveTick}
+      {archive}
+      marketOpen={status.market.isOpen}
+      {symbolExtension}
+      on:arm={(event) => armContext = event.detail}
+    />
 
     <!-- Directly under the status grid: this answers "what is it doing", which is the question the
          metrics above raise and none of them answers. Collapsed, so it costs a row of chips. -->
@@ -496,7 +467,7 @@
       <AlertsPanel
         on:select={(e) => selectedSymbol = e.detail}
         on:arm={(e) => armContext = e.detail}
-        on:alertsChanged={() => watchlistPanel?.refresh()}
+        on:alertsChanged={() => marketWorkspace?.refresh()}
       />
     </div>
 
@@ -751,30 +722,10 @@
   .section-heading h2 { margin:.12rem 0 0; color:var(--text); font-size:.98rem; font-weight:600; }
   .section-heading p { margin:0; color:var(--text-3); font-size:.7rem; text-align:right; }
   .eyebrow { color:var(--primary); font-size:.6rem; font-weight:700; letter-spacing:.09em; text-transform:uppercase; }
-  /* minmax(0,1fr) not 1fr: the chart column must be allowed to shrink, or the canvas keeps its
-     widest measured size and pushes the grid wider on every re-render. */
-  /* min-height, because the watchlist deliberately ignores its own content height (contain:size) and
-     takes this row's instead. Without a floor the row is sized by whatever the chart card happens to
-     be showing, so on first load — chart empty, watchlist still fetching — the row collapsed to two
-     lines and CLIPPED the watchlist's own loading state, which read as an empty watchlist. */
-  .watch-row {
-    display:grid; grid-template-columns:minmax(260px,320px) minmax(0,1fr); gap:.75rem;
-    margin-bottom:.75rem; align-items:stretch; min-height:22rem;
-  }
-  .watch-row.watchlist-compact:not(.expanded) { grid-template-columns:minmax(100px,116px) minmax(0,1fr); }
   .alerts-row { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:.75rem; margin-bottom:1.25rem; align-items:start; }
   @media (max-width: 900px) {
-    /* Stacked: each card carries its own height again, so the floor would only add dead space. */
-    .watch-row, .alerts-row { grid-template-columns:minmax(0,1fr); }
-    .watch-row { min-height:0; }
-    .watch-row.watchlist-compact:not(.expanded) { grid-template-columns:minmax(0,1fr); }
+    .alerts-row { grid-template-columns:minmax(0,1fr); }
   }
-
-  /* Expanded: the chart takes the full width and the watchlist STACKS BENEATH it rather than being
-     hidden — losing the ability to switch symbols would be a poor trade for the extra width. */
-  .watch-row.expanded { grid-template-columns:minmax(0,1fr); }
-  .watch-row.expanded :global(> section:first-child) { order:2; height:auto; contain:none; overflow:visible; }
-  .watch-row.expanded :global(> section:first-child .rows) { flex:none; max-height:min(52vh,420px); }
   .archive-head { display:flex; justify-content:space-between; align-items:stretch; gap:.5rem; }
   .archive-toggle { flex:1 1 auto; width:auto; }
   .archive-head .btn { display:flex; align-items:center; gap:.4rem; white-space:nowrap; margin:.55rem .65rem .55rem 0; }

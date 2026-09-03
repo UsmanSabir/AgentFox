@@ -102,6 +102,14 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
         _activity = activity;
     }
 
+    /// <summary>
+    /// The reconciliation reason intents are currently paused for, or null when they are not paused.
+    /// Held so the pause is logged when it CHANGES rather than on every poll — see the comment at the
+    /// pause itself. Not thread-safety-sensitive: every read and write happens inside
+    /// <see cref="RunNowAsync"/>, which is serialised by <c>_runGate</c>.
+    /// </summary>
+    private string? _pausedReason;
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var interval = TimeSpan.FromSeconds(
@@ -159,10 +167,28 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
                 Math.Max(10, _options.Value.ReconciliationMaxAgeSeconds));
             if (!snapshot.Supported || !snapshot.Healthy || DateTime.UtcNow - snapshot.CheckedUtc > maxAge)
             {
-                _logger.LogWarning(
-                    "[PersistentOrders] {Count} intent(s) paused: reconciliation is not healthy/fresh: {Reason}",
-                    intents.Count, snapshot.Reason);
+                // Once per change of reason, not once per poll. This worker wakes on a 15-600s timer
+                // and the reason is usually a broker that will be down for as long as it is down, so
+                // the unconditional version turned one after-hours outage into 21 identical lines
+                // carrying a five-clause reason each (2026-09-01, 19:39-19:59). The pause is not new
+                // information every minute; it is one fact with a start and an end, and both of those
+                // are worth a line.
+                if (!string.Equals(_pausedReason, snapshot.Reason, StringComparison.Ordinal))
+                {
+                    _pausedReason = snapshot.Reason;
+                    _logger.LogWarning(
+                        "[PersistentOrders] {Count} intent(s) paused: reconciliation is not "
+                        + "healthy/fresh: {Reason}", intents.Count, snapshot.Reason);
+                }
                 return;
+            }
+
+            if (_pausedReason is not null)
+            {
+                _logger.LogWarning(
+                    "[PersistentOrders] Reconciliation is healthy again; {Count} intent(s) resume. The "
+                    + "pause was: {Reason}", intents.Count, _pausedReason);
+                _pausedReason = null;
             }
 
             var market = _calendar.GetStatus();

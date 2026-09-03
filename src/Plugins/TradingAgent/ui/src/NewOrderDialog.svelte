@@ -8,6 +8,7 @@
   import {
     ShoppingCart, X, AlertTriangle, RefreshCw, CheckCircle2, Clock3, BriefcaseBusiness, Wallet
   } from 'lucide-svelte';
+  import { livePriceLabel, useLivePrices } from './livePrices';
 
   export let selectedSymbol: string | null = null;
 
@@ -21,6 +22,7 @@
   let quantity: number | null = null;
   let orderValue: number | null = null;
   let currentPrice: number | null = null;
+  let triggerReferencePrice: number | null = null;
   /**
    * The symbol the price fields were last seeded from.
    *
@@ -43,6 +45,11 @@
   let holdingLoaded = false;
   let account: BrokerAccountSnapshot | null = null;
   let holdingError: string | null = null;
+  let quantityWasEdited = false;
+  let attachStop = false;
+  let stopTrigger: number | null = null;
+  let stopLimit: number | null = null;
+  let stopRecurring = true;
   let busy = false;
   let error: string | null = null;
   let result: { ok: boolean; title: string; detail: string; executionId?: string } | null = null;
@@ -50,6 +57,14 @@
 
   const money = (value: number) => value.toLocaleString(undefined, { maximumFractionDigits: 2 });
   const when = (value: string) => new Date(value).toLocaleString();
+  const livePrices = useLivePrices();
+  let livePriceStore = livePrices.quote(symbol);
+  $: livePriceStore = livePrices.quote(symbol);
+  $: livePriceView = $livePriceStore;
+  $: latestPrice = livePriceView.quote?.current ?? currentPrice;
+  $: latestPriceLabel = livePriceView.quote?.current != null
+    ? livePriceLabel(livePriceView)
+    : 'Latest available price';
   $: categories = [...new Set((registry?.intents ?? []).map(item => item.category))];
 
   onMount(async () => {
@@ -95,7 +110,16 @@
       // with the same symbol, so a typed price is still left alone.
       const changed = pricedSymbol !== null && pricedSymbol !== chart.symbol.trim().toUpperCase();
       pricedSymbol = chart.symbol.trim().toUpperCase();
-      applySuggestedPrices(changed);
+      if (changed) {
+        // Size is instrument-specific too. Carrying 500 shares or a PKR amount from one ticker to the
+        // next is just as stale as carrying its limit price, and can change exposure dramatically.
+        quantity = null;
+        orderValue = null;
+        quantityWasEdited = false;
+        triggerReferencePrice = null;
+      }
+      applySuggestedPrices(changed, chart.snapshot.close);
+      defaultStopLossQuantity(account, chart.symbol.trim().toUpperCase());
     } catch (e) {
       currentPrice = null;
       error = `Latest price unavailable: ${e instanceof Error ? e.message : String(e)}`;
@@ -112,8 +136,21 @@
     triggerPercent = intent.defaultPercent ?? null;
     result = null;
     error = null;
+    attachStop = false;
+    stopTrigger = null;
+    stopLimit = null;
     clientRequestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    applySuggestedPrices(true);
+    triggerReferencePrice = latestPrice;
+    applySuggestedPrices(true, latestPrice);
+    // Account context is part of composing an order, not homework for the operator. In particular a
+    // SELL stop-loss defaults to every uncommitted share as soon as this fresh snapshot arrives.
+    if (intent.action === 'SELL' && intent.orderType === 'STOPLOSS') {
+      sizeMode = 'shares';
+      quantity = null;
+      quantityWasEdited = false;
+      defaultStopLossQuantity(account, symbol.trim().toUpperCase());
+    }
+    void loadHolding();
   }
 
   /**
@@ -121,15 +158,22 @@
    * when `force` is set, which means the numbers on screen belong to a different order intent or a
    * different symbol and are therefore not that person's answer to the question now being asked.
    */
-  function applySuggestedPrices(force: boolean) {
-    if (!choice || !currentPrice || currentPrice <= 0) return;
-    if (choice.priceField === 'limit' && (force || price == null)) price = currentPrice;
+  function applySuggestedPrices(force: boolean, reference = latestPrice) {
+    if (!choice || !reference || reference <= 0) return;
+    if (choice.priceField === 'limit' && (force || price == null)) price = reference;
     if (choice.priceField === 'target' && (force || price == null))
-      price = Number((currentPrice * 1.05).toFixed(2));
+      price = Number((reference * 1.05).toFixed(2));
     if (choice.priceField === 'stop' && (force || triggerPrice == null)) {
-      triggerPrice = Number((currentPrice * (choice.action === 'SELL' ? .98 : 1.02)).toFixed(2));
+      triggerPrice = Number((reference * (choice.action === 'SELL' ? .98 : 1.02)).toFixed(2));
       limitPrice = Number((triggerPrice * (choice.action === 'SELL' ? .99 : 1.01)).toFixed(2));
     }
+  }
+
+  // A live quote may arrive before the slower candle fallback. Seed only blank fields and freeze the
+  // reference used by percentage triggers; subsequent ticks update the readout, never the draft.
+  $: if (choice && triggerReferencePrice == null && latestPrice && latestPrice > 0) {
+    triggerReferencePrice = latestPrice;
+    applySuggestedPrices(false, latestPrice);
   }
 
   const sameSymbol = (candidate: string | null | undefined, ticker: string) =>
@@ -142,6 +186,7 @@
     try {
       account = await trading.account();
       holdingLoaded = true;
+      defaultStopLossQuantity(account, symbol.trim().toUpperCase());
     } catch (e) {
       holdingError = e instanceof Error ? e.message : String(e);
     } finally {
@@ -157,6 +202,24 @@
     if (shares <= 0) return;
     sizeMode = 'shares';
     quantity = shares;
+    quantityWasEdited = true;
+  }
+
+  function defaultStopLossQuantity(snapshot: BrokerAccountSnapshot | null, ticker: string) {
+    if (!snapshot || choice?.action !== 'SELL' || choice.orderType !== 'STOPLOSS'
+        || sizeMode !== 'shares' || quantityWasEdited) return;
+    const holdings = snapshot.holdings.filter(
+      holding => sameSymbol(holding.symbol ?? holding.instrumentId, ticker));
+    const sellOrders = snapshot.orders.filter(order =>
+      sameSymbol(order.symbol ?? order.instrumentId, ticker)
+      && (order.side?.toUpperCase() === 'SELL' || order.side?.toUpperCase() === 'SEL'));
+    if (!snapshot.holdingsAvailable || !snapshot.ordersAvailable
+        || holdings.some(holding => holding.quantity == null)
+        || sellOrders.some(order => order.remainingQuantity == null)) return;
+    const held = holdings.reduce((sum, holding) => sum + Math.max(0, holding.quantity ?? 0), 0);
+    const committed = sellOrders.reduce(
+      (sum, order) => sum + Math.max(0, order.remainingQuantity ?? 0), 0);
+    quantity = Math.floor(Math.max(0, held - committed)) || null;
   }
 
   function buyFraction(fraction: number) {
@@ -170,7 +233,7 @@
   }
 
   $: conditionalLevel = choice?.submission === 'conditional' && choice.triggerKind
-    ? percentTriggerLevel(choice.triggerKind, currentPrice, triggerPercent)
+    ? percentTriggerLevel(choice.triggerKind, triggerReferencePrice, triggerPercent)
     : null;
   $: marketDisabled = choice?.orderType === 'MARKET'
     && registry != null && !registry.capabilities.marketOrdersEnabled;
@@ -206,7 +269,7 @@
   // seconds stale. Telling the operator early is worth much more than refusing here would be.
   $: buyExceedsBuyingPower = choice?.action === 'BUY' && buyingPower != null
     && estimatedValue != null && estimatedValue > buyingPower;
-  $: estimatedPrice = choice?.orderType === 'MARKET' ? currentPrice
+  $: estimatedPrice = choice?.orderType === 'MARKET' ? latestPrice
     : choice?.orderType === 'STOPLOSS' ? triggerPrice
     : choice?.submission === 'conditional' ? conditionalLevel : price;
   $: availableSellValue = availableSellQuantity != null && estimatedPrice && estimatedPrice > 0
@@ -222,6 +285,22 @@
     && effectiveQuantity > availableSellQuantity;
   $: sizingDifference = sizeMode === 'value' && orderValue && estimatedValue != null
     ? estimatedValue - orderValue
+    : null;
+  $: canAttachStop = choice?.action === 'BUY' && choice.submission === 'conditional';
+  $: if (!canAttachStop) attachStop = false;
+  $: if (attachStop && stopTrigger == null && estimatedPrice && estimatedPrice > 0)
+    stopTrigger = Number((estimatedPrice * .98).toFixed(2));
+  $: if (attachStop && stopTrigger != null && stopLimit == null)
+    stopLimit = Number((stopTrigger * .99).toFixed(2));
+  $: attachedStopRisk = attachStop && estimatedPrice && stopTrigger && effectiveQuantity
+    ? (estimatedPrice - stopTrigger) * effectiveQuantity
+    : null;
+  $: attachedStopError = !attachStop ? null
+    : stopTrigger == null || stopTrigger <= 0 ? 'Enter a protective stop trigger.'
+    : estimatedPrice != null && stopTrigger >= estimatedPrice
+      ? `The protective stop must be below the expected entry price (${money(estimatedPrice)}).`
+    : stopLimit == null || stopLimit <= 0 ? 'Enter a protective stop limit.'
+    : stopLimit > stopTrigger ? 'The protective stop limit must be at or below its trigger.'
     : null;
 
   $: summary = (() => {
@@ -259,11 +338,12 @@
     const submittedQuantity = effectiveQuantity;
     if (!submittedQuantity || submittedQuantity <= 0) { error = 'Enter a valid order size.'; return; }
     if (marketDisabled) { error = 'Market orders are disabled in broker settings.'; return; }
+    if (attachedStopError) { error = attachedStopError; return; }
     if (choice.submission === 'conditional') {
       if (!choice.triggerKind || !triggerPercent || triggerPercent <= 0 || triggerPercent > 50) {
         error = 'Enter a trigger move between 0 and 50%.'; return;
       }
-      if (!currentPrice || !conditionalLevel) {
+      if (!triggerReferencePrice || !conditionalLevel) {
         error = 'A current price is required to arm a percentage trigger.'; return;
       }
     } else if (choice.orderType === 'STOPLOSS') {
@@ -326,12 +406,15 @@
           quantity: submittedQuantity,
           triggerKind: choice.triggerKind as TriggerKind,
           triggerPercent,
-          referencePrice: currentPrice,
+          referencePrice: triggerReferencePrice,
           trailing: choice.trailing,
           orderType: choice.orderType,
           price: choice.orderType === 'MARKET' ? null : conditionalLevel,
           expiresInDays,
           persistentUntilFilled,
+          attachStop: attachStop && stopTrigger
+            ? { stopTrigger, stopLimit, recurring: stopRecurring }
+            : null,
           note: `New Order: ${choice.label}`
         };
         const armed = await trading.armed.arm(request);
@@ -339,6 +422,10 @@
           ok: true,
           title: 'Waiting order armed',
           detail: `${armed.note} ${armed.willFireUnattended ? 'It can fire unattended.' : 'It still needs approval before sending.'}`
+            + (armed.attachedStop
+              ? ` A ${armed.attachedStop.recurring ? 'recurring' : 'one-session'} protective stop at ${money(armed.attachedStop.stopTrigger)} `
+                + `(limit ${money(armed.attachedStop.stopLimit)}) is attached and will cover the shares that actually fill.`
+              : '')
         };
       }
       dispatch('changed');
@@ -373,7 +460,7 @@
         <label><span>Symbol</span><input list="new-order-symbols" bind:value={symbol} on:change={refreshQuote} /></label>
         <datalist id="new-order-symbols">{#each symbols as entry}<option value={entry.symbol}>{entry.companyName ?? ''}</option>{/each}</datalist>
         <div class="quote">
-          <span>Latest price</span><b>{currentPrice != null ? money(currentPrice) : '—'}</b>
+          <span>{latestPriceLabel}</span><b>{latestPrice != null ? money(latestPrice) : '—'}</b>
           <button class="icon" on:click={refreshQuote} disabled={quoteBusy} title="Refresh latest price"><RefreshCw size={13} /></button>
         </div>
       </div>
@@ -503,7 +590,8 @@
                         on:click={() => sizeMode = 'value'}>Value (PKR)</button>
               </div>
               {#if sizeMode === 'shares'}
-                <label><span>Quantity (shares)</span><input type="number" min="1" step="1" bind:value={quantity} /></label>
+                <label><span>Quantity (shares)</span><input type="number" min="1" step="1" bind:value={quantity}
+                       on:input={() => quantityWasEdited = true} /></label>
               {:else}
                 <label><span>Order value (PKR)</span><input type="number" min="1" step="1" bind:value={orderValue} /></label>
               {/if}
@@ -516,12 +604,41 @@
               <label><span>Worst acceptable price after trigger</span><input type="number" min="0.01" step="0.01" bind:value={limitPrice} /></label>
             {/if}
             {#if choice.submission === 'conditional'}
-              <label><span>Move from {currentPrice ?? 'latest price'} (%)</span><input type="number" min="0.1" max="50" step="0.1" bind:value={triggerPercent} /></label>
+              <label><span>Move from {triggerReferencePrice ?? 'latest price'} (%)</span><input type="number" min="0.1" max="50" step="0.1" bind:value={triggerPercent} /></label>
             {/if}
             {#if choice.submission === 'conditional' || persistentUntilFilled}
               <label><span>Expires in (days)</span><input type="number" min="1" max="365" bind:value={expiresInDays} /></label>
             {/if}
           </div>
+
+          {#if canAttachStop}
+            <section class="attach-stop" class:on={attachStop}>
+              <label class="attach-check">
+                <input type="checkbox" bind:checked={attachStop} />
+                <span>
+                  <b>Protect this BUY with a stop after it fills</b>
+                  <em>The stop automatically covers all shares from this order that actually fill.</em>
+                </span>
+              </label>
+              {#if attachStop}
+                <div class="grid stop-grid">
+                  <label><span>Protective stop trigger</span><input type="number" min="0.01" step="0.01" bind:value={stopTrigger} /></label>
+                  <label><span>Worst acceptable price</span><input type="number" min="0.01" step="0.01" bind:value={stopLimit} /></label>
+                </div>
+                <label class="attach-check recurring">
+                  <input type="checkbox" bind:checked={stopRecurring} />
+                  <span>
+                    <b>Re-place every trading session</b>
+                    <em>Broker stop orders expire at the close; recurring keeps the position protected.</em>
+                  </span>
+                </label>
+                {#if attachedStopRisk != null && attachedStopRisk > 0}
+                  <p class="estimate">Risk if the stop fills: <b>{money(attachedStopRisk)} PKR</b></p>
+                {/if}
+                {#if attachedStopError}<p class="warning"><AlertTriangle size={13} /> {attachedStopError}</p>{/if}
+              {/if}
+            </section>
+          {/if}
 
           {#if persistable}
             <label class="persist-check">
@@ -597,6 +714,8 @@
   .title span { color:var(--text-3); font-size:.68rem; }
   .icon { border:0; background:none; color:var(--text-3); cursor:pointer; padding:.3rem; display:flex; border-radius:var(--radius-sm); }
   .icon:hover { background:var(--surface-3); color:var(--text); }.icon:disabled { opacity:.5; cursor:wait; }
+  .icon:focus-visible,.choice:focus-visible,input:focus-visible,.persist-check:focus-within,
+  .attach-check:focus-within { outline:2px solid var(--primary); outline-offset:2px; }
   .loading { padding:2rem; color:var(--text-3); text-align:center; }
   .symbol-row { display:flex; align-items:end; gap:1rem; padding:1rem; border-bottom:1px solid var(--border); flex-wrap:wrap; }
   label { display:flex; flex-direction:column; gap:.3rem; color:var(--text-3); font-size:.68rem; }
@@ -607,6 +726,16 @@
   .persist-check span { display:flex; flex-direction:column; gap:.15rem; }
   .persist-check b { color:var(--text); font-size:.75rem; }
   .persist-check em { color:var(--text-3); font-style:normal; }
+  .attach-stop { margin-top:.8rem; padding:.7rem; border:1px solid var(--border);
+                 border-radius:var(--radius-sm); background:var(--surface); }
+  .attach-stop.on { border-left:3px solid var(--success); }
+  .attach-check { flex-direction:row; align-items:flex-start; gap:.55rem; cursor:pointer; }
+  .attach-check input { min-width:auto; margin-top:.15rem; }
+  .attach-check span { display:flex; flex-direction:column; gap:.15rem; }
+  .attach-check b { color:var(--text); font-size:.75rem; }
+  .attach-check em { color:var(--text-3); font-style:normal; line-height:1.4; }
+  .attach-check.recurring { margin-top:.65rem; }
+  .stop-grid { margin-top:.65rem; }
   input { background:var(--surface-2); border:1px solid var(--border-md); border-radius:var(--radius-sm);
           color:var(--text); padding:.5rem .6rem; font:inherit; min-width:150px; }
   .quote { display:grid; grid-template-columns:auto auto auto; align-items:center; gap:.45rem; color:var(--text-3); font-size:.68rem; }

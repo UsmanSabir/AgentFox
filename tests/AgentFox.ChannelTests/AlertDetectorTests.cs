@@ -28,7 +28,7 @@ public sealed class AlertDetectorTests
         var seed = AlertDetector.Seed("OGDC");
         var snapshot = Snapshot(setup: TradeSetup.AvoidBreakdown, zone: PriceZone.AtSupport, rsi: 20m);
 
-        var result = AlertDetector.Detect(seed, snapshot, null, Thresholds);
+        var result = Pass(seed, snapshot, null, Thresholds);
 
         Assert.AreEqual(0, result.Fired.Count,
             "A cold start must record state silently; otherwise a restart alerts on every standing "
@@ -44,12 +44,12 @@ public sealed class AlertDetectorTests
         var bouncing = Snapshot(
             setup: TradeSetup.BuyAtSupport, zone: PriceZone.AtSupport, upDays: 1, support: 95m);
 
-        var first = AlertDetector.Detect(state, bouncing, null, Thresholds);
+        var first = Pass(state, bouncing, null, Thresholds);
         Assert.AreEqual(0, first.Fired.Count(a => a.Kind == AlertKind.SupportBounce),
             "One pass is not confirmation — price oscillating on a level would fire every tick.");
         Assert.AreEqual(1, first.NextState.Streaks[AlertKind.SupportBounce]);
 
-        var second = AlertDetector.Detect(first.NextState, bouncing, null, Thresholds);
+        var second = Pass(first.NextState, bouncing, null, Thresholds);
         Assert.AreEqual(1, second.Fired.Count(a => a.Kind == AlertKind.SupportBounce),
             "The second consecutive pass confirms it.");
     }
@@ -61,10 +61,10 @@ public sealed class AlertDetectorTests
         var bouncing = Snapshot(
             setup: TradeSetup.BuyAtSupport, zone: PriceZone.AtSupport, upDays: 1, support: 95m);
 
-        var pass1 = AlertDetector.Detect(state, bouncing, null, Thresholds);
-        var pass2 = AlertDetector.Detect(pass1.NextState, bouncing, null, Thresholds);
-        var pass3 = AlertDetector.Detect(pass2.NextState, bouncing, null, Thresholds);
-        var pass4 = AlertDetector.Detect(pass3.NextState, bouncing, null, Thresholds);
+        var pass1 = Pass(state, bouncing, null, Thresholds);
+        var pass2 = Pass(pass1.NextState, bouncing, null, Thresholds);
+        var pass3 = Pass(pass2.NextState, bouncing, null, Thresholds);
+        var pass4 = Pass(pass3.NextState, bouncing, null, Thresholds);
 
         Assert.AreEqual(1, pass2.Fired.Count(a => a.Kind == AlertKind.SupportBounce));
         Assert.AreEqual(0, pass3.Fired.Count(a => a.Kind == AlertKind.SupportBounce),
@@ -80,8 +80,8 @@ public sealed class AlertDetectorTests
             setup: TradeSetup.BuyAtSupport, zone: PriceZone.AtSupport, upDays: 1, support: 95m);
         var quiet = Snapshot(setup: TradeSetup.Wait, zone: PriceZone.MidRange, support: 95m);
 
-        var pass1 = AlertDetector.Detect(state, bouncing, null, Thresholds);
-        var lapsed = AlertDetector.Detect(pass1.NextState, quiet, null, Thresholds);
+        var pass1 = Pass(state, bouncing, null, Thresholds);
+        var lapsed = Pass(pass1.NextState, quiet, null, Thresholds);
 
         Assert.IsFalse(lapsed.NextState.Streaks.ContainsKey(AlertKind.SupportBounce),
             "A condition that stopped holding must reset, or a stale streak would fire on a "
@@ -104,8 +104,8 @@ public sealed class AlertDetectorTests
             close: (decimal)close, resistance: 100m, downDays: 2,
             newRangeLow: true, volumeRatio: 2m);
 
-        var pass1 = AlertDetector.Detect(state, snapshot, null, Thresholds);
-        var pass2 = AlertDetector.Detect(pass1.NextState, snapshot, null, Thresholds);
+        var pass1 = Pass(state, snapshot, null, Thresholds);
+        var pass2 = Pass(pass1.NextState, snapshot, null, Thresholds);
 
         Assert.AreEqual(expected, pass2.Fired.Any(a => a.Kind == AlertKind.SupportBreak), because);
     }
@@ -118,8 +118,8 @@ public sealed class AlertDetectorTests
             setup: TradeSetup.AvoidBreakdown, zone: PriceZone.AtSupport,
             close: 92m, resistance: 100m, downDays: 2, newRangeLow: true, volumeRatio: 0.4m);
 
-        var pass1 = AlertDetector.Detect(state, thin, null, Thresholds);
-        var pass2 = AlertDetector.Detect(pass1.NextState, thin, null, Thresholds);
+        var pass1 = Pass(state, thin, null, Thresholds);
+        var pass2 = Pass(pass1.NextState, thin, null, Thresholds);
 
         Assert.IsFalse(pass2.Fired.Any(a => a.Kind == AlertKind.SupportBreak),
             "A break on thin volume is frequently retraced; reporting it wastes the reader's attention.");
@@ -133,8 +133,8 @@ public sealed class AlertDetectorTests
             setup: TradeSetup.AvoidBreakdown, zone: PriceZone.AtSupport,
             close: 99m, resistance: 100m, downDays: 0, newRangeLow: true, volumeRatio: 2m);
 
-        var pass1 = AlertDetector.Detect(state, stabilising, null, Thresholds);
-        var pass2 = AlertDetector.Detect(pass1.NextState, stabilising, null, Thresholds);
+        var pass1 = Pass(state, stabilising, null, Thresholds);
+        var pass2 = Pass(pass1.NextState, stabilising, null, Thresholds);
 
         Assert.IsFalse(pass2.Fired.Any(a => a.Kind == AlertKind.SupportBreak),
             "A fresh low that is no longer falling is a base, not a break in progress.");
@@ -149,8 +149,8 @@ public sealed class AlertDetectorTests
             setup: TradeSetup.Wait, zone: PriceZone.UpperRange,
             close: 101m, support: 100m, upDays: 2, newRangeHigh: true, volumeRatio: 2m);
 
-        var pass1 = AlertDetector.Detect(state, breakout, null, Thresholds);
-        var pass2 = AlertDetector.Detect(pass1.NextState, breakout, null, Thresholds);
+        var pass1 = Pass(state, breakout, null, Thresholds);
+        var pass2 = Pass(pass1.NextState, breakout, null, Thresholds);
 
         var alert = pass2.Fired.Single(a => a.Kind == AlertKind.ResistanceBreakout);
         Assert.AreEqual(100m, alert.LevelPrice, "The reported level is the one just cleared.");
@@ -166,14 +166,14 @@ public sealed class AlertDetectorTests
             setup: TradeSetup.SellAtResistance, zone: PriceZone.AtResistance,
             resistance: 105m, downDays: 0);
 
-        var pass1 = AlertDetector.Detect(state, pressing, null, Thresholds);
-        var pass2 = AlertDetector.Detect(pass1.NextState, pressing, null, Thresholds);
+        var pass1 = Pass(state, pressing, null, Thresholds);
+        var pass2 = Pass(pass1.NextState, pressing, null, Thresholds);
         Assert.IsFalse(pass2.Fired.Any(a => a.Kind == AlertKind.ResistanceRejection),
             "Sitting at resistance is not a rejection until price actually turns down.");
 
         var rejecting = pressing with { ConsecutiveDownDays = 1 };
-        var pass3 = AlertDetector.Detect(pass2.NextState, rejecting, null, Thresholds);
-        var pass4 = AlertDetector.Detect(pass3.NextState, rejecting, null, Thresholds);
+        var pass3 = Pass(pass2.NextState, rejecting, null, Thresholds);
+        var pass4 = Pass(pass3.NextState, rejecting, null, Thresholds);
         Assert.IsTrue(pass4.Fired.Any(a => a.Kind == AlertKind.ResistanceRejection));
     }
 
@@ -188,15 +188,15 @@ public sealed class AlertDetectorTests
         var below = Snapshot(sma20: 90m, sma50: 100m);
         var above = Snapshot(sma20: 105m, sma50: 100m);
 
-        var seeded = AlertDetector.Detect(AlertDetector.Seed("OGDC"), below, null, Thresholds);
+        var seeded = Pass(AlertDetector.Seed("OGDC"), below, null, Thresholds);
         Assert.AreEqual("below", seeded.NextState.SmaRelation);
 
-        var cross = AlertDetector.Detect(seeded.NextState, above, null, Thresholds);
+        var cross = Pass(seeded.NextState, above, null, Thresholds);
         Assert.IsTrue(cross.Fired.Any(a => a.Kind == AlertKind.TrendFlip),
             "An SMA cross exists for one pass; requiring two would mean it never fires at all.");
 
         // Still above: the cross already happened, so there is nothing new to say.
-        var after = AlertDetector.Detect(cross.NextState, above, null, Thresholds);
+        var after = Pass(cross.NextState, above, null, Thresholds);
         Assert.IsFalse(after.Fired.Any(a => a.Kind == AlertKind.TrendFlip));
     }
 
@@ -206,11 +206,11 @@ public sealed class AlertDetectorTests
         var neutral = Snapshot(rsi: 50m);
         var oversold = Snapshot(rsi: 28m);
 
-        var seeded = AlertDetector.Detect(AlertDetector.Seed("OGDC"), neutral, null, Thresholds);
-        var enter = AlertDetector.Detect(seeded.NextState, oversold, null, Thresholds);
+        var seeded = Pass(AlertDetector.Seed("OGDC"), neutral, null, Thresholds);
+        var enter = Pass(seeded.NextState, oversold, null, Thresholds);
         Assert.IsTrue(enter.Fired.Any(a => a.Kind == AlertKind.RsiOversold));
 
-        var stay = AlertDetector.Detect(enter.NextState, oversold, null, Thresholds);
+        var stay = Pass(enter.NextState, oversold, null, Thresholds);
         Assert.IsFalse(stay.Fired.Any(a => a.Kind == AlertKind.RsiOversold),
             "Remaining oversold is a condition, not an event.");
     }
@@ -221,7 +221,7 @@ public sealed class AlertDetectorTests
         var state = Established(zone: PriceZone.LowerRange, setup: TradeSetup.BuyAtSupport);
         var breaking = Snapshot(setup: TradeSetup.AvoidBreakdown, zone: PriceZone.AtSupport);
 
-        var alert = AlertDetector.Detect(state, breaking, null, Thresholds)
+        var alert = Pass(state, breaking, null, Thresholds)
             .Fired.Single(a => a.Kind == AlertKind.SetupChanged);
 
         Assert.AreEqual(AlertSeverity.High, alert.Severity,
@@ -239,11 +239,11 @@ public sealed class AlertDetectorTests
         Assert.IsTrue(breakdown.WeeklyBreakdown,
             "Test fixture must actually produce a weekly breakdown for this to mean anything.");
 
-        var first = AlertDetector.Detect(state, snapshot, breakdown, Thresholds);
+        var first = Pass(state, snapshot, breakdown, Thresholds);
         var alert = first.Fired.Single(a => a.Kind == AlertKind.WeeklyBreakdown);
         Assert.AreEqual(AlertSeverity.Critical, alert.Severity);
 
-        var second = AlertDetector.Detect(first.NextState, snapshot, breakdown, Thresholds);
+        var second = Pass(first.NextState, snapshot, breakdown, Thresholds);
         Assert.IsFalse(second.Fired.Any(a => a.Kind == AlertKind.WeeklyBreakdown),
             "Still broken down is not news; entering the breakdown was.");
     }
@@ -285,8 +285,8 @@ public sealed class AlertDetectorTests
             Reasons = ["Last 96 is 1.05% above nearest support 95."]
         };
 
-        var pass1 = AlertDetector.Detect(state, bouncing, null, Thresholds);
-        var alert = AlertDetector.Detect(pass1.NextState, bouncing, null, Thresholds)
+        var pass1 = Pass(state, bouncing, null, Thresholds);
+        var alert = Pass(pass1.NextState, bouncing, null, Thresholds)
             .Fired.Single(a => a.Kind == AlertKind.SupportBounce);
 
         Assert.AreEqual(95m, alert.LevelPrice);
@@ -298,6 +298,121 @@ public sealed class AlertDetectorTests
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
+
+    // ── Confirmation is a DURATION, not a number of passes ───────────────────
+    //
+    // A live price tick can ask for a pass immediately (premium's PriceTriggerWatcher, min gap 5s, up
+    // to 12/min). While confirmation counted passes, that quietly cut the evidence required from ~30
+    // seconds to ~5 — and an armed order keyed on the resulting alert places a real order. These pin
+    // the property that makes reacting to live data safe: looking more often changes only how SOON a
+    // condition is confirmed, never WHETHER it is.
+
+    [TestMethod]
+    public void ANudgedPassCannotConfirmFasterThanTheConfirmWindow()
+    {
+        var state = Established(zone: PriceZone.AtSupport, setup: TradeSetup.Wait);
+        var bouncing = Snapshot(
+            setup: TradeSetup.BuyAtSupport, zone: PriceZone.AtSupport, upDays: 1, support: 95m);
+
+        var first = PassAt(state, bouncing, T0);
+        var nudged = PassAt(first.NextState, bouncing, T0.AddSeconds(5));
+
+        Assert.AreEqual(0, nudged.Fired.Count(a => a.Kind == AlertKind.SupportBounce),
+            "five seconds of evidence is not thirty, however promptly it was observed");
+
+        var afterWindow = PassAt(nudged.NextState, bouncing, T0.AddSeconds(30));
+        Assert.AreEqual(1, afterWindow.Fired.Count(a => a.Kind == AlertKind.SupportBounce),
+            "once the condition really has held for the window, it confirms");
+    }
+
+    [TestMethod]
+    public void ABurstOfNudgesInsideTheWindowConfirmsNothingAndThenFiresExactlyOnce()
+    {
+        var state = Established(zone: PriceZone.AtSupport, setup: TradeSetup.Wait);
+        var bouncing = Snapshot(
+            setup: TradeSetup.BuyAtSupport, zone: PriceZone.AtSupport, upDays: 1, support: 95m);
+
+        var current = PassAt(state, bouncing, T0);
+        var firedInsideWindow = 0;
+        foreach (var second in new[] { 5, 10, 15, 20, 25 })
+        {
+            current = PassAt(current.NextState, bouncing, T0.AddSeconds(second));
+            firedInsideWindow += current.Fired.Count(a => a.Kind == AlertKind.SupportBounce);
+        }
+
+        Assert.AreEqual(0, firedInsideWindow,
+            "the rate cap allows 12 nudges a minute; none of them may buy confirmation");
+
+        var crossing = PassAt(current.NextState, bouncing, T0.AddSeconds(31));
+        Assert.AreEqual(1, crossing.Fired.Count(a => a.Kind == AlertKind.SupportBounce));
+
+        var after = PassAt(crossing.NextState, bouncing, T0.AddSeconds(36));
+        Assert.AreEqual(0, after.Fired.Count(a => a.Kind == AlertKind.SupportBounce),
+            "and it stays fired once, exactly as pass-counting behaved");
+    }
+
+    [TestMethod]
+    public void ALiveTickConfirmsSoonerThanTheNextScheduledPassWould()
+    {
+        // The point of the whole exercise. On a 30s schedule the second pass lands at T+60 and the
+        // alert waits for it; a tick arriving at T+31 confirms then. Same evidence, half the latency.
+        var state = Established(zone: PriceZone.AtSupport, setup: TradeSetup.Wait);
+        var bouncing = Snapshot(
+            setup: TradeSetup.BuyAtSupport, zone: PriceZone.AtSupport, upDays: 1, support: 95m);
+
+        var first = PassAt(state, bouncing, T0);
+        var onTick = PassAt(first.NextState, bouncing, T0.AddSeconds(31));
+
+        Assert.AreEqual(1, onTick.Fired.Count(a => a.Kind == AlertKind.SupportBounce));
+    }
+
+    [TestMethod]
+    public void ALapsedConditionRestartsItsClockRatherThanKeepingCredit()
+    {
+        // A condition that held 25s, lapsed, then returned must serve the full window again — otherwise
+        // a flickering level accumulates credit across gaps and confirms on no continuous evidence.
+        var state = Established(zone: PriceZone.AtSupport, setup: TradeSetup.Wait);
+        var bouncing = Snapshot(
+            setup: TradeSetup.BuyAtSupport, zone: PriceZone.AtSupport, upDays: 1, support: 95m);
+        var quiet = Snapshot(setup: TradeSetup.Wait, zone: PriceZone.MidRange, support: 95m);
+
+        var held = PassAt(state, bouncing, T0);
+        held = PassAt(held.NextState, bouncing, T0.AddSeconds(25));
+        var lapsed = PassAt(held.NextState, quiet, T0.AddSeconds(30));
+        var returned = PassAt(lapsed.NextState, bouncing, T0.AddSeconds(35));
+
+        Assert.IsFalse(lapsed.NextState.HeldSince.ContainsKey(AlertKind.SupportBounce),
+            "the lapse must drop the clock, which is what re-arms the condition");
+        Assert.AreEqual(0, returned.Fired.Count(a => a.Kind == AlertKind.SupportBounce),
+            "returning after a lapse starts the window again");
+
+        var confirmed = PassAt(returned.NextState, bouncing, T0.AddSeconds(66));
+        Assert.AreEqual(1, confirmed.Fired.Count(a => a.Kind == AlertKind.SupportBounce),
+            "and confirms a full window after it came back, not after the earlier partial hold");
+    }
+
+    /// <summary>
+    /// One monitoring pass, thirty seconds after the state it is handed — the production
+    /// <c>Monitor.IntervalSeconds</c>. Confirmation is measured in TIME now, so a test that ran every
+    /// pass at the same instant would prove nothing; chaining the real cadence keeps each existing case
+    /// meaning what it did when a pass was the unit.
+    /// </summary>
+    private static AlertDetection Pass(
+        SymbolMonitorState previous,
+        TechnicalSnapshot snapshot,
+        MultiTimeframeView? multi,
+        MonitorThresholds thresholds) =>
+        AlertDetector.Detect(previous, snapshot, multi, thresholds, NextPassAt(previous));
+
+    private static DateTime NextPassAt(SymbolMonitorState previous) =>
+        (previous.UpdatedUtc == default ? T0 : previous.UpdatedUtc).AddSeconds(30);
+
+    private static readonly DateTime T0 = new(2026, 9, 1, 10, 0, 0, DateTimeKind.Utc);
+
+    /// <summary>A pass at an EXPLICIT moment, for the cases that are about timing itself.</summary>
+    private static AlertDetection PassAt(
+        SymbolMonitorState previous, TechnicalSnapshot snapshot, DateTime at) =>
+        AlertDetector.Detect(previous, snapshot, null, Thresholds, at);
 
     private static SymbolMonitorState Established(
         PriceZone zone,

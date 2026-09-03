@@ -1991,6 +1991,9 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
             await AddColumnIfMissingAsync(
                 connection, "persistent_order_intents", "operator_originated",
                 "INTEGER NOT NULL DEFAULT 0", ct);
+            // Time-based alert confirmation needs to remember WHEN each condition started holding.
+            await AddColumnIfMissingAsync(
+                connection, "watchlist_state", "held_since_json", "TEXT NULL", ct);
             await WidenPlacementUniquenessAsync(connection, ct);
             await SeedPerSymbolCoverageAsync(connection, ct);
 
@@ -2341,7 +2344,7 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         var command = connection.CreateCommand();
         command.CommandText = """
             SELECT symbol, zone, setup, support, resistance, sma_relation, rsi_band,
-                   weekly_breakdown, streaks_json, updated_utc
+                   weekly_breakdown, streaks_json, updated_utc, held_since_json
             FROM watchlist_state
             """;
 
@@ -2364,6 +2367,12 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                 WeeklyBreakdown = reader.GetInt64(7) != 0,
                 Streaks         = ParseStreaks(reader.GetString(8)),
                 UpdatedUtc      = ParseUtc(reader.GetString(9)),
+                // Absent on a row written before confirmation became time-based. An empty map simply
+                // restarts every hold clock at the next pass, which delays an alert by the confirm
+                // window once and never fires one early.
+                HeldSince       = reader.IsDBNull(10)
+                                      ? new Dictionary<AlertKind, DateTime>()
+                                      : ParseHeldSince(reader.GetString(10)),
                 IsNew           = false
             };
         }
@@ -2379,13 +2388,13 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         command.CommandText = """
             INSERT INTO watchlist_state
                 (symbol, zone, setup, support, resistance, sma_relation, rsi_band,
-                 weekly_breakdown, streaks_json, updated_utc)
+                 weekly_breakdown, streaks_json, updated_utc, held_since_json)
             VALUES ($symbol, $zone, $setup, $support, $resistance, $sma, $rsi,
-                    $breakdown, $streaks, $now)
+                    $breakdown, $streaks, $now, $held)
             ON CONFLICT(symbol) DO UPDATE SET
                 zone = $zone, setup = $setup, support = $support, resistance = $resistance,
                 sma_relation = $sma, rsi_band = $rsi, weekly_breakdown = $breakdown,
-                streaks_json = $streaks, updated_utc = $now
+                streaks_json = $streaks, updated_utc = $now, held_since_json = $held
             """;
         command.Parameters.AddWithValue("$symbol", state.Symbol);
         command.Parameters.AddWithValue("$zone", state.Zone.ToString());
@@ -2398,6 +2407,8 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         command.Parameters.AddWithValue("$streaks", JsonSerializer.Serialize(
             state.Streaks.ToDictionary(kv => kv.Key.ToString(), kv => kv.Value)));
         command.Parameters.AddWithValue("$now", state.UpdatedUtc.ToString("O"));
+        command.Parameters.AddWithValue("$held", JsonSerializer.Serialize(
+            state.HeldSince.ToDictionary(kv => kv.Key.ToString(), kv => kv.Value.ToString("O"))));
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -3006,6 +3017,31 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         reader.IsDBNull(ordinal)
             ? null
             : decimal.Parse(reader.GetString(ordinal), CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// When each holding condition started. A corrupt or unreadable value costs at most one delayed
+    /// alert — the clock restarts — and never an early one, which is the safe direction.
+    /// </summary>
+    private static IReadOnlyDictionary<AlertKind, DateTime> ParseHeldSince(string json)
+    {
+        var held = new Dictionary<AlertKind, DateTime>();
+        try
+        {
+            var raw = JsonSerializer.Deserialize<Dictionary<string, string>>(json);
+            if (raw is null) return held;
+            foreach (var (key, value) in raw)
+            {
+                if (Enum.TryParse<AlertKind>(key, out var kind)
+                    && DateTime.TryParse(value, CultureInfo.InvariantCulture,
+                        DateTimeStyles.RoundtripKind, out var since))
+                    held[kind] = since;
+            }
+        }
+        catch (JsonException)
+        {
+        }
+        return held;
+    }
 
     private static IReadOnlyDictionary<AlertKind, int> ParseStreaks(string json)
     {
