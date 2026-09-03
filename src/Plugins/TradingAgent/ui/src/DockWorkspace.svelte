@@ -2,7 +2,7 @@
   import { onMount, tick } from 'svelte';
   import { createDockview, themeDark, themeLight, type DockviewApi, type IContentRenderer } from 'dockview';
   import 'dockview/dist/styles/dockview.css';
-  import { Command, PanelsTopLeft, RotateCcw, Maximize2, Minimize2, Sun, Moon, Keyboard, Pin, PinOff, X } from 'lucide-svelte';
+  import { Command, PanelsTopLeft, RotateCcw, Maximize, Minimize, Sun, Moon, Keyboard, Pin, PinOff, X } from 'lucide-svelte';
   import WorkspaceShortcuts from './WorkspaceShortcuts.svelte';
   import { readWorkspaceAppearance, saveWorkspaceAppearance, type WorkspaceTheme } from './workspaceAppearance';
   import type { WorkspaceCommand, WorkspaceComposition, WorkspacePanel, WorkspaceRegion } from './workspaceComposition';
@@ -181,8 +181,8 @@
   function drawHeaderIcon(button: HTMLButtonElement, paths: string[]) {
     const svg = document.createElementNS('http://www.w3.org/2000/svg','svg');
     svg.setAttribute('viewBox','0 0 24 24');
-    svg.setAttribute('width','14');
-    svg.setAttribute('height','14');
+    svg.setAttribute('width','16');
+    svg.setAttribute('height','16');
     svg.setAttribute('fill','none');
     svg.setAttribute('stroke','currentColor');
     svg.setAttribute('stroke-width','2');
@@ -197,9 +197,9 @@
   }
 
   function drawMaximizeIcon(button: HTMLButtonElement, restoring: boolean) {
-    drawHeaderIcon(button,[restoring
-      ? 'm14 10 7-7M20 10h-6V4M3 21l7-7M4 14h6v6'
-      : 'm15 3 6 6M21 3h-6v6M9 21l-6-6M3 21v-6h6']);
+    drawHeaderIcon(button,restoring
+      ? ['M8 3v3a2 2 0 0 1-2 2H3','M21 8h-3a2 2 0 0 1-2-2V3','M3 16h3a2 2 0 0 1 2 2v3','M16 21v-3a2 2 0 0 1 2-2h3']
+      : ['M8 3H5a2 2 0 0 0-2 2v3','M21 8V5a2 2 0 0 0-2-2h-3','M3 16v3a2 2 0 0 0 2 2h3','M16 21h3a2 2 0 0 0 2-2v-3']);
   }
 
   function drawUnpinIcon(button: HTMLButtonElement) {
@@ -598,7 +598,7 @@
       <button class="icon-control" on:click={maximize} disabled={!desktop} aria-pressed={maximized}
               aria-label={maximized ? 'Restore active group' : 'Maximize active group'}
               title={`${maximized ? 'Restore' : 'Maximize'} active group (Ctrl+Shift+Space)`}>
-        {#if maximized}<Minimize2 size={14}/>{:else}<Maximize2 size={14}/>{/if}
+        {#if maximized}<Minimize size={16}/>{:else}<Maximize size={16}/>{/if}
       </button>
       <button on:click={toggleTheme} title={currentTheme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}>{#if currentTheme === 'dark'}<Sun size={14}/> Light theme{:else}<Moon size={14}/> Dark theme{/if}</button>
       <button on:click={() => shortcutsSheet.open()} title="Keyboard shortcuts (Ctrl+/)"><Keyboard size={14}/> Shortcuts</button>
