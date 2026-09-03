@@ -10,6 +10,14 @@ const layout = () => ({
 const saved = () => saveWorkspaceLayout('premium', 'trading', layout(), now);
 const read = (value) => readWorkspaceLayout(JSON.stringify(value), 'premium', ['chart', 'watchlist'], ['trading'], now);
 
+test('maximized panel restores only a panel still in the docked grid', () => {
+  const value = saveWorkspaceLayout('premium','trading',layout(),now,undefined,'chart');
+  assert.equal(read(value).maximized,'chart');
+  for (const maximized of [null,5,'missing','watchlist']) assert.equal(read({...value,maximized}),null);
+  assert.equal(saveWorkspaceLayout('premium','trading',layout(),now,undefined,'watchlist').maximized,undefined);
+  assert.equal(read(saved()).maximized,undefined);
+});
+
 test('accepts current edition view metadata, including a hidden catalogue panel', () => {
   assert.deepEqual(read(saved()), saved());
 });

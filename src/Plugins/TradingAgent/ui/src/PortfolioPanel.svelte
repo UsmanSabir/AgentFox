@@ -9,6 +9,10 @@
   } from 'lucide-svelte';
   import type { SymbolExtensionComponent } from './symbolExtensions';
   import LiveHoldingCells from './LiveHoldingCells.svelte';
+  import { orderListNavigation } from './orderListNavigation';
+  export let keyboardMode = false;
+  let query = '';
+  $: visibleOrders = (account?.orders ?? []).filter(o => !keyboardMode || `${o.symbol ?? o.instrumentId} ${o.side} ${o.status}`.toLowerCase().includes(query.trim().toLowerCase()));
 
   /**
    * Optional component rendered under each holding's instrument name. Null in a community build. It
@@ -73,7 +77,7 @@
   const attributeValue = (value: string | null, visible: boolean) => visible ? text(value) : hidden;
 </script>
 
-<section class="portfolio" class:open>
+<section class="portfolio" class:open use:orderListNavigation={keyboardMode}>
   <header>
     <button class="toggle" on:click={toggleOpen} aria-expanded={open} aria-controls="portfolio-content">
       {#if open}<ChevronDown size={15}/>{:else}<ChevronRight size={15}/>{/if}
@@ -153,15 +157,18 @@
 
         <section class="account-section">
           <h3><BookOpen size={15}/> Working orders <span>{account.orders.length}</span></h3>
+          {#if keyboardMode}<label class="order-filter">Find working order <input type="search" bind:value={query} aria-label="Find working order" placeholder="Symbol, side or status"/></label><p class="message">Read-only broker book. ↑ ↓ / Home / End navigate rows; Enter focuses details. Values remain masked until you choose Show values.</p>{/if}
           {#if !account.ordersAvailable}
             <div class="unavailable"><b>Order book unavailable</b><span>Do not assume there are no working orders; check the broker directly.</span></div>
           {:else if !account.orders.length}
             <div class="empty">The broker confirms there are no working orders.</div>
+          {:else if !visibleOrders.length}
+            <div class="empty">No working orders match this filter.</div>
           {:else}
             <div class="table-wrap"><table>
               <thead><tr><th>Instrument</th><th>Side</th><th>Type / status</th><th>Remaining</th><th>Price</th><th>Placed</th></tr></thead>
-              <tbody>{#each account.orders as order}
-                <tr>
+              <tbody>{#each visibleOrders as order}
+                <tr data-order-row tabindex={keyboardMode ? 0 : undefined}>
                   <td><b>{text(order.symbol ?? order.instrumentId)}</b><small>{showValues ? `#${text(order.orderId)}` : `#${hidden}`}</small>{#if extras(order.attributes).length}<details class="broker-details"><summary>Details</summary><dl>{#each extras(order.attributes) as [label, value]}<dt>{label}</dt><dd>{attributeValue(value, showValues)}</dd>{/each}</dl></details>{/if}</td>
                   <td><span class:buy={order.side === 'BUY'} class:sell={order.side === 'SELL'}>{text(order.side)}</span></td>
                   <td>{text(order.orderType)}<small>{text(order.status)}</small></td>
@@ -179,6 +186,9 @@
 </section>
 
 <style>
+  [data-order-row]:focus-visible, input:focus-visible { outline:2px solid var(--primary); outline-offset:-2px; }
+  .order-filter { display:flex; gap:.5rem; align-items:center; color:var(--text-2); font-size:.75rem; }
+  .order-filter input { min-width:0; padding:.35rem; border:1px solid var(--border-md); background:var(--surface-2); color:var(--text); border-radius:4px; }
   .portfolio { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); margin-bottom:1.25rem; overflow:hidden; }
   .portfolio.open { border-color:color-mix(in srgb,var(--primary) 25%,var(--border)); }
   header { display:flex; align-items:center; justify-content:space-between; gap:.7rem; padding:.15rem .45rem .15rem 0; }

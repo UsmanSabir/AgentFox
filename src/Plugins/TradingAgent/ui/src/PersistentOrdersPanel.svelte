@@ -3,6 +3,10 @@
   import { RefreshCw, Repeat2, Trash2, AlertTriangle, CheckCircle2, RotateCcw, ShieldQuestion } from 'lucide-svelte';
   import { trading, type PersistentOrder, type BrokerOrdersView } from './api';
   import LivePriceInline from './LivePriceInline.svelte';
+  import { orderListNavigation, focusOrderControls } from './orderListNavigation';
+  export let keyboardMode = false;
+  let query = '';
+  $: visibleOrders = orders.filter(o => !keyboardMode || `${o.symbol} ${o.action} ${o.state} ${o.intentId}`.toLowerCase().includes(query.trim().toLowerCase()));
 
   export let refreshTick = 0;
 
@@ -185,7 +189,7 @@
   onMount(load);
 </script>
 
-<section class="persistent">
+<section class="persistent" use:orderListNavigation={keyboardMode}>
   <header>
     <div class="title">
       <Repeat2 size={15} />
@@ -196,6 +200,7 @@
       <button on:click={load} disabled={busy != null}><RefreshCw size={12} /> Refresh</button>
     </div>
   </header>
+  {#if keyboardMode}<label class="order-filter">Find persistent order <input type="search" bind:value={query} aria-label="Find persistent order" placeholder="Symbol, state or intent ID"/></label><p class="notice">↑ ↓ / Home / End navigate rows · Enter focuses actions · Tab reaches each recovery control.</p>{/if}
 
   {#if notice}<p class="notice">{notice}</p>{/if}
   {#if error}<p class="notice bad"><AlertTriangle size={12} /> {error}</p>{/if}
@@ -204,12 +209,14 @@
     <p class="empty">Loading…</p>
   {:else if !orders.length}
     <p class="empty">No keep-working orders. Enable “Keep the unfilled remainder working” when placing or arming a LIMIT or STOPLOSS.</p>
+  {:else if !visibleOrders.length}
+    <p class="empty">No persistent orders match this filter.</p>
   {:else}
     <div class="grid">
-      {#each orders as order (order.intentId)}
-        <article class:danger={danger(order.state)} class:done={terminal(order.state)}>
+      {#each visibleOrders as order (order.intentId)}
+        <article class:danger={danger(order.state)} class:done={terminal(order.state)} data-order-row>
           <div class="top">
-            <span class="symbol">{order.symbol}</span>
+            {#if keyboardMode}<button class="symbol" data-order-focus aria-label={`Controls for ${order.symbol} ${order.action} intent ${order.intentId}, ${order.state}`} on:click={focusOrderControls}>{order.symbol}</button>{:else}<span class="symbol">{order.symbol}</span>{/if}
             <LivePriceInline symbol={order.symbol} fallbackChange={null} />
             <span class="side {order.action.toLowerCase()}">{order.action}</span>
             <span class="state">{order.state}</span>
@@ -309,6 +316,9 @@
 </section>
 
 <style>
+  [data-order-row]:focus-visible, button:focus-visible, input:focus-visible { outline:2px solid var(--primary); outline-offset:-2px; }
+  .order-filter { display:flex; gap:.5rem; align-items:center; padding:.7rem; color:var(--text-2); font-size:.75rem; }
+  .order-filter input { min-width:0; padding:.35rem; border:1px solid var(--border-md); background:var(--surface-2); color:var(--text); border-radius:4px; }
   .persistent { margin:1rem 0; border:1px solid var(--border); border-radius:var(--radius);
                 background:var(--surface); overflow:hidden; }
   header { display:flex; justify-content:space-between; align-items:center; gap:1rem; padding:.75rem .9rem;
@@ -321,7 +331,7 @@
            border-radius:var(--radius-sm); background:var(--surface-2); color:var(--text-2);
            padding:.35rem .55rem; cursor:pointer; font-size:.67rem; }
   button:disabled { opacity:.5; cursor:wait; }
-  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(310px,1fr)); gap:.65rem; padding:.75rem; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,310px),1fr)); gap:.65rem; padding:.75rem; }
   article { border:1px solid var(--border); border-radius:var(--radius-sm); padding:.7rem; background:var(--surface-2); }
   article.danger { border-color:var(--warning); } article.done { opacity:.72; }
   .top { display:flex; align-items:center; gap:.4rem; }.symbol { font-weight:800; color:var(--text); }

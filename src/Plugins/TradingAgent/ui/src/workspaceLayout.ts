@@ -11,6 +11,7 @@ export interface WorkspaceLayout {
   layout: SerializedDockview;
   /** View metadata only. No peek state or panel contents. Missing means pinned. */
   bottomTray?: AutoHideTray;
+  maximized?: string;
 }
 
 /** Validate before handing browser preferences to Dockview; never accept components/params as code. */
@@ -33,6 +34,7 @@ export function readWorkspaceLayout(
         || (panel.params && Object.keys(panel.params).length)) return null;
     }
     const tray = value.bottomTray;
+    if (value.maximized !== undefined && (typeof value.maximized !== 'string' || !Object.hasOwn(layout.panels,value.maximized))) return null;
     if (tray !== undefined && (!tray || typeof tray !== 'object' || !Array.isArray(tray.ids) || !tray.ids.length || tray.ids.length > allowedIds.length
       || new Set(tray.ids).size !== tray.ids.length || !tray.ids.includes(tray.active)
       || tray.ids.some(id => !allowedIds.includes(id) || id in layout.panels)
@@ -43,10 +45,11 @@ export function readWorkspaceLayout(
 
 /** Only view geometry and stable metadata are persisted, never order drafts or component parameters. */
 export function saveWorkspaceLayout(
-  edition: string, preset: string, layout: SerializedDockview, now = Date.now(), bottomTray?: AutoHideTray
+  edition: string, preset: string, layout: SerializedDockview, now = Date.now(), bottomTray?: AutoHideTray, maximized?: string
 ): WorkspaceLayout {
   const copy = JSON.parse(JSON.stringify(layout)) as SerializedDockview;
   for (const panel of Object.values(copy.panels)) delete panel.params;
   return { version: 1, edition, savedAt: now, preset, layout: copy,
+    ...(maximized && Object.hasOwn(copy.panels,maximized) ? {maximized} : {}),
     ...(bottomTray ? { bottomTray:{ ids:[...bottomTray.ids], active:bottomTray.active, height:bottomTray.height } } : {}) };
 }

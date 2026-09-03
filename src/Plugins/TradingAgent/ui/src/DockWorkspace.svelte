@@ -2,7 +2,9 @@
   import { onMount, tick } from 'svelte';
   import { createDockview, themeDark, themeLight, type DockviewApi, type IContentRenderer } from 'dockview';
   import 'dockview/dist/styles/dockview.css';
-  import { Command, PanelsTopLeft, RotateCcw, Maximize2, Pin, PinOff, X } from 'lucide-svelte';
+  import { Command, PanelsTopLeft, RotateCcw, Maximize2, Minimize2, Sun, Moon, Keyboard, Pin, PinOff, X } from 'lucide-svelte';
+  import WorkspaceShortcuts from './WorkspaceShortcuts.svelte';
+  import { readWorkspaceAppearance, saveWorkspaceAppearance, type WorkspaceTheme } from './workspaceAppearance';
   import type { WorkspaceCommand, WorkspaceComposition, WorkspacePanel, WorkspaceRegion } from './workspaceComposition';
   import { readWorkspaceLayout, saveWorkspaceLayout, type AutoHideTray } from './workspaceLayout';
 
@@ -24,6 +26,32 @@
   let palette: HTMLDialogElement;
   let search: HTMLInputElement;
   let api: DockviewApi | null = null;
+  let shortcutsSheet: WorkspaceShortcuts;
+  let maximized = false;
+  let localTheme: WorkspaceTheme | null = null;
+  let currentTheme: WorkspaceTheme = 'dark';
+  let hostTheme: WorkspaceTheme = 'dark';
+  let applyingWorkspaceTheme = false;
+  let appearanceWarning = '';
+  const appearanceKey = storageKey + '.appearance';
+  function applyTheme(theme: WorkspaceTheme) {
+    currentTheme = theme;
+    applyingWorkspaceTheme = true;
+    document.documentElement.dataset.theme = theme;
+    window.dispatchEvent(new CustomEvent('agentfox:themechange',{detail:theme}));
+    applyingWorkspaceTheme = false;
+  }
+  function toggleTheme() {
+    localTheme = currentTheme === 'dark' ? 'light' : 'dark';
+    applyTheme(localTheme);
+    try { localStorage.setItem(appearanceKey,saveWorkspaceAppearance(localTheme)); appearanceWarning = ''; }
+    catch { appearanceWarning = 'Theme changed for this session; this browser could not save it.'; }
+  }
+  function followHostTheme() {
+    localTheme = null;
+    try { localStorage.removeItem(appearanceKey); appearanceWarning = ''; } catch { appearanceWarning = 'Could not clear the saved theme preference.'; }
+    applyTheme(hostTheme);
+  }
   let desktop = true;
   let preset = presets[0].id;
   let commands: WorkspaceCommand[] = [];
@@ -123,7 +151,7 @@
       void tick().then(() => { if (!disposed && trayOpen && bottomTray?.active === id) trayHost.appendChild(container(id)); });
     } else if (api) {
       closeTray(false);
-      if (api.hasMaximizedGroup()) api.exitMaximizedGroup();
+      if (api.hasMaximizedGroup() && !api.getPanel(id)?.api.isMaximized()) api.exitMaximizedGroup();
       let panel = api.getPanel(id);
       if (!panel) {
         const region = panels.find(p => p.id === id)?.region;
@@ -186,7 +214,7 @@
   function persist() {
     if (!api || suppressSave || !dirty) return;
     try {
-      localStorage.setItem(storageKey, JSON.stringify(saveWorkspaceLayout(edition, preset, api.toJSON(), Date.now(), bottomTray)));
+      localStorage.setItem(storageKey, JSON.stringify(saveWorkspaceLayout(edition, preset, api.toJSON(), Date.now(), bottomTray, api.hasMaximizedGroup() ? api.activePanel?.id : undefined)));
       dirty = false;
       storageWarning = '';
     } catch { storageWarning = 'Layout could not be saved in this browser; trading is unaffected.'; }
@@ -222,6 +250,9 @@
     if (!api?.activePanel) return;
     if (api.hasMaximizedGroup()) api.exitMaximizedGroup();
     else api.activePanel.api.maximize();
+    maximized = api.hasMaximizedGroup();
+    notice = maximized ? 'Group maximized. Escape or Restore group returns to your layout.' : 'Group restored.';
+    scheduleSave();
   }
   function resize(width: number, height: number) {
     if (trayOpen && bottomTray) {
@@ -324,6 +355,9 @@
 
   $: panelCommands = panels.map(p => ({ id: 'panel.' + p.id, label: 'Show ' + p.title, run: () => focusPanel(p.id) }));
   $: layoutCommands = [
+    { id:'workspace.shortcuts', label:'Show keyboard shortcuts', run:() => shortcutsSheet.open() },
+    { id:'workspace.theme', label:'Toggle light / dark theme', run:toggleTheme },
+    { id:'workspace.host-theme', label:'Use host theme (clear workspace theme override)', run:followHostTheme },
     { id:'layout.bottom', label:bottomTray ? 'Pin bottom tools' : 'Unpin bottom tools (auto-hide)', run:() => bottomTray ? pinBottom() : unpinBottom() },
     { id:'layout.reset', label:'Reset view to default', run:resetView },
     { id:'layout.maximize', label:'Maximize / restore active group', run:maximize },
@@ -386,6 +420,9 @@
     const target = event.target instanceof HTMLElement ? event.target : null;
     if (palette?.open || target?.closest('dialog, [role="dialog"], [role="alertdialog"]')) return;
     if (event.key === 'Escape' && trayOpen) { event.preventDefault(); event.stopPropagation(); closeTray(); return; }
+    if (event.ctrlKey && !event.altKey && !event.shiftKey && event.code === 'Slash') {
+      event.preventDefault(); event.stopPropagation(); void shortcutsSheet.open(); return;
+    }
     if ((event.ctrlKey || event.metaKey) && !event.altKey && event.code === 'KeyK') {
       event.preventDefault(); event.stopPropagation(); void openPalette(); return;
     }
@@ -393,7 +430,9 @@
       event.preventDefault(); event.stopPropagation(); cycleGroup(event.shiftKey ? -1 : 1); return;
     }
     if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
-    const direct: Record<string,string> = { Digit1:'watchlist', Digit2:'chart', Digit3:'plan', Digit4:'ticket', Digit5:'order-logs' };
+    if (event.key === 'Escape' && api?.hasMaximizedGroup()) { event.preventDefault(); event.stopPropagation(); maximize(); return; }
+    if ((event.ctrlKey || event.metaKey) && event.shiftKey && !event.altKey && event.code === 'Space') { event.preventDefault(); event.stopPropagation(); maximize(); return; }
+    const direct: Record<string,string> = { Digit1:'watchlist', Digit2:'chart', Digit3:'plan', Digit4:'ticket', Digit5:'order-logs', Digit6:'portfolio', Digit7:'persistent', Digit8:'armed' };
     if ((event.ctrlKey || event.metaKey) && event.shiftKey && !event.altKey && direct[event.code]) focusPanel(direct[event.code]);
     else if ((event.ctrlKey || event.metaKey) && event.shiftKey && !event.altKey && event.code === 'Digit0') resetView();
     else if (event.ctrlKey && !event.shiftKey && event.code === 'BracketRight') cycleTab(1);
@@ -403,6 +442,13 @@
   }
 
   onMount(() => {
+    hostTheme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+    try {
+      const raw = localStorage.getItem(appearanceKey);
+      localTheme = readWorkspaceAppearance(raw);
+      if (raw && !localTheme) localStorage.removeItem(appearanceKey);
+    } catch { /* Browser storage is optional. */ }
+    applyTheme(localTheme ?? hostTheme);
     const media = window.matchMedia('(min-width:901px)');
     let subscriptions: { dispose(): void }[] = [];
     function disconnect() {
@@ -413,6 +459,7 @@
       subscriptions = [];
       api?.dispose();
       api = null;
+      maximized = false;
     }
     function connect() {
       desktop = media.matches;
@@ -429,19 +476,25 @@
       if (api) return;
       api = createDockview(dockRoot, {
         createRightHeaderActionComponent: group => {
-          const element = document.createElement('button');
-          element.className = 'bottom-unpin';
-          element.textContent = 'Unpin';
-          element.title = 'Auto-hide this bottom tool group';
-          element.setAttribute('aria-label','Unpin this bottom group');
+          const element = document.createElement('div');
+          element.className = 'group-actions';
+          const pin = document.createElement('button');
+          pin.className = 'group-control'; pin.textContent = 'Unpin'; pin.title = 'Auto-hide this bottom tool group';
+          pin.setAttribute('aria-label','Unpin this bottom group');
+          pin.onclick = () => unpinBottom(group.id);
+          const expand = document.createElement('button'); expand.className = 'group-control';
+          expand.onclick = () => { group.activePanel?.api.setActive(); maximize(); };
           element.onpointerdown = event => event.stopPropagation();
-          element.onclick = () => unpinBottom(group.id);
+          element.append(pin,expand);
           const refresh = () => {
-            element.hidden = !group.panels.length || !group.panels.every(p => panels.find(s => s.id === p.id)?.region === 'bottom');
-            element.disabled = !!bottomTray;
+            pin.hidden = !group.panels.length || !group.panels.every(p => panels.find(s => s.id === p.id)?.region === 'bottom');
+            pin.disabled = !!bottomTray;
+            expand.textContent = group.api.isMaximized() ? 'Restore' : 'Max';
+            expand.setAttribute('aria-label',(group.api.isMaximized() ? 'Restore ' : 'Maximize ') + (group.activePanel?.title ?? 'group'));
+            expand.title = expand.getAttribute('aria-label')!;
           };
-          let subscription: {dispose():void} | undefined;
-          return { element, init() { refresh(); subscription = api?.onDidLayoutChange(refresh); }, dispose() { subscription?.dispose(); } };
+          let listeners: {dispose():void}[] = [];
+          return { element, init() { refresh(); if(api) listeners = [api.onDidLayoutChange(refresh),api.onDidMaximizedGroupChange(refresh)]; }, dispose() { listeners.forEach(s => s.dispose()); } };
         },
         createComponent: ({ id }): IContentRenderer => ({
           element: container(id), init() { place(id); },
@@ -460,19 +513,27 @@
       try { raw = localStorage.getItem(storageKey); } catch { /* Storage may be disabled. */ }
       const saved = readWorkspaceLayout(raw, edition, panels.map(p => p.id), presets.map(p => p.id));
       if (saved) {
-        try { api.fromJSON(saved.layout); preset = saved.preset; bottomTray = saved.bottomTray; }
+        try { api.fromJSON(saved.layout); preset = saved.preset; bottomTray = saved.bottomTray; if(saved.maximized) api.getPanel(saved.maximized)?.api.maximize(); }
         catch { removeSaved(); buildDefault(presets[0].id); }
       } else if (raw) removeSaved();
       suppressSave = false;
       dirty = false;
       activeId = api.activePanel?.id ?? activeId;
+      maximized = api.hasMaximizedGroup();
       subscriptions.push(api.onDidLayoutChange(scheduleSave));
+      subscriptions.push(api.onDidMaximizedGroupChange(() => { maximized = api?.hasMaximizedGroup() ?? false; scheduleSave(); }));
       subscriptions.push(api.onDidActivePanelChange(() => activeId = api?.activePanel?.id ?? activeId));
     }
     for (const id of nodes.keys()) place(id);
     connect();
     media.addEventListener('change', connect);
-    const theme = () => api?.updateOptions({ theme:document.documentElement.dataset.theme === 'light' ? themeLight : themeDark });
+    const theme = () => {
+      const incoming = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+      if (!applyingWorkspaceTheme) hostTheme = incoming;
+      if (localTheme && incoming !== localTheme) { applyTheme(localTheme); return; }
+      currentTheme = incoming;
+      api?.updateOptions({ theme:incoming === 'light' ? themeLight : themeDark });
+    };
     window.addEventListener('agentfox:themechange', theme);
     window.addEventListener('keydown', shortcut, true);
     window.addEventListener('pagehide', persist);
@@ -487,6 +548,8 @@
       window.removeEventListener('pagehide', persist);
       window.removeEventListener('pointerdown', outsideTray);
       window.removeEventListener('focusin', outsideTray);
+      document.documentElement.dataset.theme = hostTheme;
+      window.dispatchEvent(new CustomEvent('agentfox:themechange',{detail:hostTheme}));
     };
   });
 </script>
@@ -500,7 +563,9 @@
       {/each}
       <button on:click={() => openPalette(true)}><PanelsTopLeft size={14}/> Panels</button>
       <button on:click={() => openPalette()} title="Search commands (Ctrl+K)"><Command size={14}/> Commands <kbd>Ctrl K</kbd></button>
-      <button on:click={maximize} disabled={!desktop} title="Maximize or restore the active group"><Maximize2 size={14}/><span class="sr-only">Maximize / restore</span></button>
+      <button on:click={maximize} disabled={!desktop} aria-pressed={maximized} title="Maximize / restore group (Ctrl+Shift+Space)">{#if maximized}<Minimize2 size={14}/> Restore group{:else}<Maximize2 size={14}/> Maximize group{/if}</button>
+      <button on:click={toggleTheme} title={currentTheme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}>{#if currentTheme === 'dark'}<Sun size={14}/> Light theme{:else}<Moon size={14}/> Dark theme{/if}</button>
+      <button on:click={() => shortcutsSheet.open()} title="Keyboard shortcuts (Ctrl+/)"><Keyboard size={14}/> Shortcuts</button>
       <button on:click={() => bottomTray ? pinBottom() : unpinBottom()} disabled={!desktop} title="Auto-hide a bottom tool group without closing its contents">
         {#if bottomTray}<Pin size={14}/> Pin bottom{:else}<PinOff size={14}/> Unpin bottom{/if}
       </button>
@@ -509,6 +574,7 @@
     </nav>
   </header>
   {#if storageWarning}<p class="storage-warning" role="status">{storageWarning}</p>{/if}
+  {#if appearanceWarning}<p class="storage-warning" role="status">{appearanceWarning}</p>{/if}
   <div class="core-toolbar" bind:this={toolbar}></div>
   <div class="edition-health" bind:this={health}></div>
   <div class="dock-area" class:hidden={!desktop} bind:this={dockArea}>
@@ -535,6 +601,7 @@
   <div hidden bind:this={depot}><slot {workspace}/></div>
 </section>
 <div class="workstation-overlays" bind:this={overlays}></div>
+<WorkspaceShortcuts bind:this={shortcutsSheet}/>
 
 <dialog class="command-palette" bind:this={palette} on:cancel={() => previousFocus?.focus()} on:keydown={paletteKey} aria-label={panelsOnly ? 'Panels' : 'Workspace commands'}>
   <div class="palette-heading"><strong>{panelsOnly ? 'All panels' : 'Workspace commands'}</strong><button on:click={closePalette} aria-label="Close commands"><X size={16}/></button></div>
@@ -591,9 +658,10 @@
      area; neither flex shrink nor a percentage-height chain can flatten the candles. */
   .workspace-dock :global([data-workspace-panel='chart'] .plot) { height:clamp(300px, calc(100cqh - 110px), 900px); }
   .workspace-dock :global(.dv-tab) { font-size:.7rem; }
-  .workspace-dock :global(.bottom-unpin) { align-self:center; cursor:pointer; margin:0 .3rem; padding:.25rem .4rem; border:1px solid var(--border-md); border-radius:3px; background:var(--surface); color:var(--text-2); font-size:.65rem; }
-  .workspace-dock :global(.bottom-unpin:focus-visible) { outline:2px solid var(--primary); outline-offset:-2px; }
-  .workspace-dock :global(.bottom-unpin:disabled) { opacity:.5; cursor:default; }
+  .workspace-dock :global(.group-actions) { display:flex; align-items:center; }
+  .workspace-dock :global(.group-control) { align-self:center; cursor:pointer; margin:0 .2rem; padding:.25rem .3rem; border:1px solid var(--border-md); border-radius:3px; background:var(--surface); color:var(--text-2); font-size:.65rem; }
+  .workspace-dock :global(.group-control:focus-visible) { outline:2px solid var(--primary); outline-offset:-2px; }
+  .workspace-dock :global(.group-control:disabled) { opacity:.5; cursor:default; }
   .workspace-dock :global(.dv-tab.dv-active-tab) { box-shadow:inset 0 2px var(--primary); }
   .workspace-dock { --dv-group-view-background-color:var(--surface); --dv-tabs-and-actions-container-background-color:var(--surface-2); --dv-activegroup-visiblepanel-tab-background-color:var(--surface); --dv-activegroup-visiblepanel-tab-color:var(--text); --dv-separator-border:var(--border-md); --dv-active-sash-color:var(--primary); --dv-tabs-and-actions-container-height:32px; }
   .command-palette { width:min(580px,calc(100vw - 2rem)); max-height:75dvh; padding:1rem; margin:10dvh auto auto; border:1px solid var(--border-high); border-radius:10px; background:var(--surface); color:var(--text); box-shadow:0 20px 70px #0008; }

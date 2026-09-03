@@ -502,7 +502,7 @@
     </WorkspacePanel>
     <WorkspacePanel {workspace} id="portfolio">
     <div id="trading-portfolio" class="section-anchor">
-      <PortfolioPanel holdingStatus={symbolExtension?.holdingStatus ?? null} />
+      <PortfolioPanel holdingStatus={symbolExtension?.holdingStatus ?? null} keyboardMode={!!workspace}/>
     </div>
 
     </WorkspacePanel>
@@ -575,12 +575,12 @@
 
     {/if}
     <WorkspacePanel {workspace} id="persistent">
-    <PersistentOrdersPanel bind:this={persistentPanel} refreshTick={marketTick} />
+    <PersistentOrdersPanel bind:this={persistentPanel} refreshTick={marketTick} keyboardMode={!!workspace}/>
     </WorkspacePanel>
 
     <div class="alerts-row">
       <WorkspacePanel {workspace} id="armed">
-      <ArmedOrdersPanel bind:this={armedPanel} refreshTick={marketTick} />
+      <ArmedOrdersPanel bind:this={armedPanel} refreshTick={marketTick} keyboardMode={!!workspace}/>
       </WorkspacePanel>
       <WorkspacePanel {workspace} id="alerts">
       <AlertsPanel
