@@ -345,6 +345,10 @@
     load(); startMarketClock();
     const unregister = [
       workspace?.registerCommand({ id:'order.new', label:'New Order — open existing order form', run:openNewOrder }),
+      workspace?.registerCommand({ id:'watchlist.search', label:'Search watched symbols', run:() => {
+        workspace?.focusPanel('watchlist');
+        requestAnimationFrame(() => workspaceWatchlist?.focusSearch());
+      } }),
       workspace?.registerCommand({ id:'trading.refresh', label:'Refresh trading state', run:load }),
       workspace?.registerCommand({ id:'broker.check', label:'Check broker now', run:reconcileNow })
     ];
@@ -484,7 +488,8 @@
     {:else}
       <WorkspacePanel {workspace} id="watchlist">
         <WatchlistPanel bind:this={workspaceWatchlist} bind:selected={selectedSymbol} bind:selectedCompany
-          allowCompact={false} refreshTick={marketTick} marketOpen={status.market.isOpen}
+          allowCompact={false} dense refreshTick={marketTick} marketOpen={status.market.isOpen}
+          on:newOrder={event => {selectedSymbol = event.detail.symbol; openNewOrder();}}
           rowStatus={symbolExtension?.rowStatus ?? null}/>
       </WorkspacePanel>
       <WorkspacePanel {workspace} id="chart">

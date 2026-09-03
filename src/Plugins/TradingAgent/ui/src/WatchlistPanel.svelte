@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { createEventDispatcher, onMount } from 'svelte';
   import {
     trading, type WatchlistEntry, type WatchlistResponse, type CandleArchiveStatus,
     type WatchlistPresetPreview
@@ -11,6 +11,8 @@
   } from 'lucide-svelte';
   import type { SymbolExtensionComponent } from './symbolExtensions';
   import LivePriceInline from './LivePriceInline.svelte';
+  import WatchlistTable from './WatchlistTable.svelte';
+  import { moveWatchlistRow, type WatchlistAction } from './watchlistNavigation';
 
   /** Selected symbol, so the chart pane (Phase 2) can follow the list. */
   export let selected: string | null = null;
@@ -20,6 +22,10 @@
   export let compact = false;
   /** A docked workspace resizes the whole panel, so its legacy narrow-rail control is not applicable. */
   export let allowCompact = true;
+  /** Dense workstation presentation; classic retains its existing cards and controls. */
+  export let dense = false;
+  let managementOpen = false;
+  const dispatch = createEventDispatcher<{ newOrder:{symbol:string} }>();
   /** Shared dashboard clock; used to refresh live session moves without adding another timer. */
   export let refreshTick = 0;
   /** Session gate supplied by the dashboard status endpoint. Closed-market moves do not change. */
@@ -48,6 +54,7 @@
   /** Narrows the rows below by symbol — separate from `input`, which is for adding a new ticker. */
   let search = '';
   let searchInput: HTMLInputElement;
+  let managementButton: HTMLButtonElement;
   /** When active, show only symbols that currently have one or more unacknowledged alerts. */
   let alertsOnly = false;
   /** Narrows rows by the effective auto-trading state, including configuration-locked symbols. */
@@ -453,6 +460,38 @@
     await loadArchive();
   }
 
+  export function focusSearch() {
+    if (searchInput?.isConnected) searchInput.focus();
+    else managementButton?.focus();
+  }
+
+  async function tableAction(action:WatchlistAction, symbol:string) {
+    const entry = data?.entries.find(item => item.symbol === symbol);
+    if (!entry || busy) return;
+    // Resolve the identity against the current list, never an index captured before a refresh.
+    switch (action) {
+      case 'order': dispatch('newOrder',{symbol}); return;
+      case 'pin': await togglePin(entry); return;
+      case 'alerts': await toggleAlerts(entry); return;
+      case 'automation': if (entry.tradable) await toggleAutoTrade(entry); return;
+      case 'history':
+        if (!entry.hasWeeklyHistory && !gapBySymbol.get(symbol)?.noEarlierHistory && !archive?.progress.isRunning) await fillHistory(entry);
+        return;
+      case 'remove': await remove(entry); return;
+      case 'up': case 'down': {
+        if (!data || search.trim() || alertsOnly || autoTradeFilter !== 'all') return;
+        const before = data.entries;
+        const reordered = moveWatchlistRow(before,symbol,action === 'up' ? -1 : 1);
+        if (!reordered) return;
+        busy = true;
+        data = {...data,entries:reordered};
+        try { await trading.watchlist.reorder(reordered.map(item => item.symbol)); }
+        catch (e) { data = {...data,entries:before}; error = e instanceof Error ? e.message : String(e); }
+        finally { busy = false; }
+      }
+    }
+  }
+
   onMount(() => {
     compact = allowCompact && localStorage.getItem('trading-watchlist-density') === 'compact';
     configuredListNoteDismissed = localStorage.getItem(configuredListNoteStorageKey) === 'true';
@@ -494,7 +533,7 @@
 
 </script>
 
-<section class="watchlist" class:compact>
+<section class="watchlist" class:compact class:dense>
   <header>
     <div class="head-copy">
       <b>
@@ -523,16 +562,24 @@
           title={compact ? 'Expand watchlist' : 'Collapse watchlist to give the chart more space'}
         >{#if compact}<PanelLeftOpen size={14} />{:else}<PanelLeftClose size={14} />{/if}</button>
       {/if}
+      {#if dense}
+        <button bind:this={managementButton} class="btn btn-ghost" aria-expanded={managementOpen} aria-controls="watchlist-management" on:click={() => managementOpen = !managementOpen}>Manage</button>
+      {:else}
       <button class="btn btn-ghost" on:click={reset} disabled={busy || loading} title="Reset to the configured allowed-symbols list">
         <RotateCcw size={13} /> Reset
       </button>
+      {/if}
     </div>
   </header>
 
+  {#if !dense || managementOpen}
+  <div id="watchlist-management" class="management">
+  {#if dense}<button class="btn btn-ghost" on:click={reset} disabled={busy || loading} title="Reset symbols and settings to the configured list; this is not Reset view"><RotateCcw size={13}/> Reset list…</button>{/if}
   <form class="add-row" on:submit|preventDefault={add}>
     <input
       class="symbol-input"
       placeholder="Add ticker (e.g. OGDC)"
+      aria-label="Add ticker"
       bind:value={input}
       maxlength="16"
       spellcheck="false"
@@ -588,6 +635,8 @@
       </small>
     </div>
   {/if}
+  </div>
+  {/if}
 
   {#if data?.configuredListChanged && !configuredListNoteDismissed}
     <div class="note warn configured-list" role="note">
@@ -622,7 +671,7 @@
     </div>
   {/if}
 
-  {#if error}<p class="note danger">{error}</p>{/if}
+  {#if error}<p class="note danger" role="alert">{error}</p>{/if}
   {#if notice}<p class="note">{notice}</p>{/if}
 
   {#if loading}
@@ -681,6 +730,7 @@
         <Bell size={13} /> Alerts only
       </button>
     </div>
+    {#if !dense || managementOpen}
     <div class="automation-actions" aria-label="Bulk auto-trading actions">
       <span><Bot size={13} aria-hidden="true" /> Auto trading</span>
       <button
@@ -696,6 +746,7 @@
         title="Set every watched symbol to manual-only"
       ><Hand size={13} aria-hidden="true" /> Manual-only all</button>
     </div>
+    {/if}
     {#if !filteredEntries.length}
       <p class="note" role="status" aria-live="polite">
         {#if autoTradeFilter === 'enabled' && !alertsOnly && !search.trim()}
@@ -710,6 +761,12 @@
           No watched symbols match "{search}".
         {/if}
       </p>
+    {:else if dense}
+      <WatchlistTable entries={filteredEntries} {selected} {archive} {rowStatus} {busy} {dragOverSymbol}
+        canReorder={!search.trim() && !alertsOnly && autoTradeFilter === 'all'}
+        onSelect={symbol => selected = symbol} onAction={tableAction} onSearch={focusSearch}
+        onDragStart={startDrag} onDragOver={dragOver} onDrop={dropOn}
+        onDragEnd={() => { draggedSymbol = null; dragOverSymbol = null; }}/>
     {:else}
     <ul class="rows">
       {#each filteredEntries as entry (entry.symbol)}
@@ -867,6 +924,15 @@
 </section>
 
 <style>
+  .management { display:contents; }
+  .dense { gap:.45rem; }
+  .dense header { gap:.4rem; }
+  .dense .head-copy span { font-size:.62rem; }
+  .dense .management { display:flex; flex-direction:column; flex:none; gap:.45rem; max-height:40%; overflow:auto; }
+  .dense .management > button { align-self:flex-start; }
+  .dense .symbol-input { min-width:0; }
+  .dense .filter-row { flex-wrap:wrap; }
+  .dense .search-row { flex-basis:100%; }
   .watchlist {
     background: var(--surface);
     border: 1px solid var(--border);
