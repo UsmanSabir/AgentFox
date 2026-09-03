@@ -563,9 +563,18 @@ public sealed class TradingScanOptions
 
     /// <summary>
     /// Archived intraday bars loaded per analysis, in addition to the current session rebuilt from
-    /// ticks. 120 covers roughly a week and a half of 15m bars.
+    /// ticks.
+    ///
+    /// <para>
+    /// <b>Count sessions, not bars, when changing this.</b> A PSX session runs about six hours, so it
+    /// yields roughly 24 fifteen-minute buckets — the previous default of 120 was five sessions
+    /// exactly, not "a week and a half" as this comment used to claim. Bars are fetched newest-first,
+    /// so a window sized at exactly N sessions truncates the OLDEST one at its start and leaves the
+    /// morning slots a sample short. Any consumer matching on time of day therefore needs headroom
+    /// over the sessions it requires, not parity with them; 250 gives about ten sessions at 15m.
+    /// </para>
     /// </summary>
-    public int IntradayLookbackBars { get; set; } = 120;
+    public int IntradayLookbackBars { get; set; } = 250;
 
     /// <summary>Within this percent of a support level counts as "at support" (buy zone).</summary>
     public decimal SupportProximityPercent { get; set; } = 2.5m;

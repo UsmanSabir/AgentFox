@@ -61,6 +61,7 @@ public sealed partial class TradingCoreEndpoints
             TradingReconciliationState reconciliation,
             TradingPolicyProvider policyProvider,
             ApprovalIntentRegistry intentRegistry,
+            ITradingRepository repository,
             IOptions<TradingAgentOptions> options,
             HttpContext http,
             CancellationToken ct) =>
@@ -175,11 +176,28 @@ public sealed partial class TradingCoreEndpoints
                             message = availability.Reason
                         });
                     if (availability.AvailableQuantity <= 0)
+                    {
+                        // WHAT is holding the shares, not merely that something is. This broker sizes
+                        // every SELL against custody MINUS quantity already committed to resting
+                        // SELLs, so a protective stop covering the whole holding leaves nothing free —
+                        // and the operator is refused on a position they can plainly see they own,
+                        // with no way to guess that their own stop is the cause or what to do about
+                        // it. The armed-order path already stands its own stop down for a sell it
+                        // recognises (WatchlistMonitorWorker); a human asking by hand got no such
+                        // help and no such explanation.
+                        var blocking = await BlockingStopsAsync(repository, symbol, ct);
                         return Results.Conflict(new
                         {
                             error = "no_sellable_holding",
-                            message = $"No uncommitted {symbol} shares are available to sell."
+                            message = blocking.Count == 0
+                                ? $"No uncommitted {symbol} shares are available to sell."
+                                : $"No uncommitted {symbol} shares are available to sell: "
+                                  + string.Join(" and ", blocking.Select(s => s.Describe))
+                                  + ". Disarm it from the protective stops list to free the shares, "
+                                  + "then place this sell.",
+                            blockingStops = blocking
                         });
+                    }
 
                     effectiveQuantity = Math.Min(effectiveQuantity, availability.AvailableQuantity);
                     if (effectiveQuantity != body.Quantity.Value)
@@ -436,6 +454,53 @@ public sealed partial class TradingCoreEndpoints
         remainingQuantity = order.RemainingQuantity,
         price = order.Price
     };
+
+    /// <summary>
+    /// This system's OWN protective stops that are currently resting for a symbol, which is the usual
+    /// answer to "why can I not sell shares I hold".
+    ///
+    /// <para>
+    /// Deliberately reports only stops with a placed quantity and a broker order number: those are the
+    /// ones that actually commit shares at the venue and that the operator can disarm. A stop with no
+    /// order behind it commits nothing and naming it would send them to cancel the wrong thing. An
+    /// unreadable ledger returns an empty list, so the refusal falls back to its plain wording rather
+    /// than failing — the sell is already refused, and a diagnostic must not turn that into a 500.
+    /// </para>
+    /// </summary>
+    private static async Task<IReadOnlyList<BlockingStop>> BlockingStopsAsync(
+        ITradingRepository repository,
+        string symbol,
+        CancellationToken ct)
+    {
+        try
+        {
+            return (await repository.GetProtectiveStopsAsync(openOnly: true, ct))
+                .Where(s => s.Symbol.Equals(symbol, StringComparison.OrdinalIgnoreCase)
+                         && s.State == "active"
+                         && s.PlacedQuantity > 0
+                         && s.LastOrderNo is { Length: > 0 })
+                .Select(s => new BlockingStop(
+                    s.StopId,
+                    s.LastOrderNo!,
+                    s.PlacedQuantity,
+                    s.StopTrigger,
+                    $"a protective stop at {s.StopTrigger:0.##} (broker order {s.LastOrderNo}) is "
+                    + $"holding {s.PlacedQuantity} share(s)"))
+                .ToList();
+        }
+        catch (Exception) when (!ct.IsCancellationRequested)
+        {
+            return [];
+        }
+    }
+
+    /// <param name="Describe">Server-authored clause, shown verbatim inside the refusal sentence.</param>
+    private sealed record BlockingStop(
+        string StopId,
+        string OrderNo,
+        int Quantity,
+        decimal Trigger,
+        string Describe);
 
     private sealed record CancelBrokerOrderRequest(string? OrderNo);
 }
