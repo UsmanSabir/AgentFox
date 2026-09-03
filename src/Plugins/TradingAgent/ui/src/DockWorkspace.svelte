@@ -108,7 +108,11 @@
     if (api) {
       if (api.hasMaximizedGroup()) api.exitMaximizedGroup();
       let panel = api.getPanel(id);
-      if (!panel) panel = addPanel(id);
+      if (!panel) {
+        const region = panels.find(p => p.id === id)?.region;
+        const peer = panels.find(p => p.region === region && api?.getPanel(p.id));
+        panel = addPanel(id, peer?.id);
+      }
       panel?.api.setActive();
     }
     activeId = id;
@@ -296,7 +300,7 @@
       event.preventDefault(); event.stopPropagation(); void openPalette(); return;
     }
     if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
-    const direct: Record<string,string> = { Digit1:'watchlist', Digit2:'chart', Digit3:'plan' };
+    const direct: Record<string,string> = { Digit1:'watchlist', Digit2:'chart', Digit3:'plan', Digit4:'ticket' };
     if ((event.ctrlKey || event.metaKey) && event.shiftKey && !event.altKey && direct[event.code]) focusPanel(direct[event.code]);
     else if ((event.ctrlKey || event.metaKey) && event.shiftKey && !event.altKey && event.code === 'Digit0') resetView();
     else if (event.key === 'F6' && !event.ctrlKey && !event.metaKey && !event.altKey) cycleGroup(event.shiftKey ? -1 : 1);
@@ -393,7 +397,7 @@
   <div class="edition-health" bind:this={health}></div>
   <div class="workspace-dock" class:hidden={!desktop} bind:this={dockRoot}></div>
   <div class="workspace-stack" class:hidden={desktop} bind:this={stack}></div>
-  <footer><span>Focus: {panels.find(p => p.id === activeId)?.title ?? 'Workspace'}</span><span>F6 panels · Ctrl [ / ] tabs · Ctrl Shift 1/2/3 Watchlist / Chart / Plan</span></footer>
+  <footer><span>Focus: {panels.find(p => p.id === activeId)?.title ?? 'Workspace'}</span><span>F6 panels · Ctrl [ / ] tabs · Ctrl Shift 1/2/3/4 Watchlist / Chart / Plan / Ticket</span></footer>
   <p class="sr-only" role="status">{notice}</p>
   <div hidden bind:this={depot}><slot {workspace}/></div>
 </section>

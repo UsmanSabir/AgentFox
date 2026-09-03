@@ -24,6 +24,7 @@
   import ActivityPanel from './ActivityPanel.svelte';
   import MoversPanel from './MoversPanel.svelte';
   import NewOrderDialog from './NewOrderDialog.svelte';
+  import OrderComposer from './OrderComposer.svelte';
   import PortfolioPanel from './PortfolioPanel.svelte';
   import PersistentOrdersPanel from './PersistentOrdersPanel.svelte';
   import SideNavigation from './SideNavigation.svelte';
@@ -82,6 +83,8 @@
   let persistentPanel: PersistentOrdersPanel | null = null;
   let marketWorkspace: MarketWorkspace | null = null;
   let newOrderOpen = false;
+  let ticket: OrderComposer;
+  let orderReturnFocus: HTMLElement | null = null;
 
   /** Symbol the watchlist has selected; drives the chart pane. */
   export let selectedSymbol: string | null = null;
@@ -338,13 +341,31 @@
     }
   }
 
-  function openNewOrder() { newOrderOpen = true; }
+  function openNewOrder() {
+    if (!newOrderOpen) orderReturnFocus = document.activeElement as HTMLElement;
+    newOrderOpen = true;
+    if (workspace) {
+      workspace.focusPanel('ticket');
+      requestAnimationFrame(() => ticket?.focusComposer());
+    }
+  }
+  function closeNewOrder() {
+    newOrderOpen = false;
+    requestAnimationFrame(() => {
+      if (orderReturnFocus?.isConnected && orderReturnFocus.getClientRects().length) orderReturnFocus.focus();
+      else workspace?.focusPanel('watchlist');
+    });
+  }
+  export function beginOrder(symbol:string) {
+    if (!newOrderOpen) selectedSymbol = symbol;
+    openNewOrder();
+  }
   function refreshWatchlist() { if (workspace) void workspaceWatchlist?.refresh(); else void marketWorkspace?.refresh(); }
 
   onMount(() => {
     load(); startMarketClock();
     const unregister = [
-      workspace?.registerCommand({ id:'order.new', label:'New Order — open existing order form', run:openNewOrder }),
+      workspace?.registerCommand({ id:'order.new', label:'New Order — open or resume order ticket', run:openNewOrder }),
       workspace?.registerCommand({ id:'watchlist.search', label:'Search watched symbols', run:() => {
         workspace?.focusPanel('watchlist');
         requestAnimationFrame(() => workspaceWatchlist?.focusSearch());
@@ -365,11 +386,11 @@
   />
 {/if}
 
-{#if newOrderOpen}
+{#if newOrderOpen && !workspace}
   <NewOrderDialog
     {selectedSymbol}
     on:changed={() => { load(); armedPanel?.load(); persistentPanel?.load(); }}
-    on:close={() => newOrderOpen = false}
+    on:close={closeNewOrder}
   >
     <svelte:fragment slot="order-detail" let:action let:quantity let:price>
       <slot name="order-detail" {action} {quantity} {price}/>
@@ -377,6 +398,25 @@
   </NewOrderDialog>
 {/if}
 </WorkspacePanel>
+
+{#if workspace}
+  <WorkspacePanel {workspace} id="ticket">
+    {#if newOrderOpen}
+      <OrderComposer docked bind:this={ticket} {selectedSymbol}
+        on:changed={() => { load(); armedPanel?.load(); persistentPanel?.load(); }}
+        on:attention={() => workspace?.focusPanel('ticket')} on:close={closeNewOrder}>
+        <svelte:fragment slot="order-detail" let:action let:quantity let:price>
+          <slot name="order-detail" {action} {quantity} {price}/>
+        </svelte:fragment>
+      </OrderComposer>
+    {:else}
+      <div class="ticket-empty"><h2>Order ticket</h2><p>Compose an order for {selectedSymbol ?? 'a symbol'}. Nothing is sent until you review and confirm.</p>
+        <button class="btn btn-primary" on:click={openNewOrder}>Start order draft</button>
+        <p>Ctrl+Shift+4 focuses this panel. Ctrl+Enter inside a draft opens review. Closing a panel preserves the draft; reload clears it.</p>
+      </div>
+    {/if}
+  </WorkspacePanel>
+{/if}
 
 <div class="dashboard-shell" class:hosted={workspace !== null} class:without-navigation={!showSideNavigation}>
   {#if showSideNavigation}
@@ -749,6 +789,8 @@
 </div>
 
 <style>
+  .ticket-empty { padding:1rem; color:var(--text-2); font-size:.8rem; line-height:1.6; }
+  .ticket-empty h2 { font-size:1rem; color:var(--text); }
   .hosted { display:contents; }
   .hosted-toolbar { padding:.4rem .75rem; background:var(--surface); border-bottom:1px solid var(--border); }
   .hosted-toolbar .page-header-row { margin:0; align-items:center; }
