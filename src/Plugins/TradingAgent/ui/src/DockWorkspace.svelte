@@ -177,6 +177,26 @@
     });
   }
 
+  /** Dockview exposes the group action seam/API; its demo's header glyph is app-supplied. */
+  function drawMaximizeIcon(button: HTMLButtonElement, restoring: boolean) {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg','svg');
+    svg.setAttribute('viewBox','0 0 24 24');
+    svg.setAttribute('width','14');
+    svg.setAttribute('height','14');
+    svg.setAttribute('fill','none');
+    svg.setAttribute('stroke','currentColor');
+    svg.setAttribute('stroke-width','2');
+    svg.setAttribute('stroke-linecap','round');
+    svg.setAttribute('stroke-linejoin','round');
+    svg.setAttribute('aria-hidden','true');
+    const path = document.createElementNS('http://www.w3.org/2000/svg','path');
+    path.setAttribute('d',restoring
+      ? 'm14 10 7-7M20 10h-6V4M3 21l7-7M4 14h6v6'
+      : 'm15 3 6 6M21 3h-6v6M9 21l-6-6M3 21v-6h6');
+    svg.appendChild(path);
+    button.replaceChildren(svg);
+  }
+
   function buildDefault(next: string) {
     if (!api) return;
     parkTray();
@@ -489,8 +509,9 @@
           const refresh = () => {
             pin.hidden = !group.panels.length || !group.panels.every(p => panels.find(s => s.id === p.id)?.region === 'bottom');
             pin.disabled = !!bottomTray;
-            expand.textContent = group.api.isMaximized() ? 'Restore' : 'Max';
-            expand.setAttribute('aria-label',(group.api.isMaximized() ? 'Restore ' : 'Maximize ') + (group.activePanel?.title ?? 'group'));
+            const restoring = group.api.isMaximized();
+            drawMaximizeIcon(expand,restoring);
+            expand.setAttribute('aria-label',(restoring ? 'Restore ' : 'Maximize ') + (group.activePanel?.title ?? 'group'));
             expand.title = expand.getAttribute('aria-label')!;
           };
           let listeners: {dispose():void}[] = [];
@@ -563,7 +584,11 @@
       {/each}
       <button on:click={() => openPalette(true)}><PanelsTopLeft size={14}/> Panels</button>
       <button on:click={() => openPalette()} title="Search commands (Ctrl+K)"><Command size={14}/> Commands <kbd>Ctrl K</kbd></button>
-      <button on:click={maximize} disabled={!desktop} aria-pressed={maximized} title="Maximize / restore group (Ctrl+Shift+Space)">{#if maximized}<Minimize2 size={14}/> Restore group{:else}<Maximize2 size={14}/> Maximize group{/if}</button>
+      <button class="icon-control" on:click={maximize} disabled={!desktop} aria-pressed={maximized}
+              aria-label={maximized ? 'Restore active group' : 'Maximize active group'}
+              title={`${maximized ? 'Restore' : 'Maximize'} active group (Ctrl+Shift+Space)`}>
+        {#if maximized}<Minimize2 size={14}/>{:else}<Maximize2 size={14}/>{/if}
+      </button>
       <button on:click={toggleTheme} title={currentTheme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}>{#if currentTheme === 'dark'}<Sun size={14}/> Light theme{:else}<Moon size={14}/> Dark theme{/if}</button>
       <button on:click={() => shortcutsSheet.open()} title="Keyboard shortcuts (Ctrl+/)"><Keyboard size={14}/> Shortcuts</button>
       <button on:click={() => bottomTray ? pinBottom() : unpinBottom()} disabled={!desktop} title="Auto-hide a bottom tool group without closing its contents">
@@ -659,11 +684,12 @@
   .workspace-dock :global([data-workspace-panel='chart'] .plot) { height:clamp(300px, calc(100cqh - 110px), 900px); }
   .workspace-dock :global(.dv-tab) { font-size:.7rem; }
   .workspace-dock :global(.group-actions) { display:flex; align-items:center; }
-  .workspace-dock :global(.group-control) { align-self:center; cursor:pointer; margin:0 .2rem; padding:.25rem .3rem; border:1px solid var(--border-md); border-radius:3px; background:var(--surface); color:var(--text-2); font-size:.65rem; }
+  .workspace-dock :global(.group-control) { align-self:center; display:inline-flex; align-items:center; justify-content:center; cursor:pointer; margin:0 .2rem; min-width:26px; min-height:24px; padding:.2rem .3rem; border:1px solid var(--border-md); border-radius:3px; background:var(--surface); color:var(--text-2); font-size:.65rem; }
   .workspace-dock :global(.group-control:focus-visible) { outline:2px solid var(--primary); outline-offset:-2px; }
   .workspace-dock :global(.group-control:disabled) { opacity:.5; cursor:default; }
   .workspace-dock :global(.dv-tab.dv-active-tab) { box-shadow:inset 0 2px var(--primary); }
   .workspace-dock { --dv-group-view-background-color:var(--surface); --dv-tabs-and-actions-container-background-color:var(--surface-2); --dv-activegroup-visiblepanel-tab-background-color:var(--surface); --dv-activegroup-visiblepanel-tab-color:var(--text); --dv-separator-border:var(--border-md); --dv-active-sash-color:var(--primary); --dv-tabs-and-actions-container-height:32px; }
+  .icon-control { min-width:30px; justify-content:center; padding-inline:.4rem; }
   .command-palette { width:min(580px,calc(100vw - 2rem)); max-height:75dvh; padding:1rem; margin:10dvh auto auto; border:1px solid var(--border-high); border-radius:10px; background:var(--surface); color:var(--text); box-shadow:0 20px 70px #0008; }
   .command-palette::backdrop { background:#0008; }
   .palette-heading { display:flex; align-items:center; justify-content:space-between; margin-bottom:.75rem; }
