@@ -53,3 +53,20 @@ test('rejects floating, pop-out and excessively large saved views', () => {
   }
   assert.equal(readWorkspaceLayout(' '.repeat(MAX_LAYOUT_LENGTH + 1), 'premium', ['chart'], ['trading'], now), null);
 });
+
+test('auto-hidden view restores only known unique panels outside the grid and a bounded height', () => {
+  const tray = {ids:['watchlist'],active:'watchlist',height:250};
+  const value = saveWorkspaceLayout('premium','trading',layout(),now,tray);
+  assert.deepEqual(read(value).bottomTray,tray);
+  tray.ids.push('chart');
+  assert.deepEqual(value.bottomTray.ids,['watchlist']);
+  for (const bottomTray of [
+    null, false, 0,
+    {ids:[],active:'watchlist',height:250}, {ids:['chart'],active:'chart',height:250},
+    {ids:['watchlist','watchlist'],active:'watchlist',height:250},
+    {ids:['watchlist'],active:'unknown',height:250},
+    {ids:['unknown'],active:'unknown',height:250},
+    {ids:['watchlist'],active:'watchlist',height:Infinity},
+    {ids:['watchlist'],active:'watchlist',height:10}
+  ]) assert.equal(read({...value,bottomTray}),null);
+});

@@ -2,9 +2,9 @@
   import { onMount, tick } from 'svelte';
   import { createDockview, themeDark, themeLight, type DockviewApi, type IContentRenderer } from 'dockview';
   import 'dockview/dist/styles/dockview.css';
-  import { Command, PanelsTopLeft, RotateCcw, Maximize2, X } from 'lucide-svelte';
+  import { Command, PanelsTopLeft, RotateCcw, Maximize2, Pin, PinOff, X } from 'lucide-svelte';
   import type { WorkspaceCommand, WorkspaceComposition, WorkspacePanel, WorkspaceRegion } from './workspaceComposition';
-  import { readWorkspaceLayout, saveWorkspaceLayout } from './workspaceLayout';
+  import { readWorkspaceLayout, saveWorkspaceLayout, type AutoHideTray } from './workspaceLayout';
 
   export let panels: WorkspacePanel[];
   export let title = 'Trading workstation';
@@ -15,6 +15,7 @@
 
   let root: HTMLElement;
   let dockRoot: HTMLDivElement;
+  let dockArea: HTMLDivElement;
   let depot: HTMLDivElement;
   let toolbar: HTMLDivElement;
   let health: HTMLDivElement;
@@ -37,6 +38,12 @@
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
   let dirty = false;
   let disposed = false;
+  let bottomTray: AutoHideTray | undefined;
+  let trayOpen = false;
+  let trayHost: HTMLDivElement;
+  let trayShell: HTMLDivElement;
+  let trayStrip: HTMLElement;
+  let trayReturnFocus: HTMLElement | null = null;
   const nodes = new Map<string, HTMLElement>();
   const containers = new Map<string, HTMLDivElement>();
   const special = new Set(['core-toolbar', 'edition-health', 'core-dialogs']);
@@ -105,7 +112,17 @@
 
   function focusPanel(id: string) {
     if (!panels.some(p => p.id === id)) return;
-    if (api) {
+    if (desktop && bottomTray && !bottomTray.ids.includes(id) && !api?.getPanel(id)
+      && panels.find(p => p.id === id)?.region === 'bottom') bottomTray = { ...bottomTray, ids:[...bottomTray.ids,id] };
+    if (desktop && bottomTray?.ids.includes(id)) {
+      if (trayOpen && bottomTray.active !== id) depot.appendChild(container(bottomTray.active));
+      if (!trayOpen) trayReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      bottomTray = { ...bottomTray, active:id };
+      trayOpen = true;
+      scheduleSave();
+      void tick().then(() => { if (!disposed && trayOpen && bottomTray?.active === id) trayHost.appendChild(container(id)); });
+    } else if (api) {
+      closeTray(false);
       if (api.hasMaximizedGroup()) api.exitMaximizedGroup();
       let panel = api.getPanel(id);
       if (!panel) {
@@ -134,6 +151,8 @@
 
   function buildDefault(next: string) {
     if (!api) return;
+    parkTray();
+    bottomTray = undefined;
     api.exitMaximizedGroup();
     api.clear();
     const primary = panels.find(p => p.region === 'center')!;
@@ -167,7 +186,7 @@
   function persist() {
     if (!api || suppressSave || !dirty) return;
     try {
-      localStorage.setItem(storageKey, JSON.stringify(saveWorkspaceLayout(edition, preset, api.toJSON())));
+      localStorage.setItem(storageKey, JSON.stringify(saveWorkspaceLayout(edition, preset, api.toJSON(), Date.now(), bottomTray)));
       dirty = false;
       storageWarning = '';
     } catch { storageWarning = 'Layout could not be saved in this browser; trading is unaffected.'; }
@@ -182,7 +201,7 @@
     clearTimeout(saveTimer);
     suppressSave = true;
     if (api) buildDefault(presets[0].id);
-    else preset = presets[0].id;
+    else { preset = presets[0].id; bottomTray = undefined; }
     removeSaved();
     storageWarning = '';
     dirty = false;
@@ -199,16 +218,22 @@
     notice = 'Layout changed. Every panel remains available in Panels.';
   }
   function maximize() {
+    if (trayOpen) { notice = 'Pin the bottom tools before maximizing their group.'; return; }
     if (!api?.activePanel) return;
     if (api.hasMaximizedGroup()) api.exitMaximizedGroup();
     else api.activePanel.api.maximize();
   }
   function resize(width: number, height: number) {
+    if (trayOpen && bottomTray) {
+      bottomTray = { ...bottomTray, height:Math.min(900, Math.max(130, bottomTray.height + height)) };
+      scheduleSave(); return;
+    }
     const panel = api?.getPanel(activeId);
     if (!panel) return;
     panel.api.setSize({ width: Math.max(180, panel.api.width + width), height: Math.max(100, panel.api.height + height) });
   }
   function move(position: 'left' | 'right' | 'top' | 'bottom') {
+    if (trayOpen) { notice = 'Pin bottom tools before moving their docking tabs.'; return; }
     const panel = api?.getPanel(activeId);
     if (!api || !panel) return;
     const direction = position === 'top' ? 'above' : position === 'bottom' ? 'below' : position;
@@ -217,26 +242,89 @@
     focusPanel(panel.id);
   }
   function hideActive() {
+    if (trayOpen) { closeTray(); return; }
     api?.getPanel(activeId)?.api.close();
     if (api?.activePanel) focusPanel(api.activePanel.id);
     else root.focus();
   }
   function cycleGroup(delta: number) {
+    if (trayOpen) {
+      closeTray(false);
+      const group = delta > 0 ? api?.groups[0] : api?.groups.at(-1);
+      if (group?.activePanel) focusPanel(group.activePanel.id);
+      return;
+    }
     if (!api?.groups.length) return;
     const groups = api.groups;
     const index = groups.findIndex(g => g === api?.activeGroup);
+    if (bottomTray && (index + delta < 0 || index + delta >= groups.length)) { focusPanel(bottomTray.active); return; }
     const next = groups[(index + delta + groups.length) % groups.length].activePanel;
     if (next) focusPanel(next.id);
   }
   function cycleTab(delta: number) {
+    if (trayOpen && bottomTray) {
+      const index = bottomTray.ids.indexOf(bottomTray.active);
+      focusPanel(bottomTray.ids[(index + delta + bottomTray.ids.length) % bottomTray.ids.length]);
+      return;
+    }
     const group = api?.activeGroup;
     if (!group?.panels.length) return;
     const index = group.panels.findIndex(p => p.id === group.activePanel?.id);
     focusPanel(group.panels[(index + delta + group.panels.length) % group.panels.length].id);
   }
 
+  // App-owned auto-hide: only docking wrappers are removed. Producer nodes/readers stay mounted.
+  // One tool group at a time; repinning puts it at the bottom without resetting the main grid.
+  function parkTray() {
+    for (const id of bottomTray?.ids ?? []) if (containers.has(id)) depot.appendChild(container(id));
+    trayOpen = false;
+  }
+  function closeTray(restore = true) {
+    if (!trayOpen) return;
+    parkTray();
+    if (restore) {
+      const trigger = trayStrip?.querySelector<HTMLElement>(`[data-tray-id="${bottomTray?.active}"]`);
+      (trigger ?? (trayReturnFocus?.isConnected ? trayReturnFocus : root)).focus();
+    }
+  }
+  function unpinBottom(groupId?: string) {
+    if (!api || bottomTray) return;
+    const eligible = api.groups.filter(g => g.panels.length && g.panels.every(p => panels.find(s => s.id === p.id)?.region === 'bottom'));
+    const group = groupId ? eligible.find(g => g.id === groupId) : eligible.includes(api.activeGroup!) ? api.activeGroup! : eligible.sort((a,b) => (b.api.boundingBox?.top ?? 0) - (a.api.boundingBox?.top ?? 0))[0];
+    if (!group) { notice = 'No bottom tool group to unpin. Tab bottom tools together, or use Reset view.'; return; }
+    if (api.hasMaximizedGroup()) api.exitMaximizedGroup();
+    bottomTray = { ids:group.panels.map(p => p.id), active:group.activePanel!.id, height:Math.min(900, Math.max(260, group.api.height)) };
+    suppressSave = true;
+    for (const id of bottomTray.ids) api.getPanel(id)?.api.close();
+    suppressSave = false;
+    scheduleSave();
+    void tick().then(() => trayStrip?.querySelector<HTMLElement>('button[data-tray-id]')?.focus());
+    notice = 'Bottom tools unpinned. Open from the bottom strip or Panels; Escape closes the peek.';
+  }
+  function pinBottom() {
+    if (!api || !bottomTray) return;
+    const saved = bottomTray;
+    parkTray();
+    bottomTray = undefined;
+    suppressSave = true;
+    const first = addPanel(saved.ids[0], undefined, 'below');
+    for (const id of saved.ids.slice(1)) addPanel(id, saved.ids[0]);
+    first?.api.setSize({ height:saved.height });
+    suppressSave = false;
+    focusPanel(saved.active);
+    scheduleSave();
+    notice = 'Bottom tools pinned. Other groups and trading forms are unchanged.';
+  }
+  function outsideTray(event: Event) {
+    const target = event.target;
+    if (!trayOpen || !(target instanceof Node) || trayShell?.contains(target) || trayStrip?.contains(target)
+      || (target instanceof Element && target.closest('dialog, [role="dialog"], [role="alertdialog"]'))) return;
+    closeTray(false);
+  }
+
   $: panelCommands = panels.map(p => ({ id: 'panel.' + p.id, label: 'Show ' + p.title, run: () => focusPanel(p.id) }));
   $: layoutCommands = [
+    { id:'layout.bottom', label:bottomTray ? 'Pin bottom tools' : 'Unpin bottom tools (auto-hide)', run:() => bottomTray ? pinBottom() : unpinBottom() },
     { id:'layout.reset', label:'Reset view to default', run:resetView },
     { id:'layout.maximize', label:'Maximize / restore active group', run:maximize },
     { id:'layout.hide', label:'Hide active panel (restore from Panels)', run:hideActive },
@@ -250,6 +338,7 @@
     ...panels.map(p => ({
       id:'layout.tab.' + p.id, label:'Tab active panel with ' + p.title,
       run:() => {
+        if (trayOpen) { notice = 'Pin bottom tools before moving their docking tabs.'; return; }
         const current = api?.getPanel(activeId);
         const target = api?.getPanel(p.id);
         if (current && target && current !== target) current.api.moveTo({ group:target.group });
@@ -296,14 +385,17 @@
     if (event.defaultPrevented || event.isComposing || event.repeat) return;
     const target = event.target instanceof HTMLElement ? event.target : null;
     if (palette?.open || target?.closest('dialog, [role="dialog"], [role="alertdialog"]')) return;
+    if (event.key === 'Escape' && trayOpen) { event.preventDefault(); event.stopPropagation(); closeTray(); return; }
     if ((event.ctrlKey || event.metaKey) && !event.altKey && event.code === 'KeyK') {
       event.preventDefault(); event.stopPropagation(); void openPalette(); return;
     }
+    if (event.key === 'F6' && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      event.preventDefault(); event.stopPropagation(); cycleGroup(event.shiftKey ? -1 : 1); return;
+    }
     if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
-    const direct: Record<string,string> = { Digit1:'watchlist', Digit2:'chart', Digit3:'plan', Digit4:'ticket' };
+    const direct: Record<string,string> = { Digit1:'watchlist', Digit2:'chart', Digit3:'plan', Digit4:'ticket', Digit5:'order-logs' };
     if ((event.ctrlKey || event.metaKey) && event.shiftKey && !event.altKey && direct[event.code]) focusPanel(direct[event.code]);
     else if ((event.ctrlKey || event.metaKey) && event.shiftKey && !event.altKey && event.code === 'Digit0') resetView();
-    else if (event.key === 'F6' && !event.ctrlKey && !event.metaKey && !event.altKey) cycleGroup(event.shiftKey ? -1 : 1);
     else if (event.ctrlKey && !event.shiftKey && event.code === 'BracketRight') cycleTab(1);
     else if (event.ctrlKey && !event.shiftKey && event.code === 'BracketLeft') cycleTab(-1);
     else return;
@@ -316,6 +408,7 @@
     function disconnect() {
       clearTimeout(saveTimer);
       persist();
+      parkTray();
       for (const s of subscriptions) s.dispose();
       subscriptions = [];
       api?.dispose();
@@ -326,6 +419,7 @@
       // matchMedia fires before Svelte flushes the visibility classes on a breakpoint transition.
       // Set these immediately so Dockview measures the real host, not a display:none zero rectangle.
       dockRoot.classList.toggle('hidden', !desktop);
+      dockArea.classList.toggle('hidden', !desktop);
       stack.classList.toggle('hidden', desktop);
       if (!desktop) {
         disconnect();
@@ -334,6 +428,21 @@
       }
       if (api) return;
       api = createDockview(dockRoot, {
+        createRightHeaderActionComponent: group => {
+          const element = document.createElement('button');
+          element.className = 'bottom-unpin';
+          element.textContent = 'Unpin';
+          element.title = 'Auto-hide this bottom tool group';
+          element.setAttribute('aria-label','Unpin this bottom group');
+          element.onpointerdown = event => event.stopPropagation();
+          element.onclick = () => unpinBottom(group.id);
+          const refresh = () => {
+            element.hidden = !group.panels.length || !group.panels.every(p => panels.find(s => s.id === p.id)?.region === 'bottom');
+            element.disabled = !!bottomTray;
+          };
+          let subscription: {dispose():void} | undefined;
+          return { element, init() { refresh(); subscription = api?.onDidLayoutChange(refresh); }, dispose() { subscription?.dispose(); } };
+        },
         createComponent: ({ id }): IContentRenderer => ({
           element: container(id), init() { place(id); },
           dispose() { if (depot?.isConnected) depot.appendChild(container(id)); }
@@ -351,7 +460,7 @@
       try { raw = localStorage.getItem(storageKey); } catch { /* Storage may be disabled. */ }
       const saved = readWorkspaceLayout(raw, edition, panels.map(p => p.id), presets.map(p => p.id));
       if (saved) {
-        try { api.fromJSON(saved.layout); preset = saved.preset; }
+        try { api.fromJSON(saved.layout); preset = saved.preset; bottomTray = saved.bottomTray; }
         catch { removeSaved(); buildDefault(presets[0].id); }
       } else if (raw) removeSaved();
       suppressSave = false;
@@ -367,6 +476,8 @@
     window.addEventListener('agentfox:themechange', theme);
     window.addEventListener('keydown', shortcut, true);
     window.addEventListener('pagehide', persist);
+    window.addEventListener('pointerdown', outsideTray);
+    window.addEventListener('focusin', outsideTray);
     return () => {
       disposed = true;
       disconnect();
@@ -374,6 +485,8 @@
       window.removeEventListener('agentfox:themechange', theme);
       window.removeEventListener('keydown', shortcut, true);
       window.removeEventListener('pagehide', persist);
+      window.removeEventListener('pointerdown', outsideTray);
+      window.removeEventListener('focusin', outsideTray);
     };
   });
 </script>
@@ -388,6 +501,9 @@
       <button on:click={() => openPalette(true)}><PanelsTopLeft size={14}/> Panels</button>
       <button on:click={() => openPalette()} title="Search commands (Ctrl+K)"><Command size={14}/> Commands <kbd>Ctrl K</kbd></button>
       <button on:click={maximize} disabled={!desktop} title="Maximize or restore the active group"><Maximize2 size={14}/><span class="sr-only">Maximize / restore</span></button>
+      <button on:click={() => bottomTray ? pinBottom() : unpinBottom()} disabled={!desktop} title="Auto-hide a bottom tool group without closing its contents">
+        {#if bottomTray}<Pin size={14}/> Pin bottom{:else}<PinOff size={14}/> Unpin bottom{/if}
+      </button>
       <button on:click={resetView}><RotateCcw size={14}/> Reset view</button>
       <button on:click={onExit}>Classic view</button>
     </nav>
@@ -395,9 +511,26 @@
   {#if storageWarning}<p class="storage-warning" role="status">{storageWarning}</p>{/if}
   <div class="core-toolbar" bind:this={toolbar}></div>
   <div class="edition-health" bind:this={health}></div>
-  <div class="workspace-dock" class:hidden={!desktop} bind:this={dockRoot}></div>
+  <div class="dock-area" class:hidden={!desktop} bind:this={dockArea}>
+    <div class="workspace-dock" bind:this={dockRoot}></div>
+    <div class="tray-peek" class:hidden={!trayOpen} bind:this={trayShell} style:height={bottomTray?.height + 'px'}>
+      <div class="tray-heading"><strong>{panels.find(p => p.id === bottomTray?.active)?.title}</strong><span>Auto-hidden · Esc to close</span>
+        <button aria-label="Make bottom peek shorter" on:click={() => resize(0,-80)}>−</button><button aria-label="Make bottom peek taller" on:click={() => resize(0,80)}>+</button>
+        <button on:click={pinBottom}><Pin size={14}/> Pin bottom</button><button aria-label="Close bottom peek" on:click={() => closeTray()}><X size={14}/></button>
+      </div>
+      <div class="tray-content" bind:this={trayHost}></div>
+    </div>
+  </div>
+  {#if desktop && bottomTray}
+    <nav class="tray-strip" aria-label="Auto-hidden bottom panels" bind:this={trayStrip}>
+      {#each bottomTray.ids as id}
+        <button data-tray-id={id} aria-expanded={trayOpen && bottomTray.active === id} class:chosen={trayOpen && bottomTray.active === id}
+          on:click={() => trayOpen && bottomTray?.active === id ? closeTray() : focusPanel(id)}>{panels.find(p => p.id === id)?.title}</button>
+      {/each}
+    </nav>
+  {/if}
   <div class="workspace-stack" class:hidden={desktop} bind:this={stack}></div>
-  <footer><span>Focus: {panels.find(p => p.id === activeId)?.title ?? 'Workspace'}</span><span>F6 panels · Ctrl [ / ] tabs · Ctrl Shift 1/2/3/4 Watchlist / Chart / Plan / Ticket</span></footer>
+  <footer><span>Focus: {panels.find(p => p.id === activeId)?.title ?? 'Workspace'}</span><span>F6 panels · Ctrl [ / ] tabs · Ctrl Shift 1/2/3/4/5 Watchlist / Chart / Plan / Ticket / Logs</span></footer>
   <p class="sr-only" role="status">{notice}</p>
   <div hidden bind:this={depot}><slot {workspace}/></div>
 </section>
@@ -432,6 +565,16 @@
   .storage-warning { margin:0; padding:.3rem .7rem; font-size:.7rem; color:var(--warning); background:var(--surface-2); }
   .edition-health { padding:0 .7rem; }
   .workspace-dock { flex:1 1 0; min-height:0; min-width:0; overflow:hidden; }
+  .dock-area { position:relative; display:flex; flex:1 1 0; min-height:0; overflow:hidden; }
+  .tray-peek { position:absolute; inset:auto 0 0; max-height:90%; min-height:0; display:flex; flex-direction:column; background:var(--surface); border:1px solid var(--primary); box-shadow:0 -8px 28px #0005; z-index:5; }
+  .tray-heading { display:flex; align-items:center; gap:.5rem; padding:.25rem .6rem; flex:none; background:var(--surface-2); font-size:.75rem; }
+  .tray-heading span { flex:1; color:var(--text-2); font-size:.65rem; }
+  .tray-content { flex:1; min-height:0; overflow:hidden; }
+  .tray-content :global(.workstation-panel) { height:100%; overflow:auto; padding:.65rem; box-sizing:border-box; }
+  .tray-content :global(.mobile-panel-title) { display:none; }
+  .tray-content :global(.workstation-panel:focus-visible) { outline:2px solid var(--primary); outline-offset:-2px; }
+  .tray-strip { flex:none; flex-wrap:nowrap; overflow-x:auto; gap:0; border-top:1px solid var(--border-md); background:var(--surface-2); }
+  .tray-strip button { flex:none; border-radius:0; border-color:transparent; }
   .hidden { display:none; }
   footer { display:flex; justify-content:space-between; gap:1rem; padding:.25rem .7rem; border-top:1px solid var(--border); font-size:.61rem; color:var(--text-3); flex:none; }
   .workspace-dock :global(.workstation-panel) { height:100%; width:100%; min-height:0; min-width:0; overflow:auto; overscroll-behavior:contain; background:var(--surface); padding:.65rem; box-sizing:border-box; }
@@ -448,6 +591,9 @@
      area; neither flex shrink nor a percentage-height chain can flatten the candles. */
   .workspace-dock :global([data-workspace-panel='chart'] .plot) { height:clamp(300px, calc(100cqh - 110px), 900px); }
   .workspace-dock :global(.dv-tab) { font-size:.7rem; }
+  .workspace-dock :global(.bottom-unpin) { align-self:center; cursor:pointer; margin:0 .3rem; padding:.25rem .4rem; border:1px solid var(--border-md); border-radius:3px; background:var(--surface); color:var(--text-2); font-size:.65rem; }
+  .workspace-dock :global(.bottom-unpin:focus-visible) { outline:2px solid var(--primary); outline-offset:-2px; }
+  .workspace-dock :global(.bottom-unpin:disabled) { opacity:.5; cursor:default; }
   .workspace-dock :global(.dv-tab.dv-active-tab) { box-shadow:inset 0 2px var(--primary); }
   .workspace-dock { --dv-group-view-background-color:var(--surface); --dv-tabs-and-actions-container-background-color:var(--surface-2); --dv-activegroup-visiblepanel-tab-background-color:var(--surface); --dv-activegroup-visiblepanel-tab-color:var(--text); --dv-separator-border:var(--border-md); --dv-active-sash-color:var(--primary); --dv-tabs-and-actions-container-height:32px; }
   .command-palette { width:min(580px,calc(100vw - 2rem)); max-height:75dvh; padding:1rem; margin:10dvh auto auto; border:1px solid var(--border-high); border-radius:10px; background:var(--surface); color:var(--text); box-shadow:0 20px 70px #0008; }

@@ -2,12 +2,15 @@ import type { SerializedDockview } from 'dockview';
 
 export const WORKSPACE_RETENTION_MS = 180 * 24 * 60 * 60 * 1000;
 export const MAX_LAYOUT_LENGTH = 100_000;
+export interface AutoHideTray { ids: string[]; active: string; height: number }
 export interface WorkspaceLayout {
   version: 1;
   edition: string;
   savedAt: number;
   preset: string;
   layout: SerializedDockview;
+  /** View metadata only. No peek state or panel contents. Missing means pinned. */
+  bottomTray?: AutoHideTray;
 }
 
 /** Validate before handing browser preferences to Dockview; never accept components/params as code. */
@@ -29,15 +32,21 @@ export function readWorkspaceLayout(
       if (!allowedIds.includes(id) || panel.id !== id || panel.contentComponent !== id
         || (panel.params && Object.keys(panel.params).length)) return null;
     }
+    const tray = value.bottomTray;
+    if (tray !== undefined && (!tray || typeof tray !== 'object' || !Array.isArray(tray.ids) || !tray.ids.length || tray.ids.length > allowedIds.length
+      || new Set(tray.ids).size !== tray.ids.length || !tray.ids.includes(tray.active)
+      || tray.ids.some(id => !allowedIds.includes(id) || id in layout.panels)
+      || !Number.isFinite(tray.height) || tray.height < 130 || tray.height > 900)) return null;
     return value;
   } catch { return null; }
 }
 
 /** Only view geometry and stable metadata are persisted, never order drafts or component parameters. */
 export function saveWorkspaceLayout(
-  edition: string, preset: string, layout: SerializedDockview, now = Date.now()
+  edition: string, preset: string, layout: SerializedDockview, now = Date.now(), bottomTray?: AutoHideTray
 ): WorkspaceLayout {
   const copy = JSON.parse(JSON.stringify(layout)) as SerializedDockview;
   for (const panel of Object.values(copy.panels)) delete panel.params;
-  return { version: 1, edition, savedAt: now, preset, layout: copy };
+  return { version: 1, edition, savedAt: now, preset, layout: copy,
+    ...(bottomTray ? { bottomTray:{ ids:[...bottomTray.ids], active:bottomTray.active, height:bottomTray.height } } : {}) };
 }
