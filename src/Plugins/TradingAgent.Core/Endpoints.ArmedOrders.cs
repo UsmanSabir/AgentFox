@@ -573,6 +573,56 @@ public sealed partial class TradingCoreEndpoints
             });
         }).RequireAuthorization("TradingAnalyst");
 
+        // Stand a protective stop down for ONE reducing sell, without giving up the stop.
+        //
+        // WHY THIS IS NOT THE DISARM ABOVE. This broker sizes every SELL against custody minus the
+        // quantity already committed to resting SELLs, so a stop covering the whole holding leaves
+        // nothing free and refuses any sell of those same shares — including one that only REDUCES the
+        // position. The armed-order path has always handled this itself (WatchlistMonitorWorker stands
+        // its own stop down as the sell fires); an operator selling by hand had no equivalent, and was
+        // left with a refusal, a stop they could only disarm permanently, and no way back.
+        //
+        // The difference from disarming is the whole point: only the native ORDER is cancelled. The
+        // stop's intent survives and the recurring pass re-places it over whatever remains once the
+        // sell is through, so protection comes back without the operator remembering to rebuild it.
+        //
+        // A trader's authorisation, deliberately stricter than the analyst-level disarm beside it:
+        // this exists to enable a trade, so freeing shares must not be available to somebody who could
+        // not place the sell they are being freed for.
+        trading.MapPost("/protective-stops/release-for-sell", async (
+            ReleaseStopForSellRequest? body,
+            IProtectiveStopReleaser releaser,
+            CancellationToken ct) =>
+        {
+            string symbol;
+            try { symbol = PsxDataClient.NormalizeStockSymbol(body?.Symbol ?? ""); }
+            catch (ArgumentException ex)
+            {
+                return Results.BadRequest(new { error = "invalid_symbol", message = ex.Message });
+            }
+
+            if (body?.Quantity is not > 0)
+                return Results.BadRequest(new
+                {
+                    error = "invalid_quantity",
+                    message = "Say how many shares need to be freed."
+                });
+
+            var result = await releaser.ReleaseForSellAsync(symbol, body.Quantity, ct);
+
+            // 200 either way. "Nothing needed releasing" and "the stop was stood down" are both
+            // successful answers to the same question and the caller's next step is identical — try
+            // the sell. Only `released` tells them apart, and the reason is always given: a refusal to
+            // release says why, and that sentence is what the operator needs when the sell still fails.
+            return Results.Ok(new
+            {
+                symbol,
+                quantity = body.Quantity,
+                released = result.Released,
+                message = result.Reason
+            });
+        }).RequireAuthorization("TradingTrader");
+
         // ── Approval window ───────────────────────────────────────────────────
 
         trading.MapPost("/approval/arm", (

@@ -50,6 +50,8 @@
   let searchInput: HTMLInputElement;
   /** When active, show only symbols that currently have one or more unacknowledged alerts. */
   let alertsOnly = false;
+  /** Narrows rows by the effective auto-trading state, including configuration-locked symbols. */
+  let autoTradeFilter: 'all' | 'enabled' | 'disabled' = 'all';
   let draggedSymbol: string | null = null;
   let dragOverSymbol: string | null = null;
   let preset: WatchlistPresetPreview | null = null;
@@ -90,7 +92,7 @@
   }
 
   function startDrag(event: DragEvent, entry: WatchlistEntry) {
-    if (search.trim() || alertsOnly) {
+    if (search.trim() || alertsOnly || autoTradeFilter !== 'all') {
       event.preventDefault();
       return;
     }
@@ -484,6 +486,9 @@
   $: selectedCompany = data?.entries.find(entry => entry.symbol === selected)?.companyName ?? null;
   $: filteredEntries = (data?.entries ?? []).filter(entry =>
     (!alertsOnly || entry.openAlerts > 0) &&
+    (autoTradeFilter === 'all' ||
+      (autoTradeFilter === 'enabled' && !entry.manualOnly) ||
+      (autoTradeFilter === 'disabled' && entry.manualOnly)) &&
     `${entry.symbol} ${entry.companyName ?? ''}`.toLowerCase().includes(search.trim().toLowerCase())
   );
 
@@ -657,6 +662,14 @@
           ><X size={13} /></button>
         {/if}
       </div>
+      <label class="automation-filter" title="Filter by effective auto-trading status">
+        <Bot size={13} aria-hidden="true" />
+        <select bind:value={autoTradeFilter} aria-label="Filter by auto-trading status">
+          <option value="all">All modes</option>
+          <option value="enabled">Auto only</option>
+          <option value="disabled">Manual only</option>
+        </select>
+      </label>
       <button
         class="alerts-filter"
         class:active={alertsOnly}
@@ -684,11 +697,15 @@
       ><Hand size={13} aria-hidden="true" /> Manual-only all</button>
     </div>
     {#if !filteredEntries.length}
-      <p class="note">
-        {#if alertsOnly && search.trim()}
-          No symbols with open alerts match "{search}".
-        {:else if alertsOnly}
+      <p class="note" role="status" aria-live="polite">
+        {#if autoTradeFilter === 'enabled' && !alertsOnly && !search.trim()}
+          No watched symbols have auto trading enabled.
+        {:else if autoTradeFilter === 'disabled' && !alertsOnly && !search.trim()}
+          No watched symbols are manual-only.
+        {:else if alertsOnly && autoTradeFilter === 'all' && !search.trim()}
           No watched symbols have open alerts.
+        {:else if autoTradeFilter !== 'all' || alertsOnly}
+          No watched symbols match the selected filters{search.trim() ? ` and "${search.trim()}"` : ''}.
         {:else}
           No watched symbols match "{search}".
         {/if}
@@ -702,13 +719,13 @@
           class:pinned={entry.pinned}
           class:drag-over={dragOverSymbol === entry.symbol}
           class:dragging={draggedSymbol === entry.symbol}
-          draggable={!search.trim() && !alertsOnly}
+          draggable={!search.trim() && !alertsOnly && autoTradeFilter === 'all'}
           on:dragstart={(event) => startDrag(event, entry)}
           on:dragover={(event) => dragOver(event, entry)}
           on:drop={(event) => dropOn(event, entry)}
           on:dragend={() => { draggedSymbol = null; dragOverSymbol = null; }}
         >
-          <span class="drag-handle" title={search.trim() || alertsOnly ? 'Clear filters to reorder' : 'Drag to reorder'}>
+          <span class="drag-handle" title={search.trim() || alertsOnly || autoTradeFilter !== 'all' ? 'Clear filters to reorder' : 'Drag to reorder'}>
             <GripVertical size={13} />
           </span>
           <button
@@ -935,6 +952,19 @@
   }
   .search-clear:hover { color:var(--text); background:var(--surface-3); }
   .search-clear:focus-visible { outline:2px solid var(--primary); outline-offset:1px; }
+  .automation-filter {
+    display:flex; align-items:center; gap:.25rem; white-space:nowrap;
+    background:var(--surface-2); border:1px solid var(--border-md);
+    border-radius:var(--radius-sm); padding:.32rem .35rem .32rem .5rem; color:var(--text-3);
+  }
+  .automation-filter:focus-within {
+    border-color:var(--primary);
+    box-shadow:0 0 0 2px color-mix(in srgb, var(--primary) 16%, transparent);
+  }
+  .automation-filter select {
+    min-width:0; border:0; outline:0; background:var(--surface-2); color:var(--text-2);
+    font:inherit; font-size:.7rem; cursor:pointer;
+  }
   .alerts-filter {
     display:flex; align-items:center; gap:.3rem; white-space:nowrap;
     background:var(--surface-2); border:1px solid var(--border-md);

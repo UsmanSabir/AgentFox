@@ -43,6 +43,31 @@ const REQUEST_TIMEOUT_MS = 20_000;
 // attempt budget, so it cannot share the 20s CRUD ceiling without the browser giving up first.
 const CANDLE_TIMEOUT_MS = 60_000;
 
+/**
+ * A refusal the server EXPLAINED, with the explanation still attached.
+ *
+ * `send` used to reduce every failure to its `message`, which is right while all a caller can do is
+ * show it — but some refusals are actionable, and acting needs the structured half. The worked
+ * example is `no_sellable_holding`: the message says a protective stop is holding the shares, and
+ * `detail.blockingStops` says which one, so the order dialog can offer to stand it down rather than
+ * leaving the operator to work out what to cancel.
+ *
+ * It extends Error, so every existing `catch (e) { e.message }` behaves exactly as it did.
+ */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    /** The server's stable machine-readable code, when it sent one. Never shown to a person. */
+    readonly code: string | null,
+    readonly status: number,
+    /** The whole parsed body, for the fields a particular caller knows how to read. */
+    readonly detail: Record<string, unknown> | null
+  ) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
 function withTimeout(timeoutMs = REQUEST_TIMEOUT_MS): { signal: AbortSignal; cancel: () => void } {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -76,9 +101,13 @@ async function send<T>(
     });
     if (!res.ok) {
       // The watchlist endpoints answer a rejected edit with { error, message }; surfacing that beats
-      // showing the user a bare "400 Bad Request".
+      // showing the user a bare "400 Bad Request". The whole body is carried too — see ApiError.
       const detail = await res.json().catch(() => null);
-      throw new Error(detail?.message ?? `${res.status} ${res.statusText}`);
+      throw new ApiError(
+        detail?.message ?? `${res.status} ${res.statusText}`,
+        typeof detail?.error === 'string' ? detail.error : null,
+        res.status,
+        detail && typeof detail === 'object' ? detail : null);
     }
     return await (res.json() as Promise<T>);
   } catch (e) {
@@ -1291,7 +1320,23 @@ export const trading = {
         state: string;
         brokerOrderStillResting: boolean;
         message: string;
-      }>(`/trading/protective-stops/${encodeURIComponent(stopId)}`)
+      }>(`/trading/protective-stops/${encodeURIComponent(stopId)}`),
+
+    /**
+     * Frees shares this system's own protective stop is holding, so a sell that only REDUCES the
+     * position can go through. Unlike `disarm`, the stop is kept: only its broker order is cancelled,
+     * and the recurring pass re-places it over whatever remains once the sell is done.
+     *
+     * `released: false` is not an error — it can equally mean nothing needed freeing. Either way the
+     * next step is the same: try the sell. The message says which it was.
+     */
+    releaseForSell: (symbol: string, quantity: number) =>
+      post<{
+        symbol: string;
+        quantity: number;
+        released: boolean;
+        message: string;
+      }>('/trading/protective-stops/release-for-sell', { symbol, quantity })
   },
 
   approval: {

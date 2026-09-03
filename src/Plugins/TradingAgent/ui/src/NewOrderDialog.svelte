@@ -1,7 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher, onMount } from 'svelte';
   import {
-    trading, percentTriggerLevel,
+    trading, percentTriggerLevel, ApiError,
     type OrderIntentDefinition, type OrderIntentRegistryResponse, type WatchlistEntry,
     type TriggerKind, type ArmOrderRequest, type BrokerAccountSnapshot
   } from './api';
@@ -53,6 +53,20 @@
   let busy = false;
   let error: string | null = null;
   let result: { ok: boolean; title: string; detail: string; executionId?: string } | null = null;
+
+  /**
+   * Set when a SELL was refused because this system's OWN protective stop is holding the shares.
+   *
+   * The broker sizes every SELL against custody minus the quantity already committed to resting
+   * SELLs, so a stop covering the whole holding refuses even a sell that only REDUCES the position.
+   * The automated path has always stood its own stop down for such a sell; selling by hand had no
+   * equivalent, so the operator met a refusal on shares they could see they owned and no way through
+   * short of disarming the stop for good. `blockedSell` carries what is needed to offer the same
+   * courtesy: stand the stop down, place the sell, and let the recurring pass put the stop back over
+   * whatever remains.
+   */
+  let blockedSell: { symbol: string; quantity: number; stops: string[] } | null = null;
+  let releasing = false;
   let clientRequestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
   const money = (value: number) => value.toLocaleString(undefined, { maximumFractionDigits: 2 });
@@ -320,9 +334,17 @@
     return `${side} ${effectiveQuantity} ${symbol} at ${price ?? '—'} or better.`;
   })();
 
-  async function submit() {
+  /**
+   * @param alreadyConfirmed Suppresses the "submit this order now?" prompt because the caller has
+   * ALREADY put the same decision, in the same words, in front of the operator. Only
+   * `releaseStopAndRetry` passes it. Note the call sites use `() => submit()` rather than `submit`
+   * directly: handing a click handler straight to this function would pass the MouseEvent as this
+   * argument, and a truthy object here silently disables the confirmation on every ordinary click.
+   */
+  async function submit(alreadyConfirmed = false) {
     if (!choice || busy) return;
     error = null;
+    blockedSell = null;
     if (!symbol.trim()) { error = 'Choose a symbol.'; return; }
     if (sizeMode === 'value') {
       if (!orderValue || orderValue <= 0) { error = 'Enter a positive order value.'; return; }
@@ -361,7 +383,11 @@
     }
 
     const immediate = choice.submission === 'immediate';
-    if (immediate && !confirm(
+    // `alreadyConfirmed` is set only by the release-and-retry path, whose own prompt already spelled
+    // out this exact order AND the stop being stood down for it. Two modals back to back for one
+    // decision the operator has just taken is a hurdle, not a safeguard — it trains people to click
+    // through the second one, which is the opposite of what this gate is for.
+    if (immediate && !alreadyConfirmed && !confirm(
       `${summary}\n\nSubmit this order now? Every policy and risk gate still applies, but if they pass this can place a REAL broker order.`
       + (persistentUntilFilled
         ? `\n\nThe unfilled remainder will be submitted again once per PSX trading day for up to ${expiresInDays} day(s).`
@@ -431,8 +457,67 @@
       dispatch('changed');
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
+
+      // A refusal we can DO something about. The message already says a protective stop is holding
+      // the shares; this is what turns that from a dead end into a next step.
+      if (e instanceof ApiError && e.code === 'no_sellable_holding') {
+        const stops = Array.isArray(e.detail?.blockingStops) ? e.detail.blockingStops : [];
+        if (stops.length > 0) {
+          blockedSell = {
+            symbol: symbol.trim().toUpperCase(),
+            quantity: submittedQuantity,
+            stops: stops.map(s => String((s as { describe?: unknown }).describe ?? ''))
+                        .filter(text => text.length > 0)
+          };
+        }
+      }
     } finally {
       busy = false;
+    }
+  }
+
+  /**
+   * Stands the blocking stop down and immediately tries the order again.
+   *
+   * TWO STEPS, NOT ONE, and the failure of either is shown. The release is a real broker cancellation
+   * and can be refused — an unreadable order book, or shares held by an order this system did not
+   * place, both come back "not released" with a reason. Only a confirmed release is worth retrying
+   * on, so a refusal stops here rather than resubmitting into the same wall.
+   *
+   * What the operator gives up is coverage on the slice being sold, for as long as the sell rests.
+   * That is the trade the broker forces: a stop over the whole holding and a sell of part of it
+   * cannot both exist. The stop's INTENT survives, so the recurring pass re-places it over what
+   * remains once the sell is through.
+   */
+  async function releaseStopAndRetry() {
+    if (!blockedSell || releasing || busy) return;
+    const target = blockedSell;
+
+    // THE one confirmation for both halves, which is why it carries the order summary as well as the
+    // stop. `submit` is then told not to ask again — see its `alreadyConfirmed` parameter.
+    if (!confirm(
+      `${summary}\n\n`
+      + `Your own protective stop is holding these shares:\n${target.stops.join('\n')}\n\n`
+      + `Stand it down and place this order? Its broker order is cancelled now and the stop goes back `
+      + `over whatever remains once the sell is done. Until then, the shares being sold are not `
+      + `covered by it. Every policy and risk gate still applies, but if they pass this can place a `
+      + `REAL broker order.`
+    )) return;
+
+    releasing = true;
+    error = null;
+    try {
+      const released = await trading.stops.releaseForSell(target.symbol, target.quantity);
+      if (!released.released) {
+        error = `The stop was not stood down, so the sell was not retried. ${released.message}`;
+        return;
+      }
+      blockedSell = null;
+      await submit(true);
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      releasing = false;
     }
   }
 </script>
@@ -692,9 +777,27 @@
       {/if}
 
       {#if error}<p class="error"><AlertTriangle size={13} /> {error}</p>{/if}
+
+      <!--
+        The one refusal in this dialog with a remedy attached. Offered rather than done automatically:
+        standing a stop down uncovers the shares being sold for as long as the sell rests, and that is
+        the operator's call, not this dialog's.
+      -->
+      {#if blockedSell}
+        <div class="blocked-sell">
+          <p>
+            Your own protective stop is holding these shares. It can stand down for this sell and go
+            back over whatever remains once the sell is done.
+          </p>
+          <button class="btn btn-primary" on:click={releaseStopAndRetry} disabled={releasing || busy}>
+            {releasing ? 'Standing the stop down…' : 'Stand the stop down and place this sell'}
+          </button>
+        </div>
+      {/if}
+
       <div class="footer">
         <button class="btn btn-ghost" on:click={() => dispatch('close')} disabled={busy}>Cancel</button>
-        <button class="btn btn-primary" on:click={submit} disabled={!choice || busy || marketDisabled}>
+        <button class="btn btn-primary" on:click={() => submit()} disabled={!choice || busy || marketDisabled}>
           {busy ? 'Submitting…' : choice?.submission === 'conditional' ? 'Arm waiting order' : 'Review & submit'}
         </button>
       </div>
@@ -800,6 +903,12 @@
   .sizing-note b { color:var(--text); }
   .summary { margin:.7rem 0 0; color:var(--text); font-size:.75rem; line-height:1.5; font-weight:600; }
   .estimate { margin:.3rem 0 0; color:var(--text-3); font-size:.68rem; }.estimate b { color:var(--text-2); }
+  .blocked-sell {
+    margin:0 1rem .65rem; padding:.6rem .7rem; border-radius:var(--radius-sm);
+    background:color-mix(in srgb,var(--warning,#c88) 8%,transparent);
+    display:flex; flex-direction:column; gap:.5rem; align-items:flex-start;
+  }
+  .blocked-sell p { margin:0; font-size:.8rem; line-height:1.5; }
   .warning,.error { margin:.65rem 1rem; padding:.55rem .65rem; border-radius:var(--radius-sm); display:flex; gap:.35rem;
                     align-items:flex-start; color:var(--warning); background:color-mix(in srgb,var(--warning) 8%,transparent); font-size:.7rem; line-height:1.4; }
   .form-card .warning { margin:.65rem 0 0; }.error { color:var(--danger); background:color-mix(in srgb,var(--danger) 8%,transparent); }
