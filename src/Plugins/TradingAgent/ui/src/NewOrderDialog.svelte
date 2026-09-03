@@ -334,7 +334,14 @@
     return `${side} ${effectiveQuantity} ${symbol} at ${price ?? '—'} or better.`;
   })();
 
-  async function submit() {
+  /**
+   * @param alreadyConfirmed Suppresses the "submit this order now?" prompt because the caller has
+   * ALREADY put the same decision, in the same words, in front of the operator. Only
+   * `releaseStopAndRetry` passes it. Note the call sites use `() => submit()` rather than `submit`
+   * directly: handing a click handler straight to this function would pass the MouseEvent as this
+   * argument, and a truthy object here silently disables the confirmation on every ordinary click.
+   */
+  async function submit(alreadyConfirmed = false) {
     if (!choice || busy) return;
     error = null;
     blockedSell = null;
@@ -376,7 +383,11 @@
     }
 
     const immediate = choice.submission === 'immediate';
-    if (immediate && !confirm(
+    // `alreadyConfirmed` is set only by the release-and-retry path, whose own prompt already spelled
+    // out this exact order AND the stop being stood down for it. Two modals back to back for one
+    // decision the operator has just taken is a hurdle, not a safeguard — it trains people to click
+    // through the second one, which is the opposite of what this gate is for.
+    if (immediate && !alreadyConfirmed && !confirm(
       `${summary}\n\nSubmit this order now? Every policy and risk gate still applies, but if they pass this can place a REAL broker order.`
       + (persistentUntilFilled
         ? `\n\nThe unfilled remainder will be submitted again once per PSX trading day for up to ${expiresInDays} day(s).`
@@ -482,11 +493,15 @@
     if (!blockedSell || releasing || busy) return;
     const target = blockedSell;
 
+    // THE one confirmation for both halves, which is why it carries the order summary as well as the
+    // stop. `submit` is then told not to ask again — see its `alreadyConfirmed` parameter.
     if (!confirm(
-      `Stand the protective stop down so this sell can go through?\n\n`
-      + `${target.stops.join('\n')}\n\n`
-      + `Its broker order is cancelled now and the stop is placed again over whatever remains once `
-      + `the sell is done. Until then, the shares being sold are not covered by it.`
+      `${summary}\n\n`
+      + `Your own protective stop is holding these shares:\n${target.stops.join('\n')}\n\n`
+      + `Stand it down and place this order? Its broker order is cancelled now and the stop goes back `
+      + `over whatever remains once the sell is done. Until then, the shares being sold are not `
+      + `covered by it. Every policy and risk gate still applies, but if they pass this can place a `
+      + `REAL broker order.`
     )) return;
 
     releasing = true;
@@ -498,7 +513,7 @@
         return;
       }
       blockedSell = null;
-      await submit();
+      await submit(true);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -782,7 +797,7 @@
 
       <div class="footer">
         <button class="btn btn-ghost" on:click={() => dispatch('close')} disabled={busy}>Cancel</button>
-        <button class="btn btn-primary" on:click={submit} disabled={!choice || busy || marketDisabled}>
+        <button class="btn btn-primary" on:click={() => submit()} disabled={!choice || busy || marketDisabled}>
           {busy ? 'Submitting…' : choice?.submission === 'conditional' ? 'Arm waiting order' : 'Review & submit'}
         </button>
       </div>
