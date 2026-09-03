@@ -1,9 +1,19 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { RefreshCw, Repeat2, Trash2, AlertTriangle, CheckCircle2, RotateCcw, ShieldQuestion } from 'lucide-svelte';
+  import { onMount, tick } from 'svelte';
+  import { RefreshCw, Repeat2, Trash2, AlertTriangle, CheckCircle2, RotateCcw, ShieldQuestion, MoreHorizontal } from 'lucide-svelte';
   import { trading, type PersistentOrder, type BrokerOrdersView } from './api';
   import LivePriceInline from './LivePriceInline.svelte';
   import { orderListNavigation, focusOrderControls } from './orderListNavigation';
+  import OrderActionReview from './OrderActionReview.svelte';
+  import OrderRowActions from './OrderRowActions.svelte';
+  import PersistentOrderResolutionDialog from './PersistentOrderResolutionDialog.svelte';
+  import {
+    isOrderActionsKey,
+    persistentActions,
+    validateAttentionResolution,
+    type AttentionResolution,
+    type PersistentActionId
+  } from './persistentOrderUi';
   export let keyboardMode = false;
   let query = '';
   $: visibleOrders = orders.filter(o => !keyboardMode || `${o.symbol} ${o.action} ${o.state} ${o.intentId}`.toLowerCase().includes(query.trim().toLowerCase()));
@@ -15,6 +25,11 @@
   let busy: string | null = null;
   let error: string | null = null;
   let notice: string | null = null;
+  let reviewing = false;
+  let feedback: HTMLParagraphElement;
+  let review: OrderActionReview;
+  let actionSheet: OrderRowActions;
+  let resolutionSheet: PersistentOrderResolutionDialog;
   let showHistory = false;
   let lastTick = 0;
   /**
@@ -29,41 +44,63 @@
   let brokerView: Record<string, BrokerOrdersView> = {};
   let inspecting: string | null = null;
 
+  async function confirmAction(message: string, label: string) {
+    if (!keyboardMode) return confirm(message);
+    reviewing = true;
+    try {
+      return await review.ask(message, label);
+    } finally {
+      reviewing = false;
+    }
+  }
+
+  function focusFeedback() {
+    void tick().then(() => feedback?.focus());
+  }
+
   async function inspectBroker(order: PersistentOrder) {
-    if (inspecting) return;
-    inspecting = order.intentId;
+    if (inspecting || reviewing) return;
+    const intentId = order.intentId;
+    inspecting = intentId;
     error = null;
     try {
-      brokerView = { ...brokerView, [order.intentId]: await trading.persistentOrders.brokerOrders(order.intentId) };
+      brokerView = { ...brokerView, [intentId]: await trading.persistentOrders.brokerOrders(intentId) };
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
       inspecting = null;
+      focusFeedback();
     }
   }
 
   async function cancelBrokerOrder(order: PersistentOrder, orderNo: string) {
-    if (busy) return;
+    if (busy || reviewing) return;
+    const intentId = order.intentId;
+    const symbol = order.symbol;
+    const action = order.action;
+    const exactOrderNo = orderNo;
     // Named in full, because this is the one action here that is taken on a person's identification
     // rather than on the ledger's own record.
-    if (!confirm(
-      `Cancel broker order #${orderNo}?\n\n`
-      + `This cancels that exact order at the broker and records it against this ${order.symbol} `
-      + `${order.action}.\n\nOnly do this if you have checked the broker's own book and it is this `
+    if (!await confirmAction(
+      `Cancel broker order #${exactOrderNo}?\n\n`
+      + `Intent ${intentId}\n${symbol} ${action}\n\n`
+      + `This cancels that exact order at the broker and records it against this ${symbol} `
+      + `${action}.\n\nOnly do this if you have checked the broker's own book and it is this `
       + `order's. It cannot be undone.`
-    )) return;
+    , `Cancel broker order #${exactOrderNo}`)) return;
 
-    busy = order.intentId;
+    busy = intentId;
     notice = null;
     try {
-      const result = await trading.persistentOrders.cancelBrokerOrder(order.intentId, orderNo);
+      const result = await trading.persistentOrders.cancelBrokerOrder(intentId, exactOrderNo);
       notice = result.message;
-      await inspectBroker(order);
+      brokerView = { ...brokerView, [intentId]: await trading.persistentOrders.brokerOrders(intentId) };
       await load();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
       busy = null;
+      focusFeedback();
     }
   }
 
@@ -82,51 +119,53 @@
   }
 
   async function cancel(order: PersistentOrder) {
-    if (busy) return;
-    if (!confirm(
-      `Stop this persistent order?\n\n${order.action} ${order.remainingQuantity} remaining `
-      + `${order.symbol} ${order.orderType} @ ${order.price ?? '—'}.\n\n`
+    if (busy || reviewing) return;
+    const { intentId, symbol, action, remainingQuantity, orderType, price } = order;
+    if (!await confirmAction(
+      `Stop this persistent order?\n\nIntent ${intentId}\n${action} ${remainingQuantity} remaining `
+      + `${symbol} ${orderType} @ ${price ?? '—'}.\n\n`
       + `Any exact broker order still resting will be cancelled and verified before this is marked complete.`
-    )) return;
+    , 'Stop and cancel remainder')) return;
 
-    busy = order.intentId;
+    busy = intentId;
     notice = null;
     try {
-      const result = await trading.persistentOrders.cancel(order.intentId);
+      const result = await trading.persistentOrders.cancel(intentId);
       notice = result.message;
       await load();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
       busy = null;
+      focusFeedback();
     }
   }
 
   async function retry(order: PersistentOrder) {
-    if (busy || !order.canRetry) return;
-    if (!confirm(
-      `Check the broker and retry this order?\n\n${order.action} ${order.remainingQuantity} `
-      + `${order.symbol} ${order.orderType} @ ${order.price ?? '—'}.\n\n`
+    if (busy || reviewing || !order.canRetry) return;
+    const { intentId, symbol, action, remainingQuantity, orderType, price } = order;
+    if (!await confirmAction(
+      `Check the broker and retry this order?\n\nIntent ${intentId}\n${action} ${remainingQuantity} `
+      + `${symbol} ${orderType} @ ${price ?? '—'}.\n\n`
       + `The retry is sent only if today's outstanding orders and activity show no matching order or fill.`
-    )) return;
+    , 'Check broker and retry')) return;
 
-    busy = order.intentId;
+    busy = intentId;
     notice = null;
     error = null;
     try {
-      const result = await trading.persistentOrders.retry(order.intentId);
+      const result = await trading.persistentOrders.retry(intentId);
       notice = result.message;
       await load();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
       busy = null;
+      focusFeedback();
     }
   }
 
-  async function resolveAttention(order: PersistentOrder) {
-    if (busy) return;
-
+  function askClassicResolution(order: PersistentOrder): AttentionResolution | null {
     const choice = prompt(
       `Resolve ${order.symbol} ${order.action} — the broker's own order history only covers TODAY, `
       + `so AgentFox cannot check what happened on ${order.lastAttemptSessionDate ?? 'the prior attempt date'} `
@@ -137,47 +176,86 @@
       + `  filled — the full ${order.quantity} share(s) filled\n\n`
       + `Type: not_filled, partial, or filled`
     )?.trim().toLowerCase();
-    if (!choice) return;
-    if (!['not_filled', 'partial', 'filled'].includes(choice)) {
-      error = `"${choice}" is not one of not_filled, partial, filled.`;
-      return;
+    if (!choice) return null;
+    let quantityText: string | number = '';
+    if (choice === 'partial') {
+      const answer = prompt(`How many of the ${order.quantity} total share(s) actually filled (1-${order.quantity - 1})?`);
+      if (!answer) return null;
+      quantityText = answer;
     }
-    const resolution = choice as 'not_filled' | 'partial' | 'filled';
+    const note = prompt('What did you check at the broker (order book, activity log, statement) to confirm this? Required.');
+    if (note == null) return null;
+    const result = validateAttentionResolution(choice, quantityText, note, order.quantity);
+    if (!result.value) error = result.error;
+    return result.value;
+  }
 
-    let filledQuantity: number | null = null;
-    if (resolution === 'partial') {
-      const qtyText = prompt(
-        `How many of the ${order.quantity} total share(s) actually filled (1-${order.quantity - 1})?`
-      );
-      if (!qtyText) return;
-      filledQuantity = Number(qtyText);
-      if (!Number.isFinite(filledQuantity) || filledQuantity <= 0 || filledQuantity >= order.quantity) {
-        error = `Enter a whole number between 1 and ${order.quantity - 1}.`;
-        return;
-      }
+  async function resolveAttention(order: PersistentOrder) {
+    if (busy || reviewing) return;
+    const target = {
+      intentId: order.intentId,
+      symbol: order.symbol,
+      action: order.action,
+      quantity: order.quantity,
+      lastAttemptSessionDate: order.lastAttemptSessionDate
+    };
+    reviewing = keyboardMode;
+    let resolution: AttentionResolution | null;
+    try {
+      resolution = keyboardMode ? await resolutionSheet.ask(target) : askClassicResolution(order);
+    } finally {
+      reviewing = false;
     }
+    if (!resolution) return;
 
-    const note = prompt(
-      'What did you check at the broker (order book, activity log, statement) to confirm this? Required.'
-    )?.trim();
-    if (!note) {
-      error = 'A note describing what you checked at the broker is required.';
-      return;
-    }
-
-    busy = order.intentId;
+    busy = target.intentId;
     notice = null;
     error = null;
     try {
       const result = await trading.persistentOrders.resolveAttention(
-        order.intentId, resolution, filledQuantity, note);
+        target.intentId, resolution.resolution, resolution.filledQuantity, resolution.note);
       notice = result.message;
       await load();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
       busy = null;
+      focusFeedback();
     }
+  }
+
+  async function openActions(order: PersistentOrder) {
+    if (!keyboardMode || busy || reviewing || inspecting) return;
+    const choices = persistentActions(order);
+    if (!choices.length) return;
+    reviewing = true;
+    let action: PersistentActionId | null;
+    try {
+      action = await actionSheet.ask(`Actions for ${order.symbol} · ${order.intentId}`, choices);
+    } finally {
+      reviewing = false;
+    }
+    if (action === 'inspect') await inspectBroker(order);
+    else if (action === 'retry') await retry(order);
+    else if (action === 'resolve') await resolveAttention(order);
+    else if (action === 'cancel') await cancel(order);
+  }
+
+  function persistentKey(event: KeyboardEvent) {
+    if (!keyboardMode || !isOrderActionsKey(event)) return;
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    const row = target?.closest<HTMLElement>('[data-order-row]');
+    const intentId = row?.dataset.orderId;
+    const order = visibleOrders.find(candidate => candidate.intentId === intentId);
+    if (!order) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void openActions(order);
+  }
+
+  function persistentActionKeys(node: HTMLElement) {
+    node.addEventListener('keydown', persistentKey);
+    return { destroy: () => node.removeEventListener('keydown', persistentKey) };
   }
 
   const num = (value: number) => value.toLocaleString(undefined, { maximumFractionDigits: 2 });
@@ -189,7 +267,8 @@
   onMount(load);
 </script>
 
-<section class="persistent" use:orderListNavigation={keyboardMode}>
+<section class="persistent" aria-label="Persistent order management"
+         use:orderListNavigation={keyboardMode} use:persistentActionKeys>
   <header>
     <div class="title">
       <Repeat2 size={15} />
@@ -197,13 +276,14 @@
     </div>
     <div class="actions">
       <label><input type="checkbox" bind:checked={showHistory} on:change={load} /> show history</label>
-      <button on:click={load} disabled={busy != null}><RefreshCw size={12} /> Refresh</button>
+      <button on:click={load} disabled={busy != null || reviewing}><RefreshCw size={12} /> Refresh</button>
     </div>
   </header>
-  {#if keyboardMode}<label class="order-filter">Find persistent order <input type="search" bind:value={query} aria-label="Find persistent order" placeholder="Symbol, state or intent ID"/></label><p class="notice">↑ ↓ / Home / End navigate rows · Enter focuses actions · Tab reaches each recovery control.</p>{/if}
+  {#if keyboardMode}<label class="order-filter">Find persistent order <input type="search" bind:value={query} aria-label="Find persistent order" placeholder="Symbol, state or intent ID"/></label><p class="notice">↑ ↓ / Home / End navigate rows · Enter focuses controls · Shift+F10 or the context-menu key opens row actions.</p>{/if}
 
-  {#if notice}<p class="notice">{notice}</p>{/if}
-  {#if error}<p class="notice bad"><AlertTriangle size={12} /> {error}</p>{/if}
+  <p class:bad={!!error} class="notice feedback" role="status" tabindex="-1" bind:this={feedback}>
+    {#if error}<AlertTriangle size={12} />{/if}{error ?? notice ?? ''}
+  </p>
 
   {#if loading}
     <p class="empty">Loading…</p>
@@ -214,13 +294,20 @@
   {:else}
     <div class="grid">
       {#each visibleOrders as order (order.intentId)}
-        <article class:danger={danger(order.state)} class:done={terminal(order.state)} data-order-row>
+        <article class:danger={danger(order.state)} class:done={terminal(order.state)} data-order-row data-order-id={order.intentId}>
           <div class="top">
             {#if keyboardMode}<button class="symbol" data-order-focus aria-label={`Controls for ${order.symbol} ${order.action} intent ${order.intentId}, ${order.state}`} on:click={focusOrderControls}>{order.symbol}</button>{:else}<span class="symbol">{order.symbol}</span>{/if}
             <LivePriceInline symbol={order.symbol} fallbackChange={null} />
             <span class="side {order.action.toLowerCase()}">{order.action}</span>
             <span class="state">{order.state}</span>
             {#if terminal(order.state)}<CheckCircle2 size={13} />{/if}
+            {#if keyboardMode && persistentActions(order).length}
+              <button class="row-menu" aria-label={`Actions for ${order.symbol} intent ${order.intentId}`}
+                      title="Order actions (Shift+F10)" on:click={() => openActions(order)}
+                      disabled={busy != null || reviewing || inspecting != null}>
+                <MoreHorizontal size={14} />
+              </button>
+            {/if}
           </div>
           <div class="order">
             <b>{order.remainingQuantity}</b> remaining of {order.quantity}
@@ -238,20 +325,20 @@
           {#if !terminal(order.state)}
             <div class="order-actions">
               {#if order.canRetry}
-                <button class="retry" on:click={() => retry(order)} disabled={busy != null}
+                <button class="retry" on:click={() => retry(order)} disabled={busy != null || reviewing}
                         title={order.retryReason}>
                   <RotateCcw size={12} />
                   {busy === order.intentId ? 'Checking broker…' : 'Check broker & retry'}
                 </button>
               {/if}
               {#if order.state === 'attention'}
-                <button class="resolve" on:click={() => resolveAttention(order)} disabled={busy != null}
+                <button class="resolve" on:click={() => resolveAttention(order)} disabled={busy != null || reviewing}
                         title="Only you can say what happened on a prior trading date — the broker's own history API only covers today.">
                   <ShieldQuestion size={12} />
                   {busy === order.intentId ? 'Resolving…' : 'Resolve from broker check'}
                 </button>
               {/if}
-              <button class="cancel" on:click={() => cancel(order)} disabled={busy != null}>
+              <button class="cancel" on:click={() => cancel(order)} disabled={busy != null || reviewing}>
                 <Trash2 size={12} /> {busy === order.intentId ? 'Working…' : 'Stop & cancel remainder'}
               </button>
             </div>
@@ -268,7 +355,7 @@
           {#if order.state !== 'fulfilled'}
             <div class="order-actions">
               <button class="inspect" on:click={() => inspectBroker(order)}
-                      disabled={inspecting != null || busy != null}
+                      disabled={inspecting != null || busy != null || reviewing}
                       title="Read the broker's own outstanding orders for this symbol. Use this when a cancel could not find the order it was looking for, or when an order was marked cancelled but you suspect something is still resting.">
                 <ShieldQuestion size={12} />
                 {inspecting === order.intentId ? 'Reading broker…' : 'What is resting at the broker?'}
@@ -286,6 +373,10 @@
                     <div class="broker-row">
                       <code>#{resting.orderNo}</code>
                       <span>{describeOrder(resting)}</span>
+                      <button class="cancel" disabled={busy != null || reviewing}
+                              on:click={() => cancelBrokerOrder(order, resting.orderNo)}>
+                        <Trash2 size={11} /> Cancel #{resting.orderNo}
+                      </button>
                     </div>
                   {/each}
                 {/if}
@@ -299,7 +390,7 @@
                     <div class="broker-row">
                       <code>#{candidate.orderNo}</code>
                       <span>{describeOrder(candidate)}</span>
-                      <button class="cancel" disabled={busy != null}
+                      <button class="cancel" disabled={busy != null || reviewing}
                               on:click={() => cancelBrokerOrder(order, candidate.orderNo)}>
                         <Trash2 size={11} /> Cancel #{candidate.orderNo}
                       </button>
@@ -314,6 +405,12 @@
     </div>
   {/if}
 </section>
+
+{#if keyboardMode}
+  <OrderActionReview bind:this={review} />
+  <OrderRowActions bind:this={actionSheet} />
+  <PersistentOrderResolutionDialog bind:this={resolutionSheet} />
+{/if}
 
 <style>
   [data-order-row]:focus-visible, button:focus-visible, input:focus-visible { outline:2px solid var(--primary); outline-offset:-2px; }
@@ -335,6 +432,8 @@
   article { border:1px solid var(--border); border-radius:var(--radius-sm); padding:.7rem; background:var(--surface-2); }
   article.danger { border-color:var(--warning); } article.done { opacity:.72; }
   .top { display:flex; align-items:center; gap:.4rem; }.symbol { font-weight:800; color:var(--text); }
+  button.symbol { border:0; background:transparent; padding:.2rem; }
+  .row-menu { padding:.22rem; border-color:transparent; background:transparent; }
   .side,.state { padding:.12rem .34rem; border-radius:999px; font-size:.6rem; font-weight:700; }
   .side.buy { color:var(--success); background:color-mix(in srgb,var(--success) 12%,transparent); }
   .side.sell { color:var(--danger); background:color-mix(in srgb,var(--danger) 12%,transparent); }
@@ -356,4 +455,5 @@
   .broker-row code { font-size:.68rem; color:var(--text-1); }
   .broker-row span { color:var(--text-2); }.notice,.empty { margin:0; padding:.65rem .9rem; color:var(--text-3); font-size:.69rem; }
   .notice { display:flex; align-items:center; gap:.35rem; border-bottom:1px solid var(--border); }.notice.bad { color:var(--danger); }
+  .feedback:empty { display:none; }
 </style>

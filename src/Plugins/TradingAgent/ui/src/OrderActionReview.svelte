@@ -3,11 +3,13 @@
   let dialog: HTMLDialogElement;
   let back: HTMLButtonElement;
   let message = '';
+  let confirmLabel = 'Confirm action';
   let resolve: ((accepted: boolean) => void) | null = null;
   let previous: HTMLElement | null = null;
-  export async function ask(text: string): Promise<boolean> {
+  export async function ask(text: string, nextConfirmLabel = 'Confirm action'): Promise<boolean> {
     if (resolve) return false;
     message = text;
+    confirmLabel = nextConfirmLabel;
     previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const answer = new Promise<boolean>(done => resolve = done);
     dialog.showModal(); await tick(); back.focus();
@@ -26,7 +28,7 @@
   <h2>Review order management action</h2>
   <p>{message}</p>
   <small>Review the exact target before confirming. Closing this review makes no change.</small>
-  <footer><button bind:this={back} on:click={() => finish(false)}>Back — no change</button><button on:click={() => finish(true)}>Confirm action</button></footer>
+  <footer><button bind:this={back} on:click={() => finish(false)}>Back — no change</button><button on:click={() => finish(true)}>{confirmLabel}</button></footer>
 </dialog>
 <style>
   dialog { width:min(530px,calc(100vw - 2rem)); max-height:80dvh; overflow:auto; padding:1rem; border:1px solid var(--border-md); border-radius:8px; background:var(--surface); color:var(--text); }
