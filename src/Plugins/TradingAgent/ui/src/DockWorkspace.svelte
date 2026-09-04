@@ -604,8 +604,10 @@
     </nav>
   </header>
   {#if storageWarning}<p class="storage-warning" role="status">{storageWarning}</p>{/if}
-  <div class="core-toolbar" bind:this={toolbar}></div>
-  <div class="edition-health" bind:this={health}></div>
+  <div class="workspace-operational-row">
+    <div class="core-toolbar" bind:this={toolbar}></div>
+    <div class="edition-health" bind:this={health}></div>
+  </div>
   <div class="dock-area" class:hidden={!desktop} bind:this={dockArea}>
     <div class="workspace-dock" bind:this={dockRoot}></div>
     <div class="tray-peek" class:hidden={!trayOpen} bind:this={trayShell} style:height={bottomTray?.height + 'px'}>
@@ -657,7 +659,10 @@
   button:disabled { opacity:.45; cursor:default; }
   button:focus-visible, input:focus-visible { outline:2px solid var(--primary); outline-offset:2px; }
   kbd { font-size:.58rem; color:var(--text-3); }
-  .core-toolbar, .edition-health { flex:none; min-width:0; }
+  .workspace-operational-row { display:flex; align-items:center; flex:none; min-width:0; border-bottom:1px solid var(--border); background:var(--surface); }
+  .core-toolbar { flex:1 1 auto; min-width:0; }
+  .edition-health { flex:0 0 auto; min-width:0; padding:0 .55rem; }
+  .edition-health :global(.price-status) { margin:0; }
   .storage-warning { margin:0; padding:.3rem .7rem; font-size:.7rem; color:var(--warning); background:var(--surface-2); }
   .edition-health { padding:0 .7rem; }
   .workspace-dock { flex:1 1 0; min-height:0; min-width:0; overflow:hidden; }
@@ -709,4 +714,9 @@
   .workspace-stack :global(.workstation-panel) { padding:.75rem; min-width:0; overflow:auto; border-bottom:1px solid var(--border); }
   .workspace-stack :global(.mobile-panel-title) { font-size:1rem; margin:.4rem 0; }
   .mobile footer { display:none; }
+  @media (max-width:900px) {
+    .workspace-operational-row { align-items:flex-start; flex-wrap:wrap; }
+    .core-toolbar { flex-basis:100%; }
+    .edition-health { padding-bottom:.25rem; }
+  }
 </style>

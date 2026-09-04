@@ -449,6 +449,7 @@
   {#if error}<div class="error-banner">{error}</div>{/if}
   {#if loading && !status}<div class="loading-state">Loading trading state…</div>{/if}
   {#if status}
+    <div class="runtime-cluster">
     {#if workspace}<div class="workspace-status-line">
       <span>{status.policy.executionMode}</span>
       <span>{status.market.isOpen ? 'Market open' : 'Market closed'}</span>
@@ -459,7 +460,7 @@
       <ShieldAlert size={19} />
       <div><b>{status.liveExecutionReady ? 'Live safety gates ready' : 'Live execution blocked'}</b><span>{status.liveExecutionReady ? 'All reported live prerequisites are healthy.' : liveBlockReason(status)}</span></div>
     </div>
-
+    </div>
   {/if}
   </div>
   </WorkspacePanel>
@@ -792,13 +793,20 @@
   .ticket-empty { padding:1rem; color:var(--text-2); font-size:.8rem; line-height:1.6; }
   .ticket-empty h2 { font-size:1rem; color:var(--text); }
   .hosted { display:contents; }
-  .hosted-toolbar { padding:.4rem .75rem; background:var(--surface); border-bottom:1px solid var(--border); }
-  .hosted-toolbar .page-header-row { margin:0; align-items:center; }
+  .hosted-toolbar { display:grid; grid-template-columns:max-content minmax(0,1fr) max-content; align-items:center; gap:.35rem .75rem; padding:.28rem .55rem; background:var(--surface); }
+  .hosted-toolbar .page-header-row { display:contents; margin:0; }
+  .hosted-toolbar .page-header-row > div:first-child { grid-column:1; grid-row:1; }
+  .hosted-toolbar .header-actions { grid-column:3; grid-row:1; }
   .hosted-toolbar .page-title { font-size:.9rem; margin:0; }
   .hosted-toolbar .page-sub { display:none; }
-  .hosted-toolbar .safety-banner, .hosted-toolbar .error-banner { margin:.3rem 0 0; padding:.3rem .5rem; font-size:.7rem; }
+  .hosted-toolbar .runtime-cluster { grid-column:2; grid-row:1; min-width:0; display:flex; align-items:center; gap:.65rem; }
+  .hosted-toolbar .safety-banner, .hosted-toolbar .error-banner { margin:0; padding:.25rem .45rem; font-size:.68rem; border-radius:4px; }
+  .hosted-toolbar > .error-banner { grid-column:1 / -1; }
   .hosted-toolbar .safety-banner div { flex-direction:row; gap:.5rem; flex-wrap:wrap; }
   .hosted-toolbar .kill-switch-btn { padding:.3rem .5rem; font-size:.65rem; }
+  .hosted-toolbar .workspace-status-line { flex:0 1 auto; flex-wrap:wrap; gap:.6rem; margin:0; }
+  .hosted-toolbar .safety-banner { flex:0 1 auto; min-width:0; }
+  .runtime-cluster { display:contents; }
   .workspace-status-line { display:flex; flex-wrap:wrap; gap:1rem; margin-top:.3rem; font-size:.65rem; color:var(--text-2); }
 
   .dashboard-shell { display:grid; grid-template-columns:minmax(0,1fr) 4.2rem; align-items:stretch; }
@@ -862,6 +870,12 @@
   @media (max-width: 900px) {
     .alerts-row { grid-template-columns:minmax(0,1fr); }
   }
+
+  @media (min-width: 901px) and (max-width: 1300px) {
+    .hosted-toolbar { grid-template-columns:max-content minmax(0,1fr); }
+    .hosted-toolbar .header-actions { grid-column:2; }
+    .hosted-toolbar .runtime-cluster { grid-column:1 / -1; grid-row:2; }
+  }
   .archive-head { display:flex; justify-content:space-between; align-items:stretch; gap:.5rem; }
   .archive-toggle { flex:1 1 auto; width:auto; }
   .archive-head .btn { display:flex; align-items:center; gap:.4rem; white-space:nowrap; margin:.55rem .65rem .55rem 0; }
@@ -900,6 +914,9 @@
   .record-details pre { margin:.5rem 0 0; }
 
   @media (max-width: 640px) {
+    .hosted-toolbar { display:flex; flex-wrap:wrap; }
+    .hosted-toolbar .page-header-row { display:flex; flex:1 1 100%; }
+    .hosted-toolbar .runtime-cluster { flex:1 1 100%; flex-wrap:wrap; }
     .page-header-row { flex-direction:column; align-items:stretch; margin-bottom:1rem; }
     .header-actions { flex-wrap:wrap; }
     .kill-switch-btn { flex:1 1 230px; white-space:normal; justify-content:center; }
