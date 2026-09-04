@@ -2,7 +2,7 @@
   import { onMount, tick } from 'svelte';
   import { createDockview, themeDark, themeLight, type DockviewApi, type IContentRenderer } from 'dockview';
   import 'dockview/dist/styles/dockview.css';
-  import { Command, PanelsTopLeft, RotateCcw, Maximize, Minimize, Sun, Moon, Keyboard, Pin, PinOff, X } from 'lucide-svelte';
+  import { Command, PanelsTopLeft, RotateCcw, Maximize, Minimize, Sun, Moon, Keyboard, Pin, PinOff, X, Fullscreen, Shrink } from 'lucide-svelte';
   import WorkspaceShortcuts from './WorkspaceShortcuts.svelte';
   import { readWorkspaceAppearance, saveWorkspaceAppearance, type WorkspaceTheme } from './workspaceAppearance';
   import type { WorkspaceCommand, WorkspaceComposition, WorkspacePanel, WorkspaceRegion } from './workspaceComposition';
@@ -28,6 +28,8 @@
   let api: DockviewApi | null = null;
   let shortcutsSheet: WorkspaceShortcuts;
   let maximized = false;
+  let fullscreen = false;
+  let fullscreenSupported = false;
   let localTheme: WorkspaceTheme | null = null;
   let currentTheme: WorkspaceTheme = 'dark';
   let hostTheme: WorkspaceTheme = 'dark';
@@ -51,6 +53,21 @@
     localTheme = null;
     try { localStorage.removeItem(appearanceKey); appearanceWarning = ''; } catch { appearanceWarning = 'Could not clear the saved theme preference.'; }
     applyTheme(hostTheme);
+  }
+  async function toggleFullscreen() {
+    if (!fullscreenSupported) {
+      notice = 'Page full screen is unavailable here. Use the browser F11 command instead.';
+      return;
+    }
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else await root.requestFullscreen();
+    } catch {
+      notice = 'The browser blocked page full screen. Use the toolbar button again or the browser F11 command.';
+    }
+  }
+  function syncFullscreen() {
+    fullscreen = document.fullscreenElement === root;
   }
   let desktop = true;
   let preset = presets[0].id;
@@ -385,6 +402,8 @@
   $: panelCommands = panels.map(p => ({ id: 'panel.' + p.id, label: 'Show ' + p.title, run: () => focusPanel(p.id) }));
   $: layoutCommands = [
     { id:'workspace.shortcuts', label:'Show keyboard shortcuts', run:() => shortcutsSheet.open() },
+    { id:'workspace.fullscreen', label:fullscreen ? 'Exit page full screen' : 'Enter page full screen', run:toggleFullscreen,
+      disabled:() => fullscreenSupported ? null : 'Page full screen is unavailable in this browser or host frame.' },
     { id:'workspace.theme', label:'Toggle light / dark theme', run:toggleTheme },
     { id:'workspace.host-theme', label:'Use host theme (clear workspace theme override)', run:followHostTheme },
     { id:'layout.bottom', label:bottomTray ? 'Pin bottom tools' : 'Unpin bottom tools (auto-hide)', run:() => bottomTray ? pinBottom() : unpinBottom() },
@@ -459,6 +478,9 @@
       event.preventDefault(); event.stopPropagation(); cycleGroup(event.shiftKey ? -1 : 1); return;
     }
     if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
+    if ((event.ctrlKey || event.metaKey) && event.shiftKey && !event.altKey && event.code === 'KeyF') {
+      event.preventDefault(); event.stopPropagation(); void toggleFullscreen(); return;
+    }
     if (event.key === 'Escape' && api?.hasMaximizedGroup()) { event.preventDefault(); event.stopPropagation(); maximize(); return; }
     if ((event.ctrlKey || event.metaKey) && event.shiftKey && !event.altKey && event.code === 'Space') { event.preventDefault(); event.stopPropagation(); maximize(); return; }
     const direct: Record<string,string> = { Digit1:'watchlist', Digit2:'chart', Digit3:'plan', Digit4:'ticket', Digit5:'order-logs', Digit6:'portfolio', Digit7:'persistent', Digit8:'armed' };
@@ -471,6 +493,8 @@
   }
 
   onMount(() => {
+    fullscreenSupported = typeof root.requestFullscreen === 'function' && document.fullscreenEnabled !== false;
+    syncFullscreen();
     hostTheme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
     try {
       const raw = localStorage.getItem(appearanceKey);
@@ -568,6 +592,7 @@
     };
     window.addEventListener('agentfox:themechange', theme);
     window.addEventListener('keydown', shortcut, true);
+    document.addEventListener('fullscreenchange', syncFullscreen);
     window.addEventListener('pagehide', persist);
     window.addEventListener('pointerdown', outsideTray);
     window.addEventListener('focusin', outsideTray);
@@ -577,6 +602,7 @@
       media.removeEventListener('change', connect);
       window.removeEventListener('agentfox:themechange', theme);
       window.removeEventListener('keydown', shortcut, true);
+      document.removeEventListener('fullscreenchange', syncFullscreen);
       window.removeEventListener('pagehide', persist);
       window.removeEventListener('pointerdown', outsideTray);
       window.removeEventListener('focusin', outsideTray);
@@ -599,6 +625,11 @@
               aria-label={maximized ? 'Restore active group' : 'Maximize active group'}
               title={`${maximized ? 'Restore' : 'Maximize'} active group (Ctrl+Shift+Space)`}>
         {#if maximized}<Minimize size={16}/>{:else}<Maximize size={16}/>{/if}
+      </button>
+      <button class="icon-control" on:click={toggleFullscreen} disabled={!desktop || !fullscreenSupported}
+              aria-pressed={fullscreen} aria-label={fullscreen ? 'Exit page full screen' : 'Page full screen'}
+              title={fullscreen ? 'Exit page full screen (Escape)' : 'Page full screen (Ctrl+Shift+F; browser F11 is separate)'}>
+        {#if fullscreen}<Shrink size={16}/>{:else}<Fullscreen size={16}/>{/if}
       </button>
       <button on:click={toggleTheme} title={currentTheme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}>{#if currentTheme === 'dark'}<Sun size={14}/> Light theme{:else}<Moon size={14}/> Dark theme{/if}</button>
       <button on:click={() => shortcutsSheet.open()} title="Keyboard shortcuts (Ctrl+/)"><Keyboard size={14}/> Shortcuts</button>

@@ -14,6 +14,7 @@
     ['F6 / Shift+F6','Next / previous panel group, including auto-hidden tools'],
     ['Ctrl+] / Ctrl+[','Next / previous tab in the focused group'],
     ['Ctrl+Shift+Space','Maximize / restore the active group'],
+    ['Ctrl+Shift+F','Enter / exit page full screen; browser F11 remains browser-owned'],
     ['Ctrl+Shift+1 / 2 / 3','Watchlist / Price chart / Trade plan'],
     ['Ctrl+Shift+4 / 5','Order ticket / Order logs'],
     ['Ctrl+Shift+6 / 7 / 8','Portfolio / Persistent orders / Armed orders'],

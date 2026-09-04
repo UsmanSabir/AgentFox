@@ -60,6 +60,8 @@
     bind:this={frame}
     src={current.entry}
     title={current.title}
+    allow="fullscreen"
+    allowfullscreen
     on:load={() => handoff()}
   ></iframe>
 {/if}
