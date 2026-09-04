@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { page } from '$app/stores';
   import { sidebarCollapsed } from '$lib/stores';
+  import { serializeSidebarCollapsed, SIDEBAR_COLLAPSED_KEY } from '$lib/sidebarPreference';
   import { api } from '$lib/api';
   import {
     LayoutDashboard,
@@ -87,6 +88,15 @@
     if (href === '/') return current === '/';
     return current.startsWith(href);
   }
+
+  function toggleCollapsed() {
+    sidebarCollapsed.update(value => {
+      const next = !value;
+      try { localStorage.setItem(SIDEBAR_COLLAPSED_KEY,serializeSidebarCollapsed(next)); }
+      catch { /* Keep the session toggle working when browser storage is unavailable. */ }
+      return next;
+    });
+  }
 </script>
 
 <aside
@@ -105,7 +115,10 @@
     <button
       class="collapse-btn"
       class:rotated={collapsed}
-      on:click={() => sidebarCollapsed.update(v => !v)}
+      on:click={toggleCollapsed}
+      aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+      aria-expanded={!collapsed}
+      aria-controls="agentfox-sidebar-navigation"
       title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
     >
       <ChevronLeft size={15} />
@@ -113,7 +126,7 @@
   </div>
 
   <!-- Nav -->
-  <nav class="nav">
+  <nav class="nav" id="agentfox-sidebar-navigation">
     {#each [...navItems, ...pluginItems, ...trailingNavItems] as item}
       <a
         href={item.href}

@@ -34,7 +34,7 @@
   <header><h2>Keyboard shortcuts</h2><button bind:this={back} on:click={close}>Close shortcuts</button></header>
   <p>Layout shortcuts do not place orders. Number, tab-cycle and maximize shortcuts are ignored while typing. Commands and F6 remain available from inputs. On Mac, Cmd also works for the Ctrl+K, number and maximize shortcuts.</p>
   <table><caption>Workstation keyboard reference</caption><tbody>{#each shortcuts as [keys,description]}<tr><th scope="row"><kbd>{keys}</kbd></th><td>{description}</td></tr>{/each}</tbody></table>
-  <p>Use <b>Commands</b> for pin/unpin, theme, resizing and moving panels. Browser/OS shortcuts may take priority; every action also has an on-screen control. Native order controls retain explicit confirmation.</p>
+  <p>Use <b>Commands</b> for pin/unpin, resizing and moving panels. The workstation follows the AgentFox theme. Browser/OS shortcuts may take priority; every action also has an on-screen control. Native order controls retain explicit confirmation.</p>
 </dialog>
 <style>
   dialog { width:min(760px,calc(100vw - 2rem)); max-height:80dvh; padding:1rem; border:1px solid var(--border-md); border-radius:8px; background:var(--surface); color:var(--text); overflow:auto; }

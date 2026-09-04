@@ -2,9 +2,8 @@
   import { onMount, tick } from 'svelte';
   import { createDockview, themeDark, themeLight, type DockviewApi, type IContentRenderer } from 'dockview';
   import 'dockview/dist/styles/dockview.css';
-  import { Command, PanelsTopLeft, RotateCcw, Maximize, Minimize, Sun, Moon, Keyboard, Pin, PinOff, X, Fullscreen, Shrink } from 'lucide-svelte';
+  import { Command, PanelsTopLeft, RotateCcw, Maximize, Minimize, Keyboard, Pin, PinOff, X, Fullscreen, Shrink } from 'lucide-svelte';
   import WorkspaceShortcuts from './WorkspaceShortcuts.svelte';
-  import { readWorkspaceAppearance, saveWorkspaceAppearance, type WorkspaceTheme } from './workspaceAppearance';
   import type { WorkspaceCommand, WorkspaceComposition, WorkspacePanel, WorkspaceRegion } from './workspaceComposition';
   import { readWorkspaceLayout, saveWorkspaceLayout, type AutoHideTray } from './workspaceLayout';
 
@@ -30,30 +29,6 @@
   let maximized = false;
   let fullscreen = false;
   let fullscreenSupported = false;
-  let localTheme: WorkspaceTheme | null = null;
-  let currentTheme: WorkspaceTheme = 'dark';
-  let hostTheme: WorkspaceTheme = 'dark';
-  let applyingWorkspaceTheme = false;
-  let appearanceWarning = '';
-  const appearanceKey = storageKey + '.appearance';
-  function applyTheme(theme: WorkspaceTheme) {
-    currentTheme = theme;
-    applyingWorkspaceTheme = true;
-    document.documentElement.dataset.theme = theme;
-    window.dispatchEvent(new CustomEvent('agentfox:themechange',{detail:theme}));
-    applyingWorkspaceTheme = false;
-  }
-  function toggleTheme() {
-    localTheme = currentTheme === 'dark' ? 'light' : 'dark';
-    applyTheme(localTheme);
-    try { localStorage.setItem(appearanceKey,saveWorkspaceAppearance(localTheme)); appearanceWarning = ''; }
-    catch { appearanceWarning = 'Theme changed for this session; this browser could not save it.'; }
-  }
-  function followHostTheme() {
-    localTheme = null;
-    try { localStorage.removeItem(appearanceKey); appearanceWarning = ''; } catch { appearanceWarning = 'Could not clear the saved theme preference.'; }
-    applyTheme(hostTheme);
-  }
   async function toggleFullscreen() {
     if (!fullscreenSupported) {
       notice = 'Page full screen is unavailable here. Use the browser F11 command instead.';
@@ -404,8 +379,6 @@
     { id:'workspace.shortcuts', label:'Show keyboard shortcuts', run:() => shortcutsSheet.open() },
     { id:'workspace.fullscreen', label:fullscreen ? 'Exit page full screen' : 'Enter page full screen', run:toggleFullscreen,
       disabled:() => fullscreenSupported ? null : 'Page full screen is unavailable in this browser or host frame.' },
-    { id:'workspace.theme', label:'Toggle light / dark theme', run:toggleTheme },
-    { id:'workspace.host-theme', label:'Use host theme (clear workspace theme override)', run:followHostTheme },
     { id:'layout.bottom', label:bottomTray ? 'Pin bottom tools' : 'Unpin bottom tools (auto-hide)', run:() => bottomTray ? pinBottom() : unpinBottom() },
     { id:'layout.reset', label:'Reset view to default', run:resetView },
     { id:'layout.maximize', label:'Maximize / restore active group', run:maximize },
@@ -495,13 +468,9 @@
   onMount(() => {
     fullscreenSupported = typeof root.requestFullscreen === 'function' && document.fullscreenEnabled !== false;
     syncFullscreen();
-    hostTheme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
-    try {
-      const raw = localStorage.getItem(appearanceKey);
-      localTheme = readWorkspaceAppearance(raw);
-      if (raw && !localTheme) localStorage.removeItem(appearanceKey);
-    } catch { /* Browser storage is optional. */ }
-    applyTheme(localTheme ?? hostTheme);
+    // The host owns appearance for the whole application. Remove the retired per-workstation
+    // override once so an older preview preference cannot fight the global theme after upgrade.
+    try { localStorage.removeItem(storageKey + '.appearance'); } catch { /* Browser storage is optional. */ }
     const media = window.matchMedia('(min-width:901px)');
     let subscriptions: { dispose(): void }[] = [];
     function disconnect() {
@@ -585,9 +554,6 @@
     media.addEventListener('change', connect);
     const theme = () => {
       const incoming = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
-      if (!applyingWorkspaceTheme) hostTheme = incoming;
-      if (localTheme && incoming !== localTheme) { applyTheme(localTheme); return; }
-      currentTheme = incoming;
       api?.updateOptions({ theme:incoming === 'light' ? themeLight : themeDark });
     };
     window.addEventListener('agentfox:themechange', theme);
@@ -606,8 +572,6 @@
       window.removeEventListener('pagehide', persist);
       window.removeEventListener('pointerdown', outsideTray);
       window.removeEventListener('focusin', outsideTray);
-      document.documentElement.dataset.theme = hostTheme;
-      window.dispatchEvent(new CustomEvent('agentfox:themechange',{detail:hostTheme}));
     };
   });
 </script>
@@ -631,7 +595,6 @@
               title={fullscreen ? 'Exit page full screen (Escape)' : 'Page full screen (Ctrl+Shift+F; browser F11 is separate)'}>
         {#if fullscreen}<Shrink size={16}/>{:else}<Fullscreen size={16}/>{/if}
       </button>
-      <button on:click={toggleTheme} title={currentTheme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}>{#if currentTheme === 'dark'}<Sun size={14}/> Light theme{:else}<Moon size={14}/> Dark theme{/if}</button>
       <button on:click={() => shortcutsSheet.open()} title="Keyboard shortcuts (Ctrl+/)"><Keyboard size={14}/> Shortcuts</button>
       <button on:click={() => bottomTray ? pinBottom() : unpinBottom()} disabled={!desktop} title="Auto-hide a bottom tool group without closing its contents">
         {#if bottomTray}<Pin size={14}/> Pin bottom{:else}<PinOff size={14}/> Unpin bottom{/if}
@@ -641,7 +604,6 @@
     </nav>
   </header>
   {#if storageWarning}<p class="storage-warning" role="status">{storageWarning}</p>{/if}
-  {#if appearanceWarning}<p class="storage-warning" role="status">{appearanceWarning}</p>{/if}
   <div class="core-toolbar" bind:this={toolbar}></div>
   <div class="edition-health" bind:this={health}></div>
   <div class="dock-area" class:hidden={!desktop} bind:this={dockArea}>
