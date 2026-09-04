@@ -23,6 +23,7 @@
     ['Watchlist: ↑ ↓ / Enter','Move between symbols / select the focused symbol'],
     ['Watchlist: F2 / Shift+F10','Open actions for the focused symbol; / focuses search'],
     ['Order lists: ↑ ↓ / Home / End','Move between visible rows; Tab reaches filters and controls'],
+    ['Persistent orders: Shift+F10','Open safe row actions; selecting one opens its review or evidence form'],
     ['Order lists: Enter on symbol','Focus row controls, without activating them; Space selects a focused checkbox'],
     ['Order ticket: Ctrl+Enter','Validate and open review — never submit directly'],
     ['Order review: Tab → Confirm','Explicit confirmation; Escape returns without submitting']
