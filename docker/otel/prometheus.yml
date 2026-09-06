@@ -1,0 +1,11 @@
+# Prometheus SCRAPES; it is not pushed to. So it pulls from the endpoint the collector's
+# `prometheus` exporter exposes, rather than AgentFox or the collector sending anything here.
+global:
+  scrape_interval: 10s
+
+scrape_configs:
+  - job_name: agentfox
+    static_configs:
+      # The collector's own container name on the compose network, and the port its
+      # prometheus exporter listens on (see otel-collector-config.yaml).
+      - targets: ["otel-collector:8889"]

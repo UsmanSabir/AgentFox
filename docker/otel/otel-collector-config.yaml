@@ -1,0 +1,71 @@
+# OpenTelemetry Collector for local AgentFox development.
+#
+# The collector is a router, not a database: it RECEIVES telemetry, optionally processes it, and
+# EXPORTS it onward. Running one locally rather than pointing AgentFox straight at a backend is
+# worth the extra container for one reason — the destination becomes a collector config change
+# instead of an application change, so swapping Jaeger for Application Insights or Grafana Cloud
+# never touches AgentFox's own settings.
+
+receivers:
+  otlp:
+    protocols:
+      # gRPC on 4317 — the OTLP default, and what AgentFox uses unless told otherwise.
+      grpc:
+        endpoint: 0.0.0.0:4317
+      # HTTP/protobuf on 4318. Enabled so both protocols can be exercised; the collector does
+      # not care which one a client picks, but the CLIENT must match the port to the protocol.
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # Batching is not optional in anything but a toy setup: without it every span is its own
+  # export call. Kept small here so spans appear promptly while developing rather than
+  # accumulating for the default 8 seconds and looking like nothing is arriving.
+  batch:
+    timeout: 1s
+    send_batch_size: 128
+
+  # A hard ceiling so a burst of spans cannot push the collector into the OOM killer and take
+  # the whole telemetry pipeline down at exactly the moment something interesting is happening.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
+
+exporters:
+  # Prints every span and metric to the collector's own stdout: `docker compose logs -f otel-collector`.
+  # This is the one that answers "is anything arriving at all", which is the first question when a
+  # trace does not show up — it separates "AgentFox is not exporting" from "the backend is not
+  # displaying".
+  debug:
+    verbosity: detailed
+
+  # Traces → Jaeger. Jaeger speaks OTLP natively now, so this is just another OTLP hop.
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+  # Metrics → Prometheus, which SCRAPES rather than receives, so the collector exposes an
+  # endpoint for it instead of pushing.
+  prometheus:
+    endpoint: 0.0.0.0:8889
+
+service:
+  # Surfaces the collector's own health and refused/dropped counts. When AgentFox says it
+  # exported and Jaeger shows nothing, this is where the truth is.
+  telemetry:
+    logs:
+      level: info
+
+  pipelines:
+    traces:
+      receivers: [otlp]
+      # memory_limiter FIRST: it can only shed load if it runs before the work of batching.
+      processors: [memory_limiter, batch]
+      exporters: [debug, otlp/jaeger]
+
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug, prometheus]

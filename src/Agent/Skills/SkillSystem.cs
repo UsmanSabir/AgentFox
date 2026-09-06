@@ -1199,11 +1199,29 @@ public class GitLogTool : BaseTool
 public class DockerBuildTool : BaseTool
 {
     public override string Name => "docker_build";
-    public override string Description => "Build a Docker image";
+    public override string Description =>
+        "Build a Docker image from a Dockerfile by running 'docker build -t <tag> <path>'. "
+        + "Requires Docker to be installed and its daemon running; output is the build log, and a "
+        + "build failure is returned as the tool failing rather than as an empty success.";
     public override Dictionary<string, ToolParameter> Parameters { get; } = new()
     {
-        ["tag"] = new() { Type = "string", Description = "Image tag", Required = true },
-        ["path"] = new() { Type = "string", Description = "Dockerfile path", Required = false, Default = "." }
+        ["tag"] = new()
+        {
+            Type = "string",
+            Description = "Name and optional tag for the image, e.g. 'myapp' or 'myapp:1.2'.",
+            Required = true
+        },
+        // Was described as "Dockerfile path", which is wrong and would have the model pass
+        // ./Dockerfile: this is docker build's positional argument, i.e. the build CONTEXT
+        // directory. Passing a file makes the build fail with an unhelpful message.
+        ["path"] = new()
+        {
+            Type = "string",
+            Description = "Build context DIRECTORY (not the Dockerfile itself), which must contain "
+                          + "a Dockerfile. Defaults to the current directory.",
+            Required = false,
+            Default = "."
+        }
     };
     protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
     {
@@ -1496,11 +1514,27 @@ public class DBMigrationTool : BaseTool
 public class RunTestsTool : BaseTool
 {
     public override string Name => "run_tests";
-    public override string Description => "Run test suites";
+    public override string Description =>
+        "Run .NET tests by invoking 'dotnet test' in the current directory. This is .NET only — "
+        + "it does not run npm, pytest or any other framework. Returns the test output, including "
+        + "which tests failed.";
     public override Dictionary<string, ToolParameter> Parameters { get; } = new()
     {
-        ["pattern"] = new() { Type = "string", Description = "Test pattern", Required = false },
-        ["coverage"] = new() { Type = "boolean", Description = "Generate coverage report", Required = false, Default = false }
+        ["pattern"] = new()
+        {
+            Type = "string",
+            Description = "Optional dotnet test --filter expression to run a subset, e.g. "
+                          + "'FullyQualifiedName~MyTests' or 'Category=Unit'. Omit to run every test.",
+            Required = false
+        },
+        ["coverage"] = new()
+        {
+            Type = "boolean",
+            Description = "Also collect code coverage (XPlat Code Coverage). Slower; the raw "
+                          + "coverage files are written beside the test results.",
+            Required = false,
+            Default = false
+        }
     };
     protected override async Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)
     {

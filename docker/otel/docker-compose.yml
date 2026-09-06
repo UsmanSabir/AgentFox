@@ -1,0 +1,50 @@
+# Local telemetry backend for AgentFox development.
+#
+#   docker compose -f docker/otel/docker-compose.yml up -d
+#   docker compose -f docker/otel/docker-compose.yml logs -f otel-collector
+#   docker compose -f docker/otel/docker-compose.yml down
+#
+# Then set Telemetry:Enabled=true and Telemetry:OtlpEndpoint=http://localhost:4317 in
+# src/Agent/appsettings.user.json. See README.md in this folder.
+#
+# Nothing here is a production deployment: no auth, no persistence, no TLS, ports bound to the
+# host. It is a place for spans to land while developing.
+
+name: agentfox-otel
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.115.1
+    container_name: agentfox-otel-collector
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      # Read-only: the collector never writes its own config, and a container that cannot
+      # modify the file cannot leave a surprise behind after `down`.
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC          <- AgentFox default
+      - "4318:4318"   # OTLP HTTP/protobuf <- only if Telemetry:OtlpProtocol=http/protobuf
+      - "8889:8889"   # Prometheus scrape endpoint the collector exposes
+    depends_on:
+      - jaeger
+    restart: unless-stopped
+
+  jaeger:
+    # all-in-one keeps traces IN MEMORY. A restart loses them, which is correct for this
+    # purpose and worth knowing before wondering where yesterday's trace went.
+    image: jaegertracing/all-in-one:1.62.0
+    container_name: agentfox-jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"  # Jaeger UI -> http://localhost:16686
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.0.1
+    container_name: agentfox-prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"    # Prometheus UI -> http://localhost:9090
+    restart: unless-stopped
