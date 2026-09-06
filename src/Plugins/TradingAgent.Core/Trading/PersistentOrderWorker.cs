@@ -505,6 +505,43 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
     }
 
     /// <summary>
+    /// Whether an UNATTENDED submission may go out on <paramref name="today"/> at all.
+    ///
+    /// <para>
+    /// <b>This is deliberately NOT part of <see cref="OrderWindow"/>, and the asymmetry is the whole
+    /// point.</b> The order window answers "will the venue take this", and on a non-trading day the
+    /// answer is genuinely yes: AHL reports <c>OHO</c> on a Sunday (measured 2026-09-06), that state is
+    /// in the accepting list, and an order submitted then is QUEUED BY THE VENUE AND SENT TO MARKET AT
+    /// THE NEXT OPEN — confirmed by the account owner, not rejected as this code once assumed. An
+    /// operator who places an order on a Sunday is choosing that, and must keep being allowed to: the
+    /// standing product rule is that if the venue will take the order, send it rather than refusing on
+    /// the venue's behalf.
+    /// </para>
+    ///
+    /// <para>
+    /// An unattended loop is the one caller that cannot choose it. Nobody is present, the decision was
+    /// made on a previous session's information, and the result is a live order at Monday's open placed
+    /// by a background timer over a weekend. So this worker requires a trading DAY of its own, and the
+    /// operator paths — <see cref="RetryFailedTodayAsync"/> from the retry endpoint, and every manual
+    /// order through <c>TradingManager</c> — are untouched and still gated by the venue alone.
+    /// </para>
+    ///
+    /// <para>
+    /// A trading DAY, not an open session: <see cref="IMarketCalendar.IsTradingDay"/> honours holidays
+    /// and session overrides, and allows a Monday pre-open placement. Requiring <c>IsOpen</c> would
+    /// forfeit exactly the queue priority at the open that accepting <c>OHO</c> exists to protect.
+    /// </para>
+    /// </summary>
+    /// <remarks>
+    /// Static and internal so the rule can be tested without standing up the whole worker, which has no
+    /// test harness — the instance overload is the one the worker calls.
+    /// </remarks>
+    internal static bool MayPlaceUnattendedOn(IMarketCalendar calendar, DateOnly today) =>
+        calendar.IsTradingDay(today);
+
+    private bool MayPlaceUnattendedOn(DateOnly today) => MayPlaceUnattendedOn(_calendar, today);
+
+    /// <summary>
     /// Unattended counterpart to <see cref="RetryFailedTodayAsync"/>, called once per poll cycle from
     /// <see cref="MaintainAsync"/> for a persistent order whose latest attempt today definitively
     /// failed. Retries ONLY when the policy ladder already authorises unattended execution for this
@@ -524,6 +561,10 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
         DateOnly today,
         CancellationToken ct)
     {
+        // An unattended retry is a submission like any other — see MayPlaceUnattendedOn. Returning
+        // false leaves the caller's "waits for the next trading date" message, which is exactly true.
+        if (!MayPlaceUnattendedOn(today)) return false;
+
         if (!PersistentOrderDecisions.CanRetryFailedToday(
                 intent, latestPlacement, DateTime.UtcNow, today, out _))
             return false;
@@ -757,6 +798,10 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
                       + "placement is eligible on the next trading date.", ct);
             return;
         }
+
+        // The trading-day check comes FIRST and is this worker's own; the order window is the venue's
+        // answer and cannot stand in for it. See MayPlaceUnattendedOn.
+        if (!MayPlaceUnattendedOn(today)) return;
 
         if (!_orderWindow.Evaluate().Allowed) return;
 
