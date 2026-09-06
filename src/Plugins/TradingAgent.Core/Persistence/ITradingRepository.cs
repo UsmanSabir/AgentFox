@@ -46,6 +46,19 @@ public interface ITradingRepository
     /// <summary>Deletes TERMINAL proposals older than <paramref name="before"/>; open ones are kept.</summary>
     Task<int> PruneProposalsAsync(DateTime before, CancellationToken ct = default);
 
+    /// <summary>
+    /// Deletes TERMINAL executions older than <paramref name="before"/>, cascading to their order
+    /// events, broker orders and fills. Executions in <c>submitting</c> or <c>unknown</c> are never
+    /// aged out — an unresolved broker outcome is exactly the row a human still needs.
+    /// </summary>
+    Task<int> PruneExecutionsAsync(DateTime before, CancellationToken ct = default);
+
+    /// <summary>
+    /// Deletes reconciliation snapshots older than <paramref name="before"/>. Only the newest row
+    /// is ever read, and one is written per interval regardless of trading activity.
+    /// </summary>
+    Task<int> PruneReconciliationRunsAsync(DateTime before, CancellationToken ct = default);
+
     Task<IReadOnlyList<TradeProposalRecord>> GetProposalsAsync(
         int limit = 100,
         CancellationToken ct = default);

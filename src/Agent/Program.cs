@@ -822,6 +822,13 @@ class Program
     {
         var registry = new ToolRegistry();
 
+        // Tools:Shell now means what appsettings says it means. It previously gated only
+        // ShellCommandTool, while ~25 skill tools (git_*, docker_*, run_tests, deploy, db_query …)
+        // reached cmd.exe on their own — so the documented "Docker / sandboxed" profile of
+        // Shell=false, FileSystem=false left arbitrary command execution available. Set here rather
+        // than checked in each tool, because a per-tool check is one a new tool forgets.
+        AgentFox.Skills.SkillShellPolicy.Configure(toolsConfig.Shell);
+
         if (toolsConfig.Shell && toolsConfig.IsEnabled("shell"))
             registry.Register(new ShellCommandTool(workspaceManager, toolsConfig.ShellTimeoutSeconds));
 

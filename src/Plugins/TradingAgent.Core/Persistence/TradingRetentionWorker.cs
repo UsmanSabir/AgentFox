@@ -65,6 +65,30 @@ public sealed class TradingRetentionWorker : BackgroundService
                         "[Retention] Pruned {Count} resolved proposal(s) older than {Days} days.",
                         removed, proposalDays);
             }
+
+            var ledgerDays = _options.Value.LedgerRetentionDays;
+            if (ledgerDays > 0)
+            {
+                var removed = await _repository.PruneExecutionsAsync(
+                    DateTime.UtcNow.AddDays(-ledgerDays), ct);
+                if (removed > 0)
+                    _logger.LogInformation(
+                        "[Retention] Pruned {Count} completed execution(s) older than {Days} days, "
+                        + "with their order events, broker orders and fills. Unresolved executions "
+                        + "were kept regardless of age.",
+                        removed, ledgerDays);
+            }
+
+            var reconciliationDays = _options.Value.ReconciliationRetentionDays;
+            if (reconciliationDays > 0)
+            {
+                var removed = await _repository.PruneReconciliationRunsAsync(
+                    DateTime.UtcNow.AddDays(-reconciliationDays), ct);
+                if (removed > 0)
+                    _logger.LogInformation(
+                        "[Retention] Pruned {Count} reconciliation snapshot(s) older than {Days} days.",
+                        removed, reconciliationDays);
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

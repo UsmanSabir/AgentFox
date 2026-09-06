@@ -3383,6 +3383,96 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         return await command.ExecuteNonQueryAsync(ct);
     }
 
+    /// <summary>
+    /// Deletes completed executions older than <paramref name="before"/>, with their order events
+    /// and broker orders.
+    ///
+    /// <para>
+    /// <b>Only TERMINAL executions are pruned.</b> A row still in <c>submitting</c> or, especially,
+    /// <c>unknown</c> is kept regardless of age: <c>unknown</c> means the broker's answer was never
+    /// established, and that is precisely the row a human needs to reconcile by hand. Ageing it out
+    /// would delete the evidence of the one case the ledger exists for.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Order matters.</b> <c>PRAGMA foreign_keys=ON</c> is set, and both <c>trading_order_events</c>
+    /// and <c>broker_orders</c> reference <c>trading_executions</c>, so children go first or the
+    /// parent delete fails. <c>fills</c> in turn references <c>broker_orders</c>. All of it runs in
+    /// one transaction, so a partial sweep cannot leave the ledger half-cut.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Idempotency keys go with the rows.</b> <c>TryBeginExecutionAsync</c> looks a key up with no
+    /// time bound, so a replay of a request older than the retention window mints a new execution
+    /// rather than returning the prior claim. Harmless at any sane retention — an order request is
+    /// not replayed a fortnight later — but it is the reason not to set this to hours.
+    /// </para>
+    /// </summary>
+    public async Task<int> PruneExecutionsAsync(DateTime before, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+
+        const string terminal = "state NOT IN ('submitting','unknown') AND updated_utc < $before";
+
+        // Children first: fills -> broker_orders -> trading_order_events -> trading_executions.
+        var statements = new[]
+        {
+            $"""
+            DELETE FROM fills WHERE broker_order_id IN (
+                SELECT broker_order_id FROM broker_orders WHERE execution_id IN (
+                    SELECT execution_id FROM trading_executions WHERE {terminal}))
+            """,
+            $"""
+            DELETE FROM broker_orders WHERE execution_id IN (
+                SELECT execution_id FROM trading_executions WHERE {terminal})
+            """,
+            $"""
+            DELETE FROM trading_order_events WHERE execution_id IN (
+                SELECT execution_id FROM trading_executions WHERE {terminal})
+            """,
+            $"DELETE FROM trading_executions WHERE {terminal}"
+        };
+
+        var removed = 0;
+        foreach (var sql in statements)
+        {
+            var command = connection.CreateCommand();
+            command.Transaction = (SqliteTransaction)transaction;
+            command.CommandText = sql;
+            command.Parameters.AddWithValue("$before", before.ToString("O"));
+            var affected = await command.ExecuteNonQueryAsync(ct);
+
+            // Report the parent count as "executions pruned"; the children are consequences of it.
+            if (ReferenceEquals(sql, statements[^1]))
+                removed = affected;
+        }
+
+        await transaction.CommitAsync(ct);
+        return removed;
+    }
+
+    /// <summary>
+    /// Deletes reconciliation snapshots older than <paramref name="before"/>.
+    ///
+    /// <para>
+    /// The table nothing reads twice. A pass writes one row per interval — 60 seconds by default,
+    /// so 1,440 a day whether or not a single order is placed — and only the most recent is ever
+    /// consulted. It is the one table here that grows independently of trading activity, which is
+    /// what makes it the one that actually needed a sweeper.
+    /// </para>
+    /// </summary>
+    public async Task<int> PruneReconciliationRunsAsync(DateTime before, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM reconciliation_runs WHERE started_utc < $before";
+        command.Parameters.AddWithValue("$before", before.ToString("O"));
+        return await command.ExecuteNonQueryAsync(ct);
+    }
+
     private static TradeProposalRecord ReadProposal(Microsoft.Data.Sqlite.SqliteDataReader reader) => new(
         reader.GetString(0),
         reader.GetString(1),

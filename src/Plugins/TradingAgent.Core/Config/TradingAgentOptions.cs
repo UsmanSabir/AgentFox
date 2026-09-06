@@ -194,6 +194,44 @@ public class TradingAgentOptions
     public int ReconciliationIntervalSeconds { get; set; } = 60;
     public int ReconciliationMaxAgeSeconds { get; set; } = 180;
 
+    // ── Ledger retention ──────────────────────────────────────────────────────
+    // Until 2026-09-06 neither of these tables had a retention rule or anything that swept them.
+    // trade_proposals and watchlist_alerts did; trading_executions, trading_order_events,
+    // broker_orders, fills and reconciliation_runs grew without bound.
+
+    /// <summary>
+    /// Days to keep TERMINAL executions and everything hanging off them — order events, broker
+    /// orders and fills. 0 disables the sweep.
+    ///
+    /// <para>
+    /// Executions still <c>submitting</c> or <c>unknown</c> are never aged out whatever this says:
+    /// an unresolved broker outcome is the row a human most needs, and deleting it on a timer would
+    /// discard the evidence the ledger exists to hold.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>This value bounds how long a premium campaign can run before its realised P&amp;L goes
+    /// wrong, and nothing will report it if it does.</b> Premium's <c>ComputeRealisedAsync</c> reads
+    /// fills back to <c>campaign.StartedUtc</c> with no bound of its own. If a campaign outlives
+    /// this window, its opening fills are gone by the time it closes and the realised figure is
+    /// computed from the surviving leg alone — a plausible wrong number, not an error, which is then
+    /// written into <c>automation_outcome_daily</c> and kept for 1095 days. Set this comfortably
+    /// longer than the longest campaign you intend to hold.
+    /// </para>
+    /// </summary>
+    public int LedgerRetentionDays { get; set; } = 14;
+
+    /// <summary>
+    /// Days to keep reconciliation snapshots. 0 disables the sweep.
+    ///
+    /// <para>
+    /// The only table here that grows independently of trading: one row per
+    /// <see cref="ReconciliationIntervalSeconds"/>, so 1,440 a day at the default, of which only
+    /// the newest is ever read.
+    /// </para>
+    /// </summary>
+    public int ReconciliationRetentionDays { get; set; } = 14;
+
     // ── Execution alerts ──────────────────────────────────────────────────────
 
     /// <summary>
