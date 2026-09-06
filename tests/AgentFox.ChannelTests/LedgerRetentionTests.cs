@@ -106,7 +106,7 @@ public sealed class LedgerRetentionTests
 
         // Foreign keys are ON and the children reference the parent, so this only succeeds if the
         // deletes run children-first. A wrong order fails the statement, not the test's assertions.
-        var removed = await repository.PruneExecutionsAsync(DateTime.UtcNow.AddDays(-14));
+        var removed = (await repository.PruneExecutionsAsync(DateTime.UtcNow.AddDays(-14))).Removed;
 
         Assert.AreEqual(1, removed);
         Assert.AreEqual(0, await CountAsync("trading_executions"));
@@ -123,7 +123,7 @@ public sealed class LedgerRetentionTests
 
         await SeedExecutionAsync("recent", "accepted", DateTime.UtcNow.AddDays(-2));
 
-        Assert.AreEqual(0, await repository.PruneExecutionsAsync(DateTime.UtcNow.AddDays(-14)));
+        Assert.AreEqual(0, (await repository.PruneExecutionsAsync(DateTime.UtcNow.AddDays(-14))).Removed);
         Assert.AreEqual(1, await CountAsync("trading_executions"));
         Assert.AreEqual(1, await CountAsync("fills"));
     }
@@ -140,7 +140,7 @@ public sealed class LedgerRetentionTests
         await SeedExecutionAsync("unknown-old", "unknown", DateTime.UtcNow.AddDays(-400));
         await SeedExecutionAsync("submitting-old", "submitting", DateTime.UtcNow.AddDays(-400));
 
-        Assert.AreEqual(0, await repository.PruneExecutionsAsync(DateTime.UtcNow.AddDays(-14)));
+        Assert.AreEqual(0, (await repository.PruneExecutionsAsync(DateTime.UtcNow.AddDays(-14))).Removed);
         Assert.AreEqual(2, await CountAsync("trading_executions"));
         Assert.AreEqual(2, await CountAsync("fills"),
             "children of a kept execution must survive with it");
@@ -157,7 +157,7 @@ public sealed class LedgerRetentionTests
         await SeedExecutionAsync("old-unknown", "unknown", DateTime.UtcNow.AddDays(-30));
         await SeedExecutionAsync("new-accepted", "accepted", DateTime.UtcNow.AddDays(-1));
 
-        Assert.AreEqual(2, await repository.PruneExecutionsAsync(DateTime.UtcNow.AddDays(-14)));
+        Assert.AreEqual(2, (await repository.PruneExecutionsAsync(DateTime.UtcNow.AddDays(-14))).Removed);
         Assert.AreEqual(2, await CountAsync("trading_executions"));
         Assert.AreEqual(2, await CountAsync("broker_orders"));
     }
@@ -187,9 +187,119 @@ public sealed class LedgerRetentionTests
 
         await SeedExecutionAsync("old", "accepted", DateTime.UtcNow.AddDays(-30));
 
-        Assert.AreEqual(1, await repository.PruneExecutionsAsync(DateTime.UtcNow.AddDays(-14)));
-        Assert.AreEqual(0, await repository.PruneExecutionsAsync(DateTime.UtcNow.AddDays(-14)),
+        Assert.AreEqual(1, (await repository.PruneExecutionsAsync(DateTime.UtcNow.AddDays(-14))).Removed);
+        Assert.AreEqual(0, (await repository.PruneExecutionsAsync(DateTime.UtcNow.AddDays(-14))).Removed,
             "a second sweep on the same day must be a no-op, not an error");
+    }
+
+    /// <summary>An automation campaign, open unless <paramref name="closedUtc"/> is given.</summary>
+    private async Task SeedCampaignAsync(
+        string id, string symbol, DateTime startedUtc, DateTime? closedUtc = null)
+    {
+        const string profileJson = "{}";
+        var started = startedUtc.ToString("O");
+        var closed = closedUtc is null ? "NULL" : $"'{closedUtc.Value:O}'";
+        await ExecuteAsync($"""
+            INSERT INTO automation_campaigns
+                (campaign_id, symbol, profile_id, profile_json, state, origin, deployed_pkr,
+                 max_legs, completed_legs, quantity, started_utc, updated_utc, closed_utc)
+            VALUES ('{id}', '{symbol}', 'p1', '{profileJson}', 'running', 'auto', '0',
+                    1, 0, 10, '{started}', '{started}', {closed});
+            """);
+    }
+
+    [TestMethod]
+    public async Task AnOpenCampaignHoldsBackTheCutoff_SoItsFillsSurvive()
+    {
+        // The owner's decision, pinned: functionality outranks the retention cap. A campaign that
+        // has been running for 90 days still needs its OPENING fills when it closes, because
+        // realised P&L is computed from every fill back to StartedUtc. Sweeping them would produce
+        // a plausible wrong number rather than an error — and then keep it for 1095 days.
+        var repository = Repository();
+        await repository.GetStatusAsync();
+
+        await SeedExecutionAsync("campaign-entry", "accepted", DateTime.UtcNow.AddDays(-90));
+        await SeedCampaignAsync("c1", "OGDC", DateTime.UtcNow.AddDays(-95));
+
+        var result = await repository.PruneExecutionsAsync(DateTime.UtcNow.AddDays(-14));
+
+        Assert.AreEqual(0, result.Removed,
+            "A 14-day cutoff must be pulled back behind a campaign open since day 95.");
+        Assert.AreEqual(1, await CountAsync("fills"), "the campaign's opening fill was swept");
+        Assert.IsTrue(result.HeldBackByOpenCampaign,
+            "The sweep must SAY it was held back — otherwise 'nothing was old enough' and 'a "
+            + "campaign is holding the cutoff' look identical to an operator.");
+        Assert.IsTrue(result.EffectiveCutoff < DateTime.UtcNow.AddDays(-90),
+            "The reported cutoff must be the campaign's start, not the configured window.");
+    }
+
+    [TestMethod]
+    public async Task AClosedCampaignDoesNotHoldBackTheCutoff()
+    {
+        // Once closed, its realised figure is already computed and stored. Holding retention back
+        // for it forever would make the floor a leak rather than a safeguard.
+        var repository = Repository();
+        await repository.GetStatusAsync();
+
+        await SeedExecutionAsync("old", "accepted", DateTime.UtcNow.AddDays(-90));
+        await SeedCampaignAsync("c1", "OGDC", DateTime.UtcNow.AddDays(-95), DateTime.UtcNow.AddDays(-60));
+
+        Assert.AreEqual(1, (await repository.PruneExecutionsAsync(DateTime.UtcNow.AddDays(-14))).Removed);
+        Assert.AreEqual(0, await CountAsync("fills"));
+    }
+
+    [TestMethod]
+    public async Task TheFloorIsTheOLDESTOpenCampaign_NotTheNewest()
+    {
+        // Taking the newest would sweep the older campaign's fills — the failure this guards, with
+        // one extra campaign present to hide it.
+        var repository = Repository();
+        await repository.GetStatusAsync();
+
+        await SeedExecutionAsync("old", "accepted", DateTime.UtcNow.AddDays(-90));
+        await SeedCampaignAsync("recent", "PAEL", DateTime.UtcNow.AddDays(-3));
+        await SeedCampaignAsync("ancient", "OGDC", DateTime.UtcNow.AddDays(-120));
+
+        Assert.AreEqual(0, (await repository.PruneExecutionsAsync(DateTime.UtcNow.AddDays(-14))).Removed);
+        Assert.AreEqual(1, await CountAsync("trading_executions"));
+    }
+
+    [TestMethod]
+    public async Task AnOpenCampaignNewerThanTheCutoffChangesNothing()
+    {
+        // The floor only ever pulls the cutoff BACK. A campaign started yesterday must not extend
+        // retention forward and start sweeping rows the operator configured to keep.
+        var repository = Repository();
+        await repository.GetStatusAsync();
+
+        await SeedExecutionAsync("old", "accepted", DateTime.UtcNow.AddDays(-90));
+        await SeedExecutionAsync("recent", "accepted", DateTime.UtcNow.AddDays(-2));
+        await SeedCampaignAsync("c1", "OGDC", DateTime.UtcNow.AddDays(-1));
+
+        var result = await repository.PruneExecutionsAsync(DateTime.UtcNow.AddDays(-14));
+
+        Assert.AreEqual(1, result.Removed);
+        Assert.AreEqual(1, await CountAsync("trading_executions"), "the recent execution was swept");
+        Assert.IsFalse(result.HeldBackByOpenCampaign,
+            "A campaign newer than the cutoff is not holding anything back and must not say it is.");
+    }
+
+    [TestMethod]
+    public async Task ReconciliationSnapshotsAreNotHeldBackByAnOpenCampaign()
+    {
+        // Deliberately exempt: nothing reads a historical snapshot, so no campaign depends on one.
+        // Giving them the floor too would defeat the sweep that actually needed writing.
+        var repository = Repository();
+        await repository.GetStatusAsync();
+
+        await SeedCampaignAsync("c1", "OGDC", DateTime.UtcNow.AddDays(-120));
+        const string emptyJson = "{}";
+        await ExecuteAsync($"""
+            INSERT INTO reconciliation_runs (reconciliation_id, state, details_json, started_utc)
+            VALUES ('r-old', 'healthy', '{emptyJson}', '{DateTime.UtcNow.AddDays(-30):O}');
+            """);
+
+        Assert.AreEqual(1, await repository.PruneReconciliationRunsAsync(DateTime.UtcNow.AddDays(-14)));
     }
 
     [TestMethod]

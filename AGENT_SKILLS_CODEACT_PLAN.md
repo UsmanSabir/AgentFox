@@ -18,8 +18,10 @@ Three tracks, in this order:
    (covers skills.sh, agentskills.io, and github/awesome-copilot, which are all
    Git-resolved) and the **MCP skills source** (`Microsoft.Agents.AI.Mcp`, the
    MS-native `skill://index.json` path).
-3. **Adopt CodeAct** via `Microsoft.Agents.AI.Hyperlight`, replacing the
-   unisolated `Runtime/CodeExecution.cs` sandbox.
+3. **Adopt CodeAct** via `Microsoft.Agents.AI.Hyperlight`, behind a backend flag
+   with an automatic mode (§5.5a), superseding the unisolated
+   `Runtime/CodeExecution.cs` sandbox — which is **dead code today**, registered
+   nowhere, so this introduces a capability rather than remediating a live one.
 
 **Background agents are already implemented in AgentFox** — see §4. No adoption
 work is required; the recommendation is explicitly *not* to also turn on the
@@ -99,12 +101,19 @@ Notes that shape the design:
 
 ### 2.3 CodeAct / Hyperlight — published as preview, restores clean
 
-`Microsoft.Agents.AI.Hyperlight` **1.15.0-preview.260722.1** restores successfully
-today. The Learn article's warning that
+`Microsoft.Agents.AI.Hyperlight` restores successfully today. The Learn article's warning that
 *"`Hyperlight.HyperlightSandbox.Api` … is not yet published to nuget.org [so] the
 project will fail to restore"* **is out of date** — that dependency is published
 (0.4.0 and 0.5.0 are both on nuget.org) and a three-package restore of
 `Microsoft.Agents.AI` + `.Mcp` + `.Hyperlight` completed cleanly.
+
+**Version, corrected 2026-09-06.** This section said 1.15.0-preview, which was the
+newest release in the local NuGet cache rather than on the feed. The feed carries
+18 versions through `1.20.0-preview.260831.1`, and **`1.19.0-preview.260822.1`
+matches the `Microsoft.Agents.AI` 1.19.0 the repo pins** — so adopting it does not
+fork the family, which was the main objection on file against doing so. Every
+version is still preview, so `Directory.Packages.props`'s preview-bump policy
+applies: a deliberate change with a green gate, not a routine update.
 
 Reflected surface:
 
@@ -126,6 +135,19 @@ Runtime prerequisites — these are real deployment constraints, not footnotes:
   macOS.
 - Requires hardware virtualization: **Windows Hypervisor Platform (WHP)** on
   Windows, **KVM** on Linux. Sandbox creation fails without it.
+- **That capability CANNOT be probed reliably, so do not try.** Measured
+  2026-09-06 on a machine where virtualization works:
+
+  | Probe | Answer | What it is worth |
+  | --- | --- | --- |
+  | `Win32_ComputerSystem.HypervisorPresent` | `True` | only "a hypervisor is running" — says nothing about WHP being exposed to a user-mode process |
+  | `Win32_Processor.SecondLevelAddressTranslationExtensions` | **`False`** | a **false negative**: the OS reports CPU features through the already-running hypervisor, which masks them |
+  | `Get-WindowsOptionalFeature -FeatureName HypervisorPlatform` | **requires elevation** | unavailable to a normally-run agent |
+
+  So a probe-based `auto` mode would have disabled CodeAct on a machine where it
+  works, for a reason nobody could see. **Detection must be by ATTEMPT:** construct
+  a sandbox once at startup, catch the failure, and report which backend was
+  selected. See §5.5a.
 - The Wasm backend needs a Python guest module at `HYPERLIGHT_PYTHON_GUEST_PATH`.
   **That guest module is not distributed on nuget.org** — it comes from
   `hyperlight-dev/hyperlight-sandbox` releases. Sourcing and shipping it is a
@@ -282,6 +304,66 @@ Resolution, via `AgentSkillsProviderOptions`:
 
 ---
 
+### 5.5a CodeAct backend selection: a flag, with `auto` meaning "attempt, then fall back"
+
+Owner's decision, 2026-09-06: **bridge `execute_code` through
+`CreateGatewayTools()`, select the backend by flag with an automatic mode, and put
+the approval in HITL.** Three parts, and the middle one is not what it first looks
+like.
+
+**The flag.** `CodeAct:Backend` — one of:
+
+| Value | Behaviour |
+| --- | --- |
+| `off` (default) | no CodeAct at all; `execute_code` is not registered |
+| `hyperlight` | require the sandbox; refuse to start CodeAct if it cannot be created, rather than quietly running unsandboxed |
+| `process` | today's `Runtime/CodeExecution.cs` — subprocess, no isolation |
+| `auto` | try `hyperlight`, fall back to `process` |
+
+`hyperlight` and `process` are both explicit on purpose. An operator who asked for
+a sandbox and silently got a subprocess is worse off than one who got an error,
+because the whole value of the setting is the guarantee.
+
+**`auto` must ATTEMPT, not probe.** The obvious implementation — read
+`HypervisorPresent`, pick a backend — produces a wrong answer on real hardware.
+Measured on this machine (§2.3 has the table): virtualization works, yet
+`SecondLevelAddressTranslationExtensions` reads **False** because the OS reports
+CPU features through the hypervisor already running, and the one call that would
+actually answer the question (`Get-WindowsOptionalFeature HypervisorPlatform`)
+**requires elevation** and so is unavailable to a normally-run agent. A probe would
+have disabled the sandbox on a machine where it works, invisibly.
+
+So `auto` constructs a `HyperlightCodeActProvider` once during startup, catches the
+failure, and **logs which backend it selected and why** — at Information on
+success, at Warning on fallback. A capability decided by an unlogged probe is the
+same class of silent behaviour as the OpenTelemetry flag that emitted into no
+listener.
+
+**HITL owns the approval, exactly as §5.5 does for skill scripts.** Set
+`ApprovalMode = CodeActApprovalMode.NeverRequire` — not because approval is
+unwanted, but because the framework's own approval is the alternate authority
+`HARNESS_AGENT_ROADMAP.md` principle 2 forbids. Approval is instead raised from our
+own wrapper by calling `HitlManager.RequestApprovalAsync` before the sandbox runs,
+so there is one approval authority, one audit trail, and one `HitlBypassPolicy`.
+
+Two consequences that follow from facts already recorded in §2.3 and Phase 5, and
+that the HITL prompt has to reflect:
+
+- **`call_tool` runs in the HOST process**, not in the sandbox. So the sandbox
+  bounds the *code*, never the tools the code invokes — which is precisely why the
+  `Tools` list must be built from `CreateGatewayTools()` and nothing else.
+- **Approval covers the whole `execute_code` block, not each `call_tool` within
+  it.** The human is therefore approving a program, not a call, and the prompt must
+  show the code being run rather than a tool name. Only read-only, deterministic
+  tools belong on the provider list; anything side-effecting stays a direct agent
+  tool with its own per-invocation gate.
+
+**What this does NOT resolve, and it stays open until the spike:** the Python guest
+module is not on nuget.org (§2.3), so `CreateForWasm` cannot be wired without first
+sourcing it from `hyperlight-dev/hyperlight-sandbox`. `CreateForJavaScript()` is the
+fallback and needs no external artefact. Settle that in the Phase 5 prerequisite
+spike before any of the above is built.
+
 ## 6. Phased plan
 
 ### Phase 1 — `AgentSkillsProvider` foundation
@@ -409,7 +491,8 @@ significant standing risk; Hyperlight is a real remediation, not a nice-to-have.
   `hyperlight-dev/hyperlight-sandbox`, confirm WHP is available on target Windows
   hosts, and confirm sandbox creation succeeds on win-x64. If the guest module
   cannot be redistributed acceptably, fall back to `CreateForJavaScript()`.
-- Add `Microsoft.Agents.AI.Hyperlight` `1.15.0-preview.260722.1` centrally.
+- Add `Microsoft.Agents.AI.Hyperlight` `1.19.0-preview.260822.1` centrally — the
+  build that matches the pinned `Microsoft.Agents.AI` 1.19.0 family (§2.3).
 - `src/Agent/Runtime/CodeAct/CodeActProviderFactory.cs` — sole contact point with
   the Hyperlight API.
 - **The critical security requirement:** tools registered on
@@ -425,13 +508,21 @@ significant standing risk; Hyperlight is a real remediation, not a nice-to-have.
   each `call_tool` inside it.** So only read-only, deterministic tools go on the
   provider list. Anything side-effecting stays a direct agent tool with its own
   per-invocation gate.
-- Set `ApprovalMode = CodeActApprovalMode.AlwaysRequire` for the initial rollout.
+- Set `ApprovalMode = CodeActApprovalMode.NeverRequire` and raise approval from our
+  own wrapper via `HitlManager` instead — §5.5a. `AlwaysRequire` would work, but it
+  is the framework's own approval path, i.e. the second authority principle 2
+  forbids; this keeps one gate, one bypass policy and one audit trail.
 - Constrain the sandbox explicitly: `HostInputDirectory` scoped to the
   `WorkspaceManager` workspace, `FileMounts` empty by default, `AllowedDomains`
   empty by default (deny-all outbound).
-- Gate behind `CodeAct:Enabled=false`; `Runtime/CodeExecution.cs` remains the
-  fallback until CodeAct is proven, then `execute_code` is **removed**, not left
-  as a bypass.
+- Gate behind `CodeAct:Backend` (§5.5a), defaulting to `off`.
+  `Runtime/CodeExecution.cs` remains the `process` backend until the sandbox is
+  proven — note it is currently DEAD CODE, registered nowhere, so "the fallback"
+  means reviving it deliberately rather than leaving something running. Once the
+  sandbox is proven, `process` is **removed**, not left as a bypass.
+- `auto` selects by ATTEMPTING sandbox creation, never by probing for a hypervisor
+  — the probes give a false negative on working hardware (§2.3). Log the selected
+  backend either way.
 - Honour `IDisposable` and the one-provider-per-agent constraint in `FoxAgent`
   teardown.
 
@@ -490,15 +581,30 @@ No implementation. Two small tasks:
     "Mcp": { "Enabled": false, "RefreshIntervalMinutes": 15 }
   },
   "CodeAct": {
-    "Enabled": false,
-    "Backend": "Wasm",
+    // off | hyperlight | process | auto   — see §5.5a.
+    // "auto" ATTEMPTS the sandbox and falls back to "process", logging which it got.
+    // It never probes for a hypervisor: the probes give a false negative on working
+    // hardware (§2.3), which would disable the sandbox invisibly.
+    "Backend": "off",
+
+    // Wasm needs a Python guest module that is NOT on nuget.org (§2.3); JavaScript
+    // needs no external artefact. Settle this in the Phase 5 prerequisite spike.
+    "Guest": "JavaScript",
     "GuestModulePath": null,
-    "ApprovalMode": "AlwaysRequire",
+
+    // Deny-all by default. HostInputDirectory is scoped to the WorkspaceManager
+    // workspace; empty mounts and empty domains mean the sandbox sees nothing and
+    // reaches nothing until someone says otherwise.
     "AllowedDomains": [],
     "FileMounts": []
   }
 }
 ```
+
+`ApprovalMode` is deliberately **absent**: approval is not configurable here because
+it is not the framework's to grant. `HitlManager` raises it from our own wrapper
+(§5.5a), so it obeys `Hitl` and `Hitl:Bypass` like every other gated tool. A second
+approval switch would be a second authority.
 
 ---
 
@@ -537,9 +643,17 @@ Debug `bin` is often locked by a running AgentFox instance.
    its place now that MCP covers much of the same ground.
 3. **Skill trust tiers.** Is a two-tier model (first-party local = scripts allowed;
    remote = no scripts) sufficient, or do we need a per-skill trust grant?
-4. **CodeAct vs. `execute_code`.** Confirm the intent is to *remove*
-   `Runtime/CodeExecution.cs` once CodeAct lands, rather than keep it as a fallback
-   — keeping it would preserve the unsandboxed bypass this phase exists to close.
+4. **CodeAct vs. `execute_code`.** ~~Confirm the intent is to *remove*
+   `Runtime/CodeExecution.cs` once CodeAct lands.~~ **Answered 2026-09-06:** it is
+   removed once the sandbox is proven, and until then it is the `process` backend
+   behind an explicit flag (§5.5a). Worth knowing before planning the migration:
+   `CodeSandbox`/`CodeExecutionTool` are **dead code today** — registered nowhere,
+   so `execute_code` is not currently exposed to any model. That makes Phase 5 the
+   introduction of a capability rather than the remediation of a live one, which
+   changes its urgency but not its design.
+5. **The Python guest module** (§2.3, R5) remains the one blocking unknown for the
+   Wasm backend. `CreateForJavaScript()` needs no external artefact and is the
+   default in §8 until the spike settles it.
 
 ---
 

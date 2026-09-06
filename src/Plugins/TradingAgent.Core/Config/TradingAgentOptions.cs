@@ -210,13 +210,20 @@ public class TradingAgentOptions
     /// </para>
     ///
     /// <para>
-    /// <b>This value bounds how long a premium campaign can run before its realised P&amp;L goes
-    /// wrong, and nothing will report it if it does.</b> Premium's <c>ComputeRealisedAsync</c> reads
-    /// fills back to <c>campaign.StartedUtc</c> with no bound of its own. If a campaign outlives
-    /// this window, its opening fills are gone by the time it closes and the realised figure is
-    /// computed from the surviving leg alone — a plausible wrong number, not an error, which is then
-    /// written into <c>automation_outcome_daily</c> and kept for 1095 days. Set this comfortably
-    /// longer than the longest campaign you intend to hold.
+    /// <b>An OPEN CAMPAIGN OUTRANKS this value; it is a floor on cleanup, not a cap on how long a
+    /// campaign may run.</b> <c>PruneExecutionsAsync</c> pulls its own cutoff back to the earliest
+    /// open campaign's start, so a campaign held for a year keeps every fill it will need at close
+    /// however short this is set. Owner's decision, 2026-09-06: functionality is not compromised to
+    /// hold a retention period.
+    /// </para>
+    ///
+    /// <para>
+    /// The reason it matters: premium's <c>ComputeRealisedAsync</c> reads fills back to
+    /// <c>campaign.StartedUtc</c> with no bound of its own, so a missing opening fill does not
+    /// error — it produces a realised figure computed from the surviving leg alone, which is then
+    /// kept in <c>automation_outcome_daily</c> for 1095 days. The floor removes that failure rather
+    /// than documenting it, and errs the safe way: retention takes longer to bite, never that data
+    /// goes missing.
     /// </para>
     /// </summary>
     public int LedgerRetentionDays { get; set; } = 14;

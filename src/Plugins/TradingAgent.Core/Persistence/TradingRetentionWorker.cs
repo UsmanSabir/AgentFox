@@ -69,14 +69,26 @@ public sealed class TradingRetentionWorker : BackgroundService
             var ledgerDays = _options.Value.LedgerRetentionDays;
             if (ledgerDays > 0)
             {
-                var removed = await _repository.PruneExecutionsAsync(
+                var result = await _repository.PruneExecutionsAsync(
                     DateTime.UtcNow.AddDays(-ledgerDays), ct);
-                if (removed > 0)
+
+                if (result.Removed > 0)
                     _logger.LogInformation(
-                        "[Retention] Pruned {Count} completed execution(s) older than {Days} days, "
+                        "[Retention] Pruned {Count} completed execution(s) older than {Cutoff:u}, "
                         + "with their order events, broker orders and fills. Unresolved executions "
                         + "were kept regardless of age.",
-                        removed, ledgerDays);
+                        result.Removed, result.EffectiveCutoff);
+
+                // Reported even when nothing was removed. Otherwise an operator who set 14 days and
+                // sees no rows go has no way to tell "nothing was old enough" from "an open campaign
+                // is holding the cutoff months back" — and the second is a fact about their
+                // positions rather than a fault, so it needs saying rather than inferring.
+                if (result.HeldBackByOpenCampaign)
+                    _logger.LogInformation(
+                        "[Retention] The {Days}-day ledger cutoff was held back to {Cutoff:u} by an "
+                        + "open automation campaign — its fills are still needed to compute realised "
+                        + "P&L when it closes. Cleanup resumes once the campaign is closed.",
+                        ledgerDays, result.EffectiveCutoff);
             }
 
             var reconciliationDays = _options.Value.ReconciliationRetentionDays;

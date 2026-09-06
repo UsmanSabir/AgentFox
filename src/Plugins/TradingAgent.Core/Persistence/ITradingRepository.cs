@@ -49,9 +49,10 @@ public interface ITradingRepository
     /// <summary>
     /// Deletes TERMINAL executions older than <paramref name="before"/>, cascading to their order
     /// events, broker orders and fills. Executions in <c>submitting</c> or <c>unknown</c> are never
-    /// aged out — an unresolved broker outcome is exactly the row a human still needs.
+    /// aged out — an unresolved broker outcome is exactly the row a human still needs — and the
+    /// cutoff is pulled back behind the oldest OPEN campaign so its fills survive to be counted.
     /// </summary>
-    Task<int> PruneExecutionsAsync(DateTime before, CancellationToken ct = default);
+    Task<LedgerPruneResult> PruneExecutionsAsync(DateTime before, CancellationToken ct = default);
 
     /// <summary>
     /// Deletes reconciliation snapshots older than <paramref name="before"/>. Only the newest row
@@ -722,6 +723,21 @@ public sealed record TradeProposalRecord(
 /// parent row carried neither field — a fill that cannot be attributed to a side is reported rather
 /// than guessed, because guessing turns a purchase into a sale.
 /// </param>
+/// <summary>
+/// What a ledger sweep actually did.
+///
+/// <para>
+/// <see cref="EffectiveCutoff"/> and <see cref="HeldBackByOpenCampaign"/> exist so the reason for a
+/// sweep that removed nothing is visible. An operator who configures 14 days and sees zero rows go
+/// would otherwise have no way to tell "nothing was old enough" from "an open campaign is holding
+/// the cutoff at day 95" — and the second is a fact about their positions, not a fault.
+/// </para>
+/// </summary>
+public sealed record LedgerPruneResult(
+    int Removed,
+    DateTime EffectiveCutoff,
+    bool HeldBackByOpenCampaign);
+
 public sealed record RecordedFill(
     string Symbol,
     string? Side,

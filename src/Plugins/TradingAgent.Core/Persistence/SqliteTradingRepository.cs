@@ -3407,11 +3407,32 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
     /// rather than returning the prior claim. Harmless at any sane retention — an order request is
     /// not replayed a fortnight later — but it is the reason not to set this to hours.
     /// </para>
+    ///
+    /// <para>
+    /// <b>An OPEN CAMPAIGN OUTRANKS the retention window, and that is the owner's decision:
+    /// functionality is not compromised to hold a retention cap.</b> A campaign's realised P&amp;L is
+    /// computed at close from every fill back to its start, so pruning a fill while its campaign is
+    /// still running would produce a plausible WRONG number — computed from the surviving leg alone,
+    /// never an error — which is then kept in the 1095-day rollup. So the cutoff is pulled back to
+    /// the oldest open campaign's start whenever that is earlier than the configured one. The
+    /// consequence runs the safe way: retention takes longer to bite, never that data goes missing.
+    /// </para>
+    ///
+    /// <para>
+    /// Computed HERE rather than in the worker, because both tables live behind this one connection
+    /// and a floor applied at the call site is one a future caller forgets.
+    /// </para>
     /// </summary>
-    public async Task<int> PruneExecutionsAsync(DateTime before, CancellationToken ct = default)
+    public async Task<LedgerPruneResult> PruneExecutionsAsync(
+        DateTime before, CancellationToken ct = default)
     {
         await EnsureInitializedAsync(ct);
         await using var connection = await OpenAsync(ct);
+
+        var requested = before;
+        before = await ApplyOpenCampaignFloorAsync(connection, before, ct);
+        var heldBack = before < requested;
+
         await using var transaction = await connection.BeginTransactionAsync(ct);
 
         const string terminal = "state NOT IN ('submitting','unknown') AND updated_utc < $before";
@@ -3450,7 +3471,32 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         }
 
         await transaction.CommitAsync(ct);
-        return removed;
+        return new LedgerPruneResult(removed, before, heldBack);
+    }
+
+    /// <summary>
+    /// Pulls a retention cutoff back to the earliest OPEN campaign's start, so no fill a running
+    /// campaign will need at close is ever swept. Returns <paramref name="before"/> unchanged when
+    /// nothing is open, or when every open campaign started after it.
+    ///
+    /// <para>
+    /// Reconciliation snapshots deliberately do NOT get this floor: nothing reads a historical
+    /// snapshot, so no campaign depends on one.
+    /// </para>
+    /// </summary>
+    private static async Task<DateTime> ApplyOpenCampaignFloorAsync(
+        SqliteConnection connection, DateTime before, CancellationToken ct)
+    {
+        var command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT MIN(started_utc) FROM automation_campaigns WHERE closed_utc IS NULL";
+
+        var value = await command.ExecuteScalarAsync(ct);
+        if (value is not string raw || !DateTime.TryParse(
+                raw, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var oldestOpen))
+            return before;
+
+        return oldestOpen < before ? oldestOpen : before;
     }
 
     /// <summary>

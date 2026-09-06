@@ -719,7 +719,7 @@ public sealed class WatchlistUniverseTests
             throw new NotSupportedException();
         public Task<int> PruneProposalsAsync(DateTime before, CancellationToken ct = default) =>
             throw new NotSupportedException();
-        public Task<int> PruneExecutionsAsync(DateTime before, CancellationToken ct = default) =>
+        public Task<LedgerPruneResult> PruneExecutionsAsync(DateTime before, CancellationToken ct = default) =>
             throw new NotSupportedException();
         public Task<int> PruneReconciliationRunsAsync(DateTime before, CancellationToken ct = default) =>
             throw new NotSupportedException();
