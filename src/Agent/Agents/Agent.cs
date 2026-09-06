@@ -17,6 +17,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using AgentFox.Plugins.Interfaces;
+using AgentFox.Plugins.Observability;
 using AgentFox.Plugins.Research;
 using AgentFox.Planning;
 using SystemPromptBuilder = AgentFox.LLM.SystemPromptBuilder;
@@ -519,6 +520,18 @@ public class FoxAgent
         conversationId ??= Guid.NewGuid().ToString("N");
         CurrentSessionKey.Value = conversationId;
 
+        // Every agent turn runs under a correlation id. Ensure() adopts one already in force
+        // (a channel message, or the command that scheduled this turn) and mints one otherwise,
+        // so a turn started by the heartbeat or a cron is still groupable even though nothing
+        // upstream caused it. Tool calls, approval decisions and — through the plugin contract —
+        // trading proposals, executions and ledger events all inherit this value.
+        var correlationId = CorrelationContext.Ensure();
+
+        using var runSpan = AgentTelemetry.Start(AgentTelemetry.Agent, $"agent.run {Name}");
+        runSpan?.SetTag("agentfox.agent.name", Name);
+        runSpan?.SetTag("agentfox.agent.role", Role);
+        runSpan?.SetTag("agentfox.session.conversation_id", conversationId);
+
         // Handle /new and /reset — archive current session and start a fresh one
         if (SessionManager != null && SessionManager.IsResetCommand(task))
         {
@@ -747,6 +760,7 @@ public class FoxAgent
             };
             if (_experienceLearning != null)
                 await _experienceLearning.CompleteAsync(experienceTurn, true, timeoutToken);
+            AgentTelemetry.SetOutcome(runSpan, succeeded: true);
             return result;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -776,18 +790,23 @@ public class FoxAgent
                 "Agent '{AgentName}' turn interrupted in conversation {ConversationId}",
                 Name,
                 conversationId);
+            // Interruption is intentional, so it is a refusal rather than an error: a stopped turn
+            // that traced as a failure would put steering and real breakage in the same bucket.
+            AgentTelemetry.SetOutcome(runSpan, succeeded: false, "interrupted");
             throw;
         }
         catch (OperationCanceledException)
         {
             _logger?.LogWarning("Agent '{AgentName}' task timed out after {Timeout} seconds", Name, TimeoutSeconds);
             SessionManager?.MarkAborted(conversationId, "timeout");
+            AgentTelemetry.SetOutcome(runSpan, succeeded: false, "timeout");
             throw;
         }
         catch (Exception ex)
         {
             _logger?.LogError(ex, "Agent '{AgentName}' failed to process task in conversation {ConversationId}", Name, conversationId);
             SessionManager?.MarkAborted(conversationId, ex.Message);
+            AgentTelemetry.SetError(runSpan, ex);
             throw;
         }
         finally
@@ -1586,13 +1605,25 @@ public class AgentBuilder
             return missing;
         }
 
+        // One span per model-invoked tool call. This is the only path every such call takes, so
+        // instrumenting here rather than per tool means a new tool is traced the day it is written.
+        // Arguments and results are deliberately NOT recorded: they carry whatever the tool read,
+        // which is exactly what the credential guard exists to keep out of anything exportable.
+        using var toolSpan = AgentTelemetry.Start(AgentTelemetry.Agent, $"tool.execute {toolName}");
+        toolSpan?.SetTag("agentfox.tool.name", toolName);
+        toolSpan?.SetTag("agentfox.tool.argument_count", arguments.Count);
+
         // ── HITL approval gate (Mode 1) ──────────────────────────────────────
         if (_toolApprovalGate != null)
         {
             var allowed = await _toolApprovalGate(toolName, arguments, ct);
             if (!allowed)
+            {
+                // A blocked tool is a refusal, not a success — see AgentTelemetry.SetOutcome.
+                AgentTelemetry.SetOutcome(toolSpan, succeeded: false, "blocked by approval gate");
                 return ToolResult.Fail(
                     $"Tool '{toolName}' was blocked — not approved by user.");
+            }
         }
 
         // Tool-execution lifecycle hooks. Plugins subscribe via IPluginContext
@@ -1601,6 +1632,7 @@ public class AgentBuilder
         // observability/audit trails would silently record nothing. The Invoke* methods
         // already swallow handler exceptions, so they cannot break tool execution.
         var executionId = Guid.NewGuid().ToString("N");
+        toolSpan?.SetTag("agentfox.tool.execution_id", executionId);
         var sw = System.Diagnostics.Stopwatch.StartNew();
         await _toolRegistry.HookRegistry.InvokeToolPreExecuteAsync(toolName, arguments, executionId);
         try
@@ -1616,11 +1648,13 @@ public class AgentBuilder
             await _toolRegistry.HookRegistry.InvokeToolPostExecuteAsync(
                 toolName, result, sw.ElapsedMilliseconds, executionId);
             _experienceLearning?.RecordCurrent(toolName, arguments, result);
+            AgentTelemetry.SetOutcome(toolSpan, result.Success, result.Success ? null : result.Error);
             return result;
         }
         catch (Exception ex)
         {
             sw.Stop();
+            AgentTelemetry.SetError(toolSpan, ex);
             await _toolRegistry.HookRegistry.InvokeToolErrorAsync(
                 toolName, ex.Message, sw.ElapsedMilliseconds, executionId);
             _logger?.LogError(ex, $"Error executing tool {toolName}");

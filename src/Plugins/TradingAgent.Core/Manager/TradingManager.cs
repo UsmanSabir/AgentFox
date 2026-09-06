@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using AgentFox.Plugins.Observability;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -97,7 +99,65 @@ public sealed class TradingManager
         return TradingExecutionResult.Rejected(policyVersion, reason);
     }
 
+    /// <summary>
+    /// The single execution boundary, wrapped so ONE span covers every exit — and there are many,
+    /// most of them refusals returned through <see cref="Reject"/> rather than thrown. Wrapping is
+    /// deliberate rather than tagging each return: a gate added later is traced without anyone
+    /// remembering to instrument it, which for a component whose safe behaviour is to decline is
+    /// the difference between a trace that answers "why did nothing happen" and one that does not.
+    ///
+    /// <para>
+    /// The span carries no symbols, quantities or prices. It records the SHAPE of the request and
+    /// the outcome; the orders themselves are already in the ledger, which is the durable record
+    /// and the one an operator should be reading.
+    /// </para>
+    /// </summary>
     public async Task<TradingExecutionResult> ExecuteGroupsAsync(
+        IReadOnlyList<IReadOnlyList<TradingSignal>> groups,
+        string? sourceMessage,
+        ExecutionAuthorization? authorization = null,
+        CancellationToken ct = default)
+    {
+        // Ensure() rather than Begin(): a submission caused by an agent turn keeps that turn's id,
+        // while one raised by a background worker (armed order, protective stop, strategy pass)
+        // gets its own so its ledger rows are still groupable.
+        CorrelationContext.Ensure();
+
+        using var span = AgentTelemetry.Start(
+            AgentTelemetry.Trading, "trading.execute", ActivityKind.Client);
+        span?.SetTag("agentfox.trading.group_count", groups.Count);
+        span?.SetTag("agentfox.trading.order_count", groups.Sum(g => g.Count));
+        span?.SetTag("agentfox.trading.authorization", authorization?.Method ?? "none");
+
+        try
+        {
+            var result = await ExecuteGroupsCoreAsync(groups, sourceMessage, authorization, ct);
+
+            span?.SetTag("agentfox.trading.execution_id", result.ExecutionId);
+            span?.SetTag("agentfox.trading.policy_version", result.PolicyVersion);
+            span?.SetTag("agentfox.trading.executed", result.Executed);
+            span?.SetTag("agentfox.trading.is_replay", result.IsReplay);
+
+            // A gate refusal is the ONLY thing recorded as not-ok, and it is identified by the
+            // empty ExecutionId that TradingExecutionResult.Rejected produces — nothing was
+            // claimed, so nothing was attempted. Everything else reached the broker and is
+            // reported as a completed attempt whose Reason carries the detail.
+            //
+            // An "unknown" broker outcome is deliberately NOT an error here: the broker may well
+            // hold the order, and tracing it as a failure invites exactly the retry that turns one
+            // uncertain order into two real ones. It is visible as executed=false with a reason.
+            var refused = string.IsNullOrEmpty(result.ExecutionId);
+            AgentTelemetry.SetOutcome(span, succeeded: !refused, result.Reason);
+            return result;
+        }
+        catch (Exception ex)
+        {
+            AgentTelemetry.SetError(span, ex);
+            throw;
+        }
+    }
+
+    private async Task<TradingExecutionResult> ExecuteGroupsCoreAsync(
         IReadOnlyList<IReadOnlyList<TradingSignal>> groups,
         string? sourceMessage,
         ExecutionAuthorization? authorization = null,

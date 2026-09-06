@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using AgentFox.Plugins.Observability;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -57,6 +59,15 @@ public sealed class BrokerReconciliationWorker : BackgroundService, IMarketSessi
     /// </summary>
     public async Task<BrokerReconciliationSnapshot> RunNowAsync(CancellationToken ct = default)
     {
+        // Begin(), not Ensure(): a reconciliation pass is its own unit of work even when a caller
+        // upstream had a correlation — an on-demand run triggered from a turn should not have its
+        // rows filed under that turn, because the pass reads the WHOLE account, not that turn's
+        // orders. The one place in this change where a fresh id is the honest answer.
+        using var correlation = CorrelationContext.Begin();
+
+        using var span = AgentTelemetry.Start(
+            AgentTelemetry.Trading, "trading.reconcile", ActivityKind.Client);
+
         await _runGate.WaitAsync(ct);
         try
         {
@@ -89,6 +100,13 @@ public sealed class BrokerReconciliationWorker : BackgroundService, IMarketSessi
             if (!snapshot.Healthy)
                 _logger.LogWarning("[Reconciliation] Unhealthy: {Reason}", snapshot.Reason);
 
+            span?.SetTag("agentfox.reconciliation.healthy", snapshot.Healthy);
+            span?.SetTag("agentfox.reconciliation.fill_count", snapshot.Fills.Count);
+            // An unhealthy snapshot is a refusal, not an exception: the read failed and was
+            // recorded as such rather than throwing. That distinction matters because an unhealthy
+            // reconciliation is what pauses order submission — it needs to be findable in a trace,
+            // and it never surfaces as an error anywhere else.
+            AgentTelemetry.SetOutcome(span, snapshot.Healthy, snapshot.Healthy ? null : snapshot.Reason);
             return snapshot;
         }
         finally

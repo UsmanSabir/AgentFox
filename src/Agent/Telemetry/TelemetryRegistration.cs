@@ -1,4 +1,5 @@
 using AgentFox.Harness;
+using AgentFox.Plugins.Observability;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -84,7 +85,9 @@ public static class TelemetryRegistration
     public static IReadOnlyList<string> ResolveSourceNames(
         IConfiguration configuration, TelemetryOptions options)
     {
-        var names = new SortedSet<string>(StringComparer.Ordinal) { TelemetryOptions.AgentSourceName };
+        // Seeded from the shared contract list so a plugin that instruments itself against a
+        // declared source is collected without the host being edited to know about it.
+        var names = new SortedSet<string>(AgentTelemetry.KnownSourceNames, StringComparer.Ordinal);
 
         foreach (var profile in ReadHarnessProfiles(configuration).Values)
         {

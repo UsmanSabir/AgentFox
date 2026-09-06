@@ -1,3 +1,4 @@
+using AgentFox.Plugins.Observability;
 ﻿using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -45,6 +46,27 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         }.ToString();
     }
 
+    /// <summary>
+    /// The ambient correlation id as a SQLite parameter value, or <see cref="DBNull"/> when there
+    /// is none.
+    ///
+    /// <para>
+    /// Read here rather than passed in, deliberately. The alternative — a correlation parameter on
+    /// every repository method — would put the burden on roughly twenty call sites across the
+    /// manager, the endpoints, the tools and four background workers, and a caller who forgot
+    /// would write an orphaned row that looks exactly like a correct one. Reading the ambient
+    /// makes a new write path correlated by default.
+    /// </para>
+    ///
+    /// <para>
+    /// Absence is stored as NULL, never as an empty string or a freshly minted id: a row written
+    /// outside any correlation genuinely has no cause to point at, and inventing one would create
+    /// a correlation group of exactly one row that reads like real evidence.
+    /// </para>
+    /// </summary>
+    private static object CorrelationParameter() =>
+        CorrelationContext.Current is { Length: > 0 } id ? id : DBNull.Value;
+
     public async Task<ExecutionClaim> TryBeginExecutionAsync(
         string idempotencyKey,
         string requestJson,
@@ -59,11 +81,13 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         insert.Transaction = (SqliteTransaction)transaction;
         insert.CommandText = """
             INSERT OR IGNORE INTO trading_executions
-                (execution_id, idempotency_key, state, request_json, policy_version, created_utc, updated_utc)
+                (execution_id, idempotency_key, state, request_json, policy_version, created_utc, updated_utc,
+                 correlation_id)
             VALUES
-                ($id, $key, 'submitting', $request, $policy, $now, $now)
+                ($id, $key, 'submitting', $request, $policy, $now, $now, $correlation)
             """;
         insert.Parameters.AddWithValue("$id", executionId);
+        insert.Parameters.AddWithValue("$correlation", CorrelationParameter());
         insert.Parameters.AddWithValue("$key", idempotencyKey);
         insert.Parameters.AddWithValue("$request", requestJson);
         insert.Parameters.AddWithValue("$policy", policyVersion);
@@ -100,11 +124,13 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         var command = connection.CreateCommand();
         command.CommandText = """
             INSERT OR IGNORE INTO trade_proposals
-                (proposal_id, idempotency_key, status, proposal_json, policy_version, created_utc, updated_utc)
-            VALUES ($id, $key, 'proposed', $json, $policy, $now, $now);
+                (proposal_id, idempotency_key, status, proposal_json, policy_version, created_utc, updated_utc,
+                 correlation_id)
+            VALUES ($id, $key, 'proposed', $json, $policy, $now, $now, $correlation);
             SELECT proposal_id FROM trade_proposals WHERE idempotency_key = $key;
             """;
         command.Parameters.AddWithValue("$id", proposalId);
+        command.Parameters.AddWithValue("$correlation", CorrelationParameter());
         command.Parameters.AddWithValue("$key", idempotencyKey);
         command.Parameters.AddWithValue("$json", proposalJson);
         command.Parameters.AddWithValue("$policy", policyVersion);
@@ -241,10 +267,11 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         var command = connection.CreateCommand();
         command.CommandText = """
             INSERT INTO reconciliation_runs
-                (reconciliation_id, state, details_json, started_utc, completed_utc)
-            VALUES ($id, $state, $details, $checked, $checked)
+                (reconciliation_id, state, details_json, started_utc, completed_utc, correlation_id)
+            VALUES ($id, $state, $details, $checked, $checked, $correlation)
             """;
         command.Parameters.AddWithValue("$id", Guid.NewGuid().ToString("N"));
+        command.Parameters.AddWithValue("$correlation", CorrelationParameter());
         command.Parameters.AddWithValue("$state", snapshot.Healthy ? "healthy" : "unhealthy");
         // Keep the verdict alongside the broker payload. A no-session pass has an intentionally empty
         // broker payload, and persisting only that "{}" made the reconciliation history unable to
@@ -905,10 +932,12 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         var audit = connection.CreateCommand();
         audit.Transaction = (SqliteTransaction)transaction;
         audit.CommandText = """
-            INSERT INTO trading_order_events (execution_id, event_type, payload_json, created_utc)
-            VALUES ($id, 'unknown_resolved', $payload, $now)
+            INSERT INTO trading_order_events
+                (execution_id, event_type, payload_json, created_utc, correlation_id)
+            VALUES ($id, 'unknown_resolved', $payload, $now, $correlation)
             """;
         audit.Parameters.AddWithValue("$id", executionId);
+        audit.Parameters.AddWithValue("$correlation", CorrelationParameter());
         audit.Parameters.AddWithValue("$payload", auditPayloadJson);
         audit.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("O"));
         await audit.ExecuteNonQueryAsync(ct);
@@ -927,10 +956,12 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         await using var connection = await OpenAsync(ct);
         var command = connection.CreateCommand();
         command.CommandText = """
-            INSERT INTO trading_order_events (execution_id, event_type, payload_json, created_utc)
-            VALUES ($id, $type, $payload, $now)
+            INSERT INTO trading_order_events
+                (execution_id, event_type, payload_json, created_utc, correlation_id)
+            VALUES ($id, $type, $payload, $now, $correlation)
             """;
         command.Parameters.AddWithValue("$id", executionId);
+        command.Parameters.AddWithValue("$correlation", CorrelationParameter());
         command.Parameters.AddWithValue("$type", eventType);
         command.Parameters.AddWithValue("$payload", payloadJson);
         command.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("O"));
@@ -1956,6 +1987,15 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
             // independently and a "duplicate column" failure is the expected no-op on an
             // already-migrated database — cheaper and clearer than maintaining a version table for
             // what are purely additive, nullable columns.
+            // Correlation id — additive and nullable on purpose. Rows written before this shipped
+            // have no id and must read as "unknown", never as a wrong one; and a write path that
+            // runs outside any correlation (a manual repair, a test) still succeeds. Invariant:
+            // unknown is not zero, and here it is simply NULL.
+            await AddColumnIfMissingAsync(connection, "trade_proposals", "correlation_id", "TEXT NULL", ct);
+            await AddColumnIfMissingAsync(connection, "trading_executions", "correlation_id", "TEXT NULL", ct);
+            await AddColumnIfMissingAsync(connection, "trading_order_events", "correlation_id", "TEXT NULL", ct);
+            await AddColumnIfMissingAsync(connection, "reconciliation_runs", "correlation_id", "TEXT NULL", ct);
+
             await AddColumnIfMissingAsync(connection, "trade_proposals", "execution_id", "TEXT NULL", ct);
             await AddColumnIfMissingAsync(connection, "trade_proposals", "state_reason", "TEXT NULL", ct);
             await AddColumnIfMissingAsync(connection, "trade_proposals", "terminal_utc", "TEXT NULL", ct);

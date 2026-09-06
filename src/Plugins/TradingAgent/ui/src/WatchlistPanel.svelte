@@ -10,7 +10,6 @@
     Bot, Hand, Lock, ListPlus, X, Sparkles
   } from 'lucide-svelte';
   import type { SymbolExtensionComponent } from './symbolExtensions';
-  import AutomationSignal from './AutomationSignal.svelte';
   import LivePriceInline from './LivePriceInline.svelte';
   import WatchlistTable from './WatchlistTable.svelte';
   import { moveWatchlistRow, type WatchlistAction } from './watchlistNavigation';
@@ -777,6 +776,7 @@
           class:pinned={entry.pinned}
           class:drag-over={dragOverSymbol === entry.symbol}
           class:dragging={draggedSymbol === entry.symbol}
+          class:auto-trading={entry.tradable && entry.autoTradeEnabled}
           draggable={!search.trim() && !alertsOnly && autoTradeFilter === 'all'}
           on:dragstart={(event) => startDrag(event, entry)}
           on:dragover={(event) => dragOver(event, entry)}
@@ -794,7 +794,6 @@
             <span class="identity">
               <span class="symbol-line">
                 <span class="symbol">{entry.symbol}</span>
-                {#if entry.tradable && entry.autoTradeEnabled}<AutomationSignal />{/if}
                 <LivePriceInline symbol={entry.symbol} fallbackChange={entry.dayChangePercent} showPrice={!compact} />
               </span>
               {#if entry.companyName}<span class="company">{entry.companyName}</span>{/if}
@@ -1102,6 +1101,15 @@
     /* Anchors the picker's full-row hit area below. */
     position:relative;
   }
+  .rows li.auto-trading {
+    background-image:linear-gradient(90deg,
+      color-mix(in srgb, var(--success) 3%, transparent),
+      color-mix(in srgb, var(--success) 14%, transparent) 50%,
+      color-mix(in srgb, var(--success) 3%, transparent));
+    background-size:180% 100%;
+    box-shadow:inset 2px 0 color-mix(in srgb, var(--success) 65%, transparent);
+    animation:watchlist-auto-row-pulse 3.2s ease-in-out infinite;
+  }
   .rows li:hover { background:var(--surface-2); }
   .rows li.selected { background:var(--primary-dim); }
   .rows li.pinned { border-color:color-mix(in srgb, var(--primary) 20%, transparent); }
@@ -1117,8 +1125,13 @@
   .rows.skeleton .wide { width:42%; }
   .rows.skeleton .narrow { width:68%; opacity:.6; }
   @keyframes watchlist-skeleton { 0%,100% { opacity:.45; } 50% { opacity:.9; } }
+  @keyframes watchlist-auto-row-pulse {
+    0%,100% { background-position:100% 0; }
+    50% { background-position:0 0; }
+  }
   @media (prefers-reduced-motion: reduce) {
     .rows.skeleton .bar { animation:none; }
+    .rows li.auto-trading { animation:none; background-position:50% 0; }
   }
 
   .drag-handle { color:var(--text-3); display:flex; cursor:grab; opacity:.55; }

@@ -3,7 +3,6 @@
   import { Bell, BellOff, Pin, Lock, MoreHorizontal, X } from 'lucide-svelte';
   import type { WatchlistEntry, CandleArchiveStatus } from './api';
   import type { SymbolExtensionComponent } from './symbolExtensions';
-  import AutomationSignal from './AutomationSignal.svelte';
   import LivePriceInline from './LivePriceInline.svelte';
   import { retainedWatchlistFocus, watchlistGridTarget, type WatchlistAction } from './watchlistNavigation';
 
@@ -127,6 +126,7 @@
     {#each entries as entry, index (entry.symbol)}
       <div class="grid-row" role="row" tabindex="-1" data-symbol={entry.symbol} aria-rowindex={index + 2} aria-selected={selected === entry.symbol}
         class:selected={selected === entry.symbol} class:drop-target={dragOverSymbol === entry.symbol}
+        class:auto-trading={entry.tradable && entry.autoTradeEnabled}
         draggable={canReorder && !busy} on:dragstart={e => onDragStart(e,entry)} on:dragover={e => onDragOver(e,entry)} on:drop={e => onDrop(e,entry)} on:dragend={onDragEnd}>
         <div role="gridcell" class="identity" data-col="0" tabindex={focused === entry.symbol && column === 0 ? 0 : -1}
           aria-describedby={rowStatus ? 'watchlist-status-' + entry.symbol : undefined}
@@ -136,12 +136,7 @@
           aria-label={`${entry.symbol}, ${entry.companyName ?? 'company name unavailable'}, ${!entry.tradable ? 'monitor only' : entry.manualOnly ? 'manual only' : 'automation allowed'}${entry.manualOnlyLocked ? ', configuration locked' : ''}, ${entry.openAlerts} alerts${!entry.alertsEnabled ? ', alerts muted' : ''}`}>
           <span class="symbol">{#if entry.pinned}<Pin size={10}/>{/if}{entry.symbol}{#if entry.manualOnlyLocked}<Lock size={10}/>{/if}</span>
           <span class="company" title={entry.companyName ?? ''}>{entry.companyName ?? 'Name unavailable'}</span>
-          <span class="tags">
-            {#if entry.tradable && entry.autoTradeEnabled}
-              <AutomationSignal showLabel />
-            {:else}
-              <span>{!entry.tradable ? 'Monitor' : 'Manual'}</span>
-            {/if}
+          <span class="tags"><span>{!entry.tradable ? 'Monitor' : entry.manualOnly ? 'Manual' : 'Auto'}</span>
             {#if entry.openAlerts > 0}<span class="alert-count"><Bell size={10}/>{entry.openAlerts}</span>{/if}
             {#if !entry.alertsEnabled}<BellOff size={10} aria-label="Alerts muted"/>{/if}
             {#if !entry.hasWeeklyHistory}<span class="history">{gaps.get(entry.symbol)?.noEarlierHistory ? 'New listing' : 'No weekly'}</span>{/if}
@@ -187,6 +182,15 @@
   .grid-head,.grid-row { display:grid; grid-template-columns:minmax(95px,1fr) minmax(68px,.75fr) 26px; align-items:stretch; }
   .grid-head { position:sticky; top:0; z-index:1; background:var(--surface-2); color:var(--text-3); padding:.4rem .15rem; font-size:.6rem; border-bottom:1px solid var(--border-md); }
   .grid-row { border-bottom:1px solid var(--border); color:var(--text); }
+  .grid-row.auto-trading {
+    background-image:linear-gradient(90deg,
+      color-mix(in srgb, var(--success) 3%, transparent),
+      color-mix(in srgb, var(--success) 14%, transparent) 50%,
+      color-mix(in srgb, var(--success) 3%, transparent));
+    background-size:180% 100%;
+    box-shadow:inset 2px 0 color-mix(in srgb, var(--success) 65%, transparent);
+    animation:watchlist-auto-row-pulse 3.2s ease-in-out infinite;
+  }
   .grid-row:hover { background:var(--surface-2); }
   .grid-row.selected { background:var(--primary-dim); box-shadow:inset 2px 0 var(--primary); }
   .grid-row.drop-target { border-top:2px solid var(--primary); }
@@ -218,6 +222,13 @@
   .row-menu button:disabled { cursor:default; color:var(--text-3); }
   .close { align-self:flex-start; padding:.3rem; }
   .sr-only { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
+  @keyframes watchlist-auto-row-pulse {
+    0%,100% { background-position:100% 0; }
+    50% { background-position:0 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .grid-row.auto-trading { animation:none; background-position:50% 0; }
+  }
   @media (max-width:900px) {
     .table-shell { flex:none; height:clamp(220px,52vh,420px); min-height:0; }
   }

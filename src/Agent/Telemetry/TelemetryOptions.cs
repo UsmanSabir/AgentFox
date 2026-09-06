@@ -1,3 +1,5 @@
+using AgentFox.Plugins.Observability;
+
 namespace AgentFox.Telemetry;
 
 /// <summary>
@@ -16,10 +18,15 @@ public sealed class TelemetryOptions
     public const string SectionName = "Telemetry";
 
     /// <summary>
-    /// Source (and meter) name used by the main agent's chat-client instrumentation. Distinct
-    /// from the Harness source so a trace shows which execution path produced it.
+    /// Source (and meter) name used by the main agent's chat-client instrumentation, agent turns,
+    /// tool calls and approval decisions. Distinct from the Harness source so a trace shows which
+    /// execution path produced it.
+    ///
+    /// Defined in <see cref="AgentTelemetry"/> rather than here because plugins emit to the same
+    /// names and can only reference the shared contract assembly. One definition, so a listener
+    /// and an emitter cannot drift apart.
     /// </summary>
-    public const string AgentSourceName = "AgentFox.Agent";
+    public const string AgentSourceName = AgentTelemetry.AgentSourceName;
 
     /// <summary>Master switch. False (default) registers no SDK, no exporter, no listener.</summary>
     public bool Enabled { get; set; } = false;

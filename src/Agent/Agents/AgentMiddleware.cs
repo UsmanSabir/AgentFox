@@ -53,9 +53,35 @@ public class PromptContributorRegistry
     private readonly List<IPromptContributor> _contributors = new();
     private readonly object _lock = new();
 
+    /// <summary>
+    /// Registers a contributor, REPLACING any existing one with the same
+    /// <see cref="IPromptContributor.ContributorId"/> and keeping its position.
+    ///
+    /// <para>
+    /// This used to append unconditionally, which made a double registration silently duplicate a
+    /// prompt section — telling the model the same thing twice, which reads as emphasis rather
+    /// than as a bug. It also left <see cref="Remove"/> removing BOTH copies, so the id was
+    /// already being treated as an identity everywhere except here. Call sites that worked around
+    /// it with a Remove-then-Add (see AgentBuilder's "idempotent re-set" of runtime-skills) are
+    /// now merely redundant rather than load-bearing.
+    /// </para>
+    ///
+    /// <para>
+    /// Position is preserved rather than moving the contributor to the end: prompt section order
+    /// must be stable across turns, or the provider's cached prefix is invalidated every time a
+    /// contributor happens to re-register.
+    /// </para>
+    /// </summary>
     public void Add(IPromptContributor contributor)
     {
-        lock (_lock) _contributors.Add(contributor);
+        lock (_lock)
+        {
+            var existing = _contributors.FindIndex(c => c.ContributorId == contributor.ContributorId);
+            if (existing >= 0)
+                _contributors[existing] = contributor;
+            else
+                _contributors.Add(contributor);
+        }
     }
 
     public void Remove(string contributorId)
@@ -66,6 +92,41 @@ public class PromptContributorRegistry
     public IReadOnlyList<IPromptContributor> GetAll()
     {
         lock (_lock) return _contributors.ToList().AsReadOnly();
+    }
+
+    /// <summary>
+    /// Every contributor's fragment, in registration order, with null and whitespace-only results
+    /// omitted and a throwing contributor skipped.
+    ///
+    /// <para>
+    /// The tolerance is deliberate and was a fix, not a convenience. A prompt addon is decoration:
+    /// before this, one contributor throwing propagated out of the middleware and failed the whole
+    /// LLM call, trading a small degradation for a total one. <paramref name="onError"/> exists so
+    /// the failure is still reported — swallowing it silently would be the other wrong answer.
+    /// </para>
+    /// </summary>
+    public IReadOnlyList<string> CollectFragments(Action<IPromptContributor, Exception>? onError = null)
+    {
+        var fragments = new List<string>();
+
+        foreach (var contributor in GetAll())
+        {
+            string? fragment;
+            try
+            {
+                fragment = contributor.GetFragment();
+            }
+            catch (Exception ex)
+            {
+                onError?.Invoke(contributor, ex);
+                continue;
+            }
+
+            if (!string.IsNullOrWhiteSpace(fragment))
+                fragments.Add(fragment);
+        }
+
+        return fragments;
     }
 }
 
@@ -382,13 +443,11 @@ internal sealed class DynamicAgentMiddleware : DelegatingChatClient
     /// </summary>
     private void InjectPromptAddons(ChatOptions options)
     {
-        var contributors = _promptRegistry.GetAll();
-        if (contributors.Count == 0) return;
-
-        var fragments = contributors
-            .Select(c => c.GetFragment())
-            .Where(f => !string.IsNullOrWhiteSpace(f))
-            .ToList()!;
+        var fragments = _promptRegistry.CollectFragments((contributor, ex) =>
+            _logger?.LogWarning(
+                ex,
+                "Prompt contributor '{ContributorId}' threw and its section was omitted from this turn.",
+                contributor.ContributorId));
 
         if (fragments.Count == 0) return;
 

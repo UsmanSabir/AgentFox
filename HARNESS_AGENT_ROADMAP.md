@@ -103,11 +103,58 @@ anything **collects** them, and neither implies the other.
   `AgentFox.Agent`. It is installed *inside* `DynamicAgentMiddleware`, so a span
   records the tools and prompt addons actually sent to the model. Prompt and
   response bodies are excluded unless `Telemetry:CaptureMessageContent` is set.
-- Still to instrument: agent runs, tool calls, approval decisions, broker
-  submissions, and reconciliation runs. None of these emit spans yet; the
-  collection pipeline they will emit into exists.
-- Propagate a correlation ID through channel message, specialist delegation,
-  proposal, execution, and ledger-event records. Not started.
+- ~~Instrument agent runs, tool calls, approval decisions, broker submissions and
+  reconciliation runs.~~ Done. One span each, at the single choke point every
+  caller takes rather than per call site, so a new tool / command / gate is traced
+  the day it is written:
+
+  | Span | Emitted at | Source |
+  | --- | --- | --- |
+  | `channel.message` | `ChannelMessageGateway.ProcessChannelMessageAsync` | `AgentFox.Agent` |
+  | `command.execute {lane}` | `CommandProcessor.ExecuteHandlerAsync` | `AgentFox.Agent` |
+  | `agent.run {agent}` | `FoxAgent.ProcessAsync` | `AgentFox.Agent` |
+  | `specialist.delegate {id}` | `SpecialistAgentRegistry.RunAsync` | `AgentFox.Agent` |
+  | `tool.execute {tool}` | `AgentBuilder.ExecuteToolAsync` | `AgentFox.Agent` |
+  | `approval.request {trigger}` | `HitlManager.RequestApprovalAsync` | `AgentFox.Agent` |
+  | `trading.execute` | `TradingManager.ExecuteGroupsAsync` | `AgentFox.Trading` |
+  | `trading.reconcile` | `BrokerReconciliationWorker.RunNowAsync` | `AgentFox.Trading` |
+
+  A **refusal is recorded as an error status with its reason**, never as a
+  successful span — for a system whose safe behaviour is to decline, "why did
+  nothing happen" is the question asked most, and a refusal that traces as success
+  cannot answer it. No span carries prompts, tool arguments, results, symbols,
+  quantities or prices; the ledger is the durable record and the credential guard
+  exists to keep tool output out of anything exportable.
+
+- ~~Propagate a correlation ID through channel message, specialist delegation,
+  proposal, execution, and ledger-event records.~~ Done —
+  `AgentFox.Plugins.Observability.CorrelationContext`, an `AsyncLocal` scope
+  stamped on every span and written to `correlation_id` on `trade_proposals`,
+  `trading_executions`, `trading_order_events` and `reconciliation_runs` (additive
+  nullable columns; a row written outside any correlation stores NULL rather than a
+  minted id, because a correlation group of exactly one row reads like evidence).
+
+  Three things about it are load-bearing and none are visible at a call site:
+
+  - **It lives in `AgentFox.Plugins`, not the host.** An `AsyncLocal` correlates
+    nothing unless host and plugin share ONE static field, and `PluginLoadContext`
+    resolves only that assembly from the host's context. In the host it would
+    silently read null everywhere in the trading plugin.
+  - **The command queue is the one hop it does not cross.** A lane loop never
+    awaited the producer, so the id travels as data on `ICommand.CorrelationId`
+    (captured at construction) and `CommandProcessor` re-enters a scope from it.
+    `CorrelationContextTests` pins the loss *and* the repair, so if the ambient ever
+    starts surviving that hop the test says so before anyone deletes the repair.
+  - **`Ensure()` vs `Begin()` is a decision, not a style.** Work *caused* by
+    something upstream keeps that id (`Ensure`); a reconciliation pass reads the
+    whole account rather than one turn's orders and takes a fresh one (`Begin`).
+
+- Guarded structurally: `PluginLoadContext` now delegates
+  `System.Diagnostics.DiagnosticSource` to the host by name. It defines
+  `ActivitySource`, and an `ActivityListener` only observes spans from the type
+  identity it was registered against — so a plugin taking a `PackageReference` on
+  OpenTelemetry.Api would get a second copy and every plugin span would be created
+  and silently never collected. `PluginTypeIdentityTests` pins it.
 - Create a dedicated `TradingResearchHarness` specialist with only:
   - market/news and portfolio-read tools;
   - a read-only portfolio/report workspace;
@@ -265,12 +312,25 @@ model, integration tests, telemetry, and kill switch.
    `AgentBuilder.CreateGatewayTools()`/`ExecuteThroughGatewayAsync()`; bypass
    tests in `HarnessAdapterTests`.
 5. ~~Register an OpenTelemetry SDK and exporters so emitted spans are actually
-   collected, and instrument model calls.~~ Done — `src/Agent/Telemetry/`,
-   `TelemetryRegistrationTests`. Still open: trace/correlation IDs through
-   trading proposal and execution flows.
+   collected, instrument the execution path, and propagate trace/correlation IDs
+   through the trading proposal and execution flows.~~ Done —
+   `src/Agent/Telemetry/`, `AgentFox.Plugins/Observability/`,
+   `TelemetryRegistrationTests`, `CorrelationContextTests`,
+   `PluginTypeIdentityTests`. What remains for the Phase 1 checkpoint is the
+   evidence, not the plumbing: run the pilot and compare against the existing
+   sub-agent research path.
 6. Build the read-only `TradingResearchHarness` pilot, including provenance
    tagging of research output and sub-agent resource budgets.
 7. Evaluate the Phase 1 checkpoint before investing in skills.
+7a. ~~Add a local eval suite for the seams that regress silently.~~ Done —
+   `tests/AgentFox.ChannelTests/Evals/`: tool schema as the model receives it
+   (reflection-discovered, so a new tool is covered the day it is written), prompt
+   assembly, the plan/approval gate decision table, and the HITL bypass table.
+   Deliberately local and deterministic — no model call, so it gates on regression
+   rather than on model drift. Writing it found three real defects, all fixed:
+   a throwing prompt contributor failed the whole LLM call, `PromptContributorRegistry.Add`
+   duplicated rather than replaced by id, and the tool-gate decision was unreachable
+   for testing inside an orchestrator lambda (now `Planning.ToolGate`, a pure function).
 8. Create and test the first PSX research and portfolio-report skills.
 
 ## References
