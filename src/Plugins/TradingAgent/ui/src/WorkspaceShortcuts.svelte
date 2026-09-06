@@ -26,6 +26,7 @@
     ['Order lists: ↑ ↓ / Home / End','Move between visible rows; Tab reaches filters and controls'],
     ['Persistent orders: Shift+F10','Open safe row actions; selecting one opens its review or evidence form'],
     ['Order lists: Enter on symbol','Focus row controls, without activating them; Space selects a focused checkbox'],
+    ['New Order: toolbar / Ctrl+K','Open the modal order composer; no order is submitted by opening it'],
     ['Order ticket: Ctrl+Enter','Validate and open review — never submit directly'],
     ['Order review: Tab → Confirm','Explicit confirmation; Escape returns without submitting']
   ];

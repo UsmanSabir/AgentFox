@@ -82,9 +82,14 @@
   let armedPanel: ArmedOrdersPanel | null = null;
   let persistentPanel: PersistentOrdersPanel | null = null;
   let marketWorkspace: MarketWorkspace | null = null;
-  let newOrderOpen = false;
+  // The workstation deliberately keeps both community-owned presentations. "New Order" is the
+  // quick modal flow; the Order ticket panel remains available for traders who prefer a docked draft.
+  // Separate state prevents the toolbar action from silently moving focus or replacing a panel draft.
+  let newOrderDialogOpen = false;
+  let ticketDraftOpen = false;
   let ticket: OrderComposer;
-  let orderReturnFocus: HTMLElement | null = null;
+  let orderDialogReturnFocus: HTMLElement | null = null;
+  let ticketReturnFocus: HTMLElement | null = null;
 
   /** Symbol the watchlist has selected; drives the chart pane. */
   export let selectedSymbol: string | null = null;
@@ -341,31 +346,40 @@
     }
   }
 
-  function openNewOrder() {
-    if (!newOrderOpen) orderReturnFocus = document.activeElement as HTMLElement;
-    newOrderOpen = true;
-    if (workspace) {
-      workspace.focusPanel('ticket');
-      requestAnimationFrame(() => ticket?.focusComposer());
-    }
+  function openNewOrderDialog() {
+    if (!newOrderDialogOpen) orderDialogReturnFocus = document.activeElement as HTMLElement;
+    newOrderDialogOpen = true;
   }
-  function closeNewOrder() {
-    newOrderOpen = false;
+  function closeNewOrderDialog() {
+    newOrderDialogOpen = false;
     requestAnimationFrame(() => {
-      if (orderReturnFocus?.isConnected && orderReturnFocus.getClientRects().length) orderReturnFocus.focus();
+      if (orderDialogReturnFocus?.isConnected && orderDialogReturnFocus.getClientRects().length) orderDialogReturnFocus.focus();
       else workspace?.focusPanel('watchlist');
     });
   }
+  function openOrderTicket() {
+    if (!ticketDraftOpen) ticketReturnFocus = document.activeElement as HTMLElement;
+    ticketDraftOpen = true;
+    workspace?.focusPanel('ticket');
+    requestAnimationFrame(() => ticket?.focusComposer());
+  }
+  function closeOrderTicket() {
+    ticketDraftOpen = false;
+    requestAnimationFrame(() => {
+      if (ticketReturnFocus?.isConnected && ticketReturnFocus.getClientRects().length) ticketReturnFocus.focus();
+      else workspace?.focusPanel('ticket');
+    });
+  }
   export function beginOrder(symbol:string) {
-    if (!newOrderOpen) selectedSymbol = symbol;
-    openNewOrder();
+    if (!newOrderDialogOpen) selectedSymbol = symbol;
+    openNewOrderDialog();
   }
   function refreshWatchlist() { if (workspace) void workspaceWatchlist?.refresh(); else void marketWorkspace?.refresh(); }
 
   onMount(() => {
     load(); startMarketClock();
     const unregister = [
-      workspace?.registerCommand({ id:'order.new', label:'New Order — open or resume order ticket', run:openNewOrder }),
+      workspace?.registerCommand({ id:'order.new', label:'New Order — open dialog', run:openNewOrderDialog }),
       workspace?.registerCommand({ id:'watchlist.search', label:'Search watched symbols', run:() => {
         workspace?.focusPanel('watchlist');
         requestAnimationFrame(() => workspaceWatchlist?.focusSearch());
@@ -386,11 +400,11 @@
   />
 {/if}
 
-{#if newOrderOpen && !workspace}
+{#if newOrderDialogOpen}
   <NewOrderDialog
     {selectedSymbol}
     on:changed={() => { load(); armedPanel?.load(); persistentPanel?.load(); }}
-    on:close={closeNewOrder}
+    on:close={closeNewOrderDialog}
   >
     <svelte:fragment slot="order-detail" let:action let:quantity let:price>
       <slot name="order-detail" {action} {quantity} {price}/>
@@ -401,18 +415,18 @@
 
 {#if workspace}
   <WorkspacePanel {workspace} id="ticket">
-    {#if newOrderOpen}
+    {#if ticketDraftOpen}
       <OrderComposer docked bind:this={ticket} {selectedSymbol}
         on:changed={() => { load(); armedPanel?.load(); persistentPanel?.load(); }}
-        on:attention={() => workspace?.focusPanel('ticket')} on:close={closeNewOrder}>
+        on:attention={() => workspace?.focusPanel('ticket')} on:close={closeOrderTicket}>
         <svelte:fragment slot="order-detail" let:action let:quantity let:price>
           <slot name="order-detail" {action} {quantity} {price}/>
         </svelte:fragment>
       </OrderComposer>
     {:else}
-      <div class="ticket-empty"><h2>Order ticket</h2><p>Compose an order for {selectedSymbol ?? 'a symbol'}. Nothing is sent until you review and confirm.</p>
-        <button class="btn btn-primary" on:click={openNewOrder}>Start order draft</button>
-        <p>Ctrl+Shift+4 focuses this panel. Ctrl+Enter inside a draft opens review. Closing a panel preserves the draft; reload clears it.</p>
+      <div class="ticket-empty"><h2>Order ticket</h2><p>Keep a draft beside the market for {selectedSymbol ?? 'a symbol'}, or use New Order in the toolbar for the modal flow. Nothing is sent until you review and confirm.</p>
+        <button class="btn btn-primary" on:click={openOrderTicket}>Start docked draft</button>
+        <p>Ctrl+Shift+4 focuses this panel. Ctrl+Enter inside a docked draft opens review. Closing a panel preserves the draft; reload clears it.</p>
       </div>
     {/if}
   </WorkspacePanel>
@@ -431,7 +445,7 @@
   <div class="page-header-row" id="trading-overview">
     <div><h1 class="page-title">Trading Manager</h1><p class="page-sub">Monitor PSX signals, prepare conditional orders, and review execution history</p></div>
     <div class="header-actions">
-      <button class="btn btn-primary new-order-btn" on:click={openNewOrder}>
+      <button class="btn btn-primary new-order-btn" on:click={openNewOrderDialog}>
         <ShoppingCart size={14} /> New Order
       </button>
       {#if status}
@@ -530,7 +544,7 @@
       <WorkspacePanel {workspace} id="watchlist">
         <WatchlistPanel bind:this={workspaceWatchlist} bind:selected={selectedSymbol} bind:selectedCompany
           allowCompact={false} dense refreshTick={marketTick} marketOpen={status.market.isOpen}
-          on:newOrder={event => {selectedSymbol = event.detail.symbol; openNewOrder();}}
+          on:newOrder={event => {selectedSymbol = event.detail.symbol; openNewOrderDialog();}}
           rowStatus={symbolExtension?.rowStatus ?? null}/>
       </WorkspacePanel>
       <WorkspacePanel {workspace} id="chart">
