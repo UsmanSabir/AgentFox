@@ -18,6 +18,7 @@ using AgentFox.Runtime.Services;
 using AgentFox.Sessions;
 using AgentFox.Skills;
 using AgentFox.Tools;
+using AgentFox.Telemetry;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
@@ -415,6 +416,13 @@ class Program
         builder.Services.Configure<AgentFox.Harness.HarnessOptions>(
             configuration.GetSection(AgentFox.Harness.HarnessOptions.SectionName));
         builder.Services.AddSingleton<AgentFox.Harness.HarnessAgentFactory>();
+
+        // OpenTelemetry. Registered AFTER the Harness options above on purpose: it reads the
+        // configured Harness profiles to learn which ActivitySource names to listen to, so a
+        // profile that renames its source is still collected. Disabled by default; when off,
+        // only the startup reporter is added — and its whole job is to warn when a profile asks
+        // for telemetry that nothing is collecting.
+        builder.Services.AddAgentFoxTelemetry(configuration);
         builder.Services.AddSingleton<FoxAgentHolder>();
         builder.Services.AddSingleton<ChannelManagerHolder>();
         // Shared seam that lets plugins broadcast to the user's channels from background code.

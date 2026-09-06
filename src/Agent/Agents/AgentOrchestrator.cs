@@ -420,6 +420,7 @@ public sealed class AgentOrchestrator : IHostedService
             .WithExperienceLearning(_experienceLearning)
             .WithCompactionFromConfig(_configuration)
             .WithTodoPlannerFromConfig(_configuration)
+            .WithTelemetryFromConfig(_configuration)
             .WithToolTimeout(
                 TimeSpan.FromSeconds(
                     (_configuration.GetSection("Tools").Get<ToolsConfig>() ?? new ToolsConfig()).TimeoutSeconds),
@@ -665,7 +666,10 @@ public sealed class AgentOrchestrator : IHostedService
                 .WithSessionManager(_sessionManager)
                 .WithExperienceLearning(_experienceLearning)
                 .WithCompactionFromConfig(_configuration)
-                .WithTodoPlannerFromConfig(_configuration);
+                .WithTodoPlannerFromConfig(_configuration)
+                // Same source name as the main agent; the span's agent name is what separates
+                // a specialist's model calls from the main agent's in a trace.
+                .WithTelemetryFromConfig(_configuration);
 
             // Specialists are delegated multi-step work (research a stock, reconcile a batch) and
             // are the agents most likely to drop a step, so they get the same todo planner as the

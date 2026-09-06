@@ -43,7 +43,7 @@ integration must preserve the current security and lifecycle boundaries.
 | File access and file memory | `WorkspaceManager`, Markdown/SQLite memory, session store | Pilot in a dedicated directory with explicit access policy. |
 | Skills | AgentFox skill registry and Composio skills | Add Harness file skills for focused, versioned domain playbooks. |
 | Background agents | Sub-agent manager, command lanes, notifications | Use Harness background agents only for stateless parallel research first. |
-| Observability | Plugin lifecycle hooks, trading ledger/events | Add OpenTelemetry traces that correlate with existing audit records. |
+| Observability | Plugin lifecycle hooks, trading ledger/events, `Telemetry` section (`src/Agent/Telemetry/`) | SDK, listeners and exporters are registered; model calls are instrumented. Remaining work is correlating spans with existing audit records. |
 | CodeAct and shell | Existing tool system and workspace enforcement | Defer for TradingAgent; use only in tightly sandboxed non-trading profiles. |
 
 ## Phased Roadmap
@@ -82,10 +82,32 @@ policy gates.
 **Goal:** Gain operational insight and useful research capability without
 increasing trading authority.
 
-- Add OpenTelemetry instrumentation for agent runs, model requests, tool calls,
-  approval decisions, broker submissions, and reconciliation runs.
+**Collection is now wired; instrumentation coverage is not.** This bullet used to
+read as though `Harness:Profiles:*:EnableOpenTelemetry` was the whole job. It is
+not, and the gap was live: two profiles shipped with that flag true while the
+solution referenced no OpenTelemetry SDK, so every span they wrote went to an
+`ActivitySource` with no listener and was dropped with no error and no log line.
+A flag decides whether spans are **written**; a registered SDK decides whether
+anything **collects** them, and neither implies the other.
+
+- ~~Register the OpenTelemetry SDK, a listener for every source AgentFox can emit
+  to, and OTLP/console exporters.~~ Done — `src/Agent/Telemetry/`, bound from the
+  `Telemetry` config section and off by default. The source list is *derived from
+  the configured Harness profiles* rather than hard-coded, so a profile that
+  renames `OpenTelemetrySourceName` is still collected.
+  `TelemetryStartupReport` logs a warning for the two silent states —
+  telemetry off while a profile emits, and telemetry on with no exporter — so
+  this class of gap announces itself instead of being discovered later.
+- ~~Instrument model requests (spans, token usage, duration).~~ Done —
+  `UseOpenTelemetry` on the main and specialist chat-client pipelines, emitting to
+  `AgentFox.Agent`. It is installed *inside* `DynamicAgentMiddleware`, so a span
+  records the tools and prompt addons actually sent to the model. Prompt and
+  response bodies are excluded unless `Telemetry:CaptureMessageContent` is set.
+- Still to instrument: agent runs, tool calls, approval decisions, broker
+  submissions, and reconciliation runs. None of these emit spans yet; the
+  collection pipeline they will emit into exists.
 - Propagate a correlation ID through channel message, specialist delegation,
-  proposal, execution, and ledger-event records.
+  proposal, execution, and ledger-event records. Not started.
 - Create a dedicated `TradingResearchHarness` specialist with only:
   - market/news and portfolio-read tools;
   - a read-only portfolio/report workspace;
@@ -242,7 +264,10 @@ model, integration tests, telemetry, and kill switch.
 4. ~~Implement and test the AgentFox-to-Harness tool bridge.~~ Done —
    `AgentBuilder.CreateGatewayTools()`/`ExecuteThroughGatewayAsync()`; bypass
    tests in `HarnessAdapterTests`.
-5. Add trace/correlation IDs through trading proposal and execution flows.
+5. ~~Register an OpenTelemetry SDK and exporters so emitted spans are actually
+   collected, and instrument model calls.~~ Done — `src/Agent/Telemetry/`,
+   `TelemetryRegistrationTests`. Still open: trace/correlation IDs through
+   trading proposal and execution flows.
 6. Build the read-only `TradingResearchHarness` pilot, including provenance
    tagging of research output and sub-agent resource budgets.
 7. Evaluate the Phase 1 checkpoint before investing in skills.
@@ -253,3 +278,8 @@ model, integration tests, telemetry, and kill switch.
 - [Build your own claw and agent harness with Microsoft Agent Framework](https://devblogs.microsoft.com/agent-framework/build-your-own-claw-and-agent-harness-with-microsoft-agent-framework/)
 - [Agent Harness: Working with your data, safely](https://devblogs.microsoft.com/agent-framework/agent-harness-working-with-your-data-safely/)
 - [Agent Harness: Scaling the claw or harness capabilities](https://devblogs.microsoft.com/agent-framework/agent-harness-scaling-the-claw-or-harness-capabilities/)
+- [Agent Harness: Making your claw production ready](https://devblogs.microsoft.com/agent-framework/agent-harness-making-your-claw-production-ready/)
+  — the source of the observability-first framing above. Its Purview and Foundry
+  Hosted Agents sections are deliberately **not** adopted: Purview would create a
+  second approval authority beside `HitlManager` (see Phase 3), and Foundry hosting
+  would trade AgentFox's single self-contained executable for an Azure dependency.

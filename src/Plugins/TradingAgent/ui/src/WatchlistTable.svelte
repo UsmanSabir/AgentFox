@@ -3,6 +3,7 @@
   import { Bell, BellOff, Pin, Lock, MoreHorizontal, X } from 'lucide-svelte';
   import type { WatchlistEntry, CandleArchiveStatus } from './api';
   import type { SymbolExtensionComponent } from './symbolExtensions';
+  import AutomationSignal from './AutomationSignal.svelte';
   import LivePriceInline from './LivePriceInline.svelte';
   import { retainedWatchlistFocus, watchlistGridTarget, type WatchlistAction } from './watchlistNavigation';
 
@@ -135,7 +136,12 @@
           aria-label={`${entry.symbol}, ${entry.companyName ?? 'company name unavailable'}, ${!entry.tradable ? 'monitor only' : entry.manualOnly ? 'manual only' : 'automation allowed'}${entry.manualOnlyLocked ? ', configuration locked' : ''}, ${entry.openAlerts} alerts${!entry.alertsEnabled ? ', alerts muted' : ''}`}>
           <span class="symbol">{#if entry.pinned}<Pin size={10}/>{/if}{entry.symbol}{#if entry.manualOnlyLocked}<Lock size={10}/>{/if}</span>
           <span class="company" title={entry.companyName ?? ''}>{entry.companyName ?? 'Name unavailable'}</span>
-          <span class="tags"><span>{!entry.tradable ? 'Monitor' : entry.manualOnly ? 'Manual' : 'Auto'}</span>
+          <span class="tags">
+            {#if entry.tradable && entry.autoTradeEnabled}
+              <AutomationSignal showLabel />
+            {:else}
+              <span>{!entry.tradable ? 'Monitor' : 'Manual'}</span>
+            {/if}
             {#if entry.openAlerts > 0}<span class="alert-count"><Bell size={10}/>{entry.openAlerts}</span>{/if}
             {#if !entry.alertsEnabled}<BellOff size={10} aria-label="Alerts muted"/>{/if}
             {#if !entry.hasWeeklyHistory}<span class="history">{gaps.get(entry.symbol)?.noEarlierHistory ? 'New listing' : 'No weekly'}</span>{/if}

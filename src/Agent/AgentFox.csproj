@@ -73,6 +73,7 @@
 	  <PackageReference Include="Google.GenAI" />
 	  <PackageReference Include="Microsoft.Agents.AI.Harness" />
 	  <PackageReference Include="Microsoft.Agents.AI.Workflows" />
+	  <PackageReference Include="Microsoft.Extensions.AI" />
 	  <PackageReference Include="Microsoft.Extensions.AI.Abstractions" />
 	  <PackageReference Include="Spectre.Console" />
 	  <PackageReference Include="Microsoft.Agents.AI" />
@@ -103,6 +104,12 @@
 	  <PackageReference Include="ModelContextProtocol.Core" />
 	  <PackageReference Include="Discord.Net" />
 	  <!-- Serves wwwroot embedded in the assembly for single-file publish -->
+	  <!-- OpenTelemetry SDK + exporters. The AI packages emit to ActivitySource/Meter but
+	       ship no listener; without these the Telemetry section can collect nothing. -->
+	  <PackageReference Include="OpenTelemetry" />
+	  <PackageReference Include="OpenTelemetry.Extensions.Hosting" />
+	  <PackageReference Include="OpenTelemetry.Exporter.Console" />
+	  <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" />
 	  <PackageReference Include="Microsoft.Extensions.FileProviders.Embedded" />
   </ItemGroup>
 

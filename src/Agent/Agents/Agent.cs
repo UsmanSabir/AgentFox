@@ -4,6 +4,7 @@ using AgentFox.MCP;
 using AgentFox.Memory;
 using AgentFox.Models;
 using AgentFox.Sessions;
+using AgentFox.Telemetry;
 using AgentFox.Skills;
 using AgentFox.Tools;
 using Microsoft.Agents.AI;
@@ -1051,6 +1052,7 @@ public class AgentBuilder
     private WorkspaceManager _workspaceManager;
     private SessionManager? _sessionManager;
     private ExperienceLearningService? _experienceLearning;
+    private TelemetryOptions? _telemetryOptions;
     private readonly PromptContributorRegistry _promptContributorRegistry = new();
     private SkillRegistry? _pendingSkillsRegistry; // set by WithSkillsRegistry, consumed in Build()
 
@@ -1246,6 +1248,29 @@ public class AgentBuilder
         }
         return bridged;
     }
+
+    /// <summary>
+    /// Install OpenTelemetry instrumentation on this agent's chat-client pipeline: one span per
+    /// model call, plus token-usage and duration metrics, emitted to
+    /// <see cref="TelemetryOptions.AgentSourceName"/>.
+    ///
+    /// Passing null, or options with <see cref="TelemetryOptions.Enabled"/> false, installs
+    /// nothing — the pipeline is byte-for-byte what it was before. This matters because the
+    /// instrumentation is unconditional otherwise: an ActivitySource with no listener still
+    /// costs an allocation and a check on every call.
+    /// </summary>
+    public AgentBuilder WithTelemetry(TelemetryOptions? telemetryOptions)
+    {
+        _telemetryOptions = telemetryOptions;
+        return this;
+    }
+
+    /// <summary>
+    /// <see cref="WithTelemetry"/> bound from the <c>Telemetry</c> configuration section, matching
+    /// the WithCompactionFromConfig / WithTodoPlannerFromConfig pattern used at the call sites.
+    /// </summary>
+    public AgentBuilder WithTelemetryFromConfig(IConfiguration configuration)
+        => WithTelemetry(configuration.GetSection(TelemetryOptions.SectionName).Get<TelemetryOptions>());
 
     public AgentBuilder WithHistoryProvider(ChatHistoryProvider chatHistoryProvider)
     {
@@ -1937,6 +1962,22 @@ public class AgentBuilder
             def => CreateAgentTool(def),
             mcpManager,
             middlewareLogger));
+
+        // Model-call spans and token metrics. Registered AFTER the dynamic middleware and
+        // therefore INSIDE it: ChatClientBuilder applies factories in reverse, so the first Use
+        // is outermost. Being inner is the point — the span then records the tools and prompt
+        // addons DynamicAgentMiddleware actually injected, not the pre-injection request.
+        //
+        // EnableSensitiveData is the switch that decides whether prompts and responses leave the
+        // process; it is off unless Telemetry:CaptureMessageContent says otherwise.
+        if (_telemetryOptions is { Enabled: true })
+        {
+            var captureContent = _telemetryOptions.CaptureMessageContent;
+            agentBuilder.UseOpenTelemetry(
+                loggerFactory: null,
+                sourceName: TelemetryOptions.AgentSourceName,
+                configure: otel => otel.EnableSensitiveData = captureContent);
+        }
 
         if (_compactionConfig != null)
         {

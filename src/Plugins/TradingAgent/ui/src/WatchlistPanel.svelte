@@ -10,6 +10,7 @@
     Bot, Hand, Lock, ListPlus, X, Sparkles
   } from 'lucide-svelte';
   import type { SymbolExtensionComponent } from './symbolExtensions';
+  import AutomationSignal from './AutomationSignal.svelte';
   import LivePriceInline from './LivePriceInline.svelte';
   import WatchlistTable from './WatchlistTable.svelte';
   import { moveWatchlistRow, type WatchlistAction } from './watchlistNavigation';
@@ -793,6 +794,7 @@
             <span class="identity">
               <span class="symbol-line">
                 <span class="symbol">{entry.symbol}</span>
+                {#if entry.tradable && entry.autoTradeEnabled}<AutomationSignal />{/if}
                 <LivePriceInline symbol={entry.symbol} fallbackChange={entry.dayChangePercent} showPrice={!compact} />
               </span>
               {#if entry.companyName}<span class="company">{entry.companyName}</span>{/if}
