@@ -43,7 +43,7 @@ integration must preserve the current security and lifecycle boundaries.
 | File access and file memory | `WorkspaceManager`, Markdown/SQLite memory, session store | Pilot in a dedicated directory with explicit access policy. |
 | Skills | AgentFox skill registry and Composio skills | Add Harness file skills for focused, versioned domain playbooks. |
 | Background agents | Sub-agent manager, command lanes, notifications | Use Harness background agents only for stateless parallel research first. |
-| Observability | Plugin lifecycle hooks, trading ledger/events | Add OpenTelemetry traces that correlate with existing audit records. |
+| Observability | Plugin lifecycle hooks, trading ledger/events, `Telemetry` section (`src/Agent/Telemetry/`) | SDK, listeners and exporters are registered; model calls are instrumented. Remaining work is correlating spans with existing audit records. |
 | CodeAct and shell | Existing tool system and workspace enforcement | Defer for TradingAgent; use only in tightly sandboxed non-trading profiles. |
 
 ## Phased Roadmap
@@ -82,10 +82,79 @@ policy gates.
 **Goal:** Gain operational insight and useful research capability without
 increasing trading authority.
 
-- Add OpenTelemetry instrumentation for agent runs, model requests, tool calls,
-  approval decisions, broker submissions, and reconciliation runs.
-- Propagate a correlation ID through channel message, specialist delegation,
-  proposal, execution, and ledger-event records.
+**Collection is now wired; instrumentation coverage is not.** This bullet used to
+read as though `Harness:Profiles:*:EnableOpenTelemetry` was the whole job. It is
+not, and the gap was live: two profiles shipped with that flag true while the
+solution referenced no OpenTelemetry SDK, so every span they wrote went to an
+`ActivitySource` with no listener and was dropped with no error and no log line.
+A flag decides whether spans are **written**; a registered SDK decides whether
+anything **collects** them, and neither implies the other.
+
+- ~~Register the OpenTelemetry SDK, a listener for every source AgentFox can emit
+  to, and OTLP/console exporters.~~ Done — `src/Agent/Telemetry/`, bound from the
+  `Telemetry` config section and off by default. The source list is *derived from
+  the configured Harness profiles* rather than hard-coded, so a profile that
+  renames `OpenTelemetrySourceName` is still collected.
+  `TelemetryStartupReport` logs a warning for the two silent states —
+  telemetry off while a profile emits, and telemetry on with no exporter — so
+  this class of gap announces itself instead of being discovered later.
+- ~~Instrument model requests (spans, token usage, duration).~~ Done —
+  `UseOpenTelemetry` on the main and specialist chat-client pipelines, emitting to
+  `AgentFox.Agent`. It is installed *inside* `DynamicAgentMiddleware`, so a span
+  records the tools and prompt addons actually sent to the model. Prompt and
+  response bodies are excluded unless `Telemetry:CaptureMessageContent` is set.
+- ~~Instrument agent runs, tool calls, approval decisions, broker submissions and
+  reconciliation runs.~~ Done. One span each, at the single choke point every
+  caller takes rather than per call site, so a new tool / command / gate is traced
+  the day it is written:
+
+  | Span | Emitted at | Source |
+  | --- | --- | --- |
+  | `channel.message` | `ChannelMessageGateway.ProcessChannelMessageAsync` | `AgentFox.Agent` |
+  | `command.execute {lane}` | `CommandProcessor.ExecuteHandlerAsync` | `AgentFox.Agent` |
+  | `agent.run {agent}` | `FoxAgent.ProcessAsync` | `AgentFox.Agent` |
+  | `specialist.delegate {id}` | `SpecialistAgentRegistry.RunAsync` | `AgentFox.Agent` |
+  | `tool.execute {tool}` | `AgentBuilder.ExecuteToolAsync` | `AgentFox.Agent` |
+  | `approval.request {trigger}` | `HitlManager.RequestApprovalAsync` | `AgentFox.Agent` |
+  | `trading.execute` | `TradingManager.ExecuteGroupsAsync` | `AgentFox.Trading` |
+  | `trading.reconcile` | `BrokerReconciliationWorker.RunNowAsync` | `AgentFox.Trading` |
+
+  A **refusal is recorded as an error status with its reason**, never as a
+  successful span — for a system whose safe behaviour is to decline, "why did
+  nothing happen" is the question asked most, and a refusal that traces as success
+  cannot answer it. No span carries prompts, tool arguments, results, symbols,
+  quantities or prices; the ledger is the durable record and the credential guard
+  exists to keep tool output out of anything exportable.
+
+- ~~Propagate a correlation ID through channel message, specialist delegation,
+  proposal, execution, and ledger-event records.~~ Done —
+  `AgentFox.Plugins.Observability.CorrelationContext`, an `AsyncLocal` scope
+  stamped on every span and written to `correlation_id` on `trade_proposals`,
+  `trading_executions`, `trading_order_events` and `reconciliation_runs` (additive
+  nullable columns; a row written outside any correlation stores NULL rather than a
+  minted id, because a correlation group of exactly one row reads like evidence).
+
+  Three things about it are load-bearing and none are visible at a call site:
+
+  - **It lives in `AgentFox.Plugins`, not the host.** An `AsyncLocal` correlates
+    nothing unless host and plugin share ONE static field, and `PluginLoadContext`
+    resolves only that assembly from the host's context. In the host it would
+    silently read null everywhere in the trading plugin.
+  - **The command queue is the one hop it does not cross.** A lane loop never
+    awaited the producer, so the id travels as data on `ICommand.CorrelationId`
+    (captured at construction) and `CommandProcessor` re-enters a scope from it.
+    `CorrelationContextTests` pins the loss *and* the repair, so if the ambient ever
+    starts surviving that hop the test says so before anyone deletes the repair.
+  - **`Ensure()` vs `Begin()` is a decision, not a style.** Work *caused* by
+    something upstream keeps that id (`Ensure`); a reconciliation pass reads the
+    whole account rather than one turn's orders and takes a fresh one (`Begin`).
+
+- Guarded structurally: `PluginLoadContext` now delegates
+  `System.Diagnostics.DiagnosticSource` to the host by name. It defines
+  `ActivitySource`, and an `ActivityListener` only observes spans from the type
+  identity it was registered against — so a plugin taking a `PackageReference` on
+  OpenTelemetry.Api would get a second copy and every plugin span would be created
+  and silently never collected. `PluginTypeIdentityTests` pins it.
 - Create a dedicated `TradingResearchHarness` specialist with only:
   - market/news and portfolio-read tools;
   - a read-only portfolio/report workspace;
@@ -242,10 +311,26 @@ model, integration tests, telemetry, and kill switch.
 4. ~~Implement and test the AgentFox-to-Harness tool bridge.~~ Done —
    `AgentBuilder.CreateGatewayTools()`/`ExecuteThroughGatewayAsync()`; bypass
    tests in `HarnessAdapterTests`.
-5. Add trace/correlation IDs through trading proposal and execution flows.
+5. ~~Register an OpenTelemetry SDK and exporters so emitted spans are actually
+   collected, instrument the execution path, and propagate trace/correlation IDs
+   through the trading proposal and execution flows.~~ Done —
+   `src/Agent/Telemetry/`, `AgentFox.Plugins/Observability/`,
+   `TelemetryRegistrationTests`, `CorrelationContextTests`,
+   `PluginTypeIdentityTests`. What remains for the Phase 1 checkpoint is the
+   evidence, not the plumbing: run the pilot and compare against the existing
+   sub-agent research path.
 6. Build the read-only `TradingResearchHarness` pilot, including provenance
    tagging of research output and sub-agent resource budgets.
 7. Evaluate the Phase 1 checkpoint before investing in skills.
+7a. ~~Add a local eval suite for the seams that regress silently.~~ Done —
+   `tests/AgentFox.ChannelTests/Evals/`: tool schema as the model receives it
+   (reflection-discovered, so a new tool is covered the day it is written), prompt
+   assembly, the plan/approval gate decision table, and the HITL bypass table.
+   Deliberately local and deterministic — no model call, so it gates on regression
+   rather than on model drift. Writing it found three real defects, all fixed:
+   a throwing prompt contributor failed the whole LLM call, `PromptContributorRegistry.Add`
+   duplicated rather than replaced by id, and the tool-gate decision was unreachable
+   for testing inside an orchestrator lambda (now `Planning.ToolGate`, a pure function).
 8. Create and test the first PSX research and portfolio-report skills.
 
 ## References
@@ -253,3 +338,8 @@ model, integration tests, telemetry, and kill switch.
 - [Build your own claw and agent harness with Microsoft Agent Framework](https://devblogs.microsoft.com/agent-framework/build-your-own-claw-and-agent-harness-with-microsoft-agent-framework/)
 - [Agent Harness: Working with your data, safely](https://devblogs.microsoft.com/agent-framework/agent-harness-working-with-your-data-safely/)
 - [Agent Harness: Scaling the claw or harness capabilities](https://devblogs.microsoft.com/agent-framework/agent-harness-scaling-the-claw-or-harness-capabilities/)
+- [Agent Harness: Making your claw production ready](https://devblogs.microsoft.com/agent-framework/agent-harness-making-your-claw-production-ready/)
+  — the source of the observability-first framing above. Its Purview and Foundry
+  Hosted Agents sections are deliberately **not** adopted: Purview would create a
+  second approval authority beside `HitlManager` (see Phase 3), and Foundry hosting
+  would trade AgentFox's single self-contained executable for an Azure dependency.

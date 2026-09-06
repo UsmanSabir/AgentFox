@@ -6,6 +6,7 @@
   export let fallbackChange: number | null = null;
   export let fallbackPrice: number | null = null;
   export let showPrice = true;
+  export let showUnavailable = false;
 
   const livePrices = useLivePrices();
   let priceStore = livePrices.quote(symbol);
@@ -36,11 +37,12 @@
       <small>{view.freshness === 'stale' ? 'stale' : view.phase === 'PreOpen' ? 'pre-open' : 'close'}</small>
     {/if}
   </span>
-{/if}
+{:else if showUnavailable}<span class="unavailable" aria-label={`Price unavailable for ${symbol}`}>—</span>{/if}
 
 <style>
   .live-quote { display:inline-flex; align-items:center; gap:.3rem; min-width:0; white-space:nowrap; }
   .price { font-size:.72rem; font-variant-numeric:tabular-nums; color:var(--text-2); }
+  .unavailable { color:var(--text-3); font-size:.72rem; }
   .change { display:inline-flex; align-items:center; gap:.08rem; padding:.08rem .28rem; border-radius:999px;
             font-size:.64rem; font-weight:750; font-variant-numeric:tabular-nums; }
   .change.up { color:var(--success); background:color-mix(in srgb,var(--success) 11%,transparent); }

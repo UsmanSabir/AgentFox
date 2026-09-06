@@ -1,3 +1,4 @@
+using AgentFox.Plugins.Observability;
 using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
 
@@ -103,17 +104,26 @@ public class HitlManager
             "HITL approval pending [{ApprovalId}]: {Description}",
             request.ApprovalId, request.Description);
 
+        // The approval span covers the WAIT, so its duration is how long a human took to answer —
+        // the number that says whether the gate is a safeguard or a bottleneck. The request's
+        // description is not recorded: it interpolates the tool's arguments.
+        using var approvalSpan = AgentTelemetry.Start(
+            AgentTelemetry.Agent, $"approval.request {request.Trigger}");
+        approvalSpan?.SetTag("agentfox.approval.id", request.ApprovalId);
+        approvalSpan?.SetTag("agentfox.approval.trigger", request.Trigger.ToString());
+        approvalSpan?.SetTag("agentfox.session.key", request.SessionKey);
+
         var timeout = ToTimeout(_config.ApprovalTimeoutSeconds);
         try
         {
             using var reg = ct.Register(() => gate.TrySetCanceled(ct));
 
             if (timeout == Timeout.InfiniteTimeSpan)
-                return await gate.Task;
+                return RecordDecision(approvalSpan, await gate.Task, "answered");
 
             var completed = await Task.WhenAny(gate.Task, Task.Delay(timeout, ct));
             if (completed == gate.Task)
-                return await gate.Task;
+                return RecordDecision(approvalSpan, await gate.Task, "answered");
 
             _logger?.LogWarning(
                 "HITL approval [{ApprovalId}] for '{Description}' expired after {Seconds}s with no " +
@@ -127,12 +137,32 @@ public class HitlManager
                 $"No human responded within {timeout.TotalSeconds:F0}s — the request expired and was " +
                 "not approved. Do not retry it blindly; report that approval timed out.");
             gate.TrySetResult(expired);
-            return expired;
+            return RecordDecision(approvalSpan, expired, "expired");
         }
         finally
         {
             _pending.TryRemove(request.ApprovalId, out _);
         }
+    }
+
+    /// <summary>
+    /// Stamps the decision on the approval span and returns it unchanged.
+    ///
+    /// <para>
+    /// A DENIAL is recorded as a refusal, not a failure — a human saying no is the gate working.
+    /// What separates the two cases worth alerting on is <c>resolution</c>: "answered" means
+    /// somebody decided, "expired" means nobody did and the auto-reject fired. Those look
+    /// identical in the decision alone, and only one of them is a problem.
+    /// </para>
+    /// </summary>
+    private static HitlDecision RecordDecision(
+        System.Diagnostics.Activity? span, HitlDecision decision, string resolution)
+    {
+        span?.SetTag("agentfox.approval.approved", decision.Approved);
+        span?.SetTag("agentfox.approval.resolution", resolution);
+        AgentTelemetry.SetOutcome(
+            span, decision.Approved, decision.Approved ? null : $"not approved ({resolution})");
+        return decision;
     }
 
     /// <summary>

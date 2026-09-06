@@ -1,3 +1,4 @@
+using AgentFox.Plugins.Observability;
 using System.Collections.Concurrent;
 using AgentFox.Models;
 using AgentFox.Plugins.Channels;
@@ -109,7 +110,22 @@ public class ChannelMessageGateway : IDisposable
         int? overrideTimeoutSeconds = null)
     {
         ThrowIfDisposed();
-        
+
+        // The origin of a correlation. An inbound channel message is the outermost cause the
+        // system can see, so the id is minted here and everything downstream inherits it:
+        // ChannelCommand captures it at construction, CommandProcessor re-enters it on the far
+        // side of the queue, and the agent turn, tool calls, approvals and trading records all
+        // adopt it in turn. Answering "show me everything this one WhatsApp message did" is the
+        // whole point, and it starts on this line.
+        using var correlation = CorrelationContext.Begin();
+
+        using var span = AgentTelemetry.Start(
+            AgentTelemetry.Agent, "channel.message", System.Diagnostics.ActivityKind.Consumer);
+        span?.SetTag("agentfox.channel.id", originatingChannel.ChannelId);
+        span?.SetTag("agentfox.channel.name", originatingChannel.Name);
+        span?.SetTag("agentfox.channel.message_id", channelMessage.Id);
+        span?.SetTag("agentfox.agent.id", agentId);
+
         try
         {
             Interlocked.Increment(ref _totalReceived);
@@ -132,6 +148,7 @@ public class ChannelMessageGateway : IDisposable
                 Interlocked.Increment(ref _totalFailed);
                 
                 _logger?.LogWarning("Channel message rejected due to concurrency limit: {MessageId}", channelMessage.Id);
+                AgentTelemetry.SetOutcome(span, succeeded: false, "gateway concurrency limit reached");
                 return messageTask;
             }
             
@@ -162,7 +179,12 @@ public class ChannelMessageGateway : IDisposable
                 
                 // Start background monitoring of this task
                 _ = MonitorTaskCompletionAsync(command.RunId, originatingChannel, channelMessage, messageTask);
-                
+
+                // The span closes at ENQUEUE, not at completion — the work happens on a lane loop
+                // this method does not await. command.execute picks the trace up from there.
+                span?.SetTag("agentfox.command.run_id", command.RunId);
+                span?.SetTag("agentfox.command.lane", command.Lane.ToString());
+                AgentTelemetry.SetOutcome(span, succeeded: true);
                 return messageTask;
             }
             finally
@@ -174,7 +196,8 @@ public class ChannelMessageGateway : IDisposable
         {
             Interlocked.Increment(ref _totalFailed);
             _logger?.LogError(ex, "Error processing channel message: {MessageId}", channelMessage.Id);
-            
+            AgentTelemetry.SetError(span, ex);
+
             return new ChannelMessageTask
             {
                 MessageId = channelMessage.Id,

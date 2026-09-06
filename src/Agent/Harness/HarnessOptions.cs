@@ -49,10 +49,21 @@ public sealed class HarnessProfileOptions
     /// <summary>Allow Harness todo-list and agent-mode providers (planning UX only — AgentFox's plan gate stays the enforcement source).</summary>
     public bool EnableTodoAndModes { get; set; } = false;
 
-    /// <summary>Emit OpenTelemetry traces from the Harness pipeline.</summary>
+    /// <summary>
+    /// Emit OpenTelemetry traces from the Harness pipeline.
+    ///
+    /// This only decides whether spans are WRITTEN. Whether anything COLLECTS them is
+    /// <c>Telemetry:Enabled</c> (<see cref="AgentFox.Telemetry.TelemetryOptions"/>) — with that
+    /// off, spans go to an ActivitySource with no listener and are dropped silently. Startup
+    /// logs a warning for exactly that combination rather than leaving it to be discovered.
+    /// </summary>
     public bool EnableOpenTelemetry { get; set; } = false;
 
-    /// <summary>OpenTelemetry source name used when telemetry is enabled.</summary>
+    /// <summary>
+    /// OpenTelemetry source name used when telemetry is enabled. Renaming this is safe:
+    /// <c>TelemetryRegistration.ResolveSourceNames</c> derives its listener list from the
+    /// configured profiles, so a renamed source is still collected.
+    /// </summary>
     public string OpenTelemetrySourceName { get; set; } = "AgentFox.Harness";
 
     /// <summary>

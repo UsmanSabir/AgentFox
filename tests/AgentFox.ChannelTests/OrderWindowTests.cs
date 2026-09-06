@@ -2,6 +2,7 @@ using AgentFox.Plugins;
 using Microsoft.Extensions.Logging.Abstractions;
 using TradingAgent.Config;
 using TradingAgent.Market;
+using TradingAgent.Trading;
 
 namespace AgentFox.ChannelTests;
 
@@ -172,6 +173,61 @@ public sealed class OrderWindowTests
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    // ── A non-trading day, and the split it forces ────────────────────────────
+    //
+    // MEASURED 2026-09-06, a Sunday at 10:59 PKT: MarketStatus(REG) answers OHO. It is not a pre-open
+    // reading and not an artefact of the hour — REG, FUT and IPO all read OHO while ODL and CSF read
+    // SUS, so the venue is making a positive statement about REG. And an order submitted then is not
+    // refused: the venue QUEUES it and sends it to market at the next open (confirmed by the account
+    // owner). So "the venue will take it" is true on a Sunday, in the strongest sense.
+
+    [TestMethod]
+    public void ANonTradingDayIsSTILLAllowedByTheWindow_BecauseTheVenueGenuinelyTakesTheOrder()
+    {
+        // This is the deliberate product decision, pinned so nobody "fixes" it. An operator placing an
+        // order on a Sunday is choosing to have it queued for Monday, and the standing rule is that if
+        // the venue will take the order we send it rather than refusing on the venue's behalf.
+        //
+        // The unattended loop is gated separately and must NOT be gated here — see
+        // PersistentOrderWorker.MayPlaceUnattendedOn and the test below.
+        var window = Build(brokerState: "OHO", calendarOpen: false);
+
+        var decision = window.Evaluate();
+
+        Assert.IsTrue(decision.Allowed);
+        Assert.AreEqual("broker", decision.Source,
+            "the venue outranks the calendar here, on a weekend as much as at pre-open");
+    }
+
+    [TestMethod]
+    public void AnUnattendedSubmissionRequiresATradingDay_WhichTheWindowDoesNotProvide()
+    {
+        // The other half. Nobody is present, the decision was made on a previous session's
+        // information, and an order queued over a weekend becomes live at Monday's open placed by a
+        // background timer. So PersistentOrderWorker carries its own trading-day rule; deleting it
+        // would silently restore weekend submission, because the window above says yes.
+        var saturday = new DateOnly(2026, 9, 5);
+        var sunday = new DateOnly(2026, 9, 6);
+        var monday = new DateOnly(2026, 9, 7);
+        var calendar = new TradingDayCalendar();
+
+        Assert.IsFalse(PersistentOrderWorker.MayPlaceUnattendedOn(calendar, saturday));
+        Assert.IsFalse(PersistentOrderWorker.MayPlaceUnattendedOn(calendar, sunday));
+        Assert.IsTrue(PersistentOrderWorker.MayPlaceUnattendedOn(calendar, monday),
+            "a trading DAY, not an open session — a Monday pre-open placement must still go out, or "
+            + "accepting OHO stops buying the queue priority it exists for");
+    }
+
+    /// <summary>A calendar that answers only the question the rule above asks.</summary>
+    private sealed class TradingDayCalendar : IMarketCalendar
+    {
+        public MarketStatus GetStatus(DateTime? utcNow = null) =>
+            new(false, new DateTime(2026, 9, 7, 9, 32, 0, DateTimeKind.Unspecified), "stub");
+
+        public bool IsTradingDay(DateOnly date) =>
+            date.DayOfWeek is not (DayOfWeek.Saturday or DayOfWeek.Sunday);
+    }
 
     private static OrderWindow Build(
         string? brokerState, bool calendarOpen, AhkConfig? config = null,

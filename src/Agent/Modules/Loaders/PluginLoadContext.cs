@@ -19,13 +19,39 @@ public class PluginLoadContext : AssemblyLoadContext
         _resolver = new AssemblyDependencyResolver(pluginPath);
     }
 
+    /// <summary>
+    /// Whether an assembly is resolved from the HOST's default load context rather than from the
+    /// plugin folder — i.e. host and plugin share one copy and therefore one type identity.
+    ///
+    /// <para>
+    /// Extracted as a static predicate so it can be asserted on directly. The decision is a pure
+    /// function of a name, but <see cref="Load"/> is protected and its instance needs a real
+    /// plugin path and an <see cref="AssemblyDependencyResolver"/>, which put a rule with real
+    /// safety consequences out of reach of any test.
+    /// </para>
+    /// </summary>
+    public static bool IsSharedWithHost(string? assemblyName) =>
+        assemblyName is not null
+        && (assemblyName == "AgentFox.Plugins"
+            || assemblyName.StartsWith("Microsoft.Extensions.", StringComparison.Ordinal)
+            || assemblyName == "System.Diagnostics.DiagnosticSource"
+            || assemblyName == "Newtonsoft.Json"
+            || assemblyName.StartsWith("Polly", StringComparison.Ordinal));
+
     protected override Assembly Load(AssemblyName assemblyName)
     {
         // Share host contracts and common framework libraries rather than loading duplicates
-        if (assemblyName.Name == "AgentFox.Plugins"
-            || assemblyName.Name.StartsWith("Microsoft.Extensions.", StringComparison.Ordinal)
-            || assemblyName.Name == "Newtonsoft.Json"
-            || assemblyName.Name.StartsWith("Polly", StringComparison.Ordinal))
+        //
+        // System.Diagnostics.DiagnosticSource is here for a reason that is invisible at every call
+        // site: it defines ActivitySource and Activity, and an ActivityListener only sees spans
+        // from the SAME type identity it was registered against. Today that assembly ships in the
+        // shared framework and resolves once, so plugin spans reach the host's listener. But the
+        // moment any plugin takes a PackageReference on OpenTelemetry.Api or on DiagnosticSource
+        // itself, the DLL lands beside the plugin, AssemblyDependencyResolver finds it locally, and
+        // the plugin gets a second copy — after which every plugin span is created and silently
+        // never collected, with nothing failing and nothing logged. Delegating by name removes the
+        // failure mode rather than relying on nobody adding that reference.
+        if (IsSharedWithHost(assemblyName.Name))
         {
             return null; // fallback to Default context
         }

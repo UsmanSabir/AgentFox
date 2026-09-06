@@ -20,9 +20,20 @@
     <PackageVersion Include="Microsoft.Agents.AI.Harness" Version="1.19.0" />
     <PackageVersion Include="Microsoft.Agents.AI.OpenAI" Version="1.19.0" />
     <PackageVersion Include="Microsoft.Agents.AI.Workflows" Version="1.19.0" />
+    <!-- OpenTelemetry — the SDK, the listener and the exporters. Microsoft.Extensions.AI and
+         Microsoft.Agents.AI.Harness only bring OpenTelemetry.Api (the ActivitySource surface);
+         without these three nothing LISTENS and every span they emit is silently dropped.
+         Keep the version aligned with the OpenTelemetry.Api the AI packages resolve. -->
+    <PackageVersion Include="OpenTelemetry" Version="1.15.3" />
+    <PackageVersion Include="OpenTelemetry.Extensions.Hosting" Version="1.15.3" />
+    <PackageVersion Include="OpenTelemetry.Exporter.Console" Version="1.15.3" />
+    <PackageVersion Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.15.3" />
     <!-- LLM providers and AI abstractions -->
     <PackageVersion Include="Azure.AI.OpenAI" Version="2.1.0" />
     <PackageVersion Include="Google.GenAI" Version="1.20.0" />
+    <!-- Declared explicitly rather than taken transitively: UseOpenTelemetry (the chat-client
+         instrumentation) lives in Microsoft.Extensions.AI, not in .Abstractions. -->
+    <PackageVersion Include="Microsoft.Extensions.AI" Version="10.9.0" />
     <PackageVersion Include="Microsoft.Extensions.AI.Abstractions" Version="10.9.0" />
     <PackageVersion Include="OllamaSharp" Version="5.4.30" />
     <PackageVersion Include="OpenAI" Version="2.13.0" />

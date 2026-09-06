@@ -420,6 +420,7 @@ public sealed class AgentOrchestrator : IHostedService
             .WithExperienceLearning(_experienceLearning)
             .WithCompactionFromConfig(_configuration)
             .WithTodoPlannerFromConfig(_configuration)
+            .WithTelemetryFromConfig(_configuration)
             .WithToolTimeout(
                 TimeSpan.FromSeconds(
                     (_configuration.GetSection("Tools").Get<ToolsConfig>() ?? new ToolsConfig()).TimeoutSeconds),
@@ -451,21 +452,27 @@ public sealed class AgentOrchestrator : IHostedService
                 var sessionKey  = FoxAgent.CurrentSessionKey.Value;
                 var sessionInfo = sessionKey != null ? _sessionManager.GetSession(sessionKey) : null;
 
-                // 1) Plan enforcement — mutating tools need an approved plan for this session.
-                //    Bypass does NOT skip this: a trusted session still flows through submit_plan,
-                //    where its plan auto-approves and flips the phase to Execute.
-                if (mutatingTools.Contains(toolName)
-                    && _planStore.For(sessionKey ?? string.Empty).Phase != PlanPhase.Execute)
+                // The decision itself is a pure function (ToolGate.Decide) so it can be asserted
+                // on without a session manager, a channel or a human. Everything below this line
+                // is delivery, and only the RequiresHumanApproval branch reaches it.
+                var outcome = ToolGate.Decide(
+                    toolName,
+                    mutatingTools,
+                    watchedTools,
+                    _planStore.For(sessionKey ?? string.Empty).Phase,
+                    bypass.IsBypassed(sessionInfo, _agentHolder.Agent?.Role));
+
+                if (outcome != ToolGateOutcome.RequiresHumanApproval)
                 {
-                    return false; // surfaced to the model; the plan-phase prompt tells it to submit_plan
+                    // RefusedPendingPlan is surfaced to the model, which the plan-phase prompt
+                    // then steers towards submit_plan.
+                    if (outcome == ToolGateOutcome.RefusedPendingPlan)
+                        _logger?.LogDebug(
+                            "Tool '{ToolName}' refused: no approved plan for session {SessionKey}.",
+                            toolName, sessionKey);
+
+                    return ToolGate.IsAllowedWithoutHuman(outcome);
                 }
-
-                // 2) Per-tool human approval.
-                if (!watchedTools.Contains(toolName))
-                    return true; // not a watched tool — pass through
-
-                if (bypass.IsBypassed(sessionInfo, _agentHolder.Agent?.Role))
-                    return true; // trusted session/agent — skip the human
 
                 var channelId   = sessionInfo?.ChannelId;
                 var approvalId  = Guid.NewGuid().ToString("N")[..8].ToUpper();
@@ -665,7 +672,10 @@ public sealed class AgentOrchestrator : IHostedService
                 .WithSessionManager(_sessionManager)
                 .WithExperienceLearning(_experienceLearning)
                 .WithCompactionFromConfig(_configuration)
-                .WithTodoPlannerFromConfig(_configuration);
+                .WithTodoPlannerFromConfig(_configuration)
+                // Same source name as the main agent; the span's agent name is what separates
+                // a specialist's model calls from the main agent's in a trace.
+                .WithTelemetryFromConfig(_configuration);
 
             // Specialists are delegated multi-step work (research a stock, reconcile a batch) and
             // are the agents most likely to drop a step, so they get the same todo planner as the

@@ -4,6 +4,7 @@ using AgentFox.MCP;
 using AgentFox.Memory;
 using AgentFox.Models;
 using AgentFox.Sessions;
+using AgentFox.Telemetry;
 using AgentFox.Skills;
 using AgentFox.Tools;
 using Microsoft.Agents.AI;
@@ -16,6 +17,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using AgentFox.Plugins.Interfaces;
+using AgentFox.Plugins.Observability;
 using AgentFox.Plugins.Research;
 using AgentFox.Planning;
 using SystemPromptBuilder = AgentFox.LLM.SystemPromptBuilder;
@@ -518,6 +520,18 @@ public class FoxAgent
         conversationId ??= Guid.NewGuid().ToString("N");
         CurrentSessionKey.Value = conversationId;
 
+        // Every agent turn runs under a correlation id. Ensure() adopts one already in force
+        // (a channel message, or the command that scheduled this turn) and mints one otherwise,
+        // so a turn started by the heartbeat or a cron is still groupable even though nothing
+        // upstream caused it. Tool calls, approval decisions and — through the plugin contract —
+        // trading proposals, executions and ledger events all inherit this value.
+        var correlationId = CorrelationContext.Ensure();
+
+        using var runSpan = AgentTelemetry.Start(AgentTelemetry.Agent, $"agent.run {Name}");
+        runSpan?.SetTag("agentfox.agent.name", Name);
+        runSpan?.SetTag("agentfox.agent.role", Role);
+        runSpan?.SetTag("agentfox.session.conversation_id", conversationId);
+
         // Handle /new and /reset — archive current session and start a fresh one
         if (SessionManager != null && SessionManager.IsResetCommand(task))
         {
@@ -746,6 +760,7 @@ public class FoxAgent
             };
             if (_experienceLearning != null)
                 await _experienceLearning.CompleteAsync(experienceTurn, true, timeoutToken);
+            AgentTelemetry.SetOutcome(runSpan, succeeded: true);
             return result;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -775,18 +790,23 @@ public class FoxAgent
                 "Agent '{AgentName}' turn interrupted in conversation {ConversationId}",
                 Name,
                 conversationId);
+            // Interruption is intentional, so it is a refusal rather than an error: a stopped turn
+            // that traced as a failure would put steering and real breakage in the same bucket.
+            AgentTelemetry.SetOutcome(runSpan, succeeded: false, "interrupted");
             throw;
         }
         catch (OperationCanceledException)
         {
             _logger?.LogWarning("Agent '{AgentName}' task timed out after {Timeout} seconds", Name, TimeoutSeconds);
             SessionManager?.MarkAborted(conversationId, "timeout");
+            AgentTelemetry.SetOutcome(runSpan, succeeded: false, "timeout");
             throw;
         }
         catch (Exception ex)
         {
             _logger?.LogError(ex, "Agent '{AgentName}' failed to process task in conversation {ConversationId}", Name, conversationId);
             SessionManager?.MarkAborted(conversationId, ex.Message);
+            AgentTelemetry.SetError(runSpan, ex);
             throw;
         }
         finally
@@ -1051,6 +1071,7 @@ public class AgentBuilder
     private WorkspaceManager _workspaceManager;
     private SessionManager? _sessionManager;
     private ExperienceLearningService? _experienceLearning;
+    private TelemetryOptions? _telemetryOptions;
     private readonly PromptContributorRegistry _promptContributorRegistry = new();
     private SkillRegistry? _pendingSkillsRegistry; // set by WithSkillsRegistry, consumed in Build()
 
@@ -1246,6 +1267,29 @@ public class AgentBuilder
         }
         return bridged;
     }
+
+    /// <summary>
+    /// Install OpenTelemetry instrumentation on this agent's chat-client pipeline: one span per
+    /// model call, plus token-usage and duration metrics, emitted to
+    /// <see cref="TelemetryOptions.AgentSourceName"/>.
+    ///
+    /// Passing null, or options with <see cref="TelemetryOptions.Enabled"/> false, installs
+    /// nothing — the pipeline is byte-for-byte what it was before. This matters because the
+    /// instrumentation is unconditional otherwise: an ActivitySource with no listener still
+    /// costs an allocation and a check on every call.
+    /// </summary>
+    public AgentBuilder WithTelemetry(TelemetryOptions? telemetryOptions)
+    {
+        _telemetryOptions = telemetryOptions;
+        return this;
+    }
+
+    /// <summary>
+    /// <see cref="WithTelemetry"/> bound from the <c>Telemetry</c> configuration section, matching
+    /// the WithCompactionFromConfig / WithTodoPlannerFromConfig pattern used at the call sites.
+    /// </summary>
+    public AgentBuilder WithTelemetryFromConfig(IConfiguration configuration)
+        => WithTelemetry(configuration.GetSection(TelemetryOptions.SectionName).Get<TelemetryOptions>());
 
     public AgentBuilder WithHistoryProvider(ChatHistoryProvider chatHistoryProvider)
     {
@@ -1561,13 +1605,25 @@ public class AgentBuilder
             return missing;
         }
 
+        // One span per model-invoked tool call. This is the only path every such call takes, so
+        // instrumenting here rather than per tool means a new tool is traced the day it is written.
+        // Arguments and results are deliberately NOT recorded: they carry whatever the tool read,
+        // which is exactly what the credential guard exists to keep out of anything exportable.
+        using var toolSpan = AgentTelemetry.Start(AgentTelemetry.Agent, $"tool.execute {toolName}");
+        toolSpan?.SetTag("agentfox.tool.name", toolName);
+        toolSpan?.SetTag("agentfox.tool.argument_count", arguments.Count);
+
         // ── HITL approval gate (Mode 1) ──────────────────────────────────────
         if (_toolApprovalGate != null)
         {
             var allowed = await _toolApprovalGate(toolName, arguments, ct);
             if (!allowed)
+            {
+                // A blocked tool is a refusal, not a success — see AgentTelemetry.SetOutcome.
+                AgentTelemetry.SetOutcome(toolSpan, succeeded: false, "blocked by approval gate");
                 return ToolResult.Fail(
                     $"Tool '{toolName}' was blocked — not approved by user.");
+            }
         }
 
         // Tool-execution lifecycle hooks. Plugins subscribe via IPluginContext
@@ -1576,6 +1632,7 @@ public class AgentBuilder
         // observability/audit trails would silently record nothing. The Invoke* methods
         // already swallow handler exceptions, so they cannot break tool execution.
         var executionId = Guid.NewGuid().ToString("N");
+        toolSpan?.SetTag("agentfox.tool.execution_id", executionId);
         var sw = System.Diagnostics.Stopwatch.StartNew();
         await _toolRegistry.HookRegistry.InvokeToolPreExecuteAsync(toolName, arguments, executionId);
         try
@@ -1591,11 +1648,13 @@ public class AgentBuilder
             await _toolRegistry.HookRegistry.InvokeToolPostExecuteAsync(
                 toolName, result, sw.ElapsedMilliseconds, executionId);
             _experienceLearning?.RecordCurrent(toolName, arguments, result);
+            AgentTelemetry.SetOutcome(toolSpan, result.Success, result.Success ? null : result.Error);
             return result;
         }
         catch (Exception ex)
         {
             sw.Stop();
+            AgentTelemetry.SetError(toolSpan, ex);
             await _toolRegistry.HookRegistry.InvokeToolErrorAsync(
                 toolName, ex.Message, sw.ElapsedMilliseconds, executionId);
             _logger?.LogError(ex, $"Error executing tool {toolName}");
@@ -1937,6 +1996,22 @@ public class AgentBuilder
             def => CreateAgentTool(def),
             mcpManager,
             middlewareLogger));
+
+        // Model-call spans and token metrics. Registered AFTER the dynamic middleware and
+        // therefore INSIDE it: ChatClientBuilder applies factories in reverse, so the first Use
+        // is outermost. Being inner is the point — the span then records the tools and prompt
+        // addons DynamicAgentMiddleware actually injected, not the pre-injection request.
+        //
+        // EnableSensitiveData is the switch that decides whether prompts and responses leave the
+        // process; it is off unless Telemetry:CaptureMessageContent says otherwise.
+        if (_telemetryOptions is { Enabled: true })
+        {
+            var captureContent = _telemetryOptions.CaptureMessageContent;
+            agentBuilder.UseOpenTelemetry(
+                loggerFactory: null,
+                sourceName: TelemetryOptions.AgentSourceName,
+                configure: otel => otel.EnableSensitiveData = captureContent);
+        }
 
         if (_compactionConfig != null)
         {

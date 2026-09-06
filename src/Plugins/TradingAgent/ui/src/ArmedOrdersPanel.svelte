@@ -5,8 +5,20 @@
     Crosshair, Trash2, RefreshCw, Zap, ShieldAlert, Clock, Shield, ShieldOff, ListChecks
   } from 'lucide-svelte';
   import LivePriceInline from './LivePriceInline.svelte';
+  import OrderActionReview from './OrderActionReview.svelte';
+  import { orderListNavigation, focusOrderControls } from './orderListNavigation';
 
   export let refreshTick = 0;
+  export let keyboardMode = false;
+  let query = '';
+  let review: OrderActionReview;
+  let reviewing = false;
+  let feedback: HTMLParagraphElement;
+  async function confirmAction(message: string) {
+    if (!keyboardMode) return confirm(message);
+    reviewing = true;
+    try { return await review.ask(message); } finally { reviewing = false; }
+  }
 
   let data: ArmedOrdersResponse | null = null;
   let loading = true;
@@ -19,6 +31,8 @@
   export async function load() {
     try {
       data = await trading.armed.list(showHistory);
+      const waiting = new Set(data.orders.filter(o => o.state === 'armed' && !o.protectiveStopId).map(o => o.armedId));
+      selectedOrderIds = new Set([...selectedOrderIds].filter(id => waiting.has(id)));
       error = null;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -28,21 +42,24 @@
   }
 
   async function disarm(order: ArmedOrder) {
-    if (busy) return;
-    if (!confirm(
-      `Disarm this trigger?\n\n${order.action} ${order.quantity} ${order.symbol} ${describeFill(order)} ` +
+    if (busy || reviewing) return;
+    const armedId = order.armedId;
+    if (!await confirmAction(
+      `Disarm trigger ${armedId}?\n\n${order.action} ${order.quantity} ${order.symbol} ${describeFill(order)} ` +
       `(${describeValue(order) ?? 'value unknown'}) on ${describeTrigger(order)}.\n\n` +
       `The order is not placed and the trigger stops being watched.`
     )) return;
 
     busy = true;
     try {
-      await trading.armed.disarm(order.armedId);
+      const result = await trading.armed.disarm(armedId);
+      notice = `Trigger ${result.armedId}: ${result.state}.`;
       await load();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
       busy = false;
+      feedback?.focus();
     }
   }
 
@@ -53,32 +70,40 @@
   }
 
   function toggleSelectAll() {
-    const armed = entries.filter(order => order.state === 'armed');
+    const armed = visibleEntries.filter(order => order.state === 'armed');
     selectedOrderIds = armed.length && armed.every(order => selectedOrderIds.has(order.armedId))
       ? new Set()
       : new Set(armed.map(order => order.armedId));
   }
 
   async function disarmSelected() {
-    if (busy || !selectedOrderIds.size) return;
-    const selected = entries.filter(order => selectedOrderIds.has(order.armedId));
-    if (!confirm(
+    if (busy || reviewing || !selectedOrderIds.size) return;
+    const selected = entries.filter(order => order.state === 'armed' && selectedOrderIds.has(order.armedId)).map(order => ({armedId:order.armedId,symbol:order.symbol,action:order.action,quantity:order.quantity}));
+    if (!selected.length) return;
+    if (!await confirmAction(
       `Disarm ${selected.length} selected trigger(s)?\n\n` +
+      selected.map(order => `${order.action} ${order.quantity} ${order.symbol} · ${order.armedId}`).join('\n') + '\n\n' +
       'No broker order is cancelled; these waiting local triggers simply stop being watched.'
     )) return;
 
     busy = true;
     error = null;
     try {
-      await Promise.all(selected.map(order => trading.armed.disarm(order.armedId)));
-      notice = `${selected.length} waiting trigger(s) disarmed.`;
+      const results = await Promise.allSettled(selected.map(order => trading.armed.disarm(order.armedId)));
+      const confirmed = results.filter(result => result.status === 'fulfilled' && result.value.state === 'cancelled').length;
+      notice = `${confirmed} of ${selected.length} waiting trigger(s) confirmed cancelled.`;
+      const failed = results.find(result => result.status === 'rejected');
+      if (failed?.status === 'rejected') error = `Some outcomes were not confirmed. Refresh and check before retrying. ${failed.reason instanceof Error ? failed.reason.message : String(failed.reason)}`;
       selectedOrderIds = new Set();
+      const failure = error;
       await load();
+      if (failure) error = failure;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
       await load();
     } finally {
       busy = false;
+      feedback?.focus();
     }
   }
 
@@ -172,9 +197,10 @@
 
   /** The local backstops are shown as part of their stop, not as loose triggers in the main list. */
   $: entries = (data?.orders ?? []).filter(o => !o.protectiveStopId);
+  $: visibleEntries = entries.filter(o => !keyboardMode || `${o.symbol} ${o.action} ${o.state} ${o.armedId}`.toLowerCase().includes(query.trim().toLowerCase()));
   $: selectableEntries = entries.filter(order => order.state === 'armed');
   $: selectedCount = selectableEntries.filter(order => selectedOrderIds.has(order.armedId)).length;
-  $: allSelected = selectableEntries.length > 0 && selectedCount === selectableEntries.length;
+  $: allSelected = visibleEntries.some(o => o.state === 'armed') && visibleEntries.filter(o => o.state === 'armed').every(o => selectedOrderIds.has(o.armedId));
 
   /**
    * Where the protection actually IS, which is the only thing worth reading on this row. "Armed" is
@@ -192,9 +218,10 @@
         : { text: 'not at the broker yet — local backstop only', tone: 'warn' as const };
 
   async function disarmStop(stop: ProtectiveStop) {
-    if (busy) return;
-    if (!confirm(
-      `Stop managing this protective stop?\n\n` +
+    if (busy || reviewing) return;
+    const stopId = stop.stopId;
+    if (!await confirmAction(
+      `Stop managing protective stop ${stopId}?\n\n` +
       `SELL ${stop.desiredQuantity || '—'} ${stop.symbol} at ${stop.stopTrigger}.\n\n` +
       (stop.restingToday
         ? `A native stop is ALREADY RESTING at the broker for today and cannot be cancelled from ` +
@@ -204,7 +231,7 @@
 
     busy = true;
     try {
-      const result = await trading.stops.disarm(stop.stopId);
+      const result = await trading.stops.disarm(stopId);
       notice = result.message;
       await load();
     } catch (e) {
@@ -220,7 +247,7 @@
   onMount(load);
 </script>
 
-<section class="armed">
+<section class="armed" use:orderListNavigation={keyboardMode}>
   <header>
     <div class="head-copy">
       <Crosshair size={15} />
@@ -265,14 +292,17 @@
     </div>
   {/if}
 
-  {#if notice}<p class="line">{notice}</p>{/if}
-  {#if error}<p class="line danger">{error}</p>{/if}
+  <p class="line" class:danger={!!error} role="status" tabindex="-1" bind:this={feedback}>{error ?? notice ?? ''}</p>
+  {#if keyboardMode}
+    <label class="order-filter">Find trigger <input type="search" bind:value={query} aria-label="Find armed order" placeholder="Symbol, state or trigger ID"/></label>
+    <p class="line">↑ ↓ / Home / End navigate rows · Enter focuses row controls · Tab reaches actions. Selection can include filtered-out rows; review lists every target.</p>
+  {/if}
 
   {#if !loading && selectableEntries.length}
     <div class="bulk-actions">
       <label>
         <input type="checkbox" checked={allSelected} on:change={toggleSelectAll} />
-        <ListChecks size={12} /> {allSelected ? 'Clear selection' : 'Select all waiting'}
+        <ListChecks size={12} /> {allSelected ? 'Clear selection' : keyboardMode ? 'Select visible waiting' : 'Select all waiting'}
       </label>
       <span>{selectedCount} selected</span>
       <button class="btn btn-danger" on:click={disarmSelected} disabled={!selectedCount || busy}>
@@ -291,8 +321,8 @@
     </p>
   {:else}
     <ul class="list">
-      {#each entries as order (order.armedId)}
-        <li class="row {order.state}">
+      {#each visibleEntries as order (order.armedId)}
+        <li class="row {order.state}" data-order-row>
           {#if order.state === 'armed'}
             <label class="row-select" title="Select waiting trigger">
               <input
@@ -308,7 +338,7 @@
                  when it goes in; this line is what goes in, and reading the card without it meant
                  sizing was invisible. -->
             <div class="row-1">
-              <span class="symbol">{order.symbol}</span>
+              {#if keyboardMode}<button class="symbol row-focus" data-order-focus aria-label={`Controls for ${order.symbol} ${order.action} trigger ${order.armedId}, ${order.state}`} on:click={focusOrderControls}>{order.symbol}</button>{:else}<span class="symbol">{order.symbol}</span>{/if}
               <LivePriceInline symbol={order.symbol} fallbackChange={null} />
               <span class="side {order.action.toLowerCase()}">{order.action}</span>
               <span class="qty">{order.quantity}</span>
@@ -336,13 +366,14 @@
             {#if order.stateReason}<p class="reason">{order.stateReason}</p>{/if}
           </div>
           {#if order.state === 'armed'}
-            <button class="icon danger" title="Disarm" on:click={() => disarm(order)} disabled={busy}>
+            <button class="icon danger" title="Disarm" aria-label={`Disarm ${order.symbol} trigger ${order.armedId}`} on:click={() => disarm(order)} disabled={busy || reviewing}>
               <Trash2 size={13} />
             </button>
           {/if}
         </li>
       {/each}
     </ul>
+    {#if entries.length && !visibleEntries.length}<p class="line">No triggers match this filter. Protection below is always shown.</p>{/if}
   {/if}
 
   {#if stops.length}
@@ -351,10 +382,10 @@
       <ul class="list">
         {#each stops as stop (stop.stopId)}
           {@const cover = describeCover(stop)}
-          <li class="row stop {cover.tone}">
+          <li class="row stop {cover.tone}" data-order-row>
             <div class="body">
               <div class="row-1">
-                <span class="symbol">{stop.symbol}</span>
+                {#if keyboardMode}<button class="symbol row-focus" data-order-focus aria-label={`Controls for ${stop.symbol} protective stop ${stop.stopId}`} on:click={focusOrderControls}>{stop.symbol}</button>{:else}<span class="symbol">{stop.symbol}</span>{/if}
                 <LivePriceInline symbol={stop.symbol} fallbackChange={null} />
                 <span class="side sell">STOP</span>
                 {#if stop.desiredQuantity}<span class="qty">{stop.desiredQuantity}</span>{/if}
@@ -376,7 +407,7 @@
               {#if stop.stateReason}<p class="reason">{stop.stateReason}</p>{/if}
             </div>
             {#if stop.state !== 'closed'}
-              <button class="icon danger" title="Disarm this stop"
+              <button class="icon danger" title="Disarm this stop" aria-label={`Disarm ${stop.symbol} protective stop ${stop.stopId}`}
                       on:click={() => disarmStop(stop)} disabled={busy}>
                 <Trash2 size={13} />
               </button>
@@ -394,8 +425,13 @@
 
   {#if data}<p class="caveat"><Zap size={12} /> {data.caveat}</p>{/if}
 </section>
+{#if keyboardMode}<OrderActionReview bind:this={review}/>{/if}
 
 <style>
+  .row-focus { background:none; border:0; padding:0; cursor:pointer; font-size:inherit; }
+  [data-order-row]:focus-visible, button:focus-visible, input:focus-visible { outline:2px solid var(--primary); outline-offset:-2px; }
+  .order-filter { display:flex; align-items:center; gap:.5rem; font-size:.75rem; color:var(--text-2); }
+  .order-filter input { min-width:0; padding:.35rem; border:1px solid var(--border-md); border-radius:4px; background:var(--surface-2); color:var(--text); }
   .armed {
     background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
     padding: 1rem; display: flex; flex-direction: column; gap: .7rem; margin-bottom: 1.25rem;

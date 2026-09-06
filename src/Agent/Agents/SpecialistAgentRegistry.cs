@@ -1,3 +1,4 @@
+using AgentFox.Plugins.Observability;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using AgentFox.Plugins.Interfaces;
@@ -47,9 +48,24 @@ public sealed class SpecialistAgentRegistry : IAgentRegistry
             _ => new SemaphoreSlim(
                 Math.Clamp(descriptor.MaxConcurrentTurns, 1, 32),
                 Math.Clamp(descriptor.MaxConcurrentTurns, 1, 32)));
+        // Delegation stays INSIDE the caller's correlation rather than starting a new one — the
+        // specialist's work was caused by the delegating turn, and splitting them would hide
+        // exactly the hand-off this trace exists to show. The specialist's own agent.run span
+        // nests under this one.
+        using var span = AgentTelemetry.Start(
+            AgentTelemetry.Agent, $"specialist.delegate {agentId}");
+        span?.SetTag("agentfox.specialist.id", agentId);
+        span?.SetTag("agentfox.specialist.name", descriptor.Name);
+        span?.SetTag("agentfox.session.conversation_id", conversationId);
+
+        var stopwatchGate = Stopwatch.StartNew();
         Interlocked.Increment(ref metrics.WaitingTurns);
         try { await gate.WaitAsync(ct); }
         finally { Interlocked.Decrement(ref metrics.WaitingTurns); }
+        // Recorded separately from total duration: time spent waiting on the per-specialist
+        // concurrency gate is queueing, not the specialist being slow.
+        stopwatchGate.Stop();
+        span?.SetTag("agentfox.specialist.gate_wait_ms", stopwatchGate.ElapsedMilliseconds);
         Interlocked.Increment(ref metrics.ActiveTurns);
         Interlocked.Increment(ref metrics.TotalTurns);
         var stopwatch = Stopwatch.StartNew();
@@ -57,12 +73,14 @@ public sealed class SpecialistAgentRegistry : IAgentRegistry
         {
             var result = await runner(input, conversationId, ct);
             metrics.LastError = null;
+            AgentTelemetry.SetOutcome(span, succeeded: true);
             return result;
         }
         catch (Exception ex)
         {
             Interlocked.Increment(ref metrics.FailedTurns);
             metrics.LastError = ex.GetType().Name;
+            AgentTelemetry.SetError(span, ex);
             throw;
         }
         finally

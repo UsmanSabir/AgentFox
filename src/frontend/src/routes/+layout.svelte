@@ -10,6 +10,7 @@
   import { page } from '$app/stores';
   import { MessageSquare, Zap, Sun, Moon } from 'lucide-svelte';
   import { goto } from '$app/navigation';
+  import { parseSidebarCollapsed, SIDEBAR_COLLAPSED_KEY } from '$lib/sidebarPreference';
 
   function startNewChat(event: MouseEvent) {
     event.preventDefault();
@@ -45,9 +46,12 @@
     const initialTheme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
     applyTheme(initialTheme, false);
 
-    // Start narrow screens on the compact rail. Users can still open the sidebar as a drawer, while
-    // the page retains enough width for plugin dashboards and chat content.
-    if (window.matchMedia('(max-width: 760px)').matches) sidebarCollapsed.set(true);
+    // An explicit user choice wins on every viewport. Without one, narrow screens start on the
+    // compact rail so plugin dashboards and chat retain usable width.
+    let savedSidebar: boolean | null = null;
+    try { savedSidebar = parseSidebarCollapsed(localStorage.getItem(SIDEBAR_COLLAPSED_KEY)); }
+    catch { /* Browser storage is optional. */ }
+    sidebarCollapsed.set(savedSidebar ?? window.matchMedia('(max-width: 760px)').matches);
 
     const savedMode = localStorage.getItem(UI_MODE_KEY);
     if (savedMode === 'simple' || savedMode === 'advanced') {

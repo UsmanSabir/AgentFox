@@ -1,3 +1,4 @@
+using AgentFox.Plugins.Observability;
 using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
 
@@ -317,6 +318,24 @@ public class CommandProcessor : IDisposable
         Guid taskId,
         CancellationToken ct)
     {
+        // Re-enter the correlation the producer was running under. This is the ONE place the
+        // chain is rejoined after the queue breaks it — see ICommand.CorrelationId. Everything
+        // downstream (the agent turn, its tool calls, an approval, and the trading plugin's
+        // proposal/execution/ledger rows) inherits from here, so a command type that leaves the
+        // id null starts a fresh correlation rather than losing one.
+        using var correlation = CorrelationContext.Begin(command.CorrelationId);
+
+        using var commandSpan = AgentTelemetry.Start(
+            AgentTelemetry.Agent, $"command.execute {lane}");
+        commandSpan?.SetTag("agentfox.command.lane", lane.ToString());
+        commandSpan?.SetTag("agentfox.command.run_id", command.RunId);
+        commandSpan?.SetTag("agentfox.command.type", command.GetType().Name);
+        commandSpan?.SetTag("agentfox.session.key", command.SessionKey);
+        // How long this sat in the queue before a lane slot freed up. A saturated lane shows up
+        // here as latency nothing else attributes to queueing.
+        commandSpan?.SetTag(
+            "agentfox.command.queue_wait_ms", (DateTime.UtcNow - command.CreatedAt).TotalMilliseconds);
+
         try
         {
             _activeByLane.AddOrUpdate(lane, 1, (_, current) => current + 1);
@@ -325,15 +344,18 @@ public class CommandProcessor : IDisposable
             _logger?.LogDebug("Executing {Lane} command {RunId}", lane, command.RunId);
             await handler(command, ct).ConfigureAwait(false);
             Interlocked.Increment(ref _totalProcessed);
+            AgentTelemetry.SetOutcome(commandSpan, succeeded: true);
         }
         catch (OperationCanceledException)
         {
             _logger?.LogDebug("{Lane} command {RunId} cancelled", lane, command.RunId);
+            AgentTelemetry.SetOutcome(commandSpan, succeeded: false, "cancelled");
         }
         catch (Exception ex)
         {
             _logger?.LogError(ex, "{Lane} command {RunId} failed: {Message}", lane, command.RunId, ex.Message);
             Interlocked.Increment(ref _totalFailed);
+            AgentTelemetry.SetError(commandSpan, ex);
         }
         finally
         {
