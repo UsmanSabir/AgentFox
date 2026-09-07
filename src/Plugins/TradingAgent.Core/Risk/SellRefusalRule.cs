@@ -36,11 +36,29 @@ namespace TradingAgent.Risk;
 public static class SellRefusalRule
 {
     /// <summary>
-    /// Is this cached answer worth spending a broker read on? Only a provable zero is: an unknown
-    /// availability has nothing to confirm, and a positive one is not being refused anyway.
+    /// Is this cached answer worth spending a broker read on? Only when it would SHORT-CHANGE a sell of
+    /// <paramref name="requestedQuantity"/> — refuse it outright, or quietly size it down.
+    ///
+    /// <para>
+    /// A cached figure that already covers the request needs no read: staleness can only make it
+    /// understate what is free (a cancellation or a fill FREES shares; a commitment this system did not
+    /// make is the only way it moves the other way, and the execution boundary re-reads before
+    /// submitting regardless). An UNKNOWN answer has nothing to confirm and never refuses anyway.
+    /// </para>
+    ///
+    /// <para>
+    /// The shortfall form rather than the zero form is deliberate, and 2026-09-07 is why. The zero case
+    /// is only the loudest symptom of a stale snapshot — the quiet one is a clamp. Three callers reduce
+    /// a SELL to this figure without refusing anything: the dashboard's keep-working branch, the same
+    /// branch for a triggered armed order, and the decision to stand our own protective stop down. On
+    /// the deployed interval a clamp can be sized on an account picture up to a poll interval old, and
+    /// unlike a refusal it produces no error for anyone to notice — just a smaller sell than was asked
+    /// for, explained by a <see cref="SellQuantityAdjustment"/> message nobody reads.
+    /// </para>
     /// </summary>
-    public static bool NeedsBrokerConfirmation(SellAvailabilityDecision cached) =>
-        cached is { Known: true, AvailableQuantity: <= 0 };
+    public static bool NeedsBrokerConfirmation(
+        SellAvailabilityDecision cached, int requestedQuantity) =>
+        cached is { Known: true } && cached.AvailableQuantity < Math.Max(1, requestedQuantity);
 
     /// <summary>
     /// May a refusal be issued on this answer? Only when it is both KNOWN and zero, which after a

@@ -58,10 +58,9 @@ public sealed partial class TradingCoreEndpoints
             MonitoredUniverse universe,
             TradingAgent.Manager.TradingManager manager,
             PersistentOrderWorker persistentOrders,
-            TradingReconciliationState reconciliation,
-            // Injected so a SELL that LOOKS fully committed can be confirmed against the broker before
-            // it is refused, rather than on a snapshot a timer last refreshed. See SellRefusalRule.
-            BrokerReconciliationWorker reconciliationWorker,
+            // The ONLY sanctioned way to ask what is free to sell: it confirms a cached answer against
+            // the broker whenever that answer would refuse or shrink the order. See its own doc.
+            SellAvailabilityConfirmer sellAvailabilityConfirmer,
             TradingPolicyProvider policyProvider,
             ApprovalIntentRegistry intentRegistry,
             ITradingRepository repository,
@@ -159,13 +158,21 @@ public sealed partial class TradingCoreEndpoints
             // an ordinary immediate sell — the common case — skipped the check entirely and met the
             // broker's own refusal instead.
             //
-            // Every rule about WHEN this may refuse, and why it costs a broker read to do so, is in
-            // SellRefusalRule. Read it before changing the shape of this call.
-            if (intent.Action.Equals("SELL", StringComparison.OrdinalIgnoreCase)
-                && await UnsellableHoldingRefusalAsync(
-                       symbol, reconciliation, reconciliationWorker, repository, options, logger, ct)
-                   is { } unsellable)
-                return unsellable;
+            // Every rule about WHEN a cached answer is good enough, and why it costs a broker read when
+            // it is not, is in SellAvailabilityConfirmer and SellRefusalRule. Read them before changing
+            // the shape of this. Asked ONCE for the whole request: the keep-working branch below sizes
+            // from this same answer rather than taking its own reading of the same account.
+            ConfirmedSellAvailability? sellAvailability = null;
+            if (intent.Action.Equals("SELL", StringComparison.OrdinalIgnoreCase))
+            {
+                sellAvailability = await sellAvailabilityConfirmer.ForSellAsync(
+                    symbol, body.Quantity.Value, ct);
+
+                if (sellAvailability.BrokerConfirmed
+                    && SellRefusalRule.MayRefuse(sellAvailability.Decision))
+                    return await UnsellableHoldingConflictAsync(
+                        symbol, sellAvailability, repository, ct);
+            }
 
             if (body.PersistentUntilFilled)
             {
@@ -187,27 +194,47 @@ public sealed partial class TradingCoreEndpoints
 
                 if (intent.Action.Equals("SELL", StringComparison.OrdinalIgnoreCase))
                 {
-                    var availability = SellQuantityRule.Available(
-                        reconciliation.Current,
-                        symbol,
-                        DateTime.UtcNow,
-                        TimeSpan.FromSeconds(Math.Max(
-                            10, options.Value.ReconciliationMaxAgeSeconds)));
-                    if (!availability.Known)
+                    var availability = sellAvailability!;
+
+                    // The clamp below is the QUIET half of the 2026-09-07 stale-snapshot incident: it
+                    // reduces the order instead of refusing it, so a figure a poll interval out of date
+                    // produced a smaller sell than was asked for and no error for anyone to notice. It
+                    // may therefore only size on an answer that was either confirmed with the broker or
+                    // already covered the request — which is exactly what the confirmer returns.
+                    //
+                    // A confirming read that FAILED sizes nothing here. Carrying the full quantity to
+                    // the execution boundary is strictly better than clamping on a figure just shown to
+                    // be untrustworthy: TradingManager re-reads the broker book for every independent
+                    // SELL, so the order is still bounded by custody — just bounded by a current
+                    // reading instead of a stale one. Same reasoning as the released-stop branch in
+                    // WatchlistMonitorWorker, and the same reason this is not a refusal.
+                    if (availability.MustDeferSizing)
+                    {
+                        logger.LogWarning(
+                            "[TradingAgent] {Symbol} keep-working SELL of {Quantity} is sized at the "
+                            + "execution boundary: {Why}",
+                            symbol, effectiveQuantity, availability.ConfirmationFailure);
+                    }
+                    else if (!availability.Decision.Known)
+                    {
+                        // A keep-working order must not be built on an unknown availability: it
+                        // re-places itself for days, so a wrong size outlives the reading that produced
+                        // it. An immediate sell is left to the execution boundary instead.
                         return Results.Conflict(new
                         {
                             error = "sell_availability_unknown",
-                            message = availability.Reason
+                            message = availability.Decision.Reason
                         });
-                    // The known-and-zero case is already refused above, for every sell rather than
-                    // only for a persistent one. What is left here is this branch's own business:
-                    // an unknown availability, which a keep-working order must not be built on, and
-                    // clamping a partly-available quantity down to what can actually be sold.
-                    effectiveQuantity = Math.Min(effectiveQuantity, availability.AvailableQuantity);
-                    if (effectiveQuantity != body.Quantity.Value)
+                    }
+                    else
                     {
-                        sellQuantityAdjustment = new SellQuantityAdjustment(
-                            0, 0, symbol, body.Quantity.Value, effectiveQuantity).Message;
+                        effectiveQuantity = Math.Min(
+                            effectiveQuantity, availability.Decision.AvailableQuantity);
+                        if (effectiveQuantity != body.Quantity.Value)
+                        {
+                            sellQuantityAdjustment = new SellQuantityAdjustment(
+                                0, 0, symbol, body.Quantity.Value, effectiveQuantity).Message;
+                        }
                     }
                 }
 
@@ -499,74 +526,31 @@ public sealed partial class TradingCoreEndpoints
     }
 
     /// <summary>
-    /// Confirms a "nothing free to sell" answer against the broker and turns it into a 409, or returns
-    /// null to let the order carry on to the live check at the execution boundary.
+    /// Builds the 409 for a sell the broker itself currently has nothing free for.
     ///
     /// <para>
-    /// The decision rules and the incident that produced them live in <see cref="SellRefusalRule"/>; this
-    /// method is only the I/O around them. Two things about the I/O are load-bearing:
+    /// Takes an ALREADY-CONFIRMED availability rather than reading anything: the caller has established
+    /// with a fresh broker read that there is genuinely nothing to sell, and the rules governing when
+    /// that is allowed to happen live in <see cref="SellRefusalRule"/>. This method only explains it.
     /// </para>
     ///
-    /// <list type="bullet">
-    ///   <item><description>
-    ///     The broker read goes through <see cref="BrokerReconciliationWorker.RunNowAsync"/> rather than
-    ///     <see cref="IBrokerStateReader"/> directly, for two reasons: it is single-flight, so several
-    ///     callers arriving at once share one pass instead of each opening their own; and it PUBLISHES
-    ///     what it read, so the snapshot every other consumer reads is corrected as a side effect of
-    ///     this one refusal rather than staying stale until the next tick.
-    ///   </description></item>
-    ///   <item><description>
-    ///     A read that FAILS returns null. The order is not this diagnostic's to refuse, and the live
-    ///     check downstream is both authoritative and better placed to explain a broker that cannot be
-    ///     reached at all.
-    ///   </description></item>
-    /// </list>
+    /// <para>
+    /// It names the blockers from <see cref="ConfirmedSellAvailability.Snapshot"/> — the same read the
+    /// number came from — so the sentence and the figure cannot disagree.
+    /// </para>
     /// </summary>
-    private static async Task<IResult?> UnsellableHoldingRefusalAsync(
+    private static async Task<IResult> UnsellableHoldingConflictAsync(
         string symbol,
-        TradingReconciliationState reconciliation,
-        BrokerReconciliationWorker reconciliationWorker,
+        ConfirmedSellAvailability availability,
         ITradingRepository repository,
-        IOptions<TradingAgentOptions> options,
-        ILogger logger,
         CancellationToken ct)
     {
-        var maxAge = TimeSpan.FromSeconds(Math.Max(10, options.Value.ReconciliationMaxAgeSeconds));
-
-        // The cached answer decides only whether to spend a broker call — never whether to refuse.
-        var cached = SellQuantityRule.Available(reconciliation.Current, symbol, DateTime.UtcNow, maxAge);
-        if (!SellRefusalRule.NeedsBrokerConfirmation(cached))
-            return null;
-
-        BrokerReconciliationSnapshot fresh;
-        try
-        {
-            fresh = await reconciliationWorker.RunNowAsync(ct);
-        }
-        catch (Exception ex) when (!ct.IsCancellationRequested)
-        {
-            logger.LogWarning(ex,
-                "[TradingAgent] {Symbol} sell availability could not be confirmed with the broker; "
-                + "leaving the decision to the execution boundary.", symbol);
-            return null;
-        }
-
-        var confirmed = SellQuantityRule.Available(fresh, symbol, DateTime.UtcNow, maxAge);
-        if (!SellRefusalRule.MayRefuse(confirmed))
-        {
-            // Worth a line at Information: this is the exact staleness that produced a false refusal
-            // before the confirming read existed, and it is otherwise invisible — the operator just
-            // sees an order succeed.
-            logger.LogInformation(
-                "[TradingAgent] {Symbol} looked fully committed in the cached broker snapshot, but a "
-                + "fresh read disagrees ({Reason}). The sell was not refused.", symbol, confirmed.Reason);
-            return null;
-        }
-
         var blocking = await BlockingStopsAsync(repository, symbol, ct);
         var foreign = SellRefusalRule
             .RestingSellsNotPlacedHere(
-                fresh, symbol, blocking.Select(s => s.OrderNo.Trim()).ToHashSet(StringComparer.OrdinalIgnoreCase))
+                availability.Snapshot,
+                symbol,
+                blocking.Select(s => s.OrderNo.Trim()).ToHashSet(StringComparer.OrdinalIgnoreCase))
             .Select(o => new RestingSell(
                 o.OrderNo.Trim(),
                 o.RemainingQuantity!.Value,
@@ -580,11 +564,11 @@ public sealed partial class TradingCoreEndpoints
             error = "no_sellable_holding",
             message = SellRefusalRule.Compose(
                 symbol,
-                confirmed.Reason,
+                availability.Decision.Reason,
                 blocking.Select(s => s.Describe).ToList(),
                 foreign.Select(o => o.Describe).ToList()),
-            basis = confirmed.Reason,
-            checkedUtc = fresh.CheckedUtc,
+            basis = availability.Decision.Reason,
+            checkedUtc = availability.Snapshot.CheckedUtc,
             blockingStops = blocking,
             restingSells = foreign
         });

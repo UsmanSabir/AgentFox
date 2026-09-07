@@ -1,5 +1,9 @@
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using TradingAgent;
 using TradingAgent.Reconciliation;
 using TradingAgent.Risk;
+using TradingAgent.Watchlist;
 
 namespace AgentFox.ChannelTests;
 
@@ -29,7 +33,7 @@ public sealed class SellRefusalTests
                      openOrders: [new("0911XK5", "FCEPL", "SEL", 50, 152m)]),
             "FCEPL", Now, TimeSpan.FromMinutes(3));
 
-        Assert.IsTrue(SellRefusalRule.NeedsBrokerConfirmation(committed),
+        Assert.IsTrue(SellRefusalRule.NeedsBrokerConfirmation(committed, requestedQuantity: 25),
             "A provable zero is worth one broker read, because it is about to refuse an order.");
         Assert.IsTrue(SellRefusalRule.MayRefuse(committed));
     }
@@ -41,7 +45,9 @@ public sealed class SellRefusalTests
         var free = SellQuantityRule.Available(
             Snapshot(positions: [new("FCEPL", 50m)]), "FCEPL", Now, TimeSpan.FromMinutes(3));
 
-        Assert.IsFalse(SellRefusalRule.NeedsBrokerConfirmation(free));
+        Assert.IsFalse(SellRefusalRule.NeedsBrokerConfirmation(free, requestedQuantity: 25),
+            "A cached figure that already covers the request needs no read: staleness can only make "
+            + "it understate what is free.");
         Assert.IsFalse(SellRefusalRule.MayRefuse(free),
             "50 free shares must reach the execution boundary, which is the authoritative check.");
     }
@@ -64,9 +70,42 @@ public sealed class SellRefusalTests
         {
             Assert.IsFalse(decision.Known);
             Assert.IsFalse(SellRefusalRule.MayRefuse(decision));
-            Assert.IsFalse(SellRefusalRule.NeedsBrokerConfirmation(decision),
+            Assert.IsFalse(SellRefusalRule.NeedsBrokerConfirmation(decision, requestedQuantity: 25),
                 "There is nothing to confirm about an answer that is already unknown.");
         }
+    }
+
+    [TestMethod]
+    public void AShortfallIsConfirmedToo_NotOnlyAZero()
+    {
+        // 20 free against a 50-share sell. Nothing is refused here — the order is CLAMPED to 20 — and
+        // that is precisely why it needs confirming: a clamp on a stale figure undersells the position
+        // and reports only a SellQuantityAdjustment message nobody reads.
+        var partial = SellQuantityRule.Available(
+            Snapshot(positions: [new("FCEPL", 50m)],
+                     openOrders: [new("0911XK5", "FCEPL", "SEL", 30, 152m)]),
+            "FCEPL", Now, TimeSpan.FromMinutes(3));
+
+        Assert.AreEqual(20, partial.AvailableQuantity);
+        Assert.IsTrue(SellRefusalRule.NeedsBrokerConfirmation(partial, requestedQuantity: 50),
+            "A clamp is a consequence of the cached figure and must be confirmed like a refusal.");
+        Assert.IsFalse(SellRefusalRule.NeedsBrokerConfirmation(partial, requestedQuantity: 20),
+            "20 free covers a 20-share sell exactly; there is nothing to gain from a read.");
+        Assert.IsFalse(SellRefusalRule.MayRefuse(partial),
+            "A shortfall is never a refusal — only a zero is.");
+    }
+
+    [TestMethod]
+    public void AZeroQuantityRequestStillTreatsZeroAvailableAsAShortfall()
+    {
+        // Guards the Math.Max(1, requested) floor: a request of 0 must not make "nothing is free" look
+        // like a satisfied one, or a refusal could be issued on an unconfirmed zero through that door.
+        var committed = SellQuantityRule.Available(
+            Snapshot(positions: [new("FCEPL", 50m)],
+                     openOrders: [new("0911XK5", "FCEPL", "SEL", 50, 152m)]),
+            "FCEPL", Now, TimeSpan.FromMinutes(3));
+
+        Assert.IsTrue(SellRefusalRule.NeedsBrokerConfirmation(committed, requestedQuantity: 0));
     }
 
     [TestMethod]
@@ -156,6 +195,48 @@ public sealed class SellRefusalTests
         {
             StringAssert.Contains(message, "0 held minus 0 already committed.");
             StringAssert.Contains(message, "Checked with the broker just now, not from a cached snapshot.");
+        }
+    }
+
+    /// <summary>
+    /// The confirming read added a constructor dependency to a hosted worker, and invariant 12's lesson
+    /// is that a DI graph this codebase cannot construct fails as a StackOverflow or a resolution
+    /// throw at startup — while every unit test stays green, because nothing else in either suite looks
+    /// at the container at all.
+    ///
+    /// <para>
+    /// Checks the REGISTRATIONS rather than building a provider. Booting one needs host services
+    /// (<c>PluginConfigManager</c>, the plugin context, a database path) that only the host supplies, and
+    /// stubbing them would make this a test of the stubs. What it catches is the failure this change
+    /// could actually cause: a constructor parameter whose type nothing registers.
+    /// </para>
+    /// </summary>
+    [TestMethod]
+    public void EveryTradingDependencyOfTheConfirmerAndItsCallerIsRegistered()
+    {
+        var services = new ServiceCollection();
+        TradingAgentRuntime.AddCore(
+            services, new ConfigurationBuilder().AddInMemoryCollection().Build());
+        var registered = services.Select(d => d.ServiceType).ToHashSet();
+
+        Assert.IsTrue(registered.Contains(typeof(SellAvailabilityConfirmer)),
+            "The confirmer is the only sanctioned way to ask what is free to sell, so AddCore must "
+            + "register it — the endpoint and the armed-order worker both inject it.");
+
+        foreach (var type in new[] { typeof(SellAvailabilityConfirmer), typeof(WatchlistMonitorWorker) })
+        {
+            var constructor = type.GetConstructors().Single();
+            foreach (var parameter in constructor.GetParameters())
+            {
+                // Host-supplied and optional parameters are not AddCore's to register.
+                var dependency = parameter.ParameterType;
+                if (parameter.HasDefaultValue) continue;
+                if (dependency.Assembly != typeof(TradingAgentRuntime).Assembly) continue;
+
+                Assert.IsTrue(registered.Contains(dependency),
+                    $"{type.Name} takes {dependency.Name}, which AddCore does not register. The host "
+                    + "would fail to construct it at startup, and no other test would notice.");
+            }
         }
     }
 
