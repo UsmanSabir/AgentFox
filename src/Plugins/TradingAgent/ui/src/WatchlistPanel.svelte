@@ -794,7 +794,8 @@
             <span class="identity">
               <span class="symbol-line">
                 <span class="symbol">{entry.symbol}</span>
-                <LivePriceInline symbol={entry.symbol} fallbackChange={entry.dayChangePercent} showPrice={!compact} />
+                <LivePriceInline symbol={entry.symbol} fallbackPrice={entry.lastPrice}
+                  fallbackChange={entry.dayChangePercent} showPrice={!compact} />
               </span>
               {#if entry.companyName}<span class="company">{entry.companyName}</span>{/if}
             </span>

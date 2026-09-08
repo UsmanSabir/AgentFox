@@ -61,6 +61,16 @@ export interface LivePriceView {
   phase: VenuePhase;
 }
 
+/** One price cell's resolved contents. See `resolveDisplayQuote`. */
+export interface LivePriceDisplay {
+  price: number | null;
+  change: number | null;
+  /** Provenance of `price`, or null when it needs no qualifier because it is a current live tick. */
+  tag: 'stale' | 'pre-open' | 'close' | 'delayed' | null;
+  /** Long-form provenance for a tooltip and the accessible name. */
+  label: string;
+}
+
 export interface LivePriceConnection {
   state: LivePriceConnectionState;
   reason: string | null;
@@ -70,12 +80,38 @@ export interface LivePriceConnection {
   venuePhase: VenuePhase;
   /** Its raw token, for a tooltip. */
   venueState: string | null;
+  /**
+   * True once nothing has arrived for longer than a transport that is working would ever be quiet.
+   *
+   * <p>`state: 'live'` is set by any envelope and latched: nothing un-set it, so a stream that
+   * stopped delivering silently — a half-open socket, a proxy idle timeout, a resumed laptop — left
+   * the status reading "live" indefinitely while the quote book emptied under the retention sweep
+   * below. That is the failure this flag exists to make visible: a display saying prices are live
+   * while showing none is worse than one that admits it has lost the feed.</p>
+   *
+   * <p>Measured on OUR OWN clock from when each envelope arrived, never by differencing the server's
+   * `serverTimeUtc` against ours. Those are two clocks, and comparing them has already produced one
+   * confident and entirely fictional finding in this product.</p>
+   */
+  stale: boolean;
+  /**
+   * How long the stream has been quiet, once that silence is a fault worth naming — 0 whenever
+   * `stale` is false, and null until a first message has ever arrived.
+   */
+  silentForSeconds: number | null;
 }
 
 const CONTEXT_KEY = Symbol('trading-live-prices');
 const UI_RETENTION_MS = 10 * 60 * 1000;
 const SWEEP_MS = 15_000;
 const COMMIT_MS = 100;
+/**
+ * Three missed heartbeats. The premium stream sends a `status` envelope every 15 seconds even on a
+ * dead-quiet tape (`PremiumEndpoints.MapPremiumEndpoints`'s `/quotes/stream` PeriodicTimer), so
+ * silence past this is a transport fault rather than a quiet market. Any transport feeding this book
+ * must heartbeat faster than this; one that cannot has to report its own liveness instead.
+ */
+const SILENCE_MS = 45_000;
 
 const cleanSymbol = (symbol: string | null | undefined) => symbol?.trim().toUpperCase() ?? '';
 const positive = (value: number | null | undefined) =>
@@ -94,12 +130,14 @@ export class LivePriceBook {
   private readonly pending = new Map<string, LivePrice>();
   private readonly connectionStore = writable<LivePriceConnection>({
     state: 'unavailable', reason: null, feedState: null, lastMessageAtUtc: null,
-    venuePhase: 'Unknown', venueState: null
+    venuePhase: 'Unknown', venueState: null, stale: false, silentForSeconds: null
   });
   private connectionValue: LivePriceConnection = {
     state: 'unavailable', reason: null, feedState: null, lastMessageAtUtc: null,
-    venuePhase: 'Unknown', venueState: null
+    venuePhase: 'Unknown', venueState: null, stale: false, silentForSeconds: null
   };
+  /** When the last envelope reached US. See `LivePriceConnection.stale` for why it is not the server's stamp. */
+  private lastMessageAtMs: number | null = null;
   private latestSequence = 0;
   private marketOpen = false;
   private staleAfterMs = 120_000;
@@ -134,7 +172,11 @@ export class LivePriceBook {
   }
 
   setConnection(state: LivePriceConnectionState, reason: string | null = null): void {
-    this.connectionValue = { ...this.connectionValue, state, reason };
+    // `stale` is the derived answer for a transport that has NOT noticed it stopped delivering. Once
+    // the transport says so itself, the derived flag would only double-report it — and would outlive
+    // the reconnect it describes, because nothing but an envelope clears it.
+    const stale = state === 'live' && this.connectionValue.stale;
+    this.connectionValue = { ...this.connectionValue, state, reason, stale };
     this.connectionStore.set(this.connectionValue);
     this.refreshViews();
   }
@@ -153,6 +195,7 @@ export class LivePriceBook {
 
     this.marketOpen = envelope.marketOpen;
     this.staleAfterMs = Math.max(30_000, envelope.staleAfterSeconds * 1000);
+    this.lastMessageAtMs = Date.now();
     this.connectionValue = {
       ...this.connectionValue,
       state: 'live',
@@ -160,7 +203,11 @@ export class LivePriceBook {
       feedState: envelope.feedState || null,
       lastMessageAtUtc: envelope.serverTimeUtc,
       venuePhase: envelope.venuePhase ?? 'Unknown',
-      venueState: envelope.venueState ?? null
+      venueState: envelope.venueState ?? null,
+      // A heartbeat counts. It carries no quotes, but it proves the transport is still delivering,
+      // which is the only thing this pair of fields claims.
+      stale: false,
+      silentForSeconds: 0
     };
     this.connectionStore.set(this.connectionValue);
 
@@ -230,6 +277,7 @@ export class LivePriceBook {
   }
 
   private sweep(): void {
+    this.refreshSilence();
     const cutoff = Date.now() - UI_RETENTION_MS;
     const removed: string[] = [];
     for (const [symbol, quote] of this.quotes) {
@@ -243,6 +291,27 @@ export class LivePriceBook {
     // Fresh values can cross the stale threshold without another trade, so refresh subscribed rows.
     for (const [symbol, store] of this.stores)
       if (!removed.includes(symbol)) store.set(this.view(this.quotes.get(symbol) ?? null));
+  }
+
+  /**
+   * Recomputes whether the stream has gone quiet, and publishes it when the answer changes.
+   *
+   * <p>Runs on the sweep's existing tick, so its resolution is `SWEEP_MS`. A background tab whose
+   * timers the browser has throttled therefore notices late — acceptable, because it corrects on the
+   * next tick after focus, and because a hidden tab is not a screen anyone is trading from.</p>
+   */
+  private refreshSilence(): void {
+    if (this.lastMessageAtMs === null) return;
+    const silentMs = Date.now() - this.lastMessageAtMs;
+    const stale = this.connectionValue.state === 'live' && silentMs > SILENCE_MS;
+    // Only a stall needs a duration. Publishing a counter that ticked every sweep would re-render
+    // every subscriber of this store forever, to say nothing anyone is waiting to hear.
+    const silentForSeconds = stale ? Math.max(0, Math.round(silentMs / 1000)) : 0;
+    if (stale === this.connectionValue.stale
+        && silentForSeconds === this.connectionValue.silentForSeconds) return;
+
+    this.connectionValue = { ...this.connectionValue, stale, silentForSeconds };
+    this.connectionStore.set(this.connectionValue);
   }
 
   private refreshViews(): void {
@@ -263,6 +332,7 @@ export class LivePriceBook {
     const current = Number.isFinite(received)
       && Date.now() - received <= this.staleAfterMs
       && this.connectionValue.state === 'live'
+      && !this.connectionValue.stale
       && feedCurrent;
     return { quote, freshness: current ? 'live' : 'stale', phase };
   }
@@ -276,6 +346,42 @@ export function provideLivePrices(book: LivePriceBook): void {
 
 export function useLivePrices(): LivePriceBook {
   return getContext<LivePriceBook | undefined>(CONTEXT_KEY) ?? unavailableBook;
+}
+
+/**
+ * What one price cell should show, once the live book and the caller's delayed fallbacks are both
+ * taken into account.
+ *
+ * <p>Pure, and shared by every consumer, because the rule it encodes is easy to get subtly wrong and
+ * was: a cell resolves price and change INDEPENDENTLY, so a row can legitimately show a live change
+ * beside a delayed price, or a delayed change beside no price at all. `tag` therefore describes where
+ * the PRICE came from rather than where the view came from — a live quote whose own `current` is null
+ * still has to label a fallback price as delayed.</p>
+ *
+ * <p>The tag is not decoration. A delayed snapshot rendered without it is indistinguishable from a
+ * live tick, which would make a stalled feed look like a quiet market.</p>
+ */
+export function resolveDisplayQuote(
+  view: LivePriceView,
+  fallbackPrice: number | null = null,
+  fallbackChange: number | null = null,
+  showPrice = true
+): LivePriceDisplay {
+  const livePrice = view.quote?.current ?? null;
+  const price = livePrice ?? fallbackPrice;
+  const change = view.quote?.changePercent ?? fallbackChange;
+
+  const tag = livePrice !== null
+    ? (view.freshness === 'live'
+        ? null
+        // Pre-open is not "close": the price is the last trade, but the venue is live and taking
+        // orders. Labelling it "close" reads as a market that has finished for the day.
+        : view.freshness === 'stale' ? 'stale' : view.phase === 'PreOpen' ? 'pre-open' : 'close')
+    // Conditioned on a price being SHOWN, not merely on there being one, so a change-only column
+    // does not repeat a tag its sibling cell already carries.
+    : showPrice && price !== null ? 'delayed' : null;
+
+  return { price, change, tag, label: view.quote ? livePriceLabel(view) : 'Delayed market snapshot' };
 }
 
 export function livePriceLabel(view: LivePriceView): string {

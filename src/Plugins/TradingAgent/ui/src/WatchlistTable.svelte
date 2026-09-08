@@ -145,7 +145,8 @@
         </div>
         <div role="gridcell" class="quote" data-col="1" tabindex={focused === entry.symbol && column === 1 ? 0 : -1}
           on:focus={() => {focused = entry.symbol; column = 1;}}>
-          <LivePriceInline symbol={entry.symbol} fallbackChange={entry.dayChangePercent} showUnavailable/>
+          <LivePriceInline symbol={entry.symbol} fallbackPrice={entry.lastPrice}
+            fallbackChange={entry.dayChangePercent} showUnavailable/>
         </div>
         <button type="button" role="gridcell" class="actions-toggle" data-col="2" aria-label={`Actions for ${entry.symbol}`} aria-haspopup="dialog"
           tabindex={focused === entry.symbol && column === 2 ? 0 : -1} on:focus={() => {focused = entry.symbol; column = 2;}}

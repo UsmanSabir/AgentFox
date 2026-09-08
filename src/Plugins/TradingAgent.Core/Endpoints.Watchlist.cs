@@ -106,6 +106,13 @@ public sealed partial class TradingCoreEndpoints
                     // Current session move against the previous close. It stays null when the
                     // market-watch quote is unavailable; unknown must not be presented as flat.
                     dayChangePercent = marketWatch.GetValueOrDefault(e.Symbol)?.ChangePercent,
+                    // The price behind that percentage, from the SAME quote, so a row can never show
+                    // one without the other. Projecting only the percentage is what left the watchlist
+                    // blank whenever the browser's live-price book had nothing for a symbol: the
+                    // component falls back per field, and the price had no fallback to reach for while
+                    // this response was already holding the number. Delayed by construction — the row
+                    // prefers a live tick and only lands here when there is none.
+                    lastPrice = marketWatch.GetValueOrDefault(e.Symbol)?.Current,
                     addedUtc = e.AddedUtc,
                     source = e.Source,
                     sortOrder = e.SortOrder,

@@ -446,6 +446,12 @@ export interface WatchlistEntry {
   companyName?: string | null;
   /** Current session move from the previous close; absent when market-watch data is unavailable. */
   dayChangePercent?: number | null;
+  /**
+   * Last price from the same market-watch quote as `dayChangePercent`. A DELAYED snapshot: a row
+   * shows the live tick when the price book has one and only falls back to this. Both fields come
+   * from one quote so a row can never display a move without the price it was measured from.
+   */
+  lastPrice?: number | null;
   addedUtc: string;
   source: 'seed' | 'user' | string;
   sortOrder: number;
