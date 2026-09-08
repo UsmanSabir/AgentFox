@@ -21,6 +21,7 @@ public sealed class BrokerReconciliationWorker : BackgroundService, IMarketSessi
     private readonly IBrokerStateReader _reader;
     private readonly TradingReconciliationState _state;
     private readonly ITradingRepository _repository;
+    private readonly IMarketCalendar _calendar;
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly ILogger<BrokerReconciliationWorker> _logger;
     private readonly SemaphoreSlim _runGate = new(1, 1);
@@ -29,23 +30,64 @@ public sealed class BrokerReconciliationWorker : BackgroundService, IMarketSessi
         IBrokerStateReader reader,
         TradingReconciliationState state,
         ITradingRepository repository,
+        IMarketCalendar calendar,
         IOptions<TradingAgentOptions> options,
         ILogger<BrokerReconciliationWorker> logger)
     {
         _reader = reader;
         _state = state;
         _repository = repository;
+        _calendar = calendar;
         _options = options;
         _logger = logger;
     }
 
+    /// <summary>
+    /// The periodic pass, gated by the calendar since 2026-09-08. It used to read the account around the
+    /// clock, so on the deployed 1260s interval roughly two thirds of ~340 daily SOAP calls asked a shut
+    /// venue what had changed — and nothing can change while it is shut. What the gate KEEPS is the
+    /// important half: every in-session pass, because that is the floor under the pushed order events
+    /// and a push only arrives if the socket is up. <see cref="ReconciliationSchedule"/> holds the rules
+    /// and the reasoning.
+    /// </summary>
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var delay = TimeSpan.FromSeconds(Math.Max(10, _options.Value.ReconciliationIntervalSeconds));
+        var startup = true;
+        DateOnly? postCloseDoneFor = null;
+
         while (!stoppingToken.IsCancellationRequested)
         {
-            try { await RunNowAsync(stoppingToken); }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
+            ReconciliationTrigger trigger;
+            try
+            {
+                var status = _calendar.GetStatus();
+                trigger = ReconciliationSchedule.Decide(
+                    startup, status, _calendar.IsTradingDay(DateOnly.FromDateTime(status.PktNow)),
+                    postCloseDoneFor);
+
+                if (trigger == ReconciliationTrigger.PostClose)
+                    postCloseDoneFor = DateOnly.FromDateTime(status.PktNow);
+            }
+            catch (Exception ex)
+            {
+                // An unreadable calendar must not silence reconciliation: this gate exists to save
+                // pointless calls, never to decide whether the account may be read at all.
+                _logger.LogWarning(ex,
+                    "[Reconciliation] Could not read the market calendar; taking the pass anyway.");
+                trigger = ReconciliationTrigger.InSession;
+            }
+
+            startup = false;
+
+            if (trigger != ReconciliationTrigger.None)
+            {
+                _logger.LogDebug("[Reconciliation] Periodic pass: {Why}.",
+                    ReconciliationSchedule.Describe(trigger));
+
+                try { await RunNowAsync(stoppingToken); }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
+            }
 
             try { await Task.Delay(delay, stoppingToken); }
             catch (OperationCanceledException) { break; }
