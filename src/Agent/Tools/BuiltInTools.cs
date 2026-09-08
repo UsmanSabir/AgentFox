@@ -401,10 +401,19 @@ public class MakeDirectoryTool : BaseTool
     }
 
     public override string Name => "make_directory";
-    public override string Description => "Create a new directory";
+    public override string Description =>
+        "Create a directory, including any missing parent directories (like 'mkdir -p'). "
+        + "Succeeds without error if the directory already exists, so it is safe to call before "
+        + "writing a file. Restricted to the configured workspace: a path outside it is refused.";
     public override Dictionary<string, ToolParameter> Parameters { get; } = new()
     {
-        ["path"] = new() { Type = "string", Description = "Path of the directory to create", Required = true }
+        ["path"] = new()
+        {
+            Type = "string",
+            Description = "Directory to create. Relative paths resolve against the workspace root. "
+                          + "Missing parents are created too.",
+            Required = true
+        }
     };
 
     protected override Task<ToolResult> ExecuteInternalAsync(Dictionary<string, object?> arguments)

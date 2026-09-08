@@ -53,12 +53,12 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
     private readonly ApprovalGate _approvals;
     private readonly TradingAgent.Manager.TradingManager _manager;
     private readonly PersistentOrderWorker _persistentOrders;
-    private readonly TradingReconciliationState _reconciliation;
     private readonly TradingAgent.Broker.IBrokerOutstandingOrdersReader _outstandingReader;
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly ILogger<WatchlistMonitorWorker> _logger;
     private readonly TradingActivityLog? _activity;
     private readonly IProtectiveStopReleaser? _stopReleaser;
+    private readonly SellAvailabilityConfirmer _sellAvailability;
 
     private readonly object _statusLock = new();
     private readonly SemaphoreSlim _runGate = new(1, 1);
@@ -75,7 +75,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
         ApprovalGate approvals,
         TradingAgent.Manager.TradingManager manager,
         PersistentOrderWorker persistentOrders,
-        TradingReconciliationState reconciliation,
+        SellAvailabilityConfirmer sellAvailability,
         TradingAgent.Broker.IBrokerOutstandingOrdersReader outstandingReader,
         IOptions<TradingAgentOptions> options,
         ILogger<WatchlistMonitorWorker> logger,
@@ -94,7 +94,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
         _approvals = approvals;
         _manager = manager;
         _persistentOrders = persistentOrders;
-        _reconciliation = reconciliation;
+        _sellAvailability = sellAvailability;
         _outstandingReader = outstandingReader;
         _options = options;
         _logger = logger;
@@ -478,13 +478,26 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                     var effectiveQuantity = order.Quantity;
                     if (order.Action.Equals("SELL", StringComparison.OrdinalIgnoreCase))
                     {
-                        var availability = SellQuantityRule.Available(
-                            _reconciliation.Current,
-                            order.Symbol,
-                            DateTime.UtcNow,
-                            TimeSpan.FromSeconds(Math.Max(
-                                10, _options.Value.ReconciliationMaxAgeSeconds)));
-                        if (!availability.Known)
+                        // Confirmed with the broker whenever the cached figure would shrink this sell.
+                        // A triggered exit sized on a stale account picture is the QUIET half of the
+                        // 2026-09-07 stale-snapshot incident: the order still goes out, just smaller
+                        // than the thesis asked for, and nothing errors. On the deployed interval that
+                        // picture can be 21 minutes old. See SellAvailabilityConfirmer.
+                        var confirmed = await _sellAvailability.ForSellAsync(
+                            order.Symbol, order.Quantity, ct);
+                        var availability = confirmed.Decision;
+
+                        // The broker could not be asked. Carry the full quantity and let the execution
+                        // boundary size it against a fresh book — the same move the released-stop branch
+                        // below makes, and for the same reason. Re-arming instead would postpone a
+                        // triggered exit over a broker hiccup.
+                        if (confirmed.MustDeferSizing)
+                        {
+                            _logger.LogWarning(
+                                "[ArmedOrders] {ArmedId} ({Symbol}) is sized at the execution boundary: "
+                                + "{Why}", order.ArmedId, order.Symbol, confirmed.ConfirmationFailure);
+                        }
+                        else if (!availability.Known)
                         {
                             await _repository.TrySetArmedOrderStateAsync(
                                 order.ArmedId, "firing", "armed",
@@ -492,42 +505,51 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                                 ct: ct);
                             continue;
                         }
-                        // The release itself has already been attempted, before this branch, for every
-                        // triggered SELL. What is left here is the consequence for SIZING, and it is
-                        // specific to the persistent path: this local snapshot still shows the released
-                        // stop's order resting, so re-reading it would answer 0 again. Carry the full
-                        // quantity and let TradingManager decide — it re-reads the broker book for
-                        // exactly this reason, and it is the single execution boundary every other
-                        // caller is already sized by.
-                        if (availability.AvailableQuantity <= 0 && releasedForThisOrder)
-                            availability = new SellAvailabilityDecision(
-                                true, order.Quantity,
-                                "A protective stop was stood down to free these shares; the final "
-                                + "size is set at the execution boundary against a fresh book.");
-
-                        if (availability.AvailableQuantity <= 0)
+                        else
                         {
-                            // Back to "armed", NOT "failed". Zero free quantity is a transient fact
-                            // about the order book, not a verdict on this order: at this broker a SELL
-                            // is sized against custody minus resting SELLs, so a protective stop
-                            // covering the whole position leaves nothing free — and that clears the
-                            // moment the stop is superseded, or at the close, when the venue clears the
-                            // book. Marking it failed destroys a live thesis at the exact moment it was
-                            // proved right, which is why the unknown branch above already returns here.
-                            await _repository.TrySetArmedOrderStateAsync(
-                                order.ArmedId, "firing", "armed",
-                                $"Trigger met, but every {order.Symbol} share is committed to a resting "
-                                + $"SELL — {availability.Reason} Still armed; it retries while the "
-                                + "trigger holds.",
-                                ct: ct);
-                            continue;
-                        }
+                            // The release itself has already been attempted, before this branch, for
+                            // every triggered SELL. What is left here is the consequence for SIZING,
+                            // and it is specific to the persistent path: a book read before the release
+                            // still shows the released stop's order resting, so it would answer 0
+                            // again. Carry the full quantity and let TradingManager decide — it
+                            // re-reads the broker book for exactly this reason, and it is the single
+                            // execution boundary every other caller is already sized by.
+                            if (availability.AvailableQuantity <= 0 && releasedForThisOrder)
+                                availability = new SellAvailabilityDecision(
+                                    true, order.Quantity,
+                                    "A protective stop was stood down to free these shares; the final "
+                                    + "size is set at the execution boundary against a fresh book.");
 
-                        effectiveQuantity = Math.Min(effectiveQuantity, availability.AvailableQuantity);
-                        if (effectiveQuantity != order.Quantity)
-                        {
-                            quantityAdjustment = new SellQuantityAdjustment(
-                                0, 0, order.Symbol, order.Quantity, effectiveQuantity).Message;
+                            if (availability.AvailableQuantity <= 0)
+                            {
+                                // Back to "armed", NOT "failed". Zero free quantity is a transient fact
+                                // about the order book, not a verdict on this order: at this broker a
+                                // SELL is sized against custody minus resting SELLs, so a protective
+                                // stop covering the whole position leaves nothing free — and that
+                                // clears the moment the stop is superseded, or at the close, when the
+                                // venue clears the book. Marking it failed destroys a live thesis at
+                                // the exact moment it was proved right, which is why the unknown branch
+                                // above already returns here.
+                                //
+                                // Trustworthy as of 2026-09-07: this zero was confirmed with the broker
+                                // rather than read from a snapshot up to a poll interval old, so it no
+                                // longer postpones an exit whose shares were freed elsewhere.
+                                await _repository.TrySetArmedOrderStateAsync(
+                                    order.ArmedId, "firing", "armed",
+                                    $"Trigger met, but every {order.Symbol} share is committed to a "
+                                    + $"resting SELL — {availability.Reason} Still armed; it retries "
+                                    + "while the trigger holds.",
+                                    ct: ct);
+                                continue;
+                            }
+
+                            effectiveQuantity = Math.Min(
+                                effectiveQuantity, availability.AvailableQuantity);
+                            if (effectiveQuantity != order.Quantity)
+                            {
+                                quantityAdjustment = new SellQuantityAdjustment(
+                                    0, 0, order.Symbol, order.Quantity, effectiveQuantity).Message;
+                            }
                         }
                     }
 
@@ -708,14 +730,21 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
     {
         if (_stopReleaser is null) return null;
 
-        var availability = SellQuantityRule.Available(
-            _reconciliation.Current,
-            order.Symbol,
-            DateTime.UtcNow,
-            TimeSpan.FromSeconds(Math.Max(10, _options.Value.ReconciliationMaxAgeSeconds)));
+        var confirmed = await _sellAvailability.ForSellAsync(order.Symbol, order.Quantity, ct);
 
         // Not known is not the same as zero, and neither is a positive figure: only a confirmed
         // "every share is committed" is worth cancelling protection over.
+        //
+        // BROKER-confirmed since 2026-09-07, and this is the site where that mattered most. Cancelling
+        // a stop is the one action here that REMOVES protection, and it used to be taken on a snapshot
+        // a background timer had last refreshed — 21 minutes earlier on the deployed interval. A
+        // cancellation made anywhere else freed the shares without the snapshot noticing, so this could
+        // stand a stop down to make room for a sell that needed no room at all, opening a protection
+        // gap for nothing. A read that fails leaves the stop alone: unknown resolves to doing nothing,
+        // which is this method's standing rule and is doubly right when the alternative is irreversible.
+        if (confirmed.MustDeferSizing) return null;
+
+        var availability = confirmed.Decision;
         if (!availability.Known || availability.AvailableQuantity > 0) return null;
 
         var release = await _stopReleaser.ReleaseForSellAsync(order.Symbol, order.Quantity, ct);

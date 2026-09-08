@@ -117,4 +117,43 @@ public sealed class BrokerReconciliationWorker : BackgroundService, IMarketSessi
 
     public async Task RunAtMarketOpenAsync(MarketSessionOpenContext context, CancellationToken ct) =>
         await RunNowAsync(ct);
+
+    /// <summary>
+    /// How long a refresh request waits for a burst to settle before reading the account.
+    ///
+    /// <para>
+    /// One order's life pushes several events within seconds — accepted, then one event per fill — and
+    /// every one of them describes the SAME account, so reading once per event would pay five SOAP calls
+    /// for each restatement of the same fact. A login replaying a backlog of stored messages is the
+    /// extreme case of that.
+    /// </para>
+    ///
+    /// <para>
+    /// Two seconds is chosen against the thing this exists to fix: an operator who cancels an order
+    /// elsewhere and immediately tries to sell. Their round trip is tens of seconds, so two is invisible
+    /// to them while still collapsing a burst. It is deliberately NOT configurable — a delay nobody will
+    /// tune is not configuration, it is a constant with a settings page (§0.2).
+    /// </para>
+    /// </summary>
+    private static readonly TimeSpan RefreshBurstWindow = TimeSpan.FromSeconds(2);
+
+    private CoalescingRefresh? _eventRefresh;
+
+    public void RefreshSoon(string reason)
+    {
+        // Built on first use rather than in the constructor: the delegate closes over RunNowAsync, and a
+        // worker that is never asked for an event-driven refresh should not carry the machinery.
+        _eventRefresh ??= new CoalescingRefresh(
+            why =>
+            {
+                _logger.LogInformation(
+                    "[Reconciliation] Reading the account now rather than at the next tick: {Why}", why);
+                return RunNowAsync();
+            },
+            RefreshBurstWindow,
+            _logger,
+            "Reconciliation");
+
+        _eventRefresh.Request(reason);
+    }
 }

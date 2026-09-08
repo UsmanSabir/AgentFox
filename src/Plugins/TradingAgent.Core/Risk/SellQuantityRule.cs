@@ -171,7 +171,13 @@ public static class SellQuantityRule
         Timestamp = signal.Timestamp
     };
 
-    private static bool IsSell(string? side) =>
+    /// <summary>
+    /// The one spelling of "this resting order is a SELL". Public so a caller that has to NAME the
+    /// orders behind a commitment (see <see cref="SellRefusalRule.RestingSellsNotPlacedHere"/>) matches
+    /// exactly the orders whose quantity <see cref="Available"/> counted — a second private copy of this
+    /// vocabulary would let the two disagree silently.
+    /// </summary>
+    public static bool IsSell(string? side) =>
         side is not null
         && (side.Equals("SELL", StringComparison.OrdinalIgnoreCase)
          || side.Equals("SEL", StringComparison.OrdinalIgnoreCase));

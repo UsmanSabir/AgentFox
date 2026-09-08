@@ -1,6 +1,6 @@
 <script lang="ts">
   import { ArrowDownRight, ArrowUpRight, Minus } from 'lucide-svelte';
-  import { livePriceLabel, useLivePrices } from './livePrices';
+  import { resolveDisplayQuote, useLivePrices } from './livePrices';
 
   export let symbol: string;
   export let fallbackChange: number | null = null;
@@ -12,9 +12,11 @@
   let priceStore = livePrices.quote(symbol);
   $: priceStore = livePrices.quote(symbol);
   $: view = $priceStore;
-  $: price = view.quote?.current ?? fallbackPrice;
-  $: change = view.quote?.changePercent ?? fallbackChange;
-  $: sourceLabel = view.quote ? livePriceLabel(view) : 'Delayed market snapshot';
+  // Every rule about which number wins and how it must be labelled lives in one pure function, so
+  // the six cells that render prices cannot drift from each other. See `resolveDisplayQuote`.
+  $: display = resolveDisplayQuote(view, fallbackPrice, fallbackChange, showPrice);
+  $: ({ price, change, tag } = display);
+  $: sourceLabel = display.label;
 
   const money = (value: number) => value.toLocaleString(undefined, { maximumFractionDigits: 2 });
   const percent = (value: number) => `${value > 0 ? '+' : ''}${value.toFixed(2)}%`;
@@ -31,11 +33,7 @@
         {percent(change)}
       </span>
     {/if}
-    {#if view.quote && view.freshness !== 'live'}
-      <!-- Pre-open is not "close": the price is the last trade, but the venue is live and taking
-           orders. Labelling it "close" reads as a market that has finished for the day. -->
-      <small>{view.freshness === 'stale' ? 'stale' : view.phase === 'PreOpen' ? 'pre-open' : 'close'}</small>
-    {/if}
+    {#if tag}<small>{tag}</small>{/if}
   </span>
 {:else if showUnavailable}<span class="unavailable" aria-label={`Price unavailable for ${symbol}`}>—</span>{/if}
 

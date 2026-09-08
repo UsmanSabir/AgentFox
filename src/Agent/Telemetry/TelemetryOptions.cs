@@ -40,6 +40,20 @@ public sealed class TelemetryOptions
     /// </summary>
     public string? OtlpEndpoint { get; set; }
 
+    /// <summary>
+    /// OTLP wire protocol: <c>grpc</c> (default, port 4317) or <c>http/protobuf</c> (port 4318).
+    /// Falls back to <c>OTEL_EXPORTER_OTLP_PROTOCOL</c>, then to grpc.
+    ///
+    /// <para>
+    /// This exists because the two are NOT interchangeable and picking the wrong one fails
+    /// quietly: a gRPC exporter aimed at 4318 and an HTTP exporter aimed at 4317 both retry in
+    /// the background without failing the app, so the only symptom is a collector that receives
+    /// nothing. Setting the endpoint without the matching protocol is the easy version of that
+    /// mistake, which is why the two live side by side here rather than one being env-only.
+    /// </para>
+    /// </summary>
+    public string? OtlpProtocol { get; set; }
+
     /// <summary>Also write spans and metrics to the console. Intended for local development.</summary>
     public bool ConsoleExporter { get; set; } = false;
 
