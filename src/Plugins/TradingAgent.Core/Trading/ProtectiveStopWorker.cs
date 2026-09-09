@@ -448,6 +448,37 @@ public sealed class ProtectiveStopWorker
     // ── Fill confirmation ─────────────────────────────────────────────────────
 
     /// <summary>
+    /// Whether the trading session that could have filled an immediate entry is OVER — the only thing
+    /// that licenses reading "no fill recorded" as "the DAY order lapsed".
+    ///
+    /// <para>
+    /// <b>Static and internal because the worker has no test harness, and this rule cost a real
+    /// protection gap.</b> See <see cref="WatchForImmediateEntryFillAsync"/> for the 2026-09-09 THCCL
+    /// incident: an instantly-filled order is absent from the outstanding book for exactly the same
+    /// reason a lapsed one is, so the book cannot tell them apart and the difference has to come from
+    /// the clock.
+    /// </para>
+    ///
+    /// <para>
+    /// The same-day discriminator is <c>PersistentOrderWorker</c>'s: a next opening on a LATER date
+    /// means this session has ended, where a same-day one is Friday's lunch break and the order may
+    /// still fill after it. A closed market with no next opening at all counts as over — an unreadable
+    /// forward schedule must not keep a dead stop alive for ever.
+    /// </para>
+    /// </summary>
+    internal static bool EntrySessionIsOver(MarketStatus market, DateTime createdUtc)
+    {
+        var todayPkt = DateOnly.FromDateTime(market.PktNow);
+
+        // PKT is UTC+5 with no daylight saving, so the offset is a constant rather than a lookup.
+        if (DateOnly.FromDateTime(createdUtc.AddHours(5)) < todayPkt) return true;
+
+        return !market.IsOpen
+            && (market.NextOpenPkt is null
+                || DateOnly.FromDateTime(market.NextOpenPkt.Value) > todayPkt);
+    }
+
+    /// <summary>
     /// Activates — or closes — a stop attached to an IMMEDIATE dashboard entry, which has no armed
     /// order to watch. Sized from what that entry's own orders actually filled.
     ///
@@ -526,9 +557,27 @@ public sealed class ProtectiveStopWorker
 
         if (resting.Any(r => r.Symbol.Equals(stop.Symbol, StringComparison.OrdinalIgnoreCase))) return;
 
+        // ABSENCE FROM THE BOOK IS NOT EVIDENCE OF A LAPSE, and treating it as such opened a real
+        // protection gap on the day this shipped — 2026-09-09, THCCL. An operator bought 57 shares
+        // immediately at 84.60 with a stop attached at 82.91; the order FILLED IN 70 MILLISECONDS
+        // (ORDER_EXE ... Bought ... 57 THCCL ... filled at 84.49 - Remaining 00), so it never rested,
+        // and no fill had reached the ledger yet. Eighty seconds later this branch read "not resting,
+        // no fill" and closed the stop as never filled. An instantly-filled order and a lapsed one are
+        // INDISTINGUISHABLE by the outstanding book, because neither is in it.
+        //
+        // That is invariant 4 -- unknown is never zero -- and it ran in the unprotected direction: the
+        // shares were real, the stop was gone, and only a second stop from an unrelated armed entry
+        // happened to cover the position (at a level 7.5% wider than the operator asked for). Without
+        // that coincidence the position would have been bare.
+        //
+        // What actually licenses "the DAY order lapsed" is the SESSION ENDING. Until then, no fill
+        // recorded is ignorance, and the answer to ignorance is to wait.
+        if (!EntrySessionIsOver(_calendar.GetStatus(), stop.CreatedUtc)) return;
+
         await CloseAsync(repository, stop,
-            "The entry order is no longer outstanding and recorded no fill, so there is nothing to "
-            + "protect. A DAY order that did not fill is cleared at the close.", ct);
+            "The entry order is no longer outstanding and recorded no fill by the end of its trading "
+            + "session, so there is nothing to protect. A DAY order that did not fill is cleared at "
+            + "the close.", ct);
     }
 
     /// <summary>
