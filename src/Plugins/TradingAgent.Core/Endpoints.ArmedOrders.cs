@@ -1,4 +1,4 @@
-using AgentFox.Plugins.Interfaces;
+﻿using AgentFox.Plugins.Interfaces;
 using AgentFox.Plugins.Research;
 using AgentFox.Plugins;
 using Microsoft.AspNetCore.Routing;
@@ -339,54 +339,23 @@ public sealed partial class TradingCoreEndpoints
                 SourceAlertId    = body.SourceAlertId
             };
 
-            // A stop may only be attached to a BUY: it protects a position this entry creates, and
-            // attaching one to a SELL would arm a second sell of stock the first one is disposing of.
+            // Validated by AttachedStopRule, which the immediate-order path uses too so the two cannot
+            // drift on what an attachable stop is. It owns the BUY-only rule and both level checks.
             ProtectiveStop? attached = null;
             if (body.AttachStop is { } attach)
             {
-                if (action != "BUY")
-                    return Results.BadRequest(new
-                    {
-                        error = "stop_requires_buy",
-                        message = "A protective stop can only be attached to a BUY entry."
-                    });
-
-                if (attach.StopTrigger is not > 0)
-                    return Results.BadRequest(new
-                    {
-                        error = "invalid_stop_trigger",
-                        message = "A protective stop needs a positive trigger price."
-                    });
-
-                var entryPrice = order.Price ?? order.TriggerPrice;
-                if (entryPrice is { } entry && attach.StopTrigger >= entry)
-                    return Results.BadRequest(new
-                    {
-                        error = "stop_above_entry",
-                        message = $"A protective stop at {attach.StopTrigger} sits at or above the entry "
-                                + $"({entry}), so it would trigger immediately rather than protect anything."
-                    });
-
-                // Default the limit just below the trigger. A stop limit set exactly AT its trigger
-                // routinely misses the move that triggered it, which is protection in name only.
-                var stopLimit = attach.StopLimit
-                    ?? Math.Round(attach.StopTrigger!.Value * 0.99m, 2, MidpointRounding.AwayFromZero);
-
-                if (stopLimit > attach.StopTrigger)
-                    return Results.BadRequest(new
-                    {
-                        error = "invalid_stop_limit",
-                        message = $"A SELL stop's limit ({stopLimit}) must be at or below its trigger "
-                                + $"({attach.StopTrigger}), or it cannot fill once triggered."
-                    });
+                var plan = AttachedStopRule.Validate(
+                    action, attach.StopTrigger, attach.StopLimit, order.Price ?? order.TriggerPrice);
+                if (!plan.Ok)
+                    return Results.BadRequest(new { error = plan.ErrorCode, message = plan.Message });
 
                 attached = new ProtectiveStop
                 {
                     StopId        = Guid.NewGuid().ToString("N"),
                     Symbol        = symbol,
                     ParentArmedId = order.ArmedId,
-                    StopTrigger   = attach.StopTrigger!.Value,
-                    StopLimit     = stopLimit,
+                    StopTrigger   = plan.StopTrigger,
+                    StopLimit     = plan.StopLimit,
                     // Sized at fill time, never here: what matters is what the entry actually buys.
                     DesiredQuantity = 0,
                     Recurring     = attach.Recurring,

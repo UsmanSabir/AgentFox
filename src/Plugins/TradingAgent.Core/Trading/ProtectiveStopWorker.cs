@@ -448,6 +448,90 @@ public sealed class ProtectiveStopWorker
     // ── Fill confirmation ─────────────────────────────────────────────────────
 
     /// <summary>
+    /// Activates — or closes — a stop attached to an IMMEDIATE dashboard entry, which has no armed
+    /// order to watch. Sized from what that entry's own orders actually filled.
+    ///
+    /// <para>
+    /// <b>Three outcomes, and the middle one is the whole reason this is not a one-liner.</b> Fills
+    /// recorded: activate on exactly that quantity, raised as more land. Nothing filled but the entry
+    /// is still live: wait, and say nothing. Nothing filled and the entry is gone: close, because the
+    /// DAY order lapsed and there is nothing to protect. Getting the third confused with the second is
+    /// how a stop waits silently for ever on shares that were never bought.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>An unreadable order book WAITS rather than closing.</b> <paramref name="resting"/> is null
+    /// when the book could not be read, and absence of evidence is not evidence the entry lapsed —
+    /// closing on it would retire real protection because of a broker hiccup. The keep-working case
+    /// needs no book at all: its intent says whether it is still alive.
+    /// </para>
+    /// </summary>
+    private async Task WatchForImmediateEntryFillAsync(
+        ITradingRepository repository,
+        ProtectiveStop stop,
+        IReadOnlyList<RestingOrder>? resting,
+        CancellationToken ct)
+    {
+        var intent = stop.ParentPersistentIntentId is { } intentId
+            ? (await repository.GetPersistentOrdersAsync(openOnly: false, ct))
+                .FirstOrDefault(i => i.IntentId == intentId)
+            : null;
+
+        if (stop.ParentPersistentIntentId is not null && intent is null)
+        {
+            await CloseAsync(repository, stop,
+                "The keep-working entry this stop was attached to no longer exists.", ct);
+            return;
+        }
+
+        // The intent's own filled quantity already sums its placements' fills across every session it
+        // has run for, which one execution cannot. Otherwise: this execution's own fills.
+        var filled = intent is not null
+            ? intent.FilledQuantity
+            : await repository.GetFilledQuantityForExecutionAsync(
+                stop.ParentExecutionId!, stop.Symbol, ct);
+
+        if (filled > 0)
+        {
+            if (filled <= stop.DesiredQuantity) return;   // already protecting at least this much
+
+            var reason = intent is not null
+                ? $"The keep-working entry reports {filled} filled share(s)."
+                : $"The entry order reports {filled} filled share(s).";
+            await repository.RecordProtectiveStopFillAsync(stop.StopId, filled, reason, ct);
+            _logger.LogWarning(
+                "[ProtectiveStops] {StopId} ({Symbol}) ACTIVE on an immediate entry's confirmed fill "
+                + "of {Qty}. {Why}", stop.StopId, stop.Symbol, filled, reason);
+            _activity?.Info("Stops",
+                $"{stop.Symbol}: entry filled ({filled}) — the stop is now active", reason);
+            await ArmBackstopAsync(repository, stop with
+            {
+                State = "active",
+                DesiredQuantity = Math.Max(stop.DesiredQuantity, filled)
+            }, filled, ct);
+            return;
+        }
+
+        // Nothing filled yet. Is the entry still capable of filling?
+        if (intent is not null)
+        {
+            if (!intent.IsTerminal) return;
+            await CloseAsync(repository, stop,
+                $"The keep-working entry ended as '{intent.State}' without filling, so there is "
+                + "nothing to protect.", ct);
+            return;
+        }
+
+        if (resting is null) return;   // unreadable book: wait, never close on silence
+
+        if (resting.Any(r => r.Symbol.Equals(stop.Symbol, StringComparison.OrdinalIgnoreCase))) return;
+
+        await CloseAsync(repository, stop,
+            "The entry order is no longer outstanding and recorded no fill, so there is nothing to "
+            + "protect. A DAY order that did not fill is cleared at the close.", ct);
+    }
+
+    /// <summary>
     /// Decides whether the entry behind a dormant stop has actually executed.
     ///
     /// <para>
@@ -463,6 +547,16 @@ public sealed class ProtectiveStopWorker
         IReadOnlyList<RestingOrder>? resting,
         CancellationToken ct)
     {
+        // An IMMEDIATE entry has no armed parent to consult, so it is settled first and separately.
+        // See ProtectiveStop.ParentExecutionId for why it is measured from its own fills rather than
+        // from a holdings baseline.
+        if (stop.ParentArmedId is null
+            && (stop.ParentExecutionId is not null || stop.ParentPersistentIntentId is not null))
+        {
+            await WatchForImmediateEntryFillAsync(repository, stop, resting, ct);
+            return;
+        }
+
         var parent = stop.ParentArmedId is null
             ? null
             : (await repository.GetArmedOrdersAsync(armedOnly: false, ct))

@@ -1,4 +1,4 @@
-namespace TradingAgent.Persistence;
+﻿namespace TradingAgent.Persistence;
 
 using System.Text.Json;
 using TradingAgent.Manager;
@@ -559,6 +559,23 @@ public interface ITradingRepository
 
     Task<string> SaveProtectiveStopAsync(
         TradingAgent.Watchlist.ProtectiveStop stop,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Executed quantity for one of OUR executions on one symbol, from the recorded fills. Zero when
+    /// nothing has executed - a MEASUREMENT, not ignorance, because the fills table is written from the
+    /// broker's own reconciliation snapshot.
+    ///
+    /// <para>
+    /// This is how a stop attached to an IMMEDIATE entry learns what to protect. An armed entry's fill
+    /// is inferred from holdings rising above a baseline; an immediate order has no window in which to
+    /// take that baseline, but its fills are attributable to its own execution. See
+    /// <see cref="TradingAgent.Watchlist.ProtectiveStop.ParentExecutionId"/>.
+    /// </para>
+    /// </summary>
+    Task<int> GetFilledQuantityForExecutionAsync(
+        string executionId,
+        string symbol,
         CancellationToken ct = default);
 
     /// <summary>Stops not yet closed; <paramref name="openOnly"/> false includes the history.</summary>

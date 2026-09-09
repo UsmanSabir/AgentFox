@@ -360,14 +360,30 @@
   // seconds stale. Telling the operator early is worth much more than refusing here would be.
   $: buyExceedsBuyingPower = choice?.action === 'BUY' && buyingPower != null
     && estimatedValue != null && estimatedValue > buyingPower;
+  // An order that FITS the buying power can still be refused, because the broker adds its own charges
+  // on top of traded value and this figure is traded value alone. Core models no fee schedule at all
+  // and must not invent one, so it says what the number excludes rather than guessing a headroom --
+  // the exact charge is shown by whatever fills the order-detail slot, which reads the same cost
+  // projection the rest of the system uses.
+  //
+  // 99% rather than 100%: below that there is room for any plausible charge and a warning would be
+  // noise, which is the failure mode a caution about costs falls into fastest.
+  $: buyLeavesNoRoomForCharges = choice?.action === 'BUY' && buyingPower != null && buyingPower > 0
+    && estimatedValue != null && !buyExceedsBuyingPower
+    && estimatedValue > buyingPower * 0.99;
   $: estimatedPrice = choice?.orderType === 'MARKET' ? latestPrice
     : choice?.orderType === 'STOPLOSS' ? triggerPrice
     : choice?.submission === 'conditional' ? conditionalLevel : price;
   $: availableSellValue = availableSellQuantity != null && estimatedPrice && estimatedPrice > 0
     ? availableSellQuantity * estimatedPrice
     : null;
+  // FLOOR, not round. A value is a budget, and Math.round could buy one share MORE than it covers --
+  // up to half a share's worth over, which on a 425 PKR share is over 200 PKR. Combined with "Use it
+  // all" spending the whole reported buying power on traded value, that is a broker refusal waiting to
+  // happen, and it happened (2026-09-09: an order sized to 100% of available balance was refused for
+  // insufficient balance).
   $: valueSizedQuantity = sizeMode === 'value' && orderValue && orderValue > 0 && estimatedPrice && estimatedPrice > 0
-    ? Math.round(orderValue / estimatedPrice)
+    ? Math.floor(orderValue / estimatedPrice)
     : null;
   $: effectiveQuantity = sizeMode === 'value' ? valueSizedQuantity : quantity;
   $: estimatedValue = effectiveQuantity && estimatedPrice ? effectiveQuantity * estimatedPrice : null;
@@ -377,19 +393,36 @@
   $: sizingDifference = sizeMode === 'value' && orderValue && estimatedValue != null
     ? estimatedValue - orderValue
     : null;
-  $: canAttachStop = choice?.action === 'BUY' && choice.submission === 'conditional';
+  // Any BUY, waiting or immediate. It was 'conditional' only, which meant the three most-used ways to
+  // buy -- "Buy at my price", "Buy now", "Buy if it rises to a price" -- offered no protection at all
+  // and said nothing about it. The server validates both paths through one shared rule.
+  $: canAttachStop = choice?.action === 'BUY';
   $: if (!canAttachStop) attachStop = false;
   $: if (attachStop && stopTrigger == null && estimatedPrice && estimatedPrice > 0)
     stopTrigger = Number((estimatedPrice * .98).toFixed(2));
+  // Informational, never a block -- the same trade as buyExceedsBuyingPower just above. A market buy
+  // has no committed price, so nothing can prove this stop is below the entry; saying so beats either
+  // refusing on a number nobody has or staying silent about it.
+  $: marketEntryNote = !attachStop || choice?.orderType !== 'MARKET' ? null
+    : stopTrigger != null && latestPrice != null && stopTrigger >= latestPrice
+      ? `A market buy has no set entry price. This stop at ${money(stopTrigger)} is at or above the `
+        + `last trade (${money(latestPrice)}), so it would very likely fire as soon as it activates.`
+      : 'A market buy has no set entry price, so this stop cannot be checked against one. Choose a '
+        + 'level you would still accept if the fill comes in worse than the last trade.';
   $: if (attachStop && stopTrigger != null && stopLimit == null)
     stopLimit = Number((stopTrigger * .99).toFixed(2));
   $: attachedStopRisk = attachStop && estimatedPrice && stopTrigger && effectiveQuantity
     ? (estimatedPrice - stopTrigger) * effectiveQuantity
     : null;
+  // The price the entry actually COMMITS to, which a market order has none of: estimatedPrice falls
+  // back to the last trade there, and that is not what the order will pay. The server makes the same
+  // distinction (entryPrice is null for MARKET, so AttachedStopRule skips its entry check), and the two
+  // must agree on what is refused -- a dialog stricter than the endpoint is a hurdle nobody chose.
+  $: committedEntryPrice = choice?.orderType === 'MARKET' ? null : estimatedPrice;
   $: attachedStopError = !attachStop ? null
     : stopTrigger == null || stopTrigger <= 0 ? 'Enter a protective stop trigger.'
-    : estimatedPrice != null && stopTrigger >= estimatedPrice
-      ? `The protective stop must be below the expected entry price (${money(estimatedPrice)}).`
+    : committedEntryPrice != null && stopTrigger >= committedEntryPrice
+      ? `The protective stop must be below the expected entry price (${money(committedEntryPrice)}).`
     : stopLimit == null || stopLimit <= 0 ? 'Enter a protective stop limit.'
     : stopLimit > stopTrigger ? 'The protective stop limit must be at or below its trigger.'
     : null;
@@ -464,7 +497,8 @@
     // value-sized estimates while the review is open, but can never change the submitted quantity.
     const immediateRequest = {
       orderIntentId: choice.id, symbol: symbol.trim().toUpperCase(), quantity: submittedQuantity,
-      price, triggerPrice, limitPrice, clientRequestId, persistentUntilFilled, expiresInDays
+      price, triggerPrice, limitPrice, clientRequestId, persistentUntilFilled, expiresInDays,
+      attachStop: attachStop && stopTrigger ? {stopTrigger, stopLimit, recurring: stopRecurring} : null
     };
     const waitingRequest: ArmOrderRequest = {
       symbol: symbol.trim().toUpperCase(), action: choice.action, quantity: submittedQuantity,
@@ -486,7 +520,7 @@
       + (persistentUntilFilled
         ? `\n\nThe unfilled remainder will be submitted again once per PSX trading day for up to ${expiresInDays} day(s).`
         : '')
-      + (waitingRequest.attachStop && !immediate
+      + (attachStop && stopTrigger
         ? `\n\nAttach a ${stopRecurring ? 'recurring' : 'one-session'} protective stop: trigger ${stopTrigger}, worst price ${stopLimit}. It covers the shares that actually fill.` : ''),
       immediate ? 'Confirm & submit order' : 'Confirm & arm waiting order'
     )) return;
@@ -504,7 +538,18 @@
               executionId: placed.executionId || undefined
             }
           : placed.accepted
-          ? { ok: true, title: 'Order accepted', detail: placed.reason, executionId: placed.executionId }
+          ? {
+              // A stop that was requested and NOT created is the one case where an accepted order is
+              // not simply good news, so it leads rather than being appended.
+              ok: placed.attachedStop == null || placed.attachedStop.created,
+              title: placed.attachedStop != null && !placed.attachedStop.created
+                ? 'Order accepted — but the protective stop was NOT created'
+                : 'Order accepted',
+              detail: placed.attachedStop == null
+                ? placed.reason
+                : `${placed.reason} ${placed.attachedStop.message}`,
+              executionId: placed.executionId
+            }
           : {
               ok: false,
               title: placed.reason.toLowerCase().includes('unknown')
@@ -817,6 +862,12 @@
                 {#if attachedStopRisk != null && attachedStopRisk > 0}
                   <p class="estimate">Risk if the stop fills: <b>{money(attachedStopRisk)} PKR</b></p>
                 {/if}
+                {#if marketEntryNote}
+                  <p class:warning={stopTrigger != null && latestPrice != null && stopTrigger >= latestPrice}
+                     class:estimate={!(stopTrigger != null && latestPrice != null && stopTrigger >= latestPrice)}>
+                    {marketEntryNote}
+                  </p>
+                {/if}
                 {#if attachedStopError}<p class="warning"><AlertTriangle size={13} /> {attachedStopError}</p>{/if}
               {/if}
             </section>
@@ -844,13 +895,15 @@
           {/if}
           {#if sizeMode === 'value' && valueSizedQuantity && estimatedPrice && estimatedValue != null && sizingDifference != null}
             <p class="sizing-note">
-              Nearest whole-share quantity: <b>{valueSizedQuantity} shares</b> at {money(estimatedPrice)} PKR
+              Largest whole-share quantity that fits: <b>{valueSizedQuantity} shares</b> at {money(estimatedPrice)} PKR
               = {money(estimatedValue)} PKR
               ({sizingDifference === 0 ? 'exactly your value' : `${money(Math.abs(sizingDifference))} PKR ${sizingDifference > 0 ? 'above' : 'below'} your value`}).
             </p>
           {/if}
           {#if buyExceedsBuyingPower && estimatedValue != null && buyingPower != null}
             <p class="warning"><AlertTriangle size={13} /> This order is about {money(estimatedValue)} PKR, above the {money(buyingPower)} PKR the broker currently reports as available. It is not blocked here — the broker decides — but it may be refused or reduced.</p>
+          {:else if buyLeavesNoRoomForCharges && estimatedValue != null && buyingPower != null}
+            <p class="warning"><AlertTriangle size={13} /> This order is about {money(estimatedValue)} PKR and uses almost all of the {money(buyingPower)} PKR available. Buying power covers traded value only — the broker's charges are added on top, so an order this close to the limit is often refused for insufficient balance. Leave a little room, or check the cost shown for this order.</p>
           {/if}
           {#if sellExceedsAvailable && effectiveQuantity != null && availableSellQuantity != null}
             <p class="warning"><AlertTriangle size={13} /> You entered {money(effectiveQuantity)} shares, but the broker snapshot shows only {money(availableSellQuantity)} available now. Use “Sell all available” or reduce the size; final availability is checked again on submission.</p>

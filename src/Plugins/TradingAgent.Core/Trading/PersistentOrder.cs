@@ -177,6 +177,131 @@ public static class PersistentOrderDecisions
         && priorDate < today
         && latestPlacement?.State == "accepted";
 
+    /// <summary>
+    /// How long the UNATTENDED retry waits after <paramref name="consecutiveFailures"/> attempts have
+    /// failed in a row on one trading date. Doubling, from one poll cycle up to a half-hour ceiling:
+    /// <c>1, 2, 4, 8, 16, 30, 30, …</c> minutes.
+    ///
+    /// <para>
+    /// <b>Why this exists.</b> Measured live on 2026-09-09: a keep-working BUY of 35 LUCK at 424.98
+    /// (PKR 14,874) was refused by the broker for <c>Insufficient Exposure ( Amount Remaining = 4902.00 )</c>
+    /// and re-sent 32 times, once per <c>PersistentOrderPollSeconds</c>, from 09:32 until the log ended
+    /// at 10:03 — every one refused identically. Nothing capped it: <see cref="CanRetryFailedToday"/>
+    /// weighs state, expiry and remaining quantity, <c>attempt_count</c> is incremented and never
+    /// compared to anything, and no caller consults <c>OrderResult.TransientRejection</c> outside
+    /// <c>ProtectiveStopWorker</c>. The cost is not only noise: each attempt consumes one of the
+    /// account's order sequence numbers, which this broker's numbering already makes a collision hazard.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Backoff rather than termination, and that is the product owner's decision (2026-09-09).</b>
+    /// Funds genuinely do reappear intraday — a sale's proceeds count as buying power immediately, so
+    /// an order refused at 09:32 can be affordable at 11:00 — and a standing instruction that gave up
+    /// on the first refusal would be the §0.2 hurdle in its purest form: a feature that reduces what
+    /// the system will do. So this never stops trying, it only stops trying every minute.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>The first retry is deliberately unchanged at one minute.</b> A single refusal is usually a
+    /// blip — a stale availability figure, a board mid-transition — and making the common case wait
+    /// would trade a real fix for a new delay. The schedule only bites once a failure is clearly
+    /// repeating, and the ceiling bounds the worst case at a 30-minute wait after funds appear.
+    /// </para>
+    /// </summary>
+    public static TimeSpan AutoRetryDelayFor(int consecutiveFailures) => consecutiveFailures switch
+    {
+        <= 1 => TimeSpan.FromMinutes(1),
+        2    => TimeSpan.FromMinutes(2),
+        3    => TimeSpan.FromMinutes(4),
+        4    => TimeSpan.FromMinutes(8),
+        5    => TimeSpan.FromMinutes(16),
+        _    => TimeSpan.FromMinutes(30)
+    };
+
+    /// <summary>
+    /// How many attempts have failed IN A ROW at the end of <paramref name="sessionDate"/>'s placement
+    /// history. Walks backwards from the newest, stopping at the first placement that is not a failure
+    /// on that date, so an accepted placement between two failures resets the backoff rather than
+    /// letting an old cluster of failures keep punishing a new attempt.
+    /// </summary>
+    /// <remarks>
+    /// ASSUMES the repository's <c>ORDER BY session_date, attempt</c> ordering — newest last.
+    /// </remarks>
+    public static int ConsecutiveFailedAttemptsOn(
+        IReadOnlyList<PersistentOrderPlacement> placements, DateOnly sessionDate)
+    {
+        var failures = 0;
+        for (var i = placements.Count - 1; i >= 0; i--)
+        {
+            if (placements[i].SessionDate != sessionDate) break;
+            if (!string.Equals(placements[i].State, "failed", StringComparison.OrdinalIgnoreCase)) break;
+            failures++;
+        }
+        return failures;
+    }
+
+    /// <summary>
+    /// Whether the UNATTENDED retry of today's failed placement is due yet, per
+    /// <see cref="AutoRetryDelayFor"/>. <paramref name="reason"/> is written either way and is what the
+    /// operator reads on the intent, so it carries the failure count, the broker's own last words and
+    /// the wait remaining — "waiting" with no explanation is the state this loop was already in.
+    ///
+    /// <para>
+    /// <b>Only the unattended path may consult this.</b> An operator pressing Retry has chosen to try
+    /// now and must not be told to come back in sixteen minutes — the same asymmetry as
+    /// <c>PersistentOrderWorker.MayPlaceUnattendedOn</c>, for the same reason: the hazard is a
+    /// background timer repeating itself, not a person deciding.
+    /// </para>
+    /// </summary>
+    public static bool AutoRetryIsDue(
+        IReadOnlyList<PersistentOrderPlacement> placements,
+        DateOnly today,
+        DateTime nowUtc,
+        out string reason)
+    {
+        var failures = ConsecutiveFailedAttemptsOn(placements, today);
+        if (failures == 0 || placements.Count == 0)
+        {
+            reason = "No attempt has failed today, so no retry backoff applies.";
+            return true;
+        }
+
+        var latest = placements[^1];
+        var delay = AutoRetryDelayFor(failures);
+        var due = latest.CreatedUtc + delay;
+
+        if (nowUtc >= due)
+        {
+            reason = $"{failures} attempt(s) have failed today; the {Minutes(delay)} wait after the "
+                   + "last one has elapsed, so another is due.";
+            return true;
+        }
+
+        reason = $"{failures} attempt(s) have failed today. The broker's last answer was: "
+               + $"{Clip(latest.Message) ?? "(not recorded)"} Retrying every minute cannot change it, "
+               + $"so the next unattended attempt waits {Minutes(due - nowUtc)} "
+               + $"({Minutes(delay)} after the last failure). Retry now from the dashboard to override.";
+        return false;
+    }
+
+    /// <summary>A duration in the operator's words, never "00:16:00".</summary>
+    private static string Minutes(TimeSpan span) =>
+        span.TotalSeconds < 60
+            ? $"{span.TotalSeconds:0}s"
+            : $"{span.TotalMinutes:0.#} minute{(span.TotalMinutes >= 1.95 ? "s" : "")}";
+
+    /// <summary>
+    /// The broker's message, bounded. A rejection can carry a whole wire frame, and this string is
+    /// rewritten onto the intent on every poll — an unbounded copy of it is a row that grows.
+    /// </summary>
+    private static string? Clip(string? message)
+    {
+        var text = message?.Trim();
+        if (string.IsNullOrEmpty(text)) return null;
+        text = text.Length <= 200 ? text : text[..200] + "…";
+        return text.EndsWith('.') || text.EndsWith('…') ? text : text + ".";
+    }
+
     public static bool CanRetryFailedToday(
         PersistentOrderIntent intent,
         PersistentOrderPlacement? latestPlacement,
