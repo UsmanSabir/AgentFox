@@ -1,4 +1,4 @@
-using AgentFox.Plugins.Observability;
+﻿using AgentFox.Plugins.Observability;
 ﻿using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -1823,6 +1823,10 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                     stop_id           TEXT PRIMARY KEY,
                     symbol            TEXT NOT NULL,
                     parent_armed_id   TEXT NULL,
+                    -- The other two entry kinds a stop can hang off; see ProtectiveStop's own doc for
+                    -- why an immediate order cannot be measured by a baseline the way an armed one is.
+                    parent_execution_id     TEXT NULL,
+                    parent_persistent_id    TEXT NULL,
                     stop_trigger      TEXT NOT NULL,
                     stop_limit        TEXT NOT NULL,
                     desired_qty       INTEGER NOT NULL DEFAULT 0,
@@ -1991,6 +1995,11 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
             // have no id and must read as "unknown", never as a wrong one; and a write path that
             // runs outside any correlation (a manual repair, a test) still succeeds. Invariant:
             // unknown is not zero, and here it is simply NULL.
+            await AddColumnIfMissingAsync(
+                connection, "protective_stops", "parent_execution_id", "TEXT NULL", ct);
+            await AddColumnIfMissingAsync(
+                connection, "protective_stops", "parent_persistent_id", "TEXT NULL", ct);
+
             await AddColumnIfMissingAsync(connection, "trade_proposals", "correlation_id", "TEXT NULL", ct);
             await AddColumnIfMissingAsync(connection, "trading_executions", "correlation_id", "TEXT NULL", ct);
             await AddColumnIfMissingAsync(connection, "trading_order_events", "correlation_id", "TEXT NULL", ct);
@@ -2834,16 +2843,22 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         var command = connection.CreateCommand();
         command.CommandText = """
             INSERT INTO protective_stops
-                (stop_id, symbol, parent_armed_id, stop_trigger, stop_limit, desired_qty, recurring,
+                (stop_id, symbol, parent_armed_id, parent_execution_id, parent_persistent_id,
+                 stop_trigger, stop_limit, desired_qty, recurring,
                  state, baseline_qty, placed_qty, backstop_armed_id, created_utc, state_reason, note,
                  supersedes_stop_id, operator_originated)
-            VALUES ($id, $symbol, $parent, $trigger, $limit, $desired, $recurring,
+            VALUES ($id, $symbol, $parent, $parentExec, $parentIntent,
+                    $trigger, $limit, $desired, $recurring,
                     $state, $baseline, $placed, $backstop, $created, $reason, $note, $supersedes,
                     $operator)
             """;
         command.Parameters.AddWithValue("$id", stop.StopId);
         command.Parameters.AddWithValue("$symbol", stop.Symbol);
         command.Parameters.AddWithValue("$parent", stop.ParentArmedId ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue(
+            "$parentExec", stop.ParentExecutionId ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue(
+            "$parentIntent", stop.ParentPersistentIntentId ?? (object)DBNull.Value);
         command.Parameters.AddWithValue("$trigger", Money(stop.StopTrigger));
         command.Parameters.AddWithValue("$limit", Money(stop.StopLimit));
         command.Parameters.AddWithValue("$desired", stop.DesiredQuantity);
@@ -2862,6 +2877,39 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         return stop.StopId;
     }
 
+    /// <summary>
+    /// Executed quantity for one of OUR executions, on one symbol, summed from the recorded fills.
+    ///
+    /// <para>
+    /// Joined through <c>broker_orders.execution_id</c> rather than matched on a broker order number,
+    /// because a broker order number is not an identity - see
+    /// <see cref="ProtectiveStop.ParentExecutionId"/> for what summing by number gets wrong in each
+    /// direction. The symbol filter is belt and braces: an execution can in principle carry a group of
+    /// orders, and a stop protects one symbol.
+    /// </para>
+    /// </summary>
+    public async Task<int> GetFilledQuantityForExecutionAsync(
+        string executionId, string symbol, CancellationToken ct = default)
+    {
+        var execution = executionId?.Trim() ?? "";
+        if (execution.Length == 0) return 0;
+
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT COALESCE(SUM(f.quantity), 0)
+              FROM fills f
+              JOIN broker_orders o ON o.broker_order_id = f.broker_order_id
+             WHERE o.execution_id = $exec
+               AND UPPER(json_extract(o.order_json, '$.Symbol')) = $symbol
+            """;
+        command.Parameters.AddWithValue("$exec", execution);
+        command.Parameters.AddWithValue("$symbol", (symbol ?? "").Trim().ToUpperInvariant());
+        var total = await command.ExecuteScalarAsync(ct);
+        return total is null or DBNull ? 0 : (int)Convert.ToInt64(total);
+    }
+
     public async Task<IReadOnlyList<ProtectiveStop>> GetProtectiveStopsAsync(
         bool openOnly = true, CancellationToken ct = default)
     {
@@ -2872,7 +2920,7 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
             SELECT stop_id, symbol, parent_armed_id, stop_trigger, stop_limit, desired_qty, recurring,
                    state, baseline_qty, placed_qty, last_placed_date, last_order_no, backstop_armed_id,
                    created_utc, fill_confirmed_utc, closed_utc, state_reason, note, supersedes_stop_id,
-                   operator_originated
+                   operator_originated, parent_execution_id, parent_persistent_id
             FROM protective_stops
             {(openOnly ? "WHERE state <> 'closed'" : "")}
             ORDER BY created_utc DESC
@@ -3046,7 +3094,9 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         StateReason          = reader.IsDBNull(16) ? null : reader.GetString(16),
         Note                 = reader.IsDBNull(17) ? null : reader.GetString(17),
         SupersedesStopId     = reader.IsDBNull(18) ? null : reader.GetString(18),
-        OperatorOriginated   = !reader.IsDBNull(19) && reader.GetInt64(19) != 0
+        OperatorOriginated   = !reader.IsDBNull(19) && reader.GetInt64(19) != 0,
+        ParentExecutionId    = reader.IsDBNull(20) ? null : reader.GetString(20),
+        ParentPersistentIntentId = reader.IsDBNull(21) ? null : reader.GetString(21)
     };
 
     private static object Money(decimal? value) => value is null

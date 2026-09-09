@@ -26,6 +26,53 @@ public sealed record ProtectiveStop
     /// <summary>The armed entry this protects, when it came from one. Null for a bare holding.</summary>
     public string? ParentArmedId { get; init; }
 
+    /// <summary>
+    /// The execution id of an IMMEDIATE entry this protects - the "Protect this BUY with a stop"
+    /// option on an ordinary dashboard buy, which has no armed order to be a parent.
+    ///
+    /// <para>
+    /// <b>Why a third parent kind rather than reusing the baseline.</b> An armed entry's fill is proved
+    /// by holdings RISING above a baseline captured while the entry still sat unfired. An immediate
+    /// order has no such window: by the time anything could read a baseline the order may already have
+    /// filled, and a baseline captured too late reads equal to the holding for ever - the fill is never
+    /// detected and the stop never activates. That failure is silent and runs in the UNPROTECTED
+    /// direction, so it is not an acceptable trade for one fewer column.
+    /// </para>
+    ///
+    /// <para>
+    /// An immediate order needs no baseline, because it has something better: the fills recorded against
+    /// its own <c>broker_orders</c> rows. That is the same mechanism
+    /// <see cref="TradingAgent.Trading.PersistentOrderIntent"/> already trusts for its filled quantity.
+    /// No fills recorded means no activation AND a visible "the entry never filled" close, rather than a
+    /// stop that waits silently for ever.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>The EXECUTION id, deliberately, not the broker order number.</b> A broker order number is not
+    /// an identity here - AHL reuses one across connections, and a colliding number is stored qualified
+    /// as <c>{orderNo}#{clientOrderId}</c> (see <c>SqliteTradingRepository.RecordBrokerOrdersAsync</c>).
+    /// Summing fills by order number would therefore either MISS this order's fills (an exact match
+    /// against a qualified row) or ADD another order's (a prefix match), and the second sizes a real
+    /// sell order against shares belonging to a different position. The execution id is ours, unique by
+    /// construction, and known at the moment the stop is created.
+    /// </para>
+    ///
+    /// <para>
+    /// Mutually exclusive with <see cref="ParentArmedId"/> and
+    /// <see cref="ParentPersistentIntentId"/>; all three null means a bare holding, which is created
+    /// <c>active</c> and never watched for a fill at all.
+    /// </para>
+    /// </summary>
+    public string? ParentExecutionId { get; init; }
+
+    /// <summary>
+    /// The keep-working intent this protects, when the entry was an immediate order with "keep the
+    /// unfilled remainder working" on. A persistent intent re-places a fresh DAY order every session
+    /// under a NEW number, so no single execution can account for its fills - the intent's own
+    /// cumulative <c>FilledQuantity</c> can, and does.
+    /// </summary>
+    public string? ParentPersistentIntentId { get; init; }
+
     /// <summary>Price at which the stop triggers.</summary>
     public required decimal StopTrigger { get; init; }
 

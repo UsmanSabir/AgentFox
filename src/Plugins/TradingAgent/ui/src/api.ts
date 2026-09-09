@@ -194,6 +194,8 @@ export interface DashboardOrderRequest {
   clientRequestId: string;
   persistentUntilFilled?: boolean;
   expiresInDays?: number;
+  /** BUY only. Creates a protective stop that activates on this order's confirmed fill. */
+  attachStop?: AttachStopRequest | null;
 }
 
 export interface DashboardOrderResult {
@@ -204,6 +206,21 @@ export interface DashboardOrderResult {
   reason: string;
   groups: unknown[];
   persistentOrder?: PersistentOrder | null;
+  /**
+   * Present only when a stop was requested. `created: false` means the ORDER went through and the
+   * stop did not, which the operator has to be told rather than left to discover.
+   */
+  attachedStop?: AttachedStopOutcome | null;
+}
+
+/** What became of a protective stop requested alongside an entry. */
+export interface AttachedStopOutcome {
+  created: boolean;
+  stopId?: string;
+  stopTrigger: number;
+  stopLimit: number;
+  recurring: boolean;
+  message: string;
 }
 
 export interface PersistentOrderPlacement {

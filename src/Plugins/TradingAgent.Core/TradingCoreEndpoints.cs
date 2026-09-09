@@ -1,4 +1,4 @@
-using AgentFox.Plugins.Interfaces;
+﻿using AgentFox.Plugins.Interfaces;
 using AgentFox.Plugins.Research;
 using AgentFox.Plugins;
 using Microsoft.AspNetCore.Routing;
@@ -136,7 +136,13 @@ public sealed record DashboardOrderRequest(
     string? ClientRequestId = null,
     bool PersistentUntilFilled = false,
     DateTime? ExpiresUtc = null,
-    int? ExpiresInDays = null);
+    int? ExpiresInDays = null,
+    /// <summary>
+    /// A protective stop to create once this BUY is confirmed filled. Same shape and same rules as the
+    /// waiting-order path's own attachment — see <see cref="AttachStopRequest"/> and
+    /// <c>TradingAgent.Watchlist.AttachedStopRule</c>.
+    /// </summary>
+    AttachStopRequest? AttachStop = null);
 
 /// <summary>Auditable bulk alert state change. Dismiss is the UI's soft-delete operation.</summary>
 public sealed record BulkAlertActionRequest(

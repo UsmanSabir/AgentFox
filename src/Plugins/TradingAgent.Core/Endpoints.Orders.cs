@@ -64,6 +64,7 @@ public sealed partial class TradingCoreEndpoints
             TradingPolicyProvider policyProvider,
             ApprovalIntentRegistry intentRegistry,
             ITradingRepository repository,
+            ProtectiveStopWorker protectiveStops,
             IOptions<TradingAgentOptions> options,
             ILogger<TradingCoreEndpoints> logger,
             HttpContext http,
@@ -267,6 +268,19 @@ public sealed partial class TradingCoreEndpoints
                         : body.ClientRequestId.Trim());
             }
 
+            // Validated BEFORE anything is submitted, and shared with the waiting-order path via
+            // AttachedStopRule so the two cannot drift. Order matters: refusing an attachment after a
+            // real BUY has gone out would leave the position bare with nothing but an error to say so.
+            AttachedStopPlan? stopPlan = null;
+            if (body.AttachStop is { } attach)
+            {
+                var plan = AttachedStopRule.Validate(
+                    intent.Action, attach.StopTrigger, attach.StopLimit, entryPrice);
+                if (!plan.Ok)
+                    return Results.BadRequest(new { error = plan.ErrorCode, message = plan.Message });
+                stopPlan = plan;
+            }
+
             // The TradingTrader request is the approval event. Bind it to the exact order and let the
             // manager consume/re-hash the one-time intent exactly as it does for a host tool approval.
             var approvalIntent = ApprovalIntent.Create(
@@ -281,6 +295,16 @@ public sealed partial class TradingCoreEndpoints
                 var submission = await persistentOrders.CreateAndSubmitAsync(
                     persistent, authorization, ct);
                 var persistentResult = submission.Execution;
+                var persistentStop = stopPlan is { } keepWorkingPlan
+                    ? await AttachStopAsync(
+                        repository, protectiveStops, logger, symbol, keepWorkingPlan,
+                        body.AttachStop!.Recurring,
+                        // A keep-working entry re-places a fresh order every session, so the INTENT is
+                        // the only thing that can account for its cumulative fills.
+                        parentPersistentIntentId: submission.Intent?.IntentId,
+                        parentExecutionId: null,
+                        requestedQuantity: body.AttachStop!.Quantity, ct)
+                    : null;
                 return Results.Ok(new
                 {
                     accepted = submission.Accepted,
@@ -292,7 +316,8 @@ public sealed partial class TradingCoreEndpoints
                         : sellQuantityAdjustment + " " + submission.Reason,
                     Groups = persistentResult?.Groups
                              ?? Array.Empty<IReadOnlyList<OrderResult>>(),
-                    persistentOrder = submission.Intent
+                    persistentOrder = submission.Intent,
+                    attachedStop = persistentStop
                 });
             }
 
@@ -301,6 +326,20 @@ public sealed partial class TradingCoreEndpoints
             var brokerAccepted = result.Executed
                 && brokerResults.Count > 0
                 && brokerResults.All(order => order.Success);
+
+            // Created ONLY on an accepted order, and that asymmetry is the point: a stop attached to an
+            // order the broker refused would sit in pending_fill watching for a fill that cannot come,
+            // and would eventually close itself reporting an entry that never existed. A rejected order
+            // has nothing to protect, so there is nothing to create.
+            var attachedStop = stopPlan is { } immediatePlan && brokerAccepted
+                ? await AttachStopAsync(
+                    repository, protectiveStops, logger, symbol, immediatePlan,
+                    body.AttachStop!.Recurring,
+                    parentPersistentIntentId: null,
+                    parentExecutionId: result.ExecutionId,
+                    requestedQuantity: body.AttachStop!.Quantity, ct)
+                : null;
+
             return Results.Ok(new
             {
                 accepted = brokerAccepted,
@@ -308,7 +347,8 @@ public sealed partial class TradingCoreEndpoints
                 result.ExecutionId,
                 result.PolicyVersion,
                 result.Reason,
-                result.Groups
+                result.Groups,
+                attachedStop
             });
         }).RequireAuthorization("TradingTrader");
 
@@ -475,6 +515,123 @@ public sealed partial class TradingCoreEndpoints
                     message = result.Message
                 });
         }).RequireAuthorization("TradingTrader");
+    }
+
+    /// <summary>
+    /// Writes the protective stop for an accepted IMMEDIATE entry and returns what to tell the
+    /// operator, or null when nothing was created.
+    ///
+    /// <para>
+    /// Created <c>pending_fill</c> with <c>DesiredQuantity = 0</c> — the same discipline as the
+    /// waiting-order path, and for the same reason: a stop must never exist before the shares do,
+    /// because selling stock you do not own is a rejection at best and a short at worst. What it
+    /// protects is whatever the entry ACTUALLY fills, which a part fill makes different from what was
+    /// asked for. See <see cref="ProtectiveStop.ParentExecutionId"/> for how that is measured.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>No baseline is captured, unlike the waiting-order path.</b> That path calls
+    /// <c>CaptureBaselineSoon</c> because its entry has not gone in yet and holdings-before is the
+    /// only fill evidence it will ever get. Here the order has already been submitted, so a baseline
+    /// read now could include the new shares — and a baseline equal to the holding means the fill is
+    /// never detected and the stop never activates. Fills attributed to this execution answer the same
+    /// question exactly, and cannot be too late.
+    /// </para>
+    ///
+    /// <para>
+    /// A failure to write is reported, never thrown: the BUY has already been placed and accepted, and
+    /// turning a bookkeeping error into a 500 would tell the operator their order failed when it did
+    /// not. The response says the stop was not created so they can place one by hand.
+    /// </para>
+    /// </summary>
+    private static async Task<object> AttachStopAsync(
+        ITradingRepository repository,
+        ProtectiveStopWorker protectiveStops,
+        ILogger logger,
+        string symbol,
+        AttachedStopPlan plan,
+        bool recurring,
+        string? parentPersistentIntentId,
+        string? parentExecutionId,
+        int? requestedQuantity,
+        CancellationToken ct)
+    {
+        if (parentPersistentIntentId is null && parentExecutionId is null)
+        {
+            logger.LogWarning(
+                "[ProtectiveStops] {Symbol}: the entry was accepted but reported neither an execution "
+                + "id nor a keep-working intent, so the requested stop at {Trigger} was NOT created. "
+                + "Place it by hand.", symbol, plan.StopTrigger);
+            return new
+            {
+                created = false,
+                stopTrigger = plan.StopTrigger,
+                stopLimit = plan.StopLimit,
+                recurring,
+                message = "The order went through, but it reported nothing to attach a stop to, so the "
+                        + "protective stop was NOT created. Place it by hand."
+            };
+        }
+
+        var stop = new ProtectiveStop
+        {
+            StopId = Guid.NewGuid().ToString("N"),
+            Symbol = symbol,
+            ParentArmedId = null,
+            ParentExecutionId = parentExecutionId,
+            ParentPersistentIntentId = parentPersistentIntentId,
+            StopTrigger = plan.StopTrigger,
+            StopLimit = plan.StopLimit,
+            // Sized at fill time, never here: what matters is what the entry actually buys.
+            DesiredQuantity = 0,
+            Recurring = recurring,
+            State = "pending_fill",
+            Note = requestedQuantity is { } wanted ? $"Requested cover: {wanted} share(s)." : null,
+            // Attached by hand to an order placed by hand; it inherits the entry's origination.
+            OperatorOriginated = true
+        };
+
+        try
+        {
+            await repository.SaveProtectiveStopAsync(stop, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogError(ex,
+                "[ProtectiveStops] {Symbol}: the entry was accepted but the attached stop at {Trigger} "
+                + "could not be saved. Place it by hand.", symbol, plan.StopTrigger);
+            return new
+            {
+                created = false,
+                stopTrigger = plan.StopTrigger,
+                stopLimit = plan.StopLimit,
+                recurring,
+                message = "The order went through, but the protective stop could NOT be saved "
+                        + $"({ex.Message}). Place it by hand."
+            };
+        }
+
+        // Not awaited on the arm path, and awaited nowhere here either — this only nudges the worker
+        // to look sooner than its next tick, so the stop activates within seconds of the fill rather
+        // than within a pass.
+        protectiveStops.CaptureBaselineSoon(stop.StopId);
+
+        logger.LogWarning(
+            "[ProtectiveStops] {StopId} attached to an immediate entry: SELL stop {Trigger}/{Limit} "
+            + "on {Symbol}, recurring={Recurring}. It activates on the entry's confirmed fill.",
+            stop.StopId, plan.StopTrigger, plan.StopLimit, symbol, recurring);
+
+        return new
+        {
+            created = true,
+            stopId = stop.StopId,
+            stopTrigger = plan.StopTrigger,
+            stopLimit = plan.StopLimit,
+            recurring,
+            message = $"A {(recurring ? "recurring" : "one-session")} protective stop at "
+                    + $"{plan.StopTrigger} (worst price {plan.StopLimit}) is attached and will cover "
+                    + "the shares that actually fill."
+        };
     }
 
     private static object Project(BrokerWorkingOrder order) => new

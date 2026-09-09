@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Configuration;
+﻿using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using TradingAgent.Config;
@@ -739,6 +739,9 @@ public sealed class WatchlistUniverseTests
             throw new NotSupportedException();
         public Task<string> SaveProtectiveStopAsync(
             ProtectiveStop stop, CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<int> GetFilledQuantityForExecutionAsync(
+            string executionId, string symbol, CancellationToken ct = default) =>
+            throw new NotSupportedException();
         public Task<IReadOnlyList<ProtectiveStop>> GetProtectiveStopsAsync(
             bool openOnly = true, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<bool> TrySetProtectiveStopStateAsync(
