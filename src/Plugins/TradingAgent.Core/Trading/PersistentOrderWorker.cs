@@ -569,6 +569,37 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
                 intent, latestPlacement, DateTime.UtcNow, today, out _))
             return false;
 
+        // WHY the broker refused decides whether waiting can help at all — see OrderRejectionOutlook.
+        // Checked before the backoff, because a refusal that can never clear should not be scheduled
+        // for later; it should stop and say so.
+        var outlook = OrderRejectionOutlook.Classify(latestPlacement.Message);
+        if (outlook is not RejectionOutlook.RetryToday)
+        {
+            var explanation = OrderRejectionOutlook.Explain(outlook, latestPlacement.Message)!;
+
+            // Never -> attention, which MayAttempt and CanRetryFailedToday both refuse, so nothing
+            // automatic touches this intent again until a person resolves it. Tomorrow -> left active:
+            // LastAttemptSessionDate already makes it ineligible for the rest of today and eligible on
+            // the next trading date, so the "wait a day" case needs no new durable state at all.
+            var state = outlook is RejectionOutlook.Never
+                ? "attention"
+                : intent.FilledQuantity > 0 ? "partial" : "active";
+
+            await _repository.SetPersistentOrderProgressAsync(
+                intent.IntentId, intent.FilledQuantity, state, explanation, ct);
+
+            // The activity log is where an operator looks to find out why nothing happened, and a
+            // stopped retry is precisely the case where silence reads as the system still working on
+            // it. Warn rather than Info: this needs a decision from somebody.
+            _activity?.Warn("Orders",
+                $"{intent.Symbol}: {OrderRejectionOutlook.Label(outlook)}", explanation);
+            _logger.LogWarning(
+                "[PersistentOrders] {Symbol} ({IntentId}): {Label}. Broker said: {Reason}",
+                intent.Symbol, intent.IntentId, OrderRejectionOutlook.Label(outlook),
+                latestPlacement.Message);
+            return true;
+        }
+
         // Repeated failures back off — see PersistentOrderDecisions.AutoRetryDelayFor for the schedule
         // and the live incident that produced it. Returning TRUE claims the pass: the caller's
         // fall-through would otherwise overwrite this reason with "eligible on the next trading date",

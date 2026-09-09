@@ -360,14 +360,30 @@
   // seconds stale. Telling the operator early is worth much more than refusing here would be.
   $: buyExceedsBuyingPower = choice?.action === 'BUY' && buyingPower != null
     && estimatedValue != null && estimatedValue > buyingPower;
+  // An order that FITS the buying power can still be refused, because the broker adds its own charges
+  // on top of traded value and this figure is traded value alone. Core models no fee schedule at all
+  // and must not invent one, so it says what the number excludes rather than guessing a headroom --
+  // the exact charge is shown by whatever fills the order-detail slot, which reads the same cost
+  // projection the rest of the system uses.
+  //
+  // 99% rather than 100%: below that there is room for any plausible charge and a warning would be
+  // noise, which is the failure mode a caution about costs falls into fastest.
+  $: buyLeavesNoRoomForCharges = choice?.action === 'BUY' && buyingPower != null && buyingPower > 0
+    && estimatedValue != null && !buyExceedsBuyingPower
+    && estimatedValue > buyingPower * 0.99;
   $: estimatedPrice = choice?.orderType === 'MARKET' ? latestPrice
     : choice?.orderType === 'STOPLOSS' ? triggerPrice
     : choice?.submission === 'conditional' ? conditionalLevel : price;
   $: availableSellValue = availableSellQuantity != null && estimatedPrice && estimatedPrice > 0
     ? availableSellQuantity * estimatedPrice
     : null;
+  // FLOOR, not round. A value is a budget, and Math.round could buy one share MORE than it covers --
+  // up to half a share's worth over, which on a 425 PKR share is over 200 PKR. Combined with "Use it
+  // all" spending the whole reported buying power on traded value, that is a broker refusal waiting to
+  // happen, and it happened (2026-09-09: an order sized to 100% of available balance was refused for
+  // insufficient balance).
   $: valueSizedQuantity = sizeMode === 'value' && orderValue && orderValue > 0 && estimatedPrice && estimatedPrice > 0
-    ? Math.round(orderValue / estimatedPrice)
+    ? Math.floor(orderValue / estimatedPrice)
     : null;
   $: effectiveQuantity = sizeMode === 'value' ? valueSizedQuantity : quantity;
   $: estimatedValue = effectiveQuantity && estimatedPrice ? effectiveQuantity * estimatedPrice : null;
@@ -879,13 +895,15 @@
           {/if}
           {#if sizeMode === 'value' && valueSizedQuantity && estimatedPrice && estimatedValue != null && sizingDifference != null}
             <p class="sizing-note">
-              Nearest whole-share quantity: <b>{valueSizedQuantity} shares</b> at {money(estimatedPrice)} PKR
+              Largest whole-share quantity that fits: <b>{valueSizedQuantity} shares</b> at {money(estimatedPrice)} PKR
               = {money(estimatedValue)} PKR
               ({sizingDifference === 0 ? 'exactly your value' : `${money(Math.abs(sizingDifference))} PKR ${sizingDifference > 0 ? 'above' : 'below'} your value`}).
             </p>
           {/if}
           {#if buyExceedsBuyingPower && estimatedValue != null && buyingPower != null}
             <p class="warning"><AlertTriangle size={13} /> This order is about {money(estimatedValue)} PKR, above the {money(buyingPower)} PKR the broker currently reports as available. It is not blocked here — the broker decides — but it may be refused or reduced.</p>
+          {:else if buyLeavesNoRoomForCharges && estimatedValue != null && buyingPower != null}
+            <p class="warning"><AlertTriangle size={13} /> This order is about {money(estimatedValue)} PKR and uses almost all of the {money(buyingPower)} PKR available. Buying power covers traded value only — the broker's charges are added on top, so an order this close to the limit is often refused for insufficient balance. Leave a little room, or check the cost shown for this order.</p>
           {/if}
           {#if sellExceedsAvailable && effectiveQuantity != null && availableSellQuantity != null}
             <p class="warning"><AlertTriangle size={13} /> You entered {money(effectiveQuantity)} shares, but the broker snapshot shows only {money(availableSellQuantity)} available now. Use “Sell all available” or reduce the size; final availability is checked again on submission.</p>
