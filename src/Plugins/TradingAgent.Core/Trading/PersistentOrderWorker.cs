@@ -569,6 +569,19 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
                 intent, latestPlacement, DateTime.UtcNow, today, out _))
             return false;
 
+        // Repeated failures back off — see PersistentOrderDecisions.AutoRetryDelayFor for the schedule
+        // and the live incident that produced it. Returning TRUE claims the pass: the caller's
+        // fall-through would otherwise overwrite this reason with "eligible on the next trading date",
+        // which is exactly wrong while a retry is still due later today.
+        if (!PersistentOrderDecisions.AutoRetryIsDue(
+                placements, today, DateTime.UtcNow, out var backoffReason))
+        {
+            await _repository.SetPersistentOrderProgressAsync(
+                intent.IntentId, intent.FilledQuantity,
+                intent.FilledQuantity > 0 ? "partial" : "active", backoffReason, ct);
+            return true;
+        }
+
         var prep = await PrepareRetryAsync(intent, placements, latestPlacement, snapshot, ct);
         if (!prep.Ready)
         {

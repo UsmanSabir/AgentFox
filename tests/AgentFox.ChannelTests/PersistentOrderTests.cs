@@ -1,4 +1,4 @@
-using TradingAgent.Models;
+﻿using TradingAgent.Models;
 using TradingAgent.Reconciliation;
 using TradingAgent.Risk;
 using TradingAgent.Trading;
@@ -197,6 +197,69 @@ public sealed class PersistentOrderTests
         Assert.IsNotNull(PriceIntentRule.Validate(stop, 100.01m, 99m));
         Assert.IsNotNull(PriceIntentRule.Validate(stop, 100m, 98.99m));
     }
+
+    [TestMethod]
+    public void AutoRetryBackoff_DoublesFromOneMinuteToAHalfHourCeiling()
+    {
+        Assert.AreEqual(TimeSpan.FromMinutes(1), PersistentOrderDecisions.AutoRetryDelayFor(0));
+        Assert.AreEqual(TimeSpan.FromMinutes(1), PersistentOrderDecisions.AutoRetryDelayFor(1));
+        Assert.AreEqual(TimeSpan.FromMinutes(2), PersistentOrderDecisions.AutoRetryDelayFor(2));
+        Assert.AreEqual(TimeSpan.FromMinutes(4), PersistentOrderDecisions.AutoRetryDelayFor(3));
+        Assert.AreEqual(TimeSpan.FromMinutes(8), PersistentOrderDecisions.AutoRetryDelayFor(4));
+        Assert.AreEqual(TimeSpan.FromMinutes(16), PersistentOrderDecisions.AutoRetryDelayFor(5));
+        Assert.AreEqual(TimeSpan.FromMinutes(30), PersistentOrderDecisions.AutoRetryDelayFor(6));
+        Assert.AreEqual(TimeSpan.FromMinutes(30), PersistentOrderDecisions.AutoRetryDelayFor(400));
+    }
+
+    [TestMethod]
+    public void AutoRetryBackoff_CountsOnlyTheTrailingRunOfFailuresOnTheSameDate()
+    {
+        // An accepted placement between two failures resets the backoff; yesterday's failures never
+        // count towards today's.
+        Assert.AreEqual(2, PersistentOrderDecisions.ConsecutiveFailedAttemptsOn(
+            [Failed(1), Failed(2)], Today));
+        Assert.AreEqual(1, PersistentOrderDecisions.ConsecutiveFailedAttemptsOn(
+            [Failed(1), Placement("accepted") with { Attempt = 2 }, Failed(3)], Today));
+        Assert.AreEqual(0, PersistentOrderDecisions.ConsecutiveFailedAttemptsOn(
+            [Failed(1), Placement("accepted") with { Attempt = 2 }], Today));
+        Assert.AreEqual(0, PersistentOrderDecisions.ConsecutiveFailedAttemptsOn(
+            [Failed(1) with { SessionDate = Today.AddDays(-1) }], Today));
+    }
+
+    [TestMethod]
+    public void AutoRetry_IsNotDueUntilTheBackoffHasElapsed()
+    {
+        // The live 2026-09-09 shape: one failure, then the poll cycle comes round 60s later.
+        var failures = new[] { Failed(1) with { CreatedUtc = Now, Message = "Insufficient Exposure" } };
+
+        Assert.IsFalse(PersistentOrderDecisions.AutoRetryIsDue(
+            failures, Today, Now.AddSeconds(30), out var waiting));
+        Assert.IsTrue(PersistentOrderDecisions.AutoRetryIsDue(
+            failures, Today, Now.AddMinutes(1), out _));
+
+        // The reason carries the broker's own words and the wait, because it is what the operator reads.
+        StringAssert.Contains(waiting, "Insufficient Exposure");
+        StringAssert.Contains(waiting, "1 attempt(s) have failed");
+
+        // Four in a row and the wait is eight minutes, not one — the loop this exists to stop.
+        var four = new[] { Failed(1), Failed(2), Failed(3), Failed(4) with { CreatedUtc = Now } };
+        Assert.IsFalse(PersistentOrderDecisions.AutoRetryIsDue(
+            four, Today, Now.AddMinutes(7), out _));
+        Assert.IsTrue(PersistentOrderDecisions.AutoRetryIsDue(
+            four, Today, Now.AddMinutes(8), out _));
+    }
+
+    [TestMethod]
+    public void AutoRetry_IsDueWhenNothingHasFailedToday()
+    {
+        // No history at all, and a history whose last placement was accepted: neither is a backoff.
+        Assert.IsTrue(PersistentOrderDecisions.AutoRetryIsDue([], Today, Now, out _));
+        Assert.IsTrue(PersistentOrderDecisions.AutoRetryIsDue(
+            [Placement("accepted")], Today, Now, out _));
+    }
+
+    private static PersistentOrderPlacement Failed(int attempt) =>
+        Placement("failed") with { Attempt = attempt, PlacementId = $"placement-{attempt}" };
 
     private static PersistentOrderIntent Intent(int quantity) => new()
     {
