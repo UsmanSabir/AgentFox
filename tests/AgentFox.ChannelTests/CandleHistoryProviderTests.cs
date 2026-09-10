@@ -6,6 +6,30 @@ namespace AgentFox.ChannelTests;
 public sealed class CandleHistoryProviderTests
 {
     [TestMethod]
+    public void Candle_source_description_changes_for_sources_not_request_size()
+    {
+        var chartRead = CandleHistoryProvider.DescribeHistorySourceSet(
+            [CandleSource.LocalArchive]);
+        var strategyRead = CandleHistoryProvider.DescribeHistorySourceSet(
+            Enumerable.Repeat(CandleSource.LocalArchive, 30));
+        var mixedReadInAnotherOrder = CandleHistoryProvider.DescribeHistorySourceSet(
+            [CandleSource.PsxPortal, CandleSource.AhlAnalytics, CandleSource.PsxPortal]);
+        var sameMixedRead = CandleHistoryProvider.DescribeHistorySourceSet(
+            [CandleSource.AhlAnalytics, CandleSource.PsxPortal]);
+
+        Assert.AreEqual(chartRead, strategyRead,
+            "A one-symbol chart and a universe scan using the same source must not alternate activity rows.");
+        Assert.AreEqual(mixedReadInAnotherOrder, sameMixedRead,
+            "Source ordering and frequency are request shape, not an operational source transition.");
+        Assert.AreNotEqual(chartRead, sameMixedRead);
+
+        Assert.AreEqual(
+            CandleHistoryProvider.DescribeLiveSourceSet(["psx", "AHL", "psx"]),
+            CandleHistoryProvider.DescribeLiveSourceSet(["AHL", "PSX"]));
+        Assert.AreEqual("none", CandleHistoryProvider.DescribeLiveSourceSet([]));
+    }
+
+    [TestMethod]
     [DataRow(0, 60, true, true)]
     [DataRow(19, 60, true, true)]
     [DataRow(20, 60, true, false)]

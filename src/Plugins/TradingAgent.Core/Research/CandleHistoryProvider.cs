@@ -42,10 +42,10 @@ public sealed class CandleHistoryProvider
     private readonly ILogger<CandleHistoryProvider> _logger;
 
     /// <summary>
-    /// Last source mix announced to the activity log. The log collapses identical consecutive lines,
-    /// but a scan runs every few minutes and would still repost the same line indefinitely, so the
-    /// announcement is suppressed until the mix actually changes — which is the only moment an
-    /// operator needs to see it.
+    /// Last source set announced to the activity log. Request size is deliberately absent: a chart
+    /// asks for one symbol while a strategy pass asks for the whole universe, and treating those
+    /// counts as a source change made the two callers alternate candle announcements indefinitely.
+    /// The operator needs to see a source transition, not the size of every request.
     /// </summary>
     private string? _lastAnnouncedSourceMix;
 
@@ -293,24 +293,13 @@ public sealed class CandleHistoryProvider
     {
         if (sources.Count == 0) return;
 
-        var counts = sources.Values
-            .GroupBy(v => v)
-            .OrderByDescending(g => g.Count())
-            .ToList();
-
-        var mix = string.Join(", ", counts.Select(g => $"{Describe(g.Key)} {g.Count()}"));
-        var liveMix = live.Count == 0
-            ? "none"
-            : string.Join(", ", live.Values
-                .GroupBy(q => q.Source, StringComparer.OrdinalIgnoreCase)
-                .OrderByDescending(g => g.Count())
-                .Select(g => $"{DescribeLive(g.Key)} {g.Count()}"));
+        var mix = DescribeHistorySourceSet(sources.Values);
+        var liveMix = DescribeLiveSourceSet(live.Values.Select(q => q.Source));
         var announcementKey = $"history:{mix}|live:{liveMix}";
         if (announcementKey == _lastAnnouncedSourceMix) return;
         _lastAnnouncedSourceMix = announcementKey;
 
-        var primary = counts[0].Key;
-        var historyDetail = primary == CandleSource.AhlAnalytics
+        var historyDetail = sources.Values.Contains(CandleSource.AhlAnalytics)
             ? "AHL bars are corporate-action ADJUSTED — correct for indicators and levels, but they " +
               "do not reconcile against fill prices. PSX remains the source of record for money."
             : _ahl.Enabled
@@ -327,6 +316,24 @@ public sealed class CandleHistoryProvider
             $"{historyDetail} {liveDetail}");
         _logger.LogInformation("[CandleHistory] Historical source: {History}; live top-up: {Live}",
             mix, liveMix);
+    }
+
+    /// <summary>
+    /// Stable source description for activity de-duplication. Counts are request shape, not source
+    /// state, and ordering is canonical so the same set cannot look changed because proportions did.
+    /// </summary>
+    internal static string DescribeHistorySourceSet(IEnumerable<CandleSource> sources) =>
+        string.Join(", ", sources.Distinct().OrderBy(v => v).Select(Describe));
+
+    internal static string DescribeLiveSourceSet(IEnumerable<string> sources)
+    {
+        var set = sources
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(s => s, StringComparer.OrdinalIgnoreCase)
+            .Select(DescribeLive)
+            .ToList();
+        return set.Count == 0 ? "none" : string.Join(", ", set);
     }
 
     private static string Describe(CandleSource source) => source switch

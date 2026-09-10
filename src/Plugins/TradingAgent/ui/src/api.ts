@@ -902,7 +902,7 @@ export interface TradingActivity {
   lastUtc: string;
   /** Further occurrences folded into this entry. 0 for something that happened once. */
   repeats: number;
-  /** Which part of the agent: Broker, Orders, Stops, Armed, Monitor, Feed. */
+  /** Which part of the agent: Broker, Orders, Stops, Armed, Monitor, Feed, Candles. */
   source: string;
   level: 'info' | 'warn' | 'error';
   message: string;
