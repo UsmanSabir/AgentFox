@@ -9,6 +9,7 @@
   } from 'lucide-svelte';
   import type { SymbolExtensionComponent } from './symbolExtensions';
   import LiveHoldingCells from './LiveHoldingCells.svelte';
+  import PortfolioAllocationChart from './PortfolioAllocationChart.svelte';
   import { orderListNavigation } from './orderListNavigation';
   export let keyboardMode = false;
   let query = '';
@@ -141,6 +142,7 @@
           {:else if !account.holdings.length}
             <div class="empty">The broker reports no current holdings.</div>
           {:else}
+            <PortfolioAllocationChart holdings={account.holdings} {showValues} />
             <div class="table-wrap"><table>
               <thead><tr><th>Instrument</th><th>Quantity</th><th>Average cost</th><th>Market price</th><th>Market value</th><th>Unrealized P/L</th></tr></thead>
               <tbody>{#each account.holdings as holding}

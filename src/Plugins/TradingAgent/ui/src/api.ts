@@ -392,6 +392,8 @@ export interface BrokerAccountHolding {
   symbol?: string | null;
   exchange?: string | null;
   assetType?: string | null;
+  sectorCode?: string | null;
+  sector?: string | null;
   quantity?: number | null;
   averageCost?: number | null;
   marketPrice?: number | null;

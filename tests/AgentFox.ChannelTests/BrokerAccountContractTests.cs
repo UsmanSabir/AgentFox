@@ -1,4 +1,5 @@
 using TradingAgent.Broker;
+using TradingAgent.AhlAnalytics;
 using TradingAgent.Feed;
 using TradingAgent.Models;
 
@@ -28,6 +29,24 @@ public sealed class BrokerAccountContractTests
         Assert.AreEqual(25m, mapped.Quantity);
         Assert.AreEqual(5450m, mapped.MarketValue);
         Assert.AreEqual("PKR", mapped.Currency);
+    }
+
+    [TestMethod]
+    public void AhkHolding_AddsSectorClassificationFromMarketSnapshot()
+    {
+        var mapped = AhkBrokerAccountReader.MapHolding(
+            new HoldingPosition { Symbol = " ogdc ", CurrentValue = 5450m },
+            new AhlSnapshotData
+            {
+                Equities = new Dictionary<string, AhlEquity>
+                {
+                    ["OGDC"] = new() { SectorCode = "0820" }
+                }
+            });
+
+        Assert.AreEqual("OGDC", mapped.Symbol);
+        Assert.AreEqual("0820", mapped.SectorCode);
+        Assert.AreEqual("Oil & Gas Exploration Companies", mapped.Sector);
     }
 
     [TestMethod]
