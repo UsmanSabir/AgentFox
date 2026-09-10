@@ -160,6 +160,32 @@
     });
   }
 
+  /**
+   * Places panels the catalogue has gained since this layout was saved.
+   *
+   * A saved layout records what the operator ARRANGED, not what the product offers, so restoring one
+   * verbatim hides every panel added since — for ever, and only from the people who have used the
+   * workspace before. `known` is what makes the difference between "hidden on purpose" and "did not
+   * exist yet" legible; a record written before that field shipped cannot say, so it is read as having
+   * known exactly what it placed. That adopts a deliberately hidden panel once, on the first load after
+   * this shipped, and never again — the save below records the catalogue in full.
+   *
+   * Ids parked in the auto-hide tray are skipped: readWorkspaceLayout refuses a record that has an id
+   * in both, so their absence from the layout is a placement rather than a gap.
+   */
+  function adoptNewPanels(placed: readonly string[], known?: readonly string[]) {
+    if (!api) return false;
+    const seen = new Set(known ?? [...placed, ...(bottomTray?.ids ?? [])]);
+    let adopted = false;
+    for (const spec of panels) {
+      if (seen.has(spec.id) || api.getPanel(spec.id) || bottomTray?.ids.includes(spec.id)) continue;
+      const peer = panels.find(p => p.region === spec.region && api?.getPanel(p.id));
+      addPanel(spec.id, peer?.id);
+      adopted = true;
+    }
+    return adopted;
+  }
+
   function addPanel(id: string, reference?: string, direction: 'left' | 'right' | 'above' | 'below' | 'within' = 'within') {
     const spec = panels.find(p => p.id === id)!;
     return api?.addPanel({
@@ -235,7 +261,7 @@
   function persist() {
     if (!api || suppressSave || !dirty) return;
     try {
-      localStorage.setItem(storageKey, JSON.stringify(saveWorkspaceLayout(edition, preset, api.toJSON(), Date.now(), bottomTray, api.hasMaximizedGroup() ? api.activePanel?.id : undefined)));
+      localStorage.setItem(storageKey, JSON.stringify(saveWorkspaceLayout(edition, preset, api.toJSON(), Date.now(), bottomTray, api.hasMaximizedGroup() ? api.activePanel?.id : undefined, panels.map(p => p.id))));
       dirty = false;
       storageWarning = '';
     } catch { storageWarning = 'Layout could not be saved in this browser; trading is unaffected.'; }
@@ -537,12 +563,21 @@
       let raw: string | null = null;
       try { raw = localStorage.getItem(storageKey); } catch { /* Storage may be disabled. */ }
       const saved = readWorkspaceLayout(raw, edition, panels.map(p => p.id), presets.map(p => p.id));
+      let adopted = false;
       if (saved) {
-        try { api.fromJSON(saved.layout); preset = saved.preset; bottomTray = saved.bottomTray; if(saved.maximized) api.getPanel(saved.maximized)?.api.maximize(); }
+        try {
+          api.fromJSON(saved.layout); preset = saved.preset; bottomTray = saved.bottomTray;
+          adopted = adoptNewPanels(Object.keys(saved.layout.panels), saved.known);
+          if(saved.maximized) api.getPanel(saved.maximized)?.api.maximize();
+        }
         catch { removeSaved(); buildDefault(presets[0].id); }
       } else if (raw) removeSaved();
       suppressSave = false;
       dirty = false;
+      // Written back immediately when a panel was adopted, so the record gains its catalogue list even
+      // if the operator never moves anything. Without it the adoption is harmless but endless, and a
+      // panel they hide right afterwards would come back on the next load.
+      if (adopted) { dirty = true; persist(); }
       activeId = api.activePanel?.id ?? activeId;
       maximized = api.hasMaximizedGroup();
       subscriptions.push(api.onDidLayoutChange(scheduleSave));
