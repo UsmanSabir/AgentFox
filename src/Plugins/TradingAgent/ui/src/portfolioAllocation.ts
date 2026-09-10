@@ -74,14 +74,25 @@ export function buildPortfolioAllocation(
   return { currency, mixedCurrencies, unavailableCount, total, rows, slices };
 }
 
-export function allocationGradient(slices: AllocationRow[], colors: string[]): string {
+export function allocationGradient(
+  slices: AllocationRow[],
+  colors: string[],
+  gapColor = 'transparent'
+): string {
   if (!slices.length) return 'transparent';
   let cursor = 0;
-  const stops = slices.map((slice, index) => {
+  const stops = slices.flatMap((slice, index) => {
     const start = cursor;
     cursor += slice.percent;
     const end = index === slices.length - 1 ? 100 : cursor;
-    return `${colors[index % colors.length]} ${start.toFixed(3)}% ${end.toFixed(3)}%`;
+    // A narrow separator makes neighbouring colors legible without materially changing their area.
+    // Clamp it for very small slices so the separator can never consume the wedge.
+    const gap = Math.min(.22, Math.max(0, slice.percent / 5));
+    return [
+      `${gapColor} ${start.toFixed(3)}% ${(start + gap).toFixed(3)}%`,
+      `${colors[index % colors.length]} ${(start + gap).toFixed(3)}% ${(end - gap).toFixed(3)}%`,
+      `${gapColor} ${(end - gap).toFixed(3)}% ${end.toFixed(3)}%`
+    ];
   });
   return `conic-gradient(from -90deg, ${stops.join(', ')})`;
 }

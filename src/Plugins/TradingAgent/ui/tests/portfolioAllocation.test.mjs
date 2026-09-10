@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildPortfolioAllocation } from '../src/portfolioAllocation.ts';
+import { allocationGradient, buildPortfolioAllocation } from '../src/portfolioAllocation.ts';
 
 const holding = (symbol, marketValue, sector = null, currency = 'PKR') => ({
   instrumentId: symbol,
@@ -61,4 +61,16 @@ test('missing values and mixed currencies are never folded into a false total', 
   assert.equal(mixed.mixedCurrencies, true);
   assert.equal(mixed.total, 0);
   assert.deepEqual(mixed.rows, []);
+});
+
+test('doughnut gradient separates slices while preserving their assigned colors', () => {
+  const gradient = allocationGradient([
+    { label: 'A', value: 60, percent: 60 },
+    { label: 'B', value: 40, percent: 40 }
+  ], ['blue', 'gold'], 'gap');
+
+  assert.match(gradient, /^conic-gradient\(from -90deg,/);
+  assert.match(gradient, /blue 0\.220% 59\.780%/);
+  assert.match(gradient, /gold 60\.220% 99\.780%/);
+  assert.match(gradient, /gap 59\.780% 60\.000%/);
 });
