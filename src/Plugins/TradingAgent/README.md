@@ -538,7 +538,7 @@ disabled; this tool uses the explicit AgentFox provider bridge instead.
 | `Monitor.BreakBufferPercent` | `0.5` | How far past a level a close must be to count as a break rather than a wick. |
 | `Monitor.VolumeConfirmRatio` | `1.3` | Volume vs the 30-bar average required to confirm a break. 0 accepts any volume. |
 | `Monitor.CooldownMinutes` | `0` | Minutes before the same symbol+kind+level may alert again; 0 means the rest of the session. |
-| `Monitor.MaxAlertsPerPass` | `25` | Circuit breaker for a market-wide move. Excess is logged, never silently dropped. |
+| `Monitor.MaxAlertsPerPass` | `100` | Circuit breaker for a market-wide move. Excess is logged BY NAME, never silently dropped. Was 25, which a normal market-open pass exceeded. |
 | `Monitor.RunAfterClose` | `true` | One extra pass after the close, on the day's settled bars. |
 | `Monitor.RetentionDays` | `90` | Alert history retained; older rows are pruned so the table has a ceiling. |
 | `Proposals.TtlHours` | `24` | Hours a proposal stays actionable before it is expired. |

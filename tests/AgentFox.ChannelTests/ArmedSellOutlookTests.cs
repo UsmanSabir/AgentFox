@@ -1,6 +1,8 @@
+using TradingAgent.Config;
 using TradingAgent.Models;
 using TradingAgent.Reconciliation;
 using TradingAgent.Risk;
+using TradingAgent.Trading;
 
 namespace AgentFox.ChannelTests;
 
@@ -123,6 +125,35 @@ public sealed class ArmedSellOutlookTests
 
         Assert.AreEqual(ArmedSellDisposition.StayArmed,
             ArmedSellOutlook.For(foreign, brokerConfirmed: true, "CNERGY").Disposition);
+    }
+
+    /// <summary>
+    /// The refused-SELL backoff reuses <see cref="PersistentOrderDecisions.AutoRetryDelayFor"/> rather
+    /// than carrying a schedule of its own, so this repository has ONE curve across the three loops
+    /// that retry a refused order. Pinned here because a private copy in the worker would drift
+    /// silently — nothing else compares them.
+    /// </summary>
+    [TestMethod]
+    public void TheRefusedSellBackoffIsTheSameCurveEveryOtherRetryLoopUses()
+    {
+        Assert.AreEqual(TimeSpan.FromMinutes(1), PersistentOrderDecisions.AutoRetryDelayFor(1),
+            "The first retry stays at one minute: a single refusal is usually a blip.");
+        Assert.AreEqual(TimeSpan.FromMinutes(30), PersistentOrderDecisions.AutoRetryDelayFor(6));
+        Assert.AreEqual(TimeSpan.FromMinutes(30), PersistentOrderDecisions.AutoRetryDelayFor(99),
+            "It backs off; it never gives up. Only a confirmed empty holding ends an armed SELL.");
+    }
+
+    /// <summary>
+    /// A regression guard on the measured incident, not a taste preference. MEASURED 2026-09-11 at
+    /// 09:17:09 the market-open pass detected 45 alerts and the cap of 25 dropped 20 of them. A
+    /// circuit breaker that trips on the busiest ORDINARY pass of the day is censoring the open.
+    /// </summary>
+    [TestMethod]
+    public void TheAlertCapIsAboveAnOrdinaryMarketOpenPass()
+    {
+        Assert.IsTrue(new TradingAgentOptions().Monitor.MaxAlertsPerPass >= 50,
+            "45 alerts on one open pass is normal for a watchlist of this size; the cap has to sit "
+            + "clear of that or it silently drops half of them.");
     }
 
     private static BrokerReconciliationSnapshot Snapshot(

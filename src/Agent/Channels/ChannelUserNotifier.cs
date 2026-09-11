@@ -29,6 +29,35 @@ public sealed class ChannelUserNotifier : IUserNotifier
     public Task<int> NotifyAsync(string message, CancellationToken ct = default) =>
         NotifyAsync(message, topic: null, ct);
 
+    /// <summary>
+    /// Waits for <see cref="AgentOrchestrator"/> to publish the manager. The holder already exposes
+    /// exactly this — <c>WaitAsync</c> was added so modules could serve requests that arrive before
+    /// channels are loaded — and a notification that cannot be re-sent is the same problem.
+    ///
+    /// <para>
+    /// A timeout is reported, never thrown: the caller's message is not this method's to discard, and
+    /// "channels took longer than expected" is a weaker statement than "delivery failed". Cancellation
+    /// still propagates, because that is the host going away.
+    /// </para>
+    /// </summary>
+    public async Task<bool> WaitUntilReadyAsync(TimeSpan timeout, CancellationToken ct = default)
+    {
+        if (_holder.Manager is not null) return true;
+
+        try
+        {
+            await _holder.WaitAsync(ct).WaitAsync(timeout, ct);
+            return true;
+        }
+        catch (TimeoutException)
+        {
+            _logger?.LogWarning(
+                "IUserNotifier: channels were still not ready after {Seconds:0.#}s.",
+                timeout.TotalSeconds);
+            return false;
+        }
+    }
+
     public async Task<int> NotifyAsync(string message, string? topic, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(message)) return 0;

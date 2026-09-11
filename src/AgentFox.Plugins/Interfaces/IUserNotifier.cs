@@ -46,4 +46,31 @@ public interface IUserNotifier
     /// </param>
     Task<int> NotifyAsync(string message, string? topic, CancellationToken ct = default)
         => NotifyAsync(message, ct);
+
+    /// <summary>
+    /// Waits until this notifier is able to deliver anything at all, and reports whether it got there
+    /// within <paramref name="timeout"/>.
+    ///
+    /// <para>
+    /// <b>For a caller whose message cannot simply be re-sent.</b> Most notifications describe
+    /// something the caller will observe again next pass, so dropping one at startup costs nothing.
+    /// A broker replaying stored order events at login is the opposite: the venue says each one ONCE,
+    /// and a fill or a cancellation that arrives while channels are still being wired is gone.
+    /// OBSERVED 2026-09-11 at 10:27:00 — four order events dropped in half a second, and the very
+    /// next line was the login reporting it had replayed four stored messages.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Default-implemented as "always ready", which is the honest answer for an implementation with
+    /// no concept of readiness</b> — a test double, or a notifier writing straight to a sink. Only a
+    /// host that wires channels asynchronously has anything to wait for, and only it overrides this.
+    /// </para>
+    ///
+    /// <para>
+    /// False means the wait ran out, NOT that delivery will fail. The caller decides what to do with
+    /// that; sending anyway is usually right, because the timeout is a guess and the notifier is not.
+    /// </para>
+    /// </summary>
+    Task<bool> WaitUntilReadyAsync(TimeSpan timeout, CancellationToken ct = default)
+        => Task.FromResult(true);
 }
