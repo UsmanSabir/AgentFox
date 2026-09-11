@@ -93,11 +93,24 @@ public sealed class CandleAnalysisService
         var history = await historyTask;
         var quote = await quoteTask;
 
+        // THROWN, never defaulted to zeros. An indicator computed from no candles is a number that
+        // looks like analysis and is not, and both premium strategy loops catch this per symbol and
+        // record it as a coded rejection, so one dataless ticker costs its own review and nothing
+        // else's.
+        //
+        // The fallback sentence names the RECENT LISTING first, because that is the case an operator
+        // actually meets and the one the old wording sent them the wrong way on. CONFIRMED 2026-09-11:
+        // a stock bought at IPO and genuinely held was reported as "Verify the ticker is listed on the
+        // PSX" on every pass — it IS listed, the holding is real, and the exchange simply has not
+        // published its history yet. A diagnostic that tells you to check the one thing that is fine
+        // is worse than none, and this text reaches the operator: it is interpolated into the run
+        // report's rejection and into the exit review's "could not be reviewed".
         if (!history.Series.TryGetValue(symbol, out var fullDaily) || fullDaily.Count == 0)
             throw new CandleAnalysisException(
-                $"No candles were returned for {symbol}. " +
+                $"No price history is available for {symbol}. " +
                 string.Join(" ", history.Warnings.DefaultIfEmpty(
-                    "Verify the ticker is listed on the PSX.")));
+                    "A recently listed stock has none until the exchange publishes it, and nothing "
+                    + "can be analysed until then; otherwise verify the ticker is listed on the PSX.")));
 
         var warnings = history.Warnings.ToList();
 
