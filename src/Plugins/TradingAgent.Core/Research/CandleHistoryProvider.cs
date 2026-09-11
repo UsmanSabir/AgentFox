@@ -390,6 +390,20 @@ public sealed class CandleHistoryProvider
                 await _repository.SaveDailySessionAsync(
                     session.Key, bars, [.. bars.Select(b => b.Symbol).Distinct()], ct);
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // The host is shutting down mid-write, which is not a failure and has nothing to
+                // diagnose. It used to fall into the catch below and print a Warning with a full
+                // SqliteTradingRepository stack, so every restart that happened to interrupt an
+                // archive looked like a lost session — OBSERVED 2026-09-11, 41 seconds before a
+                // deliberate restart. Not rethrown, for the same reason the general catch does not:
+                // archiving is an optimisation and must never fail the analysis that triggered it.
+                // The session is simply re-archived on the next run.
+                _logger.LogDebug(
+                    "[CandleHistory] Archiving session {Date} stopped: the host is shutting down. "
+                    + "It is re-archived on the next run.", session.Key);
+                return;
+            }
             catch (Exception ex)
             {
                 // Archiving is an optimisation; failing to write must never fail an analysis.
