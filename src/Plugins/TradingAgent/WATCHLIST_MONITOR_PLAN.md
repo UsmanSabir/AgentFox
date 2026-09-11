@@ -702,7 +702,7 @@ orders or expand real risk: `Approval.Mode` (defaults to `Always`) and `Ahk.Capt
   "CooldownMinutes": 0,              // 0 = rest of session
   "HoldingsRefreshMinutes": 15,
   "AutoAssessMinSeverity": "",       // "" = never auto-assess (cost control)
-  "MaxAlertsPerPass": 25             // circuit breaker
+  "MaxAlertsPerPass": 100            // circuit breaker
 },
 "Watchlist": {
   "SeedFromAllowedSymbols": true, "MaxSymbols": 150,

@@ -79,6 +79,51 @@ public sealed class ProtectiveStopWorker
     private DateTime _placementsBlockedUntilUtc = DateTime.MinValue;
     private TimeSpan _transientBackoff = TimeSpan.Zero;
 
+    /// <summary>
+    /// Per-stop backoff after a refusal the broker did NOT mark transient — a rejection about THIS
+    /// order rather than about the venue.
+    ///
+    /// <para>
+    /// <b>Why this is separate from <see cref="_placementsBlockedUntilUtc"/>, and must stay separate.</b>
+    /// The transient one is account-wide because a shut board refuses everything. A permanent refusal
+    /// is a statement about one order on one symbol, so blocking the account on it would stop every
+    /// OTHER position's stop from being placed — turning one symbol's problem into a portfolio-wide
+    /// protection gap, which is far worse than the wasted orders this exists to prevent.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>It backs off; it never gives up.</b> A protective stop is the position's protection, so
+    /// "stop trying" is not an outcome this worker may choose — the same conclusion the owner reached
+    /// for keep-working orders on 2026-09-09, and with more force here. The delay doubles 1 → 2 → 4 →
+    /// 8 → 16 → 30 minutes and stays there, so a condition that clears intraday still gets picked up
+    /// within half an hour.
+    /// </para>
+    ///
+    /// <para>
+    /// MEASURED 2026-09-10, ATRL. A stop was refused `Order Rejected! Chances of Wash Trade against
+    /// this Order`, classified PERMANENT, and re-sent on every 3-minute pass — six identical orders in
+    /// fifteen minutes, six of the account's order sequence numbers spent (§6a documents those as a
+    /// collision hazard), six ERROR lines and six activity rows, and the position was covered only by
+    /// the local backstop throughout. Nothing capped it, because the block at
+    /// <c>if (order is { TransientRejection: true })</c> was the ONLY thing that ever set a delay.
+    /// </para>
+    ///
+    /// <para>
+    /// Keyed on the stop AND the order it would place, so changing the trigger, the limit or the
+    /// quantity retries at once: that is a different order and the broker's refusal said nothing about
+    /// it. Cleared outright by any successful placement.
+    /// </para>
+    /// </summary>
+    private readonly Dictionary<string, (DateTime UntilUtc, TimeSpan Delay)> _rejectedStopBackoff =
+        new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Names the exact order a placement would submit, so a backoff cannot outlive the order it was
+    /// recorded against. See <see cref="_rejectedStopBackoff"/>.
+    /// </summary>
+    private static string PlacementKey(ProtectiveStop stop, int quantity) =>
+        $"{stop.StopId}|{quantity}|{stop.StopTrigger}|{stop.StopLimit}";
+
     /// <summary>Serialises ad-hoc baseline captures and guards the shared snapshot below.</summary>
     private readonly SemaphoreSlim _baselineGate = new(1, 1);
     private readonly SemaphoreSlim _runGate = new(1, 1);
@@ -1088,6 +1133,25 @@ public sealed class ProtectiveStopWorker
             return;
         }
 
+        // The broker last refused THIS order on its own merits, not on timing. Re-sending the identical
+        // order on the next 3-minute pass collects the identical refusal and spends another of the
+        // account's order sequence numbers doing it. See _rejectedStopBackoff for the live incident.
+        //
+        // Scoped to this stop and this exact order: every other position's stop is unaffected, and a
+        // changed trigger, limit or quantity is a different order that retries immediately.
+        var placementKey = PlacementKey(stop, decision.Quantity);
+        if (_rejectedStopBackoff.TryGetValue(placementKey, out var rejected)
+            && DateTime.UtcNow < rejected.UntilUtc)
+        {
+            var waitFor = rejected.UntilUtc - DateTime.UtcNow;
+            _logger.LogInformation(
+                "[ProtectiveStops] {StopId} ({Symbol}): holding off — the broker refused this exact "
+                + "stop and the refusal was not about timing. {Wait:mm\\:ss} to go; the position is on "
+                + "the local backstop meanwhile.",
+                stop.StopId, stop.Symbol, waitFor);
+            return;
+        }
+
         var signal = new TradingSignal
         {
             IsSignal   = true,
@@ -1141,6 +1205,7 @@ public sealed class ProtectiveStopWorker
             // Something got through, so whatever the broker was holding has cleared.
             _placementsBlockedUntilUtc = DateTime.MinValue;
             _transientBackoff = TimeSpan.Zero;
+            _rejectedStopBackoff.Remove(PlacementKey(stop, decision.Quantity));
 
             // What was SUBMITTED, not what was asked for. Core sizes a SELL down to the free quantity
             // at the execution boundary, so recording the requested figure would credit the stop with
@@ -1232,23 +1297,53 @@ public sealed class ProtectiveStopWorker
                 stop.StopId, stop.Symbol, order.Message, _transientBackoff,
                 _placementsBlockedUntilUtc.ToLocalTime());
         }
+        else
+        {
+            // A refusal about THIS order rather than about the venue. Back off on this stop alone —
+            // see _rejectedStopBackoff for why it must not be account-wide, and for the ATRL incident
+            // that ran six identical refused orders through the broker in fifteen minutes.
+            //
+            // This is the else of the transient branch rather than a test of its own, deliberately:
+            // every refusal now carries a delay, so a wording nobody has classified costs a slower
+            // retry instead of an unbounded loop. Nothing is abandoned either way.
+            var delay = _rejectedStopBackoff.TryGetValue(placementKey, out var previous)
+                ? TimeSpan.FromTicks(Math.Min(previous.Delay.Ticks * 2, TimeSpan.FromMinutes(30).Ticks))
+                : TimeSpan.FromMinutes(1);
+            _rejectedStopBackoff[placementKey] = (DateTime.UtcNow + delay, delay);
+
+            _logger.LogWarning(
+                "[ProtectiveStops] {StopId} ({Symbol}): the broker refused this stop on the ORDER, not "
+                + "on timing — {Reason} Next attempt in {Backoff} (at {Until:HH:mm:ss} local). Other "
+                + "symbols' stops are unaffected.",
+                stop.StopId, stop.Symbol, order?.Message ?? result.Reason, delay,
+                (DateTime.UtcNow + delay).ToLocalTime());
+        }
 
         // Not placed. The intent stays active so a later pass retries; the position is meanwhile
         // covered only by the local backstop, and only while this process is running.
-        _logger.LogError(
-            "[ProtectiveStops] {StopId} ({Symbol}): the native stop was NOT placed — {Reason}. "
-            + "The position is protected only by the local backstop until this succeeds.",
-            stop.StopId, stop.Symbol, order?.Message ?? result.Reason);
-        _activity?.Error("Stops",
-            $"{stop.Symbol}: the stop was NOT placed — the position is unprotected at the broker",
-            order?.Message ?? result.Reason);
+        //
+        // ONCE PER STOP PER DAY, not once per pass. This is an ERROR and an activity row saying the
+        // position is unprotected at the broker, and the ATRL incident emitted six of each for one
+        // stop — the loudest line in the log repeating itself is how the rest of it stops being read.
+        // The backoff above already logs each individual refusal at Warn with its retry time, so
+        // nothing is lost; MarkAlerted is the same once-a-day gate AlertOnceAsync uses just below.
+        if (MarkAlerted(stop, "placement-failed-detail", today))
+        {
+            _logger.LogError(
+                "[ProtectiveStops] {StopId} ({Symbol}): the native stop was NOT placed — {Reason}. "
+                + "The position is protected only by the local backstop until this succeeds.",
+                stop.StopId, stop.Symbol, order?.Message ?? result.Reason);
+            _activity?.Error("Stops",
+                $"{stop.Symbol}: the stop was NOT placed — the position is unprotected at the broker",
+                order?.Message ?? result.Reason);
+        }
 
         await AlertOnceAsync(stop, "placement-failed", today,
             $"🛡️ **Stop rejected by the broker — {stop.Symbol}**\n"
             + $"• SELL {decision.Quantity:N0} {stop.Symbol} at {stop.StopTrigger:0.##} was refused\n"
             + $"• {order?.Message ?? result.Reason}\n"
-            + "_Retrying next pass. Until it succeeds the position is covered only by the local "
-            + "backstop, which needs AgentFox running._");
+            + "_Retrying on a widening delay. Until it succeeds the position is covered only by the "
+            + "local backstop, which needs AgentFox running._");
     }
 
     // ── Supersession ────────────────────────────────────────────────────────────

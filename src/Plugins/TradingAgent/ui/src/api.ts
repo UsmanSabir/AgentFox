@@ -392,6 +392,8 @@ export interface BrokerAccountHolding {
   symbol?: string | null;
   exchange?: string | null;
   assetType?: string | null;
+  sectorCode?: string | null;
+  sector?: string | null;
   quantity?: number | null;
   averageCost?: number | null;
   marketPrice?: number | null;
@@ -902,7 +904,7 @@ export interface TradingActivity {
   lastUtc: string;
   /** Further occurrences folded into this entry. 0 for something that happened once. */
   repeats: number;
-  /** Which part of the agent: Broker, Orders, Stops, Armed, Monitor, Feed. */
+  /** Which part of the agent: Broker, Orders, Stops, Armed, Monitor, Feed, Candles. */
   source: string;
   level: 'info' | 'warn' | 'error';
   message: string;

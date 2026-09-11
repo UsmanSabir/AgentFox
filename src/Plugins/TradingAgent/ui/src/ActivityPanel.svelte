@@ -1,8 +1,9 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { trading, type TradingActivity, type TradingActivityFeed } from './api';
+  import { filterActivity, routineCandleUpdateCount } from './activityFeed';
   import {
-    Activity, ChevronDown, ChevronRight, AlertTriangle, XCircle, Chrome, Loader
+    Activity, ChevronDown, ChevronRight, AlertTriangle, XCircle, Chrome, Loader, ListFilter
   } from 'lucide-svelte';
 
   /**
@@ -17,6 +18,10 @@
    * the counts behind the header chips. The list is always taken whole from the server rather than
    * merged locally — the server folds a repeated activity into its existing entry, and a client
    * keeping its own copy would go on showing a count that had since moved.</p>
+   *
+   * <p>Routine candle-source announcements are hidden by default. Their count and an explicit toggle
+   * stay visible, while candle warnings and errors are never filtered. Source diagnostics remain one
+   * click away without pushing order and protection activity out of the readable view.</p>
    */
 
   /** Collapsed by default — see above. */
@@ -27,6 +32,7 @@
   let error: string | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let loading = true;
+  let showRoutineCandles = false;
 
   const OPEN_POLL_MS = 4_000;
   const CLOSED_POLL_MS = 30_000;
@@ -75,6 +81,8 @@
     ? 'AHL push'
     : `${feedProvider.toUpperCase()} feed`;
   $: feedReason = feed?.now.feedReason ?? 'Live quotes are falling back to the PSX market watch.';
+  $: routineCandleUpdates = routineCandleUpdateCount(entries);
+  $: visibleEntries = filterActivity(entries, showRoutineCandles);
 </script>
 
 <section class="activity" class:open>
@@ -127,14 +135,35 @@
       </p>
     {/if}
 
-    {#if entries.length === 0}
+    {#if routineCandleUpdates > 0}
+      <div class="filters">
+        <button
+          type="button"
+          class="filter"
+          class:active={showRoutineCandles}
+          on:click={() => showRoutineCandles = !showRoutineCandles}
+          aria-pressed={showRoutineCandles}
+        >
+          <ListFilter size={12} aria-hidden="true" />
+          {showRoutineCandles ? 'Hide' : 'Show'} routine candles
+          <span>{routineCandleUpdates} {showRoutineCandles ? 'shown' : 'hidden'}</span>
+        </button>
+      </div>
+    {/if}
+
+    {#if visibleEntries.length === 0}
       <p class="empty">
-        Nothing recorded in the last {feed?.retentionMinutes ?? 120} minutes.
-        <small>Activity appears when the agent reads the portal, places an order, or manages a stop.</small>
+        {#if routineCandleUpdates > 0 && !showRoutineCandles}
+          No other activity recorded in the last {feed?.retentionMinutes ?? 120} minutes.
+          <small>Routine candle diagnostics are hidden by the filter above.</small>
+        {:else}
+          Nothing recorded in the last {feed?.retentionMinutes ?? 120} minutes.
+          <small>Activity appears when the agent reads the portal, places an order, or manages a stop.</small>
+        {/if}
       </p>
     {:else}
       <ul class="list">
-        {#each entries as item (item.seq)}
+        {#each visibleEntries as item (item.seq)}
           <li class="row {item.level}">
             <span class="when" title={new Date(item.lastUtc).toLocaleString()}>{time(item.lastUtc)}</span>
             <span class="source">{item.source}</span>
@@ -194,6 +223,21 @@
   .empty { color: var(--text-3); padding-bottom: 1rem; display: flex; flex-direction: column; gap: .25rem; }
   .empty small { color: var(--text-3); opacity: .8; font-size: .68rem; }
   .foot { color: var(--text-3); font-size: .65rem; padding: .5rem 1rem .8rem; }
+
+  .filters { display: flex; padding: 0 1rem .55rem; }
+  .filter {
+    min-height: 30px; padding: .25rem .5rem; cursor: pointer; font: inherit;
+    display: inline-flex; align-items: center; gap: .35rem;
+    border: 1px solid var(--border-md); border-radius: 999px;
+    background: var(--surface-2); color: var(--text-2); font-size: .68rem;
+  }
+  .filter:hover { border-color: var(--primary); color: var(--text); }
+  .filter:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+  .filter.active { border-color: var(--primary); color: var(--primary); }
+  .filter span {
+    padding-left: .35rem; border-left: 1px solid var(--border-md);
+    color: var(--text-3); font-variant-numeric: tabular-nums;
+  }
 
   .list {
     list-style: none; margin: 0; padding: 0 1rem;

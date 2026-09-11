@@ -1,3 +1,5 @@
+using Microsoft.Extensions.Logging;
+using TradingAgent.AhlAnalytics;
 using TradingAgent.Feed;
 using TradingAgent.Models;
 
@@ -17,11 +19,22 @@ public sealed class AhkBrokerAccountReader : IBrokerAccountReader
 {
     private readonly PortfolioReader _portfolio;
     private readonly AhkPortalClient _portal;
+    private readonly AhlAnalyticsClient _analytics;
+    private readonly IAnalyticsSsoUrlProvider _analyticsSso;
+    private readonly ILogger<AhkBrokerAccountReader> _logger;
 
-    public AhkBrokerAccountReader(PortfolioReader portfolio, AhkPortalClient portal)
+    public AhkBrokerAccountReader(
+        PortfolioReader portfolio,
+        AhkPortalClient portal,
+        AhlAnalyticsClient analytics,
+        IAnalyticsSsoUrlProvider analyticsSso,
+        ILogger<AhkBrokerAccountReader> logger)
     {
         _portfolio = portfolio;
         _portal = portal;
+        _analytics = analytics;
+        _analyticsSso = analyticsSso;
+        _logger = logger;
     }
 
     public async Task<BrokerAccountSnapshot> ReadAccountAsync(CancellationToken ct = default)
@@ -55,6 +68,26 @@ public sealed class AhkBrokerAccountReader : IBrokerAccountReader
             warnings.Add($"The working order book could not be read: {ex.Message}");
         }
 
+        AhlSnapshotData? market = null;
+        if (_analytics.Enabled && portfolio?.Holdings is { Count: > 0 })
+        {
+            try
+            {
+                // Portfolio refresh is user-initiated, but still must not silently launch the browser
+                // login required by the community AHK provider. Premium's SOAP provider reports this
+                // as safe, while a warm community broker session can reuse its existing login.
+                market = await _analytics.GetMarketSnapshotAsync(
+                    allowHandshake: _analyticsSso.CanHandshakeSafely, ct: ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception ex)
+            {
+                // Classification is additive context. A failed analytics read must never turn an
+                // otherwise reliable broker account snapshot into a failed account read.
+                _logger.LogDebug(ex, "[TradingAgent] Sector classification was unavailable for the account view.");
+            }
+        }
+
         return new BrokerAccountSnapshot
         {
             BrokerId = "ahk",
@@ -79,7 +112,7 @@ public sealed class AhkBrokerAccountReader : IBrokerAccountReader
                         }
                     }
                 ],
-            Holdings = portfolio?.Holdings.Select(MapHolding).ToList() ?? [],
+            Holdings = portfolio?.Holdings.Select(holding => MapHolding(holding, market)).ToList() ?? [],
             Orders = orderBook is { Ok: true } book
                 ? book.Orders.Select(MapOrder).ToList()
                 : [],
@@ -92,21 +125,29 @@ public sealed class AhkBrokerAccountReader : IBrokerAccountReader
         };
     }
 
-    internal static BrokerAccountHolding MapHolding(HoldingPosition h) => new()
+    internal static BrokerAccountHolding MapHolding(HoldingPosition h, AhlSnapshotData? market = null)
     {
-        InstrumentId = h.Symbol,
-        Symbol = h.Symbol,
-        Exchange = "PSX",
-        AssetType = "equity",
-        Quantity = h.Quantity,
-        AverageCost = h.AverageBuyPrice,
-        MarketPrice = h.CurrentPrice,
-        CostValue = h.InvestmentValue,
-        MarketValue = h.CurrentValue,
-        UnrealizedProfitLoss = h.ProfitLoss,
-        UnrealizedProfitLossPercent = h.ProfitLossPercent,
-        Currency = "PKR"
-    };
+        var symbol = h.Symbol.Trim().ToUpperInvariant();
+        AhlEquity? equity = null;
+        market?.Equities?.TryGetValue(symbol, out equity);
+        return new BrokerAccountHolding
+        {
+            InstrumentId = symbol,
+            Symbol = symbol,
+            Exchange = "PSX",
+            AssetType = "equity",
+            SectorCode = equity?.SectorCode,
+            Sector = AhlSectors.Name(equity?.SectorCode) ?? equity?.SectorCode,
+            Quantity = h.Quantity,
+            AverageCost = h.AverageBuyPrice,
+            MarketPrice = h.CurrentPrice,
+            CostValue = h.InvestmentValue,
+            MarketValue = h.CurrentValue,
+            UnrealizedProfitLoss = h.ProfitLoss,
+            UnrealizedProfitLossPercent = h.ProfitLossPercent,
+            Currency = "PKR"
+        };
+    }
 
     internal static BrokerAccountOrder MapOrder(AhkOutstandingOrder o)
     {

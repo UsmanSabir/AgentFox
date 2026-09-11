@@ -494,9 +494,18 @@ public sealed class TradingMonitorOptions
 
     /// <summary>
     /// Upper bound on alerts raised in a single pass. A circuit breaker for a market-wide move, where
-    /// every symbol would otherwise fire at once; the excess is logged rather than silently dropped.
+    /// every symbol would otherwise fire at once; the excess is logged, naming each alert it dropped,
+    /// rather than reported as a bare count nobody can act on.
+    ///
+    /// <para>
+    /// <b>Raised from 25 to 100 on 2026-09-11.</b> 25 was below an ordinary market-open pass, not
+    /// above it: MEASURED that morning at 09:17:09, the open pass detected 45 alerts and 20 of them —
+    /// nearly half — were dropped. A circuit breaker that trips on the busiest normal pass of the day
+    /// is not protecting against a storm, it is censoring the open. 100 leaves real headroom on a
+    /// watchlist of this size while still bounding a genuinely market-wide move.
+    /// </para>
     /// </summary>
-    public int MaxAlertsPerPass { get; set; } = 25;
+    public int MaxAlertsPerPass { get; set; } = 100;
 
     /// <summary>
     /// Run one settle pass after the close, on top of the in-session cadence, so the day's final bars

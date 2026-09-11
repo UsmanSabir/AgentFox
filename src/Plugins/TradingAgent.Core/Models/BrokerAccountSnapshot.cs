@@ -39,6 +39,8 @@ public sealed record BrokerAccountHolding
     public string? Symbol { get; init; }
     public string? Exchange { get; init; }
     public string? AssetType { get; init; }
+    public string? SectorCode { get; init; }
+    public string? Sector { get; init; }
     public decimal? Quantity { get; init; }
     public decimal? AverageCost { get; init; }
     public decimal? MarketPrice { get; init; }

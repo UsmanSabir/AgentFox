@@ -585,18 +585,44 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
                 ? "attention"
                 : intent.FilledQuantity > 0 ? "partial" : "active";
 
-            await _repository.SetPersistentOrderProgressAsync(
-                intent.IntentId, intent.FilledQuantity, state, explanation, ct);
+            // ANNOUNCE THE DECISION ONCE, NOT ONCE PER POLL CYCLE. This branch is reached on EVERY
+            // pass for the rest of the day — MaintainAsync calls it every PersistentOrderPollSeconds
+            // (60) and the outlook does not change — so writing and logging unconditionally produced
+            // ~360 identical rows a day per stopped intent. MEASURED 2026-09-10: one BUXL intent
+            // refused Over_Price_Limit at 09:34 emitted the same Warn 27 times in the 26 minutes the
+            // log covers, burying an unrelated protective-stop failure that was live at the time.
+            //
+            // The damage is not merely noise. This same Warn goes to the ACTIVITY LOG, which is the
+            // one surface an operator reads to find out why nothing happened — the reason it was put
+            // there in the first place. A single repeating row crowds out everything else on it, so
+            // the change that made a stopped retry visible was also making the rest invisible.
+            //
+            // The intent's own row is the idempotency record: re-announce only when what we would
+            // write differs from what is already stored. A genuinely new refusal carries different
+            // broker text and so still speaks up.
+            var alreadyRecorded =
+                string.Equals(intent.State, state, StringComparison.Ordinal)
+                && string.Equals(intent.StateReason, explanation, StringComparison.Ordinal);
 
-            // The activity log is where an operator looks to find out why nothing happened, and a
-            // stopped retry is precisely the case where silence reads as the system still working on
-            // it. Warn rather than Info: this needs a decision from somebody.
-            _activity?.Warn("Orders",
-                $"{intent.Symbol}: {OrderRejectionOutlook.Label(outlook)}", explanation);
-            _logger.LogWarning(
-                "[PersistentOrders] {Symbol} ({IntentId}): {Label}. Broker said: {Reason}",
-                intent.Symbol, intent.IntentId, OrderRejectionOutlook.Label(outlook),
-                latestPlacement.Message);
+            if (!alreadyRecorded)
+            {
+                await _repository.SetPersistentOrderProgressAsync(
+                    intent.IntentId, intent.FilledQuantity, state, explanation, ct);
+
+                // The activity log is where an operator looks to find out why nothing happened, and a
+                // stopped retry is precisely the case where silence reads as the system still working
+                // on it. Warn rather than Info: this needs a decision from somebody.
+                _activity?.Warn("Orders",
+                    $"{intent.Symbol}: {OrderRejectionOutlook.Label(outlook)}", explanation);
+                _logger.LogWarning(
+                    "[PersistentOrders] {Symbol} ({IntentId}): {Label}. Broker said: {Reason}",
+                    intent.Symbol, intent.IntentId, OrderRejectionOutlook.Label(outlook),
+                    latestPlacement.Message);
+            }
+
+            // TRUE either way. The pass is still claimed: the decision stands whether or not this
+            // call is the one that announced it, and returning false would let the caller overwrite
+            // the stored reason with its generic "waits for the next trading date" message.
             return true;
         }
 

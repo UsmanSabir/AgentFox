@@ -145,6 +145,29 @@ public sealed class AhlAnalyticsClient : IDisposable
     /// </summary>
     public string? LastError { get; private set; }
 
+    /// <summary>
+    /// Failures already reported today, keyed by method + path + status. Cleared on the date change,
+    /// which is also what bounds it: the keys are bounded by the symbol universe within one day and
+    /// the whole set is dropped at the roll, so it cannot accumulate (§0.1).
+    /// </summary>
+    private readonly HashSet<string> _reportedFailures = new(StringComparer.OrdinalIgnoreCase);
+    private DateOnly _reportedFailuresFor;
+
+    /// <summary>True the first time this exact failure is seen on this date, false every time after.</summary>
+    private bool FirstFailureToday(string key)
+    {
+        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        lock (_reportedFailures)
+        {
+            if (_reportedFailuresFor != today)
+            {
+                _reportedFailures.Clear();
+                _reportedFailuresFor = today;
+            }
+            return _reportedFailures.Add(key);
+        }
+    }
+
     private AhlSnapshotData? _snapshot;
     private DateTimeOffset _snapshotAt;
 
@@ -455,8 +478,26 @@ public sealed class AhlAnalyticsClient : IDisposable
                     var body = await SafeSnippetAsync(response, ct);
                     LastError = $"{method} {path} returned {(int)response.StatusCode}" +
                                 (body is null ? "." : $": {body}");
-                    _logger.LogWarning("[AhlAnalytics] {Method} {Path} returned {Status}. {Body}",
-                        method, path, (int)response.StatusCode, body);
+
+                    // Loud the FIRST time this exact failure is seen today, quiet afterwards. Some
+                    // failures here are permanent and expected rather than faults: the portal answers
+                    // 500 for a symbol whose history it does not carry, and a recently listed stock an
+                    // operator genuinely holds has none — CONFIRMED 2026-09-11, one such ticker
+                    // produced twelve identical Warnings in two and a half hours and would have
+                    // produced one per pass for as long as it was held.
+                    //
+                    // It is the repetition that is dropped, never the fact. LastError is untouched, a
+                    // DIFFERENT status or path still speaks up at once, and the suppressed ones are
+                    // still at Debug. This is the same once-per-day rule ProtectiveStopWorker applies
+                    // to a repeating stop refusal, and for the reason given there: the loudest line in
+                    // the log repeating itself is how the rest of it stops being read.
+                    if (FirstFailureToday($"{method} {path} {(int)response.StatusCode}"))
+                        _logger.LogWarning("[AhlAnalytics] {Method} {Path} returned {Status}. {Body}",
+                            method, path, (int)response.StatusCode, body);
+                    else
+                        _logger.LogDebug(
+                            "[AhlAnalytics] {Method} {Path} returned {Status} again. {Body}",
+                            method, path, (int)response.StatusCode, body);
                     return null;
                 }
 

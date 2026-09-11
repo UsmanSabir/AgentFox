@@ -251,6 +251,11 @@
    */
   function applySuggestedPrices(force: boolean, reference = latestPrice) {
     if (!choice || !reference || reference <= 0) return;
+    if (choice.priceField === 'trigger-and-limit') {
+      const factor = choice.triggerKind === 'PriceBelow' ? .98 : 1.02;
+      if (force || triggerPrice == null) triggerPrice = Number((reference * factor).toFixed(2));
+      if (force || price == null) price = triggerPrice;
+    }
     if (choice.priceField === 'limit' && (force || price == null)) price = reference;
     if (choice.priceField === 'target' && (force || price == null))
       price = Number((reference * 1.05).toFixed(2));
@@ -323,7 +328,9 @@
     orderValue = value;
   }
 
-  $: conditionalLevel = choice?.submission === 'conditional' && choice.triggerKind
+  $: exactPriceTrigger = choice?.submission === 'conditional'
+    && (choice.triggerKind === 'PriceBelow' || choice.triggerKind === 'PriceAbove');
+  $: conditionalLevel = exactPriceTrigger ? triggerPrice : choice?.submission === 'conditional' && choice.triggerKind
     ? percentTriggerLevel(choice.triggerKind, triggerReferencePrice, triggerPercent)
     : null;
   $: marketDisabled = choice?.orderType === 'MARKET'
@@ -373,6 +380,7 @@
     && estimatedValue > buyingPower * 0.99;
   $: estimatedPrice = choice?.orderType === 'MARKET' ? latestPrice
     : choice?.orderType === 'STOPLOSS' ? triggerPrice
+    : exactPriceTrigger ? price
     : choice?.submission === 'conditional' ? conditionalLevel : price;
   $: availableSellValue = availableSellQuantity != null && estimatedPrice && estimatedPrice > 0
     ? availableSellQuantity * estimatedPrice
@@ -430,6 +438,10 @@
   $: summary = (() => {
     if (!choice || !symbol || !effectiveQuantity) return null;
     const side = choice.action === 'BUY' ? 'Buy' : 'Sell';
+    if (exactPriceTrigger) {
+      const comparison = choice.triggerKind === 'PriceBelow' ? 'at or below' : 'at or above';
+      return `Wait until ${symbol} is ${comparison} ${triggerPrice ?? '—'} PKR, then submit a limit ${side.toLowerCase()} for ${effectiveQuantity} shares at ${price ?? '—'} PKR or better. Filling is not guaranteed.`;
+    }
     if (choice.submission === 'conditional' && conditionalLevel != null) {
       const move = choice.triggerKind === 'PercentDrop' ? 'falls' : 'rises';
       const trail = choice.trailing ? ' from the highest price seen after arming' : '';
@@ -471,7 +483,12 @@
     if (!submittedQuantity || submittedQuantity <= 0) { error = 'Enter a valid order size.'; return; }
     if (marketDisabled) { error = 'Market orders are disabled in broker settings.'; return; }
     if (attachedStopError) { error = attachedStopError; return; }
-    if (choice.submission === 'conditional') {
+    if (exactPriceTrigger) {
+      if (!triggerPrice || !Number.isFinite(triggerPrice) || triggerPrice <= 0
+          || !price || !Number.isFinite(price) || price <= 0) {
+        error = 'Enter a positive trigger price and limit price.'; return;
+      }
+    } else if (choice.submission === 'conditional') {
       if (!choice.triggerKind || !triggerPercent || triggerPercent <= 0 || triggerPercent > 50) {
         error = 'Enter a trigger move between 0 and 50%.'; return;
       }
@@ -502,9 +519,12 @@
     };
     const waitingRequest: ArmOrderRequest = {
       symbol: symbol.trim().toUpperCase(), action: choice.action, quantity: submittedQuantity,
-      triggerKind: choice.triggerKind as TriggerKind, triggerPercent, referencePrice: triggerReferencePrice,
+      triggerKind: choice.triggerKind as TriggerKind,
+      triggerPrice: exactPriceTrigger ? triggerPrice : null,
+      triggerPercent: exactPriceTrigger ? null : triggerPercent,
+      referencePrice: exactPriceTrigger ? null : triggerReferencePrice,
       trailing: choice.trailing, orderType: choice.orderType,
-      price: choice.orderType === 'MARKET' ? null : conditionalLevel, expiresInDays, persistentUntilFilled,
+      price: choice.orderType === 'MARKET' ? null : exactPriceTrigger ? price : conditionalLevel, expiresInDays, persistentUntilFilled,
       attachStop: attachStop && stopTrigger ? {stopTrigger, stopLimit, recurring:stopRecurring} : null,
       note: `New Order: ${choice.label}`
     };
@@ -823,14 +843,16 @@
                 <label><span>Order value (PKR)</span><input type="number" min="1" step="1" bind:value={orderValue} /></label>
               {/if}
             </div>
-            {#if choice.priceField === 'limit' || choice.priceField === 'target'}
+            {#if choice.priceField === 'limit' || choice.priceField === 'target' || exactPriceTrigger}
               <label><span>{choice.priceField === 'target' ? 'Target sell price' : 'Limit price'}</span><input type="number" min="0.01" step="0.01" bind:value={price} /></label>
             {/if}
             {#if choice.priceField === 'stop'}
               <label><span>Trigger price</span><input type="number" min="0.01" step="0.01" bind:value={triggerPrice} /></label>
               <label><span>Worst acceptable price after trigger</span><input type="number" min="0.01" step="0.01" bind:value={limitPrice} /></label>
             {/if}
-            {#if choice.submission === 'conditional'}
+            {#if exactPriceTrigger}
+              <label><span>Trigger price ({choice.triggerKind === 'PriceBelow' ? 'at or below' : 'at or above'})</span><input type="number" min="0.01" step="0.01" bind:value={triggerPrice} /></label>
+            {:else if choice.submission === 'conditional'}
               <label><span>Move from {triggerReferencePrice ?? 'latest price'} (%)</span><input type="number" min="0.1" max="50" step="0.1" bind:value={triggerPercent} /></label>
             {/if}
             {#if choice.submission === 'conditional' || persistentUntilFilled}
@@ -907,6 +929,9 @@
           {/if}
           {#if sellExceedsAvailable && effectiveQuantity != null && availableSellQuantity != null}
             <p class="warning"><AlertTriangle size={13} /> You entered {money(effectiveQuantity)} shares, but the broker snapshot shows only {money(availableSellQuantity)} available now. Use “Sell all available” or reduce the size; final availability is checked again on submission.</p>
+          {/if}
+          {#if exactPriceTrigger}
+            <p class="estimate">AgentFox waits locally and submits only after observing the trigger while running with monitoring active and the market open. Approval and risk checks still apply. A price already beyond the trigger can activate on the next check.</p>
           {/if}
           {#if summary}<p class="summary">{summary}</p>{/if}
           {#if estimatedValue}<p class="estimate">Estimated value: <b>{money(estimatedValue)} PKR</b>{choice.orderType === 'MARKET' ? ' at the latest price; actual value can move.' : ''}</p>{/if}
