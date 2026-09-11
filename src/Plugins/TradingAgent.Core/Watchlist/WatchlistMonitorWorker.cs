@@ -440,6 +440,44 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                 TradingSignal signal;
                 string source;
 
+                // ONE confirming availability read for the whole triggered-SELL path, taken here and
+                // handed to everything below it. It used to be taken twice — once inside the stop
+                // release and again inside the persistence branch — which on the deployed wiring is
+                // ten SOAP calls over the account's single session for one trigger.
+                //
+                // It answers the question that has to come first: whether this order can EVER fill.
+                // An armed SELL is a standing instruction with a ten-day expiry and nothing but the
+                // operator's Disarm button ever ended one early, so an exit that outlived its position
+                // went on triggering against an empty holding until somebody noticed. MEASURED
+                // 2026-09-11 on CNERGY: 29 triggers and 29 identical refusals in 53 minutes. See
+                // ArmedSellOutlook for the incident and for why only a BROKER-CONFIRMED zero HOLDING
+                // may retire an order.
+                ConfirmedSellAvailability? sellAvailability = null;
+                if (order.Action.Equals("SELL", StringComparison.OrdinalIgnoreCase))
+                {
+                    sellAvailability = await _sellAvailability.ForSellAsync(
+                        order.Symbol, order.Quantity, ct);
+
+                    var outlook = ArmedSellOutlook.For(
+                        sellAvailability.Decision, sellAvailability.BrokerConfirmed, order.Symbol);
+                    if (outlook.Disposition == ArmedSellDisposition.Retire)
+                    {
+                        // "expired", the same terminal state an unfired order ages into, rather than
+                        // "failed": nothing went wrong here and nothing needs verifying at the broker.
+                        // The position was closed by something else and this instruction is spent.
+                        await _repository.TrySetArmedOrderStateAsync(
+                            order.ArmedId, "firing", "expired", outlook.Reason, ct: ct);
+                        _logger.LogWarning(
+                            "[ArmedOrders] {ArmedId} ({Symbol}) retired unfilled: the account holds "
+                            + "no {Symbol} shares. {Why}", order.ArmedId, order.Symbol, order.Symbol,
+                            outlook.Reason);
+                        _activity?.Warn("Armed",
+                            $"{order.Symbol}: armed {order.Action} retired — the position is gone",
+                            outlook.Reason);
+                        continue;
+                    }
+                }
+
                 // A SELL blocked by our OWN protective stop is asked for its shares HERE, before the
                 // persistence branch, because it has nothing to do with persistence.
                 //
@@ -456,9 +494,9 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                 // book, an unreadable quantity, or shares held by somebody else's order all come back
                 // "not released", and the caller leaves the sell armed rather than forcing anything.
                 var releasedForThisOrder = false;
-                if (order.Action.Equals("SELL", StringComparison.OrdinalIgnoreCase)
+                if (sellAvailability is not null
                     && _stopReleaser is not null
-                    && await ReleaseOwnStopIfBlockingAsync(order, ct) is { } releaseNote)
+                    && await ReleaseOwnStopIfBlockingAsync(order, sellAvailability, ct) is { } releaseNote)
                 {
                     releasedForThisOrder = true;
                     _activity?.Warn("Armed",
@@ -476,15 +514,23 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                     }
 
                     var effectiveQuantity = order.Quantity;
-                    if (order.Action.Equals("SELL", StringComparison.OrdinalIgnoreCase))
+                    // Pattern-matched on the read rather than on the action string, so the one place
+                    // that establishes "this is a SELL and its availability has been confirmed" is the
+                    // block at the top of the trigger. Testing the action a second time would let the
+                    // two drift apart, which is how a null slips into a branch that cannot handle one.
+                    if (sellAvailability is { } confirmed)
                     {
-                        // Confirmed with the broker whenever the cached figure would shrink this sell.
-                        // A triggered exit sized on a stale account picture is the QUIET half of the
-                        // 2026-09-07 stale-snapshot incident: the order still goes out, just smaller
-                        // than the thesis asked for, and nothing errors. On the deployed interval that
-                        // picture can be 21 minutes old. See SellAvailabilityConfirmer.
-                        var confirmed = await _sellAvailability.ForSellAsync(
-                            order.Symbol, order.Quantity, ct);
+                        // The read taken at the top of the trigger, not a second one. It was confirmed
+                        // with the broker whenever the cached figure would shrink this sell, which is
+                        // the QUIET half of the 2026-09-07 stale-snapshot incident: the order still
+                        // goes out, just smaller than the thesis asked for, and nothing errors. On the
+                        // deployed interval that picture can be 21 minutes old. See
+                        // SellAvailabilityConfirmer.
+                        //
+                        // Re-reading here would answer the same thing anyway — a book read just after
+                        // a release still shows the released order resting, which is what the
+                        // releasedForThisOrder override below exists for — so the second read bought
+                        // nothing and cost five SOAP calls on the account's one session.
                         var availability = confirmed.Decision;
 
                         // The broker could not be asked. Carry the full quantity and let the execution
@@ -715,9 +761,10 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
     /// whenever nothing needed releasing or nothing could be released safely.
     ///
     /// <para>
-    /// Called for every triggered SELL, persistent or not. The check that free quantity is zero stays
-    /// inside here so the caller does not have to read the snapshot twice, and so the ONE place that
-    /// decides "our own stop is in the way" is the one place that acts on it.
+    /// Called for every triggered SELL, persistent or not, with the availability the caller already
+    /// confirmed — so the ONE place that decides "our own stop is in the way" acts on the SAME read
+    /// that decided whether the order could fill at all, and the trigger costs one broker read rather
+    /// than two.
     /// </para>
     ///
     /// <para>
@@ -726,11 +773,10 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
     /// leaves the sell armed. Cancelling on a guess here would cancel a stranger's live order.
     /// </para>
     /// </summary>
-    private async Task<string?> ReleaseOwnStopIfBlockingAsync(ArmedOrder order, CancellationToken ct)
+    private async Task<string?> ReleaseOwnStopIfBlockingAsync(
+        ArmedOrder order, ConfirmedSellAvailability confirmed, CancellationToken ct)
     {
         if (_stopReleaser is null) return null;
-
-        var confirmed = await _sellAvailability.ForSellAsync(order.Symbol, order.Quantity, ct);
 
         // Not known is not the same as zero, and neither is a positive figure: only a confirmed
         // "every share is committed" is worth cancelling protection over.

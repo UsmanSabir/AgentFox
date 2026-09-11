@@ -3,10 +3,33 @@ using TradingAgent.Reconciliation;
 
 namespace TradingAgent.Risk;
 
+/// <param name="Known">
+/// The broker book could be read. False means nothing here may be acted on — see invariant 4.
+/// </param>
+/// <param name="AvailableQuantity">Custody minus what is already committed to resting SELL orders.</param>
+/// <param name="Reason">The arithmetic, in the operator's words.</param>
+/// <param name="HeldQuantity">
+/// What CUSTODY says, before any commitment is subtracted. Null when <paramref name="Known"/> is false.
+///
+/// <para>
+/// <b>Carried separately because zero available has two completely different meanings and the
+/// arithmetic cannot tell them apart.</b> "You own 2471 and every one is committed to a resting stop"
+/// clears the moment that stop is superseded or the venue clears the book at the close, so a triggered
+/// exit should wait. "You own none" never clears, and an order waiting on it waits for ever.
+/// </para>
+///
+/// <para>
+/// MEASURED 2026-09-11: an armed trailing SELL for 2471 CNERGY outlived the position a sibling order had
+/// already sold, and was triggered and refused 29 times in 53 minutes on the identical message, because
+/// the only fact distinguishing the two cases was folded away into a single zero. See
+/// <see cref="ArmedSellOutlook"/>.
+/// </para>
+/// </param>
 public sealed record SellAvailabilityDecision(
     bool Known,
     int AvailableQuantity,
-    string Reason);
+    string Reason,
+    int? HeldQuantity = null);
 
 public sealed record SellQuantityAdjustment(
     int GroupIndex,
@@ -86,8 +109,10 @@ public static class SellQuantityRule
 
         var committed = matchingSells.Sum(o => Math.Max(0m, o.RemainingQuantity!.Value));
         var available = Math.Max(0m, decimal.Floor(held - committed));
+        var heldWhole = Math.Max(0m, decimal.Floor(held));
         return new(true, available >= int.MaxValue ? int.MaxValue : (int)available,
-            $"{held:N0} held minus {committed:N0} already committed to outstanding SELL orders.");
+            $"{held:N0} held minus {committed:N0} already committed to outstanding SELL orders.",
+            heldWhole >= int.MaxValue ? int.MaxValue : (int)heldWhole);
     }
 
     /// <summary>
