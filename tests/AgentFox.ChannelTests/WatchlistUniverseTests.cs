@@ -488,6 +488,79 @@ public sealed class WatchlistUniverseTests
         Summary = $"{symbol} bounced"
     };
 
+    [TestMethod]
+    public async Task SaveDailyBars_stores_many_sessions_for_one_symbol_and_covers_each_date()
+    {
+        // The inverse shape of SaveDailySessionAsync, and the one a read-through archive needs: it
+        // discovers a gap while serving ONE symbol and holds that symbol's whole history in hand.
+        // Through the session method that is one connection and one transaction PER BAR.
+        using var env = TestEnv.Create(["OGDC"]);
+        var dates = new[]
+        {
+            new DateOnly(2026, 8, 10), new DateOnly(2026, 8, 11), new DateOnly(2026, 8, 12)
+        };
+
+        await env.Repository.SaveDailyBarsAsync("OGDC", [.. dates.Select(d => Candle("OGDC", d))]);
+
+        var stored = await env.Repository.GetDailyBarsAsync("OGDC", 10);
+        Assert.AreEqual(3, stored.Count, "every session given is stored");
+
+        Assert.AreEqual(
+            3, (await env.Repository.GetCoveredDailyDatesAsync(dates[0], dates[2], ["OGDC"])).Count,
+            "each date is covered for the symbol that was actually asked for");
+
+        Assert.AreEqual(
+            0, (await env.Repository.GetCoveredDailyDatesAsync(dates[0], dates[2], ["OGDC", "GHNI"])).Count,
+            "and for nobody else: claiming a date covered for a symbol never requested is what "
+            + "leaves that symbol permanently starved of history");
+    }
+
+    [TestMethod]
+    public async Task SaveDailyBars_refuses_a_forming_session_rather_than_freezing_it()
+    {
+        // An unsettled bar stored as though it had settled would be served for ever afterwards as
+        // that day's final price.
+        using var env = TestEnv.Create(["OGDC"]);
+        var settled = new DateOnly(2026, 8, 10);
+        var forming = new DateOnly(2026, 8, 11);
+
+        await env.Repository.SaveDailyBarsAsync(
+            "OGDC", [Candle("OGDC", settled), Candle("OGDC", forming) with { IsLive = true }]);
+
+        var stored = await env.Repository.GetDailyBarsAsync("OGDC", 10);
+        Assert.AreEqual(1, stored.Count);
+        Assert.AreEqual(settled, stored.Single().Date, "only the settled session was archived");
+
+        Assert.AreEqual(
+            0, (await env.Repository.GetCoveredDailyDatesAsync(forming, forming, ["OGDC"])).Count,
+            "and the forming date is not claimed as covered, or the gap would freeze");
+    }
+
+    [TestMethod]
+    public async Task SaveDailyBars_never_lowers_a_dates_recorded_symbol_count()
+    {
+        // symbol_count is informational — how many bars a fetch stored — so a per-symbol write
+        // naturally has 1 to report. Assigning it would rewrite a whole-market backfill's count down
+        // to 1 on every date the archive happens to touch, which is how 503 dates in the live
+        // database came to read 1 beside 483 actual covered symbols.
+        using var env = TestEnv.Create(["OGDC", "GHNI"]);
+        var session = new DateOnly(2026, 8, 10);
+
+        await env.Repository.SaveDailySessionAsync(
+            session, [Candle("OGDC", session), Candle("GHNI", session)], ["OGDC", "GHNI"]);
+
+        await env.Repository.SaveDailyBarsAsync("OGDC", [Candle("OGDC", session)]);
+
+        var status = await env.Repository.GetDailyArchiveStatusAsync();
+        Assert.IsTrue(
+            status.CoveredDates > 0,
+            "the date is still covered after the per-symbol write");
+
+        Assert.AreEqual(
+            1, (await env.Repository.GetCoveredDailyDatesAsync(session, session, ["OGDC", "GHNI"])).Count,
+            "and the pair's coverage survives: the per-symbol write adds, it does not replace");
+    }
+
     private static TradingAgent.Research.PsxCandle Candle(string symbol, DateOnly date) => new()
     {
         Symbol = symbol,
@@ -642,6 +715,11 @@ public sealed class WatchlistUniverseTests
             DateOnly d, IReadOnlyList<TradingAgent.Research.PsxCandle> b,
             IReadOnlyCollection<string> r, CancellationToken ct = default) =>
             throw new NotSupportedException();
+
+        public Task SaveDailyBarsAsync(
+            string symbol,
+            IReadOnlyList<TradingAgent.Research.PsxCandle> bars,
+            CancellationToken ct = default) => throw new NotSupportedException();
         public Task SaveNonTradingDayAsync(DateOnly d, CancellationToken ct = default) =>
             throw new NotSupportedException();
         public Task<IReadOnlyList<TradingAgent.Research.PsxCandle>> GetDailyBarsAsync(
