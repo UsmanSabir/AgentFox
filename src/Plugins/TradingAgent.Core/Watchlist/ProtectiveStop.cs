@@ -466,12 +466,19 @@ public static class ProtectiveStopDecisions
     /// to break-even or trailed on ATR — which is the normal state of a managed position, and would make
     /// this whole path fire almost nowhere.
     /// </param>
+    /// <param name="excludedOrderNumbers">
+    /// Orders belonging to OTHER stop rows on this symbol — see
+    /// <see cref="OrdersOwnedBySiblings"/>. Without it, a stop whose own order has left the book falls
+    /// through to the price match and sizes <c>committed</c> from a SIBLING's order, which is a
+    /// different number of shares at a different trigger.
+    /// </param>
     public static int? ShrinkTo(
         ProtectiveStop stop,
         decimal? heldQuantity,
         IReadOnlyList<RestingOrder>? resting,
         bool supersedeInFlight,
-        DateOnly today)
+        DateOnly today,
+        IReadOnlySet<string>? excludedOrderNumbers = null)
     {
         if (stop.State != "active" || supersedeInFlight) return null;
 
@@ -487,7 +494,7 @@ public static class ProtectiveStopDecisions
 
         if (resting is null) return null;
 
-        var mine = FindOwnResting(stop, resting);
+        var mine = FindOwnResting(stop, resting, excludedOrderNumbers);
         if (mine.Ambiguous) return null;
 
         // What the venue currently holds against this stop. Its own row when the book lists it, and
@@ -703,10 +710,17 @@ public static class ProtectiveStopDecisions
     /// "stand down", since firing on an unknown is how a position gets sold twice.
     /// </para>
     /// </summary>
+    /// <param name="excludedOrderNumbers">
+    /// Orders belonging to OTHER stop rows on this symbol — see
+    /// <see cref="OrdersOwnedBySiblings"/>. A sibling's native stop covers a DIFFERENT tranche, so
+    /// standing down against it leaves this stop's own shares with no cover at all: no native order
+    /// (<see cref="DecidePlacement"/> skipped for the same reason) and now no backstop either.
+    /// </param>
     public static bool BackstopShouldStandDown(
         ProtectiveStop stop,
         IReadOnlyList<RestingOrder>? resting,
-        out string reason)
+        out string reason,
+        IReadOnlySet<string>? excludedOrderNumbers = null)
     {
         if (resting is null)
         {
@@ -715,7 +729,7 @@ public static class ProtectiveStopDecisions
             return true;
         }
 
-        var match = FindOwnResting(stop, resting);
+        var match = FindOwnResting(stop, resting, excludedOrderNumbers);
         if (match.Order is { } mine)
         {
             reason = $"A native stop for {stop.Symbol} is resting"
@@ -733,6 +747,63 @@ public static class ProtectiveStopDecisions
 
         reason = $"No native stop is resting for {stop.Symbol}; the backstop is the only protection.";
         return false;
+    }
+
+    /// <summary>
+    /// Order numbers resting for this symbol that belong to a DIFFERENT protective stop row, and so
+    /// must never be read as protection THIS stop can rely on.
+    ///
+    /// <para>
+    /// <b>The failure this exists to stop.</b> Two entries on one symbol produce two independent stop
+    /// rows — nothing merges them, and nothing should: they protect different share counts at
+    /// different triggers. But <see cref="FindOwnResting"/>'s across-session fallback is the PRICE, and
+    /// two stops on the same name routinely sit within <see cref="PriceMatchTolerance"/> of each other.
+    /// So the second row reads the first row's order as "a stop is already resting here", skips
+    /// forever, and never places one of its own — and because the row still reads <c>active</c>, that
+    /// tranche is reported protected while nothing at the broker covers it. The local backstop does not
+    /// fill the gap either: <see cref="BackstopShouldStandDown"/> matches the same way and stands down
+    /// against the same order.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Only today's placements, and never this stop's own number.</b> PSX clears the book at the
+    /// close and this broker's order numbers are only unique within a connection — the format is
+    /// <c>{connection}11XK{seq}</c>, and a fresh connection restarts the sequence — so a sibling's
+    /// number from an earlier session names an order the venue already cleared AND may well have been
+    /// reissued to something live today. Excluding one on that basis could hide this stop's own resting
+    /// order from it and place a duplicate, which is the one outcome worse than the bug being fixed.
+    /// Hence both guards: the sibling must have placed for <paramref name="today"/>, and this stop's
+    /// own <see cref="ProtectiveStop.LastOrderNo"/> is removed from the result unconditionally.
+    /// </para>
+    ///
+    /// <para>
+    /// Rows in <c>pending_fill</c> have never placed anything, and a <c>closed</c> row's number is
+    /// exactly the stale kind described above, so neither contributes.
+    /// </para>
+    /// </summary>
+    public static IReadOnlySet<string> OrdersOwnedBySiblings(
+        ProtectiveStop stop,
+        IReadOnlyList<ProtectiveStop> allStops,
+        DateOnly today)
+    {
+        var siblings = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var other in allStops)
+        {
+            if (other.StopId == stop.StopId) continue;
+            if (!other.Symbol.Equals(stop.Symbol, StringComparison.OrdinalIgnoreCase)) continue;
+            if (other.State is not ("active" or "superseded_pending_cancel")) continue;
+            if (other.LastPlacedSessionDate != today) continue;
+            if (other.LastOrderNo is not { Length: > 0 } no) continue;
+            siblings.Add(no.Trim());
+        }
+
+        // Never hide this stop's OWN order from it, whatever a sibling has recorded. A collision here
+        // is not hypothetical — see the reissued-number reasoning above — and the cost of getting it
+        // wrong in this direction is a second live SELL over shares already committed.
+        if (stop.LastOrderNo is { Length: > 0 } mine) siblings.Remove(mine.Trim());
+
+        return siblings;
     }
 
     /// <summary>
