@@ -871,6 +871,13 @@ public sealed class ProtectiveStopWorker
         // are used, RetirePredecessorFirst only runs when its order has already left the book, and the
         // other two add that very number themselves.
         var excluded = new HashSet<string>(siblings, StringComparer.OrdinalIgnoreCase);
+
+        // Orders this pass has CONFIRMED cancelled, which the snapshot above still lists. A separate
+        // set from `excluded` because they answer different questions: `excluded` says "not mine", and
+        // a sibling's order is not mine yet still commits its shares at the venue; this one says "gone",
+        // and only those shares are genuinely free again. Sizing against the wrong one sends orders the
+        // broker refuses.
+        var cancelled = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (stop.SupersedesStopId is { Length: > 0 } predecessorId)
         {
             var predecessor = allStops.FirstOrDefault(s => s.StopId == predecessorId);
@@ -894,8 +901,11 @@ public sealed class ProtectiveStopWorker
                     // lists it. Without excluding it, a raise inside the price-match tolerance would
                     // be skipped as "already protected" by an order that no longer exists — and the
                     // placement below would size against a book that has moved on.
-                    if (predecessor.LastOrderNo is { Length: > 0 } cancelled)
-                        excluded.Add(cancelled.Trim());
+                    if (predecessor.LastOrderNo is { Length: > 0 } gone)
+                    {
+                        excluded.Add(gone.Trim());
+                        cancelled.Add(gone.Trim());
+                    }
                     break;
 
                 case SupersedeAction.Wait:
@@ -940,7 +950,7 @@ public sealed class ProtectiveStopWorker
         }
 
         var decision = ProtectiveStopDecisions.DecidePlacement(
-            stop, held, today, resting ?? [], excluded);
+            stop, held, today, resting ?? [], excluded, cancelled);
 
         switch (decision.Action)
         {
