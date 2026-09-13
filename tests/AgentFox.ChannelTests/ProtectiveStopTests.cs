@@ -441,6 +441,286 @@ public sealed class ProtectiveStopTests
         Assert.IsFalse(down, reason);
     }
 
+    // ── Two independent stops on one symbol ──────────────────────────────────
+    //
+    // Two entries in the same name produce two stop rows — nothing merges them, and nothing should:
+    // they protect different share counts at different triggers. But FindOwnResting's across-session
+    // fallback is the PRICE, and two stops on one name routinely sit inside its 2% tolerance. Left
+    // unattributed, the second row reads the FIRST row's order as "already protected here" and skips
+    // every pass while still reading `active` — the tranche is reported protected with nothing at the
+    // broker covering it. These tests pin the attribution that tells the two apart.
+
+    /// <summary>The other stop on this symbol, resting an order it placed today.</summary>
+    private static ProtectiveStop Sibling(string orderNo, int placed = 60) => Stop(baseline: 0) with
+    {
+        StopId = "stop-2", State = "active", DesiredQuantity = placed,
+        StopTrigger = 556m, StopLimit = 550m,
+        LastOrderNo = orderNo, PlacedQuantity = placed, LastPlacedSessionDate = Today
+    };
+
+    [TestMethod]
+    public void Siblings_ASecondStopIsNotBlockedByTheFirstStopsOrder()
+    {
+        // The bug this whole section exists for: without the exclusion this is Skip, for ever.
+        var stop = Active(desired: 45);
+        var siblings = ProtectiveStopDecisions.OrdersOwnedBySiblings(
+            stop, [stop, Sibling("B-2")], Today);
+
+        var decision = ProtectiveStopDecisions.DecidePlacement(
+            stop, heldQuantity: 105m, Today, [Sized(556m, 60, "B-2")], siblings);
+
+        Assert.AreEqual(PlacementAction.Place, decision.Action, decision.Reason);
+        Assert.AreEqual(45, decision.Quantity, decision.Reason);
+    }
+
+    [TestMethod]
+    public void Siblings_AnUnattributableRestingStopStillBlocks()
+    {
+        // The exclusion is by order number and nothing else, so a manual stop — or one of ours from a
+        // placement that was never recorded — is left alone exactly as before.
+        var stop = Active(desired: 45);
+        var siblings = ProtectiveStopDecisions.OrdersOwnedBySiblings(
+            stop, [stop, Sibling("B-2")], Today);
+
+        var decision = ProtectiveStopDecisions.DecidePlacement(
+            stop, heldQuantity: 105m, Today, [Sized(556m, 60, "SOMEONE-ELSE")], siblings);
+
+        Assert.AreEqual(PlacementAction.Skip, decision.Action, decision.Reason);
+    }
+
+    [TestMethod]
+    public void Siblings_TheBackstopStillCoversWhenOnlyASiblingsOrderIsResting()
+    {
+        // The second half of the same failure. The sibling's order already let this row's native stop
+        // be skipped; standing the backstop down against it too leaves the shares with no cover at all.
+        var stop = Active(desired: 45);
+        var siblings = ProtectiveStopDecisions.OrdersOwnedBySiblings(
+            stop, [stop, Sibling("B-2")], Today);
+
+        var down = ProtectiveStopDecisions.BackstopShouldStandDown(
+            stop, [Sized(556m, 60, "B-2")], out var reason, siblings);
+
+        Assert.IsFalse(down, reason);
+    }
+
+    [TestMethod]
+    public void Siblings_TheBackstopStillStandsDownForThisStopsOwnOrder()
+    {
+        var stop = Active(desired: 45) with { LastOrderNo = "A-1" };
+        var siblings = ProtectiveStopDecisions.OrdersOwnedBySiblings(
+            stop, [stop, Sibling("B-2")], Today);
+
+        var down = ProtectiveStopDecisions.BackstopShouldStandDown(
+            stop, [Sized(554m, 45, "A-1"), Sized(556m, 60, "B-2")], out var reason, siblings);
+
+        Assert.IsTrue(down, reason);
+    }
+
+    [TestMethod]
+    public void Siblings_AStopsOwnOrderIsNeverExcludedByACollidingSiblingNumber()
+    {
+        // Order numbers are only unique within a connection — {connection}11XK{seq}, and a fresh
+        // connection restarts the sequence — so a sibling can hold the number this stop is resting
+        // under. Excluding it would hide this stop's own order from it and place a duplicate.
+        var stop = Active(desired: 45) with { LastOrderNo = "A-1" };
+
+        var siblings = ProtectiveStopDecisions.OrdersOwnedBySiblings(
+            stop, [stop, Sibling("A-1")], Today);
+
+        Assert.AreEqual(0, siblings.Count, "this stop's own order number must never be excluded");
+    }
+
+    [TestMethod]
+    public void Siblings_AnOrderFromAnEarlierSessionIsNotExcluded()
+    {
+        // PSX clears the book at the close, so a sibling's number from yesterday names an order that no
+        // longer exists AND may have been reissued to something live today.
+        var stop = Active(desired: 45);
+        var stale = Sibling("B-2") with { LastPlacedSessionDate = Yesterday };
+
+        var siblings = ProtectiveStopDecisions.OrdersOwnedBySiblings(stop, [stop, stale], Today);
+
+        Assert.AreEqual(0, siblings.Count);
+    }
+
+    [TestMethod]
+    public void Siblings_AClosedStopsOrderNumberIsNotExcluded()
+    {
+        var stop = Active(desired: 45);
+        var closed = Sibling("B-2") with { State = "closed" };
+
+        var siblings = ProtectiveStopDecisions.OrdersOwnedBySiblings(stop, [stop, closed], Today);
+
+        Assert.AreEqual(0, siblings.Count);
+    }
+
+    [TestMethod]
+    public void Siblings_AnotherSymbolsStopIsNotASibling()
+    {
+        var stop = Active(desired: 45);
+        var elsewhere = Sibling("B-2") with { Symbol = "PAEL" };
+
+        var siblings = ProtectiveStopDecisions.OrdersOwnedBySiblings(stop, [stop, elsewhere], Today);
+
+        Assert.AreEqual(0, siblings.Count);
+    }
+
+    [TestMethod]
+    public void Siblings_ShrinkSizesAgainstThisStopsOwnOrder_NotASiblings()
+    {
+        // This stop placed 100 and its own order has left the book; the sibling's 10 is still resting
+        // inside the price tolerance. The ceiling is 80 held minus the sibling's 10 = 70. Sizing
+        // `committed` from the sibling's 10 would read 10 against that 70, conclude nothing is
+        // oversized, and leave a 100-share order standing over a 70-share claim.
+        var stop = Active(desired: 100) with
+        {
+            LastOrderNo = "A-1", PlacedQuantity = 100, LastPlacedSessionDate = Today
+        };
+        var siblings = ProtectiveStopDecisions.OrdersOwnedBySiblings(
+            stop, [stop, Sibling("B-2", placed: 10)], Today);
+
+        var ceiling = ProtectiveStopDecisions.ShrinkTo(
+            stop, heldQuantity: 80m, [Sized(556m, 10, "B-2")],
+            supersedeInFlight: false, Today, siblings);
+
+        Assert.AreEqual(70, ceiling);
+    }
+
+    // ── Sizing against what the venue will actually accept ───────────────────
+    //
+    // Everything above sizes against CUSTODY. The broker sizes against custody MINUS shares already
+    // committed to resting SELLs, so with a sibling protecting another tranche the two disagree, and
+    // the difference is the gap an order falls through: it is rejected, and the worker then parks that
+    // exact order in its refusal backoff and stops retrying — so shares that COULD have been covered
+    // are left bare. These pin the cap that closes it.
+
+    [TestMethod]
+    public void Sizing_PlacesOnlyWhatIsFreeOfASiblingsRestingStop()
+    {
+        // 80 held, a sibling resting 60, so 20 are free. The stop wants 45 and gets 20 — partial
+        // coverage beats a rejection that covers nothing.
+        var stop = Active(desired: 45);
+
+        var decision = ProtectiveStopDecisions.DecidePlacement(
+            stop, heldQuantity: 80m, Today, [Sized(556m, 60, "B-2")],
+            excludedOrderNumbers: Set("B-2"));
+
+        Assert.AreEqual(PlacementAction.Place, decision.Action, decision.Reason);
+        Assert.AreEqual(20, decision.Quantity, decision.Reason);
+    }
+
+    [TestMethod]
+    public void Sizing_PlacesTheWholeShortfallWhenItFits()
+    {
+        // 105 held, a sibling resting 60, 45 free, 45 wanted. The cap must not shave a fitting order.
+        var stop = Active(desired: 45);
+
+        var decision = ProtectiveStopDecisions.DecidePlacement(
+            stop, heldQuantity: 105m, Today, [Sized(556m, 60, "B-2")],
+            excludedOrderNumbers: Set("B-2"));
+
+        Assert.AreEqual(PlacementAction.Place, decision.Action, decision.Reason);
+        Assert.AreEqual(45, decision.Quantity, decision.Reason);
+    }
+
+    [TestMethod]
+    public void Sizing_SkipsWhenASiblingHoldsEveryShare()
+    {
+        // Not Close: the position is still there and still worth protecting. It is the ORDER that
+        // cannot go in, and it can once the sibling's clears.
+        var stop = Active(desired: 45);
+
+        var decision = ProtectiveStopDecisions.DecidePlacement(
+            stop, heldQuantity: 60m, Today, [Sized(556m, 60, "B-2")],
+            excludedOrderNumbers: Set("B-2"));
+
+        Assert.AreEqual(PlacementAction.Skip, decision.Action, decision.Reason);
+    }
+
+    [TestMethod]
+    public void Sizing_CountsThisStopsOwnRestingOrderAgainstATopUp()
+    {
+        // Holding grew to 100 and this stop already has 30 resting; a sibling holds 60. The shortfall
+        // says 70, but only 10 shares are actually free — and 70 would be refused outright.
+        var stop = Active(desired: 100) with
+        {
+            LastOrderNo = "A-1", PlacedQuantity = 30, LastPlacedSessionDate = Today
+        };
+
+        var decision = ProtectiveStopDecisions.DecidePlacement(
+            stop, heldQuantity: 100m, Today,
+            [Sized(554m, 30, "A-1"), Sized(556m, 60, "B-2")],
+            excludedOrderNumbers: Set("B-2"));
+
+        Assert.AreEqual(PlacementAction.Place, decision.Action, decision.Reason);
+        Assert.AreEqual(10, decision.Quantity, decision.Reason);
+    }
+
+    [TestMethod]
+    public void Sizing_ACancelledPredecessorsSharesAreFreeAgain()
+    {
+        // The pass cancelled the predecessor, but `resting` is the snapshot taken before that and still
+        // lists it. Its shares are free however the stale book reads — and the attribution set alone
+        // must NOT be what says so, or a sibling's live order would be freed the same way.
+        var stop = Active(desired: 45);
+
+        var decision = ProtectiveStopDecisions.DecidePlacement(
+            stop, heldQuantity: 45m, Today, [Sized(556m, 45, "OLD-1")],
+            excludedOrderNumbers: Set("OLD-1"), cancelledOrderNumbers: Set("OLD-1"));
+
+        Assert.AreEqual(PlacementAction.Place, decision.Action, decision.Reason);
+        Assert.AreEqual(45, decision.Quantity, decision.Reason);
+    }
+
+    [TestMethod]
+    public void Sizing_AnUnreadableQuantityCapsNothingRatherThanBlocking()
+    {
+        // The one unknown in this class that does NOT become a Skip. Every other unknown guards an
+        // irreversible act; this one guards only against a rejection, and refusing on it would let an
+        // unreadable grid leave a position bare for as long as the grid stays unreadable. Placing the
+        // full shortfall is what this did before the cap existed, so the cap can only improve on it.
+        var stop = Active(desired: 45);
+
+        var decision = ProtectiveStopDecisions.DecidePlacement(
+            stop, heldQuantity: 105m, Today, [Resting(price: 610m)]);
+
+        Assert.AreEqual(PlacementAction.Place, decision.Action, decision.Reason);
+        Assert.AreEqual(45, decision.Quantity, decision.Reason);
+    }
+
+    [TestMethod]
+    public void Sizing_TwoOverCommittedStopsConvergeRatherThanBothZeroing()
+    {
+        // 80 held under a 100-share stop and a 60-share sibling — 160 committed over 80 shares. The row
+        // with room corrects first; the row with none is left alone rather than shrunk to nothing,
+        // because shrinking to nothing is the worker CANCELLING protection and replacing it with an
+        // order for no shares. Both converge on the holding from above.
+        var big = Active(desired: 100) with
+        {
+            LastOrderNo = "A-1", PlacedQuantity = 100, LastPlacedSessionDate = Today
+        };
+        var small = Active(desired: 60) with
+        {
+            StopId = "stop-2", StopTrigger = 556m, StopLimit = 550m,
+            LastOrderNo = "B-2", PlacedQuantity = 60, LastPlacedSessionDate = Today
+        };
+        var book = new[] { Sized(554m, 100, "A-1"), Sized(556m, 60, "B-2") };
+
+        var bigCeiling = ProtectiveStopDecisions.ShrinkTo(
+            big, heldQuantity: 80m, book, supersedeInFlight: false, Today,
+            ProtectiveStopDecisions.OrdersOwnedBySiblings(big, [big, small], Today));
+
+        var smallCeiling = ProtectiveStopDecisions.ShrinkTo(
+            small, heldQuantity: 80m, book, supersedeInFlight: false, Today,
+            ProtectiveStopDecisions.OrdersOwnedBySiblings(small, [big, small], Today));
+
+        Assert.AreEqual(20, bigCeiling, "the 100-share stop may claim only what the sibling leaves");
+        Assert.IsNull(smallCeiling, "the 60-share stop must be left alone, never shrunk to nothing");
+    }
+
+    private static IReadOnlySet<string> Set(params string[] orderNumbers) =>
+        new HashSet<string>(orderNumbers, StringComparer.OrdinalIgnoreCase);
+
     // ── Fixtures ─────────────────────────────────────────────────────────────
 
     private static ProtectiveStop Stop(int? baseline) => new()
@@ -788,16 +1068,22 @@ public sealed class ProtectiveStopTests
         // A lift of 1.25% falls inside the 2% price-match tolerance, so without excluding the
         // predecessor's order number the raise matches the very order it is replacing and is skipped
         // silently — forever. This is the bug the exclusion set exists for.
+        // 200 held against a 100-share predecessor, so free quantity is NOT the binding constraint and
+        // this measures only what it names. That is the SupersedeAction.Proceed shape: the replacement
+        // fits alongside the order it replaces, and the exclusion is about attribution rather than
+        // about shares being freed. A predecessor that has actually been CANCELLED frees its shares
+        // through cancelledOrderNumbers instead — see Sizing_ACancelledPredecessorsSharesAreFreeAgain,
+        // and the reasoning on DecidePlacement for why the two sets cannot be the same one.
         var raised = Successor() with { StopTrigger = 121.5m, StopLimit = 120.3m };
         RestingOrder[] resting = [Sized(120m, 100, "OLD-120")];
 
         var withoutExclusion = ProtectiveStopDecisions.DecidePlacement(
-            raised, heldQuantity: 100m, Today, resting);
+            raised, heldQuantity: 200m, Today, resting);
         Assert.AreEqual(PlacementAction.Skip, withoutExclusion.Action,
             "documents the old behaviour the exclusion set corrects");
 
         var withExclusion = ProtectiveStopDecisions.DecidePlacement(
-            raised, heldQuantity: 100m, Today, resting,
+            raised, heldQuantity: 200m, Today, resting,
             new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "OLD-120" });
 
         Assert.AreEqual(PlacementAction.Place, withExclusion.Action, withExclusion.Reason);

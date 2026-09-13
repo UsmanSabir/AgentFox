@@ -798,6 +798,15 @@ public sealed class ProtectiveStopWorker
 
         var held = holdings is null ? null : TryHeld(holdings, stop.Symbol);
 
+        // ── Orders that belong to a DIFFERENT stop on this symbol ────────────────────────────────
+        // Two entries on one symbol produce two stop rows, and the across-session fallback in
+        // FindOwnResting is the PRICE — which two stops on the same name are routinely within. Without
+        // this, the second row reads the first row's order as "already protected here", skips every
+        // pass at LogDebug, and never places anything, while still reading `active` in the panel. It is
+        // computed once here and handed to every decision below that asks "is my own order resting",
+        // because they must all answer it the same way.
+        var siblings = ProtectiveStopDecisions.OrdersOwnedBySiblings(stop, allStops, today);
+
         // ── The resting stop no longer matches what is actually held ─────────────────────────────
         // A manual sell at the broker's own client, a partial exit executed outside this system —
         // held has shrunk below what this stop already has resting. Corrected the same way a
@@ -815,7 +824,7 @@ public sealed class ProtectiveStopWorker
 
         if (held is { } heldForShrink
             && ProtectiveStopDecisions.ShrinkTo(
-                   stop, heldForShrink, resting, supersedeInFlight, today) is { } ceiling
+                   stop, heldForShrink, resting, supersedeInFlight, today, siblings) is { } ceiling
             && !allStops.Any(s => s.SupersedesStopId == stop.StopId))
         {
             var successor = new ProtectiveStop
@@ -857,7 +866,18 @@ public sealed class ProtectiveStopWorker
         // "make" of make-before-break cannot succeed until the "break" has happened. Deciding that
         // here, rather than discovering it as a placement failure, is what stops a raise retrying
         // forever while the operator is told it succeeded.
-        var excluded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Seeded with the siblings, then added to by the supersede block below. A predecessor that is
+        // ALSO a sibling by this reckoning changes nothing: the Wait case returns before the exclusions
+        // are used, RetirePredecessorFirst only runs when its order has already left the book, and the
+        // other two add that very number themselves.
+        var excluded = new HashSet<string>(siblings, StringComparer.OrdinalIgnoreCase);
+
+        // Orders this pass has CONFIRMED cancelled, which the snapshot above still lists. A separate
+        // set from `excluded` because they answer different questions: `excluded` says "not mine", and
+        // a sibling's order is not mine yet still commits its shares at the venue; this one says "gone",
+        // and only those shares are genuinely free again. Sizing against the wrong one sends orders the
+        // broker refuses.
+        var cancelled = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (stop.SupersedesStopId is { Length: > 0 } predecessorId)
         {
             var predecessor = allStops.FirstOrDefault(s => s.StopId == predecessorId);
@@ -881,8 +901,11 @@ public sealed class ProtectiveStopWorker
                     // lists it. Without excluding it, a raise inside the price-match tolerance would
                     // be skipped as "already protected" by an order that no longer exists — and the
                     // placement below would size against a book that has moved on.
-                    if (predecessor.LastOrderNo is { Length: > 0 } cancelled)
-                        excluded.Add(cancelled.Trim());
+                    if (predecessor.LastOrderNo is { Length: > 0 } gone)
+                    {
+                        excluded.Add(gone.Trim());
+                        cancelled.Add(gone.Trim());
+                    }
                     break;
 
                 case SupersedeAction.Wait:
@@ -927,7 +950,7 @@ public sealed class ProtectiveStopWorker
         }
 
         var decision = ProtectiveStopDecisions.DecidePlacement(
-            stop, held, today, resting ?? [], excluded);
+            stop, held, today, resting ?? [], excluded, cancelled);
 
         switch (decision.Action)
         {

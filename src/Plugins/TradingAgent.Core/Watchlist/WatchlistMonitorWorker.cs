@@ -924,8 +924,8 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
     /// </summary>
     private async Task<string?> BackstopMustStandDownAsync(ArmedOrder order, CancellationToken ct)
     {
-        var stop = (await _repository.GetProtectiveStopsAsync(openOnly: false, ct))
-            .FirstOrDefault(s => s.StopId == order.ProtectiveStopId);
+        var allStops = await _repository.GetProtectiveStopsAsync(openOnly: false, ct);
+        var stop = allStops.FirstOrDefault(s => s.StopId == order.ProtectiveStopId);
 
         if (stop is null)
             return "the protective stop it backs no longer exists";
@@ -943,7 +943,15 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
             resting = null;   // unreadable counts as "cannot rule out a resting stop"
         }
 
-        return ProtectiveStopDecisions.BackstopShouldStandDown(stop, resting, out var reason)
+        // A native stop resting for a DIFFERENT stop row on this symbol covers a different tranche at a
+        // different trigger, and standing down against it would leave these shares with nothing: the
+        // sibling's order already made DecidePlacement skip this row's own native stop, so the backstop
+        // is the only cover left. Matched by order number only, so an order this system cannot
+        // positively attribute to another row still stands the backstop down, exactly as before.
+        var siblings = ProtectiveStopDecisions.OrdersOwnedBySiblings(
+            stop, allStops, DateOnly.FromDateTime(_calendar.GetStatus().PktNow));
+
+        return ProtectiveStopDecisions.BackstopShouldStandDown(stop, resting, out var reason, siblings)
             ? reason
             : null;
     }

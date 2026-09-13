@@ -1074,6 +1074,104 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         await transaction.CommitAsync(ct);
     }
 
+    public async Task SaveDailyBarsAsync(
+        string symbol,
+        IReadOnlyList<TradingAgent.Research.PsxCandle> bars,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(symbol) || bars.Count == 0) return;
+
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+
+        var nowUtc = DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture);
+
+        var insert = connection.CreateCommand();
+        insert.Transaction = (SqliteTransaction)transaction;
+        insert.CommandText = """
+            INSERT INTO daily_bars
+                (symbol, session_date, open, high, low, close, previous_close, volume, saved_utc)
+            VALUES
+                ($symbol, $session, $open, $high, $low, $close, $prev, $volume, $saved)
+            ON CONFLICT (symbol, session_date) DO UPDATE SET
+                open = excluded.open, high = excluded.high, low = excluded.low,
+                close = excluded.close, previous_close = excluded.previous_close,
+                volume = excluded.volume, saved_utc = excluded.saved_utc
+            """;
+
+        var barSymbol = insert.Parameters.Add("$symbol", SqliteType.Text);
+        var barDate = insert.Parameters.Add("$session", SqliteType.Text);
+        var open = insert.Parameters.Add("$open", SqliteType.Text);
+        var high = insert.Parameters.Add("$high", SqliteType.Text);
+        var low = insert.Parameters.Add("$low", SqliteType.Text);
+        var close = insert.Parameters.Add("$close", SqliteType.Text);
+        var prev = insert.Parameters.Add("$prev", SqliteType.Text);
+        var volume = insert.Parameters.Add("$volume", SqliteType.Integer);
+        var saved = insert.Parameters.Add("$saved", SqliteType.Text);
+        saved.Value = nowUtc;
+
+        // symbol_count stays MONOTONE here. It is documented as informational — how many bars a fetch
+        // stored — and a per-symbol write stores exactly one per date, so assigning it would rewrite a
+        // whole-market backfill's count down to 1 on every date this archive happens to touch. Taking
+        // the larger of the two keeps the more informative number without pretending this call covered
+        // a market it never read.
+        var coverage = connection.CreateCommand();
+        coverage.Transaction = (SqliteTransaction)transaction;
+        coverage.CommandText = """
+            INSERT INTO daily_bar_coverage (session_date, symbol_count, fetched_utc, market_closed)
+            VALUES ($session, 1, $fetched, 0)
+            ON CONFLICT (session_date) DO UPDATE SET
+                symbol_count = MAX(daily_bar_coverage.symbol_count, 1),
+                fetched_utc = excluded.fetched_utc
+            """;
+        var coverDate = coverage.Parameters.Add("$session", SqliteType.Text);
+        coverage.Parameters.AddWithValue("$fetched", nowUtc);
+
+        var mark = connection.CreateCommand();
+        mark.Transaction = (SqliteTransaction)transaction;
+        mark.CommandText = """
+            INSERT OR IGNORE INTO daily_bar_coverage_symbols (session_date, symbol)
+            VALUES ($session, $symbol)
+            """;
+        var markDate = mark.Parameters.Add("$session", SqliteType.Text);
+        // Trimmed and upper-cased, matching how Normalize stores them for the session write. A raw
+        // symbol here would write a coverage row GetCoveredDailyDatesAsync cannot match, so the date
+        // would look uncovered for ever and the backfill would keep re-fetching it.
+        mark.Parameters.AddWithValue("$symbol", symbol.Trim().ToUpperInvariant());
+
+        foreach (var bar in bars)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            // A forming session is not archived: it would freeze an intraday snapshot as if it were
+            // that day's settled candle, and every later read would serve that frozen price as final.
+            if (bar.IsLive || bar.IsIntraday) continue;
+
+            var session = bar.Date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+
+            barSymbol.Value = bar.Symbol;
+            barDate.Value = session;
+            open.Value = bar.Open.ToString(CultureInfo.InvariantCulture);
+            high.Value = bar.High.ToString(CultureInfo.InvariantCulture);
+            low.Value = bar.Low.ToString(CultureInfo.InvariantCulture);
+            close.Value = bar.Close.ToString(CultureInfo.InvariantCulture);
+            prev.Value = bar.PreviousClose is { } p
+                ? p.ToString(CultureInfo.InvariantCulture)
+                : (object)DBNull.Value;
+            volume.Value = bar.Volume;
+            await insert.ExecuteNonQueryAsync(ct);
+
+            coverDate.Value = session;
+            await coverage.ExecuteNonQueryAsync(ct);
+
+            markDate.Value = session;
+            await mark.ExecuteNonQueryAsync(ct);
+        }
+
+        await transaction.CommitAsync(ct);
+    }
+
     public async Task SaveNonTradingDayAsync(DateOnly sessionDate, CancellationToken ct = default)
     {
         await EnsureInitializedAsync(ct);

@@ -347,12 +347,21 @@ public static class ProtectiveStopDecisions
     /// order being replaced. Mirrors <c>SellQuantityRule.Available</c>'s parameter of the same name,
     /// for the same reason.
     /// </param>
+    /// <param name="cancelledOrderNumbers">
+    /// Orders the snapshot still lists but which are CONFIRMED cancelled during this pass. Distinct
+    /// from <paramref name="excludedOrderNumbers"/> and NOT interchangeable with it: that set answers
+    /// "this order is not mine", which is exactly what a sibling stop's order is — and a sibling's
+    /// order still commits its shares at the venue. This one answers "this order no longer exists", and
+    /// only those shares are free again. Conflating the two would size against a book with a sibling's
+    /// committed shares silently added back, which is how an order that cannot fit gets sent anyway.
+    /// </param>
     public static PlacementDecision DecidePlacement(
         ProtectiveStop stop,
         decimal? heldQuantity,
         DateOnly today,
         IReadOnlyList<RestingOrder> resting,
-        IReadOnlySet<string>? excludedOrderNumbers = null)
+        IReadOnlySet<string>? excludedOrderNumbers = null,
+        IReadOnlySet<string>? cancelledOrderNumbers = null)
     {
         if (stop.State != "active")
             return new PlacementDecision(PlacementAction.Skip, 0, $"Not active (state: {stop.State}).");
@@ -397,14 +406,57 @@ public static class ProtectiveStopDecisions
                 + (mine.OrderNo is not null ? $" (order no {mine.OrderNo})" : "")
                 + ", and this system did not place it this session. Leaving it alone.");
 
-        return new PlacementDecision(PlacementAction.Place, shortfall,
-            coveredThisSession > 0
-                ? $"Holding grew to {quantity}; topping up by {shortfall} share(s) on top of the "
+        // ── What the venue will actually accept ─────────────────────────────────────────────────
+        // Everything above sizes against CUSTODY, which is the right ceiling for "how much should be
+        // protected" and the wrong one for "how much can be placed". The broker sizes every SELL
+        // against custody minus shares already committed to resting SELLs, so a second stop on a
+        // symbol — a sibling protecting another tranche, or this stop's own partial coverage — makes
+        // the difference real. Sending the full shortfall anyway earns a rejection, and a rejection is
+        // not free: the worker parks this exact order in its refusal backoff and stops retrying, so the
+        // shares that COULD have been covered are left bare for the backoff's duration.
+        //
+        // This stop's own resting order is counted in `committed` on purpose. `shortfall` has already
+        // deducted what this stop placed THIS SESSION, so the two agree in the ordinary top-up case;
+        // where they disagree — a placement the ledger missed, a quantity the venue reduced — the
+        // book is the side that is right, because it is the side the rejection comes from.
+        // This is a CAP, never a gate. An unreadable quantity leaves the sum unknown, and unknown here
+        // means "place what was asked for" rather than the Skip an unknown earns elsewhere in this
+        // class — deliberately, because the two unknowns are not the same shape. Every other unknown
+        // guards an irreversible act (cancelling a stop, selling a position twice); this one guards
+        // only against a REJECTION, and refusing to place on it would let an unreadable grid leave a
+        // position bare for as long as the grid stays unreadable. Falling through to the full shortfall
+        // is exactly what this code did before the cap existed, so the cap can only ever improve on it.
+        // The same reasoning is why a resting take-profit with no quantity still does not block a stop.
+        var (_, committed) = CommittedSells(stop.Symbol, resting, cancelledOrderNumbers);
+        var placeable = shortfall;
+
+        if (committed is { } alreadyCommitted)
+        {
+            var free = (int)Math.Floor(held) - alreadyCommitted;
+            if (free <= 0)
+                return new PlacementDecision(PlacementAction.Skip, 0,
+                    $"All {(int)Math.Floor(held)} {stop.Symbol} share(s) are already committed to "
+                    + $"resting SELLs, leaving nothing free for the {shortfall} this stop still needs. "
+                    + "The broker sizes every SELL against custody minus resting SELLs, so this order "
+                    + "cannot be placed until some of that clears.");
+
+            // Partial rather than nothing: covering what fits beats covering none of it, and the
+            // remainder is topped up on a later pass — the same path a holding that grew already uses.
+            placeable = Math.Min(shortfall, free);
+        }
+
+        return new PlacementDecision(PlacementAction.Place, placeable,
+            (coveredThisSession > 0
+                ? $"Holding grew to {quantity}; topping up by {placeable} share(s) on top of the "
                   + $"{coveredThisSession} already resting."
                 : stop.LastPlacedSessionDate is null
-                    ? $"No stop is resting for {stop.Symbol}; placing for {shortfall} share(s)."
+                    ? $"No stop is resting for {stop.Symbol}; placing for {placeable} share(s)."
                     : $"Session rolled over (last placed {stop.LastPlacedSessionDate:yyyy-MM-dd}); "
-                      + $"re-placing for {shortfall} share(s).");
+                      + $"re-placing for {placeable} share(s).")
+            + (placeable < shortfall
+                ? $" Capped at the {placeable} share(s) free of resting SELLs; the remaining "
+                  + $"{shortfall - placeable} is topped up once they clear."
+                : ""));
     }
 
     /// <summary>
@@ -466,12 +518,19 @@ public static class ProtectiveStopDecisions
     /// to break-even or trailed on ATR — which is the normal state of a managed position, and would make
     /// this whole path fire almost nowhere.
     /// </param>
+    /// <param name="excludedOrderNumbers">
+    /// Orders belonging to OTHER stop rows on this symbol — see
+    /// <see cref="OrdersOwnedBySiblings"/>. Without it, a stop whose own order has left the book falls
+    /// through to the price match and sizes <c>committed</c> from a SIBLING's order, which is a
+    /// different number of shares at a different trigger.
+    /// </param>
     public static int? ShrinkTo(
         ProtectiveStop stop,
         decimal? heldQuantity,
         IReadOnlyList<RestingOrder>? resting,
         bool supersedeInFlight,
-        DateOnly today)
+        DateOnly today,
+        IReadOnlySet<string>? excludedOrderNumbers = null)
     {
         if (stop.State != "active" || supersedeInFlight) return null;
 
@@ -487,7 +546,7 @@ public static class ProtectiveStopDecisions
 
         if (resting is null) return null;
 
-        var mine = FindOwnResting(stop, resting);
+        var mine = FindOwnResting(stop, resting, excludedOrderNumbers);
         if (mine.Ambiguous) return null;
 
         // What the venue currently holds against this stop. Its own row when the book lists it, and
@@ -496,7 +555,27 @@ public static class ProtectiveStopDecisions
         var committed = mine.Order?.Quantity ?? stop.PlacedQuantity;
         if (committed <= 0) return null;
 
-        var ceiling = Math.Min(stop.DesiredQuantity, (int)Math.Floor(held));
+        // ── Custody this stop can actually claim ────────────────────────────────────────────────
+        // A ceiling of Min(DesiredQuantity, held) is right for the only-stop-on-the-symbol case and
+        // wrong as soon as a sibling protects another tranche of the same holding: both would shrink to
+        // the WHOLE remaining custody and their orders would sum to more than exists, which the venue
+        // refuses. What is left for this stop is custody minus what siblings already have resting.
+        var (_, bySiblings) = CommittedSells(
+            stop.Symbol,
+            resting.Where(r => excludedOrderNumbers?.Contains((r.OrderNo ?? "").Trim()) ?? false).ToList());
+        if (bySiblings is not { } siblingShares) return null;
+
+        var ceiling = Math.Min(stop.DesiredQuantity, (int)Math.Floor(held) - siblingShares);
+
+        // A ceiling at or below zero says the siblings' orders already account for every share held.
+        // That is a real over-commitment, but shrinking to nothing is CLOSING this stop's protection,
+        // and the worker would do it by cancelling the resting order and replacing it with one for no
+        // shares at all. Leaving it alone keeps the position covered and lets the sibling's own shrink
+        // settle it: whichever row is evaluated with room to spare corrects first, and the next pass
+        // finds the other one fitting. Both orders converge on the holding from above rather than one
+        // of them being zeroed on the way.
+        if (ceiling <= 0) return null;
+
         return committed > ceiling ? ceiling : null;
     }
 
@@ -582,18 +661,12 @@ public static class ProtectiveStopDecisions
             return new(SupersedeAction.Wait,
                 "Holdings could not be read, so the free quantity behind the previous stop is unknown.");
 
-        var sells = resting
-            .Where(r => r.Symbol.Equals(successor.Symbol, StringComparison.OrdinalIgnoreCase)
-                     && !(r.Side is { Length: > 0 } side
-                          && side.Contains("BUY", StringComparison.OrdinalIgnoreCase)))
-            .ToList();
-
-        if (sells.Any(r => r.Quantity is null))
+        var (_, committedOrNull) = CommittedSells(successor.Symbol, resting);
+        if (committedOrNull is not { } committed)
             return new(SupersedeAction.Wait,
                 $"A resting {successor.Symbol} SELL has no readable quantity, so the free quantity "
                 + "cannot be computed. Refusing to guess.");
 
-        var committed = sells.Sum(r => r.Quantity!.Value);
         var free = (int)Math.Floor(held) - committed;
         var wanted = Math.Min(successor.DesiredQuantity, (int)Math.Floor(held));
 
@@ -650,18 +723,12 @@ public static class ProtectiveStopDecisions
                 "Holdings or the outstanding book could not be read, so what is holding these shares "
                 + "is unknown. Nothing was cancelled.");
 
-        var sells = resting
-            .Where(r => r.Symbol.Equals(symbol, StringComparison.OrdinalIgnoreCase)
-                     && !(r.Side is { Length: > 0 } side
-                          && side.Contains("BUY", StringComparison.OrdinalIgnoreCase)))
-            .ToList();
-
-        if (sells.Any(r => r.Quantity is null))
+        var (sells, committedOrNull) = CommittedSells(symbol, resting);
+        if (committedOrNull is not { } committed)
             return new(StopReleaseAction.CannotRelease, null, null,
                 $"A resting {symbol} SELL has no readable quantity, so the free quantity cannot be "
                 + "computed. Refusing to guess.");
 
-        var committed = sells.Sum(r => r.Quantity!.Value);
         var free = (int)Math.Floor(held) - committed;
         if (free >= quantityNeeded)
             return new(StopReleaseAction.NotNeeded, null, null,
@@ -703,10 +770,17 @@ public static class ProtectiveStopDecisions
     /// "stand down", since firing on an unknown is how a position gets sold twice.
     /// </para>
     /// </summary>
+    /// <param name="excludedOrderNumbers">
+    /// Orders belonging to OTHER stop rows on this symbol — see
+    /// <see cref="OrdersOwnedBySiblings"/>. A sibling's native stop covers a DIFFERENT tranche, so
+    /// standing down against it leaves this stop's own shares with no cover at all: no native order
+    /// (<see cref="DecidePlacement"/> skipped for the same reason) and now no backstop either.
+    /// </param>
     public static bool BackstopShouldStandDown(
         ProtectiveStop stop,
         IReadOnlyList<RestingOrder>? resting,
-        out string reason)
+        out string reason,
+        IReadOnlySet<string>? excludedOrderNumbers = null)
     {
         if (resting is null)
         {
@@ -715,7 +789,7 @@ public static class ProtectiveStopDecisions
             return true;
         }
 
-        var match = FindOwnResting(stop, resting);
+        var match = FindOwnResting(stop, resting, excludedOrderNumbers);
         if (match.Order is { } mine)
         {
             reason = $"A native stop for {stop.Symbol} is resting"
@@ -733,6 +807,97 @@ public static class ProtectiveStopDecisions
 
         reason = $"No native stop is resting for {stop.Symbol}; the backstop is the only protection.";
         return false;
+    }
+
+    /// <summary>
+    /// The resting SELL rows for a symbol, and the quantity they commit — the figure every decision
+    /// about whether an order will FIT has to be made against, because this broker sizes every SELL as
+    /// custody MINUS shares already committed to resting SELLs (confirmed live 2026-08-27, both by the
+    /// rejection text and by its own <c>PendingSellQuantity</c> field).
+    ///
+    /// <para>
+    /// A null <c>Committed</c> means a row had no readable quantity, so the sum is UNKNOWN. It is never
+    /// zero: every caller has to refuse rather than guess, because guessing low sends an order the
+    /// venue rejects and guessing high leaves a position uncovered.
+    /// </para>
+    /// </summary>
+    /// <param name="ignoredOrderNumbers">
+    /// Orders the snapshot still lists but which are CONFIRMED gone — a predecessor cancelled during
+    /// this pass, in practice. Their shares are free again however the stale book reads.
+    /// </param>
+    private static (IReadOnlyList<RestingOrder> Sells, int? Committed) CommittedSells(
+        string symbol,
+        IReadOnlyList<RestingOrder> resting,
+        IReadOnlySet<string>? ignoredOrderNumbers = null)
+    {
+        var sells = resting
+            .Where(r => r.Symbol.Equals(symbol, StringComparison.OrdinalIgnoreCase)
+                     // A row positively attributable to the other side of the book commits nothing.
+                     && !(r.Side is { Length: > 0 } side
+                          && side.Contains("BUY", StringComparison.OrdinalIgnoreCase))
+                     && !(ignoredOrderNumbers?.Contains((r.OrderNo ?? "").Trim()) ?? false))
+            .ToList();
+
+        return sells.Any(r => r.Quantity is null)
+            ? (sells, null)
+            : (sells, sells.Sum(r => r.Quantity!.Value));
+    }
+
+    /// <summary>
+    /// Order numbers resting for this symbol that belong to a DIFFERENT protective stop row, and so
+    /// must never be read as protection THIS stop can rely on.
+    ///
+    /// <para>
+    /// <b>The failure this exists to stop.</b> Two entries on one symbol produce two independent stop
+    /// rows — nothing merges them, and nothing should: they protect different share counts at
+    /// different triggers. But <see cref="FindOwnResting"/>'s across-session fallback is the PRICE, and
+    /// two stops on the same name routinely sit within <see cref="PriceMatchTolerance"/> of each other.
+    /// So the second row reads the first row's order as "a stop is already resting here", skips
+    /// forever, and never places one of its own — and because the row still reads <c>active</c>, that
+    /// tranche is reported protected while nothing at the broker covers it. The local backstop does not
+    /// fill the gap either: <see cref="BackstopShouldStandDown"/> matches the same way and stands down
+    /// against the same order.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Only today's placements, and never this stop's own number.</b> PSX clears the book at the
+    /// close and this broker's order numbers are only unique within a connection — the format is
+    /// <c>{connection}11XK{seq}</c>, and a fresh connection restarts the sequence — so a sibling's
+    /// number from an earlier session names an order the venue already cleared AND may well have been
+    /// reissued to something live today. Excluding one on that basis could hide this stop's own resting
+    /// order from it and place a duplicate, which is the one outcome worse than the bug being fixed.
+    /// Hence both guards: the sibling must have placed for <paramref name="today"/>, and this stop's
+    /// own <see cref="ProtectiveStop.LastOrderNo"/> is removed from the result unconditionally.
+    /// </para>
+    ///
+    /// <para>
+    /// Rows in <c>pending_fill</c> have never placed anything, and a <c>closed</c> row's number is
+    /// exactly the stale kind described above, so neither contributes.
+    /// </para>
+    /// </summary>
+    public static IReadOnlySet<string> OrdersOwnedBySiblings(
+        ProtectiveStop stop,
+        IReadOnlyList<ProtectiveStop> allStops,
+        DateOnly today)
+    {
+        var siblings = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var other in allStops)
+        {
+            if (other.StopId == stop.StopId) continue;
+            if (!other.Symbol.Equals(stop.Symbol, StringComparison.OrdinalIgnoreCase)) continue;
+            if (other.State is not ("active" or "superseded_pending_cancel")) continue;
+            if (other.LastPlacedSessionDate != today) continue;
+            if (other.LastOrderNo is not { Length: > 0 } no) continue;
+            siblings.Add(no.Trim());
+        }
+
+        // Never hide this stop's OWN order from it, whatever a sibling has recorded. A collision here
+        // is not hypothetical — see the reissued-number reasoning above — and the cost of getting it
+        // wrong in this direction is a second live SELL over shares already committed.
+        if (stop.LastOrderNo is { Length: > 0 } mine) siblings.Remove(mine.Trim());
+
+        return siblings;
     }
 
     /// <summary>

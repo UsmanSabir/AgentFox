@@ -254,6 +254,34 @@ public interface ITradingRepository
         CancellationToken ct = default);
 
     /// <summary>
+    /// Stores MANY sessions for ONE symbol, in a single transaction.
+    ///
+    /// <para>
+    /// The inverse of <see cref="SaveDailySessionAsync"/>, and it exists because the two access
+    /// patterns are genuinely opposite. A backfill sweeps the market a date at a time, so "one date,
+    /// many symbols" is its natural shape. A read-through archive discovers a gap while serving ONE
+    /// symbol and holds that symbol's whole history in hand, so the same work through the session
+    /// method costs one connection and one transaction PER BAR — a 260-session fill for a 500-symbol
+    /// board being 130,000 of them, which is minutes of blocking inside a request.
+    /// </para>
+    ///
+    /// <para>
+    /// Coverage is recorded exactly as the session method records it, for this one symbol on each
+    /// date written: the honest claim is that we looked for THIS symbol, and nothing more. Marking a
+    /// date covered for symbols nobody asked about is what permanently starves them of history.
+    /// </para>
+    ///
+    /// <para>
+    /// Bars are upserted, so re-running is idempotent, and a forming session is skipped rather than
+    /// frozen as if it were settled — both exactly as <see cref="SaveDailySessionAsync"/> does them.
+    /// </para>
+    /// </summary>
+    Task SaveDailyBarsAsync(
+        string symbol,
+        IReadOnlyList<TradingAgent.Research.PsxCandle> bars,
+        CancellationToken ct = default);
+
+    /// <summary>
     /// Records a date the market did not trade at all, which is covered for every symbol — now and for
     /// any symbol added later — so the backfill never asks the portal for it again.
     /// </summary>
