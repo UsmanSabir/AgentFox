@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createEventDispatcher } from 'svelte';
   import {
     trading,
     type BrokerAccountSnapshot
@@ -12,6 +13,9 @@
   import PortfolioAllocationChart from './PortfolioAllocationChart.svelte';
   import { orderListNavigation } from './orderListNavigation';
   export let keyboardMode = false;
+  const dispatch = createEventDispatcher<{
+    order: { symbol: string; action: 'BUY' | 'SELL' };
+  }>();
   let query = '';
   $: visibleOrders = (account?.orders ?? []).filter(o => !keyboardMode || `${o.symbol ?? o.instrumentId} ${o.side} ${o.status}`.toLowerCase().includes(query.trim().toLowerCase()));
 
@@ -76,6 +80,15 @@
   const extras = (attributes?: Record<string, string | null>) => Object.entries(attributes ?? {})
     .filter(([, value]) => value != null && value.trim().length > 0);
   const attributeValue = (value: string | null, visible: boolean) => visible ? text(value) : hidden;
+  const holdingSymbol = (holding: { symbol?: string | null; instrumentId: string }) =>
+    (holding.symbol ?? holding.instrumentId).trim();
+  const beginOrder = (
+    holding: { symbol?: string | null; instrumentId: string },
+    action: 'BUY' | 'SELL'
+  ) => {
+    const symbol = holdingSymbol(holding);
+    if (symbol) dispatch('order', { symbol, action });
+  };
 </script>
 
 <section class="portfolio" class:open use:orderListNavigation={keyboardMode}>
@@ -144,13 +157,29 @@
           {:else}
             <PortfolioAllocationChart holdings={account.holdings} {showValues} />
             <div class="table-wrap"><table>
-              <thead><tr><th>Instrument</th><th>Quantity</th><th>Average cost</th><th>Market price</th><th>Market value</th><th>Unrealized P/L</th></tr></thead>
+              <thead><tr><th>Instrument</th><th>Quantity</th><th>Average cost</th><th>Market price</th><th>Market value</th><th>Unrealized P/L</th><th>Trade</th></tr></thead>
               <tbody>{#each account.holdings as holding}
                 <tr>
                   <td><b>{text(holding.symbol ?? holding.instrumentId)}</b><small>{text(holding.exchange)} · {text(holding.assetType)}</small>{#if holdingStatus && holding.symbol}<div class="holding-extension"><svelte:component this={holdingStatus} symbol={holding.symbol} /></div>{/if}{#if extras(holding.attributes).length}<details class="broker-details"><summary>Details</summary><dl>{#each extras(holding.attributes) as [label, value]}<dt>{label}</dt><dd>{attributeValue(value, showValues)}</dd>{/each}</dl></details>{/if}</td>
                   <td>{quantity(holding.quantity, showValues)}</td>
                   <td>{money(holding.averageCost, holding.currency, showValues)}</td>
                   <LiveHoldingCells {holding} {showValues} />
+                  <td>
+                    <div class="holding-actions" aria-label={`Trade ${holdingSymbol(holding)}`}>
+                      <button
+                        class="trade buy-action"
+                        on:click={() => beginOrder(holding, 'BUY')}
+                        disabled={!holdingSymbol(holding)}
+                        aria-label={`Buy ${holdingSymbol(holding) || 'this holding'}`}
+                      >Buy</button>
+                      <button
+                        class="trade sell-action"
+                        on:click={() => beginOrder(holding, 'SELL')}
+                        disabled={!holdingSymbol(holding)}
+                        aria-label={`Sell ${holdingSymbol(holding) || 'this holding'}`}
+                      >Sell</button>
+                    </div>
+                  </td>
                 </tr>
               {/each}</tbody>
             </table></div>
@@ -188,7 +217,7 @@
 </section>
 
 <style>
-  [data-order-row]:focus-visible, input:focus-visible { outline:2px solid var(--primary); outline-offset:-2px; }
+  [data-order-row]:focus-visible, input:focus-visible, .trade:focus-visible { outline:2px solid var(--primary); outline-offset:2px; }
   .order-filter { display:flex; gap:.5rem; align-items:center; color:var(--text-2); font-size:.75rem; }
   .order-filter input { min-width:0; padding:.35rem; border:1px solid var(--border-md); background:var(--surface-2); color:var(--text); border-radius:4px; }
   .portfolio { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); margin-bottom:1.25rem; overflow:hidden; }
@@ -210,8 +239,15 @@
   .balance span,.unavailable span { color:var(--text-3); font-size:.68rem; }.balance b { color:var(--text); font-size:1rem; }.unavailable b { color:var(--warning); font-size:.75rem; }
   .account-section { display:flex; flex-direction:column; gap:.55rem; }.account-section h3 { display:flex; align-items:center; gap:.4rem; margin:0; color:var(--text); font-size:.78rem; }.account-section h3 span { color:var(--text-3); font-size:.67rem; font-weight:500; }
   .table-wrap { overflow-x:auto; border:1px solid var(--border); border-radius:var(--radius-sm); }
-  table { width:100%; border-collapse:collapse; min-width:760px; font-size:.7rem; } th { padding:.55rem .65rem; color:var(--text-3); text-align:left; font-weight:600; background:var(--surface-2); border-bottom:1px solid var(--border); } td { padding:.6rem .65rem; color:var(--text-2); border-bottom:1px solid var(--border); } tbody tr:last-child td { border-bottom:0; } td b { color:var(--text); } td small { display:block; margin-top:.18rem; color:var(--text-3); font-size:.62rem; }
+  table { width:100%; border-collapse:collapse; min-width:860px; font-size:.7rem; } th { padding:.55rem .65rem; color:var(--text-3); text-align:left; font-weight:600; background:var(--surface-2); border-bottom:1px solid var(--border); } td { padding:.6rem .65rem; color:var(--text-2); border-bottom:1px solid var(--border); } tbody tr:last-child td { border-bottom:0; } td b { color:var(--text); } td small { display:block; margin-top:.18rem; color:var(--text-3); font-size:.62rem; }
   .buy { color:var(--success)!important; }.sell { color:var(--danger)!important; }.empty { padding:.8rem; border:1px dashed var(--border); border-radius:var(--radius-sm); color:var(--text-3); font-size:.72rem; text-align:center; }
+  .holding-actions { display:flex; align-items:center; gap:.4rem; white-space:nowrap; }
+  .trade { min-width:3rem; min-height:2rem; padding:.35rem .55rem; border:1px solid var(--border-md); border-radius:var(--radius-sm); background:var(--surface-2); color:var(--text-2); font:inherit; font-weight:650; cursor:pointer; }
+  .trade:hover:not(:disabled) { background:var(--surface); border-color:var(--border-hover); }
+  .trade:active:not(:disabled) { opacity:.78; }
+  .trade:disabled { opacity:.45; cursor:not-allowed; }
+  .buy-action { color:var(--success); border-color:color-mix(in srgb,var(--success) 38%,var(--border)); }
+  .sell-action { color:var(--danger); border-color:color-mix(in srgb,var(--danger) 38%,var(--border)); }
   .holding-extension { margin-top:.3rem; }
   .broker-details { margin-top:.3rem; color:var(--text-3); font-size:.62rem; }.broker-details summary { cursor:pointer; color:var(--text-3); }.broker-details dl { display:grid; grid-template-columns:max-content 1fr; gap:.2rem .45rem; margin:.35rem 0 0; }.broker-details dt { color:var(--text-3); }.broker-details dd { margin:0; color:var(--text-2); overflow-wrap:anywhere; }
   @media (max-width:720px) { header { align-items:stretch; flex-direction:column; padding:0; }.header-actions { padding:0 .8rem .7rem; }.action { flex:1; justify-content:center; } }

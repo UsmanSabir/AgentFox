@@ -86,6 +86,7 @@
   // quick modal flow; the Order ticket panel remains available for traders who prefer a docked draft.
   // Separate state prevents the toolbar action from silently moving focus or replacing a panel draft.
   let newOrderDialogOpen = false;
+  let selectedOrderAction: 'BUY' | 'SELL' | null = null;
   let ticketDraftOpen = false;
   let ticket: OrderComposer;
   let orderDialogReturnFocus: HTMLElement | null = null;
@@ -348,6 +349,7 @@
 
   function openNewOrderDialog() {
     if (!newOrderDialogOpen) orderDialogReturnFocus = document.activeElement as HTMLElement;
+    selectedOrderAction = null;
     newOrderDialogOpen = true;
   }
   function closeNewOrderDialog() {
@@ -370,9 +372,13 @@
       else workspace?.focusPanel('ticket');
     });
   }
-  export function beginOrder(symbol:string) {
-    if (!newOrderDialogOpen) selectedSymbol = symbol;
-    openNewOrderDialog();
+  export function beginOrder(symbol:string, action: 'BUY' | 'SELL' | null = null) {
+    if (!newOrderDialogOpen) {
+      selectedSymbol = symbol;
+      selectedOrderAction = action;
+      orderDialogReturnFocus = document.activeElement as HTMLElement;
+    }
+    newOrderDialogOpen = true;
   }
   function refreshWatchlist() { if (workspace) void workspaceWatchlist?.refresh(); else void marketWorkspace?.refresh(); }
 
@@ -403,6 +409,7 @@
 {#if newOrderDialogOpen}
   <NewOrderDialog
     {selectedSymbol}
+    selectedAction={selectedOrderAction}
     on:changed={() => { load(); armedPanel?.load(); persistentPanel?.load(); }}
     on:close={closeNewOrderDialog}
   >
@@ -517,7 +524,8 @@
     </WorkspacePanel>
     <WorkspacePanel {workspace} id="portfolio">
     <div id="trading-portfolio" class="section-anchor">
-      <PortfolioPanel holdingStatus={symbolExtension?.holdingStatus ?? null} keyboardMode={!!workspace}/>
+      <PortfolioPanel holdingStatus={symbolExtension?.holdingStatus ?? null} keyboardMode={!!workspace}
+        on:order={event => beginOrder(event.detail.symbol, event.detail.action)}/>
     </div>
 
     </WorkspacePanel>
