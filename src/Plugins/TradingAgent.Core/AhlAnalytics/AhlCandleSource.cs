@@ -78,7 +78,7 @@ public sealed class AhlCandleSource
         {
             // Already oldest-first: the client reverses the portal's newest-first ordering once, at
             // its own boundary.
-            var bars = await _client.GetDailyCandlesAsync(symbol, ct);
+            var bars = await _client.GetDailyCandlesAsync(symbol, minimumCandles: sessions, ct: ct);
             if (bars.Count == 0) return [];
 
             var mapped = new List<PsxCandle>(Math.Min(bars.Count, sessions));
