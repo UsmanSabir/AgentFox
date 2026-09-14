@@ -32,6 +32,61 @@ public sealed class AhlDailyCandleCacheTests
     }
 
     [TestMethod]
+    public async Task FullHistoryContainingCurrentSessionExpiresAtRetryBoundary()
+    {
+        var clock = new TestClock();
+        var cache = new AhlDailyCandleCache(clock);
+        var loads = 0;
+        Task<IReadOnlyList<AhlCandle>> Load(CancellationToken _)
+        {
+            loads++;
+            return Task.FromResult<IReadOnlyList<AhlCandle>>(
+                Enumerable.Range(0, 260)
+                    .Select(i => Bar(i == 259 ? "2026-09-14 16:00:00" : "2026-09-11 16:00:00"))
+                    .ToList());
+        }
+
+        await cache.GetAsync("LIVE", TimeSpan.FromHours(12), Load, minimumCandles: 260);
+        clock.Now += AhlDailyCandleCache.ShortHistoryRetryAfter - TimeSpan.FromSeconds(1);
+        await cache.GetAsync("LIVE", TimeSpan.FromHours(12), Load, minimumCandles: 260);
+        Assert.AreEqual(1, loads, "A forming daily response still coalesces nearby reads.");
+
+        clock.Now += TimeSpan.FromSeconds(1);
+        await cache.GetAsync("LIVE", TimeSpan.FromHours(12), Load, minimumCandles: 260);
+        Assert.AreEqual(2, loads, "Today's forming bar must not stay frozen for twelve hours.");
+    }
+
+    [TestMethod]
+    public async Task FullSettledHistoryKeepsConfiguredTtl()
+    {
+        var clock = new TestClock();
+        var cache = new AhlDailyCandleCache(clock);
+        var loads = 0;
+        Task<IReadOnlyList<AhlCandle>> Load(CancellationToken _)
+        {
+            loads++;
+            return Task.FromResult<IReadOnlyList<AhlCandle>>(
+                Enumerable.Range(0, 260).Select(_ => Bar("2026-09-11 16:00:00")).ToList());
+        }
+
+        await cache.GetAsync("SETTLED", TimeSpan.FromHours(12), Load, minimumCandles: 260);
+        clock.Now += TimeSpan.FromHours(1);
+        await cache.GetAsync("SETTLED", TimeSpan.FromHours(12), Load, minimumCandles: 260);
+
+        Assert.AreEqual(1, loads, "Only a forming or short series gets the shortened TTL.");
+    }
+
+    [TestMethod]
+    public void PktSessionDateUsesTheExchangeDateRatherThanTheUtcDate()
+    {
+        var beforePktMidnight = new DateTimeOffset(2026, 9, 14, 18, 59, 59, TimeSpan.Zero);
+        var afterPktMidnight = beforePktMidnight.AddSeconds(1);
+
+        Assert.AreEqual(new DateOnly(2026, 9, 14), AhlCandleSource.PktSessionDate(beforePktMidnight));
+        Assert.AreEqual(new DateOnly(2026, 9, 15), AhlCandleSource.PktSessionDate(afterPktMidnight));
+    }
+
+    [TestMethod]
     public async Task ShortHistoryNeverExtendsAShorterConfiguredTtl()
     {
         var clock = new TestClock();
@@ -109,9 +164,9 @@ public sealed class AhlDailyCandleCacheTests
         Assert.AreEqual(2, loads, "A transient empty/rate-limited result must recover on the next read.");
     }
 
-    private static AhlCandle Bar() => new()
+    private static AhlCandle Bar(string date = "2026-08-20 16:00:00") => new()
     {
-        Date = "2026-08-20 16:00:00",
+        Date = date,
         Open = 100m,
         High = 105m,
         Low = 99m,

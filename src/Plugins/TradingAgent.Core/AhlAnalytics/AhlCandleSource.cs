@@ -40,11 +40,16 @@ public sealed class AhlCandleSource
 {
     private readonly AhlAnalyticsClient _client;
     private readonly ILogger<AhlCandleSource> _logger;
+    private readonly TimeProvider _clock;
 
-    public AhlCandleSource(AhlAnalyticsClient client, ILogger<AhlCandleSource> logger)
+    public AhlCandleSource(
+        AhlAnalyticsClient client,
+        ILogger<AhlCandleSource> logger,
+        TimeProvider? clock = null)
     {
         _client = client;
         _logger = logger;
+        _clock = clock ?? TimeProvider.System;
     }
 
     /// <summary>Configured on, per <c>Plugins:AhlAnalytics:Enabled</c>.</summary>
@@ -81,6 +86,7 @@ public sealed class AhlCandleSource
             var bars = await _client.GetDailyCandlesAsync(symbol, minimumCandles: sessions, ct: ct);
             if (bars.Count == 0) return [];
 
+            var currentPktSession = PktSessionDate(_clock.GetUtcNow());
             var mapped = new List<PsxCandle>(Math.Min(bars.Count, sessions));
             foreach (var bar in bars)
             {
@@ -103,7 +109,9 @@ public sealed class AhlCandleSource
                     // disagree with the exchange's own figure.
                     PreviousClose = null,
                     Volume = bar.Volume,
-                    IsLive = false
+                    // AHL includes the forming session in the daily endpoint. Calling it settled is
+                    // what let an early snapshot enter durable history and remain there all day.
+                    IsLive = date == currentPktSession
                 });
             }
 
@@ -136,4 +144,8 @@ public sealed class AhlCandleSource
             timestamp[..10], "yyyy-MM-dd", CultureInfo.InvariantCulture,
             DateTimeStyles.None, out var date) ? date : null;
     }
+
+    /// <summary>Pakistan has no daylight-saving transition; PSX session dates are UTC+05:00.</summary>
+    internal static DateOnly PktSessionDate(DateTimeOffset utcNow) =>
+        DateOnly.FromDateTime(utcNow.UtcDateTime.AddHours(5));
 }

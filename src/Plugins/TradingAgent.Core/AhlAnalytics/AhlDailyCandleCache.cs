@@ -49,9 +49,12 @@ internal sealed class AhlDailyCandleCache
     {
         if (_entries.TryGetValue(symbol, out var entry))
         {
-            // A short response is not proof of listing age. Bound retries for callers asking for
-            // deeper history without changing the normal TTL or bypassing single-flight loading.
-            if (entry.Candles.Count < minimumCandles && ttl > ShortHistoryRetryAfter)
+            // A short response is not proof of listing age, and a response containing today's bar
+            // is not settled history even when its COUNT is complete. Bound retries for both cases
+            // without bypassing single-flight loading. Otherwise an early, zero-range daily bar can
+            // remain the scanner's answer for the full twelve-hour cache lifetime.
+            if ((entry.Candles.Count < minimumCandles || ContainsCurrentPktSession(entry.Candles))
+                && ttl > ShortHistoryRetryAfter)
                 ttl = ShortHistoryRetryAfter;
             if (_clock.GetUtcNow() - entry.StoredAt < ttl)
             {
@@ -62,6 +65,17 @@ internal sealed class AhlDailyCandleCache
 
         candles = [];
         return false;
+    }
+
+    private bool ContainsCurrentPktSession(IReadOnlyList<AhlCandle> candles)
+    {
+        var today = AhlCandleSource.PktSessionDate(_clock.GetUtcNow());
+        return candles.Any(candle =>
+            candle.Date is { Length: >= 10 } stamp
+            && DateOnly.TryParseExact(
+                stamp[..10], "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.None, out var date)
+            && date == today);
     }
 
     private sealed record Entry(DateTimeOffset StoredAt, IReadOnlyList<AhlCandle> Candles);
