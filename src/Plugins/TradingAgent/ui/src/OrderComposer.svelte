@@ -12,6 +12,12 @@
   import { livePriceLabel, useLivePrices } from './livePrices';
 
   export let selectedSymbol: string | null = null;
+  /**
+   * Optional side requested by a nearby trading affordance, such as a portfolio-row Buy/Sell
+   * button. The server-owned registry still decides which concrete instruction represents that
+   * side; taking the first matching entry preserves its ordering as the source of truth.
+   */
+  export let selectedAction: 'BUY' | 'SELL' | null = null;
   export let docked = false;
 
   const dispatch = createEventDispatcher<{ close: void; changed: void; attention: void }>();
@@ -155,6 +161,10 @@
       ]);
       if (intentResult.status === 'rejected') throw intentResult.reason;
       registry = intentResult.value;
+      if (selectedAction) {
+        const initialIntent = registry.intents.find(item => item.action === selectedAction);
+        if (initialIntent) choose(initialIntent);
+      }
       if (watchlistResult.status === 'fulfilled') {
         symbols = watchlistResult.value.entries.filter(entry => entry.tradable);
         if (!symbol) symbol = symbols[0]?.symbol ?? '';

@@ -430,10 +430,12 @@ the audit trail.
 
 Add the following sections to `appsettings.json`.
 
-### 1. Enable the webhook module
+### 1. The webhook module
+
+Nothing to enable — every discovered module runs by default. Turn one OFF with `DisabledModules`:
 
 ```json
-"Modules": "cli,web,webhook"
+"DisabledModules": "webhook"
 ```
 
 ### 2. Plugin settings

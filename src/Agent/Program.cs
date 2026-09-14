@@ -459,19 +459,41 @@ class Program
         }
 
         // ── Load modules ──────────────────────────────────────────────────────
-        // All discovered modules (built-in + plugins) are ENABLED BY DEFAULT. Opt OUT specific
-        // ones with a "DisabledModules" CSV (e.g. "web,webhook"). The legacy opt-in "Modules"
-        // key is still honored for back-compat: if present, ONLY those are enabled.
+        // All discovered modules (built-in + plugins) are ENABLED BY DEFAULT. Opt OUT specific ones
+        // with a "DisabledModules" CSV (e.g. "web,webhook"). There is exactly one mechanism.
+        //
+        // The legacy opt-IN "Modules" CSV is GONE. It could not do the job it was being asked to do:
+        // when present it meant "only these run", and a list written before a plugin existed cannot
+        // name that plugin — so a correctly installed plugin module was discovered, skipped before
+        // RegisterServices/MapEndpoints/GetPages, and reported only on the console. The premium
+        // edition's PSX planner page was missing from every release-installed deployment for exactly
+        // this reason, and no amount of shipping the right plugin could fix it from the plugin side.
+        //
+        // An opt-out list does not have that failure mode: a name it has never heard of runs.
         var disabledModules = (configuration["DisabledModules"] ?? string.Empty)
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var legacyEnabledModules = configuration["Modules"]?
-            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        bool IsModuleEnabled(string name) => legacyEnabledModules is { Count: > 0 }
-            ? legacyEnabledModules.Contains(name)
-            : !disabledModules.Contains(name);
+        bool IsModuleEnabled(string name) => !disabledModules.Contains(name);
+
+        // A host that still carries the old key would otherwise change behaviour SILENTLY, and in the
+        // permissive direction: everything the list used to hold back now runs. Say so, name what is
+        // newly running, and give the one-line translation — a startup this changes must not be a
+        // startup that looks identical.
+        var legacyModulesKey = configuration["Modules"];
+        if (!string.IsNullOrWhiteSpace(legacyModulesKey))
+        {
+            var wereListed = legacyModulesKey
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            AnsiConsole.MarkupLineInterpolated(
+                $"[yellow]⚠ The \"Modules\" setting is no longer read[/] [dim](it was an opt-IN list and could never name a plugin newer than itself).[/]");
+            AnsiConsole.MarkupLineInterpolated(
+                $"[dim]  Everything discovered now runs unless \"DisabledModules\" names it. To keep the old set, list the rest there instead.[/]");
+            AnsiConsole.MarkupLineInterpolated(
+                $"[dim]  It named: {string.Join(", ", wereListed)}[/]");
+        }
 
         bool requiresWeb   = IsModuleEnabled("api") || IsModuleEnabled("web");
         var pluginDiscovery = LoadPluginsAndModules(builder);
@@ -501,14 +523,11 @@ class Program
         // A plugin module that is explicitly disabled is skipped on purpose; tell the user so a
         // dropped-in plugin that does nothing isn't a mystery.
         var hostAssembly = typeof(Program).Assembly;
-        var enableHint = legacyEnabledModules is { Count: > 0 }
-            ? "remove it from \"DisabledModules\" or add it to \"Modules\""
-            : "remove it from \"DisabledModules\"";
         foreach (var module in modules.Where(m =>
                      m.GetType().Assembly != hostAssembly && !IsModuleEnabled(m.Name)))
         {
             AnsiConsole.MarkupLineInterpolated(
-                $"[yellow]⚠ Plugin module '{module.Name}' is disabled[/] [dim]({enableHint} to enable).[/]");
+                $"[yellow]⚠ Plugin module '{module.Name}' is disabled[/] [dim](remove it from \"DisabledModules\" to enable).[/]");
         }
 
         // NOTE: Plugin tools are NOT registered into DI here. Nothing resolves IEnumerable<ITool>

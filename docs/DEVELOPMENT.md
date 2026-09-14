@@ -184,10 +184,15 @@ agent.WithHybridMemory(shortTermSize: 50, longTermPath: "memory.json");
 
 ### Modules & Plugins
 
-Modules are enabled through `appsettings.json`. All discovered modules (built-in + plugins) are
-enabled by default; opt out specific ones with a `DisabledModules` CSV (e.g. `"web,webhook"`).
-The legacy opt-in `Modules` key is still honored: if present, ONLY the listed modules are enabled
-(e.g. `"Modules": "cli,web,trading-agent"`).
+All discovered modules (built-in + plugins) are enabled by default. Opt OUT specific ones with a
+`DisabledModules` CSV in `appsettings.json` (e.g. `"DisabledModules": "web,webhook"`). That is the
+only mechanism.
+
+The old opt-IN `Modules` key is no longer read. It meant "only these run", and a list written before
+a plugin existed can never name that plugin — so a correctly installed plugin module was discovered,
+silently skipped, and the only notice went to the console. A host that still carries the key warns at
+startup and is otherwise unaffected; translate it by listing what you wanted OFF in `DisabledModules`
+instead.
 
 Plugins are discovered from the `plugins/` folder next to the AgentFox binary. Copy each plugin's
 entire publish output (DLL + `.deps.json` + dependencies) into its own subfolder — e.g.

@@ -160,6 +160,6 @@ Run it:
     cd "$out"
     .\AgentFox.exe
 
-Plugins load only when named in the "Modules" config value, e.g.:
-    `$env:Modules = "web,trading-agent"
+Plugins load automatically from plugins/. Turn one off with DisabledModules, e.g.:
+    `$env:DisabledModules = "webhook"
 "@
