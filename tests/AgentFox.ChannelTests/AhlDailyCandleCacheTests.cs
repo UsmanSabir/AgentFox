@@ -6,6 +6,55 @@ namespace AgentFox.ChannelTests;
 public sealed class AhlDailyCandleCacheTests
 {
     [TestMethod]
+    public async Task ShortResponseExpiresAtRetryBoundary_AndCanRecoverToFullDepth()
+    {
+        var clock = new TestClock();
+        var cache = new AhlDailyCandleCache(clock);
+        var loads = 0;
+        Task<IReadOnlyList<AhlCandle>> Load(CancellationToken _)
+        {
+            loads++;
+            return Task.FromResult<IReadOnlyList<AhlCandle>>(
+                Enumerable.Range(0, loads == 1 ? 14 : 260).Select(_ => Bar()).ToList());
+        }
+
+        await cache.GetAsync("NEW", TimeSpan.FromHours(12), Load, minimumCandles: 260);
+        clock.Now += AhlDailyCandleCache.ShortHistoryRetryAfter - TimeSpan.FromSeconds(1);
+        await cache.GetAsync("NEW", TimeSpan.FromHours(12), Load, minimumCandles: 260);
+        Assert.AreEqual(1, loads);
+        clock.Now += TimeSpan.FromSeconds(1);
+        var recovered = await cache.GetAsync("NEW", TimeSpan.FromHours(12), Load, minimumCandles: 260);
+        Assert.AreEqual(2, loads);
+        Assert.AreEqual(260, recovered.Count);
+        clock.Now += TimeSpan.FromHours(1);
+        await cache.GetAsync("NEW", TimeSpan.FromHours(12), Load, minimumCandles: 260);
+        Assert.AreEqual(2, loads, "Full history keeps the configured TTL.");
+    }
+
+    [TestMethod]
+    public async Task ShortHistoryNeverExtendsAShorterConfiguredTtl()
+    {
+        var clock = new TestClock();
+        var cache = new AhlDailyCandleCache(clock);
+        var loads = 0;
+        Task<IReadOnlyList<AhlCandle>> Load(CancellationToken _)
+        {
+            loads++;
+            return Task.FromResult<IReadOnlyList<AhlCandle>>([Bar()]);
+        }
+        await cache.GetAsync("NEW", TimeSpan.FromMinutes(1), Load, minimumCandles: 260);
+        clock.Now += TimeSpan.FromMinutes(1);
+        await cache.GetAsync("NEW", TimeSpan.FromMinutes(1), Load, minimumCandles: 260);
+        Assert.AreEqual(2, loads);
+    }
+
+    private sealed class TestClock : TimeProvider
+    {
+        public DateTimeOffset Now { get; set; } = new(2026, 9, 14, 5, 0, 0, TimeSpan.Zero);
+        public override DateTimeOffset GetUtcNow() => Now;
+    }
+
+    [TestMethod]
     public async Task RepeatedSymbolRead_UsesOnePortalLoad()
     {
         var cache = new AhlDailyCandleCache();

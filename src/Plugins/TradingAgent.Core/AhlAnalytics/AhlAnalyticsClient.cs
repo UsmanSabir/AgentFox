@@ -646,8 +646,16 @@ public sealed class AhlAnalyticsClient : IDisposable
     /// reconstruct what a trade actually cost. Fractional-paisa closes are the adjustment fingerprint.
     /// </para>
     /// </summary>
+    public Task<IReadOnlyList<AhlCandle>> GetDailyCandlesAsync(
+        string symbol, CancellationToken ct = default) => GetDailyCandlesAsync(symbol, 0, ct);
+
+    /// <summary>
+    /// Daily candles with a requested depth. Cached shorter responses become eligible for a retry
+    /// after 15 minutes (or the configured TTL, if shorter), not the default 12 hours.
+    /// The depth is not a promise that pre-listing history exists.
+    /// </summary>
     public async Task<IReadOnlyList<AhlCandle>> GetDailyCandlesAsync(
-        string symbol, CancellationToken ct = default)
+        string symbol, int minimumCandles, CancellationToken ct = default)
     {
         var normalized = symbol.Trim().ToUpperInvariant();
         var ttl = TimeSpan.FromMinutes(Math.Max(1, Config.DailyCandleCacheMinutes));
@@ -663,7 +671,7 @@ public sealed class AhlAnalyticsClient : IDisposable
             var response = await GetJsonAsync<AhlCandleResponse>(
                 $"api/v3/market?path=/daily/{Uri.EscapeDataString(normalized)}", token);
             return Reverse(response?.Data);
-        }, ct);
+        }, ct, minimumCandles);
     }
 
     /// <summary>

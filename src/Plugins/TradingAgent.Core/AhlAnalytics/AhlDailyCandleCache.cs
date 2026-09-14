@@ -8,6 +8,11 @@ namespace TradingAgent.AhlAnalytics;
 /// </summary>
 internal sealed class AhlDailyCandleCache
 {
+    internal static readonly TimeSpan ShortHistoryRetryAfter = TimeSpan.FromMinutes(15);
+    private readonly TimeProvider _clock;
+
+    public AhlDailyCandleCache(TimeProvider? clock = null) => _clock = clock ?? TimeProvider.System;
+
     private readonly ConcurrentDictionary<string, Entry> _entries =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _gates =
@@ -17,20 +22,21 @@ internal sealed class AhlDailyCandleCache
         string symbol,
         TimeSpan ttl,
         Func<CancellationToken, Task<IReadOnlyList<AhlCandle>>> loader,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        int minimumCandles = 0)
     {
-        if (TryGetFresh(symbol, ttl, out var cached)) return cached;
+        if (TryGetFresh(symbol, ttl, minimumCandles, out var cached)) return cached;
 
         var gate = _gates.GetOrAdd(symbol, static _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(ct);
         try
         {
-            if (TryGetFresh(symbol, ttl, out cached)) return cached;
+            if (TryGetFresh(symbol, ttl, minimumCandles, out cached)) return cached;
 
             var loaded = await loader(ct);
             // Never cache an outage or a rate-limit response masquerading as an empty series.
             if (loaded.Count > 0)
-                _entries[symbol] = new Entry(DateTimeOffset.UtcNow, loaded);
+                _entries[symbol] = new Entry(_clock.GetUtcNow(), loaded);
             return loaded;
         }
         finally
@@ -39,13 +45,19 @@ internal sealed class AhlDailyCandleCache
         }
     }
 
-    private bool TryGetFresh(string symbol, TimeSpan ttl, out IReadOnlyList<AhlCandle> candles)
+    private bool TryGetFresh(string symbol, TimeSpan ttl, int minimumCandles, out IReadOnlyList<AhlCandle> candles)
     {
-        if (_entries.TryGetValue(symbol, out var entry)
-            && DateTimeOffset.UtcNow - entry.StoredAt < ttl)
+        if (_entries.TryGetValue(symbol, out var entry))
         {
-            candles = entry.Candles;
-            return true;
+            // A short response is not proof of listing age. Bound retries for callers asking for
+            // deeper history without changing the normal TTL or bypassing single-flight loading.
+            if (entry.Candles.Count < minimumCandles && ttl > ShortHistoryRetryAfter)
+                ttl = ShortHistoryRetryAfter;
+            if (_clock.GetUtcNow() - entry.StoredAt < ttl)
+            {
+                candles = entry.Candles;
+                return true;
+            }
         }
 
         candles = [];
