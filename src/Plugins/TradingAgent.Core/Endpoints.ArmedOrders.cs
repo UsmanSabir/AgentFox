@@ -201,6 +201,18 @@ public sealed partial class TradingCoreEndpoints
                 alertKind = parsed;
                 triggerLevel = null;
             }
+            else if (kind == ArmedTriggerKind.Scheduled)
+            {
+                // The date is the entire condition, so there is nothing else to validate here — and
+                // nothing else may be stored. The rules are in ScheduledOrderRule so they can be
+                // tabled rather than reached only through a broker, a universe and a database.
+                if (ScheduledOrderRule.ValidateScheduledRequest(
+                        body.ActiveFromDate, body.TriggerPrice, body.TriggerPercent,
+                        body.TriggerAlertKind) is { } problem)
+                    return Results.BadRequest(new { error = problem.Code, message = problem.Message });
+
+                triggerLevel = null;
+            }
             else if (PercentTrigger.IsPercent(kind))
             {
                 // A percent trigger is "if it drops 3%", which needs a size of move and a price to
@@ -262,6 +274,24 @@ public sealed partial class TradingCoreEndpoints
                     message = "A price trigger needs a positive level."
                 });
             }
+
+            // ── When this order becomes active, and when it gives up ──────────────────────────
+            //
+            // Both bounds come from ScheduledOrderRule, which owns the PKT conversion, the default
+            // expiry's anchor and the ordering check as pure, tabled rules.
+            //
+            // Note what is deliberately NOT checked: whether the date is a TRADING day.
+            // IMarketCalendar.IsTradingDay reads a configured holiday list that ships EMPTY, so such a
+            // refusal would catch weekends and nothing else — arm-time protection that looks real and
+            // mostly is not. The order goes to the broker and the venue decides, which is how every
+            // other order in this system already behaves; a date the exchange is shut on simply waits
+            // for the open that follows it.
+            var window = ScheduledOrderRule.Resolve(
+                body.ActiveFromDate, body.ExpiresUtc, body.ExpiresInDays,
+                PsxTime.Today(), DateTime.UtcNow);
+
+            if (!window.Ok)
+                return Results.BadRequest(new { error = window.ErrorCode, message = window.Message });
 
             // Refuse up front rather than at fire time. An armed order for a non-tradable symbol would
             // sit there looking like protection and be rejected by the risk engine the moment it
@@ -332,9 +362,10 @@ public sealed partial class TradingCoreEndpoints
                 // manual-only symbol — see ArmedOrder.OperatorOriginated.
                 OperatorOriginated = true,
                 // Default an expiry: an entry trigger left open indefinitely can fire months later
-                // against a thesis nobody remembers forming.
-                ExpiresUtc       = body.ExpiresUtc
-                                   ?? DateTime.UtcNow.AddDays(Math.Clamp(body.ExpiresInDays ?? 30, 1, 365)),
+                // against a thesis nobody remembers forming. Resolved above, because a scheduled
+                // order's default is measured from its activation date rather than from now.
+                ExpiresUtc       = window.ExpiresUtc,
+                ActiveFromUtc    = window.ActiveFromUtc,
                 Note             = body.Note,
                 SourceAlertId    = body.SourceAlertId
             };

@@ -101,6 +101,18 @@ public sealed class TradingRetentionWorker : BackgroundService
                         "[Retention] Pruned {Count} reconciliation snapshot(s) older than {Days} days.",
                         removed, reconciliationDays);
             }
+
+            var armedOrderDays = _options.Value.ArmedOrderRetentionDays;
+            if (armedOrderDays > 0)
+            {
+                var removed = await _repository.PruneArmedOrdersAsync(
+                    DateTime.UtcNow.AddDays(-armedOrderDays), ct);
+                if (removed > 0)
+                    _logger.LogInformation(
+                        "[Retention] Pruned {Count} finished armed order(s) older than {Days} days. "
+                        + "Orders still armed are standing instructions and are never pruned by age.",
+                        removed, armedOrderDays);
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

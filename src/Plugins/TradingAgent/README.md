@@ -773,7 +773,7 @@ immediately never rests, and treating its absence there as "never placed" would 
 
 ---
 
-## Armed orders — an order waiting on a level or an event
+## Armed orders — an order waiting on a level, an event or a date
 
 An armed order is a **trigger plus an order**, evaluated by the monitor pass:
 
@@ -781,16 +781,54 @@ An armed order is a **trigger plus an order**, evaluated by the monitor pass:
 | --- | --- |
 | `PriceBelow` | last price reaches or falls below the level — a protective exit |
 | `PriceAbove` | last price reaches or rises above it — a breakout entry |
+| `PercentDrop` | the price has fallen N% from a reference; with `trailing`, a trailing stop |
+| `PercentRise` | the mirror of the above; with `trailing`, it chases a falling market down |
 | `Event` | the monitor raises a given `AlertKind` for that symbol (bounce, break, trend flip) |
+| `Scheduled` | `activeFromDate` arrives and the market is open — the date is the whole condition |
 
 ```
 POST   /api/trading/armed-orders    { symbol, action, quantity, triggerKind, triggerPrice |
-                                      triggerAlertKind, orderType, price, limitPrice, expiresInDays }
+                                      triggerAlertKind, orderType, price, limitPrice, expiresInDays,
+                                      activeFromDate }
 GET    /api/trading/armed-orders?all=false
 DELETE /api/trading/armed-orders/{id}                      → disarm
 POST   /api/trading/approval/arm    { minutes }             → suspend confirmation (RiskManager)
 POST   /api/trading/approval/disarm
 ```
+
+### Scheduling one for a date
+
+`activeFromDate` (a PSX calendar date, `YYYY-MM-DD`) is a **lower** time bound: nothing fires before
+it. It is orthogonal to the trigger kind, which is what makes both shapes of "on the 22nd" one field
+rather than two features:
+
+| What the operator wants | `triggerKind` | `activeFromDate` |
+| --- | --- | --- |
+| "BUY 100 ABC at 45 LIMIT on 22-09-2026" | `Scheduled` | `2026-09-22` |
+| "…and only if it is below 42 that day" | `PriceBelow` + `triggerPrice: 42` | `2026-09-22` |
+| "buy it if it falls to 42" (unchanged) | `PriceBelow` | omitted |
+
+Four things about it are deliberate:
+
+- **`Scheduled` carries its own market gate, and the other kinds do not need one.** Every other
+  trigger is protected from a closed venue by accident: there is no live price while the market is
+  shut, so the evaluator declines. A scheduled order has no price to decline on, and PSX does not
+  reject an order placed while the board is shut — it *keeps* it and sends it at the next open. So
+  without the gate an unattended timer would place a Saturday order into Monday's opening auction.
+- **The date is resolved in PKT**, at that date's midnight, and the market gate holds the order to the
+  session. The monitor runs a pass at the open as an `IMarketSessionOpenParticipant`, so the opening
+  pass is the first one that can fire it.
+- **A holiday is NOT refused at arm time.** `IMarketCalendar.IsTradingDay` reads a holiday list that
+  ships empty, so such a check would catch weekends and nothing else — an arm-time refusal that looks
+  like protection and mostly is not. The order goes to the broker and the venue decides, which is how
+  every other order here behaves; a date the exchange is shut on simply waits for the next open.
+- **The default expiry is measured from ACTIVATION, not from now.** "Expires in 30 days" is how long
+  to keep trying, and measuring it from today would spend the whole allowance waiting — an order
+  scheduled two months out would expire before it ever became active. An explicit `expiresUtc` is
+  taken as sent, and refused if it falls before activation.
+
+A scheduled order passes the kill switch, approval, holdings, reconciliation and risk checks **when it
+fires**, not when it is armed. Nothing about a date exempts it from the three layers below.
 
 **Prefer the broker's native stop where one fits.** It rests at the exchange and fires whether or not
 this process is running; an armed order only fires while AgentFox is up *and* the market is open. The
@@ -810,7 +848,13 @@ Safety properties, each deliberate:
   disarm a protective stop, but a submission that threw is genuinely ambiguous about whether it
   reached the broker, so reconciliation owns that rather than a retry.
 - **Expiry outranks the condition**, and one is defaulted (30 days) — an entry trigger left open
-  indefinitely can fire months later against a thesis nobody remembers forming.
+  indefinitely can fire months later against a thesis nobody remembers forming. It also outranks the
+  *activation* date: an order that is somehow both expired and not yet active reports the expiry,
+  because a terminal fact beats a future one.
+- **Retention never removes an ARMED row.** `ArmedOrderRetentionDays` (90) sweeps orders that reached
+  a terminal state — fired, cancelled, expired, failed. An order still armed is a live standing
+  instruction, and one carrying an activation date can legitimately sit armed for months before it is
+  due; expiring it on a retention timer would cancel it silently.
 
 ### Arming one from the UI
 

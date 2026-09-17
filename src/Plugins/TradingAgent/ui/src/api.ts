@@ -706,7 +706,17 @@ async function waitForAssessment<T>(jobId: string): Promise<T> {
 export const TRIGGER_KINDS = [
   'PercentDrop', 'PercentRise', 'PriceBelow', 'PriceAbove', 'Event'
 ] as const;
-export type TriggerKind = (typeof TRIGGER_KINDS)[number];
+
+/**
+ * `Scheduled` is a real trigger kind but is deliberately NOT in the list above, which is what the
+ * trigger picker renders. An order fires on its date alone when the operator schedules one without
+ * adding a price condition — "when should this happen" and "what has to be true" are different
+ * questions, and only the second belongs in a list of triggers. The dialog picks the kind for them.
+ */
+export type TriggerKind = (typeof TRIGGER_KINDS)[number] | 'Scheduled';
+
+/** A scheduled order's date IS its condition, so it carries no level and no alert kind. */
+export const isScheduledTrigger = (kind: TriggerKind | string) => kind === 'Scheduled';
 
 /** Percent triggers measure a move; the others wait at a fixed level or on an event. */
 export const isPercentTrigger = (kind: TriggerKind | string) =>
@@ -761,6 +771,12 @@ export interface ArmedOrder {
   state: 'armed' | 'firing' | 'fired' | 'cancelled' | 'expired' | 'failed' | string;
   armedUtc: string;
   expiresUtc: string | null;
+  /**
+   * Nothing fires before this instant. `null` is the ordinary case — active from the moment it was
+   * armed. An order with a future value here is armed but not yet watching, which is a different
+   * thing from armed-and-waiting and has to read differently on screen.
+   */
+  activeFromUtc: string | null;
   firedUtc: string | null;
   executionId: string | null;
   stateReason: string | null;
@@ -847,6 +863,16 @@ export interface ArmOrderRequest {
   trailing?: boolean;
   /** After the trigger, keep re-placing a LIMIT/STOPLOSS each trading day until filled or expired. */
   persistentUntilFilled?: boolean;
+
+  /**
+   * A PSX calendar date (`YYYY-MM-DD`) before which this order does nothing — "buy ABC on the 22nd".
+   * Orthogonal to `triggerKind`: with `Scheduled` the date is the whole condition, and with a price
+   * kind it postpones when that price starts being watched. Omitted, the order is active at once.
+   *
+   * Sent as a plain date string, never a `Date`: the server resolves it in PKT, and serialising a
+   * browser's local midnight would arm the order on the wrong day for anyone outside Pakistan.
+   */
+  activeFromDate?: string | null;
 }
 
 /** A protective stop to attach to a BUY entry. Sized at fill time, not here. */

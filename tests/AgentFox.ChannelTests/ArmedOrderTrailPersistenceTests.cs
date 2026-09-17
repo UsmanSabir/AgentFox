@@ -85,6 +85,95 @@ public sealed class ArmedOrderTrailPersistenceTests
         Assert.IsFalse(legacy.OperatorOriginated,
             "Origination is claimed, never inferred: a migrated row must not be promoted to \"the "
             + "operator armed this\", which is what lets an order fire on a manual-only symbol.");
+        Assert.IsNull(legacy.ActiveFromUtc,
+            "A row written before activation dates existed is active NOW, exactly as it always was. "
+            + "A migration that gave it a date would postpone a live standing instruction.");
+    }
+
+    // ── Activation date ───────────────────────────────────────────────────────
+
+    [TestMethod]
+    public async Task AScheduledOrder_RoundTripsItsKindAndItsDate()
+    {
+        var repository = NewRepository();
+        await repository.SaveArmedOrderAsync(Scheduled());
+
+        var stored = (await repository.GetArmedOrdersAsync()).Single(o => o.ArmedId == "sched1");
+
+        Assert.AreEqual(ArmedTriggerKind.Scheduled, stored.TriggerKind);
+        Assert.AreEqual(
+            new DateTime(2026, 9, 21, 19, 0, 0, DateTimeKind.Utc), stored.ActiveFromUtc,
+            "The instant must survive exactly: it is 22-09 PKT midnight, and a round trip that "
+            + "shifted it by hours would move the order to a different trading day.");
+        Assert.IsNull(stored.TriggerPrice, "A scheduled order has no level.");
+    }
+
+    [TestMethod]
+    public async Task APriceTriggerCanCarryAnActivationDate()
+    {
+        // The conditional half: the date and the trigger kind are orthogonal, and storage must not
+        // quietly couple them by, say, only persisting the date for scheduled orders.
+        var repository = NewRepository();
+        await repository.SaveArmedOrderAsync(Scheduled() with
+        {
+            ArmedId      = "sched2",
+            TriggerKind  = ArmedTriggerKind.PriceBelow,
+            TriggerPrice = 95m
+        });
+
+        var stored = (await repository.GetArmedOrdersAsync()).Single(o => o.ArmedId == "sched2");
+
+        Assert.AreEqual(ArmedTriggerKind.PriceBelow, stored.TriggerKind);
+        Assert.AreEqual(95m, stored.TriggerPrice);
+        Assert.AreEqual(
+            new DateTime(2026, 9, 21, 19, 0, 0, DateTimeKind.Utc), stored.ActiveFromUtc);
+    }
+
+    [TestMethod]
+    public async Task AnOrdinaryOrder_StoresNoActivationDate()
+    {
+        var repository = NewRepository();
+        await repository.SaveArmedOrderAsync(TrailingDrop());
+
+        var stored = (await repository.GetArmedOrdersAsync()).Single(o => o.ArmedId == "trail1");
+
+        Assert.IsNull(stored.ActiveFromUtc,
+            "Null is the ordinary case and must stay distinguishable from a date — the evaluator "
+            + "reads null as \"active now\".");
+    }
+
+    // ── Retention ─────────────────────────────────────────────────────────────
+
+    [TestMethod]
+    public async Task TheSweep_RemovesFinishedOrdersAndNeverArmedOnes()
+    {
+        // The asymmetry IS the rule. An armed row is a live standing instruction — pruning one would
+        // cancel an order the operator is relying on, silently — and an order carrying an activation
+        // date can legitimately sit armed for months before it is due.
+        var repository = NewRepository();
+        var longAgo = DateTime.UtcNow.AddDays(-400);
+
+        await repository.SaveArmedOrderAsync(TrailingDrop() with
+        {
+            ArmedId = "old-armed", ArmedUtc = longAgo
+        });
+        await repository.SaveArmedOrderAsync(TrailingDrop() with
+        {
+            ArmedId = "old-fired", ArmedUtc = longAgo, State = "fired"
+        });
+        await repository.SaveArmedOrderAsync(TrailingDrop() with
+        {
+            ArmedId = "recent-fired", State = "fired"
+        });
+
+        var removed = await repository.PruneArmedOrdersAsync(DateTime.UtcNow.AddDays(-90));
+
+        Assert.AreEqual(1, removed);
+        var remaining = (await repository.GetArmedOrdersAsync(armedOnly: false))
+            .Select(o => o.ArmedId).ToHashSet();
+        CollectionAssert.AreEquivalent(
+            new[] { "old-armed", "recent-fired" }, remaining.ToArray(),
+            "Only the OLD terminal row goes. A 400-day-old armed order stays armed.");
     }
 
     [TestMethod]
@@ -214,6 +303,23 @@ public sealed class ArmedOrderTrailPersistenceTests
         Quantity       = 500,
         OrderType      = "MARKET",
         Note           = "trailing stop"
+    };
+
+    /// <summary>
+    /// A scheduled order as the arm endpoint builds one: no level, no percentage, and an activation
+    /// instant that is 2026-09-22 midnight in Pakistan (UTC+5, no DST) — i.e. 2026-09-21T19:00Z.
+    /// </summary>
+    private static ArmedOrder Scheduled() => new()
+    {
+        ArmedId       = "sched1",
+        Symbol        = "OGDC",
+        TriggerKind   = ArmedTriggerKind.Scheduled,
+        ActiveFromUtc = new DateTime(2026, 9, 21, 19, 0, 0, DateTimeKind.Utc),
+        Action        = "BUY",
+        Quantity      = 100,
+        OrderType     = "LIMIT",
+        Price         = 45m,
+        Note          = "buy it on the 22nd"
     };
 
     private SqliteTradingRepository NewRepository()

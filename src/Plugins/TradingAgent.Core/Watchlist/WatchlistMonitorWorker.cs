@@ -430,6 +430,12 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
 
         var now = DateTime.UtcNow;
 
+        // Read once for the whole batch rather than per order: it is the same answer for every one of
+        // them, and a scheduled order is the only kind that consults it. See ArmedTriggerKind.Scheduled
+        // — it has no price condition, so this is the only thing standing between a timer and an order
+        // placed into a venue that would hold it until the next open.
+        var marketIsOpen = _calendar.GetStatus().IsOpen;
+
         foreach (var order in armed)
         {
             ct.ThrowIfCancellationRequested();
@@ -449,7 +455,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
             var price = live.TryGetValue(order.Symbol, out var quote) ? quote.Current : null;
             var alerts = alertsBySymbol.GetValueOrDefault(order.Symbol, Array.Empty<AlertKind>());
 
-            if (!ArmedOrderEvaluator.ShouldFire(order, price, alerts, now, out var why))
+            if (!ArmedOrderEvaluator.ShouldFire(order, price, alerts, now, out var why, marketIsOpen))
             {
                 // Not firing — so this is the moment a trailing trigger follows the price. Done after
                 // the fire check so a fire never waits on a bookkeeping write, and only when the

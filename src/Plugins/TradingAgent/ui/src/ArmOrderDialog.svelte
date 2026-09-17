@@ -2,7 +2,7 @@
   import { createEventDispatcher, onMount } from 'svelte';
   import {
     trading, TRIGGER_KINDS, ALERT_KINDS, PERCENT_PRESETS,
-    isPercentTrigger, percentTriggerLevel,
+    isPercentTrigger, isScheduledTrigger, percentTriggerLevel,
     type ArmOrderRequest, type TriggerKind, type BrokerAccountSnapshot
   } from './api';
   import { Crosshair, X, AlertTriangle, Zap } from 'lucide-svelte';
@@ -89,9 +89,41 @@
   export let attachTakeProfit = false;
   export let takeProfitPrice: number | null = null;
 
+  /**
+   * A PSX calendar date this order should wait for, as `YYYY-MM-DD`. Null is the ordinary case: the
+   * order is active the moment it is armed.
+   *
+   * A STRING, never a `Date`. The server resolves it in Pakistan time; handing it a `Date` would
+   * serialise the browser's own local midnight and arm the order on the wrong day for anyone outside
+   * Pakistan — the sort of bug that shows up once, in production, on a date nobody can reproduce.
+   */
+  export let activeFromDate: string | null = null;
+
+  let scheduleForDate = activeFromDate != null;
+  /** "…and only if" — off by default, because a scheduled order is unconditional unless asked. */
+  let conditionOnDate = false;
+  /** Restores what the operator had picked when they untick the schedule, rather than losing it. */
+  let kindBeforeSchedule: TriggerKind = 'PriceBelow';
+
   onMount(() => dialogElement.focus());
 
+  // A date and a condition are different questions, so the trigger KIND is derived from the two
+  // checkboxes rather than being a sixth option in the trigger list. Scheduled means "the date is
+  // the whole condition"; ticking "…and only if" hands the decision back to a real trigger.
+  $: if (scheduleForDate && !conditionOnDate && triggerKind !== 'Scheduled') {
+    kindBeforeSchedule = triggerKind;
+    triggerKind = 'Scheduled';
+  }
+  $: if ((!scheduleForDate || conditionOnDate) && triggerKind === 'Scheduled') {
+    triggerKind = kindBeforeSchedule;
+  }
+  $: if (!scheduleForDate && activeFromDate != null) {
+    activeFromDate = null;
+    conditionOnDate = false;
+  }
+
   $: isEvent = triggerKind === 'Event';
+  $: isScheduled = isScheduledTrigger(triggerKind);
   $: isPercent = isPercentTrigger(triggerKind);
   $: isStop = orderType === 'STOPLOSS';
   $: persistable = orderType !== 'MARKET';
@@ -306,16 +338,22 @@
       if (!(referencePrice && referencePrice > 0)) {
         error = 'Enter the price to measure the move from.'; return;
       }
-    } else if (!isEvent && !(triggerPrice && triggerPrice > 0)) {
+    } else if (!isEvent && !isScheduled && !(triggerPrice && triggerPrice > 0)) {
       error = 'Enter a trigger price.'; return;
+    }
+    if (scheduleForDate && !activeFromDate) {
+      error = 'Pick the date this order should become active.'; return;
     }
     if (stopError) { error = stopError; return; }
     if (takeProfitError) { error = takeProfitError; return; }
 
     const request: ArmOrderRequest = {
       symbol, action, quantity: submittedQuantity, triggerKind,
-      triggerPrice: isEvent || isPercent ? null : triggerPrice,
+      triggerPrice: isEvent || isPercent || isScheduled ? null : triggerPrice,
       triggerAlertKind: isEvent ? triggerAlertKind : null,
+      // The server refuses a Scheduled order carrying a level or an alert kind rather than dropping
+      // them, so the two nulls above are load-bearing, not tidiness.
+      activeFromDate: scheduleForDate ? activeFromDate : null,
       // Sent rather than left to the server to capture, so the level armed is the one quoted above.
       triggerPercent: isPercent ? triggerPercent : null,
       referencePrice: isPercent ? referencePrice : null,
@@ -397,6 +435,48 @@
         <button class="btn btn-primary" on:click={() => dispatch('close')}>Done</button>
       </div>
     {:else}
+      <!-- WHEN this becomes live, above everything else, because it changes what the rest of the form
+           means. A date and a price condition are different questions: the date says when to start
+           looking, the trigger says what to look for. Kept as two checkboxes rather than a sixth
+           entry in the trigger list for that reason — and because the common case, "buy it on the
+           22nd", has no condition at all and should not have to dismiss one. -->
+      <div class="schedule-block">
+        <label class="check">
+          <input type="checkbox" bind:checked={scheduleForDate} />
+          <span>Schedule this for a date</span>
+        </label>
+
+        {#if scheduleForDate}
+          <label class="full">
+            <span>Becomes active on (PSX date)</span>
+            <input type="date" bind:value={activeFromDate} />
+          </label>
+
+          <label class="check">
+            <input type="checkbox" bind:checked={conditionOnDate} />
+            <span>…and only if a price condition is met</span>
+          </label>
+
+          <p class="hint-note">
+            {#if conditionOnDate}
+              Nothing happens before {activeFromDate || 'the date above'}. From that morning the
+              condition below is checked on every pass, and the order goes in the first time it is met.
+            {:else}
+              This goes to the broker on the first check after the market opens on
+              {activeFromDate || 'the date above'}, with no price condition. It is placed by the
+              agent, so it still passes the kill switch, approval, holdings and risk checks at that
+              moment — not now.
+            {/if}
+          </p>
+
+          <p class="hint-note warn">
+            <AlertTriangle size={12} />
+            The date is not checked against the PSX holiday calendar. If the exchange is shut that
+            day, the order waits and goes in on the next open rather than being refused now.
+          </p>
+        {/if}
+      </div>
+
       {#if isTradePlan}
         <div class="plan-entry">
           <label>
@@ -422,10 +502,12 @@
             </p>
           {/if}
         </div>
-      {:else}
+      {:else if !isScheduled}
         <!-- WHEN it fires, on its own, above the order itself. The trigger is the decision; the order
              is the consequence. Reading them the other way round is what made the percent triggers
-             look like an extra field on a form rather than a different question. -->
+             look like an extra field on a form rather than a different question.
+             Hidden entirely for a scheduled order: its date IS the condition, and offering a trigger
+             picker bound to a kind the list does not contain would render an empty select. -->
         <div class="trigger-block">
         <label class="full">
           <span>Fire this order when…</span>
@@ -849,6 +931,17 @@
     border: 1px solid var(--border-md); border-left: 3px solid var(--primary);
     border-radius: var(--radius-sm); padding: .65rem .7rem;
     display: flex; flex-direction: column; gap: .55rem;
+  }
+  /* Same framing as the trigger, deliberately: "when does this start" sits alongside "what has to be
+     true" as a peer question, not as an advanced setting tucked under one of them. The muted left
+     edge keeps the trigger as the louder of the two when both are shown. */
+  .schedule-block {
+    border: 1px solid var(--border-md); border-left: 3px solid var(--border-md);
+    border-radius: var(--radius-sm); padding: .65rem .7rem;
+    display: flex; flex-direction: column; gap: .55rem;
+  }
+  .schedule-block input[type="date"] {
+    font-variant-numeric: tabular-nums;
   }
   .percent-row { display: flex; gap: .6rem; align-items: flex-end; flex-wrap: wrap; }
   .presets { display: flex; gap: .3rem; }

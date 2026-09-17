@@ -152,6 +152,11 @@
    * indistinguishable from a fixed one on the row that is supposed to explain it.
    */
   const describeTrigger = (o: ArmedOrder) => {
+    if (o.triggerKind === 'Scheduled')
+      return o.activeFromUtc
+        ? new Date(o.activeFromUtc).toLocaleDateString()
+        : 'a date that was not recorded';
+
     if (o.triggerKind === 'Event')
       return (o.triggerAlertKind ?? '').replace(/([a-z])([A-Z])/g, '$1 $2');
 
@@ -167,6 +172,17 @@
       : '';
     return `${comparator} ${level} — ${o.triggerPercent}%${basis}`;
   };
+
+  /**
+   * An order that is armed but not yet WATCHING. Worth its own state on the row: "armed" and "armed
+   * but dormant until the 22nd" behave identically to every control on this panel and differently to
+   * the market, and an operator scanning for what is live has no other way to tell them apart.
+   */
+  const notYetActive = (o: ArmedOrder) =>
+    o.activeFromUtc != null && new Date(o.activeFromUtc).getTime() > Date.now();
+
+  const describeActivation = (o: ArmedOrder) =>
+    o.activeFromUtc ? new Date(o.activeFromUtc).toLocaleDateString() : '';
 
   /**
    * The price the ORDER goes in at — which is not the trigger, and was previously not shown at all.
@@ -350,7 +366,15 @@
               {#if order.state !== 'armed'}<span class="chip">{order.state}</span>{/if}
             </div>
             <div class="row-2">
-              fires when {order.triggerKind === 'Event' ? 'event' : 'price'} {describeTrigger(order)}
+              {#if order.triggerKind === 'Scheduled'}
+                fires on {describeTrigger(order)}, at the first check after the market opens
+              {:else}
+                fires when {order.triggerKind === 'Event' ? 'event' : 'price'} {describeTrigger(order)}
+                {#if order.activeFromUtc} · not before {describeActivation(order)}{/if}
+              {/if}
+              {#if notYetActive(order) && order.state === 'armed'}
+                <span class="chip scheduled">waiting for {describeActivation(order)}</span>
+              {/if}
               {#if order.trailing}<span class="chip trail">trailing</span>{/if}
               {#if order.persistentUntilFilled}<span class="chip">keep working after trigger</span>{/if}
               {#if order.orderType === 'STOPLOSS' && order.limitPrice != null}
@@ -489,6 +513,9 @@
   .chip { font-size: .6rem; padding: .05rem .35rem; border-radius: 999px;
           border: 1px solid var(--border-md); color: var(--text-3); }
   .chip.trail { color: var(--primary); border-color: color-mix(in srgb, var(--primary) 40%, transparent); }
+  /* Dormant, not live. Deliberately cooler than .trail: a scheduled order is the one row on this
+     panel that is doing nothing yet, and it should not compete with the ones that are. */
+  .chip.scheduled { color: var(--text-2); border-style: dashed; }
   .meta { color: var(--text-3); font-size: .65rem; }
   .note { margin: 0; color: var(--text-2); font-size: .71rem; }
   .reason { margin: 0; color: var(--warning); font-size: .69rem; line-height: 1.45; }

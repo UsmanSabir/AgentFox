@@ -1910,7 +1910,12 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                     persistent_until_filled INTEGER NOT NULL DEFAULT 0,
                     -- 1 = a person armed this by hand. Defaults to 0 so anything that has not claimed
                     -- origination counts as automation and stays refused on a manual-only symbol.
-                    operator_originated INTEGER NOT NULL DEFAULT 0
+                    operator_originated INTEGER NOT NULL DEFAULT 0,
+                    -- Nothing fires before this instant. NULL is the original behaviour: active from
+                    -- the moment it was armed. Paired with trigger_kind 'Scheduled' the date IS the
+                    -- whole condition; paired with a price kind it postpones when that price starts
+                    -- being watched.
+                    active_from_utc TEXT NULL
                 );
                 CREATE INDEX IF NOT EXISTS ix_armed_orders_state
                     ON armed_orders(state, symbol);
@@ -2139,6 +2144,11 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
             // for this" by a migration.
             await AddColumnIfMissingAsync(
                 connection, "armed_orders", "operator_originated", "INTEGER NOT NULL DEFAULT 0", ct);
+            // The lower time bound: nothing fires before it. NULL for every existing row, which is
+            // "active from the moment it was armed" — exactly how they already behave, so no order
+            // written before this column existed is postponed by the migration.
+            await AddColumnIfMissingAsync(
+                connection, "armed_orders", "active_from_utc", "TEXT NULL", ct);
             await AddColumnIfMissingAsync(
                 connection, "protective_stops", "operator_originated", "INTEGER NOT NULL DEFAULT 0", ct);
             await AddColumnIfMissingAsync(
@@ -2774,10 +2784,10 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                 (armed_id, symbol, trigger_kind, trigger_price, trigger_alert, action, quantity,
                  order_type, price, limit_price, state, armed_utc, expires_utc, note, source_alert,
                  protective_stop_id, trigger_percent, reference_price, trailing,
-                 persistent_until_filled, operator_originated)
+                 persistent_until_filled, operator_originated, active_from_utc)
             VALUES ($id, $symbol, $kind, $tprice, $talert, $action, $qty,
                     $otype, $price, $limit, $state, $armed, $expires, $note, $alert, $stop,
-                    $tpercent, $reference, $trailing, $persistent, $operator)
+                    $tpercent, $reference, $trailing, $persistent, $operator, $activeFrom)
             """;
         command.Parameters.AddWithValue("$id", order.ArmedId);
         command.Parameters.AddWithValue("$symbol", order.Symbol);
@@ -2802,6 +2812,8 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         command.Parameters.AddWithValue("$trailing", order.Trailing ? 1 : 0);
         command.Parameters.AddWithValue("$persistent", order.PersistentUntilFilled ? 1 : 0);
         command.Parameters.AddWithValue("$operator", order.OperatorOriginated ? 1 : 0);
+        command.Parameters.AddWithValue("$activeFrom",
+            order.ActiveFromUtc?.ToString("O") ?? (object)DBNull.Value);
         await command.ExecuteNonQueryAsync(ct);
         return order.ArmedId;
     }
@@ -2817,7 +2829,7 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                    order_type, price, limit_price, state, armed_utc, expires_utc, fired_utc,
                    execution_id, state_reason, note, source_alert, protective_stop_id,
                    trigger_percent, reference_price, trailing, persistent_until_filled,
-                   operator_originated
+                   operator_originated, active_from_utc
             FROM armed_orders
             {(armedOnly ? "WHERE state = 'armed'" : "")}
             ORDER BY armed_utc DESC
@@ -2934,7 +2946,8 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         ReferencePrice   = ParseDecimal(reader, 20),
         Trailing         = !reader.IsDBNull(21) && reader.GetInt64(21) != 0,
         PersistentUntilFilled = !reader.IsDBNull(22) && reader.GetInt64(22) != 0,
-        OperatorOriginated    = !reader.IsDBNull(23) && reader.GetInt64(23) != 0
+        OperatorOriginated    = !reader.IsDBNull(23) && reader.GetInt64(23) != 0,
+        ActiveFromUtc         = reader.IsDBNull(24) ? null : ParseUtc(reader.GetString(24))
     };
 
     // ── Protective stops ──────────────────────────────────────────────────────
@@ -3693,6 +3706,27 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         await using var connection = await OpenAsync(ct);
         var command = connection.CreateCommand();
         command.CommandText = "DELETE FROM reconciliation_runs WHERE started_utc < $before";
+        command.Parameters.AddWithValue("$before", before.ToString("O"));
+        return await command.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<int> PruneArmedOrdersAsync(DateTime before, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        // Terminal rows only. An 'armed' row is a live standing instruction and is never swept at any
+        // age — deleting one would cancel an order the operator is relying on, silently, and an order
+        // carrying an activation date can legitimately sit armed for months before it is due.
+        //
+        // Aged on armed_utc rather than on a terminal timestamp because this table has no column for
+        // when a row went terminal. That errs toward keeping rows LONGER only in the case that matters
+        // least (a long-lived order that fired near the end of its life), and it needs no migration.
+        command.CommandText = """
+            DELETE FROM armed_orders
+            WHERE state IN ('fired', 'cancelled', 'expired', 'failed')
+              AND armed_utc < $before
+            """;
         command.Parameters.AddWithValue("$before", before.ToString("O"));
         return await command.ExecuteNonQueryAsync(ct);
     }
