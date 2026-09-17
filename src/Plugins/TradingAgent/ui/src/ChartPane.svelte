@@ -24,6 +24,7 @@
   } from 'lucide-svelte';
   import AssessmentCard from './AssessmentCard.svelte';
   import { livePriceLabel, useLivePrices, type LivePrice } from './livePrices';
+  import type { SymbolExtensionComponent } from './symbolExtensions';
 
   export let symbol: string | null = null;
   export let companyName: string | null = null;
@@ -67,6 +68,13 @@
   // Weekly-confirmed structure is the readable default. All nearby levels remain one click away and
   // are always listed below, but no longer cover the price axis on first render.
   let levelMode: 'all' | 'key' | 'off' = 'key';
+
+  /**
+   * An optional per-symbol detail from whoever is hosting this dashboard, rendered under the plot.
+   * See `symbolExtensions.ts` for the contract; null in a community build, which then renders
+   * nothing at all here.
+   */
+  export let quoteDetail: SymbolExtensionComponent | null = null;
 
   /** RSI in its own pane costs ~90px of candles; worth reclaiming when the pane is small. */
   let showRsi = true;
@@ -971,6 +979,12 @@
 
     {#if data}
       <div class="readout">
+        <!-- Above the chart's own metrics because it is the only row here that is a live tape: it
+             changes while the rest of the readout holds still, and burying a moving number under
+             static ones is how it stops being read. -->
+        {#if quoteDetail && symbol}
+          <svelte:component this={quoteDetail} {symbol} />
+        {/if}
         {#if chartError}
           <p class="inline-error">Chart refresh failed; showing the last successful data. {chartError}
             <button class="retry" on:click={() => load(true)}>Retry</button>

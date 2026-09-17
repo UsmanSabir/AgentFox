@@ -79,6 +79,7 @@
         symbol={selectedSymbol}
         companyName={selectedCompany}
         bind:expanded={chartExpanded}
+        quoteDetail={symbolExtension?.quoteDetail ?? null}
         {refreshTick}
         {historyRefreshTick}
         {archive}
