@@ -1,4 +1,4 @@
-using TradingAgent.Trading;
+﻿using TradingAgent.Trading;
 
 namespace AgentFox.ChannelTests;
 
@@ -40,6 +40,56 @@ public sealed class OrderRejectionOutlookTests
         Assert.AreEqual(RejectionOutlook.RetryTomorrow, OrderRejectionOutlook.Classify(
             "The exchange rejected this order (Over_Price_Limit). The price 172 is above NML's cap "
             + "of 171.72."));
+    }
+
+    [TestMethod]
+    public void AnAccountTheBrokerIsRefusingWaitsForTheNextSession()
+    {
+        // MEASURED 2026-09-17. After the AHL client re-used an order-request number the day had already
+        // issued, the broker refused every subsequent order — a fresh connection, a restarted agent and
+        // the operator's own mobile app alike, with a cancel from the app doing nothing. It cleared at
+        // the next session, so retrying today reaches nothing and costs a request number each time.
+        Assert.AreEqual(RejectionOutlook.RetryTomorrow, OrderRejectionOutlook.Classify(
+            "Rejected before reaching the market: Order[2]: Order Rej: Last order request not Complete "
+            + "The REG board was not reported shut, so this is NOT the venue being closed — "
+            + OrderRejectionOutlook.AccountOrderEntryRefusedMarker + "."));
+    }
+
+    [TestMethod]
+    public void TheSameBrokerWordingWithoutTheMarkerStillRetriesToday()
+    {
+        // THE LOAD-BEARING HALF. AHL says exactly this for a shut board too, and a Break is MINUTES.
+        // Only the adapter holds the ORDER_MST reading that tells the two apart — a stored placement
+        // does not carry the transient flag — so this method must key on the adapter's marker and never
+        // on the broker's own words. Without the marker, the safe default is the only honest answer.
+        Assert.AreEqual(RejectionOutlook.RetryToday, OrderRejectionOutlook.Classify(
+            "Rejected before reaching the market: Order[66]: Order Rej: Last order request not Complete "
+            + "The REG board was last reported as 'Break', so the venue was not accepting orders."));
+
+        // And the transient flag still outranks everything, as it does for every other wording.
+        Assert.AreEqual(RejectionOutlook.RetryToday, OrderRejectionOutlook.Classify(
+            "Order Rej: Last order request not Complete " + OrderRejectionOutlook.AccountOrderEntryRefusedMarker,
+            transient: true));
+    }
+
+    [TestMethod]
+    public void ARefusedAccountIsExplainedAsTheAccountAndNotAsAPrice()
+    {
+        var refused = OrderRejectionOutlook.Explain(
+            RejectionOutlook.RetryTomorrow,
+            "Order[2]: Order Rej: Last order request not Complete "
+            + OrderRejectionOutlook.AccountOrderEntryRefusedMarker)!;
+
+        StringAssert.Contains(refused, "ACCOUNT");
+        StringAssert.Contains(refused, "next trading date");
+        // Telling the operator to re-price is the one instruction that cannot help here, so the
+        // price-band sentence must not be the one they are shown.
+        Assert.IsFalse(refused.Contains("Re-price", StringComparison.OrdinalIgnoreCase));
+        Assert.IsFalse(refused.Contains("10% of the previous close", StringComparison.Ordinal));
+
+        // And the price-band cause still gets its own sentence.
+        var band = OrderRejectionOutlook.Explain(RejectionOutlook.RetryTomorrow, "Over_Price_Limit")!;
+        StringAssert.Contains(band, "Re-price");
     }
 
     [TestMethod]
