@@ -711,7 +711,7 @@ export const TRIGGER_KINDS = [
  * `Scheduled` is a real trigger kind but is deliberately NOT in the list above, which is what the
  * trigger picker renders. An order fires on its date alone when the operator schedules one without
  * adding a price condition — "when should this happen" and "what has to be true" are different
- * questions, and only the second belongs in a list of triggers. The dialog picks the kind for them.
+ * questions, and only the second belongs in a list of triggers. New Order owns date scheduling.
  */
 export type TriggerKind = (typeof TRIGGER_KINDS)[number] | 'Scheduled';
 
@@ -897,7 +897,8 @@ export interface AttachTakeProfitRequest {
  */
 export interface ArmOrderDialogContext {
   symbol: string;
-  triggerKind?: TriggerKind;
+  // Stock-detail actions create conditions; dates are composed only in New Order.
+  triggerKind?: Exclude<TriggerKind, 'Scheduled'>;
   triggerPrice?: number | null;
   triggerAlertKind?: string | null;
   action?: 'BUY' | 'SELL';

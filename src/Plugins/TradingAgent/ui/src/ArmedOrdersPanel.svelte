@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { describePsxDate } from './orderSchedule';
   import { onMount } from 'svelte';
   import { trading, type ArmedOrdersResponse, type ArmedOrder, type ProtectiveStop } from './api';
   import {
@@ -45,7 +46,7 @@
     if (busy || reviewing) return;
     const armedId = order.armedId;
     if (!await confirmAction(
-      `Disarm trigger ${armedId}?\n\n${order.action} ${order.quantity} ${order.symbol} ${describeFill(order)} ` +
+      `Cancel waiting order ${armedId}?\n\n${order.action} ${order.quantity} ${order.symbol} ${describeFill(order)} ` +
       `(${describeValue(order) ?? 'value unknown'}) on ${describeTrigger(order)}.\n\n` +
       `The order is not placed and the trigger stops being watched.`
     )) return;
@@ -81,7 +82,7 @@
     const selected = entries.filter(order => order.state === 'armed' && selectedOrderIds.has(order.armedId)).map(order => ({armedId:order.armedId,symbol:order.symbol,action:order.action,quantity:order.quantity}));
     if (!selected.length) return;
     if (!await confirmAction(
-      `Disarm ${selected.length} selected trigger(s)?\n\n` +
+      `Cancel ${selected.length} selected waiting order(s)?\n\n` +
       selected.map(order => `${order.action} ${order.quantity} ${order.symbol} · ${order.armedId}`).join('\n') + '\n\n' +
       'No broker order is cancelled; these waiting local triggers simply stop being watched.'
     )) return;
@@ -154,7 +155,7 @@
   const describeTrigger = (o: ArmedOrder) => {
     if (o.triggerKind === 'Scheduled')
       return o.activeFromUtc
-        ? new Date(o.activeFromUtc).toLocaleDateString()
+        ? describePsxDate(o.activeFromUtc)
         : 'a date that was not recorded';
 
     if (o.triggerKind === 'Event')
@@ -182,7 +183,7 @@
     o.activeFromUtc != null && new Date(o.activeFromUtc).getTime() > Date.now();
 
   const describeActivation = (o: ArmedOrder) =>
-    o.activeFromUtc ? new Date(o.activeFromUtc).toLocaleDateString() : '';
+    o.activeFromUtc ? describePsxDate(o.activeFromUtc) : '';
 
   /**
    * The price the ORDER goes in at — which is not the trigger, and was previously not shown at all.
@@ -268,8 +269,8 @@
     <div class="head-copy">
       <Crosshair size={15} />
       <div>
-        <b>Armed orders {#if data?.orders.length}<span class="count">{data.orders.filter(o => o.state === 'armed').length}</span>{/if}</b>
-        <span>Orders waiting on a price level or an event</span>
+        <b>Waiting orders {#if data?.orders.length}<span class="count">{data.orders.filter(o => o.state === 'armed').length}</span>{/if}</b>
+        <span>Scheduled orders and orders waiting for a price or event</span>
       </div>
     </div>
     <div class="head-actions">
@@ -310,7 +311,7 @@
 
   <p class="line" class:danger={!!error} role="status" tabindex="-1" bind:this={feedback}>{error ?? notice ?? ''}</p>
   {#if keyboardMode}
-    <label class="order-filter">Find trigger <input type="search" bind:value={query} aria-label="Find armed order" placeholder="Symbol, state or trigger ID"/></label>
+    <label class="order-filter">Find trigger <input type="search" bind:value={query} aria-label="Find waiting order" placeholder="Symbol, state or trigger ID"/></label>
     <p class="line">↑ ↓ / Home / End navigate rows · Enter focuses row controls · Tab reaches actions. Selection can include filtered-out rows; review lists every target.</p>
   {/if}
 
@@ -322,7 +323,7 @@
       </label>
       <span>{selectedCount} selected</span>
       <button class="btn btn-danger" on:click={disarmSelected} disabled={!selectedCount || busy}>
-        <Trash2 size={13} /> Disarm selected
+        <Trash2 size={13} /> Cancel selected
       </button>
     </div>
   {/if}
@@ -331,9 +332,8 @@
     <p class="line">Loading…</p>
   {:else if !entries.length && !stops.length}
     <p class="empty">
-      Nothing armed. Use "sell if it drops" on the chart to protect a holding against a fall of a
-      given percent, click a support or resistance level for an exact price, or "arm on this event"
-      on an alert.
+      No waiting orders. Use New Order to schedule a buy or sell for a date.
+      For a price condition, choose a chart level or "sell if it drops"; alerts can create event conditions.
     </p>
   {:else}
     <ul class="list">
@@ -367,7 +367,7 @@
             </div>
             <div class="row-2">
               {#if order.triggerKind === 'Scheduled'}
-                fires on {describeTrigger(order)}, at the first check after the market opens
+                eligible from {describeTrigger(order)}, at the first market-open check before expiry
               {:else}
                 fires when {order.triggerKind === 'Event' ? 'event' : 'price'} {describeTrigger(order)}
                 {#if order.activeFromUtc} · not before {describeActivation(order)}{/if}
@@ -390,7 +390,7 @@
             {#if order.stateReason}<p class="reason">{order.stateReason}</p>{/if}
           </div>
           {#if order.state === 'armed'}
-            <button class="icon danger" title="Disarm" aria-label={`Disarm ${order.symbol} trigger ${order.armedId}`} on:click={() => disarm(order)} disabled={busy || reviewing}>
+            <button class="icon danger" title="Cancel waiting order" aria-label={`Cancel ${order.symbol} waiting order ${order.armedId}`} on:click={() => disarm(order)} disabled={busy || reviewing}>
               <Trash2 size={13} />
             </button>
           {/if}

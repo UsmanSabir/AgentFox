@@ -1,5 +1,6 @@
 <script lang="ts">
   import { createEventDispatcher, onMount, onDestroy, tick } from 'svelte';
+  import { psxDateInput, scheduleDateError } from './orderSchedule';
   import { uncertainOrderFailure, isOrderReviewKey } from './orderReview';
   import {
     trading, percentTriggerLevel, ApiError,
@@ -104,6 +105,7 @@
   let triggerPrice: number | null = null;
   let limitPrice: number | null = null;
   let triggerPercent: number | null = null;
+  let activeFromDate = '';
   let expiresInDays = 30;
   let persistentUntilFilled = false;
   let loading = true;
@@ -230,6 +232,7 @@
 
   function choose(intent: OrderIntentDefinition) {
     choice = intent;
+    activeFromDate = '';
     blockedSell = null;
     price = null;
     triggerPrice = null;
@@ -338,6 +341,8 @@
     orderValue = value;
   }
 
+  $: scheduled = choice?.triggerKind === 'Scheduled';
+  $: activationError = scheduled && activeFromDate ? scheduleDateError(activeFromDate) : null;
   $: exactPriceTrigger = choice?.submission === 'conditional'
     && (choice.triggerKind === 'PriceBelow' || choice.triggerKind === 'PriceAbove');
   $: conditionalLevel = exactPriceTrigger ? triggerPrice : choice?.submission === 'conditional' && choice.triggerKind
@@ -390,7 +395,7 @@
     && estimatedValue > buyingPower * 0.99;
   $: estimatedPrice = choice?.orderType === 'MARKET' ? latestPrice
     : choice?.orderType === 'STOPLOSS' ? triggerPrice
-    : exactPriceTrigger ? price
+    : exactPriceTrigger || scheduled ? price
     : choice?.submission === 'conditional' ? conditionalLevel : price;
   $: availableSellValue = availableSellQuantity != null && estimatedPrice && estimatedPrice > 0
     ? availableSellQuantity * estimatedPrice
@@ -448,6 +453,8 @@
   $: summary = (() => {
     if (!choice || !symbol || !effectiveQuantity) return null;
     const side = choice.action === 'BUY' ? 'Buy' : 'Sell';
+    if (scheduled)
+      return `On or after ${activeFromDate || 'your chosen date'} (PKT), submit a limit ${side.toLowerCase()} for ${effectiveQuantity} ${symbol} at ${price ?? '—'} PKR or better, at the first eligible market-open check. Filling is not guaranteed.`;
     if (exactPriceTrigger) {
       const comparison = choice.triggerKind === 'PriceBelow' ? 'at or below' : 'at or above';
       return `Wait until ${symbol} is ${comparison} ${triggerPrice ?? '—'} PKR, then submit a limit ${side.toLowerCase()} for ${effectiveQuantity} shares at ${price ?? '—'} PKR or better. Filling is not guaranteed.`;
@@ -493,7 +500,13 @@
     if (!submittedQuantity || submittedQuantity <= 0) { error = 'Enter a valid order size.'; return; }
     if (marketDisabled) { error = 'Market orders are disabled in broker settings.'; return; }
     if (attachedStopError) { error = attachedStopError; return; }
-    if (exactPriceTrigger) {
+    if (scheduled) {
+      const dateError = scheduleDateError(activeFromDate);
+      if (dateError) { error = dateError; return; }
+      if (!price || !Number.isFinite(price) || price <= 0) {
+        error = 'Enter a positive limit price.'; return;
+      }
+    } else if (exactPriceTrigger) {
       if (!triggerPrice || !Number.isFinite(triggerPrice) || triggerPrice <= 0
           || !price || !Number.isFinite(price) || price <= 0) {
         error = 'Enter a positive trigger price and limit price.'; return;
@@ -519,6 +532,11 @@
       error = 'Enter a positive limit price.'; return;
     }
 
+    if ((choice.submission === 'conditional' || persistentUntilFilled)
+        && (!Number.isInteger(expiresInDays) || expiresInDays < 1 || expiresInDays > 365)) {
+      error = 'Enter an expiry between 1 and 365 whole days.'; return;
+    }
+
     const immediate = choice.submission === 'immediate';
     // Capture the exact reviewed request BEFORE yielding to a confirmation. Live ticks may update
     // value-sized estimates while the review is open, but can never change the submitted quantity.
@@ -531,10 +549,11 @@
       symbol: symbol.trim().toUpperCase(), action: choice.action, quantity: submittedQuantity,
       triggerKind: choice.triggerKind as TriggerKind,
       triggerPrice: exactPriceTrigger ? triggerPrice : null,
-      triggerPercent: exactPriceTrigger ? null : triggerPercent,
-      referencePrice: exactPriceTrigger ? null : triggerReferencePrice,
+      triggerPercent: exactPriceTrigger || scheduled ? null : triggerPercent,
+      referencePrice: exactPriceTrigger || scheduled ? null : triggerReferencePrice,
+      activeFromDate: scheduled ? activeFromDate : null,
       trailing: choice.trailing, orderType: choice.orderType,
-      price: choice.orderType === 'MARKET' ? null : exactPriceTrigger ? price : conditionalLevel, expiresInDays, persistentUntilFilled,
+      price: choice.orderType === 'MARKET' ? null : exactPriceTrigger || scheduled ? price : conditionalLevel, expiresInDays, persistentUntilFilled,
       attachStop: attachStop && stopTrigger ? {stopTrigger, stopLimit, recurring:stopRecurring} : null,
       note: `New Order: ${choice.label}`
     };
@@ -542,11 +561,11 @@
     // out this exact order AND the stop being stood down for it. Two modals back to back for one
     // decision the operator has just taken is a hurdle, not a safeguard — it trains people to click
     // through the second one, which is the opposite of what this gate is for.
-    if ((immediate || docked) && !alreadyConfirmed && !await confirmAction(
+    if ((immediate || docked || scheduled) && !alreadyConfirmed && !await confirmAction(
       immediate ? 'Review order' : 'Review waiting order',
       `${summary}\n\n` + (immediate
         ? 'Submit this order now? Every policy and risk gate still applies, but if they pass this can place a REAL broker order.'
-        : `Arm this waiting order for up to ${expiresInDays} day(s)? When its condition is met, existing approval and risk controls determine whether it sends a REAL broker order.`)
+        : `Arm this waiting order for up to ${expiresInDays} day(s)${scheduled ? ' from the activation date (PKT)' : ''}? When its condition is met, existing approval and risk controls determine whether it sends a REAL broker order.`)
       + (persistentUntilFilled
         ? `\n\nThe unfilled remainder will be submitted again once per PSX trading day for up to ${expiresInDays} day(s).`
         : '')
@@ -592,8 +611,8 @@
         const armed = await trading.armed.arm(waitingRequest);
         result = {
           ok: true,
-          title: 'Waiting order armed',
-          detail: `${armed.note} ${armed.willFireUnattended ? 'It can fire unattended.' : 'It still needs approval before sending.'}`
+          title: scheduled ? 'Scheduled order saved' : 'Waiting order armed',
+          detail: `${scheduled ? `Active from ${activeFromDate} (PKT), expiring ${expiresInDays} day(s) later. Manage or cancel it in Waiting orders. ` : ''}${armed.note} ${armed.willFireUnattended ? 'It can fire unattended.' : 'It still needs approval before sending.'}`
             + (armed.attachedStop
               ? ` A ${armed.attachedStop.recurring ? 'recurring' : 'one-session'} protective stop at ${money(armed.attachedStop.stopTrigger)} `
                 + `(limit ${money(armed.attachedStop.stopLimit)}) is attached and will cover the shares that actually fill.`
@@ -606,7 +625,7 @@
 
       if (docked && uncertainOrderFailure(e instanceof ApiError ? e.status : null, e instanceof ApiError ? e.code : null)) {
         result = {ok:false, title:'Outcome unknown — do not retry yet',
-          detail:`${error} Check ${immediate ? 'Decisions & ledger and the broker order book' : 'Armed orders'} before creating another order. This ticket will not retry automatically.`};
+          detail:`${error} Check ${immediate ? 'Decisions & ledger and the broker order book' : 'Waiting orders'} before creating another order. This ticket will not retry automatically.`};
         dispatch('changed');
       }
 
@@ -713,7 +732,7 @@
             <option value="" disabled>Choose what you want to happen</option>
             {#each categories as category}<optgroup label={category}>{#each registry?.intents.filter(item => item.category === category) ?? [] as item}<option value={item.id}>{item.label}</option>{/each}</optgroup>{/each}
           </select></label>
-          {#if choice}<p>{choice.description} {choice.submission === 'conditional' ? 'Waits for a trigger.' : 'Sent after your confirmation.'}</p>{/if}
+          {#if choice}<p>{choice.description} {scheduled ? 'Waits for your PSX date.' : choice.submission === 'conditional' ? 'Waits for a trigger.' : 'Sent after your confirmation.'}</p>{/if}
         </div>
       {:else}
       <div class="choices">
@@ -724,7 +743,7 @@
               {#each registry?.intents.filter(item => item.category === category) ?? [] as item (item.id)}
                 <button class="choice" class:selected={choice?.id === item.id} on:click={() => choose(item)}>
                   <b>{item.label}</b><span>{item.description}</span>
-                  {#if item.submission === 'conditional'}<em><Clock3 size={11} /> waits for a trigger</em>{/if}
+                  {#if item.submission === 'conditional'}<em><Clock3 size={11} /> {item.triggerKind === 'Scheduled' ? 'waits for a date' : 'waits for a trigger'}</em>{/if}
                 </button>
               {/each}
             </div>
@@ -862,14 +881,21 @@
             {/if}
             {#if exactPriceTrigger}
               <label><span>Trigger price ({choice.triggerKind === 'PriceBelow' ? 'at or below' : 'at or above'})</span><input type="number" min="0.01" step="0.01" bind:value={triggerPrice} /></label>
-            {:else if choice.submission === 'conditional'}
+            {:else if choice.submission === 'conditional' && !scheduled}
               <label><span>Move from {triggerReferencePrice ?? 'latest price'} (%)</span><input type="number" min="0.1" max="50" step="0.1" bind:value={triggerPercent} /></label>
             {/if}
+            {#if scheduled}
+              <label><span>Activation date (PKT)</span><input type="date" min={psxDateInput()} bind:value={activeFromDate} aria-invalid={activationError ? 'true' : undefined} aria-describedby="schedule-help" /></label>
+            {/if}
             {#if choice.submission === 'conditional' || persistentUntilFilled}
-              <label><span>Expires in (days)</span><input type="number" min="1" max="365" bind:value={expiresInDays} /></label>
+              <label><span>{scheduled ? 'Expires after activation (days)' : 'Expires in (days)'}</span><input type="number" min="1" max="365" bind:value={expiresInDays} /></label>
             {/if}
           </div>
 
+          {#if scheduled}
+            <p class="estimate" id="schedule-help">AgentFox must be running with monitoring active. It waits for the first eligible market-open check on or after this date, including after weekends or holidays, until expiry. This is a date, not an exact execution time. Approval and risk checks still apply.</p>
+            {#if activationError}<p class="warning" role="alert">{activationError}</p>{/if}
+          {/if}
           {#if canAttachStop}
             <section class="attach-stop" class:on={attachStop}>
               <label class="attach-check">
@@ -984,7 +1010,7 @@
       <div class="footer">
         <button class="btn btn-ghost" on:click={closeComposer} disabled={busy || releasing || reviewing}>{docked ? 'Discard draft' : 'Cancel'}</button>
         <button class="btn btn-primary" on:click={reviewOrder} disabled={!choice || busy || releasing || reviewing || quoteBusy || marketDisabled}>
-          {busy ? 'Submitting…' : docked ? 'Review order' : choice?.submission === 'conditional' ? 'Arm waiting order' : 'Review & submit'}
+          {busy ? 'Submitting…' : docked ? 'Review order' : scheduled ? 'Review & schedule' : choice?.submission === 'conditional' ? 'Arm waiting order' : 'Review & submit'}
         </button>
       </div>
     {/if}

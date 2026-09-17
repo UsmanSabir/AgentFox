@@ -27,6 +27,13 @@ public static class OrderIntentRegistry
             "Sell at the best available price; the final proceeds can move.",
             "Buy & sell", "immediate", "SELL", "MARKET", PriceField: "none"),
 
+        new("scheduled-buy", "Buy on a date",
+            "On or after your PSX date, submit a limit buy at your price or lower.",
+            "Schedule for a date", "conditional", "BUY", "LIMIT", "Scheduled", PriceField: "limit"),
+        new("scheduled-sell", "Sell on a date",
+            "On or after your PSX date, submit a limit sell at your price or higher.",
+            "Schedule for a date", "conditional", "SELL", "LIMIT", "Scheduled", PriceField: "limit"),
+
         new("profit-book", "Book profit at a target",
             "Place a sell limit at your target price for shares you already own.",
             "Protect & exit", "immediate", "SELL", "LIMIT", PriceField: "target"),
