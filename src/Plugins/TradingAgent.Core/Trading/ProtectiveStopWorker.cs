@@ -585,6 +585,11 @@ public sealed class ProtectiveStopWorker
                 State = "active",
                 DesiredQuantity = Math.Max(stop.DesiredQuantity, filled)
             }, filled, ct);
+            await EnsureTakeProfitAsync(repository, stop with
+            {
+                State = "active",
+                DesiredQuantity = Math.Max(stop.DesiredQuantity, filled)
+            }, filled, ct);
             return;
         }
 
@@ -700,6 +705,11 @@ public sealed class ProtectiveStopWorker
                 State = "active",
                 DesiredQuantity = Math.Max(stop.DesiredQuantity, confirmed)
             }, confirmed, ct);
+            await EnsureTakeProfitAsync(repository, stop with
+            {
+                State = "active",
+                DesiredQuantity = Math.Max(stop.DesiredQuantity, confirmed)
+            }, confirmed, ct);
             _activity?.Info("Stops",
                 $"{stop.Symbol}: exact entry fill activated protection ({confirmed})", reason);
             return;
@@ -727,6 +737,11 @@ public sealed class ProtectiveStopWorker
                     $"{stop.Symbol}: entry filled ({verdict.Quantity}) — the stop is now active",
                     verdict.Reason);
                 await ArmBackstopAsync(repository, stop with
+                {
+                    State = "active",
+                    DesiredQuantity = Math.Max(stop.DesiredQuantity, verdict.Quantity)
+                }, verdict.Quantity, ct);
+                await EnsureTakeProfitAsync(repository, stop with
                 {
                     State = "active",
                     DesiredQuantity = Math.Max(stop.DesiredQuantity, verdict.Quantity)
@@ -785,6 +800,8 @@ public sealed class ProtectiveStopWorker
                 stop = stop with { DesiredQuantity = confirmed };
             }
         }
+
+        await EnsureTakeProfitAsync(repository, stop, stop.DesiredQuantity, ct);
 
         // A stop that has already had its session and is not recurring has done its job; it is not
         // re-placed, but it is also not closed, because the position may still be held.
@@ -955,6 +972,14 @@ public sealed class ProtectiveStopWorker
         switch (decision.Action)
         {
             case PlacementAction.Close:
+                if (stop.TakeProfitPrice is > 0m)
+                {
+                    var targetId = stop.TakeProfitArmedId ?? $"{stop.StopId}-tp";
+                    await repository.TrySetArmedOrderStateAsync(
+                        targetId, "armed", "cancelled",
+                        $"The position is gone, so its attached take-profit is no longer actionable: {decision.Reason}",
+                        ct: ct);
+                }
                 await CloseAsync(repository, stop, decision.Reason, ct);
                 // The position going to zero usually means the stop fired — an exit the operator did
                 // not initiate, and the single most important thing on this worker to hear about.
@@ -1609,6 +1634,68 @@ public sealed class ProtectiveStopWorker
             "[ProtectiveStops] {StopId} ({Symbol}): local backstop armed at {Trigger} for {Qty}.",
             stop.StopId, stop.Symbol, stop.StopTrigger, quantity);
     }
+
+    /// <summary>
+    /// Materialises the upside half of an attached entry plan only after the same fill confirmation
+    /// that activates the stop. The target is a normal durable armed SELL from this point onward, so
+    /// it inherits the monitor's broker-confirmed availability check, stop-release coordination,
+    /// persistent remainder handling and operator-originated/manual-only semantics.
+    /// </summary>
+    private async Task EnsureTakeProfitAsync(
+        ITradingRepository repository,
+        ProtectiveStop stop,
+        int quantity,
+        CancellationToken ct)
+    {
+        if (stop.TakeProfitPrice is not > 0m || quantity <= 0) return;
+
+        var targetId = stop.TakeProfitArmedId ?? $"{stop.StopId}-tp";
+        var orders = await repository.GetArmedOrdersAsync(armedOnly: false, ct);
+        var existing = orders.FirstOrDefault(order => order.ArmedId == targetId);
+
+        if (existing is null)
+        {
+            var parent = stop.ParentArmedId is null
+                ? null
+                : orders.FirstOrDefault(order => order.ArmedId == stop.ParentArmedId);
+            var target = CreateTakeProfitOrder(stop, quantity, parent);
+
+            await repository.SaveArmedOrderAsync(target, ct);
+            existing = target;
+            _logger.LogWarning(
+                "[ProtectiveStops] {StopId} ({Symbol}): take-profit {ArmedId} armed at {Price} for {Qty}.",
+                stop.StopId, stop.Symbol, targetId, stop.TakeProfitPrice, quantity);
+            _activity?.Info("Stops",
+                $"{stop.Symbol}: take-profit armed at {stop.TakeProfitPrice} for {quantity}",
+                "It was created only after the entry fill was confirmed and will stand the protective "
+                + "stop down if it needs the same shares when it fires.");
+        }
+        else if (existing.State == "armed" && quantity > existing.Quantity)
+        {
+            await repository.TrySetArmedOrderQuantityAsync(targetId, quantity, ct);
+        }
+
+        if (stop.TakeProfitArmedId is null)
+            await repository.SetProtectiveStopTakeProfitAsync(stop.StopId, targetId, ct);
+    }
+
+    internal static ArmedOrder CreateTakeProfitOrder(
+        ProtectiveStop stop, int quantity, ArmedOrder? parent) => new()
+    {
+        ArmedId = stop.TakeProfitArmedId ?? $"{stop.StopId}-tp",
+        Symbol = stop.Symbol,
+        TriggerKind = ArmedTriggerKind.PriceAbove,
+        TriggerPrice = stop.TakeProfitPrice,
+        Action = "SELL",
+        Quantity = quantity,
+        OrderType = "LIMIT",
+        Price = stop.TakeProfitPrice,
+        PersistentUntilFilled = true,
+        ExpiresUtc = parent?.ExpiresUtc,
+        Note = $"Take-profit attached to entry {stop.ParentArmedId ?? stop.StopId}; activated "
+             + $"after {quantity} filled share(s) were confirmed.",
+        OperatorOriginated = stop.OperatorOriginated
+    };
 
     // ── Shared ────────────────────────────────────────────────────────────────
 

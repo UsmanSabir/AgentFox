@@ -832,6 +832,8 @@ export interface ArmOrderRequest {
   sourceAlertId?: string | null;
   /** BUY only. Arms a protective stop that stays dormant until the entry is confirmed filled. */
   attachStop?: AttachStopRequest | null;
+  /** BUY only. Arms a durable LIMIT sell after the same confirmed fill as the attached stop. */
+  attachTakeProfit?: AttachTakeProfitRequest | null;
 
   // ── Percent triggers ─────────────────────────────────────────────────────
   /** Size of the move. Required for PercentDrop / PercentRise, ignored otherwise. */
@@ -855,6 +857,11 @@ export interface AttachStopRequest {
   quantity?: number | null;
   /** Re-place the native stop each session. Off means it lapses after one day. */
   recurring: boolean;
+}
+
+/** A profit-taking LIMIT sell activated only after the attached BUY is confirmed filled. */
+export interface AttachTakeProfitRequest {
+  price: number;
 }
 
 /**
@@ -893,6 +900,8 @@ export interface ArmOrderDialogContext {
   stopTrigger?: number | null;
   stopLimit?: number | null;
   stopRecurring?: boolean;
+  attachTakeProfit?: boolean;
+  takeProfitPrice?: number | null;
 }
 
 /** One thing the trading agent did, as recorded by TradingActivityLog. */
@@ -1324,6 +1333,8 @@ export const trading = {
           stopLimit: number;
           recurring: boolean;
           state: string;
+          takeProfitPrice: number | null;
+          takeProfitArmedId: string | null;
           note: string;
         } | null;
       }>('/trading/armed-orders', request),

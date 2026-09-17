@@ -34,6 +34,7 @@ position is gone.
 ProtectiveStop
   Id, Symbol, ParentArmedId?
   StopTrigger, StopLimit, DesiredQuantity
+  TakeProfitPrice?, TakeProfitArmedId?
   Recurring (default true)
   State: pending_fill -> active -> closed
   PlacedQuantity, LastPlacedSessionDate, LastOrderNo
@@ -86,6 +87,12 @@ Then poll during market hours
 
 Partial fills protect what is actually owned: the stop is placed for the confirmed quantity, and
 `DesiredQuantity` is raised as further fills land, re-placing for the larger size.
+
+An optional take-profit uses this same proof. It is not armed as a SELL until the fill watcher has
+confirmed real shares; it then becomes a durable `PriceAbove` LIMIT armed order for the confirmed
+quantity. That reuses the ordinary SELL path's broker-confirmed availability check, persistent
+remainder handling, and protective-stop release. If the holding later reaches zero, the worker
+cancels any still-armed target with the stop intent.
 
 **Invariant: a SELL is never placed without a confirmed increase in holdings.** Selling shares you
 do not own is a rejection at best and a short at worst.
@@ -185,5 +192,5 @@ that quietly does not go in, so the real headers should be read off the live gri
 | `Broker/IBrokerAdapter.cs` | expose holdings + open orders to the worker |
 | `Trading/ProtectiveStopWorker.cs` | new — fill watch, native placement, session recurrence |
 | `TradingAgentModule.cs` | endpoints + DI |
-| `ui/src/ArmOrderDialog.svelte` | attach-stop checkbox and fields |
+| `ui/src/ArmOrderDialog.svelte` | compact entry/size/exits flow, including stop and take-profit |
 | `ui/src/ArmedOrdersPanel.svelte` | render stops under their entry |

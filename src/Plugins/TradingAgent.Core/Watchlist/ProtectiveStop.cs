@@ -157,6 +157,20 @@ public sealed record ProtectiveStop
     /// </summary>
     public string? LocalBackstopArmedId { get; init; }
 
+    /// <summary>
+    /// Optional profit target attached to the same BUY entry as this stop. It is only materialised as
+    /// an armed SELL after this row's fill watcher has confirmed that shares actually exist. Keeping
+    /// the price here makes the requested exit plan durable during <c>pending_fill</c>; keeping the
+    /// resulting armed id separately makes activation idempotent across retries and restarts.
+    /// </summary>
+    public decimal? TakeProfitPrice { get; init; }
+
+    /// <summary>
+    /// The durable PriceAbove LIMIT SELL created for <see cref="TakeProfitPrice"/> after fill
+    /// confirmation. Null means no target was requested or activation has not succeeded yet.
+    /// </summary>
+    public string? TakeProfitArmedId { get; init; }
+
     public DateTime CreatedUtc { get; init; } = DateTime.UtcNow;
     public DateTime? FillConfirmedUtc { get; init; }
     public DateTime? ClosedUtc { get; init; }

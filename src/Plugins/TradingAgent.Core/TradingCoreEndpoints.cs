@@ -120,6 +120,7 @@ public sealed record ArmOrderRequest(
     string? Note = null,
     string? SourceAlertId = null,
     AttachStopRequest? AttachStop = null,
+    AttachTakeProfitRequest? AttachTakeProfit = null,
     decimal? TriggerPercent = null,
     decimal? ReferencePrice = null,
     bool Trailing = false,
@@ -166,6 +167,13 @@ public sealed record AttachStopRequest(
     decimal? StopLimit = null,
     int? Quantity = null,
     bool Recurring = true);
+
+/// <summary>
+/// A profit target attached to the same BUY entry as a protective stop. It stays dormant until the
+/// shared fill watcher confirms real shares, then becomes a durable PriceAbove LIMIT SELL sized to
+/// what actually filled.
+/// </summary>
+public sealed record AttachTakeProfitRequest(decimal? Price);
 
 /// <summary>How long to suspend order confirmation for.</summary>
 public sealed record ArmApprovalRequest(int? Minutes = null);

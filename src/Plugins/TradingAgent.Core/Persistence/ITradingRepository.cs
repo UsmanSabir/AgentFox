@@ -665,6 +665,12 @@ public interface ITradingRepository
         string stopId,
         string? backstopArmedId,
         CancellationToken ct = default);
+
+    /// <summary>Links the fill-dependent take-profit armed from this stop's confirmed entry.</summary>
+    Task<bool> SetProtectiveStopTakeProfitAsync(
+        string stopId,
+        string takeProfitArmedId,
+        CancellationToken ct = default) => Task.FromResult(false);
 }
 
 /// <summary>One watched symbol.</summary>

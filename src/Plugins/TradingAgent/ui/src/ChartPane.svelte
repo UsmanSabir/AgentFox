@@ -166,6 +166,8 @@
       // dialog's generic 2%-under guess where a computed stop appears to be.
       attachStop: plan.stop != null,
       stopTrigger: plan.stop,
+      attachTakeProfit: plan.target != null,
+      takeProfitPrice: plan.target,
       currentPrice: last,
       context:
         `${symbol} last ${last} · plan entry ${plan.entry}, stop ${plan.stop ?? '—'}, `
@@ -1014,12 +1016,12 @@
             <button
               class="arm-plan"
               on:click={armPlan}
-              title="Arm a BUY at {data.plan.entry}{data.plan.stop != null
-                ? `, protected by a stop at ${data.plan.stop}`
+              title="Arm the entry{data.plan.stop != null ? `, stop at ${data.plan.stop}` : ''}{data.plan.target != null
+                ? `, and take-profit at ${data.plan.target}`
                 : ''}"
             >
               <Crosshair size={12} />
-              arm{data.plan.stop != null ? ' with stop' : ''}
+              arm plan
             </button>
           </div>
         {/if}

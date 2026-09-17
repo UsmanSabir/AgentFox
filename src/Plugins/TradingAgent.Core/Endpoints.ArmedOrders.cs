@@ -349,6 +349,20 @@ public sealed partial class TradingCoreEndpoints
                 if (!plan.Ok)
                     return Results.BadRequest(new { error = plan.ErrorCode, message = plan.Message });
 
+                decimal? takeProfitPrice = null;
+                if (body.AttachTakeProfit is { } target)
+                {
+                    var targetPlan = AttachedTakeProfitRule.Validate(
+                        action, target.Price, order.Price ?? order.TriggerPrice, hasAttachedStop: true);
+                    if (targetPlan.ErrorCode is not null)
+                        return Results.BadRequest(new
+                        {
+                            error = targetPlan.ErrorCode,
+                            message = targetPlan.Message
+                        });
+                    takeProfitPrice = targetPlan.Price;
+                }
+
                 attached = new ProtectiveStop
                 {
                     StopId        = Guid.NewGuid().ToString("N"),
@@ -360,12 +374,23 @@ public sealed partial class TradingCoreEndpoints
                     DesiredQuantity = 0,
                     Recurring     = attach.Recurring,
                     State         = "pending_fill",
+                    TakeProfitPrice = takeProfitPrice,
                     Note          = attach.Quantity is { } wanted
                                         ? $"Requested cover: {wanted} share(s)."
                                         : null,
                     // Attached by hand to an entry armed by hand; it inherits the entry's origination.
                     OperatorOriginated = true
                 };
+            }
+            else if (body.AttachTakeProfit is { } target)
+            {
+                var targetPlan = AttachedTakeProfitRule.Validate(
+                    action, target.Price, order.Price ?? order.TriggerPrice, hasAttachedStop: false);
+                return Results.BadRequest(new
+                {
+                    error = targetPlan.ErrorCode,
+                    message = targetPlan.Message
+                });
             }
 
             var id = await repository.SaveArmedOrderAsync(order, ct);
@@ -434,6 +459,8 @@ public sealed partial class TradingCoreEndpoints
                     attached.StopLimit,
                     attached.Recurring,
                     attached.State,
+                    attached.TakeProfitPrice,
+                    attached.TakeProfitArmedId,
                     // The honest version of "and then it's protected". Each clause is a real gap the
                     // operator would otherwise find out about from a position that was not covered.
                     note = "The stop is dormant until the entry is confirmed filled by an increase in "

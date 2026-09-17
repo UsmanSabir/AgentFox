@@ -80,3 +80,29 @@ public static class AttachedStopRule
         return new(null, null, trigger, limit);
     }
 }
+
+/// <summary>Pure validation for a fill-dependent take-profit paired with an attached stop.</summary>
+public static class AttachedTakeProfitRule
+{
+    public static (string? ErrorCode, string? Message, decimal Price) Validate(
+        string? action, decimal? targetPrice, decimal? entryPrice, bool hasAttachedStop)
+    {
+        if (!string.Equals(action?.Trim(), "BUY", StringComparison.OrdinalIgnoreCase))
+            return ("target_requires_buy",
+                "A take-profit can only be attached to a BUY entry.", 0m);
+
+        if (!hasAttachedStop)
+            return ("target_requires_stop",
+                "Attach a protective stop with this take-profit so both exits share one confirmed-fill lifecycle.", 0m);
+
+        if (targetPrice is not > 0)
+            return ("invalid_take_profit",
+                "A take-profit needs a positive sell price.", 0m);
+
+        if (entryPrice is { } entry && targetPrice.Value <= entry)
+            return ("target_not_above_entry",
+                $"The take-profit ({targetPrice}) must be above the entry ({entry}).", 0m);
+
+        return (null, null, targetPrice.Value);
+    }
+}

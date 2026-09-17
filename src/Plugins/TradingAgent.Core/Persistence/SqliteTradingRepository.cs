@@ -1937,6 +1937,8 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                     last_placed_date  TEXT NULL,
                     last_order_no     TEXT NULL,
                     backstop_armed_id TEXT NULL,
+                    take_profit_price TEXT NULL,
+                    take_profit_armed_id TEXT NULL,
                     created_utc       TEXT NOT NULL,
                     fill_confirmed_utc TEXT NULL,
                     closed_utc        TEXT NULL,
@@ -2097,6 +2099,10 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                 connection, "protective_stops", "parent_execution_id", "TEXT NULL", ct);
             await AddColumnIfMissingAsync(
                 connection, "protective_stops", "parent_persistent_id", "TEXT NULL", ct);
+            await AddColumnIfMissingAsync(
+                connection, "protective_stops", "take_profit_price", "TEXT NULL", ct);
+            await AddColumnIfMissingAsync(
+                connection, "protective_stops", "take_profit_armed_id", "TEXT NULL", ct);
 
             await AddColumnIfMissingAsync(connection, "trade_proposals", "correlation_id", "TEXT NULL", ct);
             await AddColumnIfMissingAsync(connection, "trading_executions", "correlation_id", "TEXT NULL", ct);
@@ -2944,11 +2950,11 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                 (stop_id, symbol, parent_armed_id, parent_execution_id, parent_persistent_id,
                  stop_trigger, stop_limit, desired_qty, recurring,
                  state, baseline_qty, placed_qty, backstop_armed_id, created_utc, state_reason, note,
-                 supersedes_stop_id, operator_originated)
+                 supersedes_stop_id, operator_originated, take_profit_price, take_profit_armed_id)
             VALUES ($id, $symbol, $parent, $parentExec, $parentIntent,
                     $trigger, $limit, $desired, $recurring,
                     $state, $baseline, $placed, $backstop, $created, $reason, $note, $supersedes,
-                    $operator)
+                    $operator, $targetPrice, $targetArmed)
             """;
         command.Parameters.AddWithValue("$id", stop.StopId);
         command.Parameters.AddWithValue("$symbol", stop.Symbol);
@@ -2971,6 +2977,9 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         command.Parameters.AddWithValue("$note", stop.Note ?? (object)DBNull.Value);
         command.Parameters.AddWithValue("$supersedes", stop.SupersedesStopId ?? (object)DBNull.Value);
         command.Parameters.AddWithValue("$operator", stop.OperatorOriginated ? 1 : 0);
+        command.Parameters.AddWithValue("$targetPrice", Money(stop.TakeProfitPrice));
+        command.Parameters.AddWithValue(
+            "$targetArmed", stop.TakeProfitArmedId ?? (object)DBNull.Value);
         await command.ExecuteNonQueryAsync(ct);
         return stop.StopId;
     }
@@ -3018,7 +3027,8 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
             SELECT stop_id, symbol, parent_armed_id, stop_trigger, stop_limit, desired_qty, recurring,
                    state, baseline_qty, placed_qty, last_placed_date, last_order_no, backstop_armed_id,
                    created_utc, fill_confirmed_utc, closed_utc, state_reason, note, supersedes_stop_id,
-                   operator_originated, parent_execution_id, parent_persistent_id
+                   operator_originated, parent_execution_id, parent_persistent_id,
+                   take_profit_price, take_profit_armed_id
             FROM protective_stops
             {(openOnly ? "WHERE state <> 'closed'" : "")}
             ORDER BY created_utc DESC
@@ -3169,6 +3179,24 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         return await command.ExecuteNonQueryAsync(ct) == 1;
     }
 
+    public async Task<bool> SetProtectiveStopTakeProfitAsync(
+        string stopId, string takeProfitArmedId, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE protective_stops
+               SET take_profit_armed_id = $target
+             WHERE stop_id = $id
+               AND state IN ('pending_fill', 'active')
+               AND take_profit_armed_id IS NULL
+            """;
+        command.Parameters.AddWithValue("$id", stopId);
+        command.Parameters.AddWithValue("$target", takeProfitArmedId);
+        return await command.ExecuteNonQueryAsync(ct) == 1;
+    }
+
     private static ProtectiveStop ReadProtectiveStop(Microsoft.Data.Sqlite.SqliteDataReader reader) => new()
     {
         StopId               = reader.GetString(0),
@@ -3194,7 +3222,9 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         SupersedesStopId     = reader.IsDBNull(18) ? null : reader.GetString(18),
         OperatorOriginated   = !reader.IsDBNull(19) && reader.GetInt64(19) != 0,
         ParentExecutionId    = reader.IsDBNull(20) ? null : reader.GetString(20),
-        ParentPersistentIntentId = reader.IsDBNull(21) ? null : reader.GetString(21)
+        ParentPersistentIntentId = reader.IsDBNull(21) ? null : reader.GetString(21),
+        TakeProfitPrice      = ParseDecimal(reader, 22),
+        TakeProfitArmedId    = reader.IsDBNull(23) ? null : reader.GetString(23)
     };
 
     private static object Money(decimal? value) => value is null
