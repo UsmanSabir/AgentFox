@@ -388,7 +388,7 @@
         <div class="outcome">
           <b>Stop attached at {result.attachedStop.stopTrigger} (limit {result.attachedStop.stopLimit})</b>
           {#if result.attachedStop.takeProfitPrice}
-            <p>Take-profit will arm at {result.attachedStop.takeProfitPrice} after the entry fill is confirmed.</p>
+            <p>A take-profit waiting order will be created at {result.attachedStop.takeProfitPrice} after the entry fill is confirmed.</p>
           {/if}
           <p>{result.attachedStop.note}</p>
         </div>
@@ -476,7 +476,7 @@
             {#if trailing}
               The {fallsToTrigger ? 'higher' : 'lower'} {symbol} goes, the {fallsToTrigger ? 'higher' : 'lower'}
               this trigger goes with it — it never moves back, so the {triggerPercent}% is always
-              measured from the {fallsToTrigger ? 'best' : 'lowest'} price seen since you armed it.
+              measured from the {fallsToTrigger ? 'best' : 'lowest'} price seen since you saved it.
             {:else}
               The {triggerPercent}% is measured from {referencePrice ?? '—'} and stays there, whatever
               {symbol} does afterwards.
@@ -513,7 +513,7 @@
           <p class="error">
             <AlertTriangle size={12} />
             {symbol} is already {fallsToTrigger ? 'at or below' : 'at or above'} {money(level!)}, so
-            this would fire on the next check rather than wait for a move. Arm it only if that is
+            this would fire on the next check rather than wait for a move. Save it only if that is
             what you mean.
           </p>
         {/if}
@@ -753,7 +753,7 @@
 
       <p class="caveat">
         <AlertTriangle size={12} />
-        An armed order is evaluated by the monitor, so it only fires while AgentFox is running and the
+        A waiting order is evaluated by the monitor, so it only fires while AgentFox is running and the
         market is open. A native broker stop has neither limitation.
       </p>
 

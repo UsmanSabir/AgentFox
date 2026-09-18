@@ -431,9 +431,9 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
         var now = DateTime.UtcNow;
 
         // Read once for the whole batch rather than per order: it is the same answer for every one of
-        // them, and a scheduled order is the only kind that consults it. See ArmedTriggerKind.Scheduled
-        // — it has no price condition, so this is the only thing standing between a timer and an order
-        // placed into a venue that would hold it until the next open.
+        // them. Every date-bound order consults it, including a price trigger that starts on a future
+        // date, so reaching both conditions while the board is shut cannot queue a market order for
+        // the next opening auction.
         var marketIsOpen = _calendar.GetStatus().IsOpen;
 
         foreach (var order in armed)

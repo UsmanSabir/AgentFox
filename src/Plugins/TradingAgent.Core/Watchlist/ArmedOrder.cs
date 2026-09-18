@@ -299,9 +299,9 @@ public static class ArmedOrderEvaluator
     /// the decision, including when the answer is no and why.
     /// </summary>
     /// <param name="marketIsOpen">
-    /// Whether the venue is accepting trade right now. Read ONLY by
-    /// <see cref="ArmedTriggerKind.Scheduled"/>, which has no price condition and therefore nothing
-    /// else that can hold it back while the board is shut.
+    /// Whether the venue is accepting trade right now. Read by every order carrying an
+    /// <see cref="ArmedOrder.ActiveFromUtc"/> date: the date may be the whole condition, or the lower
+    /// bound on a price or event condition, but neither should submit while the board is shut.
     ///
     /// <para>
     /// Optional, and it defaults to <c>false</c> — the refusing direction — so a caller that has not
@@ -338,6 +338,12 @@ public static class ArmedOrderEvaluator
         if (order.ActiveFromUtc is { } activeFrom && nowUtc < activeFrom)
         {
             reason = $"Scheduled: not active until {activeFrom:u}.";
+            return false;
+        }
+
+        if (order.ActiveFromUtc is { } scheduledFrom && !marketIsOpen)
+        {
+            reason = $"Scheduled from {scheduledFrom:u}, but the market is closed; waiting for the open.";
             return false;
         }
 
@@ -400,10 +406,8 @@ public static class ArmedOrderEvaluator
                 return fired;
 
             case ArmedTriggerKind.Scheduled:
-                // Reaching here means the activation check above has already passed, so the date has
-                // arrived and there is no second condition. The market gate is therefore the ONLY
-                // thing left between a timer and a live order — see ArmedTriggerKind.Scheduled for
-                // why a closed venue does not stop this the way it stops every other kind.
+                // Reaching here means both common date checks above have passed. There is no second
+                // condition for this kind, unlike a price trigger carrying the same lower bound.
                 if (order.ActiveFromUtc is not { } scheduledFor)
                 {
                     // A scheduled order with no date is not "fire immediately", it is a corrupt row:
@@ -411,13 +415,6 @@ public static class ArmedOrderEvaluator
                     // database or a downgrade. Firing an order of unknown intent is the one outcome
                     // worse than never firing it.
                     reason = "Scheduled order has no activation date.";
-                    return false;
-                }
-
-                if (!marketIsOpen)
-                {
-                    reason = $"Scheduled for {scheduledFor:u} and active, but the market is closed; "
-                           + "waiting for the open.";
                     return false;
                 }
 

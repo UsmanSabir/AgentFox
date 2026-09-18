@@ -1035,7 +1035,7 @@
                 : ''}"
             >
               <Crosshair size={12} />
-              arm plan
+              create entry order
             </button>
           </div>
         {/if}
@@ -1061,7 +1061,7 @@
         <!-- Defaults follow the ordinary level trade: sell at resistance, buy at support. -->
         <div class="levels">
           <div>
-            <b>Resistance <em class="hint">click to arm</em></b>
+            <b>Resistance <em class="hint">click to create order</em></b>
             {#each data.levels.resistances.slice(0, 3) as level}
               <button
                 class="level armable"
@@ -1074,7 +1074,7 @@
             {:else}<span class="level muted">none above price</span>{/each}
           </div>
           <div>
-            <b>Support <em class="hint">click to arm</em></b>
+            <b>Support <em class="hint">click to create order</em></b>
             {#each data.levels.supports.slice(0, 3) as level}
               <button
                 class="level armable"

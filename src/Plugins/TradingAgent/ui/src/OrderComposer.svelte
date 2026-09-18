@@ -269,6 +269,8 @@
       if (force || triggerPrice == null) triggerPrice = Number((reference * factor).toFixed(2));
       if (force || price == null) price = triggerPrice;
     }
+    if (choice.priceField === 'trigger' && (force || triggerPrice == null))
+      triggerPrice = reference;
     if (choice.priceField === 'limit' && (force || price == null)) price = reference;
     if (choice.priceField === 'target' && (force || price == null))
       price = Number((reference * 1.05).toFixed(2));
@@ -341,7 +343,10 @@
     orderValue = value;
   }
 
-  $: scheduled = choice?.triggerKind === 'Scheduled';
+  // A date can be the whole trigger, or it can postpone when a price trigger starts being watched.
+  // The registry says which intents need that date so the UI does not infer product semantics from an id.
+  $: scheduled = choice?.requiresActivationDate ?? choice?.triggerKind === 'Scheduled';
+  $: dateOnlySchedule = choice?.triggerKind === 'Scheduled';
   $: activationError = scheduled && activeFromDate ? scheduleDateError(activeFromDate) : null;
   $: exactPriceTrigger = choice?.submission === 'conditional'
     && (choice.triggerKind === 'PriceBelow' || choice.triggerKind === 'PriceAbove');
@@ -453,11 +458,19 @@
   $: summary = (() => {
     if (!choice || !symbol || !effectiveQuantity) return null;
     const side = choice.action === 'BUY' ? 'Buy' : 'Sell';
+    if (scheduled && exactPriceTrigger && choice.orderType === 'MARKET') {
+      const comparison = choice.triggerKind === 'PriceBelow' ? 'at or below' : 'at or above';
+      return `Starting on ${activeFromDate || 'your chosen date'} (PKT), wait until ${symbol} is ${comparison} ${triggerPrice ?? '—'} PKR, then sell ${effectiveQuantity} shares at market. The trigger is not a price guarantee; the fill can be lower.`;
+    }
+    if (scheduled && choice.orderType === 'MARKET')
+      return `On or after ${activeFromDate || 'your chosen date'} (PKT), sell ${effectiveQuantity} ${symbol} at the best available price, at the first eligible market-open check. The final proceeds can move.`;
     if (scheduled)
       return `On or after ${activeFromDate || 'your chosen date'} (PKT), submit a limit ${side.toLowerCase()} for ${effectiveQuantity} ${symbol} at ${price ?? '—'} PKR or better, at the first eligible market-open check. Filling is not guaranteed.`;
     if (exactPriceTrigger) {
       const comparison = choice.triggerKind === 'PriceBelow' ? 'at or below' : 'at or above';
-      return `Wait until ${symbol} is ${comparison} ${triggerPrice ?? '—'} PKR, then submit a limit ${side.toLowerCase()} for ${effectiveQuantity} shares at ${price ?? '—'} PKR or better. Filling is not guaranteed.`;
+      return choice.orderType === 'MARKET'
+        ? `Wait until ${symbol} is ${comparison} ${triggerPrice ?? '—'} PKR, then submit a market ${side.toLowerCase()} for ${effectiveQuantity} shares. The fill price can move.`
+        : `Wait until ${symbol} is ${comparison} ${triggerPrice ?? '—'} PKR, then submit a limit ${side.toLowerCase()} for ${effectiveQuantity} shares at ${price ?? '—'} PKR or better. Filling is not guaranteed.`;
     }
     if (choice.submission === 'conditional' && conditionalLevel != null) {
       const move = choice.triggerKind === 'PercentDrop' ? 'falls' : 'rises';
@@ -503,13 +516,17 @@
     if (scheduled) {
       const dateError = scheduleDateError(activeFromDate);
       if (dateError) { error = dateError; return; }
-      if (!price || !Number.isFinite(price) || price <= 0) {
+    }
+    if (dateOnlySchedule) {
+      if (choice.orderType === 'LIMIT' && (!price || !Number.isFinite(price) || price <= 0)) {
         error = 'Enter a positive limit price.'; return;
       }
     } else if (exactPriceTrigger) {
-      if (!triggerPrice || !Number.isFinite(triggerPrice) || triggerPrice <= 0
-          || !price || !Number.isFinite(price) || price <= 0) {
-        error = 'Enter a positive trigger price and limit price.'; return;
+      if (!triggerPrice || !Number.isFinite(triggerPrice) || triggerPrice <= 0) {
+        error = 'Enter a positive trigger price.'; return;
+      }
+      if (choice.orderType === 'LIMIT' && (!price || !Number.isFinite(price) || price <= 0)) {
+        error = 'Enter a positive limit price.'; return;
       }
     } else if (choice.submission === 'conditional') {
       if (!choice.triggerKind || !triggerPercent || triggerPercent <= 0 || triggerPercent > 50) {
@@ -549,11 +566,11 @@
       symbol: symbol.trim().toUpperCase(), action: choice.action, quantity: submittedQuantity,
       triggerKind: choice.triggerKind as TriggerKind,
       triggerPrice: exactPriceTrigger ? triggerPrice : null,
-      triggerPercent: exactPriceTrigger || scheduled ? null : triggerPercent,
-      referencePrice: exactPriceTrigger || scheduled ? null : triggerReferencePrice,
+      triggerPercent: exactPriceTrigger || dateOnlySchedule ? null : triggerPercent,
+      referencePrice: exactPriceTrigger || dateOnlySchedule ? null : triggerReferencePrice,
       activeFromDate: scheduled ? activeFromDate : null,
       trailing: choice.trailing, orderType: choice.orderType,
-      price: choice.orderType === 'MARKET' ? null : exactPriceTrigger || scheduled ? price : conditionalLevel, expiresInDays, persistentUntilFilled,
+      price: choice.orderType === 'MARKET' ? null : exactPriceTrigger || dateOnlySchedule ? price : conditionalLevel, expiresInDays, persistentUntilFilled,
       attachStop: attachStop && stopTrigger ? {stopTrigger, stopLimit, recurring:stopRecurring} : null,
       note: `New Order: ${choice.label}`
     };
@@ -562,16 +579,16 @@
     // decision the operator has just taken is a hurdle, not a safeguard — it trains people to click
     // through the second one, which is the opposite of what this gate is for.
     if ((immediate || docked || scheduled) && !alreadyConfirmed && !await confirmAction(
-      immediate ? 'Review order' : 'Review waiting order',
+      immediate ? 'Review order' : scheduled ? 'Review scheduled order' : 'Review waiting order',
       `${summary}\n\n` + (immediate
         ? 'Submit this order now? Every policy and risk gate still applies, but if they pass this can place a REAL broker order.'
-        : `Arm this waiting order for up to ${expiresInDays} day(s)${scheduled ? ' from the activation date (PKT)' : ''}? When its condition is met, existing approval and risk controls determine whether it sends a REAL broker order.`)
+        : `Save this waiting order for up to ${expiresInDays} day(s)${scheduled ? ' from the activation date (PKT)' : ''}? When its condition is met, existing approval and risk controls determine whether it sends a REAL broker order.`)
       + (persistentUntilFilled
         ? `\n\nThe unfilled remainder will be submitted again once per PSX trading day for up to ${expiresInDays} day(s).`
         : '')
       + (attachStop && stopTrigger
         ? `\n\nAttach a ${stopRecurring ? 'recurring' : 'one-session'} protective stop: trigger ${stopTrigger}, worst price ${stopLimit}. It covers the shares that actually fill.` : ''),
-      immediate ? 'Confirm & submit order' : 'Confirm & arm waiting order'
+      immediate ? 'Confirm & submit order' : scheduled ? 'Confirm & schedule order' : 'Confirm & save waiting order'
     )) return;
 
     busy = true;
@@ -611,7 +628,7 @@
         const armed = await trading.armed.arm(waitingRequest);
         result = {
           ok: true,
-          title: scheduled ? 'Scheduled order saved' : 'Waiting order armed',
+          title: scheduled ? 'Scheduled order saved' : 'Waiting order saved',
           detail: `${scheduled ? `Active from ${activeFromDate} (PKT), expiring ${expiresInDays} day(s) later. Manage or cancel it in Waiting orders. ` : ''}${armed.note} ${armed.willFireUnattended ? 'It can fire unattended.' : 'It still needs approval before sending.'}`
             + (armed.attachedStop
               ? ` A ${armed.attachedStop.recurring ? 'recurring' : 'one-session'} protective stop at ${money(armed.attachedStop.stopTrigger)} `
@@ -732,7 +749,7 @@
             <option value="" disabled>Choose what you want to happen</option>
             {#each categories as category}<optgroup label={category}>{#each registry?.intents.filter(item => item.category === category) ?? [] as item}<option value={item.id}>{item.label}</option>{/each}</optgroup>{/each}
           </select></label>
-          {#if choice}<p>{choice.description} {scheduled ? 'Waits for your PSX date.' : choice.submission === 'conditional' ? 'Waits for a trigger.' : 'Sent after your confirmation.'}</p>{/if}
+          {#if choice}<p>{choice.description} {scheduled && exactPriceTrigger ? 'Waits for your PSX date and price condition.' : scheduled ? 'Waits for your PSX date.' : choice.submission === 'conditional' ? 'Waits for a trigger.' : 'Sent after your confirmation.'}</p>{/if}
         </div>
       {:else}
       <div class="choices">
@@ -743,7 +760,7 @@
               {#each registry?.intents.filter(item => item.category === category) ?? [] as item (item.id)}
                 <button class="choice" class:selected={choice?.id === item.id} on:click={() => choose(item)}>
                   <b>{item.label}</b><span>{item.description}</span>
-                  {#if item.submission === 'conditional'}<em><Clock3 size={11} /> {item.triggerKind === 'Scheduled' ? 'waits for a date' : 'waits for a trigger'}</em>{/if}
+                  {#if item.submission === 'conditional'}<em><Clock3 size={11} /> {item.requiresActivationDate && item.triggerKind !== 'Scheduled' ? 'waits for a date + price' : item.triggerKind === 'Scheduled' ? 'waits for a date' : 'waits for a trigger'}</em>{/if}
                 </button>
               {/each}
             </div>
@@ -880,7 +897,9 @@
               <label><span>Worst acceptable price after trigger</span><input type="number" min="0.01" step="0.01" bind:value={limitPrice} /></label>
             {/if}
             {#if exactPriceTrigger}
-              <label><span>Trigger price ({choice.triggerKind === 'PriceBelow' ? 'at or below' : 'at or above'})</span><input type="number" min="0.01" step="0.01" bind:value={triggerPrice} /></label>
+              <label><span>{scheduled && choice.orderType === 'MARKET'
+                ? 'Minimum price before market sell'
+                : `Trigger price (${choice.triggerKind === 'PriceBelow' ? 'at or below' : 'at or above'})`}</span><input type="number" min="0.01" step="0.01" bind:value={triggerPrice} /></label>
             {:else if choice.submission === 'conditional' && !scheduled}
               <label><span>Move from {triggerReferencePrice ?? 'latest price'} (%)</span><input type="number" min="0.1" max="50" step="0.1" bind:value={triggerPercent} /></label>
             {/if}
@@ -893,7 +912,17 @@
           </div>
 
           {#if scheduled}
-            <p class="estimate" id="schedule-help">AgentFox must be running with monitoring active. It waits for the first eligible market-open check on or after this date, including after weekends or holidays, until expiry. This is a date, not an exact execution time. Approval and risk checks still apply.</p>
+            <p class="estimate" id="schedule-help">
+              AgentFox must be running with monitoring active. Monitoring starts on this date at the
+              first eligible market-open check, including after weekends or holidays, and continues
+              until expiry. This is a date, not an exact execution time. Approval and risk checks still apply.
+            </p>
+            {#if exactPriceTrigger && choice.orderType === 'MARKET'}
+              <p class="warning"><AlertTriangle size={13} />
+                The minimum price controls when AgentFox submits the market order. It does not guarantee
+                the fill price; a fast move or thin order book can fill lower.
+              </p>
+            {/if}
             {#if activationError}<p class="warning" role="alert">{activationError}</p>{/if}
           {/if}
           {#if canAttachStop}

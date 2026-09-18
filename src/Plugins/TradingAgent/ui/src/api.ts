@@ -173,6 +173,8 @@ export interface OrderIntentDefinition {
   priceField: 'none' | 'limit' | 'target' | 'stop' | 'limit-at-trigger' | string;
   defaultPercent: number | null;
   trailing: boolean;
+  /** This intent cannot become active until the operator's selected PKT calendar date. */
+  requiresActivationDate?: boolean;
 }
 
 export interface OrderIntentRegistryResponse {

@@ -47,6 +47,35 @@ public sealed class OrderIntentRegistryTests
         Assert.IsNull(intent.DefaultPercent);
         Assert.IsFalse(intent.Trailing);
     }
+
+    [TestMethod]
+    public void ScheduledMarketSell_UsesTheDateAloneAndCommitsToNoPrice()
+    {
+        var intent = OrderIntentRegistry.Find("scheduled-market-sell");
+        Assert.IsNotNull(intent);
+        Assert.AreEqual("conditional", intent.Submission);
+        Assert.AreEqual("SELL", intent.Action);
+        Assert.AreEqual("Scheduled", intent.TriggerKind);
+        Assert.AreEqual("MARKET", intent.OrderType);
+        Assert.AreEqual("none", intent.PriceField);
+        Assert.IsNull(intent.DefaultPercent);
+        Assert.IsFalse(intent.Trailing);
+        Assert.IsTrue(intent.RequiresActivationDate);
+    }
+
+    [TestMethod]
+    public void ScheduledMarketSellAbove_WaitsForBothTheDateAndMinimumPrice()
+    {
+        var intent = OrderIntentRegistry.Find("scheduled-market-sell-above");
+        Assert.IsNotNull(intent);
+        Assert.AreEqual("conditional", intent.Submission);
+        Assert.AreEqual("SELL", intent.Action);
+        Assert.AreEqual("PriceAbove", intent.TriggerKind);
+        Assert.AreEqual("MARKET", intent.OrderType);
+        Assert.AreEqual("trigger", intent.PriceField);
+        Assert.IsTrue(intent.RequiresActivationDate);
+    }
+
     [TestMethod]
     [DataRow("wait-buy-drops", "BUY", "PriceBelow")]
     [DataRow("wait-buy-rises", "BUY", "PriceAbove")]

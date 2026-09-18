@@ -187,13 +187,34 @@ public sealed class ArmedOrderTests
     {
         // Being active is not itself a reason to fire a CONDITIONAL order — otherwise adding a date
         // to a price trigger would quietly convert it into a scheduled one. Note marketIsOpen is
-        // true here: only the Scheduled kind consults it, and this must not start.
+        // true here: a date-bound trigger must also wait for the venue, and this test isolates price.
         var order = Armed(
             ArmedTriggerKind.PriceBelow, trigger: 287.03m, activeFrom: Now.AddMinutes(-1));
 
         Assert.IsFalse(
             ArmedOrderEvaluator.ShouldFire(order, 300m, [], Now, out var reason, marketIsOpen: true));
         StringAssert.Contains(reason, "has not reached trigger");
+    }
+
+    [TestMethod]
+    public void APriceAboveTriggerWithADate_FiresOnlyAfterBothConditionsAreMet()
+    {
+        var future = Armed(
+            ArmedTriggerKind.PriceAbove, trigger: 450m, activeFrom: Now.AddMinutes(1));
+        Assert.IsFalse(
+            ArmedOrderEvaluator.ShouldFire(future, 500m, [], Now, out var beforeDate, marketIsOpen: true));
+        StringAssert.Contains(beforeDate, "not active until");
+
+        var active = future with { ActiveFromUtc = Now.AddMinutes(-1) };
+        Assert.IsFalse(
+            ArmedOrderEvaluator.ShouldFire(active, 500m, [], Now, out var closed, marketIsOpen: false));
+        StringAssert.Contains(closed, "market is closed");
+        Assert.IsFalse(
+            ArmedOrderEvaluator.ShouldFire(active, 449.99m, [], Now, out var belowPrice, marketIsOpen: true));
+        StringAssert.Contains(belowPrice, "has not reached trigger");
+        Assert.IsTrue(
+            ArmedOrderEvaluator.ShouldFire(active, 450m, [], Now, out var atPrice, marketIsOpen: true),
+            atPrice);
     }
 
     [TestMethod]

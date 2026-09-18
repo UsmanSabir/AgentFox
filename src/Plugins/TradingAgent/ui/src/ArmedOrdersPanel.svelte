@@ -382,7 +382,7 @@
               {/if}
             </div>
             <div class="meta">
-              armed {when(order.armedUtc)}
+              saved {when(order.armedUtc)}
               {#if order.expiresUtc} · expires {new Date(order.expiresUtc).toLocaleDateString()}{/if}
               {#if order.executionId} · execution {order.executionId}{/if}
             </div>

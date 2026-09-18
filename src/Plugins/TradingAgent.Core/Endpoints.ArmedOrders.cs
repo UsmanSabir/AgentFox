@@ -97,6 +97,7 @@ public sealed partial class TradingCoreEndpoints
                     o.State,
                     o.ArmedUtc,
                     o.ExpiresUtc,
+                    o.ActiveFromUtc,
                     o.FiredUtc,
                     o.ExecutionId,
                     o.StateReason,
