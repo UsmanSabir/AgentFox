@@ -1,5 +1,6 @@
 <script lang="ts">
   import { createEventDispatcher, onMount } from 'svelte';
+  import AmountInWords from './AmountInWords.svelte';
   import {
     trading, TRIGGER_KINDS, ALERT_KINDS, PERCENT_PRESETS,
     isPercentTrigger, percentTriggerLevel,
@@ -543,6 +544,7 @@
           <label>
             <span>Amount to invest</span>
             <input type="number" min="1" step="1" bind:value={orderValue} placeholder="PKR" />
+            <AmountInWords value={orderValue} />
           </label>
           {#if valueSizedQuantity != null && sizingPrice != null}
             <p class="sizing-note">
@@ -749,6 +751,7 @@
 
       {#if estimatedValue > 0}
         <p class="estimate">Approximate order value <b>{estimatedValue.toLocaleString()} PKR</b></p>
+        {#if sizeMode === 'shares'}<AmountInWords value={estimatedValue} />{/if}
       {/if}
 
       <p class="caveat">

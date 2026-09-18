@@ -20,7 +20,7 @@
   } from './api';
   import {
     LineChart, AlertTriangle, Eye, RefreshCw, Brain, Maximize2, Minimize2,
-    Activity, Crosshair, BarChart3, TrendingDown, CalendarClock, Download
+    Activity, Crosshair, BarChart3, TrendingDown, CalendarClock, Download, ExternalLink
   } from 'lucide-svelte';
   import AssessmentCard from './AssessmentCard.svelte';
   import { livePriceLabel, useLivePrices, type LivePrice } from './livePrices';
@@ -75,6 +75,7 @@
    * nothing at all here.
    */
   export let quoteDetail: SymbolExtensionComponent | null = null;
+  export let instrumentLinks: SymbolExtensionComponent | null = null;
 
   /** RSI in its own pane costs ~90px of candles; worth reclaiming when the pane is small. */
   let showRsi = true;
@@ -811,6 +812,14 @@
         <div class="instrument">
           <b>{symbol ?? 'Chart'}</b>
           {#if companyName}<strong>{companyName}</strong>{/if}
+          {#if symbol?.trim()}
+            <a class="company-link" href={`https://dps.psx.com.pk/company/${encodeURIComponent(symbol.trim().toUpperCase())}`}
+               target="_blank" rel="noopener noreferrer"
+               aria-label={`${symbol} on PSX (opens in a new tab)`}>
+              PSX <ExternalLink size={12} aria-hidden="true" />
+            </a>
+            {#if instrumentLinks}<svelte:component this={instrumentLinks} {symbol} />{/if}
+          {/if}
         </div>
         {#if data}
           <div class="quote-line">
@@ -1107,6 +1116,9 @@
 </section>
 
 <style>
+  .company-link { display:inline-flex; align-items:center; gap:.25rem; color:var(--text-2); font-size:.75rem; white-space:nowrap; }
+  .company-link:hover { color:var(--text); }
+  .company-link:focus-visible { outline:2px solid var(--primary); outline-offset:3px; }
   .chart-card {
     background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
     padding: 1rem; display: flex; flex-direction: column; gap: .75rem; min-width: 0;

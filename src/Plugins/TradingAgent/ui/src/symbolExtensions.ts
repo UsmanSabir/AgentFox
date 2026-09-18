@@ -28,6 +28,9 @@
 export type SymbolExtensionComponent = any;
 
 export type SymbolExtension = {
+  /** Compact per-symbol links beside the instrument name in every chart layout. */
+  instrumentLinks?: SymbolExtensionComponent | null;
+
   /** Rendered inside each watchlist row, next to the existing tags. */
   rowStatus?: SymbolExtensionComponent | null;
 

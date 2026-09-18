@@ -561,6 +561,7 @@
       <WorkspacePanel {workspace} id="chart">
         <ChartPane symbol={selectedSymbol} companyName={selectedCompany} allowExpand={false}
           quoteDetail={symbolExtension?.quoteDetail ?? null}
+          instrumentLinks={symbolExtension?.instrumentLinks ?? null}
           refreshTick={marketTick} historyRefreshTick={archiveTick} {archive}
           marketOpen={status.market.isOpen} on:arm={(event) => armContext = event.detail}/>
       </WorkspacePanel>

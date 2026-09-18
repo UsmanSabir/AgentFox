@@ -1,6 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher, onMount, onDestroy, tick } from 'svelte';
   import { psxDateInput, scheduleDateError } from './orderSchedule';
+  import AmountInWords from './AmountInWords.svelte';
   import { uncertainOrderFailure, isOrderReviewKey } from './orderReview';
   import {
     trading, percentTriggerLevel, ApiError,
@@ -886,7 +887,9 @@
                 <label><span>Quantity (shares)</span><input type="number" min="1" step="1" bind:value={quantity}
                        on:input={() => quantityWasEdited = true} /></label>
               {:else}
-                <label><span>Order value (PKR)</span><input type="number" min="1" step="1" bind:value={orderValue} /></label>
+                <label><span>Order value (PKR)</span><input type="number" min="1" step="1" bind:value={orderValue} />
+                  <AmountInWords value={orderValue} />
+                </label>
               {/if}
             </div>
             {#if choice.priceField === 'limit' || choice.priceField === 'target' || exactPriceTrigger}
@@ -1000,6 +1003,7 @@
           {/if}
           {#if summary}<p class="summary">{summary}</p>{/if}
           {#if estimatedValue}<p class="estimate">Estimated value: <b>{money(estimatedValue)} PKR</b>{choice.orderType === 'MARKET' ? ' at the latest price; actual value can move.' : ''}</p>{/if}
+          {#if sizeMode === 'shares' && estimatedValue}<AmountInWords value={estimatedValue} />{/if}
           <!--
             Extension point for whoever is hosting this dialog. Deliberately generic: it passes the
             order being composed and takes no view on what, if anything, is rendered — this repo models

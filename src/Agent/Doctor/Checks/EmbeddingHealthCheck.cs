@@ -27,10 +27,25 @@ public class EmbeddingHealthCheck : IHealthCheckable
     {
         var results = new List<HealthCheckResult>();
 
-        // 1. No live embedder. Distinguish "Local configured but model missing" (repairable)
-        //    from "intentionally not configured".
-        if (_embeddingService is NullEmbeddingService)
+        // 1. No live embedder. Three distinct cases, and reporting the wrong one wastes the
+        //    operator's time: the local embedder failed and said why; it failed and did not;
+        //    or no embedder was ever configured.
+        if (_embeddingService is NullEmbeddingService nullService)
         {
+            // The startup path already classified this. Prefer its verdict — it is the only place
+            // that still had the exception.
+            if (nullService.Failure is { } failure)
+            {
+                results.Add(new HealthCheckResult(
+                    HealthStatus.Critical, "Embedding Service",
+                    $"{failure.Summary} Vector search is disabled. {failure.Remedy}",
+                    CanAutoFix: failure.CanAutoFix,
+                    FixDescription: failure.CanAutoFix
+                        ? "Download / restore the local embedding model (~22 MB)"
+                        : null));
+                return results;
+            }
+
             var provider = EmbeddingServiceFactory.ResolveConfig(_config).Provider.Trim().ToLowerInvariant();
             if (provider == "local" && !LocalEmbedder.TryEnsureModelFiles())
             {
@@ -100,6 +115,12 @@ public class EmbeddingHealthCheck : IHealthCheckable
 
     public async Task<FixResult> TryFixAsync(HealthCheckResult result, CancellationToken ct = default)
     {
+        // A failure this process already classified as unrepairable must not be handed to the
+        // model downloader or to the dimension-mismatch wizard below — neither touches the cause,
+        // and both imply progress that is not happening. Say what the operator has to do instead.
+        if (_embeddingService is NullEmbeddingService { Failure: { CanAutoFix: false } failure })
+            return new FixResult(false, failure.Remedy);
+
         // Missing local model — download/restore it. A restart is needed to pick up the
         // now-available embedder (the service was built as a no-op this run).
         if (result.Status == HealthStatus.Critical && !LocalEmbedder.TryEnsureModelFiles())

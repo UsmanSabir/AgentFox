@@ -80,6 +80,7 @@
         companyName={selectedCompany}
         bind:expanded={chartExpanded}
         quoteDetail={symbolExtension?.quoteDetail ?? null}
+        instrumentLinks={symbolExtension?.instrumentLinks ?? null}
         {refreshTick}
         {historyRefreshTick}
         {archive}
