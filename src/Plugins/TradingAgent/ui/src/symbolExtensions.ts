@@ -28,6 +28,9 @@
 export type SymbolExtensionComponent = any;
 
 export type SymbolExtension = {
+  /** Compact per-symbol links beside the instrument name in every chart layout. */
+  instrumentLinks?: SymbolExtensionComponent | null;
+
   /** Rendered inside each watchlist row, next to the existing tags. */
   rowStatus?: SymbolExtensionComponent | null;
 
@@ -36,4 +39,14 @@ export type SymbolExtension = {
 
   /** Rendered in a docked tab on desktop or beneath the chart in the stacked workspace. */
   plan?: SymbolExtensionComponent | null;
+
+  /**
+   * Rendered inside the chart card, directly beneath the plot and above its own metrics row — every
+   * layout, docked or stacked, because it belongs to the chart rather than to a workspace region.
+   *
+   * For a per-symbol reading that belongs WITH THE PRICE: a market-data detail the community build
+   * has no source for. It is the smallest slot in this contract on purpose — the chart card is dense
+   * already, and anything needing room of its own belongs in `plan`.
+   */
+  quoteDetail?: SymbolExtensionComponent | null;
 };

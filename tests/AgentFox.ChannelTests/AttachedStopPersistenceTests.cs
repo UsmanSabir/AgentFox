@@ -5,6 +5,7 @@ using TradingAgent.Config;
 using TradingAgent.Models;
 using TradingAgent.Persistence;
 using TradingAgent.Reconciliation;
+using TradingAgent.Trading;
 using TradingAgent.Watchlist;
 
 namespace AgentFox.ChannelTests;
@@ -68,6 +69,10 @@ public sealed class AttachedStopPersistenceTests
             ParentPersistentIntentId = "intent-1"
         });
         await repository.SaveProtectiveStopAsync(Stop("s-bare"));
+        await repository.SaveProtectiveStopAsync(Stop("s-target") with
+        {
+            TakeProfitPrice = 450m
+        });
 
         var stops = await repository.GetProtectiveStopsAsync(openOnly: false);
 
@@ -83,6 +88,51 @@ public sealed class AttachedStopPersistenceTests
         var bare = stops.Single(s => s.StopId == "s-bare");
         Assert.IsNull(bare.ParentExecutionId);
         Assert.IsNull(bare.ParentPersistentIntentId);
+
+        var target = stops.Single(s => s.StopId == "s-target");
+        Assert.AreEqual(450m, target.TakeProfitPrice);
+        Assert.IsNull(target.TakeProfitArmedId);
+
+        Assert.IsTrue(await repository.SetProtectiveStopTakeProfitAsync("s-target", "s-target-tp"));
+        target = (await repository.GetProtectiveStopsAsync(openOnly: false))
+            .Single(s => s.StopId == "s-target");
+        Assert.AreEqual("s-target-tp", target.TakeProfitArmedId);
+        Assert.AreEqual(450m, target.TakeProfitPrice);
+    }
+
+    [TestMethod]
+    public void AConfirmedFillBecomesADurableOperatorOriginatedLimitSell()
+    {
+        var expires = DateTime.UtcNow.AddDays(7);
+        var stop = Stop("s-target") with
+        {
+            ParentArmedId = "entry-1",
+            TakeProfitPrice = 450m,
+            OperatorOriginated = true
+        };
+        var parent = new ArmedOrder
+        {
+            ArmedId = "entry-1",
+            Symbol = "LUCK",
+            TriggerKind = ArmedTriggerKind.PriceBelow,
+            Action = "BUY",
+            Quantity = 35,
+            OrderType = "LIMIT",
+            ExpiresUtc = expires
+        };
+
+        var target = ProtectiveStopWorker.CreateTakeProfitOrder(stop, quantity: 35, parent);
+
+        Assert.AreEqual("s-target-tp", target.ArmedId);
+        Assert.AreEqual(ArmedTriggerKind.PriceAbove, target.TriggerKind);
+        Assert.AreEqual(450m, target.TriggerPrice);
+        Assert.AreEqual("SELL", target.Action);
+        Assert.AreEqual("LIMIT", target.OrderType);
+        Assert.AreEqual(35, target.Quantity);
+        Assert.AreEqual(450m, target.Price);
+        Assert.IsTrue(target.PersistentUntilFilled);
+        Assert.IsTrue(target.OperatorOriginated);
+        Assert.AreEqual(expires, target.ExpiresUtc);
     }
 
     [TestMethod]

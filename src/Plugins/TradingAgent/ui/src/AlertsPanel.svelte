@@ -323,7 +323,7 @@
             </button>
             <button
               class="icon"
-              title="Arm an order that fires the next time this event happens on {alert.symbol}"
+              title="Create an order that waits for this event to happen again on {alert.symbol}"
               on:click={() => armFromAlert(alert)}
             >
               <Crosshair size={13} />

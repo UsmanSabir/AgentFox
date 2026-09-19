@@ -413,8 +413,11 @@
     on:changed={() => { load(); armedPanel?.load(); persistentPanel?.load(); }}
     on:close={closeNewOrderDialog}
   >
-    <svelte:fragment slot="order-detail" let:action let:quantity let:price>
-      <slot name="order-detail" {action} {quantity} {price}/>
+    <!-- Every prop the composer offers, not the three that happened to be needed first. A
+         half-forwarded slot is indistinguishable from a host that does not want the rest, so the
+         next detail to need the symbol would look like a slot that cannot supply one. -->
+    <svelte:fragment slot="order-detail" let:symbol let:action let:orderType let:quantity let:price let:value>
+      <slot name="order-detail" {symbol} {action} {orderType} {quantity} {price} {value}/>
     </svelte:fragment>
   </NewOrderDialog>
 {/if}
@@ -426,8 +429,8 @@
       <OrderComposer docked bind:this={ticket} {selectedSymbol}
         on:changed={() => { load(); armedPanel?.load(); persistentPanel?.load(); }}
         on:attention={() => workspace?.focusPanel('ticket')} on:close={closeOrderTicket}>
-        <svelte:fragment slot="order-detail" let:action let:quantity let:price>
-          <slot name="order-detail" {action} {quantity} {price}/>
+        <svelte:fragment slot="order-detail" let:symbol let:action let:orderType let:quantity let:price let:value>
+          <slot name="order-detail" {symbol} {action} {orderType} {quantity} {price} {value}/>
         </svelte:fragment>
       </OrderComposer>
     {:else}
@@ -557,6 +560,8 @@
       </WorkspacePanel>
       <WorkspacePanel {workspace} id="chart">
         <ChartPane symbol={selectedSymbol} companyName={selectedCompany} allowExpand={false}
+          quoteDetail={symbolExtension?.quoteDetail ?? null}
+          instrumentLinks={symbolExtension?.instrumentLinks ?? null}
           refreshTick={marketTick} historyRefreshTick={archiveTick} {archive}
           marketOpen={status.market.isOpen} on:arm={(event) => armContext = event.detail}/>
       </WorkspacePanel>

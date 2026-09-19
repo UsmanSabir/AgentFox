@@ -801,6 +801,8 @@ public sealed class WatchlistUniverseTests
             throw new NotSupportedException();
         public Task<int> PruneReconciliationRunsAsync(DateTime before, CancellationToken ct = default) =>
             throw new NotSupportedException();
+        public Task<int> PruneArmedOrdersAsync(DateTime before, CancellationToken ct = default) =>
+            throw new NotSupportedException();
         public Task<string> SaveArmedOrderAsync(ArmedOrder order, CancellationToken ct = default) =>
             throw new NotSupportedException();
         public Task<IReadOnlyList<ArmedOrder>> GetArmedOrdersAsync(

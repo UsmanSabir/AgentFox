@@ -20,10 +20,11 @@
   } from './api';
   import {
     LineChart, AlertTriangle, Eye, RefreshCw, Brain, Maximize2, Minimize2,
-    Activity, Crosshair, BarChart3, TrendingDown, CalendarClock, Download
+    Activity, Crosshair, BarChart3, TrendingDown, CalendarClock, Download, ExternalLink
   } from 'lucide-svelte';
   import AssessmentCard from './AssessmentCard.svelte';
   import { livePriceLabel, useLivePrices, type LivePrice } from './livePrices';
+  import type { SymbolExtensionComponent } from './symbolExtensions';
 
   export let symbol: string | null = null;
   export let companyName: string | null = null;
@@ -67,6 +68,14 @@
   // Weekly-confirmed structure is the readable default. All nearby levels remain one click away and
   // are always listed below, but no longer cover the price axis on first render.
   let levelMode: 'all' | 'key' | 'off' = 'key';
+
+  /**
+   * An optional per-symbol detail from whoever is hosting this dashboard, rendered under the plot.
+   * See `symbolExtensions.ts` for the contract; null in a community build, which then renders
+   * nothing at all here.
+   */
+  export let quoteDetail: SymbolExtensionComponent | null = null;
+  export let instrumentLinks: SymbolExtensionComponent | null = null;
 
   /** RSI in its own pane costs ~90px of candles; worth reclaiming when the pane is small. */
   let showRsi = true;
@@ -166,6 +175,8 @@
       // dialog's generic 2%-under guess where a computed stop appears to be.
       attachStop: plan.stop != null,
       stopTrigger: plan.stop,
+      attachTakeProfit: plan.target != null,
+      takeProfitPrice: plan.target,
       currentPrice: last,
       context:
         `${symbol} last ${last} · plan entry ${plan.entry}, stop ${plan.stop ?? '—'}, `
@@ -801,6 +812,14 @@
         <div class="instrument">
           <b>{symbol ?? 'Chart'}</b>
           {#if companyName}<strong>{companyName}</strong>{/if}
+          {#if symbol?.trim()}
+            <a class="company-link" href={`https://dps.psx.com.pk/company/${encodeURIComponent(symbol.trim().toUpperCase())}`}
+               target="_blank" rel="noopener noreferrer"
+               aria-label={`${symbol} on PSX (opens in a new tab)`}>
+              PSX <ExternalLink size={12} aria-hidden="true" />
+            </a>
+            {#if instrumentLinks}<svelte:component this={instrumentLinks} {symbol} />{/if}
+          {/if}
         </div>
         {#if data}
           <div class="quote-line">
@@ -969,6 +988,12 @@
 
     {#if data}
       <div class="readout">
+        <!-- Above the chart's own metrics because it is the only row here that is a live tape: it
+             changes while the rest of the readout holds still, and burying a moving number under
+             static ones is how it stops being read. -->
+        {#if quoteDetail && symbol}
+          <svelte:component this={quoteDetail} {symbol} />
+        {/if}
         {#if chartError}
           <p class="inline-error">Chart refresh failed; showing the last successful data. {chartError}
             <button class="retry" on:click={() => load(true)}>Retry</button>
@@ -1014,12 +1039,12 @@
             <button
               class="arm-plan"
               on:click={armPlan}
-              title="Arm a BUY at {data.plan.entry}{data.plan.stop != null
-                ? `, protected by a stop at ${data.plan.stop}`
+              title="Arm the entry{data.plan.stop != null ? `, stop at ${data.plan.stop}` : ''}{data.plan.target != null
+                ? `, and take-profit at ${data.plan.target}`
                 : ''}"
             >
               <Crosshair size={12} />
-              arm{data.plan.stop != null ? ' with stop' : ''}
+              create entry order
             </button>
           </div>
         {/if}
@@ -1045,7 +1070,7 @@
         <!-- Defaults follow the ordinary level trade: sell at resistance, buy at support. -->
         <div class="levels">
           <div>
-            <b>Resistance <em class="hint">click to arm</em></b>
+            <b>Resistance <em class="hint">click to create order</em></b>
             {#each data.levels.resistances.slice(0, 3) as level}
               <button
                 class="level armable"
@@ -1058,7 +1083,7 @@
             {:else}<span class="level muted">none above price</span>{/each}
           </div>
           <div>
-            <b>Support <em class="hint">click to arm</em></b>
+            <b>Support <em class="hint">click to create order</em></b>
             {#each data.levels.supports.slice(0, 3) as level}
               <button
                 class="level armable"
@@ -1091,6 +1116,9 @@
 </section>
 
 <style>
+  .company-link { display:inline-flex; align-items:center; gap:.25rem; color:var(--text-2); font-size:.75rem; white-space:nowrap; }
+  .company-link:hover { color:var(--text); }
+  .company-link:focus-visible { outline:2px solid var(--primary); outline-offset:3px; }
   .chart-card {
     background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
     padding: 1rem; display: flex; flex-direction: column; gap: .75rem; min-width: 0;

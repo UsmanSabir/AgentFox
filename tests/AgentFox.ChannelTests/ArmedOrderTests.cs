@@ -72,6 +72,166 @@ public sealed class ArmedOrderTests
         StringAssert.Contains(reason, "no usable level");
     }
 
+    // ── Scheduled orders and the activation date ─────────────────────────────
+    //
+    // The activation date is ORTHOGONAL to the trigger kind, so it is tested twice: once as the whole
+    // condition (the Scheduled kind) and once as a postponement bolted onto a price trigger. The
+    // market gate is tested hardest, because a Scheduled order has no price condition and is therefore
+    // the only kind with nothing else able to hold it back.
+
+    [TestMethod]
+    public void AScheduledOrder_DoesNotFireBeforeItsDate()
+    {
+        var order = Armed(ArmedTriggerKind.Scheduled, activeFrom: Now.AddDays(9));
+
+        Assert.IsFalse(
+            ArmedOrderEvaluator.ShouldFire(order, 287.03m, [], Now, out var reason, marketIsOpen: true),
+            "An order scheduled for the 22nd must do nothing on the 13th, open market or not.");
+        StringAssert.Contains(reason, "not active until");
+    }
+
+    [TestMethod]
+    public void AScheduledOrder_FiresOnceItsDateArrivesAndTheMarketIsOpen()
+    {
+        var order = Armed(ArmedTriggerKind.Scheduled, activeFrom: Now.AddMinutes(-1));
+
+        Assert.IsTrue(
+            ArmedOrderEvaluator.ShouldFire(order, 287.03m, [], Now, out var reason, marketIsOpen: true),
+            reason);
+    }
+
+    [TestMethod]
+    public void AScheduledOrder_NeedsNoPrice()
+    {
+        // The date is the whole condition. A scheduled order must not inherit the price triggers'
+        // "no live price this pass" refusal, or it would never fire on an illiquid symbol that went
+        // an entire pass without printing.
+        var order = Armed(ArmedTriggerKind.Scheduled, activeFrom: Now.AddMinutes(-1));
+
+        Assert.IsTrue(
+            ArmedOrderEvaluator.ShouldFire(order, null, [], Now, out var reason, marketIsOpen: true),
+            reason);
+    }
+
+    [TestMethod]
+    public void AScheduledOrder_WaitsWhileTheMarketIsClosed()
+    {
+        // The whole reason ArmedTriggerKind.Scheduled carries its own gate. PSX does not reject an
+        // order placed while the board is shut — it keeps it and sends it at the next open — so
+        // firing here would put a Saturday decision into Monday's opening auction unattended.
+        var order = Armed(ArmedTriggerKind.Scheduled, activeFrom: Now.AddMinutes(-1));
+
+        Assert.IsFalse(
+            ArmedOrderEvaluator.ShouldFire(order, 287.03m, [], Now, out var reason, marketIsOpen: false),
+            "A scheduled order must wait for the venue to open.");
+        StringAssert.Contains(reason, "market is closed");
+    }
+
+    [TestMethod]
+    public void AScheduledOrder_DefaultsToWaiting_WhenTheCallerDidNotSayWhetherTheMarketIsOpen()
+    {
+        // marketIsOpen defaults to false so a caller that has not answered cannot fire one by
+        // omission. The permissive state is claimed, never inferred.
+        var order = Armed(ArmedTriggerKind.Scheduled, activeFrom: Now.AddMinutes(-1));
+
+        Assert.IsFalse(ArmedOrderEvaluator.ShouldFire(order, 287.03m, [], Now, out _));
+    }
+
+    [TestMethod]
+    public void AScheduledOrder_WithoutADate_NeverFires()
+    {
+        // Only reachable from a hand-edited row or a downgrade. Firing an order of unknown intent is
+        // worse than never firing it.
+        var order = Armed(ArmedTriggerKind.Scheduled, activeFrom: null);
+
+        Assert.IsFalse(
+            ArmedOrderEvaluator.ShouldFire(order, 287.03m, [], Now, out var reason, marketIsOpen: true));
+        StringAssert.Contains(reason, "no activation date");
+    }
+
+    [TestMethod]
+    public void AScheduledOrder_HasNoEffectiveTriggerPrice()
+    {
+        var order = Armed(ArmedTriggerKind.Scheduled, activeFrom: Now.AddDays(9));
+        Assert.IsNull(order.EffectiveTriggerPrice,
+            "A panel must not show a level for an order that fires on a date.");
+    }
+
+    [TestMethod]
+    public void APriceTriggerWithADate_IgnoresItsPriceUntilTheDateArrives()
+    {
+        // The conditional half of the feature: "buy if it drops to 287.03, but not before the 22nd".
+        // The level being met early must change nothing.
+        var order = Armed(
+            ArmedTriggerKind.PriceBelow, trigger: 287.03m, activeFrom: Now.AddDays(9));
+
+        Assert.IsFalse(
+            ArmedOrderEvaluator.ShouldFire(order, 280m, [], Now, out var reason, marketIsOpen: true),
+            "The level was reached, but the order is not active yet.");
+        StringAssert.Contains(reason, "not active until");
+    }
+
+    [TestMethod]
+    public void APriceTriggerWithADate_FiresOnItsPriceOnceActive()
+    {
+        var order = Armed(
+            ArmedTriggerKind.PriceBelow, trigger: 287.03m, activeFrom: Now.AddMinutes(-1));
+
+        Assert.IsTrue(
+            ArmedOrderEvaluator.ShouldFire(order, 280m, [], Now, out var reason, marketIsOpen: true),
+            reason);
+    }
+
+    [TestMethod]
+    public void APriceTriggerWithADate_StillNeedsItsPrice()
+    {
+        // Being active is not itself a reason to fire a CONDITIONAL order — otherwise adding a date
+        // to a price trigger would quietly convert it into a scheduled one. Note marketIsOpen is
+        // true here: a date-bound trigger must also wait for the venue, and this test isolates price.
+        var order = Armed(
+            ArmedTriggerKind.PriceBelow, trigger: 287.03m, activeFrom: Now.AddMinutes(-1));
+
+        Assert.IsFalse(
+            ArmedOrderEvaluator.ShouldFire(order, 300m, [], Now, out var reason, marketIsOpen: true));
+        StringAssert.Contains(reason, "has not reached trigger");
+    }
+
+    [TestMethod]
+    public void APriceAboveTriggerWithADate_FiresOnlyAfterBothConditionsAreMet()
+    {
+        var future = Armed(
+            ArmedTriggerKind.PriceAbove, trigger: 450m, activeFrom: Now.AddMinutes(1));
+        Assert.IsFalse(
+            ArmedOrderEvaluator.ShouldFire(future, 500m, [], Now, out var beforeDate, marketIsOpen: true));
+        StringAssert.Contains(beforeDate, "not active until");
+
+        var active = future with { ActiveFromUtc = Now.AddMinutes(-1) };
+        Assert.IsFalse(
+            ArmedOrderEvaluator.ShouldFire(active, 500m, [], Now, out var closed, marketIsOpen: false));
+        StringAssert.Contains(closed, "market is closed");
+        Assert.IsFalse(
+            ArmedOrderEvaluator.ShouldFire(active, 449.99m, [], Now, out var belowPrice, marketIsOpen: true));
+        StringAssert.Contains(belowPrice, "has not reached trigger");
+        Assert.IsTrue(
+            ArmedOrderEvaluator.ShouldFire(active, 450m, [], Now, out var atPrice, marketIsOpen: true),
+            atPrice);
+    }
+
+    [TestMethod]
+    public void AnExpiredOrder_ReportsExpiry_EvenIfItIsAlsoNotYetActive()
+    {
+        // A corrupt pairing the arm endpoint refuses to create. Pinned so the ordering of the two
+        // checks is a decision rather than an accident: terminal facts beat future ones.
+        var order = Armed(ArmedTriggerKind.Scheduled, activeFrom: Now.AddDays(9)) with
+        {
+            ExpiresUtc = Now.AddHours(-1)
+        };
+
+        Assert.IsFalse(
+            ArmedOrderEvaluator.ShouldFire(order, 287.03m, [], Now, out var reason, marketIsOpen: true));
+        StringAssert.Contains(reason, "Expired");
+    }
+
     // ── Percent triggers ─────────────────────────────────────────────────────
     // "Sell if it drops 3%" rather than "sell at 287.03". The level is DERIVED from a reference and a
     // percentage, so the tests here are about that derivation staying the single source of truth.
@@ -358,7 +518,10 @@ public sealed class ArmedOrderTests
     }
 
     private static ArmedOrder Armed(
-        ArmedTriggerKind kind, decimal? trigger = null, AlertKind? alert = null) => new()
+        ArmedTriggerKind kind,
+        decimal? trigger = null,
+        AlertKind? alert = null,
+        DateTime? activeFrom = null) => new()
         {
             ArmedId = "a1",
             Symbol = "OGDC",
@@ -369,7 +532,8 @@ public sealed class ArmedOrderTests
             Quantity = 100,
             OrderType = "LIMIT",
             Price = 287.03m,
-            ArmedUtc = Now.AddHours(-1)
+            ArmedUtc = Now.AddHours(-1),
+            ActiveFromUtc = activeFrom
         };
 
     /// <summary>

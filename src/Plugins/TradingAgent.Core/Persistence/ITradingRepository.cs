@@ -60,6 +60,13 @@ public interface ITradingRepository
     /// </summary>
     Task<int> PruneReconciliationRunsAsync(DateTime before, CancellationToken ct = default);
 
+    /// <summary>
+    /// Deletes armed orders that reached a TERMINAL state and were armed before
+    /// <paramref name="before"/>. A row still in the <c>armed</c> state is a live standing instruction
+    /// and is never removed by age, whatever the retention setting.
+    /// </summary>
+    Task<int> PruneArmedOrdersAsync(DateTime before, CancellationToken ct = default);
+
     Task<IReadOnlyList<TradeProposalRecord>> GetProposalsAsync(
         int limit = 100,
         CancellationToken ct = default);
@@ -665,6 +672,12 @@ public interface ITradingRepository
         string stopId,
         string? backstopArmedId,
         CancellationToken ct = default);
+
+    /// <summary>Links the fill-dependent take-profit armed from this stop's confirmed entry.</summary>
+    Task<bool> SetProtectiveStopTakeProfitAsync(
+        string stopId,
+        string takeProfitArmedId,
+        CancellationToken ct = default) => Task.FromResult(false);
 }
 
 /// <summary>One watched symbol.</summary>

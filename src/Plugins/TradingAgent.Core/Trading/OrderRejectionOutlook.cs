@@ -1,4 +1,4 @@
-namespace TradingAgent.Trading;
+﻿namespace TradingAgent.Trading;
 
 /// <summary>
 /// Whether re-sending an order the broker refused could ever work, and if so when.
@@ -113,6 +113,23 @@ public static class OrderRejectionOutlook
         if (Has(text, "Over_Price_Limit"))
             return RejectionOutlook.RetryTomorrow;
 
+        // The ACCOUNT's order entry is refusing, not this order. MEASURED 2026-09-17 (premium CLAUDE.md
+        // §6a): after the AHL client re-used an order-request number the day had already issued, the
+        // broker refused every subsequent order — from a fresh connection, from a restarted agent, AND
+        // from the operator's own mobile app, with a cancel from that app doing nothing either. It
+        // cleared at the next session. Retrying reaches none of that, and each attempt consumes one of
+        // the account's own request numbers.
+        //
+        // MATCHED ON THE ADAPTER'S MARKER, NEVER ON THE BROKER'S OWN WORDING, and that is the whole
+        // safety of this entry. AHL says "Order Rej: Last order request not Complete" for a shut board
+        // as well, which clears in MINUTES — and only the adapter holds the board reading that tells
+        // the two apart, because a stored placement does not carry the transient flag this method's
+        // `transient` parameter reads. Keying on the raw text here would strand a perfectly good order
+        // for a day over a lunchtime Break. If the marker ever drifts, this stops matching and the
+        // refusal falls through to RetryToday — the same safe default an unmeasured wording gets.
+        if (Has(text, AccountOrderEntryRefusedMarker))
+            return RejectionOutlook.RetryTomorrow;
+
         return RejectionOutlook.RetryToday;
     }
 
@@ -133,6 +150,19 @@ public static class OrderRejectionOutlook
             + "Automatic retries have stopped so this is not re-sent all day. Change the order, or "
             + "press Retry if you believe the refusal no longer applies.",
 
+        // RetryTomorrow has two causes and they need different sentences: one is about this order's
+        // price and is fixed by re-pricing it, the other is about the whole account and cannot be fixed
+        // from this screen at all. Telling an operator to re-price an order when the broker will not
+        // take ANY order today would send them round the one loop that cannot work.
+        RejectionOutlook.RetryTomorrow when IsAccountOrderEntryWedged(reason) =>
+            $"The broker refused this order without it reaching the market: {Clip(reason)} That is not "
+            + "about this order. It has been measured to mean the ACCOUNT's order entry is refusing for "
+            + "the rest of the session — on 2026-09-17 a restarted agent, a fresh broker connection and "
+            + "the broker's own mobile app were all refused the same way, and a cancel from the app did "
+            + "nothing. It cleared at the next session. No further attempt will be made today; the next "
+            + "one is eligible on the next trading date. Contact the broker if it is still refusing "
+            + "tomorrow.",
+
         RejectionOutlook.RetryTomorrow =>
             $"The exchange refused this order's PRICE for today: {Clip(reason)} PSX locks each day's "
             + "price to within 10% of the previous close, so the same price is refused for the rest of "
@@ -143,11 +173,23 @@ public static class OrderRejectionOutlook
         _ => null
     };
 
+    /// <summary>
+    /// The phrase an adapter emits when it has established that the BROKER is refusing this account's
+    /// order entry, rather than refusing this order. Kept as a constant here so the two repositories
+    /// share one literal instead of two that can drift apart silently — premium's
+    /// <c>TradeCastOrderSocketClient.AccountOrderEntryRefusedMarker</c> is pinned against it.
+    /// </summary>
+    public const string AccountOrderEntryRefusedMarker =
+        "the broker is refusing order entry for this account";
+
+    private static bool IsAccountOrderEntryWedged(string? reason) =>
+        reason is not null && Has(reason, AccountOrderEntryRefusedMarker);
+
     /// <summary>A short label for a log line or an activity row.</summary>
     public static string Label(RejectionOutlook outlook) => outlook switch
     {
         RejectionOutlook.Never => "retries stopped — the refusal cannot clear by waiting",
-        RejectionOutlook.RetryTomorrow => "no further attempt today — the price is outside today's band",
+        RejectionOutlook.RetryTomorrow => "no further attempt today — the refusal is fixed for this session",
         _ => "retrying later today"
     };
 

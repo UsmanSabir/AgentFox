@@ -1,5 +1,6 @@
 <script lang="ts">
   import { createEventDispatcher, onMount } from 'svelte';
+  import AmountInWords from './AmountInWords.svelte';
   import {
     trading, TRIGGER_KINDS, ALERT_KINDS, PERCENT_PRESETS,
     isPercentTrigger, percentTriggerLevel,
@@ -13,7 +14,7 @@
    * editable: the point of pre-filling is to save typing, not to hide what is being armed.
    */
   export let symbol: string;
-  export let triggerKind: TriggerKind = 'PriceBelow';
+  export let triggerKind: Exclude<TriggerKind, 'Scheduled'> = 'PriceBelow';
   export let triggerPrice: number | null = null;
   export let triggerAlertKind: string | null = null;
   export let action: 'BUY' | 'SELL' = 'SELL';
@@ -47,6 +48,8 @@
   const dispatch = createEventDispatcher<{ armed: void; close: void }>();
 
   let quantity: number | null = null;
+  let sizeMode: 'shares' | 'value' = 'shares';
+  let orderValue: number | null = null;
   let expiresInDays = 30;
   let persistentUntilFilled = false;
   let note = '';
@@ -60,7 +63,14 @@
   let result: {
     willFireUnattended: boolean;
     note: string;
-    attachedStop: { stopTrigger: number; stopLimit: number; recurring: boolean; note: string } | null;
+    attachedStop: {
+      stopTrigger: number;
+      stopLimit: number;
+      recurring: boolean;
+      takeProfitPrice: number | null;
+      takeProfitArmedId: string | null;
+      note: string;
+    } | null;
   } | null = null;
   let dialogElement: HTMLDivElement;
   const livePrices = useLivePrices();
@@ -77,6 +87,8 @@
   export let stopTrigger: number | null = null;
   export let stopLimit: number | null = null;
   export let stopRecurring = true;
+  export let attachTakeProfit = false;
+  export let takeProfitPrice: number | null = null;
 
   onMount(() => dialogElement.focus());
 
@@ -95,6 +107,7 @@
   $: if (requestedAutoSizeKey !== autoSizeKey) {
     autoSizeKey = requestedAutoSizeKey;
     if (requestedAutoSizeKey) {
+      sizeMode = 'shares';
       quantity = null;
       quantityWasEdited = false;
       void loadAvailableShares(requestedAutoSizeKey);
@@ -138,15 +151,31 @@
     price = level;
   }
 
-  $: estimatedValue = (quantity ?? 0) * (price ?? level ?? 0);
+  $: sizingPrice = price ?? level ?? null;
+  $: valueSizedQuantity = sizeMode === 'value' && orderValue != null && orderValue > 0
+    && sizingPrice != null && sizingPrice > 0
+    ? Math.floor(orderValue / sizingPrice)
+    : null;
+  $: effectiveQuantity = sizeMode === 'value' ? valueSizedQuantity : quantity;
+  $: estimatedValue = (effectiveQuantity ?? 0) * (sizingPrice ?? 0);
+  $: unallocatedValue = sizeMode === 'value' && orderValue != null && estimatedValue > 0
+    ? Math.max(0, orderValue - estimatedValue)
+    : 0;
   $: sellExceedsAvailable = requestedAutoSizeKey != null && availableShares != null
-    && quantity != null && quantity > availableShares;
+    && effectiveQuantity != null && effectiveQuantity > availableShares;
 
   // A stop only makes sense on a BUY — it protects the position this entry creates.
   $: canAttachStop = action === 'BUY';
-  $: if (!canAttachStop) attachStop = false;
+  $: if (!canAttachStop) {
+    attachStop = false;
+    attachTakeProfit = false;
+  }
+  $: if (!attachStop) attachTakeProfit = false;
 
   $: entryPrice = price ?? level ?? null;
+  // A chart plan remains in its compact layout even if one exit is switched off while editing.
+  $: isTradePlan = action === 'BUY' && triggerKind === 'PriceBelow'
+    && stopTrigger != null && takeProfitPrice != null;
 
   // Default the stop 2% under the entry, and its limit 1% under the trigger. Both are starting
   // points to edit, not recommendations — the level worth stopping at is a judgement about the
@@ -158,8 +187,8 @@
     stopLimit = Number((stopTrigger * 0.99).toFixed(2));
   }
 
-  $: stopRisk = attachStop && entryPrice != null && stopTrigger != null && quantity
-    ? (entryPrice - stopTrigger) * quantity
+  $: stopRisk = attachStop && entryPrice != null && stopTrigger != null && effectiveQuantity
+    ? (entryPrice - stopTrigger) * effectiveQuantity
     : null;
 
   $: stopError =
@@ -171,6 +200,13 @@
     : stopLimit != null && stopLimit > stopTrigger
       ? `The stop limit (${stopLimit}) must be at or below the trigger (${stopTrigger}), or it `
         + 'cannot fill once triggered.'
+    : null;
+
+  $: takeProfitError =
+    !attachTakeProfit ? null
+    : takeProfitPrice == null || takeProfitPrice <= 0 ? 'Enter a take-profit sell price.'
+    : entryPrice != null && takeProfitPrice <= entryPrice
+      ? `The take-profit (${takeProfitPrice}) must be above the entry (${entryPrice}).`
     : null;
 
   const money = (v: number) => v.toLocaleString(undefined, { maximumFractionDigits: 2 });
@@ -226,7 +262,7 @@
    * and it is the thing to read back before committing size to a level.
    */
   $: summary = (() => {
-    if (!quantity || quantity <= 0) return null;
+    if (!effectiveQuantity || effectiveQuantity <= 0) return null;
     const fill = orderType === 'MARKET'
       ? 'at the best price available'
       : price != null ? `at ${money(price)}` : 'with no price set';
@@ -234,7 +270,7 @@
 
     if (isEvent) {
       return triggerAlertKind
-        ? `${verb} ${quantity} ${symbol} ${fill} when ${symbol} raises `
+        ? `${verb} ${effectiveQuantity} ${symbol} ${fill} when ${symbol} raises `
           + `"${triggerAlertKind.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase()}".`
         : null;
     }
@@ -242,10 +278,10 @@
     if (level == null) return null;
     const move = fallsToTrigger ? 'falls' : 'rises';
 
-    if (!isPercent) return `${verb} ${quantity} ${symbol} ${fill} if it ${move} to ${money(level)}.`;
+    if (!isPercent) return `${verb} ${effectiveQuantity} ${symbol} ${fill} if it ${move} to ${money(level)}.`;
 
     const from = referencePrice != null ? money(referencePrice) : '—';
-    return `${verb} ${quantity} ${symbol} ${fill} if it ${move} ${triggerPercent}% `
+    return `${verb} ${effectiveQuantity} ${symbol} ${fill} if it ${move} ${triggerPercent}% `
          + `from ${from} — that is ${money(level)}.`;
   })();
 
@@ -253,7 +289,14 @@
     if (busy) return;
     error = null;
 
-    if (!quantity || quantity <= 0 || !Number.isInteger(quantity)) {
+    if (sizeMode === 'value' && (!orderValue || orderValue <= 0)) {
+      error = 'Order value must be a positive PKR amount.'; return;
+    }
+    if (sizeMode === 'value' && (!sizingPrice || sizingPrice <= 0)) {
+      error = 'Set an entry or limit price before sizing by value.'; return;
+    }
+    const submittedQuantity = effectiveQuantity;
+    if (!submittedQuantity || submittedQuantity <= 0 || !Number.isInteger(submittedQuantity)) {
       error = 'Quantity must be a positive whole number of shares.'; return;
     }
     if (isEvent && !triggerAlertKind) { error = 'Choose the event to trigger on.'; return; }
@@ -268,9 +311,10 @@
       error = 'Enter a trigger price.'; return;
     }
     if (stopError) { error = stopError; return; }
+    if (takeProfitError) { error = takeProfitError; return; }
 
     const request: ArmOrderRequest = {
-      symbol, action, quantity, triggerKind,
+      symbol, action, quantity: submittedQuantity, triggerKind,
       triggerPrice: isEvent || isPercent ? null : triggerPrice,
       triggerAlertKind: isEvent ? triggerAlertKind : null,
       // Sent rather than left to the server to capture, so the level armed is the one quoted above.
@@ -286,6 +330,9 @@
       sourceAlertId,
       attachStop: attachStop && stopTrigger
         ? { stopTrigger, stopLimit, recurring: stopRecurring }
+        : null,
+      attachTakeProfit: attachTakeProfit && takeProfitPrice
+        ? { price: takeProfitPrice }
         : null
     };
 
@@ -316,11 +363,13 @@
     bind:this={dialogElement}
     role="dialog"
     aria-modal="true"
-    aria-label="Arm an order"
+    aria-label="Create conditional order"
     tabindex="-1"
   >
     <header>
-      <div class="title"><Crosshair size={15} /> <b>Arm an order</b> <span>{symbol}</span></div>
+      <div class="title">
+        <Crosshair size={15} /> <b>{isTradePlan ? 'Create trade plan' : 'Create conditional order'}</b> <span>{symbol}</span>
+      </div>
       <button class="icon" on:click={() => dispatch('close')} aria-label="Close" disabled={busy}><X size={14} /></button>
     </header>
 
@@ -330,15 +379,18 @@
       <!-- Outcome view: the fire-unattended answer is the payload, not a footnote. -->
       <div class="outcome" class:live={result.willFireUnattended}>
         {#if result.willFireUnattended}
-          <b><Zap size={13} /> Armed — this WILL send without asking</b>
+          <b><Zap size={13} /> Saved — this WILL send without asking</b>
         {:else}
-          <b><AlertTriangle size={13} /> Armed — but it will NOT send on its own</b>
+          <b><AlertTriangle size={13} /> Saved — approval is required before sending</b>
         {/if}
         <p>{result.note}</p>
       </div>
       {#if result.attachedStop}
         <div class="outcome">
           <b>Stop attached at {result.attachedStop.stopTrigger} (limit {result.attachedStop.stopLimit})</b>
+          {#if result.attachedStop.takeProfitPrice}
+            <p>A take-profit waiting order will be created at {result.attachedStop.takeProfitPrice} after the entry fill is confirmed.</p>
+          {/if}
           <p>{result.attachedStop.note}</p>
         </div>
       {/if}
@@ -346,10 +398,37 @@
         <button class="btn btn-primary" on:click={() => dispatch('close')}>Done</button>
       </div>
     {:else}
-      <!-- WHEN it fires, on its own, above the order itself. The trigger is the decision; the order
-           is the consequence. Reading them the other way round is what made the percent triggers
-           look like an extra field on a form rather than a different question. -->
-      <div class="trigger-block">
+      {#if isTradePlan}
+        <div class="plan-entry">
+          <label>
+            <span>Buy when price falls to</span>
+            <input
+              type="number"
+              step="0.01"
+              bind:value={triggerPrice}
+              on:input={() => price = triggerPrice}
+            />
+          </label>
+          <p>
+            Limit entry at <b>{money(entryPrice ?? 0)}</b>
+            {#if displayedCurrentPrice != null && displayedCurrentPrice > 0}
+              · {symbol} is {money(displayedCurrentPrice)} now
+              <small title={livePriceLabel(livePriceView)}>({livePriceView.freshness})</small>
+            {/if}
+          </p>
+          {#if alreadyPassed}
+            <p class="error">
+              <AlertTriangle size={12} /> The entry level is already reached, so this plan can fire on
+              the next check.
+            </p>
+          {/if}
+        </div>
+      {:else}
+        <!-- WHEN it fires, on its own, above the order itself. The trigger is the decision; the order
+             is the consequence. Reading them the other way round is what made the percent triggers
+             look like an extra field on a form rather than a different question.
+             Scheduling belongs to New Order; this form always starts watching a condition now. -->
+        <div class="trigger-block">
         <label class="full">
           <span>Fire this order when…</span>
           <select bind:value={triggerKind}>
@@ -398,7 +477,7 @@
             {#if trailing}
               The {fallsToTrigger ? 'higher' : 'lower'} {symbol} goes, the {fallsToTrigger ? 'higher' : 'lower'}
               this trigger goes with it — it never moves back, so the {triggerPercent}% is always
-              measured from the {fallsToTrigger ? 'best' : 'lowest'} price seen since you armed it.
+              measured from the {fallsToTrigger ? 'best' : 'lowest'} price seen since you saved it.
             {:else}
               The {triggerPercent}% is measured from {referencePrice ?? '—'} and stays there, whatever
               {symbol} does afterwards.
@@ -435,12 +514,86 @@
           <p class="error">
             <AlertTriangle size={12} />
             {symbol} is already {fallsToTrigger ? 'at or below' : 'at or above'} {money(level!)}, so
-            this would fire on the next check rather than wait for a move. Arm it only if that is
+            this would fire on the next check rather than wait for a move. Save it only if that is
             what you mean.
           </p>
         {/if}
       </div>
+      {/if}
 
+      <section class="sizing" aria-labelledby="sizing-title">
+        <div class="sizing-head">
+          <span id="sizing-title">Order size</span>
+          <div class="size-tabs" role="group" aria-label="Size order by">
+            <button type="button" class:on={sizeMode === 'shares'} on:click={() => sizeMode = 'shares'}>
+              Shares
+            </button>
+            <button type="button" class:on={sizeMode === 'value'} on:click={() => sizeMode = 'value'}>
+              Value (PKR)
+            </button>
+          </div>
+        </div>
+
+        {#if sizeMode === 'shares'}
+          <label>
+            <span>Number of shares</span>
+            <input type="number" min="1" step="1" bind:value={quantity} placeholder="shares"
+                   on:input={() => quantityWasEdited = true} />
+          </label>
+        {:else}
+          <label>
+            <span>Amount to invest</span>
+            <input type="number" min="1" step="1" bind:value={orderValue} placeholder="PKR" />
+            <AmountInWords value={orderValue} />
+          </label>
+          {#if valueSizedQuantity != null && sizingPrice != null}
+            <p class="sizing-note">
+              Buys <b>{valueSizedQuantity.toLocaleString()} whole shares</b> at about
+              {money(sizingPrice)} · {Math.round(estimatedValue).toLocaleString()} PKR used
+              {#if unallocatedValue >= 1} · {Math.floor(unallocatedValue).toLocaleString()} PKR left{/if}
+            </p>
+          {:else}
+            <p class="sizing-note">The share count is calculated from the entry price and rounded down.</p>
+          {/if}
+        {/if}
+      </section>
+
+      {#if isTradePlan}
+        <details class="advanced">
+          <summary>Advanced order settings</summary>
+          <div class="grid">
+            <label>
+              <span>Side</span>
+              <select bind:value={action}>
+                <option value="SELL">SELL</option>
+                <option value="BUY">BUY</option>
+              </select>
+            </label>
+            <label>
+              <span>Order type</span>
+              <select bind:value={orderType}>
+                <option value="MARKET">Market — take the best price available</option>
+                <option value="LIMIT">Limit — no worse than a price I set</option>
+                <option value="STOPLOSS">Stop Loss — broker trigger + limit</option>
+              </select>
+            </label>
+            <label>
+              <span>Expires in (days)</span>
+              <input type="number" min="1" max="365" bind:value={expiresInDays} />
+            </label>
+          </div>
+          {#if persistable}
+            <label class="check persist">
+              <input type="checkbox" bind:checked={persistentUntilFilled} />
+              <span>Keep any unfilled entry remainder working each session</span>
+            </label>
+          {/if}
+          <label class="full">
+            <span>Note (optional)</span>
+            <input type="text" bind:value={note} placeholder="why this level" maxlength="120" />
+          </label>
+        </details>
+      {:else}
       <div class="grid">
         <label>
           <span>Side</span>
@@ -448,12 +601,6 @@
             <option value="SELL">SELL</option>
             <option value="BUY">BUY</option>
           </select>
-        </label>
-
-        <label>
-          <span>Quantity</span>
-          <input type="number" min="1" step="1" bind:value={quantity} placeholder="shares"
-                 on:input={() => quantityWasEdited = true} />
         </label>
 
         <label>
@@ -484,6 +631,7 @@
           <input type="number" min="1" max="365" bind:value={expiresInDays} />
         </label>
       </div>
+      {/if}
 
       {#if requestedAutoSizeKey}
         <p class="holding-status" class:warn={holdingError != null} aria-live="polite">
@@ -500,13 +648,13 @@
 
       {#if sellExceedsAvailable}
         <p class="holding-status warn">
-          <AlertTriangle size={12} /> You entered {quantity?.toLocaleString()} shares, but only
+          <AlertTriangle size={12} /> This order is for {effectiveQuantity?.toLocaleString()} shares, but only
           {availableShares?.toLocaleString()} are currently uncommitted. The broker will check again
           when the order fires.
         </p>
       {/if}
 
-      {#if persistable}
+      {#if persistable && !isTradePlan}
         <label class="check persist">
           <input type="checkbox" bind:checked={persistentUntilFilled} />
           <span>
@@ -536,16 +684,15 @@
       {/if}
 
       {#if canAttachStop}
-        <!-- The stop is deliberately part of arming the entry rather than a separate action: the
-             moment you decide a size is the moment you know what losing on it costs. -->
-        <div class="attach" class:on={attachStop}>
+        <div class="attach" class:on={attachStop || attachTakeProfit}>
+          <p class="section-title">After the entry fills</p>
           <label class="check">
             <input type="checkbox" bind:checked={attachStop} />
-            <span>Protect this with a stop once it fills</span>
+            <span>Sell at stop loss</span>
           </label>
 
           {#if attachStop}
-            <div class="grid">
+            <div class="exit-grid">
               <label>
                 <span>Stop trigger</span>
                 <input type="number" step="0.01" bind:value={stopTrigger} />
@@ -567,27 +714,36 @@
               </p>
             {/if}
 
-            <p class="stop-note">
-              The stop stays dormant until your holdings actually rise, which is how the fill is
-              confirmed — nothing is sold on the assumption that the entry went through.
-              {#if stopRecurring}
-                It is then re-placed at the broker each session, because outstanding orders are
-                cleared at the close.
-              {:else}
-                <b>It is placed once.</b> Outstanding orders are cleared at the close, so the position
-                stops being protected the next day.
-              {/if}
-            </p>
-
             {#if stopError}<p class="error">{stopError}</p>{/if}
+          {/if}
+
+          <label class="check target-check" title={!attachStop ? 'Add a stop first so both exits share one confirmed fill.' : undefined}>
+            <input type="checkbox" bind:checked={attachTakeProfit} disabled={!attachStop} />
+            <span>Sell at take profit</span>
+          </label>
+          {#if attachTakeProfit}
+            <label>
+              <span>Take-profit price</span>
+              <input type="number" step="0.01" bind:value={takeProfitPrice} />
+            </label>
+            {#if takeProfitError}<p class="error">{takeProfitError}</p>{/if}
+          {/if}
+
+          {#if attachStop}
+            <p class="stop-note">
+              Exits stay dormant until the entry fill is confirmed. The stop is managed at the broker;
+              the take-profit stays armed in AgentFox and releases that stop only when it needs the shares.
+            </p>
           {/if}
         </div>
       {/if}
 
-      <label class="full">
-        <span>Note (optional)</span>
-        <input type="text" bind:value={note} placeholder="why this level" maxlength="120" />
-      </label>
+      {#if !isTradePlan}
+        <label class="full">
+          <span>Note (optional)</span>
+          <input type="text" bind:value={note} placeholder="why this level" maxlength="120" />
+        </label>
+      {/if}
 
       {#if summary}
         <p class="summary">{summary}</p>
@@ -595,11 +751,12 @@
 
       {#if estimatedValue > 0}
         <p class="estimate">Approximate order value <b>{estimatedValue.toLocaleString()} PKR</b></p>
+        {#if sizeMode === 'shares'}<AmountInWords value={estimatedValue} />{/if}
       {/if}
 
       <p class="caveat">
         <AlertTriangle size={12} />
-        An armed order is evaluated by the monitor, so it only fires while AgentFox is running and the
+        A waiting order is evaluated by the monitor, so it only fires while AgentFox is running and the
         market is open. A native broker stop has neither limitation.
       </p>
 
@@ -608,7 +765,7 @@
       <div class="actions">
         <button class="btn btn-ghost" on:click={() => dispatch('close')} disabled={busy}>Cancel</button>
         <button class="btn btn-primary" on:click={submit} disabled={busy}>
-          {busy ? 'Arming…' : 'Arm order'}
+          {busy ? 'Saving…' : 'Create waiting order'}
         </button>
       </div>
     {/if}
@@ -647,6 +804,41 @@
   input:focus-visible, select:focus-visible, button:focus-visible {
     outline: 2px solid var(--primary); outline-offset: 2px; border-color: var(--primary);
   }
+
+  .plan-entry {
+    border: 1px solid var(--border-md); border-left: 3px solid var(--primary);
+    border-radius: var(--radius-sm); padding: .65rem .7rem;
+    display: grid; grid-template-columns: minmax(150px, .65fr) 1fr; gap: .45rem .75rem;
+    align-items: end;
+  }
+  .plan-entry p { margin: 0 0 .42rem; color: var(--text-2); font-size: .76rem; }
+  .plan-entry p.error { grid-column: 1 / -1; margin: 0; }
+
+  .sizing {
+    border: 1px solid var(--border-md); border-radius: var(--radius-sm);
+    padding: .65rem .7rem; display: flex; flex-direction: column; gap: .5rem;
+  }
+  .sizing-head { display: flex; justify-content: space-between; align-items: center; gap: .6rem; }
+  .sizing-head > span, .section-title {
+    color: var(--text); font-size: .75rem; font-weight: 600; margin: 0;
+  }
+  .size-tabs { display: inline-flex; border: 1px solid var(--border-md); border-radius: var(--radius-sm); overflow: hidden; }
+  .size-tabs button {
+    border: 0; border-right: 1px solid var(--border-md); border-radius: 0;
+    background: var(--surface-2); color: var(--text-2); padding: .34rem .55rem;
+    font: inherit; font-size: .72rem; cursor: pointer;
+  }
+  .size-tabs button:last-child { border-right: 0; }
+  .size-tabs button.on { background: var(--primary); color: #0c0d10; font-weight: 600; }
+  .sizing-note { margin: 0; color: var(--text-3); font-size: .7rem; line-height: 1.45; }
+  .sizing-note b { color: var(--text); }
+
+  details.advanced {
+    border: 1px solid var(--border-md); border-radius: var(--radius-sm); padding: .5rem .65rem;
+  }
+  details.advanced summary { color: var(--text-2); font-size: .73rem; cursor: pointer; }
+  details.advanced[open] { display: flex; flex-direction: column; gap: .6rem; }
+  details.advanced[open] summary { margin-bottom: .1rem; }
 
   .estimate { margin: 0; color: var(--text-2); font-size: .74rem; }
   .estimate b { color: var(--text); }
@@ -691,11 +883,12 @@
     padding: .6rem .7rem; display: flex; flex-direction: column; gap: .55rem;
   }
   .attach.on { border-left: 3px solid var(--success); }
+  .exit-grid { display: grid; grid-template-columns: 1fr 1fr; gap: .6rem; }
   .check { flex-direction: row; align-items: center; gap: .45rem; cursor: pointer; }
   .check input { width: auto; }
   .check span { color: var(--text); font-size: .78rem; text-transform: none; letter-spacing: normal; }
+  .target-check:has(input:disabled) { cursor: not-allowed; opacity: .6; }
   .stop-note { margin: 0; color: var(--text-3); font-size: .7rem; line-height: 1.55; }
-  .stop-note b { color: var(--warning); }
   .caveat { margin: 0; color: var(--warning); font-size: .68rem; display: flex; gap: .35rem;
             align-items: flex-start; line-height: 1.5; }
   .error { margin: 0; color: var(--danger); font-size: .75rem; line-height: 1.5;
@@ -712,4 +905,10 @@
   .outcome p { margin: 0; color: var(--text-2); font-size: .74rem; line-height: 1.55; }
 
   .actions { display: flex; justify-content: flex-end; gap: .5rem; }
+
+  @media (max-width: 520px) {
+    .plan-entry { grid-template-columns: 1fr; }
+    .sizing-head { align-items: flex-start; flex-direction: column; }
+    .exit-grid { grid-template-columns: 1fr; }
+  }
 </style>

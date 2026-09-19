@@ -94,4 +94,22 @@ public sealed class AttachedStopRuleTests
             Assert.AreEqual(0m, refused.StopLimit);
         }
     }
+
+    [TestMethod]
+    public void ATakeProfitMustBelongToABuyWithAStopAndSitAboveTheEntry()
+    {
+        var accepted = AttachedTakeProfitRule.Validate(
+            "BUY", targetPrice: 110m, entryPrice: 100m, hasAttachedStop: true);
+
+        Assert.IsNull(accepted.ErrorCode);
+        Assert.AreEqual(110m, accepted.Price);
+        Assert.AreEqual("target_requires_buy",
+            AttachedTakeProfitRule.Validate("SELL", 110m, 100m, true).ErrorCode);
+        Assert.AreEqual("target_requires_stop",
+            AttachedTakeProfitRule.Validate("BUY", 110m, 100m, false).ErrorCode);
+        Assert.AreEqual("invalid_take_profit",
+            AttachedTakeProfitRule.Validate("BUY", 0m, 100m, true).ErrorCode);
+        Assert.AreEqual("target_not_above_entry",
+            AttachedTakeProfitRule.Validate("BUY", 100m, 100m, true).ErrorCode);
+    }
 }

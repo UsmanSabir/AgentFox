@@ -17,7 +17,7 @@
     ['Ctrl+Shift+F','Enter / exit page full screen; browser F11 remains browser-owned'],
     ['Ctrl+Shift+1 / 2 / 3','Watchlist / Price chart / Trade plan'],
     ['Ctrl+Shift+4 / 5','Order ticket / Order logs'],
-    ['Ctrl+Shift+6 / 7 / 8','Portfolio / Persistent orders / Armed orders'],
+    ['Ctrl+Shift+6 / 7 / 8','Portfolio / Persistent orders / Waiting orders'],
     ['Ctrl+Shift+0','Reset view (does not discard in-session drafts)'],
     ['Escape','Close a dialog or bottom peek; otherwise restore a maximized group'],
     ['Tab / Shift+Tab','Move between controls; Enter / Space activates the focused control'],

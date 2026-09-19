@@ -93,9 +93,22 @@ public sealed record ResolveUnknownExecutionRequest(string? Resolution, string? 
 public sealed record ResolvePersistentAttentionRequest(
     string? Resolution, int? FilledQuantity, string? Note);
 
-/// <summary>An order to hold until a price level is reached or an alert kind fires.</summary>
+/// <summary>An order to hold until a price level is reached, an alert kind fires, or a date arrives.</summary>
 /// <param name="TriggerPercent">
 /// Size of the move, in percent, for a PercentDrop/PercentRise trigger. Ignored by every other kind.
+/// </param>
+/// <param name="ActiveFromDate">
+/// A PKT calendar date before which this order does nothing — "buy ABC on the 22nd". Orthogonal to
+/// <paramref name="TriggerKind"/>: with the <c>Scheduled</c> kind the date is the entire condition, and
+/// with a price kind it postpones when that price starts being watched. Omitted, the order is active
+/// from the moment it is armed, exactly as before.
+///
+/// <para>
+/// A DATE rather than an instant, deliberately. The exchange trades on PKT and the operator is picking a
+/// trading day, not a moment; the endpoint anchors it at that date's PKT midnight and the market gate in
+/// <c>ArmedOrderEvaluator</c> holds the order to the session. Sending a <c>DateTime</c> here would invite
+/// a browser to serialise its own local midnight and arm the order on the wrong day.
+/// </para>
 /// </param>
 /// <param name="ReferencePrice">
 /// The price a percent trigger measures its move from. Send the price the operator was looking at, so
@@ -120,10 +133,12 @@ public sealed record ArmOrderRequest(
     string? Note = null,
     string? SourceAlertId = null,
     AttachStopRequest? AttachStop = null,
+    AttachTakeProfitRequest? AttachTakeProfit = null,
     decimal? TriggerPercent = null,
     decimal? ReferencePrice = null,
     bool Trailing = false,
-    bool PersistentUntilFilled = false);
+    bool PersistentUntilFilled = false,
+    DateOnly? ActiveFromDate = null);
 
 /// <summary>An immediate order submitted from a registry choice in the trading dashboard.</summary>
 public sealed record DashboardOrderRequest(
@@ -166,6 +181,13 @@ public sealed record AttachStopRequest(
     decimal? StopLimit = null,
     int? Quantity = null,
     bool Recurring = true);
+
+/// <summary>
+/// A profit target attached to the same BUY entry as a protective stop. It stays dormant until the
+/// shared fill watcher confirms real shares, then becomes a durable PriceAbove LIMIT SELL sized to
+/// what actually filled.
+/// </summary>
+public sealed record AttachTakeProfitRequest(decimal? Price);
 
 /// <summary>How long to suspend order confirmation for.</summary>
 public sealed record ArmApprovalRequest(int? Minutes = null);

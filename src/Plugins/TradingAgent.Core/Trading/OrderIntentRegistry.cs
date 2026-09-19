@@ -27,6 +27,23 @@ public static class OrderIntentRegistry
             "Sell at the best available price; the final proceeds can move.",
             "Buy & sell", "immediate", "SELL", "MARKET", PriceField: "none"),
 
+        new("scheduled-buy", "Buy on a date at my price",
+            "On or after your PSX date, submit a limit buy at your price or lower.",
+            "Schedule for a date", "conditional", "BUY", "LIMIT", "Scheduled", PriceField: "limit",
+            RequiresActivationDate: true),
+        new("scheduled-sell", "Sell on a date at my price",
+            "On or after your PSX date, submit a limit sell at your price or higher.",
+            "Schedule for a date", "conditional", "SELL", "LIMIT", "Scheduled", PriceField: "limit",
+            RequiresActivationDate: true),
+        new("scheduled-market-sell", "Sell on a date at market",
+            "On or after your PSX date, sell at the best available price; proceeds can move.",
+            "Schedule for a date", "conditional", "SELL", "MARKET", "Scheduled", PriceField: "none",
+            RequiresActivationDate: true),
+        new("scheduled-market-sell-above", "Sell after a date if price is high enough",
+            "Starting on your PSX date, wait for your minimum price, then sell at market. The fill can be lower.",
+            "Schedule for a date", "conditional", "SELL", "MARKET", "PriceAbove", PriceField: "trigger",
+            RequiresActivationDate: true),
+
         new("profit-book", "Book profit at a target",
             "Place a sell limit at your target price for shares you already own.",
             "Protect & exit", "immediate", "SELL", "LIMIT", PriceField: "target"),
@@ -93,4 +110,5 @@ public sealed record OrderIntentDefinition(
     string? TriggerKind = null,
     string PriceField = "none",
     decimal? DefaultPercent = null,
-    bool Trailing = false);
+    bool Trailing = false,
+    bool RequiresActivationDate = false);

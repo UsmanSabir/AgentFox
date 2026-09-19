@@ -22,6 +22,15 @@ public interface IEmbeddingService
 /// <summary>No-op implementation — vector search is disabled.</summary>
 public sealed class NullEmbeddingService : IEmbeddingService
 {
+    public NullEmbeddingService(EmbeddingFailure? failure = null) => Failure = failure;
+
+    /// <summary>
+    /// Why the real embedder could not be built, or null when none was configured. The doctor runs
+    /// long after the container is built and cannot re-throw the original exception, so the verdict
+    /// has to travel with the service that replaced it.
+    /// </summary>
+    public EmbeddingFailure? Failure { get; }
+
     public Task<ReadOnlyMemory<float>> GenerateAsync(string text, CancellationToken ct = default)
         => Task.FromResult(ReadOnlyMemory<float>.Empty);
 }
@@ -166,9 +175,13 @@ public static class EmbeddingServiceFactory
     }
 
     /// <summary>
-    /// Builds the local embedder, degrading to a no-op service if the model is unavailable
-    /// (e.g. a freshly-copied single-file exe before the model is extracted/downloaded).
-    /// This keeps the app running — 'doctor --fix' repairs the model and a restart re-enables it.
+    /// Builds the local embedder, degrading to a no-op service when it cannot start — a missing
+    /// model (a freshly-copied single-file exe), or an ONNX Runtime native library that will not
+    /// load. This keeps the app running: vector search falls back to BM25 and nothing else changes.
+    /// <para>
+    /// The remedy differs per cause and only one of them is 'doctor --fix', so the failure is
+    /// classified rather than described. <see cref="EmbeddingFailure"/> explains why.
+    /// </para>
     /// </summary>
     private static IEmbeddingService TryCreateLocal()
     {
@@ -178,10 +191,15 @@ public static class EmbeddingServiceFactory
         }
         catch (Exception ex)
         {
+            var failure = EmbeddingFailure.Diagnose(ex, LocalEmbedder.TryEnsureModelFiles());
+
             AnsiConsole.MarkupLineInterpolated(
-                $"[yellow]⚠ Local embedding model unavailable — vector search disabled.[/] [dim]({ex.Message})[/]");
-            AnsiConsole.MarkupLine("[dim]  Run [bold]AgentFox doctor --fix[/] to download/restore the model.[/]");
-            return new NullEmbeddingService();
+                $"[yellow]⚠ Local embedding model unavailable — vector search disabled.[/]");
+            AnsiConsole.MarkupLineInterpolated($"[yellow]  {failure.Summary}[/]");
+            AnsiConsole.MarkupLineInterpolated($"[dim]  {failure.Remedy}[/]");
+            AnsiConsole.MarkupLineInterpolated($"[dim]  Detail: {failure.Detail}[/]");
+
+            return new NullEmbeddingService(failure);
         }
     }
 }

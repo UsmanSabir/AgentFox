@@ -353,6 +353,8 @@
         companyName={selectedCompany}
         expanded={false}
         allowExpand={false}
+        quoteDetail={symbolExtension?.quoteDetail ?? null}
+        instrumentLinks={symbolExtension?.instrumentLinks ?? null}
         {refreshTick}
         {historyRefreshTick}
         {archive}

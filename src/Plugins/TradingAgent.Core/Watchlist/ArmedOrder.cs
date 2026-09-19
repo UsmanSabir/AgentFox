@@ -37,7 +37,30 @@ public enum ArmedTriggerKind
     /// <see cref="ArmedOrder.TriggerPercent"/>% above the reference. Trailing follows the LOWEST price
     /// seen, so a breakout entry chases a falling market down instead of expiring above it.
     /// </summary>
-    PercentRise
+    PercentRise,
+
+    /// <summary>
+    /// Fire on the first pass once <see cref="ArmedOrder.ActiveFromUtc"/> has been reached and the
+    /// market is open. The DATE is the whole condition — "buy 100 ABC at 45 on the 22nd" — so there
+    /// is no price level and no alert to wait for.
+    ///
+    /// <para>
+    /// <b>This is the one kind nothing else can refuse, and that is why it carries its own market
+    /// gate.</b> Every other kind is protected from a closed venue by accident: the candle provider
+    /// omits the forming bar while the market is shut, so there is no live price and
+    /// <see cref="ArmedOrderEvaluator.ShouldFire"/> declines on the null. This kind has no price to
+    /// decline on. PSX does not reject an order placed while the board is shut — it KEEPS it and
+    /// sends it to market at the next open — so without the gate an unattended timer would place a
+    /// Saturday order on Friday's information and have it go live at Monday's bell.
+    /// </para>
+    ///
+    /// <para>
+    /// Pairing a date with a PRICE condition needs nothing from this kind: set
+    /// <see cref="ArmedOrder.ActiveFromUtc"/> on a <see cref="PriceBelow"/> or <see cref="PriceAbove"/>
+    /// order instead. The activation date is orthogonal to every trigger kind.
+    /// </para>
+    /// </summary>
+    Scheduled
 }
 
 /// <summary>
@@ -161,6 +184,30 @@ public sealed record ArmedOrder
     /// <summary>Null never expires. An entry trigger with no expiry can fire months later, so the UI defaults one.</summary>
     public DateTime? ExpiresUtc { get; init; }
 
+    /// <summary>
+    /// Nothing fires before this instant. Null is the original behaviour — active from the moment it
+    /// is armed — so every order written before this column existed keeps working unchanged.
+    ///
+    /// <para>
+    /// <b>The lower bound this whole lifecycle previously lacked.</b> <see cref="ExpiresUtc"/> and
+    /// <c>PersistentOrderIntent.ExpiresUtc</c> both say "stop by"; nothing said "do not start before",
+    /// which is the only reason "buy ABC on the 22nd" could not be expressed. It is deliberately
+    /// ORTHOGONAL to <see cref="TriggerKind"/>: paired with <see cref="ArmedTriggerKind.Scheduled"/>
+    /// the date is the entire condition, and paired with a price kind it postpones when that price
+    /// starts being watched. One field covers both shapes rather than two features covering one each.
+    /// </para>
+    ///
+    /// <para>
+    /// Stored as the PKT calendar date's midnight, converted to UTC. Midnight rather than the session
+    /// open because the PSX session window differs Monday-Thursday from Friday, so projecting a FUTURE
+    /// date's open is a second calendar calculation with its own way to be wrong — and it would buy
+    /// nothing. The market gate in <see cref="ArmedOrderEvaluator.ShouldFire"/> already holds the order
+    /// until the venue is open, and <c>WatchlistMonitorWorker</c> runs a pass AT the open as an
+    /// <c>IMarketSessionOpenParticipant</c>, so the first pass that can fire it is the opening one.
+    /// </para>
+    /// </summary>
+    public DateTime? ActiveFromUtc { get; init; }
+
     public DateTime? FiredUtc { get; init; }
     public string? ExecutionId { get; init; }
     public string? StateReason { get; init; }
@@ -211,12 +258,18 @@ public sealed record ArmedOrder
 
     /// <summary>
     /// The level this order fires at as of right now: recomputed for a percent trigger, the stored
-    /// level for a fixed one, null for an event.
+    /// level for a fixed one, null for an event or a scheduled order — neither has one.
     /// </summary>
+    /// <remarks>
+    /// A scheduled order is spelled out here rather than left to fall through to
+    /// <see cref="TriggerPrice"/>. It is null today only because the arm endpoint refuses to store a
+    /// level on one, and "correct because something else validates it" is how a panel ends up
+    /// displaying a trigger the evaluator will never consult.
+    /// </remarks>
     public decimal? EffectiveTriggerPrice =>
         PercentTrigger.IsPercent(TriggerKind)
             ? PercentTrigger.Level(TriggerKind, ReferencePrice, TriggerPercent)
-            : TriggerKind == ArmedTriggerKind.Event ? null : TriggerPrice;
+            : TriggerKind is ArmedTriggerKind.Event or ArmedTriggerKind.Scheduled ? null : TriggerPrice;
 
     /// <summary>Projects the armed order onto the signal the trading manager executes.</summary>
     public TradingSignal ToSignal() => new()
@@ -245,12 +298,26 @@ public static class ArmedOrderEvaluator
     /// True when <paramref name="order"/> should fire now. <paramref name="reason"/> always describes
     /// the decision, including when the answer is no and why.
     /// </summary>
+    /// <param name="marketIsOpen">
+    /// Whether the venue is accepting trade right now. Read by every order carrying an
+    /// <see cref="ArmedOrder.ActiveFromUtc"/> date: the date may be the whole condition, or the lower
+    /// bound on a price or event condition, but neither should submit while the board is shut.
+    ///
+    /// <para>
+    /// Optional, and it defaults to <c>false</c> — the refusing direction — so a caller that has not
+    /// answered the question cannot fire a scheduled order into a closed venue by omission. The same
+    /// reasoning as <see cref="ArmedOrder.OperatorOriginated"/>: the permissive state is claimed,
+    /// never inferred. It is also what keeps every existing call site compiling unchanged, all of
+    /// which arm price and event triggers that never consult it.
+    /// </para>
+    /// </param>
     public static bool ShouldFire(
         ArmedOrder order,
         decimal? lastPrice,
         IReadOnlyCollection<AlertKind> alertsFiredForSymbol,
         DateTime nowUtc,
-        out string reason)
+        out string reason,
+        bool marketIsOpen = false)
     {
         if (order.State != "armed")
         {
@@ -261,6 +328,22 @@ public static class ArmedOrderEvaluator
         if (order.ExpiresUtc is { } expiry && nowUtc >= expiry)
         {
             reason = $"Expired at {expiry:u} without triggering.";
+            return false;
+        }
+
+        // Checked AFTER expiry so the two orderings agree: the worker ages an order out before it
+        // evaluates anything, and an order that is somehow both expired and not yet active should
+        // report the terminal fact rather than a future one. The arm endpoint refuses that pairing,
+        // so this only decides which reason a corrupted row gives.
+        if (order.ActiveFromUtc is { } activeFrom && nowUtc < activeFrom)
+        {
+            reason = $"Scheduled: not active until {activeFrom:u}.";
+            return false;
+        }
+
+        if (order.ActiveFromUtc is { } scheduledFrom && !marketIsOpen)
+        {
+            reason = $"Scheduled from {scheduledFrom:u}, but the market is closed; waiting for the open.";
             return false;
         }
 
@@ -321,6 +404,22 @@ public static class ArmedOrderEvaluator
                     ? $"{kind} raised for {order.Symbol} this pass."
                     : $"{kind} has not been raised.";
                 return fired;
+
+            case ArmedTriggerKind.Scheduled:
+                // Reaching here means both common date checks above have passed. There is no second
+                // condition for this kind, unlike a price trigger carrying the same lower bound.
+                if (order.ActiveFromUtc is not { } scheduledFor)
+                {
+                    // A scheduled order with no date is not "fire immediately", it is a corrupt row:
+                    // the endpoint requires the date, so the only way to hold one is a hand-edited
+                    // database or a downgrade. Firing an order of unknown intent is the one outcome
+                    // worse than never firing it.
+                    reason = "Scheduled order has no activation date.";
+                    return false;
+                }
+
+                reason = $"Scheduled for {scheduledFor:u}; that date has arrived and the market is open.";
+                return true;
 
             default:
                 reason = $"Unknown trigger kind {order.TriggerKind}.";

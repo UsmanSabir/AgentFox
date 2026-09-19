@@ -239,6 +239,26 @@ public class TradingAgentOptions
     /// </summary>
     public int ReconciliationRetentionDays { get; set; } = 14;
 
+    /// <summary>
+    /// Days to keep armed orders that have reached a terminal state — fired, cancelled, expired or
+    /// failed. 0 disables the sweep.
+    ///
+    /// <para>
+    /// ARMED rows are never swept at any age: an armed order is a standing instruction, and expiring
+    /// one on a retention timer would silently cancel something the operator is relying on. That
+    /// matters more since orders can carry an activation date and legitimately sit armed for months
+    /// before they are due — see <c>ArmedOrder.ActiveFromUtc</c>. The lifecycle already ends an armed
+    /// order by its own expiry, and a terminal row is history.
+    /// </para>
+    ///
+    /// <para>
+    /// Longer than the ledger default because this is the record of what the operator ASKED for,
+    /// which is what a review of an unexpected fill starts from, and one row per instruction is a far
+    /// smaller footprint than the ledger's per-event rows.
+    /// </para>
+    /// </summary>
+    public int ArmedOrderRetentionDays { get; set; } = 90;
+
     // ── Execution alerts ──────────────────────────────────────────────────────
 
     /// <summary>
