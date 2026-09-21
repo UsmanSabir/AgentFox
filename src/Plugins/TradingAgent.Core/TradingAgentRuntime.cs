@@ -258,6 +258,8 @@ public sealed class TradingAgentRuntime
         // Depends on the worker above, so it must be registered after it reads as a singleton — and it
         // is the ONLY sanctioned way to ask what is free to sell. See SellAvailabilityConfirmer.
         services.AddSingleton<SellAvailabilityConfirmer>();
+        // Its BUY-side counterpart, and the same ordering constraint for the same reason.
+        services.AddSingleton<BuyAffordabilityConfirmer>();
         services.AddHostedService<TradingRetentionWorker>();
         services.AddHostedService<TakeProfitRetryWorker>();
         // Singleton AND hosted service, so the arm endpoint can kick an immediate baseline capture on

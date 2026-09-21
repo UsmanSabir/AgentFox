@@ -6,7 +6,8 @@
   import {
     trading, percentTriggerLevel, ApiError,
     type OrderIntentDefinition, type OrderIntentRegistryResponse, type WatchlistEntry,
-    type TriggerKind, type ArmOrderRequest, type BrokerAccountSnapshot
+    type TriggerKind, type ArmOrderRequest, type BrokerAccountSnapshot,
+    type LiveEntryConflict
   } from './api';
   import {
     ShoppingCart, X, AlertTriangle, RefreshCw, CheckCircle2, Clock3, BriefcaseBusiness, Wallet
@@ -137,6 +138,20 @@
    */
   let blockedSell: { symbol: string; quantity: number; stops: string[] } | null = null;
   let releasing = false;
+
+  /**
+   * Set when the server found a keep-working instruction on this symbol and side that is still live.
+   *
+   * A keep-working order that meets a broker refusal does NOT stop — it backs off and retries on its
+   * own, for minutes. That is deliberate and correct, and it is also invisible from this dialog, so
+   * an operator reading a failure places a replacement and the account ends up with both. Measured
+   * 2026-09-21 on MWMP: two entries 42 seconds apart, a position twice the intended size, and only
+   * one of the two attached stops covering anything.
+   *
+   * It is a warning, never a gate — "Place both" sends the same request with the acknowledgement on.
+   * A second entry on a name is an ordinary thing to want; the point is that a person saw this.
+   */
+  let duplicateEntry: { message: string; entries: LiveEntryConflict[] } | null = null;
   let clientRequestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
   const money = (value: number) => value.toLocaleString(undefined, { maximumFractionDigits: 2 });
@@ -229,12 +244,15 @@
     currentPrice = null; pricedSymbol = null; price = null; triggerPrice = null; limitPrice = null;
     triggerReferencePrice = null; stopTrigger = null; stopLimit = null;
     quantity = null; orderValue = null; quantityWasEdited = false; blockedSell = null;
+    // Both refusals name a specific symbol and side, so neither survives a change of either.
+    duplicateEntry = null;
   }
 
   function choose(intent: OrderIntentDefinition) {
     choice = intent;
     activeFromDate = '';
     blockedSell = null;
+    duplicateEntry = null;
     price = null;
     triggerPrice = null;
     limitPrice = null;
@@ -493,11 +511,17 @@
    * `releaseStopAndRetry` passes it. Note the call sites use `() => submit()` rather than `submit`
    * directly: handing a click handler straight to this function would pass the MouseEvent as this
    * argument, and a truthy object here silently disables the confirmation on every ordinary click.
+   * @param acknowledgeDuplicate Tells the server the operator has SEEN the live keep-working order it
+   * refused on and wants this one as well. Only `placeDespiteDuplicate` passes it, and it is separate
+   * from `alreadyConfirmed` deliberately: a released stop and a second entry are two different claims
+   * about two different risks, and one flag waving through both is how the load-bearing half gets
+   * deleted by someone tidying up.
    */
-  async function submit(alreadyConfirmed = false) {
+  async function submit(alreadyConfirmed = false, acknowledgeDuplicate = false) {
     if (!choice || busy || reviewing || result || quoteBusy) return;
     error = null;
     blockedSell = null;
+    duplicateEntry = null;
     if (!symbol.trim()) { error = 'Choose a symbol.'; return; }
     if (sizeMode === 'value') {
       if (!orderValue || orderValue <= 0) { error = 'Enter a positive order value.'; return; }
@@ -561,7 +585,8 @@
     const immediateRequest = {
       orderIntentId: choice.id, symbol: symbol.trim().toUpperCase(), quantity: submittedQuantity,
       price, triggerPrice, limitPrice, clientRequestId, persistentUntilFilled, expiresInDays,
-      attachStop: attachStop && stopTrigger ? {stopTrigger, stopLimit, recurring: stopRecurring} : null
+      attachStop: attachStop && stopTrigger ? {stopTrigger, stopLimit, recurring: stopRecurring} : null,
+      acknowledgeDuplicate
     };
     const waitingRequest: ArmOrderRequest = {
       symbol: symbol.trim().toUpperCase(), action: choice.action, quantity: submittedQuantity,
@@ -660,9 +685,44 @@
           };
         }
       }
+
+      // Not a failure — a question. The server has found a standing instruction that will act on its
+      // own, and is asking whether this order is meant to be a SECOND one or a replacement for it.
+      if (e instanceof ApiError && e.code === 'duplicate_live_entry') {
+        const entries = Array.isArray(e.detail?.liveEntries)
+          ? (e.detail.liveEntries as LiveEntryConflict[])
+          : [];
+        duplicateEntry = { message: error, entries };
+      }
     } finally {
       busy = false;
     }
+  }
+
+  /**
+   * Places the order the duplicate warning stopped, with the acknowledgement on.
+   *
+   * ITS OWN CONFIRMATION, and it names the total the account may end up holding rather than just
+   * this order's size — the number the operator got wrong in the incident this exists for was not
+   * the quantity they typed, it was the one they were about to own. `submit` is told not to ask
+   * again, for the same reason `releaseStopAndRetry` does: two modals for one decision trains people
+   * to click through both.
+   */
+  async function placeDespiteDuplicate() {
+    if (!duplicateEntry || busy || releasing) return;
+    const live = duplicateEntry;
+    const extra = live.entries.reduce((sum, entry) => sum + (entry.remainingQuantity ?? 0), 0);
+
+    if (!await confirmAction('Place this as a SECOND order?',
+      `${summary}\n\n`
+      + `Already live and placing on its own:\n${live.entries.map(entry => entry.describe).join('\n')}\n\n`
+      + `Place this one as well? If both go through the account ends up holding up to ${extra} `
+      + `more share(s) than this order asks for. Cancel the keep-working order in Waiting orders `
+      + `instead if this is meant to replace it.`, 'Place both'
+    )) return;
+
+    duplicateEntry = null;
+    await submit(true, true);
   }
 
   /**
@@ -734,7 +794,7 @@
       <div class="footer"><button class="btn btn-primary" on:click={() => dispatch('close')}>Done</button></div>
     {:else}
       {#if docked}<p class="draft-note">Draft for <b>{symbol || 'a new symbol'}</b>. Chart selection does not change this ticket. Hiding it preserves the draft; reload does not.</p>{/if}
-      <fieldset class="draft-fields" disabled={busy || releasing || reviewing} on:input={() => blockedSell = null}>
+      <fieldset class="draft-fields" disabled={busy || releasing || reviewing} on:input={() => { blockedSell = null; duplicateEntry = null; }}>
       <div class="symbol-row">
         <label><span>Symbol</span><input list="new-order-symbols" bind:value={symbol} on:input={event => editSymbol(event.currentTarget.value)} on:change={event => {symbol = event.currentTarget.value; void refreshQuote();}} /></label>
         <datalist id="new-order-symbols">{#each symbols as entry}<option value={entry.symbol}>{entry.companyName ?? ''}</option>{/each}</datalist>
@@ -1040,6 +1100,28 @@
         </div>
       {/if}
 
+      <!--
+        A warning, not a refusal. The server has already said what is live in `error`; this adds the
+        one thing that dialog cannot show — that the instruction keeps placing by itself — and the
+        two ways forward. "Place both" is deliberately not the primary action.
+      -->
+      {#if duplicateEntry}
+        <div class="duplicate-entry">
+          <p>
+            A keep-working order on this symbol is still live and will keep placing on its own, so
+            this one would be a <strong>second</strong> entry.
+          </p>
+          {#if duplicateEntry.entries.length}
+            <ul>
+              {#each duplicateEntry.entries as entry}<li>{entry.describe}</li>{/each}
+            </ul>
+          {/if}
+          <button class="btn btn-ghost" on:click={placeDespiteDuplicate} disabled={busy || releasing}>
+            Place this as well
+          </button>
+        </div>
+      {/if}
+
       <div class="footer">
         <button class="btn btn-ghost" on:click={closeComposer} disabled={busy || releasing || reviewing}>{docked ? 'Discard draft' : 'Cancel'}</button>
         <button class="btn btn-primary" on:click={reviewOrder} disabled={!choice || busy || releasing || reviewing || quoteBusy || marketDisabled}>
@@ -1188,6 +1270,13 @@
     display:flex; flex-direction:column; gap:.5rem; align-items:flex-start;
   }
   .blocked-sell p { margin:0; font-size:.8rem; line-height:1.5; }
+  .duplicate-entry {
+    margin:0 1rem .65rem; padding:.6rem .7rem; border-radius:var(--radius-sm);
+    background:color-mix(in srgb,var(--warning,#c88) 8%,transparent);
+    display:flex; flex-direction:column; gap:.5rem; align-items:flex-start;
+  }
+  .duplicate-entry p { margin:0; font-size:.8rem; line-height:1.5; }
+  .duplicate-entry ul { margin:0; padding-left:1.1rem; font-size:.75rem; line-height:1.5; color:var(--text-2); }
   .warning,.error { margin:.65rem 1rem; padding:.55rem .65rem; border-radius:var(--radius-sm); display:flex; gap:.35rem;
                     align-items:flex-start; color:var(--warning); background:color-mix(in srgb,var(--warning) 8%,transparent); font-size:.7rem; line-height:1.4; }
   .form-card .warning { margin:.65rem 0 0; }.error { color:var(--danger); background:color-mix(in srgb,var(--danger) 8%,transparent); }

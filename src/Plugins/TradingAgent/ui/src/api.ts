@@ -198,6 +198,24 @@ export interface DashboardOrderRequest {
   expiresInDays?: number;
   /** BUY only. Creates a protective stop that activates on this order's confirmed fill. */
   attachStop?: AttachStopRequest | null;
+  /**
+   * The operator has seen that a keep-working instruction on this symbol and side is still live, and
+   * wants this order as well. Without it the server answers 409 `duplicate_live_entry` naming what is
+   * live; it warns rather than gates, because a second entry on a name is an ordinary thing to want.
+   */
+  acknowledgeDuplicate?: boolean;
+}
+
+/** One live keep-working instruction the server found for this symbol and side. */
+export interface LiveEntryConflict {
+  intentId: string;
+  symbol: string;
+  action: string;
+  remainingQuantity: number;
+  state: string;
+  stateReason?: string | null;
+  /** Server-authored clause, shown verbatim. */
+  describe: string;
 }
 
 export interface DashboardOrderResult {

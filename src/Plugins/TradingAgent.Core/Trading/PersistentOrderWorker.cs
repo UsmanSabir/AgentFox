@@ -230,6 +230,10 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
                 "cancelling", "Cancellation requested by the operator.", ct);
 
             var placements = await _repository.GetPersistentOrderPlacementsAsync(intentId, ct);
+            // Orders that stopped resting WITHOUT this system taking them off. An order can leave the
+            // book by filling, so these are not evidence of a cancellation and must be settled against
+            // the broker before this intent is written terminal — see the check below.
+            var vanished = new List<string>();
             foreach (var orderNo in placements
                          .Select(p => p.BrokerOrderNo)
                          .Where(n => !string.IsNullOrWhiteSpace(n))
@@ -242,10 +246,35 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
                         intentId, intent.FilledQuantity, "cancelling", cancelled.Message, ct);
                     return (false, "cancelling", cancelled.Message);
                 }
+
+                if (cancelled.GoneUncancelled) vanished.Add(orderNo!);
             }
 
+            // ── An order that vanished may have FILLED, and "cancelled" would say it did not ──────
+            //
+            // MEASURED 2026-09-21 on MWMP: a BUY filled at 11:54:29 and a cancel of that exact number
+            // 27 seconds later came back "Invalid Order[...] to cancel". Gone is true and correct —
+            // it is not resting — but the shares were bought. Writing a terminal `cancelled` with the
+            // filled quantity read BEFORE the cancel closes the intent claiming nothing happened,
+            // which is how a real position ends up with no record and no attached stop.
+            //
+            // A read rather than a rule about timing, because the 2026-09-09 case this behaviour was
+            // built for — an order number from a previous trading day, cleared at that day's close —
+            // is the common and benign one, and landing every such cancel in `attention` would be a
+            // hurdle protecting nothing (§0.2). The broker can simply be asked which of the two it is.
+            if (vanished.Count > 0)
+            {
+                var settled = await SettleVanishedOnCancelAsync(intent, vanished, ct);
+                if (settled is { } outcome) return outcome;
+            }
+
+            // Re-read: the settle step above may have recorded fills this projection folds in, and the
+            // pre-cancel figure would understate what the intent actually bought.
+            var finalFilled = (await _repository.GetPersistentOrderAsync(intentId, ct))?.FilledQuantity
+                              ?? intent.FilledQuantity;
+
             await _repository.SetPersistentOrderProgressAsync(
-                intentId, intent.FilledQuantity, "cancelled",
+                intentId, finalFilled, "cancelled",
                 "Cancelled by the operator; no broker order remains outstanding.", ct);
             return (true, "cancelled", "Persistent order cancelled and outstanding placements verified gone.");
         }
@@ -253,6 +282,84 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
         {
             _runGate.Release();
         }
+    }
+
+    /// <summary>
+    /// Asks the broker what became of the order numbers that stopped resting without this system
+    /// cancelling them, and returns a non-null outcome when the intent must NOT be written
+    /// <c>cancelled</c>.
+    ///
+    /// <para>
+    /// Three answers, and the middle one is the whole reason this exists:
+    /// </para>
+    ///
+    /// <list type="bullet">
+    ///   <item>The book cannot be read — <c>attention</c>. Ignorance about whether real shares moved
+    ///   is not a cancellation, and this is the one place where invariant 4 has to run toward a
+    ///   person rather than toward letting the order through.</item>
+    ///   <item>The read shows the intent has filled more than it had — the order was taken off the
+    ///   book by the market, not by us. Terminal state is <c>fulfilled</c> when the whole quantity
+    ///   is accounted for and <c>attention</c> when only part is, because a partially filled intent
+    ///   the operator asked to cancel has a residue somebody has to decide about.</item>
+    ///   <item>Nothing filled — the order really is just gone, which is the ordinary stale-number
+    ///   case from 2026-09-09. Null, and the caller writes <c>cancelled</c> as before.</item>
+    /// </list>
+    /// </summary>
+    private async Task<(bool Completed, string State, string Message)?> SettleVanishedOnCancelAsync(
+        PersistentOrderIntent intent, IReadOnlyList<string> vanished, CancellationToken ct)
+    {
+        var numbers = string.Join(", ", vanished.Select(n => "#" + n));
+
+        BrokerReconciliationSnapshot snapshot;
+        try
+        {
+            snapshot = await _brokerStateReader.ReadSnapshotAsync(ct);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            snapshot = BrokerReconciliationSnapshot.Unsupported(ex.Message);
+        }
+
+        if (!snapshot.Supported || !snapshot.Healthy)
+        {
+            var why =
+                $"The broker reports no order {numbers}, but this system did not cancel it and the "
+                + $"order book could not be read to find out whether it FILLED instead: {snapshot.Reason} "
+                + "The intent is held for review rather than recorded as cancelled — check the broker's "
+                + "own activity log before placing a replacement.";
+            await _repository.SetPersistentOrderProgressAsync(
+                intent.IntentId, intent.FilledQuantity, "attention", why, ct);
+            _logger.LogWarning("[PersistentOrders] {IntentId} ({Symbol}): {Why}",
+                intent.IntentId, intent.Symbol, why);
+            return (false, "attention", why);
+        }
+
+        _reconciliation.Update(snapshot);
+        if (snapshot.Fills.Count > 0) await _repository.RecordFillsAsync(snapshot.Fills, ct);
+
+        // The projection folds the fills just recorded into FilledQuantity, which is what makes this a
+        // measurement rather than a guess about what the vanished order did.
+        var settled = await _repository.GetPersistentOrderAsync(intent.IntentId, ct) ?? intent;
+        if (settled.FilledQuantity <= intent.FilledQuantity) return null;
+
+        var complete = settled.FilledQuantity >= settled.Quantity;
+        var state = complete ? "fulfilled" : "attention";
+        var message = complete
+            ? $"Not cancelled: order {numbers} had already FILLED. "
+              + $"{settled.FilledQuantity:N0}/{settled.Quantity:N0} share(s) were bought, so the "
+              + "intent is fulfilled rather than cancelled."
+            : $"Not cancelled: order {numbers} had already filled in part. "
+              + $"{settled.FilledQuantity:N0}/{settled.Quantity:N0} share(s) were bought and "
+              + $"{settled.RemainingQuantity:N0} remain(s) unplaced. Held for review — decide whether "
+              + "the position now held needs protecting before this intent is closed.";
+
+        await _repository.SetPersistentOrderProgressAsync(
+            intent.IntentId, settled.FilledQuantity, state, message, ct);
+        _logger.LogWarning("[PersistentOrders] {IntentId} ({Symbol}): {Message}",
+            intent.IntentId, intent.Symbol, message);
+        _activity?.Warn("Orders", $"{intent.Symbol}: cancel found a fill, not a resting order", message);
+
+        return (true, state, message);
     }
 
     /// <summary>

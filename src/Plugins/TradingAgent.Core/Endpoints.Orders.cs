@@ -61,6 +61,9 @@ public sealed partial class TradingCoreEndpoints
             // The ONLY sanctioned way to ask what is free to sell: it confirms a cached answer against
             // the broker whenever that answer would refuse or shrink the order. See its own doc.
             SellAvailabilityConfirmer sellAvailabilityConfirmer,
+            // Its BUY-side counterpart, same rule: a cached figure never refuses, and a read is spent
+            // only on an order the cache says cannot be funded.
+            BuyAffordabilityConfirmer buyAffordabilityConfirmer,
             TradingPolicyProvider policyProvider,
             ApprovalIntentRegistry intentRegistry,
             ITradingRepository repository,
@@ -173,6 +176,59 @@ public sealed partial class TradingCoreEndpoints
                     && SellRefusalRule.MayRefuse(sellAvailability.Decision))
                     return await UnsellableHoldingConflictAsync(
                         symbol, sellAvailability, repository, ct);
+            }
+
+            // ── A BUY the broker will not fund, refused here rather than at the venue ────────────
+            //
+            // MEASURED 2026-09-21 on MWMP: a BUY worth PKR 4,967.56 went out against PKR 760 of buying
+            // power and met "Insufficient Exposure ( Amount Remaining = 760.00 )". Until then the SELL
+            // side above had a confirmer and this side had nothing at all — `available_cash` was read
+            // by a reporting tool and by nothing that submits an order.
+            //
+            // Every rule about WHEN a cached figure may refuse, why a MARKET buy is skipped, and why
+            // this must never learn a fee schedule is in BuyAffordabilityRule. Read it before changing
+            // the shape of this.
+            var orderValuePkr = BuyAffordabilityRule.OrderValue(entryPrice, body.Quantity.Value);
+            if (intent.Action.Equals("BUY", StringComparison.OrdinalIgnoreCase)
+                && orderValuePkr is { } valuePkr)
+            {
+                var affordability = await buyAffordabilityConfirmer.ForBuyAsync(symbol, valuePkr, ct);
+
+                if (affordability.BrokerConfirmed
+                    && BuyAffordabilityRule.MayRefuse(affordability.Affordability, valuePkr))
+                    return Results.Conflict(new
+                    {
+                        error = "insufficient_buying_power",
+                        message = BuyAffordabilityRule.Compose(
+                            symbol, body.Quantity.Value, valuePkr, affordability.Affordability),
+                        orderValuePkr = valuePkr,
+                        buyingPowerPkr = affordability.Affordability.BuyingPowerPkr,
+                        shortfallPkr = valuePkr - affordability.Affordability.BuyingPowerPkr,
+                        checkedUtc = affordability.Snapshot.CheckedUtc
+                    });
+            }
+
+            // ── A second entry on a name a keep-working instruction is still working ─────────────
+            //
+            // Warns, never refuses: AcknowledgeDuplicate carries the same request straight through.
+            // The 2026-09-21 double-fill and the reasoning are in DuplicateEntryRule. Placed AFTER the
+            // affordability check on purpose — an order that cannot be funded has a harder problem
+            // than a duplicate, and telling the operator about the duplicate first would send them to
+            // cancel a perfectly good standing order over a refusal that had nothing to do with it.
+            if (!body.AcknowledgeDuplicate)
+            {
+                var liveEntries = DuplicateEntryRule.FindLiveIntents(
+                    await repository.GetPersistentOrdersAsync(openOnly: true, ct),
+                    symbol,
+                    intent.Action);
+
+                if (liveEntries.Count > 0)
+                    return Results.Conflict(new
+                    {
+                        error = "duplicate_live_entry",
+                        message = DuplicateEntryRule.Compose(symbol, intent.Action, liveEntries),
+                        liveEntries
+                    });
             }
 
             if (body.PersistentUntilFilled)

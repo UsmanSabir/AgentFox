@@ -157,7 +157,21 @@ public sealed record DashboardOrderRequest(
     /// waiting-order path's own attachment — see <see cref="AttachStopRequest"/> and
     /// <c>TradingAgent.Watchlist.AttachedStopRule</c>.
     /// </summary>
-    AttachStopRequest? AttachStop = null);
+    AttachStopRequest? AttachStop = null,
+
+    /// <summary>
+    /// The operator has seen that a keep-working instruction on this symbol and side is still live and
+    /// still placing, and wants this order as well.
+    ///
+    /// <para>
+    /// Without it the endpoint answers 409 <c>duplicate_live_entry</c> naming what is live. It is a
+    /// warning rather than a gate — see <see cref="TradingAgent.Trading.DuplicateEntryRule"/> for the
+    /// 2026-09-21 MWMP double-fill it exists to prevent, and for why refusing outright would be worse.
+    /// A separate flag from any other confirmation on this request, because a second entry and, say, a
+    /// released protective stop are two different claims and one checkbox must not wave through both.
+    /// </para>
+    /// </summary>
+    bool AcknowledgeDuplicate = false);
 
 /// <summary>Auditable bulk alert state change. Dismiss is the UI's soft-delete operation.</summary>
 public sealed record BulkAlertActionRequest(

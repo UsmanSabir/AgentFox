@@ -9,7 +9,35 @@ public sealed record BrokerCancellationResult(
     bool Gone,
     bool RequestAccepted,
     bool Verified,
-    string Message);
+    string Message)
+{
+    /// <summary>
+    /// The order is not resting, and THIS SYSTEM did not take it off. Something else did, and what
+    /// that was is unknown — a fill is one of the possibilities.
+    ///
+    /// <para>
+    /// <b>Why the distinction has to exist.</b> <see cref="Gone"/> answers "is it resting", which is
+    /// all a cancel's caller usually needs, and it is deliberately true for an order the broker
+    /// reports it has never heard of — see the AHL adapter's <c>ConfirmsNoSuchOrder</c>, and the
+    /// phantom-stop defect that behaviour fixed on 2026-09-09. But an order can stop resting by
+    /// FILLING, and then "gone" and "cancelled" are opposite outcomes wearing the same flag.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>MEASURED 2026-09-21 on MWMP.</b> A BUY of 52 shares filled at 11:54:29; a cancel of that
+    /// exact order number went out at 11:54:56 and came back
+    /// <c>Invalid Order[0010TLON5W00P8CB] to cancel</c> — correctly, because it was no longer resting.
+    /// A caller reading only <see cref="Gone"/> concludes the order was cancelled and the shares were
+    /// never bought. They were.
+    /// </para>
+    ///
+    /// <para>
+    /// Derived rather than passed in, so it cannot be set inconsistently with the two flags it is a
+    /// statement about, and so no adapter has to be taught to populate it.
+    /// </para>
+    /// </summary>
+    public bool GoneUncancelled => Gone && !RequestAccepted;
+}
 
 /// <summary>
 /// Cancels one exact broker order and proves the result against the outstanding book. Both dashboard
