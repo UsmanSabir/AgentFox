@@ -54,10 +54,13 @@ public static class OrderIntentRegistry
             "Follow gains upward, then sell if price falls by your chosen percentage.",
             "Protect & exit", "conditional", "SELL", "MARKET", "PercentDrop",
             PriceField: "none", DefaultPercent: 3m, Trailing: true),
+        // Measured from the recent HIGH, not from the price at arming: "it has fallen 3% from where
+        // it just was". A fixed arm-time reference let a stock rise 5% and then need an ~8% fall to
+        // fire; the trailing stop above covers "the highest since I armed it". Owner, 2026-09-22.
         new("sell-after-drop", "Sell if it drops by a %",
-            "Watch from the current price and sell after the chosen percentage fall.",
+            "Sell at market once the price falls your chosen % below its highest price of the recent window.",
             "Protect & exit", "conditional", "SELL", "MARKET", "PercentDrop",
-            PriceField: "none", DefaultPercent: 3m),
+            PriceField: "none", DefaultPercent: 3m, DefaultWindowMinutes: 15),
 
         new("wait-buy-drops", "Buy when it drops to a price",
             "Wait in AgentFox until price drops to your trigger, then submit a limit buy.",
@@ -79,18 +82,21 @@ public static class OrderIntentRegistry
         new("buy-on-rise", "Buy if it rises to a price",
             "A native broker stop: buy only after price reaches your breakout level.",
             "React to a move", "immediate", "BUY", "STOPLOSS", PriceField: "stop"),
+        // The three below measure from the recent extreme too, for the same reason as sell-after-drop
+        // (owner, 2026-09-22). A LIMIT one is priced at the level it FIRES at, not the level quoted at
+        // arming — the level moves with the window. See ArmedOrder.PriceAtFire.
         new("buy-after-rise", "Buy if it rises by a %",
-            "Watch from the current price and buy after the chosen percentage rise.",
+            "Buy at market once the price rises your chosen % above its lowest price of the recent window.",
             "React to a move", "conditional", "BUY", "MARKET", "PercentRise",
-            PriceField: "none", DefaultPercent: 3m),
+            PriceField: "none", DefaultPercent: 3m, DefaultWindowMinutes: 15),
         new("buy-after-drop", "Buy if it drops by a %",
-            "Watch from the current price and place a limit buy after the chosen fall.",
+            "Once the price falls your chosen % below its highest price of the recent window, place a limit buy at that level.",
             "React to a move", "conditional", "BUY", "LIMIT", "PercentDrop",
-            PriceField: "limit-at-trigger", DefaultPercent: 3m),
+            PriceField: "limit-at-trigger", DefaultPercent: 3m, DefaultWindowMinutes: 15),
         new("sell-after-rise", "Sell if it rises by a %",
-            "Watch from the current price and place a limit sell after the chosen rise.",
+            "Once the price rises your chosen % above its lowest price of the recent window, place a limit sell at that level.",
             "React to a move", "conditional", "SELL", "LIMIT", "PercentRise",
-            PriceField: "limit-at-trigger", DefaultPercent: 3m)
+            PriceField: "limit-at-trigger", DefaultPercent: 3m, DefaultWindowMinutes: 15)
     ];
 
     public static OrderIntentDefinition? Find(string? id) =>
@@ -111,4 +117,5 @@ public sealed record OrderIntentDefinition(
     string PriceField = "none",
     decimal? DefaultPercent = null,
     bool Trailing = false,
-    bool RequiresActivationDate = false);
+    bool RequiresActivationDate = false,
+    int? DefaultWindowMinutes = null);

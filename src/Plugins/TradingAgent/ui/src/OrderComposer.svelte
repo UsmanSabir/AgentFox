@@ -107,6 +107,7 @@
   let triggerPrice: number | null = null;
   let limitPrice: number | null = null;
   let triggerPercent: number | null = null;
+  let triggerWindowMinutes: number | null = null;
   let activeFromDate = '';
   let expiresInDays = 30;
   let persistentUntilFilled = false;
@@ -257,6 +258,7 @@
     triggerPrice = null;
     limitPrice = null;
     triggerPercent = intent.defaultPercent ?? null;
+    triggerWindowMinutes = intent.defaultWindowMinutes ?? null;
     result = null;
     error = null;
     attachStop = false;
@@ -369,6 +371,7 @@
   $: activationError = scheduled && activeFromDate ? scheduleDateError(activeFromDate) : null;
   $: exactPriceTrigger = choice?.submission === 'conditional'
     && (choice.triggerKind === 'PriceBelow' || choice.triggerKind === 'PriceAbove');
+  $: windowed = choice?.defaultWindowMinutes != null;
   $: conditionalLevel = exactPriceTrigger ? triggerPrice : choice?.submission === 'conditional' && choice.triggerKind
     ? percentTriggerLevel(choice.triggerKind, triggerReferencePrice, triggerPercent)
     : null;
@@ -493,6 +496,15 @@
     }
     if (choice.submission === 'conditional' && conditionalLevel != null) {
       const move = choice.triggerKind === 'PercentDrop' ? 'falls' : 'rises';
+      if (windowed) {
+        const extreme = choice.triggerKind === 'PercentDrop' ? 'highest' : 'lowest';
+        const how = choice.orderType === 'LIMIT'
+          ? `place a limit ${side.toLowerCase()} for ${effectiveQuantity} ${symbol} at the level it reaches`
+          : `${side.toLowerCase()} ${effectiveQuantity} ${symbol} at market`;
+        return `When ${symbol} ${move} ${triggerPercent}% from its ${extreme} price of the last `
+          + `${triggerWindowMinutes ?? '—'} trading minutes, ${how} (${money(conditionalLevel)} measured `
+          + `from the price now; the level moves with that ${extreme} price, and counts across the close).`;
+      }
       const trail = choice.trailing ? ' from the highest price seen after arming' : '';
       return `${side} ${effectiveQuantity} ${symbol} if it ${move} ${triggerPercent}%${trail} `
         + `(currently ${money(conditionalLevel)}).`;
@@ -560,6 +572,10 @@
       if (!triggerReferencePrice || !conditionalLevel) {
         error = 'A current price is required to arm a percentage trigger.'; return;
       }
+      if (windowed && (!Number.isInteger(triggerWindowMinutes)
+          || triggerWindowMinutes! < 1 || triggerWindowMinutes! > 240)) {
+        error = 'Enter a price window between 1 and 240 whole minutes.'; return;
+      }
     } else if (choice.orderType === 'STOPLOSS') {
       if (!triggerPrice || triggerPrice <= 0 || !limitPrice || limitPrice <= 0) {
         error = 'Enter both the stop trigger and stop limit.'; return;
@@ -596,6 +612,7 @@
       referencePrice: exactPriceTrigger || dateOnlySchedule ? null : triggerReferencePrice,
       activeFromDate: scheduled ? activeFromDate : null,
       trailing: choice.trailing, orderType: choice.orderType,
+      triggerWindowMinutes: windowed ? triggerWindowMinutes : null,
       price: choice.orderType === 'MARKET' ? null : exactPriceTrigger || dateOnlySchedule ? price : conditionalLevel, expiresInDays, persistentUntilFilled,
       attachStop: attachStop && stopTrigger ? {stopTrigger, stopLimit, recurring:stopRecurring} : null,
       note: `New Order: ${choice.label}`
@@ -964,7 +981,12 @@
                 ? 'Minimum price before market sell'
                 : `Trigger price (${choice.triggerKind === 'PriceBelow' ? 'at or below' : 'at or above'})`}</span><input type="number" min="0.01" step="0.01" bind:value={triggerPrice} /></label>
             {:else if choice.submission === 'conditional' && !scheduled}
-              <label><span>Move from {triggerReferencePrice ?? 'latest price'} (%)</span><input type="number" min="0.1" max="50" step="0.1" bind:value={triggerPercent} /></label>
+              {#if windowed}
+                <label><span>{choice.triggerKind === 'PercentDrop' ? 'Fall from the recent high' : 'Rise from the recent low'} (%)</span><input type="number" min="0.1" max="50" step="0.1" bind:value={triggerPercent} /></label>
+                <label><span>Recent window (trading minutes)</span><input type="number" min="1" max="240" step="1" bind:value={triggerWindowMinutes} /></label>
+              {:else}
+                <label><span>Move from {triggerReferencePrice ?? 'latest price'} (%)</span><input type="number" min="0.1" max="50" step="0.1" bind:value={triggerPercent} /></label>
+              {/if}
             {/if}
             {#if scheduled}
               <label><span>Activation date (PKT)</span><input type="date" min={psxDateInput()} bind:value={activeFromDate} aria-invalid={activationError ? 'true' : undefined} aria-describedby="schedule-help" /></label>

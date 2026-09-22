@@ -1915,7 +1915,10 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                     -- the moment it was armed. Paired with trigger_kind 'Scheduled' the date IS the
                     -- whole condition; paired with a price kind it postpones when that price starts
                     -- being watched.
-                    active_from_utc TEXT NULL
+                    active_from_utc TEXT NULL,
+                    -- Percent triggers only: measure the move from the extreme of this many recent
+                    -- TRADING minutes instead of from reference_price. NULL = fixed or trailing.
+                    trigger_window_minutes INTEGER NULL
                 );
                 CREATE INDEX IF NOT EXISTS ix_armed_orders_state
                     ON armed_orders(state, symbol);
@@ -2149,6 +2152,8 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
             // written before this column existed is postponed by the migration.
             await AddColumnIfMissingAsync(
                 connection, "armed_orders", "active_from_utc", "TEXT NULL", ct);
+            await AddColumnIfMissingAsync(
+                connection, "armed_orders", "trigger_window_minutes", "INTEGER NULL", ct);
             await AddColumnIfMissingAsync(
                 connection, "protective_stops", "operator_originated", "INTEGER NOT NULL DEFAULT 0", ct);
             await AddColumnIfMissingAsync(
@@ -2795,10 +2800,10 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                 (armed_id, symbol, trigger_kind, trigger_price, trigger_alert, action, quantity,
                  order_type, price, limit_price, state, armed_utc, expires_utc, note, source_alert,
                  protective_stop_id, trigger_percent, reference_price, trailing,
-                 persistent_until_filled, operator_originated, active_from_utc)
+                 persistent_until_filled, operator_originated, active_from_utc, trigger_window_minutes)
             VALUES ($id, $symbol, $kind, $tprice, $talert, $action, $qty,
                     $otype, $price, $limit, $state, $armed, $expires, $note, $alert, $stop,
-                    $tpercent, $reference, $trailing, $persistent, $operator, $activeFrom)
+                    $tpercent, $reference, $trailing, $persistent, $operator, $activeFrom, $window)
             """;
         command.Parameters.AddWithValue("$id", order.ArmedId);
         command.Parameters.AddWithValue("$symbol", order.Symbol);
@@ -2825,6 +2830,8 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         command.Parameters.AddWithValue("$operator", order.OperatorOriginated ? 1 : 0);
         command.Parameters.AddWithValue("$activeFrom",
             order.ActiveFromUtc?.ToString("O") ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$window",
+            order.TriggerWindowMinutes ?? (object)DBNull.Value);
         await command.ExecuteNonQueryAsync(ct);
         return order.ArmedId;
     }
@@ -2840,7 +2847,7 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                    order_type, price, limit_price, state, armed_utc, expires_utc, fired_utc,
                    execution_id, state_reason, note, source_alert, protective_stop_id,
                    trigger_percent, reference_price, trailing, persistent_until_filled,
-                   operator_originated, active_from_utc
+                   operator_originated, active_from_utc, trigger_window_minutes
             FROM armed_orders
             {(armedOnly ? "WHERE state = 'armed'" : "")}
             ORDER BY armed_utc DESC
@@ -2958,7 +2965,8 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         Trailing         = !reader.IsDBNull(21) && reader.GetInt64(21) != 0,
         PersistentUntilFilled = !reader.IsDBNull(22) && reader.GetInt64(22) != 0,
         OperatorOriginated    = !reader.IsDBNull(23) && reader.GetInt64(23) != 0,
-        ActiveFromUtc         = reader.IsDBNull(24) ? null : ParseUtc(reader.GetString(24))
+        ActiveFromUtc         = reader.IsDBNull(24) ? null : ParseUtc(reader.GetString(24)),
+        TriggerWindowMinutes  = reader.IsDBNull(25) ? null : reader.GetInt32(25)
     };
 
     // ── Protective stops ──────────────────────────────────────────────────────

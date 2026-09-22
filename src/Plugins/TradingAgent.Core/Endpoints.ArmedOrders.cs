@@ -65,6 +65,7 @@ public sealed partial class TradingCoreEndpoints
             ITradingRepository repository,
             ApprovalGate approvals,
             IMarketCalendar calendar,
+            RecentPriceWindow recentPrices,
             IOptions<TradingAgentOptions> options,
             CancellationToken ct) =>
         {
@@ -77,18 +78,29 @@ public sealed partial class TradingCoreEndpoints
                 // Projected rather than serialized straight from the record: an enum defaults to its
                 // NUMBER on the wire, so the client would receive triggerKind: 0 and have to know the
                 // ordinal. Names are the stable contract here.
-                orders = orders.Select(o => new
+                orders = orders.Select(o =>
                 {
+                    // A windowed trigger's reference is the recent high (or low), which lives in the
+                    // monitor's memory rather than in the row. Null until the window has observed a
+                    // price, and the panel then shows the arm-time reference instead.
+                    var windowReference = o.IsWindowed
+                        ? recentPrices.Extreme(o.Symbol, o.TriggerWindowMinutes!.Value,
+                            PercentTrigger.WindowUsesHigh(o.TriggerKind))
+                        : null;
+                    return new
+                    {
                     o.ArmedId,
                     o.Symbol,
                     triggerKind = o.TriggerKind.ToString(),
-                    // The recomputed level, not the stored column: a trailing trigger's level moves,
-                    // and a panel showing where it WAS is the one thing worse than showing nothing.
-                    triggerPrice = o.EffectiveTriggerPrice,
+                    // The recomputed level, not the stored column: a trailing or windowed trigger's
+                    // level moves, and a panel showing where it WAS is worse than showing nothing.
+                    triggerPrice = o.EffectiveTriggerPriceFor(windowReference),
                     triggerAlertKind = o.TriggerAlertKind?.ToString(),
                     o.TriggerPercent,
                     o.ReferencePrice,
                     o.Trailing,
+                    o.TriggerWindowMinutes,
+                    windowReference,
                     o.Action,
                     o.Quantity,
                     o.OrderType,
@@ -105,6 +117,7 @@ public sealed partial class TradingCoreEndpoints
                     o.SourceAlertId,
                     o.ProtectiveStopId,
                     o.PersistentUntilFilled
+                    };
                 }),
                 // Sent with the orders because a stop and the entry it protects are one thing to
                 // read: "did my buy fill, and is the stop actually at the broker" is a single
@@ -160,6 +173,8 @@ public sealed partial class TradingCoreEndpoints
             ApprovalGate approvals,
             ProtectiveStopWorker protectiveStops,
             CompositeLiveQuoteSource quotes,
+            RecentPriceWindow recentPrices,
+            IMarketCalendar calendar,
             IOptions<TradingAgentOptions> options,
             ILogger<TradingCoreEndpoints> logger,
             CancellationToken ct) =>
@@ -189,6 +204,7 @@ public sealed partial class TradingCoreEndpoints
             decimal? triggerPercent = null;
             decimal? referencePrice = null;
             var trailing = false;
+            int? windowMinutes = null;
             var triggerLevel = body.TriggerPrice;
 
             if (kind == ArmedTriggerKind.Event)
@@ -266,6 +282,36 @@ public sealed partial class TradingCoreEndpoints
                     });
 
                 trailing = body.Trailing;
+
+                if (body.TriggerWindowMinutes is { } minutes)
+                {
+                    if (minutes < 1 || minutes > RecentPriceWindow.MaxWindowMinutes)
+                        return Results.BadRequest(new
+                        {
+                            error = "invalid_trigger_window",
+                            message = $"A price window must be between 1 and "
+                                    + $"{RecentPriceWindow.MaxWindowMinutes} trading minutes."
+                        });
+
+                    // A trail only ratchets; a window's high ages out and can fall. One order cannot
+                    // be both, and silently picking one would arm something other than what was asked.
+                    if (trailing)
+                        return Results.BadRequest(new
+                        {
+                            error = "invalid_trigger_window",
+                            message = "Choose a trailing reference or a recent-price window, not both."
+                        });
+
+                    windowMinutes = minutes;
+                }
+            }
+            else if (body.TriggerWindowMinutes is not null)
+            {
+                return Results.BadRequest(new
+                {
+                    error = "invalid_trigger_window",
+                    message = "A price window applies only to a percent trigger."
+                });
             }
             else if (body.TriggerPrice is not > 0)
             {
@@ -353,6 +399,7 @@ public sealed partial class TradingCoreEndpoints
                 TriggerPercent   = triggerPercent,
                 ReferencePrice   = referencePrice,
                 Trailing         = trailing,
+                TriggerWindowMinutes = windowMinutes,
                 Action           = action,
                 Quantity         = body.Quantity!.Value,
                 OrderType        = (body.OrderType ?? "LIMIT").Trim().ToUpperInvariant(),
@@ -426,6 +473,13 @@ public sealed partial class TradingCoreEndpoints
             }
 
             var id = await repository.SaveArmedOrderAsync(order, ct);
+
+            // The price the operator armed against is the window's first observation, so a fall
+            // before the monitor's next pass is still measured from it. Only while the market is open:
+            // a price recorded while it is shut would be counted as trading time.
+            if (order.IsWindowed && referencePrice is { } seed && calendar.GetStatus().IsOpen)
+                recentPrices.Record(symbol, seed, DateTime.UtcNow,
+                    RecentPriceWindow.MaxGapFor(options.Value.Monitor.IntervalSeconds));
             if (attached is not null)
             {
                 await repository.SaveProtectiveStopAsync(attached, ct);
@@ -453,7 +507,8 @@ public sealed partial class TradingCoreEndpoints
                 triggerPercent is null
                     ? ""
                     : $" ({triggerPercent}% from {referencePrice}"
-                      + (trailing ? ", trailing" : "") + ")",
+                      + (trailing ? ", trailing" : "")
+                      + (windowMinutes is { } w ? $", from the {w}-minute extreme" : "") + ")",
                 options.Value.Approval.Mode);
 
             return Results.Ok(new
@@ -469,6 +524,7 @@ public sealed partial class TradingCoreEndpoints
                     order.TriggerPercent,
                     order.ReferencePrice,
                     order.Trailing,
+                    order.TriggerWindowMinutes,
                     order.PersistentUntilFilled,
                     order.Action,
                     order.Quantity,

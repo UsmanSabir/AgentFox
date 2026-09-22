@@ -173,6 +173,11 @@ export interface OrderIntentDefinition {
   priceField: 'none' | 'limit' | 'target' | 'stop' | 'limit-at-trigger' | string;
   defaultPercent: number | null;
   trailing: boolean;
+  /**
+   * Percent intents measured from the recent extreme: the highest price (drop) or lowest (rise) of
+   * this many recent trading minutes. Null for a fixed or trailing reference.
+   */
+  defaultWindowMinutes?: number | null;
   /** This intent cannot become active until the operator's selected PKT calendar date. */
   requiresActivationDate?: boolean;
 }
@@ -783,6 +788,10 @@ export interface ArmedOrder {
   referencePrice: number | null;
   /** The reference follows the price in the favourable direction and never moves back. */
   trailing: boolean;
+  /** Measured from the extreme of this many recent trading minutes instead of `referencePrice`. */
+  triggerWindowMinutes?: number | null;
+  /** That extreme as the monitor last saw it; null until the window has observed a price. */
+  windowReference?: number | null;
   action: 'BUY' | 'SELL' | string;
   quantity: number;
   orderType: string;
@@ -881,6 +890,11 @@ export interface ArmOrderRequest {
   referencePrice?: number | null;
   /** Trail the reference with the price — a drop trigger then behaves as a trailing stop. */
   trailing?: boolean;
+  /**
+   * Measure the move from the highest (drop) or lowest (rise) price of this many recent trading
+   * minutes. Not with `trailing`. Counted in session time, so the window carries across the close.
+   */
+  triggerWindowMinutes?: number | null;
   /** After the trigger, keep re-placing a LIMIT/STOPLOSS each trading day until filled or expired. */
   persistentUntilFilled?: boolean;
 

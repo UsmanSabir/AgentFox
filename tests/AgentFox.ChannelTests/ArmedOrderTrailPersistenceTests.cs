@@ -65,6 +65,19 @@ public sealed class ArmedOrderTrailPersistenceTests
             + "the evaluator would disagree about where the order fires.");
     }
 
+    [TestMethod]
+    public async Task AWindowedTrigger_RoundTripsItsWindow()
+    {
+        var repository = NewRepository();
+        await repository.SaveArmedOrderAsync(
+            TrailingDrop() with { ArmedId = "window1", Trailing = false, TriggerWindowMinutes = 15 });
+
+        var stored = (await repository.GetArmedOrdersAsync()).Single(o => o.ArmedId == "window1");
+
+        Assert.AreEqual(15, stored.TriggerWindowMinutes);
+        Assert.IsTrue(stored.IsWindowed);
+    }
+
     // ── Migration ─────────────────────────────────────────────────────────────
 
     [TestMethod]

@@ -246,6 +246,7 @@ public sealed class TradingAgentRuntime
         services.AddSingleton<TradingActivityLog>();
         // Registered as a singleton AND as the hosted service, so the API can read its live status and
         // trigger a pass on the same instance the timer drives.
+        services.AddSingleton<RecentPriceWindow>();
         services.AddSingleton<WatchlistMonitorWorker>();
         services.AddSingleton<IMarketSessionOpenParticipant>(
             sp => sp.GetRequiredService<WatchlistMonitorWorker>());

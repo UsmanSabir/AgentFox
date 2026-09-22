@@ -118,6 +118,12 @@ public sealed record ResolvePersistentAttentionRequest(
 /// Percent triggers only. The reference follows the price in the favourable direction — the high for a
 /// drop trigger, the low for a rise — making a drop trigger a trailing stop. Never moves back.
 /// </param>
+/// <param name="TriggerWindowMinutes">
+/// Percent triggers only, and not with <paramref name="Trailing"/>. Measure the move from the highest
+/// (drop) or lowest (rise) price of this many recent TRADING minutes rather than from the reference —
+/// "sell if it falls 2% from where it has just been". Counted in session time, so a window carries
+/// across the close. See <c>RecentPriceWindow</c>.
+/// </param>
 public sealed record ArmOrderRequest(
     string? Symbol,
     string? Action,
@@ -138,7 +144,8 @@ public sealed record ArmOrderRequest(
     decimal? ReferencePrice = null,
     bool Trailing = false,
     bool PersistentUntilFilled = false,
-    DateOnly? ActiveFromDate = null);
+    DateOnly? ActiveFromDate = null,
+    int? TriggerWindowMinutes = null);
 
 /// <summary>An immediate order submitted from a registry choice in the trading dashboard.</summary>
 public sealed record DashboardOrderRequest(
