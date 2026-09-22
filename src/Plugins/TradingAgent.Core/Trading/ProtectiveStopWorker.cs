@@ -1830,7 +1830,12 @@ public sealed class ProtectiveStopWorker
         var strandedFor = now - seen.SinceUtc;
         if (strandedFor < grace)
         {
-            _logger.LogInformation(
+            // Warning, not Information: the deployed host logs at Warning, and this is the only line
+            // that shows detection WORKING before the grace runs out. The stop worker's first live
+            // strand is how the unmeasured order-book column gets settled, and at Information that
+            // evidence would be below the log floor — the 2026-09-17 lesson. At most one line a pass,
+            // for a grace of a few minutes.
+            _logger.LogWarning(
                 "[ProtectiveStops] {StopId} ({Symbol}): order {OrderNo} has TRIGGERED and is resting "
                 + "unfilled at {Limit}; treated as missed if it is still there in {Remaining:mm\\:ss}.",
                 stop.StopId, stop.Symbol, orderNo, stranded.Price ?? stop.StopLimit, grace - strandedFor);
