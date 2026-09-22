@@ -193,6 +193,26 @@ public sealed record ProtectiveStop
     /// </para>
     /// </summary>
     public bool OperatorOriginated { get; init; }
+
+    /// <summary>
+    /// When this stop has triggered but its limit was never reached — the price fell straight through
+    /// it — cancel the stranded limit and sell what is still held AT MARKET.
+    ///
+    /// <para>
+    /// <b>Opt-in, per stop, and off by default.</b> A stop-limit's limit is a floor, not a price: in a
+    /// fast fall or a gap it becomes a sell order sitting above the market that nobody will take, and
+    /// the position is then held with no protection at all. This trades that for certainty at an
+    /// unknown price, which is a real cost on a thin stock — so the person who owns the position
+    /// chooses it, stock by stock, rather than a default choosing it for every position at once.
+    /// </para>
+    ///
+    /// <para>
+    /// It also turns this stop's LOCAL BACKSTOP into a market sell, since the backstop is the same stop
+    /// expressed locally and would otherwise strand in exactly the same way. It cannot help a stock
+    /// locked at its lower price limit, where there are no buyers at any price.
+    /// </para>
+    /// </summary>
+    public bool SellAtMarketIfMissed { get; init; }
 }
 
 /// <summary>One row read from the broker's outstanding (resting) order book.</summary>
@@ -206,7 +226,8 @@ public sealed record RestingOrder(
     int? Quantity,
     decimal? Price,
     string? OrderNo,
-    string Row);
+    string Row,
+    string? AlternateOrderNo = null);
 
 /// <summary>What the holdings say about an entry that was submitted.</summary>
 public enum FillOutcome
@@ -286,6 +307,41 @@ public sealed record PlacementDecision(PlacementAction Action, int Quantity, str
 /// </summary>
 public static class ProtectiveStopDecisions
 {
+    /// <summary>
+    /// This stop's own order, if it has TRIGGERED and is resting in the book as an ordinary limit —
+    /// which, once it has stayed there past a grace period, means the price fell through its limit and
+    /// nobody is buying there. Null in every other case, including every case this cannot read.
+    ///
+    /// <para>
+    /// <b>Matched by the stop's own order number AND the symbol, never by price.</b> A price match is
+    /// how an unrelated order gets read as this stop's, and what follows from this is a cancel and a
+    /// market sale. Both of the broker's identifiers are tried, because a triggered stop can gain a
+    /// second one and which column carries which is not measured.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Unknown never counts.</b> A book that could not be read, a row with no order type, a type
+    /// other than LIMIT, a stop placed on an earlier session — each answers null. The one conclusion
+    /// this draws leads to selling at an unknown price, so it is drawn only from positive evidence.
+    /// </para>
+    /// </summary>
+    public static RestingOrder? FindStrandedLimit(
+        ProtectiveStop stop, IReadOnlyList<RestingOrder>? resting, DateOnly today)
+    {
+        if (resting is null) return null;
+        if (stop.State != "active") return null;
+        if (stop.LastPlacedSessionDate != today) return null;
+        if (stop.LastOrderNo is not { Length: > 0 } ours) return null;
+
+        var own = ours.Trim();
+        return resting.FirstOrDefault(r =>
+            r.Symbol.Equals(stop.Symbol, StringComparison.OrdinalIgnoreCase)
+            && !(r.Side is { Length: > 0 } side && side.Contains("BUY", StringComparison.OrdinalIgnoreCase))
+            && string.Equals(r.OrderType?.Trim(), "LIMIT", StringComparison.OrdinalIgnoreCase)
+            && (string.Equals(r.OrderNo?.Trim(), own, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(r.AlternateOrderNo?.Trim(), own, StringComparison.OrdinalIgnoreCase)));
+    }
+
     /// <summary>
     /// A placed price is compared to the requested trigger with a tolerance, because the portal
     /// re-clamps every order into that day's price band — the resting order's price is routinely a

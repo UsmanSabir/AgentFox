@@ -122,6 +122,7 @@
   let stopTrigger: number | null = null;
   let stopLimit: number | null = null;
   let stopRecurring = true;
+  let stopMarketIfMissed = false;
   let busy = false;
   let error: string | null = null;
   let result: { ok: boolean; title: string; detail: string; executionId?: string } | null = null;
@@ -601,7 +602,8 @@
     const immediateRequest = {
       orderIntentId: choice.id, symbol: symbol.trim().toUpperCase(), quantity: submittedQuantity,
       price, triggerPrice, limitPrice, clientRequestId, persistentUntilFilled, expiresInDays,
-      attachStop: attachStop && stopTrigger ? {stopTrigger, stopLimit, recurring: stopRecurring} : null,
+      attachStop: attachStop && stopTrigger
+        ? {stopTrigger, stopLimit, recurring: stopRecurring, sellAtMarketIfMissed: stopMarketIfMissed} : null,
       acknowledgeDuplicate
     };
     const waitingRequest: ArmOrderRequest = {
@@ -614,7 +616,8 @@
       trailing: choice.trailing, orderType: choice.orderType,
       triggerWindowMinutes: windowed ? triggerWindowMinutes : null,
       price: choice.orderType === 'MARKET' ? null : exactPriceTrigger || dateOnlySchedule ? price : conditionalLevel, expiresInDays, persistentUntilFilled,
-      attachStop: attachStop && stopTrigger ? {stopTrigger, stopLimit, recurring:stopRecurring} : null,
+      attachStop: attachStop && stopTrigger
+        ? {stopTrigger, stopLimit, recurring: stopRecurring, sellAtMarketIfMissed: stopMarketIfMissed} : null,
       note: `New Order: ${choice.label}`
     };
     // `alreadyConfirmed` is set only by the release-and-retry path, whose own prompt already spelled
@@ -630,7 +633,8 @@
         ? `\n\nThe unfilled remainder will be submitted again once per PSX trading day for up to ${expiresInDays} day(s).`
         : '')
       + (attachStop && stopTrigger
-        ? `\n\nAttach a ${stopRecurring ? 'recurring' : 'one-session'} protective stop: trigger ${stopTrigger}, worst price ${stopLimit}. It covers the shares that actually fill.` : ''),
+        ? `\n\nAttach a ${stopRecurring ? 'recurring' : 'one-session'} protective stop: trigger ${stopTrigger}, worst price ${stopLimit}. It covers the shares that actually fill.`
+          + (stopMarketIfMissed ? ' If the price falls straight through the worst price, the stop is cancelled and the shares are sold at market.' : '') : ''),
       immediate ? 'Confirm & submit order' : scheduled ? 'Confirm & schedule order' : 'Confirm & save waiting order'
     )) return;
 
@@ -1029,6 +1033,15 @@
                   <span>
                     <b>Re-place every trading session</b>
                     <em>Broker stop orders expire at the close; recurring keeps the position protected.</em>
+                  </span>
+                </label>
+                <label class="attach-check recurring">
+                  <input type="checkbox" bind:checked={stopMarketIfMissed} />
+                  <span>
+                    <b>Sell at market if the stop is missed</b>
+                    <em>If the price falls straight through your worst price, the stop is left unfilled.
+                      With this on, it is cancelled and the shares are sold at market — certain to sell,
+                      at whatever price buyers pay.</em>
                   </span>
                 </label>
                 {#if attachedStopRisk != null && attachedStopRisk > 0}

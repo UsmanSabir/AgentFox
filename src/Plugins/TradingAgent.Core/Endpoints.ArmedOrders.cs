@@ -142,6 +142,7 @@ public sealed partial class TradingCoreEndpoints
                     s.ClosedUtc,
                     s.StateReason,
                     s.Note,
+                    s.SellAtMarketIfMissed,
                     // Whether a native stop is resting at the broker RIGHT NOW, which is the only
                     // form of protection that survives this process being down. A superseded row can
                     // still have its OLD native order resting until the worker confirms the cancel —
@@ -458,7 +459,8 @@ public sealed partial class TradingCoreEndpoints
                                         ? $"Requested cover: {wanted} share(s)."
                                         : null,
                     // Attached by hand to an entry armed by hand; it inherits the entry's origination.
-                    OperatorOriginated = true
+                    OperatorOriginated = true,
+                    SellAtMarketIfMissed = attach.SellAtMarketIfMissed
                 };
             }
             else if (body.AttachTakeProfit is { } target)

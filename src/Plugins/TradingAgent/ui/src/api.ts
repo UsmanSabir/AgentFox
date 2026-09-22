@@ -831,6 +831,8 @@ export interface ProtectiveStop {
   stopLimit: number;
   desiredQuantity: number;
   recurring: boolean;
+  /** Sells at market when the stop triggers and its limit is never reached. */
+  sellAtMarketIfMissed?: boolean;
   state: 'pending_fill' | 'active' | 'closed' | string;
   /** Holding before the entry went in. `null` means never captured — which is not zero. */
   baselineQuantity: number | null;
@@ -917,6 +919,11 @@ export interface AttachStopRequest {
   quantity?: number | null;
   /** Re-place the native stop each session. Off means it lapses after one day. */
   recurring: boolean;
+  /**
+   * When the stop triggers but its limit is never reached — the price fell straight through it —
+   * cancel it and sell what is left at market. Certainty over price; off unless asked for.
+   */
+  sellAtMarketIfMissed?: boolean;
 }
 
 /** A profit-taking LIMIT sell activated only after the attached BUY is confirmed filled. */

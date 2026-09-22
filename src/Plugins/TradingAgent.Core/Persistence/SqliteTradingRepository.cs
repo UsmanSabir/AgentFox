@@ -1954,7 +1954,10 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                     note              TEXT NULL,
                     supersedes_stop_id TEXT NULL,
                     -- See armed_orders.operator_originated: same flag, same default, same reason.
-                    operator_originated INTEGER NOT NULL DEFAULT 0
+                    operator_originated INTEGER NOT NULL DEFAULT 0,
+                    -- 1 = when the stop triggers but its limit is never reached, cancel it and sell at
+                    -- market. Opt-in per stop; defaults to 0 so no existing stop changes behaviour.
+                    sell_at_market_if_missed INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS ix_protective_stops_state
                     ON protective_stops(state, symbol);
@@ -2156,6 +2159,8 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                 connection, "armed_orders", "trigger_window_minutes", "INTEGER NULL", ct);
             await AddColumnIfMissingAsync(
                 connection, "protective_stops", "operator_originated", "INTEGER NOT NULL DEFAULT 0", ct);
+            await AddColumnIfMissingAsync(
+                connection, "protective_stops", "sell_at_market_if_missed", "INTEGER NOT NULL DEFAULT 0", ct);
             await AddColumnIfMissingAsync(
                 connection, "persistent_order_intents", "operator_originated",
                 "INTEGER NOT NULL DEFAULT 0", ct);
@@ -2982,11 +2987,12 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                 (stop_id, symbol, parent_armed_id, parent_execution_id, parent_persistent_id,
                  stop_trigger, stop_limit, desired_qty, recurring,
                  state, baseline_qty, placed_qty, backstop_armed_id, created_utc, state_reason, note,
-                 supersedes_stop_id, operator_originated, take_profit_price, take_profit_armed_id)
+                 supersedes_stop_id, operator_originated, take_profit_price, take_profit_armed_id,
+                 sell_at_market_if_missed)
             VALUES ($id, $symbol, $parent, $parentExec, $parentIntent,
                     $trigger, $limit, $desired, $recurring,
                     $state, $baseline, $placed, $backstop, $created, $reason, $note, $supersedes,
-                    $operator, $targetPrice, $targetArmed)
+                    $operator, $targetPrice, $targetArmed, $marketIfMissed)
             """;
         command.Parameters.AddWithValue("$id", stop.StopId);
         command.Parameters.AddWithValue("$symbol", stop.Symbol);
@@ -3012,6 +3018,7 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         command.Parameters.AddWithValue("$targetPrice", Money(stop.TakeProfitPrice));
         command.Parameters.AddWithValue(
             "$targetArmed", stop.TakeProfitArmedId ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$marketIfMissed", stop.SellAtMarketIfMissed ? 1 : 0);
         await command.ExecuteNonQueryAsync(ct);
         return stop.StopId;
     }
@@ -3060,7 +3067,7 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                    state, baseline_qty, placed_qty, last_placed_date, last_order_no, backstop_armed_id,
                    created_utc, fill_confirmed_utc, closed_utc, state_reason, note, supersedes_stop_id,
                    operator_originated, parent_execution_id, parent_persistent_id,
-                   take_profit_price, take_profit_armed_id
+                   take_profit_price, take_profit_armed_id, sell_at_market_if_missed
             FROM protective_stops
             {(openOnly ? "WHERE state <> 'closed'" : "")}
             ORDER BY created_utc DESC
@@ -3256,7 +3263,8 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         ParentExecutionId    = reader.IsDBNull(20) ? null : reader.GetString(20),
         ParentPersistentIntentId = reader.IsDBNull(21) ? null : reader.GetString(21),
         TakeProfitPrice      = ParseDecimal(reader, 22),
-        TakeProfitArmedId    = reader.IsDBNull(23) ? null : reader.GetString(23)
+        TakeProfitArmedId    = reader.IsDBNull(23) ? null : reader.GetString(23),
+        SellAtMarketIfMissed = !reader.IsDBNull(24) && reader.GetInt64(24) != 0
     };
 
     private static object Money(decimal? value) => value is null

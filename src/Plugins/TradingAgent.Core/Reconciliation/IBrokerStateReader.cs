@@ -51,12 +51,27 @@ public sealed record BrokerFill(
     decimal Price,
     DateTime FilledUtc);
 
+/// <param name="OrderType">
+/// The order's CURRENT type in the vocabulary core uses — <c>LIMIT</c>, <c>STOPLOSS</c>, <c>MARKET</c> —
+/// or null when the broker does not report one. It is what tells a stop that is still waiting apart
+/// from one that has TRIGGERED: at a venue where a triggered stop-limit becomes an ordinary resting
+/// limit, the same order changes type from STOPLOSS to LIMIT and keeps its number. Null is not
+/// "LIMIT" — nothing reading it may act on an absent value.
+/// </param>
+/// <param name="AlternateOrderNo">
+/// A second identifier the broker reports for the same order, when it has one. At AHL a stop keeps
+/// its short connection-scoped number and gains a long exchange id when it triggers, and which of the
+/// two lands in which column of the book row is not measured — so a caller matching one of OUR numbers
+/// must try both.
+/// </param>
 public sealed record BrokerWorkingOrder(
     string OrderNo,
     string Symbol,
     string? Side,
     long? RemainingQuantity,
-    decimal? Price);
+    decimal? Price,
+    string? OrderType = null,
+    string? AlternateOrderNo = null);
 
 public sealed record BrokerOrderEvent(
     string OrderNo,

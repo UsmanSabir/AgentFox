@@ -86,6 +86,20 @@ public class TradingAgentOptions
     public int PersistentOrderPollSeconds { get; set; } = 60;
 
     /// <summary>
+    /// How long a protective stop may sit TRIGGERED but unfilled before it is treated as missed — the
+    /// price having fallen through its limit. Every stop is reported at that point; one with
+    /// <c>SellAtMarketIfMissed</c> set is then cancelled and sold at market.
+    ///
+    /// <para>
+    /// A grace rather than zero, because a triggered stop-limit can rest for a moment before a bid
+    /// appears at its limit, and selling at market in that moment would give up the price the limit
+    /// was there to protect. Two minutes is a prior, not a measurement. The stop worker only looks on
+    /// its own passes, so in practice the wait is at least this and at most this plus one interval.
+    /// </para>
+    /// </summary>
+    public int ProtectiveStopMissedGraceSeconds { get; set; } = 120;
+
+    /// <summary>
     /// Seconds an approval intent stays valid between validation and broker submission
     /// (ApprovalRequired mode). Expired intents are rejected and need re-approval. Default 120,
     /// floored at 10.

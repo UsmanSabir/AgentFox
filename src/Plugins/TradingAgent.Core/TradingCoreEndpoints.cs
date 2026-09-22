@@ -197,11 +197,16 @@ public sealed record BulkAlertActionRequest(
 /// orders at the close — a one-shot stop protects the position for a single day and then lapses
 /// silently.
 /// </param>
+/// <param name="SellAtMarketIfMissed">
+/// When the stop triggers but its limit is never reached, cancel it and sell at market. Opt-in; see
+/// <c>ProtectiveStop.SellAtMarketIfMissed</c> for the trade it makes.
+/// </param>
 public sealed record AttachStopRequest(
     decimal? StopTrigger,
     decimal? StopLimit = null,
     int? Quantity = null,
-    bool Recurring = true);
+    bool Recurring = true,
+    bool SellAtMarketIfMissed = false);
 
 /// <summary>
 /// A profit target attached to the same BUY entry as a protective stop. It stays dormant until the

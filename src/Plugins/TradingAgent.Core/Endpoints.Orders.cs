@@ -354,7 +354,7 @@ public sealed partial class TradingCoreEndpoints
                 var persistentStop = stopPlan is { } keepWorkingPlan
                     ? await AttachStopAsync(
                         repository, protectiveStops, logger, symbol, keepWorkingPlan,
-                        body.AttachStop!.Recurring,
+                        body.AttachStop!.Recurring, body.AttachStop!.SellAtMarketIfMissed,
                         // A keep-working entry re-places a fresh order every session, so the INTENT is
                         // the only thing that can account for its cumulative fills.
                         parentPersistentIntentId: submission.Intent?.IntentId,
@@ -390,7 +390,7 @@ public sealed partial class TradingCoreEndpoints
             var attachedStop = stopPlan is { } immediatePlan && brokerAccepted
                 ? await AttachStopAsync(
                     repository, protectiveStops, logger, symbol, immediatePlan,
-                    body.AttachStop!.Recurring,
+                    body.AttachStop!.Recurring, body.AttachStop!.SellAtMarketIfMissed,
                     parentPersistentIntentId: null,
                     parentExecutionId: result.ExecutionId,
                     requestedQuantity: body.AttachStop!.Quantity, ct)
@@ -607,6 +607,7 @@ public sealed partial class TradingCoreEndpoints
         string symbol,
         AttachedStopPlan plan,
         bool recurring,
+        bool sellAtMarketIfMissed,
         string? parentPersistentIntentId,
         string? parentExecutionId,
         int? requestedQuantity,
@@ -644,7 +645,8 @@ public sealed partial class TradingCoreEndpoints
             State = "pending_fill",
             Note = requestedQuantity is { } wanted ? $"Requested cover: {wanted} share(s)." : null,
             // Attached by hand to an order placed by hand; it inherits the entry's origination.
-            OperatorOriginated = true
+            OperatorOriginated = true,
+            SellAtMarketIfMissed = sellAtMarketIfMissed
         };
 
         try

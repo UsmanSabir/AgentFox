@@ -420,6 +420,7 @@
                 <span class="at">@ {num(stop.stopTrigger)}</span>
                 <span class="type">limit {num(stop.stopLimit)}</span>
                 {#if !stop.recurring}<span class="chip">one session</span>{/if}
+                {#if stop.sellAtMarketIfMissed}<span class="chip">market if missed</span>{/if}
               </div>
               <!-- Where the protection actually is. "Armed" would not distinguish an order resting
                    at the exchange from an intention held in this process. -->
