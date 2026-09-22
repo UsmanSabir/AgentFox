@@ -1076,8 +1076,7 @@ public sealed class ProtectiveStopWorker
                 // superseded_pending_cancel and warning that a cancel could not be confirmed on an
                 // operation that in fact succeeded. Found by the live host run, 2026-08-28.
                 var bookWithoutIt = resting
-                    ?.Where(r => !string.Equals(
-                        r.OrderNo?.Trim(), stop.LastOrderNo?.Trim(), StringComparison.OrdinalIgnoreCase))
+                    ?.Where(r => !r.Is(stop.LastOrderNo))
                     .ToList();
 
                 await RetireSupersededAsync(
@@ -1473,9 +1472,12 @@ public sealed class ProtectiveStopWorker
         // different symbols — a real capture had `0411XK1` as both a MARI BUY and a PAEL stop the same
         // day. Without the symbol this would read an unrelated live order as this stop's own, refuse to
         // close a row whose order really had gone, and then CANCEL THAT UNRELATED ORDER below.
+        // Either identifier: a stop that has TRIGGERED keeps its short number in the book's second
+        // column and shows the long exchange id in the first. Matching the first alone would read the
+        // triggered order as "already gone", close this row without cancelling anything, and leave a
+        // live sell resting over the position. See RestingOrder.Is.
         var stillResting = resting?.FirstOrDefault(r =>
-            r.Symbol.Equals(stop.Symbol, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(r.OrderNo?.Trim(), orderNo, StringComparison.OrdinalIgnoreCase));
+            r.Symbol.Equals(stop.Symbol, StringComparison.OrdinalIgnoreCase) && r.Is(orderNo));
 
         if (resting is not null && stillResting is null)
         {

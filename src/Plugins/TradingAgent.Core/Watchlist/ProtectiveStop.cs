@@ -227,7 +227,43 @@ public sealed record RestingOrder(
     decimal? Price,
     string? OrderNo,
     string Row,
-    string? AlternateOrderNo = null);
+    string? AlternateOrderNo = null)
+{
+    /// <summary>
+    /// Whether this row IS the order we recorded as <paramref name="orderNo"/> — under either
+    /// identifier the broker reports for it.
+    ///
+    /// <para>
+    /// <b>Both, because a stop's own number MOVES COLUMN when it triggers.</b> Measured on AHL
+    /// (2026-09-22, from the 2026-09-01 book and activity captures): the short
+    /// <c>{ServerCode}{UserCode}{seq}</c> number sits in field 6 for the whole of an order's life,
+    /// while field 5 — the one this record calls <see cref="OrderNo"/> — holds the short number while
+    /// a stop is ARMED and the long exchange id once it has TRIGGERED. So a stop matched on field 5
+    /// alone stops being recognisable at exactly the moment it becomes an ordinary resting limit, and
+    /// every caller here then concludes its order has left the book. What that costs is stated where
+    /// it bites: a superseded stop is closed WITHOUT its order being cancelled, and the triggered
+    /// order keeps resting and can still sell.
+    /// </para>
+    ///
+    /// <para>
+    /// The symbol is NOT checked here — callers filter by it first, and must keep doing so. Short
+    /// numbers are unique only within a connection, so one has named orders on different symbols.
+    /// </para>
+    /// </summary>
+    public bool Is(string? orderNo)
+    {
+        if (orderNo is not { Length: > 0 }) return false;
+        var wanted = orderNo.Trim();
+        return string.Equals(OrderNo?.Trim(), wanted, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(AlternateOrderNo?.Trim(), wanted, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Whether this row is any of <paramref name="orderNumbers"/>, under either identifier.</summary>
+    public bool IsAnyOf(IReadOnlySet<string>? orderNumbers) =>
+        orderNumbers is { Count: > 0 }
+        && (orderNumbers.Contains((OrderNo ?? "").Trim())
+            || orderNumbers.Contains((AlternateOrderNo ?? "").Trim()));
+}
 
 /// <summary>What the holdings say about an entry that was submitted.</summary>
 public enum FillOutcome
@@ -333,13 +369,13 @@ public static class ProtectiveStopDecisions
         if (stop.LastPlacedSessionDate != today) return null;
         if (stop.LastOrderNo is not { Length: > 0 } ours) return null;
 
-        var own = ours.Trim();
         return resting.FirstOrDefault(r =>
             r.Symbol.Equals(stop.Symbol, StringComparison.OrdinalIgnoreCase)
             && !(r.Side is { Length: > 0 } side && side.Contains("BUY", StringComparison.OrdinalIgnoreCase))
             && string.Equals(r.OrderType?.Trim(), "LIMIT", StringComparison.OrdinalIgnoreCase)
-            && (string.Equals(r.OrderNo?.Trim(), own, StringComparison.OrdinalIgnoreCase)
-                || string.Equals(r.AlternateOrderNo?.Trim(), own, StringComparison.OrdinalIgnoreCase)));
+            // Either identifier: a triggered stop keeps its short number in the second column while
+            // the first becomes the long exchange id. See RestingOrder.Is.
+            && r.Is(ours));
     }
 
     /// <summary>
@@ -632,7 +668,7 @@ public static class ProtectiveStopDecisions
         // refuses. What is left for this stop is custody minus what siblings already have resting.
         var (_, bySiblings) = CommittedSells(
             stop.Symbol,
-            resting.Where(r => excludedOrderNumbers?.Contains((r.OrderNo ?? "").Trim()) ?? false).ToList());
+            resting.Where(r => r.IsAnyOf(excludedOrderNumbers)).ToList());
         if (bySiblings is not { } siblingShares) return null;
 
         var ceiling = Math.Min(stop.DesiredQuantity, (int)Math.Floor(held) - siblingShares);
@@ -712,8 +748,7 @@ public static class ProtectiveStopDecisions
         // number alone would read someone else's live order as this stop's own.
         var predecessorOrder = predecessor.LastOrderNo is { Length: > 0 } no
             ? resting.FirstOrDefault(r =>
-                r.Symbol.Equals(predecessor.Symbol, StringComparison.OrdinalIgnoreCase)
-                && string.Equals(r.OrderNo?.Trim(), no.Trim(), StringComparison.OrdinalIgnoreCase))
+                r.Symbol.Equals(predecessor.Symbol, StringComparison.OrdinalIgnoreCase) && r.Is(no))
             : null;
 
         if (predecessorOrder is null)
@@ -810,8 +845,7 @@ public static class ProtectiveStopDecisions
             .Where(s => s.State == "active"
                      && s.Symbol.Equals(symbol, StringComparison.OrdinalIgnoreCase)
                      && s.LastOrderNo is { Length: > 0 })
-            .Select(s => (Stop: s, Row: sells.FirstOrDefault(r => string.Equals(
-                r.OrderNo?.Trim(), s.LastOrderNo!.Trim(), StringComparison.OrdinalIgnoreCase))))
+            .Select(s => (Stop: s, Row: sells.FirstOrDefault(r => r.Is(s.LastOrderNo))))
             .Where(x => x.Row is not null)
             .OrderByDescending(x => x.Row!.Quantity!.Value)
             .ToList();
@@ -905,7 +939,7 @@ public static class ProtectiveStopDecisions
                      // A row positively attributable to the other side of the book commits nothing.
                      && !(r.Side is { Length: > 0 } side
                           && side.Contains("BUY", StringComparison.OrdinalIgnoreCase))
-                     && !(ignoredOrderNumbers?.Contains((r.OrderNo ?? "").Trim()) ?? false))
+                     && !r.IsAnyOf(ignoredOrderNumbers))
             .ToList();
 
         return sells.Any(r => r.Quantity is null)
@@ -989,15 +1023,14 @@ public static class ProtectiveStopDecisions
     {
         var forSymbol = resting
             .Where(r => r.Symbol.Equals(stop.Symbol, StringComparison.OrdinalIgnoreCase)
-                     && !(excludedOrderNumbers?.Contains((r.OrderNo ?? "").Trim()) ?? false))
+                     && !r.IsAnyOf(excludedOrderNumbers))
             .ToList();
 
         if (forSymbol.Count == 0) return (null, false, "nothing resting");
 
         if (stop.LastOrderNo is { Length: > 0 } known)
         {
-            var byNumber = forSymbol.FirstOrDefault(r => string.Equals(
-                r.OrderNo?.Trim(), known.Trim(), StringComparison.OrdinalIgnoreCase));
+            var byNumber = forSymbol.FirstOrDefault(r => r.Is(known));
             if (byNumber is not null) return (byNumber, false, "matched by order number");
         }
 

@@ -53,10 +53,29 @@ public sealed class StrandedStopTests
     [TestMethod]
     public void The_short_number_is_found_in_either_column()
     {
-        // A triggered stop gains a long exchange id, and which column the book puts each id in is not
-        // measured. Either placement must still be recognised as ours.
+        // MEASURED 2026-09-22: the short number stays in field 6 and field 5 becomes the long exchange
+        // id when a stop triggers. Both placements are still accepted, because the one case — a stop
+        // caught between triggering and filling — has never been captured in the book itself.
         Assert.IsNotNull(ProtectiveStopDecisions.FindStrandedLimit(
             Stop(), [Row("LIMIT", "0010TKNSH300GM0R", alternate: "0411XK65")], Today));
+    }
+
+    [TestMethod]
+    public void A_triggered_stop_is_still_recognised_as_ours_everywhere_it_is_asked()
+    {
+        // The book's main-id column holds the LONG exchange id once a stop has triggered, and the
+        // short number we recorded moves to the second column. Every "is this my order" test must see
+        // through that — RetireSupersededAsync reading it as gone would close the row without
+        // cancelling, leaving a live sell resting over the position.
+        var triggered = Row("LIMIT", "0010TKNSH300GM0R", alternate: "0411XK65");
+
+        Assert.IsTrue(triggered.Is("0411XK65"), "matched by the short number in the second column");
+        Assert.IsTrue(triggered.Is("0010TKNSH300GM0R"), "and by the venue's primary id");
+        Assert.IsFalse(triggered.Is("0411XK99"));
+        Assert.IsFalse(triggered.Is(null));
+        Assert.IsTrue(triggered.IsAnyOf(new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "0411XK65" }),
+            "an exclusion set naming our number must exclude the triggered row too");
+        Assert.IsFalse(triggered.IsAnyOf(new HashSet<string>()));
     }
 
     [TestMethod]
