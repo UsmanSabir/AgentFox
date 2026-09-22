@@ -250,19 +250,12 @@ public sealed record RestingOrder(
     /// numbers are unique only within a connection, so one has named orders on different symbols.
     /// </para>
     /// </summary>
-    public bool Is(string? orderNo)
-    {
-        if (orderNo is not { Length: > 0 }) return false;
-        var wanted = orderNo.Trim();
-        return string.Equals(OrderNo?.Trim(), wanted, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(AlternateOrderNo?.Trim(), wanted, StringComparison.OrdinalIgnoreCase);
-    }
+    public bool Is(string? orderNo) =>
+        TradingAgent.Reconciliation.OrderIdentity.Matches(OrderNo, AlternateOrderNo, orderNo);
 
     /// <summary>Whether this row is any of <paramref name="orderNumbers"/>, under either identifier.</summary>
     public bool IsAnyOf(IReadOnlySet<string>? orderNumbers) =>
-        orderNumbers is { Count: > 0 }
-        && (orderNumbers.Contains((OrderNo ?? "").Trim())
-            || orderNumbers.Contains((AlternateOrderNo ?? "").Trim()));
+        TradingAgent.Reconciliation.OrderIdentity.MatchesAny(OrderNo, AlternateOrderNo, orderNumbers);
 }
 
 /// <summary>What the holdings say about an entry that was submitted.</summary>

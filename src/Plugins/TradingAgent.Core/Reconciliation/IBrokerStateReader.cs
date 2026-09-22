@@ -60,9 +60,9 @@ public sealed record BrokerFill(
 /// </param>
 /// <param name="AlternateOrderNo">
 /// A second identifier the broker reports for the same order, when it has one. At AHL a stop keeps
-/// its short connection-scoped number and gains a long exchange id when it triggers, and which of the
-/// two lands in which column of the book row is not measured — so a caller matching one of OUR numbers
-/// must try both.
+/// its short connection-scoped number and gains a long exchange id when it triggers — and MEASURED
+/// 2026-09-22, the long id then takes <see cref="OrderNo"/> while the short number moves here. So a
+/// caller matching one of OUR numbers must try both: use <see cref="Is"/>, never <c>OrderNo</c> alone.
 /// </param>
 public sealed record BrokerWorkingOrder(
     string OrderNo,
@@ -71,7 +71,42 @@ public sealed record BrokerWorkingOrder(
     long? RemainingQuantity,
     decimal? Price,
     string? OrderType = null,
-    string? AlternateOrderNo = null);
+    string? AlternateOrderNo = null)
+{
+    /// <summary>
+    /// Whether this row IS the order we recorded as <paramref name="orderNo"/>, under either identifier.
+    /// A number recorded at placement is a stop's SHORT number, and once that stop triggers the row
+    /// leads with the long exchange id instead — so a test on <see cref="OrderNo"/> alone stops
+    /// recognising the order at exactly the moment it becomes an ordinary resting limit that can sell.
+    /// The symbol is not checked here; callers filter by it, because short numbers repeat across symbols.
+    /// </summary>
+    public bool Is(string? orderNo) => OrderIdentity.Matches(OrderNo, AlternateOrderNo, orderNo);
+
+    /// <summary>Whether this row is any of <paramref name="orderNumbers"/>, under either identifier.</summary>
+    public bool IsAnyOf(IReadOnlySet<string>? orderNumbers) =>
+        OrderIdentity.MatchesAny(OrderNo, AlternateOrderNo, orderNumbers);
+}
+
+/// <summary>
+/// The ONE rule for "is this broker row the order we recorded", shared by <see cref="BrokerWorkingOrder"/>
+/// and <c>RestingOrder</c> so the two views of the same book cannot disagree about it.
+/// </summary>
+public static class OrderIdentity
+{
+    public static bool Matches(string? primary, string? alternate, string? wanted)
+    {
+        if (wanted is not { Length: > 0 }) return false;
+        var w = wanted.Trim();
+        if (w.Length == 0) return false;
+        return string.Equals(primary?.Trim(), w, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(alternate?.Trim(), w, StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static bool MatchesAny(string? primary, string? alternate, IReadOnlySet<string>? wanted) =>
+        wanted is { Count: > 0 }
+        && ((primary is { } p && p.Trim() is { Length: > 0 } pt && wanted.Contains(pt))
+         || (alternate is { } a && a.Trim() is { Length: > 0 } at && wanted.Contains(at)));
+}
 
 public sealed record BrokerOrderEvent(
     string OrderNo,

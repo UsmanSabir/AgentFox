@@ -786,8 +786,10 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
             .Where(n => !string.IsNullOrWhiteSpace(n))
             .Select(n => n!)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        // Either identifier — a triggered kept-working STOPLOSS leads with the long exchange id while
+        // the number we recorded moves to the second column. See BrokerWorkingOrder.Is.
         var ownOpen = snapshot.OpenOrders
-            .Where(o => ownNumbers.Contains(o.OrderNo.Trim()))
+            .Where(o => o.IsAnyOf(ownNumbers))
             .ToList();
 
         if (intent.FilledQuantity >= intent.Quantity)
@@ -1247,7 +1249,7 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         var ours = snapshot.OpenOrders
-            .Where(order => claimed.Contains(order.OrderNo.Trim()))
+            .Where(order => order.IsAnyOf(claimed))
             .ToList();
         var unclaimed = PersistentOrderDecisions.FindUnclaimedBrokerOrders(intent, placements, snapshot);
 
@@ -1288,8 +1290,9 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
                     "The broker's order book could not be read, so the order was not cancelled: "
                     + snapshot.Reason);
 
-            var target = snapshot.OpenOrders.FirstOrDefault(order =>
-                string.Equals(order.OrderNo.Trim(), orderNo, StringComparison.OrdinalIgnoreCase));
+            // Either identifier: the operator may hold the number recorded at placement, which for a
+            // triggered stop is no longer the one the book leads with. See BrokerWorkingOrder.Is.
+            var target = snapshot.OpenOrders.FirstOrDefault(order => order.Is(orderNo));
             if (target is null)
                 return (false, intent.State,
                     $"No order #{orderNo} is resting at the broker, so nothing was cancelled. Refresh "
@@ -1312,8 +1315,9 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
                 + "checking the broker's own book. Confirmed gone.";
 
             var placements = await _repository.GetPersistentOrderPlacementsAsync(intentId, ct);
-            var alreadyKnown = placements.Any(placement =>
-                string.Equals(placement.BrokerOrderNo?.Trim(), orderNo, StringComparison.OrdinalIgnoreCase));
+            // Known under EITHER of the order's ids — otherwise cancelling a triggered stop by its long
+            // id would record a second placement row for an order this intent already names.
+            var alreadyKnown = placements.Any(placement => target.Is(placement.BrokerOrderNo));
             if (!alreadyKnown)
             {
                 // Record it even though it is now cancelled: the audit trail should show that this order

@@ -104,7 +104,10 @@ public static class SellRefusalRule
             .Where(o => o.Symbol.Equals(symbol, StringComparison.OrdinalIgnoreCase)
                      && SellQuantityRule.IsSell(o.Side)
                      && o.RemainingQuantity is > 0
-                     && !ourOrderNumbers.Contains((o.OrderNo ?? "").Trim()))
+                     // Either identifier: our own stop, once TRIGGERED, leads with the long exchange
+                     // id and keeps the short number we recorded in the second column. Matching the
+                     // first alone reported our own triggered stop as an order placed elsewhere.
+                     && !o.IsAnyOf(ourOrderNumbers))
             .ToList();
     }
 
