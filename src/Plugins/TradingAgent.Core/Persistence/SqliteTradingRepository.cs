@@ -2259,11 +2259,18 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
 
         // Appended at the end of the display order rather than inserted alphabetically: a symbol the
         // user just added should be where they can see it.
+        //
+        // auto_trade_enabled starts at 0 (manual-only) regardless of the master automation switch.
+        // A symbol just added has no stop, no target and no plan behind it yet, and the master switch
+        // is an account-wide decision the operator already made for symbols they'd reviewed — it was
+        // never a statement about a stock that didn't exist on the list a moment ago. The operator
+        // opts a symbol into automation explicitly, the same way they'd confirm a stop and a target.
         var command = connection.CreateCommand();
         command.CommandText = """
-            INSERT OR IGNORE INTO watchlist (symbol, added_utc, source, sort_order, alerts_enabled)
+            INSERT OR IGNORE INTO watchlist
+                (symbol, added_utc, source, sort_order, alerts_enabled, auto_trade_enabled)
             VALUES ($symbol, $now, $source,
-                    COALESCE((SELECT MAX(sort_order) + 1 FROM watchlist), 0), 1)
+                    COALESCE((SELECT MAX(sort_order) + 1 FROM watchlist), 0), 1, 0)
             """;
         command.Parameters.AddWithValue("$symbol", symbol);
         command.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("O"));
@@ -2315,9 +2322,13 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         {
             var insert = connection.CreateCommand();
             insert.Transaction = (SqliteTransaction)transaction;
+            // See AddWatchlistSymbolAsync: auto_trade_enabled starts at 0 here too. A preset (e.g. a
+            // whole index) can add many symbols at once, none of which have been reviewed individually
+            // — the master automation switch is not consent for stocks that weren't on the list yet.
             insert.CommandText = """
-                INSERT INTO watchlist (symbol, added_utc, source, sort_order, alerts_enabled)
-                VALUES ($symbol, $now, $source, $order, 1)
+                INSERT INTO watchlist
+                    (symbol, added_utc, source, sort_order, alerts_enabled, auto_trade_enabled)
+                VALUES ($symbol, $now, $source, $order, 1, 0)
                 """;
             insert.Parameters.AddWithValue("$symbol", symbol);
             insert.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("O"));

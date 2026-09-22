@@ -88,25 +88,30 @@ public sealed class ManualOnlySymbolTests
     }
 
     [TestMethod]
-    public async Task Toggle_DefaultsToAutomationAllowed_AndSurvivesUnrelatedPatches()
+    public async Task SeededSymbol_KeepsAutomationAllowed_ButAFreshAddStartsManualOnly()
     {
         using var env = Env.Create(allowed: ["OGDC"], manualOnly: []);
         await env.Universe.SeedIfNeededAsync();
 
-        // A migrated database and a freshly added symbol must both behave exactly as before the flag
-        // existed; an opt-in restriction that arrived switched on would be the same bug reversed.
+        // A symbol seeded from the operator's own configured AllowedSymbols is a set they already
+        // reviewed before deployment; a migrated database must not silently disarm it. That behaviour
+        // is unchanged by the auto-trade-enabled column existing at all.
         Assert.IsTrue((await env.Repository.GetWatchlistAsync()).Entries.Single().AutoTradeEnabled);
+
+        // A symbol added live — by hand or via an index preset — has no stop, no target and no plan
+        // behind it yet, and the master automation switch was never consent for a stock that wasn't on
+        // the list a moment ago. It must start manual-only; the operator opts it in explicitly.
         Assert.IsTrue(await env.Repository.AddWatchlistSymbolAsync("HBL", "user"));
-        Assert.IsTrue((await env.Repository.GetWatchlistAsync())
+        Assert.IsFalse((await env.Repository.GetWatchlistAsync())
             .Entries.Single(e => e.Symbol == "HBL").AutoTradeEnabled);
 
         await env.Repository.UpdateWatchlistSymbolAsync(
-            "OGDC", alertsEnabled: null, notes: null, pinned: null, autoTradeEnabled: false);
-        // Patching an unrelated field must not resurrect automation for the symbol.
-        await env.Repository.UpdateWatchlistSymbolAsync("OGDC", alertsEnabled: false, notes: "mine");
+            "HBL", alertsEnabled: null, notes: null, pinned: null, autoTradeEnabled: true);
+        // Patching an unrelated field must not disturb an automation choice already made either way.
+        await env.Repository.UpdateWatchlistSymbolAsync("HBL", alertsEnabled: false, notes: "mine");
 
-        var entry = (await env.Repository.GetWatchlistAsync()).Entries.Single(e => e.Symbol == "OGDC");
-        Assert.IsFalse(entry.AutoTradeEnabled);
+        var entry = (await env.Repository.GetWatchlistAsync()).Entries.Single(e => e.Symbol == "HBL");
+        Assert.IsTrue(entry.AutoTradeEnabled);
         Assert.AreEqual("mine", entry.Notes);
     }
 
