@@ -54,9 +54,11 @@ public sealed record BrokerFill(
 /// <param name="OrderType">
 /// The order's CURRENT type in the vocabulary core uses — <c>LIMIT</c>, <c>STOPLOSS</c>, <c>MARKET</c> —
 /// or null when the broker does not report one. It is what tells a stop that is still waiting apart
-/// from one that has TRIGGERED: at a venue where a triggered stop-limit becomes an ordinary resting
-/// limit, the same order changes type from STOPLOSS to LIMIT and keeps its number. Null is not
-/// "LIMIT" — nothing reading it may act on an absent value.
+/// from one that has TRIGGERED: a triggered stop-limit is an ordinary resting limit, and an adapter
+/// must report it as LIMIT whatever the venue's own token says. That is a contract, not a
+/// translation: AHL's book keeps typing a triggered stop <c>SLO</c> and only its status changes
+/// (measured 2026-09-23), so its adapter reads the status to say LIMIT. Null is not "LIMIT" — nothing
+/// reading it may act on an absent value.
 /// </param>
 /// <param name="AlternateOrderNo">
 /// A second identifier the broker reports for the same order, when it has one. At AHL a stop keeps

@@ -1773,9 +1773,10 @@ public sealed class ProtectiveStopWorker
 
     /// <summary>
     /// Maps the broker-neutral working-order shape onto the RestingOrder shape
-    /// <see cref="ProtectiveStopDecisions"/> was written against. OrderType and the raw row text have no
-    /// equivalent in <see cref="BrokerWorkingOrder"/> and are left null/empty — neither is read by any
-    /// decision in that type, only Symbol/Side/Price/OrderNo/Quantity are.
+    /// <see cref="ProtectiveStopDecisions"/> was written against. OrderType IS carried and IS read:
+    /// <see cref="ProtectiveStopDecisions.FindStrandedLimit"/> recognises a triggered stop by it, so an
+    /// adapter reporting the venue's raw token instead of LIMIT disables that detector silently. The raw
+    /// row text has no equivalent in <see cref="BrokerWorkingOrder"/> and is left empty.
     /// </summary>
     private static IReadOnlyList<RestingOrder> RestingFrom(BrokerReconciliationSnapshot snapshot) =>
         snapshot.OpenOrders.Select(o => new RestingOrder(
