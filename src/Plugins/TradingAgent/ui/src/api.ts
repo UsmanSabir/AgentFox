@@ -463,6 +463,35 @@ export interface BrokerAccountSnapshot {
   attributes: Record<string, string | null>;
 }
 
+/** Who in this system owns a resting order — and so what else a cancel of it stops doing. */
+export interface WorkingOrderOwner {
+  kind: 'ProtectiveStop' | 'PersistentOrder' | 'Edition' | string;
+  id?: string | null;
+  consequence: string;
+}
+
+/**
+ * The answer to a working-order cancel. `gone` says the order is no longer resting; `outcome` says
+ * why, and `gone_possibly_filled` is the one that must never be read as "cancelled".
+ *
+ * A managed order is answered with 409 and `error: 'needs_acknowledgement'` — `ApiError.detail`
+ * carries this same shape, with `owners` saying what cancelling it also does.
+ */
+export interface WorkingOrderCancelResult {
+  outcome: string;
+  gone: boolean;
+  message: string;
+  orderNo?: string | null;
+  symbol?: string | null;
+  owners: WorkingOrderOwner[];
+}
+
+export interface WorkingOrderCancelRequest {
+  orderNo: string;
+  symbol: string;
+  acknowledgeManaged?: boolean;
+}
+
 export interface TradingEvent {
   eventId: number;
   executionId: string;
@@ -1194,6 +1223,9 @@ export const trading = {
   orderIntents:   ()            => get<OrderIntentRegistryResponse>('/trading/order-intents'),
   placeOrder:     (request: DashboardOrderRequest) =>
     post<DashboardOrderResult>('/trading/orders', request, 60_000),
+  /** Cancels one order from the broker's own book, through whichever part of the system owns it. */
+  cancelWorkingOrder: (request: WorkingOrderCancelRequest) =>
+    post<WorkingOrderCancelResult>('/trading/orders/cancel', request, 60_000),
   persistentOrders: {
     list: (all = false) =>
       get<PersistentOrdersResponse>(`/trading/persistent-orders?all=${all}`),
@@ -1414,9 +1446,9 @@ export const trading = {
 
   stops: {
     /**
-     * Stops managing the intent. It does NOT retract an order already resting at the broker — that
-     * is impossible from here — so the reply says whether one is still live and needs cancelling in
-     * the portal by hand.
+     * Stops managing the intent, and cancels its resting broker order best-effort. The row closes
+     * even when that cancel is not confirmed, so the reply's `message` says whether the order may
+     * still be live until the venue clears its book at the close.
      */
     disarm: (stopId: string) =>
       del<{

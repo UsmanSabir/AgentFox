@@ -105,6 +105,13 @@ public sealed class CancelOrderTool : BaseTool
         try
         {
             var book = await _reader.GetOutstandingOrdersAsync(symbol.Length > 0 ? symbol : null);
+            // Either of the order's ids is accepted, then narrowed to the one the book leads with —
+            // the shape Resolve works on carries only that one. See CanonicalOrderNo.
+            if (!string.IsNullOrWhiteSpace(orderNo))
+            {
+                orderNo = CancelTargetResolver.CanonicalOrderNo(book, orderNo, out var ambiguous);
+                if (ambiguous is not null) return ToolResult.Fail(ambiguous);
+            }
             var target = CancelTargetResolver.Resolve(book.Select(ToAhkShape).ToList(), orderNo, symbol, side);
             if (target.Error is { } error) return ToolResult.Fail(error);
 

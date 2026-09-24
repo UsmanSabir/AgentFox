@@ -49,4 +49,15 @@ export type SymbolExtension = {
    * already, and anything needing room of its own belongs in `plan`.
    */
   quoteDetail?: SymbolExtensionComponent | null;
+
+  /**
+   * REPLACES the Cancel control in each row of the portfolio's working-orders table. Unlike every
+   * other slot here it is not additive: one order gets one cancel, and two buttons that route
+   * differently would be worse than either. Absent, the community `WorkingOrderCancel` renders.
+   *
+   * Receives `symbol`, `orderNo`, `side`, `orderType`, `status`, `remainingQuantity`, `price`,
+   * `currency` and `showValues` (hide quantities and prices while false), and dispatches `changed`
+   * when the book may have moved, so the panel can re-read it.
+   */
+  orderAction?: SymbolExtensionComponent | null;
 };

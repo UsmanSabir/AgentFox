@@ -278,6 +278,9 @@ public sealed class TradingAgentRuntime
         services.AddSingleton<IMarketSessionOpenParticipant>(
             sp => sp.GetRequiredService<PersistentOrderWorker>());
         services.AddHostedService(sp => sp.GetRequiredService<PersistentOrderWorker>());
+        // The portfolio's per-row Cancel. Resolved only by endpoints, never by a worker, so it can take
+        // the broker reader and the persistent worker without adding an edge to any worker's graph.
+        services.AddSingleton<WorkingOrderCancellationService>();
         // Registered last so its participant enumeration includes every core worker above and any
         // edition-specific participant added after AddCore returns.
         services.AddSingleton<MarketSessionOpenCoordinator>();

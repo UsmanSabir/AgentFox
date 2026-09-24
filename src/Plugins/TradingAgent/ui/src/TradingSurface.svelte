@@ -527,7 +527,8 @@
     </WorkspacePanel>
     <WorkspacePanel {workspace} id="portfolio">
     <div id="trading-portfolio" class="section-anchor">
-      <PortfolioPanel holdingStatus={symbolExtension?.holdingStatus ?? null} keyboardMode={!!workspace}
+      <PortfolioPanel holdingStatus={symbolExtension?.holdingStatus ?? null}
+        orderAction={symbolExtension?.orderAction ?? null} keyboardMode={!!workspace}
         on:order={event => beginOrder(event.detail.symbol, event.detail.action)}/>
     </div>
 

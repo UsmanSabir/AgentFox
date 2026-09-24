@@ -582,9 +582,15 @@ public sealed partial class TradingCoreEndpoints
                 });
         }).RequireAuthorization("TradingAnalyst");
 
-        // A stop is disarmed rather than cancelled, and the difference is not pedantry: this broker
-        // exposes no way to retract a resting order, so an order already at the exchange stays there.
-        // Reporting "cancelled" would be a lie about a live sell order.
+        // A stop is DISARMED: this system stops managing it, and the row closes whatever the broker
+        // says. Its resting order is cancelled too, best-effort, through IBrokerOrderCanceller — every
+        // supported broker implements one — but the operator asked to stop managing the stop, so an
+        // unconfirmed cancel does not refuse that. The reply says whether the order may still rest
+        // (until the venue clears its book at the close), because reporting "cancelled" on an
+        // unconfirmed cancel would be a lie about a live sell order.
+        //
+        // Cancelling the ORDER from the portfolio's working-orders table is the stricter sibling: it
+        // closes the stop only once the cancel is confirmed. See WorkingOrderCancellationService.
         trading.MapDelete("/protective-stops/{stopId}", async (
             string stopId,
             ITradingRepository repository,

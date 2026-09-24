@@ -611,6 +611,50 @@ public sealed class AhkQuoteFeedTests
         Assert.IsNull(result.Error);
     }
 
+    [TestMethod]
+    public void A_triggered_stops_short_number_resolves_to_the_id_the_book_leads_with()
+    {
+        // Measured 2026-09-22: once a stop triggers, field 5 is the long exchange id and the short
+        // number the alert and the activity log quote has moved to the alternate column.
+        var book = new[]
+        {
+            new TradingAgent.Watchlist.RestingOrder(
+                "PAEL", "SEL", "LIMIT", 10, 38.55m, "0010TKNSH300GM0R", "row", AlternateOrderNo: "0411XK65")
+        };
+
+        var canonical = TradingAgent.Tools.CancelTargetResolver.CanonicalOrderNo(book, "0411XK65", out var error);
+
+        Assert.IsNull(error);
+        Assert.AreEqual("0010TKNSH300GM0R", canonical,
+            "Answering 'no such order' here sent the user away from an order that could still sell.");
+    }
+
+    [TestMethod]
+    public void A_short_number_naming_orders_on_two_symbols_is_refused_not_picked()
+    {
+        // 0411XK1 named a MARI buy, a QTECH stop and a SELECT stop on 2026-08-28.
+        var book = new[]
+        {
+            new TradingAgent.Watchlist.RestingOrder("MARI", "BUY", "LIMIT", 10, 650m, "0411XK1", "row"),
+            new TradingAgent.Watchlist.RestingOrder("QTECH", "SEL", "STOPLOSS", 500, 35.64m, "0411XK1", "row")
+        };
+
+        var canonical = TradingAgent.Tools.CancelTargetResolver.CanonicalOrderNo(book, "0411XK1", out var error);
+
+        Assert.IsNull(canonical);
+        StringAssert.Contains(error, "names 2 working orders");
+        StringAssert.Contains(error, "symbol");
+    }
+
+    [TestMethod]
+    public void An_unknown_number_is_passed_through_for_Resolve_to_answer()
+    {
+        var book = new[] { new TradingAgent.Watchlist.RestingOrder("MARI", "BUY", "LIMIT", 10, 650m, "1001", "row") };
+
+        Assert.AreEqual("9999", TradingAgent.Tools.CancelTargetResolver.CanonicalOrderNo(book, " 9999 ", out var error));
+        Assert.IsNull(error, "The 'no such order, here are the real numbers' answer belongs to Resolve.");
+    }
+
     private static AhkOutstandingOrder Order(
         string no, string scrip, string type, decimal price, long remaining) =>
         new() { OrderNo = no, Scrip = scrip, Type = type, Price = price, Remaining = remaining, Market = "REG" };

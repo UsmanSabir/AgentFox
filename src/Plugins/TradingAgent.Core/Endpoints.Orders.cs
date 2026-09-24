@@ -555,6 +555,21 @@ public sealed partial class TradingCoreEndpoints
                 });
         }).RequireAuthorization("TradingTrader");
 
+        // Cancel ONE order picked from the broker's own book (the portfolio's Working orders table).
+        // Ownership decides the route — see WorkingOrderCancellationService — and a managed order is
+        // refused with a 409 naming what cancelling it also does, until the caller acknowledges it.
+        trading.MapPost("/orders/cancel", async (
+            WorkingOrderCancelRequest body,
+            WorkingOrderCancellationService cancellations,
+            BrokerReconciliationWorker reconciliation,
+            HttpContext http,
+            CancellationToken ct) =>
+        {
+            var result = await cancellations.CancelAsync(
+                body, http.User.Identity?.Name ?? "operator", ct: ct);
+            return WorkingOrderCancelHttp.Respond(result, reconciliation);
+        }).RequireAuthorization("TradingTrader");
+
         trading.MapDelete("/persistent-orders/{intentId}", async (
             string intentId,
             PersistentOrderWorker worker,

@@ -11,6 +11,7 @@
   import type { SymbolExtensionComponent } from './symbolExtensions';
   import LiveHoldingCells from './LiveHoldingCells.svelte';
   import PortfolioAllocationChart from './PortfolioAllocationChart.svelte';
+  import WorkingOrderCancel from './WorkingOrderCancel.svelte';
   import { orderListNavigation } from './orderListNavigation';
   export let keyboardMode = false;
   const dispatch = createEventDispatcher<{
@@ -25,6 +26,13 @@
    * `symbolExtensions.ts`.
    */
   export let holdingStatus: SymbolExtensionComponent | null = null;
+
+  /**
+   * Replaces the Cancel control in each working-order row. Null means the community
+   * `WorkingOrderCancel`. See `symbolExtensions.ts` for the props it receives.
+   */
+  export let orderAction: SymbolExtensionComponent | null = null;
+  $: cancelControl = orderAction ?? WorkingOrderCancel;
 
   let open = false;
   let showValues = false;
@@ -188,7 +196,7 @@
 
         <section class="account-section">
           <h3><BookOpen size={15}/> Working orders <span>{account.orders.length}</span></h3>
-          {#if keyboardMode}<label class="order-filter">Find working order <input type="search" bind:value={query} aria-label="Find working order" placeholder="Symbol, side or status"/></label><p class="message">Read-only broker book. ↑ ↓ / Home / End navigate rows; Enter focuses details. Values remain masked until you choose Show values.</p>{/if}
+          {#if keyboardMode}<label class="order-filter">Find working order <input type="search" bind:value={query} aria-label="Find working order" placeholder="Symbol, side or status"/></label><p class="message">The broker's own book. ↑ ↓ / Home / End navigate rows; Enter focuses details; Cancel asks before it sends. Values remain masked until you choose Show values.</p>{/if}
           {#if !account.ordersAvailable}
             <div class="unavailable"><b>Order book unavailable</b><span>Do not assume there are no working orders; check the broker directly.</span></div>
           {:else if !account.orders.length}
@@ -197,7 +205,7 @@
             <div class="empty">No working orders match this filter.</div>
           {:else}
             <div class="table-wrap"><table>
-              <thead><tr><th>Instrument</th><th>Side</th><th>Type / status</th><th>Remaining</th><th>Price</th><th>Placed</th></tr></thead>
+              <thead><tr><th>Instrument</th><th>Side</th><th>Type / status</th><th>Remaining</th><th>Price</th><th>Placed</th><th>Action</th></tr></thead>
               <tbody>{#each visibleOrders as order}
                 <tr data-order-row tabindex={keyboardMode ? 0 : undefined}>
                   <td><b>{text(order.symbol ?? order.instrumentId)}</b><small>{showValues ? `#${text(order.orderId)}` : `#${hidden}`}</small>{#if extras(order.attributes).length}<details class="broker-details"><summary>Details</summary><dl>{#each extras(order.attributes) as [label, value]}<dt>{label}</dt><dd>{attributeValue(value, showValues)}</dd>{/each}</dl></details>{/if}</td>
@@ -206,6 +214,11 @@
                   <td>{quantity(order.remainingQuantity ?? order.quantity, showValues)}</td>
                   <td>{money(order.price, order.currency, showValues)}{#if order.triggerPrice != null}<small>Trigger {money(order.triggerPrice, order.currency, showValues)}</small>{/if}</td>
                   <td>{text(order.placedAt)}</td>
+                  <td>{#if order.orderId && (order.symbol ?? order.instrumentId)}<svelte:component this={cancelControl}
+                    symbol={(order.symbol ?? order.instrumentId).trim()} orderNo={order.orderId}
+                    side={order.side} orderType={order.orderType} status={order.status}
+                    remainingQuantity={order.remainingQuantity ?? order.quantity} price={order.price}
+                    currency={order.currency} {showValues} on:changed={load}/>{/if}</td>
                 </tr>
               {/each}</tbody>
             </table></div>
