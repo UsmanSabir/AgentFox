@@ -3041,6 +3041,21 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         return await command.ExecuteNonQueryAsync(ct) == 1;
     }
 
+    public async Task<bool> TryWithdrawArmedOrderPullbackRequestAsync(
+        string armedId, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE armed_orders
+               SET pullback_requested_utc = NULL
+             WHERE armed_id = $id AND state = 'fired' AND pullback_requested_utc IS NOT NULL
+            """;
+        command.Parameters.AddWithValue("$id", armedId);
+        return await command.ExecuteNonQueryAsync(ct) == 1;
+    }
+
     public async Task<bool> TrySetArmedOrderQuantityAsync(
         string armedId, int quantity, CancellationToken ct = default)
     {

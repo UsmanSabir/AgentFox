@@ -304,6 +304,27 @@ public sealed class ArmedOrderPullbackTests
     }
 
     [TestMethod]
+    public async Task A_withdrawn_request_leaves_the_order_watched_and_unable_to_rearm()
+    {
+        // The hand-back marks first and cancels second; when the cancel loses a race with the
+        // persistent worker, the marker comes back off so nothing re-arms over a live sell.
+        var repository = NewRepository();
+        await repository.SaveArmedOrderAsync(Armed());
+        await FireAsync(repository, "tp1");
+        await repository.TryRequestArmedOrderPullbackAsync("tp1", "handing back");
+
+        Assert.IsTrue(await repository.TryWithdrawArmedOrderPullbackRequestAsync("tp1"));
+
+        var watched = (await repository.GetArmedOrdersWatchedForPullbackAsync()).Single();
+        Assert.IsNull(watched.PullbackRequestedUtc);
+        Assert.AreEqual(240.49m, watched.PullbackPrice, "still watched for a pull-back");
+        Assert.IsFalse(await repository.TryRearmAfterPullbackAsync(
+            "tp1", new PullbackRearm(78, 242.92m, 240.49m, 0, 1, "re-armed")));
+        Assert.IsTrue(await repository.TryRequestArmedOrderPullbackAsync("tp1", "again"),
+            "a later poll may request it afresh");
+    }
+
+    [TestMethod]
     public async Task Ending_a_pullback_stops_it_being_watched()
     {
         var repository = NewRepository();

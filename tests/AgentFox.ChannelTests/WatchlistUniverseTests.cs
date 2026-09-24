@@ -828,6 +828,8 @@ public sealed class WatchlistUniverseTests
         public Task<bool> TryEndArmedOrderPullbackAsync(
             string id, string reason, CancellationToken ct = default) =>
             throw new NotSupportedException();
+        public Task<bool> TryWithdrawArmedOrderPullbackRequestAsync(
+            string id, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<string> SaveProtectiveStopAsync(
             ProtectiveStop stop, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<int> GetFilledQuantityForExecutionAsync(

@@ -886,16 +886,24 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                         break;
 
                     case PullbackAction.HandBack:
-                        // The intent first, and only from an idle state: if the persistent worker has
-                        // moved it since the read, this is a no-op and the next poll re-decides.
+                        // The MARKER first, then the intent. A cancelled persistent order WITHOUT the
+                        // marker reads as the operator's cancel, which an edition may answer by arming
+                        // a fresh sell (premium does) — so an intent cancelled here must never be
+                        // visible unmarked, even between two writes, or both that fresh sell and this
+                        // re-arm would go out over one set of shares.
+                        if (!await _repository.TryRequestArmedOrderPullbackAsync(order.ArmedId,
+                                $"Handing back: {decision.Reason}.", ct))
+                            break;
+                        // Only from an idle state: if the persistent worker has moved it since the
+                        // read, take the marker back off and let the next poll re-decide.
                         if (!await _repository.TrySetPersistentOrderStateAsync(intent!.IntentId,
                                 ["active", "partial"], "cancelled",
                                 "Handed back at the close: the venue cleared the book, and the take-profit "
                                 + "that created this order re-arms rather than being re-sent at the open.", ct))
+                        {
+                            await _repository.TryWithdrawArmedOrderPullbackRequestAsync(order.ArmedId, ct);
                             break;
-                        if (!await _repository.TryRequestArmedOrderPullbackAsync(order.ArmedId,
-                                $"Handing back: {decision.Reason}.", ct))
-                            break;
+                        }
                         await SettlePullbackAsync(order, intentId, bounce: false, ct);
                         break;
 

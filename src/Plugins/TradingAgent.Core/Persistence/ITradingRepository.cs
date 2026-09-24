@@ -611,6 +611,13 @@ public interface ITradingRepository
     Task<bool> TryEndArmedOrderPullbackAsync(
         string armedId, string reason, CancellationToken ct = default);
 
+    /// <summary>
+    /// Takes a pull-back marker back off when the cancel it announced never happened, leaving the order
+    /// watched exactly as before. Only a row whose persistent order was NOT cancelled may be passed.
+    /// </summary>
+    Task<bool> TryWithdrawArmedOrderPullbackRequestAsync(
+        string armedId, CancellationToken ct = default);
+
     // ── Protective stops ──────────────────────────────────────────────────────
     // A standing intent to keep a position protected at a level. Durable and re-materialised as a
     // native day order each session, because this venue clears outstanding orders at the close — a
