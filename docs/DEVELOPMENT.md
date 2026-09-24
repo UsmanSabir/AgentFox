@@ -233,6 +233,69 @@ workflow by hand (it is manual-only; pushing a tag does not trigger it):
 gh workflow run release.yml -f tag=v1.0.0   # or Actions > Release > Run workflow
 ```
 
+CI builds five targets. `osx-x64` (Intel Mac) is left out to save Actions minutes — a macOS runner
+bills at 10× a Linux one — so it is built by hand, below.
+
+### Building the macOS Intel (osx-x64) archive
+
+Without this archive nothing breaks: `install.sh` on an Intel Mac finds no prebuilt download and
+builds from source. Build it only when you want Intel Mac users to get a prebuilt binary.
+
+**Build it ON a Mac** — Intel or Apple Silicon both work. A macOS executable has to be code-signed
+(ad-hoc is enough), and the .NET SDK only signs it when the build runs on macOS; one cross-built
+from Windows or Linux may be refused by Gatekeeper.
+
+**Prerequisites:** .NET 10 SDK, Node.js 20, and `gh` (authenticated) if you will upload it.
+
+Run from the repository root. These are the same steps and flags the CI build uses, so the archive
+matches the others in the release:
+
+```bash
+set -euo pipefail
+RID=osx-x64
+VERSION=1.0.42                      # match the release you are attaching it to (no leading v)
+OUT="staging/$RID"
+rm -rf "$OUT"
+
+# 1. Host web UI -> src/Agent/wwwroot (embedded by the publish below, so it must come first)
+( cd src/frontend && npm ci && npm run build )
+
+# 2. The app, as one single-file executable
+dotnet publish src/Agent/AgentFox.csproj -c Release -r "$RID" --self-contained false \
+  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:UseAppHost=true \
+  -p:Version="$VERSION" -p:InformationalVersion="$VERSION+$(git rev-parse --short HEAD)" \
+  -o "$OUT"
+
+# 3. Trading plugin UI (embedded into TradingAgent.Core), then the bundled plugins
+( cd src/Plugins/TradingAgent/ui && npm ci && npm run build )
+dotnet publish src/Plugins/TradingAgent/TradingAgent.csproj                   -c Release -r "$RID" --self-contained false -o "$OUT/plugins/TradingAgent"
+dotnet publish src/Plugins/PageAgent/PageAgent.csproj                         -c Release -r "$RID" --self-contained false -o "$OUT/plugins/PageAgent"
+dotnet publish src/Plugins/AgentFox.BraveSearch/AgentFox.BraveSearch.csproj   -c Release -r "$RID" --self-contained false -o "$OUT/plugins/BraveSearch"
+dotnet publish src/Plugins/AgentFox.TavilySearch/AgentFox.TavilySearch.csproj -c Release -r "$RID" --self-contained false -o "$OUT/plugins/TavilySearch"
+dotnet publish src/Plugins/AgentFox.DuckDuckGoSearch/AgentFox.DuckDuckGoSearch.csproj -c Release -r "$RID" --self-contained false -o "$OUT/plugins/DuckDuckGoSearch"
+
+# 4. Package — the file name must be exactly this; install.sh downloads it by name
+tar -czf "agentfox-$RID.tar.gz" -C "$OUT" .
+```
+
+**Check it runs** (on an Intel Mac, or under Rosetta on Apple Silicon):
+
+```bash
+mkdir -p /tmp/af && tar -xzf agentfox-osx-x64.tar.gz -C /tmp/af && /tmp/af/AgentFox --version
+```
+
+**Attach it to the release** CI already created:
+
+```bash
+gh release upload v1.0.42 agentfox-osx-x64.tar.gz --clobber
+```
+
+`install.sh` downloads from `releases/latest`, so attach it to the newest release. An archive on an
+older release is not picked up.
+
+If macOS says the app "cannot be opened" after downloading it in a browser, that is the quarantine
+flag, not a bad build: `xattr -dr com.apple.quarantine <install-dir>`.
+
 ## Roadmap: Multi-Agent Orchestration — "Coordinator Mode"
 
 TODO: Have a full **multi-agent orchestration system**

@@ -62,13 +62,20 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
+      # Windows RIDs build on Linux on purpose: Windows minutes bill at 2x on a private repo, and the
+      # exe carries no icon, manifest or Win32 resources that only a Windows build can embed. The one
+      # difference is cosmetic — Explorer's Properties > Details tab shows no file version (NETSDK1074
+      # warning); the assembly's own version, which the app reports, is unaffected.
+      # macOS stays on macOS: an osx-arm64 apphost needs a code signature to run on Apple Silicon.
+      # osx-x64 (Intel Mac) is deliberately NOT built here — a macOS runner bills at 10x. install.sh
+      # falls back to a source build when the archive is missing; to ship one, build it by hand on a
+      # Mac and upload it (docs/DEVELOPMENT.md, "Building the macOS Intel (osx-x64) archive").
       matrix:
         include:
-          - { rid: win-x64,     os: windows-latest, archive: zip }
-          - { rid: win-arm64,   os: windows-latest, archive: zip }
+          - { rid: win-x64,     os: ubuntu-latest,  archive: zip }
+          - { rid: win-arm64,   os: ubuntu-latest,  archive: zip }
           - { rid: linux-x64,   os: ubuntu-latest,  archive: tar }
           - { rid: linux-arm64, os: ubuntu-latest,  archive: tar }
-          - { rid: osx-x64,     os: macos-latest,   archive: tar }
           - { rid: osx-arm64,   os: macos-latest,   archive: tar }
     steps:
       - uses: actions/checkout@v4
@@ -180,6 +187,7 @@ jobs:
           name: agentfox-${{ matrix.rid }}
           path: agentfox-${{ matrix.rid }}.*
           if-no-files-found: error
+          retention-days: 3
 
   release:
     name: Publish GitHub Release
