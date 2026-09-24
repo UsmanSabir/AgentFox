@@ -217,9 +217,15 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
     public Task RunAtMarketOpenAsync(MarketSessionOpenContext context, CancellationToken ct) =>
         RunNowAsync(ct);
 
+    /// <param name="requestedBy">
+    /// Who asked, in the words the intent's reason should carry. Null is the operator — every caller
+    /// before pull-backs existed. A pulled-back take-profit is not the operator's doing, and recording
+    /// it as theirs would make its timeline say something that did not happen.
+    /// </param>
     public async Task<(bool Completed, string State, string Message)> CancelAsync(
-        string intentId, CancellationToken ct = default)
+        string intentId, CancellationToken ct = default, string? requestedBy = null)
     {
+        var who = requestedBy ?? "the operator";
         await _runGate.WaitAsync(ct);
         try
         {
@@ -230,7 +236,7 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
             await _repository.TrySetPersistentOrderStateAsync(
                 intentId,
                 ["active", "placing", "resting", "partial", "attention", "expiring"],
-                "cancelling", "Cancellation requested by the operator.", ct);
+                "cancelling", $"Cancellation requested by {who}.", ct);
 
             var placements = await _repository.GetPersistentOrderPlacementsAsync(intentId, ct);
             // Orders that stopped resting WITHOUT this system taking them off. An order can leave the
@@ -278,7 +284,7 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
 
             await _repository.SetPersistentOrderProgressAsync(
                 intentId, finalFilled, "cancelled",
-                "Cancelled by the operator; no broker order remains outstanding.", ct);
+                $"Cancelled by {who}; no broker order remains outstanding.", ct);
             return (true, "cancelled", "Persistent order cancelled and outstanding placements verified gone.");
         }
         finally

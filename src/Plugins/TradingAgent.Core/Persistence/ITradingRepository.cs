@@ -587,6 +587,30 @@ public interface ITradingRepository
         int quantity,
         CancellationToken ct = default);
 
+    // ── Pull-backs (see TradingAgent.Watchlist.ArmedOrderPullback) ─────────────
+
+    /// <summary>Fired orders that still carry a pull-back level — the only ones the pull-back rule reads.</summary>
+    Task<IReadOnlyList<TradingAgent.Watchlist.ArmedOrder>> GetArmedOrdersWatchedForPullbackAsync(
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Marks a fired order's pull-back as requested. Compare-and-set on the marker being absent, so
+    /// overlapping passes cannot both start one. False means nothing was written.
+    /// </summary>
+    Task<bool> TryRequestArmedOrderPullbackAsync(
+        string armedId, string reason, CancellationToken ct = default);
+
+    /// <summary>
+    /// Returns a pulled-back order to <c>armed</c>. Only a row carrying the pull-back marker is
+    /// touched, so a persistent order a PERSON cancelled can never re-arm its trigger.
+    /// </summary>
+    Task<bool> TryRearmAfterPullbackAsync(
+        string armedId, TradingAgent.Watchlist.PullbackRearm rearm, CancellationToken ct = default);
+
+    /// <summary>Stops watching a fired order for a pull-back: clears the level and the marker.</summary>
+    Task<bool> TryEndArmedOrderPullbackAsync(
+        string armedId, string reason, CancellationToken ct = default);
+
     // ── Protective stops ──────────────────────────────────────────────────────
     // A standing intent to keep a position protected at a level. Durable and re-materialised as a
     // native day order each session, because this venue clears outstanding orders at the close — a

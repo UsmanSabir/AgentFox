@@ -376,6 +376,9 @@ public sealed class ProtectiveStopWorker
             }
         });
 
+    /// <inheritdoc cref="IProtectiveStopReleaser.RestoreSoon"/>
+    public void RestoreSoon() => TriggerSoon();
+
     public Task RunAtMarketOpenAsync(MarketSessionOpenContext context, CancellationToken ct) =>
         RunNowAsync(ct);
 

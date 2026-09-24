@@ -193,6 +193,12 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                         MarketOpen = false,
                         Message = $"Market closed — {market.Reason}. Monitoring resumes at the next open."
                     });
+
+                    // No prices and no broker call: hands back a take-profit fired ahead of its limit
+                    // once the session is over, so the next open does not re-send it blind. The post-
+                    // close pass may run before the persistent worker has noticed the day ended, so
+                    // this closed-market poll is where the hand-back actually lands.
+                    await RunPullbacksAsync(stoppingToken);
                 }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -335,6 +341,10 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
         // trigger sees exactly the alerts this pass raised — no second fetch, no drift between what
         // was detected and what fires on it.
         await EvaluateArmedOrdersAsync(history.Live, raised, ct);
+
+        // Against the same prices, straight after: a take-profit fired ahead of its limit is pulled
+        // back here once the market turns. See ArmedOrderPullback.
+        await EvaluatePullbacksAsync(history.Live, ct);
 
         // Named, and built once for both the log and the activity row so the two cannot disagree.
         // Note these are alerts that reached the CAP — some might also have been inside their cooldown
@@ -678,7 +688,10 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                     {
                         // Deterministic linkage makes a crash visible and prevents a second durable
                         // instruction being invented for one armed trigger.
-                        IntentId = $"armed-{order.ArmedId}",
+                        //
+                        // Distinct per re-arm: a pulled-back order fires again under a new id,
+                        // because intent ids are a primary key. See ArmedOrderPullback.IntentIdFor.
+                        IntentId = ArmedOrderPullback.IntentIdFor(order),
                         Symbol = order.Symbol,
                         Action = order.Action,
                         Quantity = effectiveQuantity,
@@ -799,6 +812,175 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                     ex.Message);
             }
         }
+    }
+
+    /// <summary>
+    /// Runs the pull-back rule on its own, outside a detection pass — for the closed-market poll, which
+    /// has no prices and needs none. Serialised with the passes by the same gate.
+    /// </summary>
+    public async Task RunPullbacksAsync(CancellationToken ct = default)
+    {
+        await _runGate.WaitAsync(ct);
+        try { await EvaluatePullbacksAsync(new Dictionary<string, PsxLiveQuote>(), ct); }
+        finally { _runGate.Release(); }
+    }
+
+    /// <summary>
+    /// Applies <see cref="ArmedOrderPullback"/> to every fired take-profit that carries a pull-back
+    /// level: cancels the working sell when the price has fallen to that level, hands it back at the
+    /// close, and re-arms it once the cancel is confirmed.
+    ///
+    /// <para>
+    /// <b>The cancel goes through <see cref="PersistentOrderWorker.CancelAsync"/>,</b> the path that
+    /// confirms the order is gone with the broker and asks the broker whether a vanished order filled
+    /// (MWMP, 2026-09-21). Nothing is re-armed on anything short of that: a pull-back that re-armed over
+    /// a sell still resting would put two sells over one set of shares.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Failure here is logged and otherwise ignored,</b> like a missed trail. The cost of skipping a
+    /// pass is a sell that rests one pass longer — exactly what every take-profit did before this.
+    /// </para>
+    /// </summary>
+    private async Task EvaluatePullbacksAsync(
+        IReadOnlyDictionary<string, PsxLiveQuote> live, CancellationToken ct)
+    {
+        IReadOnlyList<ArmedOrder> watched;
+        try { watched = await _repository.GetArmedOrdersWatchedForPullbackAsync(ct); }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "[ArmedOrders] Could not read the orders watched for a pull-back.");
+            return;
+        }
+
+        if (watched.Count == 0) return;
+
+        var market = _calendar.GetStatus();
+        var today = DateOnly.FromDateTime(market.PktNow);
+        // A later date's open, not merely "shut": Friday's midday break is shut too, and an order placed
+        // that morning may still be resting through it.
+        var sessionEnded = !market.IsOpen
+            && market.NextOpenPkt is { } nextOpen
+            && DateOnly.FromDateTime(nextOpen) > today;
+
+        foreach (var order in watched)
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                var intentId = ArmedOrderPullback.IntentIdFor(order);
+                var intent = await _repository.GetPersistentOrderAsync(intentId, ct);
+                var price = live.TryGetValue(order.Symbol, out var quote) ? quote.Current : null;
+                var decision = ArmedOrderPullback.Decide(
+                    order, intent, price, market.IsOpen, sessionEnded, today);
+
+                switch (decision.Action)
+                {
+                    case PullbackAction.Finish:
+                        await _repository.TryEndArmedOrderPullbackAsync(order.ArmedId,
+                            $"No longer watched for a pull-back: {decision.Reason}.", ct);
+                        break;
+
+                    case PullbackAction.PullBack:
+                        await PullBackAsync(order, intent!, decision.Reason, ct);
+                        break;
+
+                    case PullbackAction.HandBack:
+                        // The intent first, and only from an idle state: if the persistent worker has
+                        // moved it since the read, this is a no-op and the next poll re-decides.
+                        if (!await _repository.TrySetPersistentOrderStateAsync(intent!.IntentId,
+                                ["active", "partial"], "cancelled",
+                                "Handed back at the close: the venue cleared the book, and the take-profit "
+                                + "that created this order re-arms rather than being re-sent at the open.", ct))
+                            break;
+                        if (!await _repository.TryRequestArmedOrderPullbackAsync(order.ArmedId,
+                                $"Handing back: {decision.Reason}.", ct))
+                            break;
+                        await SettlePullbackAsync(order, intentId, bounce: false, ct);
+                        break;
+
+                    case PullbackAction.Rearm:
+                        // A pull-back requested on an earlier pass whose cancel has since settled, or a
+                        // hand-back interrupted by a restart. Counted as a bounce — the conservative
+                        // reading, since it can only bring the pull-back cap closer.
+                        await SettlePullbackAsync(order, intentId, bounce: true, ct);
+                        break;
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex,
+                    "[ArmedOrders] Pull-back check failed for {ArmedId} ({Symbol}); the sell stays as it is.",
+                    order.ArmedId, order.Symbol);
+            }
+        }
+    }
+
+    private async Task PullBackAsync(
+        ArmedOrder order, PersistentOrderIntent intent, string why, CancellationToken ct)
+    {
+        // Marked BEFORE the cancel, so a restart mid-cancel still knows this cancel was ours and re-arms
+        // once it settles — rather than reading a cancelled order as the operator's and leaving it.
+        if (!await _repository.TryRequestArmedOrderPullbackAsync(order.ArmedId, $"Pulling back: {why}.", ct))
+            return;
+
+        _logger.LogWarning(
+            "[ArmedOrders] {ArmedId} ({Symbol}) pulling back its working SELL: {Why}",
+            order.ArmedId, order.Symbol, why);
+        _activity?.Warn("Armed", $"{order.Symbol}: take-profit pulled back — the price turned", why);
+
+        var (completed, state, message) = await _persistentOrders.CancelAsync(
+            intent.IntentId, ct, requestedBy: "a take-profit pull-back");
+        if (!completed)
+        {
+            // Not confirmed gone. The marker stays, the order stays fired, and a later pass re-arms once
+            // the persistent worker settles the cancel — never before.
+            _logger.LogWarning(
+                "[ArmedOrders] {ArmedId} ({Symbol}) pull-back cancel not confirmed ({State}): {Message}",
+                order.ArmedId, order.Symbol, state, message);
+            return;
+        }
+
+        await SettlePullbackAsync(order, intent.IntentId, bounce: true, ct);
+    }
+
+    private async Task SettlePullbackAsync(
+        ArmedOrder order, string intentId, bool bounce, CancellationToken ct)
+    {
+        var intent = await _repository.GetPersistentOrderAsync(intentId, ct);
+        if (intent is null || intent.State is "fulfilled" or "attention")
+        {
+            var why = intent is null
+                ? "its persistent order could not be read back"
+                : intent.State == "fulfilled"
+                    ? "the sell filled before it could be pulled back"
+                    : "the cancel left an outcome a person has to settle";
+            await _repository.TryEndArmedOrderPullbackAsync(order.ArmedId, $"Not re-armed: {why}.", ct);
+            if (intent?.State == "attention")
+                _activity?.Warn("Armed", $"{order.Symbol}: take-profit pull-back needs checking", why);
+            return;
+        }
+
+        if (!intent.IsTerminal) return;   // still cancelling — a later pass settles it
+
+        if (ArmedOrderPullback.Rearm(order, intent, bounce) is not { } rearm)
+        {
+            await _repository.TryEndArmedOrderPullbackAsync(order.ArmedId,
+                "Not re-armed: every share was sold before it came back.", ct);
+            return;
+        }
+
+        if (!await _repository.TryRearmAfterPullbackAsync(order.ArmedId, rearm, ct)) return;
+
+        _logger.LogWarning(
+            "[ArmedOrders] {ArmedId} ({Symbol}) re-armed: SELL {Qty} fires at {Trigger}. {Reason}",
+            order.ArmedId, order.Symbol, rearm.Quantity, rearm.TriggerPrice, rearm.Reason);
+        _activity?.Info("Armed", $"{order.Symbol}: take-profit re-armed", rearm.Reason);
+
+        // The shares the sell was holding are free again: put the stop back over them now. Only in
+        // session — the stop worker places nothing while the venue is shut, and the next open re-places
+        // every stop anyway.
+        if (bounce && _calendar.GetStatus().IsOpen) _stopReleaser?.RestoreSoon();
     }
 
     /// <summary>

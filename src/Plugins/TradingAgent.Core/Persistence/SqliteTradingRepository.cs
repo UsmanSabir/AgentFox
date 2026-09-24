@@ -1918,7 +1918,14 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                     active_from_utc TEXT NULL,
                     -- Percent triggers only: measure the move from the extreme of this many recent
                     -- TRADING minutes instead of from reference_price. NULL = fixed or trailing.
-                    trigger_window_minutes INTEGER NULL
+                    trigger_window_minutes INTEGER NULL,
+                    -- A take-profit fired ahead of its limit is pulled back at or below this price:
+                    -- the working sell is cancelled and the order re-armed. NULL = works until filled.
+                    -- See ArmedOrderPullback. Retention is the table's own.
+                    pullback_price TEXT NULL,
+                    pullback_count INTEGER NOT NULL DEFAULT 0,
+                    rearm_count    INTEGER NOT NULL DEFAULT 0,
+                    pullback_requested_utc TEXT NULL
                 );
                 CREATE INDEX IF NOT EXISTS ix_armed_orders_state
                     ON armed_orders(state, symbol);
@@ -2157,6 +2164,16 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                 connection, "armed_orders", "active_from_utc", "TEXT NULL", ct);
             await AddColumnIfMissingAsync(
                 connection, "armed_orders", "trigger_window_minutes", "INTEGER NULL", ct);
+            // NULL / 0 for every existing row: an order armed before pull-backs existed works until
+            // filled, exactly as it did.
+            await AddColumnIfMissingAsync(
+                connection, "armed_orders", "pullback_price", "TEXT NULL", ct);
+            await AddColumnIfMissingAsync(
+                connection, "armed_orders", "pullback_count", "INTEGER NOT NULL DEFAULT 0", ct);
+            await AddColumnIfMissingAsync(
+                connection, "armed_orders", "rearm_count", "INTEGER NOT NULL DEFAULT 0", ct);
+            await AddColumnIfMissingAsync(
+                connection, "armed_orders", "pullback_requested_utc", "TEXT NULL", ct);
             await AddColumnIfMissingAsync(
                 connection, "protective_stops", "operator_originated", "INTEGER NOT NULL DEFAULT 0", ct);
             await AddColumnIfMissingAsync(
@@ -2805,10 +2822,12 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                 (armed_id, symbol, trigger_kind, trigger_price, trigger_alert, action, quantity,
                  order_type, price, limit_price, state, armed_utc, expires_utc, note, source_alert,
                  protective_stop_id, trigger_percent, reference_price, trailing,
-                 persistent_until_filled, operator_originated, active_from_utc, trigger_window_minutes)
+                 persistent_until_filled, operator_originated, active_from_utc, trigger_window_minutes,
+                 pullback_price, pullback_count, rearm_count)
             VALUES ($id, $symbol, $kind, $tprice, $talert, $action, $qty,
                     $otype, $price, $limit, $state, $armed, $expires, $note, $alert, $stop,
-                    $tpercent, $reference, $trailing, $persistent, $operator, $activeFrom, $window)
+                    $tpercent, $reference, $trailing, $persistent, $operator, $activeFrom, $window,
+                    $pullback, $pullbacks, $rearms)
             """;
         command.Parameters.AddWithValue("$id", order.ArmedId);
         command.Parameters.AddWithValue("$symbol", order.Symbol);
@@ -2837,6 +2856,9 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
             order.ActiveFromUtc?.ToString("O") ?? (object)DBNull.Value);
         command.Parameters.AddWithValue("$window",
             order.TriggerWindowMinutes ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$pullback", Money(order.PullbackPrice));
+        command.Parameters.AddWithValue("$pullbacks", order.PullbackCount);
+        command.Parameters.AddWithValue("$rearms", order.RearmCount);
         await command.ExecuteNonQueryAsync(ct);
         return order.ArmedId;
     }
@@ -2852,7 +2874,8 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                    order_type, price, limit_price, state, armed_utc, expires_utc, fired_utc,
                    execution_id, state_reason, note, source_alert, protective_stop_id,
                    trigger_percent, reference_price, trailing, persistent_until_filled,
-                   operator_originated, active_from_utc, trigger_window_minutes
+                   operator_originated, active_from_utc, trigger_window_minutes,
+                   pullback_price, pullback_count, rearm_count, pullback_requested_utc
             FROM armed_orders
             {(armedOnly ? "WHERE state = 'armed'" : "")}
             ORDER BY armed_utc DESC
@@ -2925,6 +2948,99 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         return await command.ExecuteNonQueryAsync(ct) == 1;
     }
 
+    public async Task<IReadOnlyList<ArmedOrder>> GetArmedOrdersWatchedForPullbackAsync(
+        CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT armed_id, symbol, trigger_kind, trigger_price, trigger_alert, action, quantity,
+                   order_type, price, limit_price, state, armed_utc, expires_utc, fired_utc,
+                   execution_id, state_reason, note, source_alert, protective_stop_id,
+                   trigger_percent, reference_price, trailing, persistent_until_filled,
+                   operator_originated, active_from_utc, trigger_window_minutes,
+                   pullback_price, pullback_count, rearm_count, pullback_requested_utc
+            FROM armed_orders
+            WHERE state = 'fired' AND pullback_price IS NOT NULL
+            ORDER BY armed_utc DESC
+            """;
+
+        var orders = new List<ArmedOrder>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct)) orders.Add(ReadArmedOrder(reader));
+        return orders;
+    }
+
+    public async Task<bool> TryRequestArmedOrderPullbackAsync(
+        string armedId, string reason, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        // Compare-and-set on the marker being ABSENT, so two overlapping passes cannot both start a
+        // pull-back, and one already ended (pullback_price cleared) cannot be restarted.
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE armed_orders
+               SET pullback_requested_utc = $now,
+                   state_reason = $reason
+             WHERE armed_id = $id AND state = 'fired'
+               AND pullback_price IS NOT NULL AND pullback_requested_utc IS NULL
+            """;
+        command.Parameters.AddWithValue("$id", armedId);
+        command.Parameters.AddWithValue("$reason", reason);
+        command.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("O"));
+        return await command.ExecuteNonQueryAsync(ct) == 1;
+    }
+
+    public async Task<bool> TryRearmAfterPullbackAsync(
+        string armedId, PullbackRearm rearm, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        // Only a row whose pull-back THIS system requested may go back to armed. A fired order whose
+        // persistent order a person cancelled carries no marker, and stays fired.
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE armed_orders
+               SET state = 'armed',
+                   quantity = $qty,
+                   trigger_price = $trigger,
+                   pullback_price = $pullback,
+                   pullback_count = $pullbacks,
+                   rearm_count = $rearms,
+                   pullback_requested_utc = NULL,
+                   state_reason = $reason
+             WHERE armed_id = $id AND state = 'fired' AND pullback_requested_utc IS NOT NULL
+            """;
+        command.Parameters.AddWithValue("$id", armedId);
+        command.Parameters.AddWithValue("$qty", rearm.Quantity);
+        command.Parameters.AddWithValue("$trigger", Money(rearm.TriggerPrice));
+        command.Parameters.AddWithValue("$pullback", Money(rearm.PullbackPrice));
+        command.Parameters.AddWithValue("$pullbacks", rearm.PullbackCount);
+        command.Parameters.AddWithValue("$rearms", rearm.RearmCount);
+        command.Parameters.AddWithValue("$reason", rearm.Reason);
+        return await command.ExecuteNonQueryAsync(ct) == 1;
+    }
+
+    public async Task<bool> TryEndArmedOrderPullbackAsync(
+        string armedId, string reason, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE armed_orders
+               SET pullback_price = NULL,
+                   pullback_requested_utc = NULL,
+                   state_reason = $reason
+             WHERE armed_id = $id AND state = 'fired' AND pullback_price IS NOT NULL
+            """;
+        command.Parameters.AddWithValue("$id", armedId);
+        command.Parameters.AddWithValue("$reason", reason);
+        return await command.ExecuteNonQueryAsync(ct) == 1;
+    }
+
     public async Task<bool> TrySetArmedOrderQuantityAsync(
         string armedId, int quantity, CancellationToken ct = default)
     {
@@ -2971,7 +3087,11 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         PersistentUntilFilled = !reader.IsDBNull(22) && reader.GetInt64(22) != 0,
         OperatorOriginated    = !reader.IsDBNull(23) && reader.GetInt64(23) != 0,
         ActiveFromUtc         = reader.IsDBNull(24) ? null : ParseUtc(reader.GetString(24)),
-        TriggerWindowMinutes  = reader.IsDBNull(25) ? null : reader.GetInt32(25)
+        TriggerWindowMinutes  = reader.IsDBNull(25) ? null : reader.GetInt32(25),
+        PullbackPrice         = ParseDecimal(reader, 26),
+        PullbackCount         = reader.IsDBNull(27) ? 0 : reader.GetInt32(27),
+        RearmCount            = reader.IsDBNull(28) ? 0 : reader.GetInt32(28),
+        PullbackRequestedUtc  = reader.IsDBNull(29) ? null : ParseUtc(reader.GetString(29))
     };
 
     // ── Protective stops ──────────────────────────────────────────────────────

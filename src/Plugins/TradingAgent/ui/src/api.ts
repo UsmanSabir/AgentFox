@@ -843,6 +843,13 @@ export interface ArmedOrder {
   /** Set when this order is the local backstop for a protective stop, not an ordinary trigger. */
   protectiveStopId: string | null;
   persistentUntilFilled: boolean;
+  /**
+   * A take-profit fired ahead of its limit is pulled back — cancelled and re-armed — if the price
+   * falls to this level. Null when the order works until filled. Optional so an older server's
+   * reply, which never sends it, still type-checks.
+   */
+  pullbackPrice?: number | null;
+  pullbackCount?: number;
 }
 
 /**

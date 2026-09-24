@@ -116,7 +116,9 @@ public sealed partial class TradingCoreEndpoints
                     o.Note,
                     o.SourceAlertId,
                     o.ProtectiveStopId,
-                    o.PersistentUntilFilled
+                    o.PersistentUntilFilled,
+                    o.PullbackPrice,
+                    o.PullbackCount
                     };
                 }),
                 // Sent with the orders because a stop and the entry it protects are one thing to

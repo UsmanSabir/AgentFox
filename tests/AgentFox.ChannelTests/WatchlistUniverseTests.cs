@@ -817,6 +817,17 @@ public sealed class WatchlistUniverseTests
         public Task<bool> TrySetArmedOrderQuantityAsync(
             string id, int quantity, CancellationToken ct = default) =>
             throw new NotSupportedException();
+        public Task<IReadOnlyList<ArmedOrder>> GetArmedOrdersWatchedForPullbackAsync(
+            CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<bool> TryRequestArmedOrderPullbackAsync(
+            string id, string reason, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<bool> TryRearmAfterPullbackAsync(
+            string id, PullbackRearm rearm, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<bool> TryEndArmedOrderPullbackAsync(
+            string id, string reason, CancellationToken ct = default) =>
+            throw new NotSupportedException();
         public Task<string> SaveProtectiveStopAsync(
             ProtectiveStop stop, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<int> GetFilledQuantityForExecutionAsync(
