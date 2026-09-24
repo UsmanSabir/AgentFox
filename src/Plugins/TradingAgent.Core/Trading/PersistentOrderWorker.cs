@@ -69,6 +69,7 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
     private readonly ApprovalIntentRegistry _intentRegistry;
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly TradingActivityLog? _activity;
+    private readonly IReadOnlyList<IPersistentOrderObserver> _observers;
     private readonly ILogger<PersistentOrderWorker> _logger;
     private readonly SemaphoreSlim _runGate = new(1, 1);
 
@@ -85,7 +86,8 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
         ApprovalIntentRegistry intentRegistry,
         IOptions<TradingAgentOptions> options,
         ILogger<PersistentOrderWorker> logger,
-        TradingActivityLog? activity = null)
+        TradingActivityLog? activity = null,
+        IEnumerable<IPersistentOrderObserver>? observers = null)
     {
         _repository = repository;
         _manager = manager;
@@ -100,6 +102,7 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
         _options = options;
         _logger = logger;
         _activity = activity;
+        _observers = observers?.ToArray() ?? [];
     }
 
     /// <summary>
@@ -772,6 +775,53 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
         return true;
     }
 
+    /// <summary>
+    /// Writes an intent <c>expired</c> and says so — in the activity log, and to every
+    /// <see cref="IPersistentOrderObserver"/>.
+    ///
+    /// <para>
+    /// The one place an intent expires, because there used to be three and none of them told anybody.
+    /// A fulfilled intent wrote an activity row; an expired one wrote only its own state, so a standing
+    /// instruction could end with shares unbought and the only record was a row on a screen nobody was
+    /// looking at. Expiry is the one terminal outcome no broker event reports.
+    /// </para>
+    ///
+    /// <para>
+    /// Observers are told after the write and never before it, so an announcement cannot describe an
+    /// intent that then failed to be marked. Each gets a bounded slice of time and its own try/catch: a
+    /// slow channel must not hold the run gate, and a formatter that throws must not abort the pass for
+    /// every intent after this one.
+    /// </para>
+    /// </summary>
+    private async Task MarkExpiredAsync(PersistentOrderIntent intent, string reason, CancellationToken ct)
+    {
+        await _repository.SetPersistentOrderProgressAsync(intent.IntentId,
+            intent.FilledQuantity, "expired", reason, ct);
+
+        // Re-read: the projection folds in every recorded fill, which is the figure worth reporting.
+        var expired = await _repository.GetPersistentOrderAsync(intent.IntentId, ct)
+                      ?? intent with { State = "expired", StateReason = reason };
+
+        _activity?.Warn("Orders", $"{expired.Symbol}: persistent order expired",
+            $"{expired.Action} {expired.FilledQuantity:N0}/{expired.Quantity:N0} share(s) filled; "
+            + $"{expired.RemainingQuantity:N0} unfilled. {reason}");
+
+        foreach (var observer in _observers)
+        {
+            try
+            {
+                await observer.ExpiredAsync(expired, reason, ct).WaitAsync(IPersistentOrderObserver.Budget, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            {
+                _logger.LogWarning(ex,
+                    "[PersistentOrders] {IntentId} ({Symbol}): the expiry notification failed in "
+                    + "{Observer}; the intent is expired regardless.",
+                    expired.IntentId, expired.Symbol, observer.GetType().Name);
+            }
+        }
+    }
+
     private async Task MaintainAsync(
         PersistentOrderIntent original,
         BrokerReconciliationSnapshot snapshot,
@@ -858,10 +908,14 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
                     return;
                 }
 
-                var terminal = intent.State == "cancelling" ? "cancelled" : "expired";
-                await _repository.SetPersistentOrderProgressAsync(intent.IntentId,
-                    intent.FilledQuantity, terminal,
-                    $"Intent {terminal}; no native order remains outstanding.", ct);
+                if (intent.State == "cancelling")
+                    await _repository.SetPersistentOrderProgressAsync(intent.IntentId,
+                        intent.FilledQuantity, "cancelled",
+                        "Intent cancelled; no native order remains outstanding.", ct);
+                else
+                    await MarkExpiredAsync(intent,
+                        $"Expired with {intent.RemainingQuantity} share(s) unfilled; no native order "
+                        + "remains outstanding.", ct);
             }
             return;
         }
@@ -870,8 +924,7 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
         {
             if (ownOpen.Count == 0)
             {
-                await _repository.SetPersistentOrderProgressAsync(intent.IntentId,
-                    intent.FilledQuantity, "expired",
+                await MarkExpiredAsync(intent,
                     $"Expired with {intent.RemainingQuantity} share(s) unfilled.", ct);
                 return;
             }
@@ -889,8 +942,7 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
                     return;
                 }
             }
-            await _repository.SetPersistentOrderProgressAsync(intent.IntentId,
-                intent.FilledQuantity, "expired",
+            await MarkExpiredAsync(intent,
                 $"Expired with {intent.RemainingQuantity} share(s) unfilled; resting order cancelled.", ct);
             return;
         }
