@@ -226,12 +226,11 @@ entire publish output (DLL + `.deps.json` + dependencies) into its own subfolder
 ## Building & Publishing Release Binaries
 
 To produce the prebuilt archives the installers download (and publish them to GitHub Releases for
-all six OS/arch targets), see [RELEASING.md](../RELEASING.md). In short — push a tag and CI does
-the rest:
+all six OS/arch targets), see [RELEASING.md](../RELEASING.md). In short — start the Release
+workflow by hand (it is manual-only; pushing a tag does not trigger it):
 
 ```bash
-git tag v1.0.0
-git push origin v1.0.0   # triggers .github/workflows/release.yml
+gh workflow run release.yml -f tag=v1.0.0   # or Actions > Release > Run workflow
 ```
 
 ## Roadmap: Multi-Agent Orchestration — "Coordinator Mode"

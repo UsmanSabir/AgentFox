@@ -13,11 +13,12 @@ This produces the prebuilt archives that `install.ps1` / `install.sh` download:
 
 Each archive contains the AgentFox binary **plus the Trading plugin** under `plugins/TradingAgent/`.
 
-> **Automated path (recommended):** push a tag and let CI build/publish everything:
+> **Automated path (recommended):** run the workflow by hand — GitHub → **Actions → Release → Run
+> workflow**, optionally entering a tag such as `v1.0.0` (blank auto-increments), or:
 > ```bash
-> git tag v1.0.0
-> git push origin v1.0.0
+> gh workflow run release.yml -f tag=v1.0.0
 > ```
+> Pushing a tag no longer starts a build; the workflow is manual-only to keep Actions minutes down.
 > The [`.github/workflows/release.yml`](.github/workflows/release.yml) workflow builds all six
 > targets and creates the GitHub Release. The rest of this file is the manual equivalent.
 

@@ -4,10 +4,9 @@ name: Release
 # the archives to a GitHub Release. Archive names match what install.ps1 / install.sh
 # download: agentfox-<rid>.zip (Windows) and agentfox-<rid>.tar.gz (Linux/macOS).
 
+# Manual only (Actions > Release > Run workflow). No push/tag trigger on purpose: every run is six
+# builds of billed minutes, so a release happens when someone asks for one, not on every tag push.
 on:
-  push:
-    tags:
-      - 'v*'            # e.g. git tag v1.0.0 && git push --tags
   workflow_dispatch:
     inputs:
       tag:
