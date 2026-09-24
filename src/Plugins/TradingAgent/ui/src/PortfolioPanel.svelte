@@ -11,6 +11,7 @@
   import type { SymbolExtensionComponent } from './symbolExtensions';
   import LiveHoldingCells from './LiveHoldingCells.svelte';
   import PortfolioAllocationChart from './PortfolioAllocationChart.svelte';
+  import PortfolioPnlSummary from './PortfolioPnlSummary.svelte';
   import WorkingOrderCancel from './WorkingOrderCancel.svelte';
   import { orderListNavigation } from './orderListNavigation';
   export let keyboardMode = false;
@@ -153,6 +154,9 @@
             {/each}
           {:else}
             <div class="unavailable"><b>Balances unavailable</b><span>The broker did not return a reliable balance.</span></div>
+          {/if}
+          {#if account.holdingsAvailable && account.holdings.length}
+            <PortfolioPnlSummary holdings={account.holdings} {showValues} />
           {/if}
         </div>
 
