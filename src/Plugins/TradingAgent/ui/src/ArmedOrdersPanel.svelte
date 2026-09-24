@@ -168,9 +168,12 @@
     if (o.triggerKind !== 'PercentDrop' && o.triggerKind !== 'PercentRise')
       return `${comparator} ${level}`;
 
-    const basis = o.referencePrice != null
-      ? ` ${drop ? 'below' : 'above'} ${o.trailing ? 'peak ' : ''}${num(o.referencePrice)}`
-      : '';
+    const basis = o.triggerWindowMinutes
+      ? ` ${drop ? 'below the high' : 'above the low'} of the last ${o.triggerWindowMinutes} min`
+        + (o.windowReference != null ? ` (${num(o.windowReference)})` : ' (waiting for prices)')
+      : o.referencePrice != null
+        ? ` ${drop ? 'below' : 'above'} ${o.trailing ? 'peak ' : ''}${num(o.referencePrice)}`
+        : '';
     return `${comparator} ${level} — ${o.triggerPercent}%${basis}`;
   };
 
@@ -376,6 +379,7 @@
                 <span class="chip scheduled">waiting for {describeActivation(order)}</span>
               {/if}
               {#if order.trailing}<span class="chip trail">trailing</span>{/if}
+              {#if order.triggerWindowMinutes}<span class="chip trail">recent {order.triggerWindowMinutes}-min window</span>{/if}
               {#if order.persistentUntilFilled}<span class="chip">keep working after trigger</span>{/if}
               {#if order.orderType === 'STOPLOSS' && order.limitPrice != null}
                 · stop limit {num(order.limitPrice)}
@@ -416,6 +420,7 @@
                 <span class="at">@ {num(stop.stopTrigger)}</span>
                 <span class="type">limit {num(stop.stopLimit)}</span>
                 {#if !stop.recurring}<span class="chip">one session</span>{/if}
+                {#if stop.sellAtMarketIfMissed}<span class="chip">market if missed</span>{/if}
               </div>
               <!-- Where the protection actually is. "Armed" would not distinguish an order resting
                    at the exchange from an intention held in this process. -->

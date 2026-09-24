@@ -154,10 +154,20 @@ public class AhkConfig
     public string ExecutablePath { get; set; } = "";
 
     /// <summary>
-    /// Allow MARKET orders (no limit price). Default false: market orders cannot be value-capped,
-    /// so they are blocked unless this is explicitly enabled.
+    /// Allow MARKET orders (no limit price).
+    ///
+    /// <para>
+    /// <b>On by default since 2026-09-22, the owner's decision.</b> It was off because a market order
+    /// cannot be value-capped before it trades, and that cost is unchanged — the startup validator
+    /// still warns on every live start. What changed is that something now depends on it: a protective
+    /// stop set to sell at market when it is missed (<c>ProtectiveStop.SellAtMarketIfMissed</c>) can
+    /// only act with this on, and a safety net that is silently disabled by a second setting nobody
+    /// enables is the hidden-configuration failure the product principles name. Turning it off refuses
+    /// every market order, the dashboard's "Buy now"/"Sell now" included, and leaves a missed stop
+    /// reported but not sold.
+    /// </para>
     /// </summary>
-    public bool AllowMarketOrders { get; set; } = false;
+    public bool AllowMarketOrders { get; set; } = true;
 
     /// <summary>
     /// After submitting, confirm the order actually exists by reading the account's own order book

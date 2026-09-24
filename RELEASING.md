@@ -8,18 +8,23 @@ This produces the prebuilt archives that `install.ps1` / `install.sh` download:
 | `win-arm64` | Windows ARM64 | `agentfox-win-arm64.zip` |
 | `linux-x64` | Linux x64 | `agentfox-linux-x64.tar.gz` |
 | `linux-arm64` | Linux ARM64 | `agentfox-linux-arm64.tar.gz` |
-| `osx-x64` | macOS Intel | `agentfox-osx-x64.tar.gz` |
+| `osx-x64` | macOS Intel | `agentfox-osx-x64.tar.gz` — **not built by CI**, see below |
 | `osx-arm64` | macOS Apple Silicon | `agentfox-osx-arm64.tar.gz` |
 
 Each archive contains the AgentFox binary **plus the Trading plugin** under `plugins/TradingAgent/`.
 
-> **Automated path (recommended):** push a tag and let CI build/publish everything:
+> **Automated path (recommended):** run the workflow by hand — GitHub → **Actions → Release → Run
+> workflow**, optionally entering a tag such as `v1.0.0` (blank auto-increments), or:
 > ```bash
-> git tag v1.0.0
-> git push origin v1.0.0
+> gh workflow run release.yml -f tag=v1.0.0
 > ```
-> The [`.github/workflows/release.yml`](.github/workflows/release.yml) workflow builds all six
-> targets and creates the GitHub Release. The rest of this file is the manual equivalent.
+> Pushing a tag no longer starts a build; the workflow is manual-only to keep Actions minutes down.
+> The [`.github/workflows/release.yml`](.github/workflows/release.yml) workflow builds five
+> targets and creates the GitHub Release. **`osx-x64` is left out on purpose** (a macOS runner
+> bills at 10×); build it on a Mac and attach it to the release — see
+> [docs/DEVELOPMENT.md → Building the macOS Intel (osx-x64) archive](docs/DEVELOPMENT.md#building-the-macos-intel-osx-x64-archive).
+> Without it, `install.sh` on an Intel Mac builds from source instead. The rest of this file is
+> the manual equivalent.
 
 ---
 

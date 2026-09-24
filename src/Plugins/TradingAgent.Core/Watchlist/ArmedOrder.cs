@@ -29,13 +29,21 @@ public enum ArmedTriggerKind
     /// arming, so the level ratchets UP as the position gains and never down. That is a trailing stop,
     /// and it is the case a fixed level genuinely cannot express.
     /// </para>
+    ///
+    /// <para>
+    /// With <see cref="ArmedOrder.TriggerWindowMinutes"/> set the reference is instead the highest
+    /// price observed in that many recent TRADING minutes — see <see cref="RecentPriceWindow"/>. That is
+    /// "sell if it falls 2% from where it has just been": an old high ages out, so a slow drift does
+    /// not accumulate into a fire the way it does against a fixed or trailing reference.
+    /// </para>
     /// </summary>
     PercentDrop,
 
     /// <summary>
     /// The mirror of <see cref="PercentDrop"/>: fire once the price has risen
     /// <see cref="ArmedOrder.TriggerPercent"/>% above the reference. Trailing follows the LOWEST price
-    /// seen, so a breakout entry chases a falling market down instead of expiring above it.
+    /// seen, so a breakout entry chases a falling market down instead of expiring above it; a window
+    /// measures from the lowest price of the recent window.
     /// </summary>
     PercentRise,
 
@@ -78,6 +86,11 @@ public static class PercentTrigger
 {
     /// <summary>Largest move that can be armed as a percent trigger.</summary>
     public const decimal MaxPercent = 50m;
+
+    /// <summary>
+    /// Whether the window's reference is its HIGHEST price (a drop trigger) or its lowest (a rise).
+    /// </summary>
+    public static bool WindowUsesHigh(ArmedTriggerKind kind) => kind == ArmedTriggerKind.PercentDrop;
 
     public static bool IsPercent(ArmedTriggerKind kind) =>
         kind is ArmedTriggerKind.PercentDrop or ArmedTriggerKind.PercentRise;
@@ -167,6 +180,24 @@ public sealed record ArmedOrder
     /// </para>
     /// </summary>
     public bool Trailing { get; init; }
+
+    /// <summary>
+    /// For a percent trigger: measure the move from the extreme of this many recent TRADING minutes —
+    /// the highest price for a drop, the lowest for a rise — instead of from
+    /// <see cref="ReferencePrice"/>. Null is a fixed or trailing reference, as before.
+    ///
+    /// <para>
+    /// Mutually exclusive with <see cref="Trailing"/>: a trail's reference only ratchets, where a
+    /// window's peak ages out and can fall. <see cref="ReferencePrice"/> is still captured at arm time
+    /// and shown until the window has observed something, but it is never fired on — after a restart
+    /// the window is empty, and firing against an arm-time price that may be days old would be firing
+    /// on a peak nobody watched.
+    /// </para>
+    /// </summary>
+    public int? TriggerWindowMinutes { get; init; }
+
+    /// <summary>A percent trigger measured from a rolling window of recent prices.</summary>
+    public bool IsWindowed => PercentTrigger.IsPercent(TriggerKind) && TriggerWindowMinutes is > 0;
 
     // ── The order to place when it fires ──────────────────────────────────────
     public required string Action { get; init; }        // BUY | SELL
@@ -266,10 +297,36 @@ public sealed record ArmedOrder
     /// level on one, and "correct because something else validates it" is how a panel ends up
     /// displaying a trigger the evaluator will never consult.
     /// </remarks>
-    public decimal? EffectiveTriggerPrice =>
+    public decimal? EffectiveTriggerPrice => EffectiveTriggerPriceFor(null);
+
+    /// <summary>
+    /// As <see cref="EffectiveTriggerPrice"/>, measured for a windowed order from
+    /// <paramref name="windowReference"/> — the window's current extreme — when one is known, and from
+    /// the arm-time reference otherwise. For DISPLAY: the evaluator never falls back.
+    /// </summary>
+    public decimal? EffectiveTriggerPriceFor(decimal? windowReference) =>
         PercentTrigger.IsPercent(TriggerKind)
-            ? PercentTrigger.Level(TriggerKind, ReferencePrice, TriggerPercent)
+            ? PercentTrigger.Level(TriggerKind,
+                IsWindowed ? windowReference ?? ReferencePrice : ReferencePrice, TriggerPercent)
             : TriggerKind is ArmedTriggerKind.Event or ArmedTriggerKind.Scheduled ? null : TriggerPrice;
+
+    /// <summary>
+    /// The limit to send when this order fires. For a windowed LIMIT order that is the level it fired
+    /// at, measured from <paramref name="windowReference"/>; for everything else the stored price.
+    ///
+    /// <para>
+    /// A windowed order's level MOVES with the recent high or low, so the limit worked out at arming is
+    /// stale by the time it fires: a dip-buy whose window high has since risen would fire at a higher
+    /// level and then rest below the market at the old one, and a sell-into-strength whose window low
+    /// has fallen would fire and then ask for a price the stock has not reached. Pricing at the fired
+    /// level is the only reading of "limit at the trigger" that stays true. An unreadable level keeps
+    /// the stored price rather than sending none.
+    /// </para>
+    /// </summary>
+    public decimal? PriceAtFire(decimal? windowReference) =>
+        IsWindowed && OrderType.Equals("LIMIT", StringComparison.OrdinalIgnoreCase)
+            ? PercentTrigger.Level(TriggerKind, windowReference, TriggerPercent) ?? Price
+            : Price;
 
     /// <summary>Projects the armed order onto the signal the trading manager executes.</summary>
     public TradingSignal ToSignal() => new()
@@ -311,13 +368,20 @@ public static class ArmedOrderEvaluator
     /// which arm price and event triggers that never consult it.
     /// </para>
     /// </param>
+    /// <param name="windowReference">
+    /// For a windowed percent trigger, the extreme of its recent window (highest for a drop, lowest for
+    /// a rise), including this pass's price. Null means the window has observed nothing, and such an
+    /// order then declines rather than falling back to its arm-time reference. Ignored by every other
+    /// order.
+    /// </param>
     public static bool ShouldFire(
         ArmedOrder order,
         decimal? lastPrice,
         IReadOnlyCollection<AlertKind> alertsFiredForSymbol,
         DateTime nowUtc,
         out string reason,
-        bool marketIsOpen = false)
+        bool marketIsOpen = false,
+        decimal? windowReference = null)
     {
         if (order.State != "armed")
         {
@@ -358,15 +422,19 @@ public static class ArmedOrderEvaluator
                 // the stored level is a projection of them, and trusting the projection is how a trail
                 // that failed to persist its last ratchet fires at yesterday's level.
                 var percent = PercentTrigger.IsPercent(order.TriggerKind);
+                var reference = order.IsWindowed ? windowReference : order.ReferencePrice;
                 var level = percent
-                    ? PercentTrigger.Level(order.TriggerKind, order.ReferencePrice, order.TriggerPercent)
+                    ? PercentTrigger.Level(order.TriggerKind, reference, order.TriggerPercent)
                     : order.TriggerPrice;
 
                 if (level is not { } trigger || trigger <= 0)
                 {
-                    reason = percent
-                        ? "Percent trigger has no usable reference price or percentage."
-                        : "Price trigger has no usable level.";
+                    reason = order.IsWindowed && windowReference is null
+                        ? $"No prices observed yet in the last {order.TriggerWindowMinutes} trading "
+                          + "minute(s); cannot measure a move."
+                        : percent
+                            ? "Percent trigger has no usable reference price or percentage."
+                            : "Price trigger has no usable level.";
                     return false;
                 }
 
@@ -382,10 +450,13 @@ public static class ArmedOrderEvaluator
                 var hit = falling ? price <= trigger : price >= trigger;
 
                 var how = falling ? "at or below" : "at or above";
-                var basis = percent
-                    ? $" ({order.TriggerPercent}% {(falling ? "below" : "above")} "
-                      + $"{(order.Trailing ? "trailing reference " : "")}{order.ReferencePrice})"
-                    : "";
+                var basis = !percent
+                    ? ""
+                    : order.IsWindowed
+                        ? $" ({order.TriggerPercent}% {(falling ? "below the high" : "above the low")} "
+                          + $"{reference} of the last {order.TriggerWindowMinutes} trading minute(s))"
+                        : $" ({order.TriggerPercent}% {(falling ? "below" : "above")} "
+                          + $"{(order.Trailing ? "trailing reference " : "")}{order.ReferencePrice})";
 
                 reason = hit
                     ? $"Last {price} {how} trigger {trigger}{basis}."

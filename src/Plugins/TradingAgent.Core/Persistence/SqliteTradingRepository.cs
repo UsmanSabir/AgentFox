@@ -1915,7 +1915,10 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                     -- the moment it was armed. Paired with trigger_kind 'Scheduled' the date IS the
                     -- whole condition; paired with a price kind it postpones when that price starts
                     -- being watched.
-                    active_from_utc TEXT NULL
+                    active_from_utc TEXT NULL,
+                    -- Percent triggers only: measure the move from the extreme of this many recent
+                    -- TRADING minutes instead of from reference_price. NULL = fixed or trailing.
+                    trigger_window_minutes INTEGER NULL
                 );
                 CREATE INDEX IF NOT EXISTS ix_armed_orders_state
                     ON armed_orders(state, symbol);
@@ -1951,7 +1954,10 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                     note              TEXT NULL,
                     supersedes_stop_id TEXT NULL,
                     -- See armed_orders.operator_originated: same flag, same default, same reason.
-                    operator_originated INTEGER NOT NULL DEFAULT 0
+                    operator_originated INTEGER NOT NULL DEFAULT 0,
+                    -- 1 = when the stop triggers but its limit is never reached, cancel it and sell at
+                    -- market. Opt-in per stop; defaults to 0 so no existing stop changes behaviour.
+                    sell_at_market_if_missed INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS ix_protective_stops_state
                     ON protective_stops(state, symbol);
@@ -2150,7 +2156,11 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
             await AddColumnIfMissingAsync(
                 connection, "armed_orders", "active_from_utc", "TEXT NULL", ct);
             await AddColumnIfMissingAsync(
+                connection, "armed_orders", "trigger_window_minutes", "INTEGER NULL", ct);
+            await AddColumnIfMissingAsync(
                 connection, "protective_stops", "operator_originated", "INTEGER NOT NULL DEFAULT 0", ct);
+            await AddColumnIfMissingAsync(
+                connection, "protective_stops", "sell_at_market_if_missed", "INTEGER NOT NULL DEFAULT 0", ct);
             await AddColumnIfMissingAsync(
                 connection, "persistent_order_intents", "operator_originated",
                 "INTEGER NOT NULL DEFAULT 0", ct);
@@ -2259,11 +2269,18 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
 
         // Appended at the end of the display order rather than inserted alphabetically: a symbol the
         // user just added should be where they can see it.
+        //
+        // auto_trade_enabled starts at 0 (manual-only) regardless of the master automation switch.
+        // A symbol just added has no stop, no target and no plan behind it yet, and the master switch
+        // is an account-wide decision the operator already made for symbols they'd reviewed — it was
+        // never a statement about a stock that didn't exist on the list a moment ago. The operator
+        // opts a symbol into automation explicitly, the same way they'd confirm a stop and a target.
         var command = connection.CreateCommand();
         command.CommandText = """
-            INSERT OR IGNORE INTO watchlist (symbol, added_utc, source, sort_order, alerts_enabled)
+            INSERT OR IGNORE INTO watchlist
+                (symbol, added_utc, source, sort_order, alerts_enabled, auto_trade_enabled)
             VALUES ($symbol, $now, $source,
-                    COALESCE((SELECT MAX(sort_order) + 1 FROM watchlist), 0), 1)
+                    COALESCE((SELECT MAX(sort_order) + 1 FROM watchlist), 0), 1, 0)
             """;
         command.Parameters.AddWithValue("$symbol", symbol);
         command.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("O"));
@@ -2315,9 +2332,13 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         {
             var insert = connection.CreateCommand();
             insert.Transaction = (SqliteTransaction)transaction;
+            // See AddWatchlistSymbolAsync: auto_trade_enabled starts at 0 here too. A preset (e.g. a
+            // whole index) can add many symbols at once, none of which have been reviewed individually
+            // — the master automation switch is not consent for stocks that weren't on the list yet.
             insert.CommandText = """
-                INSERT INTO watchlist (symbol, added_utc, source, sort_order, alerts_enabled)
-                VALUES ($symbol, $now, $source, $order, 1)
+                INSERT INTO watchlist
+                    (symbol, added_utc, source, sort_order, alerts_enabled, auto_trade_enabled)
+                VALUES ($symbol, $now, $source, $order, 1, 0)
                 """;
             insert.Parameters.AddWithValue("$symbol", symbol);
             insert.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("O"));
@@ -2784,10 +2805,10 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                 (armed_id, symbol, trigger_kind, trigger_price, trigger_alert, action, quantity,
                  order_type, price, limit_price, state, armed_utc, expires_utc, note, source_alert,
                  protective_stop_id, trigger_percent, reference_price, trailing,
-                 persistent_until_filled, operator_originated, active_from_utc)
+                 persistent_until_filled, operator_originated, active_from_utc, trigger_window_minutes)
             VALUES ($id, $symbol, $kind, $tprice, $talert, $action, $qty,
                     $otype, $price, $limit, $state, $armed, $expires, $note, $alert, $stop,
-                    $tpercent, $reference, $trailing, $persistent, $operator, $activeFrom)
+                    $tpercent, $reference, $trailing, $persistent, $operator, $activeFrom, $window)
             """;
         command.Parameters.AddWithValue("$id", order.ArmedId);
         command.Parameters.AddWithValue("$symbol", order.Symbol);
@@ -2814,6 +2835,8 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         command.Parameters.AddWithValue("$operator", order.OperatorOriginated ? 1 : 0);
         command.Parameters.AddWithValue("$activeFrom",
             order.ActiveFromUtc?.ToString("O") ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$window",
+            order.TriggerWindowMinutes ?? (object)DBNull.Value);
         await command.ExecuteNonQueryAsync(ct);
         return order.ArmedId;
     }
@@ -2829,7 +2852,7 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                    order_type, price, limit_price, state, armed_utc, expires_utc, fired_utc,
                    execution_id, state_reason, note, source_alert, protective_stop_id,
                    trigger_percent, reference_price, trailing, persistent_until_filled,
-                   operator_originated, active_from_utc
+                   operator_originated, active_from_utc, trigger_window_minutes
             FROM armed_orders
             {(armedOnly ? "WHERE state = 'armed'" : "")}
             ORDER BY armed_utc DESC
@@ -2947,7 +2970,8 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         Trailing         = !reader.IsDBNull(21) && reader.GetInt64(21) != 0,
         PersistentUntilFilled = !reader.IsDBNull(22) && reader.GetInt64(22) != 0,
         OperatorOriginated    = !reader.IsDBNull(23) && reader.GetInt64(23) != 0,
-        ActiveFromUtc         = reader.IsDBNull(24) ? null : ParseUtc(reader.GetString(24))
+        ActiveFromUtc         = reader.IsDBNull(24) ? null : ParseUtc(reader.GetString(24)),
+        TriggerWindowMinutes  = reader.IsDBNull(25) ? null : reader.GetInt32(25)
     };
 
     // ── Protective stops ──────────────────────────────────────────────────────
@@ -2963,11 +2987,12 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                 (stop_id, symbol, parent_armed_id, parent_execution_id, parent_persistent_id,
                  stop_trigger, stop_limit, desired_qty, recurring,
                  state, baseline_qty, placed_qty, backstop_armed_id, created_utc, state_reason, note,
-                 supersedes_stop_id, operator_originated, take_profit_price, take_profit_armed_id)
+                 supersedes_stop_id, operator_originated, take_profit_price, take_profit_armed_id,
+                 sell_at_market_if_missed)
             VALUES ($id, $symbol, $parent, $parentExec, $parentIntent,
                     $trigger, $limit, $desired, $recurring,
                     $state, $baseline, $placed, $backstop, $created, $reason, $note, $supersedes,
-                    $operator, $targetPrice, $targetArmed)
+                    $operator, $targetPrice, $targetArmed, $marketIfMissed)
             """;
         command.Parameters.AddWithValue("$id", stop.StopId);
         command.Parameters.AddWithValue("$symbol", stop.Symbol);
@@ -2993,6 +3018,7 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         command.Parameters.AddWithValue("$targetPrice", Money(stop.TakeProfitPrice));
         command.Parameters.AddWithValue(
             "$targetArmed", stop.TakeProfitArmedId ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$marketIfMissed", stop.SellAtMarketIfMissed ? 1 : 0);
         await command.ExecuteNonQueryAsync(ct);
         return stop.StopId;
     }
@@ -3041,7 +3067,7 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                    state, baseline_qty, placed_qty, last_placed_date, last_order_no, backstop_armed_id,
                    created_utc, fill_confirmed_utc, closed_utc, state_reason, note, supersedes_stop_id,
                    operator_originated, parent_execution_id, parent_persistent_id,
-                   take_profit_price, take_profit_armed_id
+                   take_profit_price, take_profit_armed_id, sell_at_market_if_missed
             FROM protective_stops
             {(openOnly ? "WHERE state <> 'closed'" : "")}
             ORDER BY created_utc DESC
@@ -3237,7 +3263,8 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         ParentExecutionId    = reader.IsDBNull(20) ? null : reader.GetString(20),
         ParentPersistentIntentId = reader.IsDBNull(21) ? null : reader.GetString(21),
         TakeProfitPrice      = ParseDecimal(reader, 22),
-        TakeProfitArmedId    = reader.IsDBNull(23) ? null : reader.GetString(23)
+        TakeProfitArmedId    = reader.IsDBNull(23) ? null : reader.GetString(23),
+        SellAtMarketIfMissed = !reader.IsDBNull(24) && reader.GetInt64(24) != 0
     };
 
     private static object Money(decimal? value) => value is null

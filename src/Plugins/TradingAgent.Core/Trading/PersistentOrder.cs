@@ -434,7 +434,10 @@ public static class PersistentOrderDecisions
         };
 
         return snapshot.OpenOrders
-            .Where(order => !claimed.Contains(order.OrderNo.Trim())
+            // Either identifier: a kept-working STOPLOSS recorded its short number, and once it
+            // triggers the book leads with the long exchange id. Matching that alone would offer our
+            // own triggered stop as an unclaimed order of unknown ownership.
+            .Where(order => !order.IsAnyOf(claimed)
                             && SameSymbolAndSide(intent, order.Symbol, order.Side)
                             && CompatiblePrice(intent, reference, order.Price)
                             && CompatibleQuantity(order.RemainingQuantity, intent.Quantity))

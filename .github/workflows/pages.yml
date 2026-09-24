@@ -1,11 +1,7 @@
 name: Deploy marketing site to Pages
 
+# Manual only (Actions > Deploy marketing site to Pages > Run workflow).
 on:
-  push:
-    branches: [dev, main]
-    paths:
-      - 'website/**'
-      - '.github/workflows/pages.yml'
   workflow_dispatch:
 
 permissions:

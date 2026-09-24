@@ -9,6 +9,16 @@ namespace TradingAgent.Trading;
 /// order type, trigger kind, defaults, and fields that intent needs. Adding a broker order type or a
 /// new conditional trigger therefore starts here instead of growing another hard-coded dialog.
 /// </para>
+///
+/// <para>
+/// <b>WHO HOLDS THE ORDER is part of the label, not just the description.</b> A native broker stop
+/// rests at the exchange and fires whether or not this process is running; an AgentFox trigger fires
+/// only while the app is up and the market is open. That is the most consequential difference on the
+/// whole board, and until 2026-09-22 it was carried by "Buy IF it rises to a price" against "Buy WHEN
+/// it rises to a price" — two cards a reader could not tell apart, distinguished by a conjunction.
+/// The broker-held ones now say so in their titles, and every label on the board is unique in more
+/// than one word.
+/// </para>
 /// </summary>
 public static class OrderIntentRegistry
 {
@@ -45,52 +55,58 @@ public static class OrderIntentRegistry
             RequiresActivationDate: true),
 
         new("profit-book", "Book profit at a target",
-            "Place a sell limit at your target price for shares you already own.",
+            "A sell limit at your target price for shares you already own — the same order as \"Sell at my price\", worded for taking a profit.",
             "Protect & exit", "immediate", "SELL", "LIMIT", PriceField: "target"),
-        new("stop-loss", "Sell if it drops to a price",
-            "A native broker stop: trigger a sell when the price falls to your level.",
+        new("stop-loss", "Stop loss held by the broker",
+            "Rests at the exchange and sells when the price falls to your level — it works even when AgentFox is not running.",
             "Protect & exit", "immediate", "SELL", "STOPLOSS", PriceField: "stop"),
         new("trailing-stop", "Trailing stop",
-            "Follow gains upward, then sell if price falls by your chosen percentage.",
+            "The sell level follows the highest price since arming and never drops. Sells the whole quantity at once; AgentFox must be running.",
             "Protect & exit", "conditional", "SELL", "MARKET", "PercentDrop",
             PriceField: "none", DefaultPercent: 3m, Trailing: true),
+        // Measured from the recent HIGH, not from the price at arming: "it has fallen 3% from where
+        // it just was". A fixed arm-time reference let a stock rise 5% and then need an ~8% fall to
+        // fire; the trailing stop above covers "the highest since I armed it". Owner, 2026-09-22.
         new("sell-after-drop", "Sell if it drops by a %",
-            "Watch from the current price and sell after the chosen percentage fall.",
+            "Sell at market once the price falls your chosen % below its highest price of the recent window.",
             "Protect & exit", "conditional", "SELL", "MARKET", "PercentDrop",
-            PriceField: "none", DefaultPercent: 3m),
+            PriceField: "none", DefaultPercent: 3m, DefaultWindowMinutes: 15),
 
         new("wait-buy-drops", "Buy when it drops to a price",
-            "Wait in AgentFox until price drops to your trigger, then submit a limit buy.",
+            "AgentFox watches the price and submits a limit buy when it drops to your trigger. It only fires while AgentFox is running.",
             "Wait for a price", "conditional", "BUY", "LIMIT", "PriceBelow",
             PriceField: "trigger-and-limit"),
         new("wait-buy-rises", "Buy when it rises to a price",
-            "Wait in AgentFox until price rises to your trigger, then submit a limit buy.",
+            "AgentFox watches the price and submits a limit buy when it rises to your trigger. It only fires while AgentFox is running.",
             "Wait for a price", "conditional", "BUY", "LIMIT", "PriceAbove",
             PriceField: "trigger-and-limit"),
         new("wait-sell-drops", "Sell when it drops to a price",
-            "Wait in AgentFox until price drops to your trigger, then submit a limit sell.",
+            "AgentFox watches the price and submits a limit sell when it drops to your trigger. It only fires while AgentFox is running.",
             "Wait for a price", "conditional", "SELL", "LIMIT", "PriceBelow",
             PriceField: "trigger-and-limit"),
         new("wait-sell-rises", "Sell when it rises to a price",
-            "Wait in AgentFox until price rises to your trigger, then submit a limit sell.",
+            "AgentFox watches the price and submits a limit sell when it rises to your trigger. It only fires while AgentFox is running.",
             "Wait for a price", "conditional", "SELL", "LIMIT", "PriceAbove",
             PriceField: "trigger-and-limit"),
 
-        new("buy-on-rise", "Buy if it rises to a price",
-            "A native broker stop: buy only after price reaches your breakout level.",
+        new("buy-on-rise", "Breakout buy held by the broker",
+            "Rests at the exchange and buys once the price reaches your breakout level — it works even when AgentFox is not running.",
             "React to a move", "immediate", "BUY", "STOPLOSS", PriceField: "stop"),
+        // The three below measure from the recent extreme too, for the same reason as sell-after-drop
+        // (owner, 2026-09-22). A LIMIT one is priced at the level it FIRES at, not the level quoted at
+        // arming — the level moves with the window. See ArmedOrder.PriceAtFire.
         new("buy-after-rise", "Buy if it rises by a %",
-            "Watch from the current price and buy after the chosen percentage rise.",
+            "Buy at market once the price rises your chosen % above its lowest price of the recent window.",
             "React to a move", "conditional", "BUY", "MARKET", "PercentRise",
-            PriceField: "none", DefaultPercent: 3m),
+            PriceField: "none", DefaultPercent: 3m, DefaultWindowMinutes: 15),
         new("buy-after-drop", "Buy if it drops by a %",
-            "Watch from the current price and place a limit buy after the chosen fall.",
+            "Once the price falls your chosen % below its highest price of the recent window, place a limit buy at that level.",
             "React to a move", "conditional", "BUY", "LIMIT", "PercentDrop",
-            PriceField: "limit-at-trigger", DefaultPercent: 3m),
+            PriceField: "limit-at-trigger", DefaultPercent: 3m, DefaultWindowMinutes: 15),
         new("sell-after-rise", "Sell if it rises by a %",
-            "Watch from the current price and place a limit sell after the chosen rise.",
+            "Once the price rises your chosen % above its lowest price of the recent window, place a limit sell at that level.",
             "React to a move", "conditional", "SELL", "LIMIT", "PercentRise",
-            PriceField: "limit-at-trigger", DefaultPercent: 3m)
+            PriceField: "limit-at-trigger", DefaultPercent: 3m, DefaultWindowMinutes: 15)
     ];
 
     public static OrderIntentDefinition? Find(string? id) =>
@@ -111,4 +127,5 @@ public sealed record OrderIntentDefinition(
     string PriceField = "none",
     decimal? DefaultPercent = null,
     bool Trailing = false,
-    bool RequiresActivationDate = false);
+    bool RequiresActivationDate = false,
+    int? DefaultWindowMinutes = null);

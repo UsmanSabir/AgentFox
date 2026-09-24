@@ -173,6 +173,11 @@ export interface OrderIntentDefinition {
   priceField: 'none' | 'limit' | 'target' | 'stop' | 'limit-at-trigger' | string;
   defaultPercent: number | null;
   trailing: boolean;
+  /**
+   * Percent intents measured from the recent extreme: the highest price (drop) or lowest (rise) of
+   * this many recent trading minutes. Null for a fixed or trailing reference.
+   */
+  defaultWindowMinutes?: number | null;
   /** This intent cannot become active until the operator's selected PKT calendar date. */
   requiresActivationDate?: boolean;
 }
@@ -198,6 +203,24 @@ export interface DashboardOrderRequest {
   expiresInDays?: number;
   /** BUY only. Creates a protective stop that activates on this order's confirmed fill. */
   attachStop?: AttachStopRequest | null;
+  /**
+   * The operator has seen that a keep-working instruction on this symbol and side is still live, and
+   * wants this order as well. Without it the server answers 409 `duplicate_live_entry` naming what is
+   * live; it warns rather than gates, because a second entry on a name is an ordinary thing to want.
+   */
+  acknowledgeDuplicate?: boolean;
+}
+
+/** One live keep-working instruction the server found for this symbol and side. */
+export interface LiveEntryConflict {
+  intentId: string;
+  symbol: string;
+  action: string;
+  remainingQuantity: number;
+  state: string;
+  stateReason?: string | null;
+  /** Server-authored clause, shown verbatim. */
+  describe: string;
 }
 
 export interface DashboardOrderResult {
@@ -765,6 +788,10 @@ export interface ArmedOrder {
   referencePrice: number | null;
   /** The reference follows the price in the favourable direction and never moves back. */
   trailing: boolean;
+  /** Measured from the extreme of this many recent trading minutes instead of `referencePrice`. */
+  triggerWindowMinutes?: number | null;
+  /** That extreme as the monitor last saw it; null until the window has observed a price. */
+  windowReference?: number | null;
   action: 'BUY' | 'SELL' | string;
   quantity: number;
   orderType: string;
@@ -804,6 +831,8 @@ export interface ProtectiveStop {
   stopLimit: number;
   desiredQuantity: number;
   recurring: boolean;
+  /** Sells at market when the stop triggers and its limit is never reached. */
+  sellAtMarketIfMissed?: boolean;
   state: 'pending_fill' | 'active' | 'closed' | string;
   /** Holding before the entry went in. `null` means never captured — which is not zero. */
   baselineQuantity: number | null;
@@ -863,6 +892,11 @@ export interface ArmOrderRequest {
   referencePrice?: number | null;
   /** Trail the reference with the price — a drop trigger then behaves as a trailing stop. */
   trailing?: boolean;
+  /**
+   * Measure the move from the highest (drop) or lowest (rise) price of this many recent trading
+   * minutes. Not with `trailing`. Counted in session time, so the window carries across the close.
+   */
+  triggerWindowMinutes?: number | null;
   /** After the trigger, keep re-placing a LIMIT/STOPLOSS each trading day until filled or expired. */
   persistentUntilFilled?: boolean;
 
@@ -885,6 +919,11 @@ export interface AttachStopRequest {
   quantity?: number | null;
   /** Re-place the native stop each session. Off means it lapses after one day. */
   recurring: boolean;
+  /**
+   * When the stop triggers but its limit is never reached — the price fell straight through it —
+   * cancel it and sell what is left at market. Certainty over price; off unless asked for.
+   */
+  sellAtMarketIfMissed?: boolean;
 }
 
 /** A profit-taking LIMIT sell activated only after the attached BUY is confirmed filled. */

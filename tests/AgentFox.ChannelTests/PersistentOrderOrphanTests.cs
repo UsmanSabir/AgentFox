@@ -89,6 +89,41 @@ public sealed class PersistentOrderOrphanTests
     }
 
     [TestMethod]
+    public void AKeptWorkingStopTheLedgerNamesIsNotAnOrphanAfterItTriggers()
+    {
+        // A kept-working STOPLOSS records its SHORT number. Once it triggers the book leads with the long
+        // exchange id and carries the short number second (measured 2026-09-22). It is still ours.
+        var placements = new[] { Placement("accepted", "0411XK63") };
+        var triggered = new BrokerWorkingOrder(
+            "0010TKNSH300CCSD", "SYS", "SEL", 50, 132m, "LIMIT", AlternateOrderNo: "0411XK63");
+
+        var unclaimed = PersistentOrderDecisions.FindUnclaimedBrokerOrders(
+            Intent("cancelling"), placements, Snapshot(triggered));
+
+        Assert.AreEqual(0, unclaimed.Count,
+            "our own triggered stop must not be offered as an order of unknown ownership");
+    }
+
+    [TestMethod]
+    public void AWorkingOrderIsRecognisedUnderEitherOfItsIds()
+    {
+        var triggered = new BrokerWorkingOrder(
+            "0010TKNSH300GM0R", "PAEL", "SEL", 10, 38.55m, "LIMIT", AlternateOrderNo: "0411XK65");
+
+        Assert.IsTrue(triggered.Is("0411XK65"), "the short number recorded at placement");
+        Assert.IsTrue(triggered.Is(" 0010tknsh300gm0r "), "the venue's primary id, trimmed, any case");
+        Assert.IsFalse(triggered.Is("0411XK66"));
+        Assert.IsFalse(triggered.Is(null));
+        Assert.IsFalse(triggered.Is("   "));
+        Assert.IsTrue(triggered.IsAnyOf(new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "0411XK65" }));
+        Assert.IsFalse(triggered.IsAnyOf(new HashSet<string>()));
+
+        // An order with no second id never matches an empty entry in a set.
+        var plain = new BrokerWorkingOrder("0010TKG61200J52S", "SYS", "SEL", 50, 132m);
+        Assert.IsFalse(plain.IsAnyOf(new HashSet<string> { "" }));
+    }
+
+    [TestMethod]
     public void AnIntentWithNoPlacementsAtAllStillFindsItsOrder()
     {
         // The purest form: the crash happened on the first attempt, so there is no placement row to take

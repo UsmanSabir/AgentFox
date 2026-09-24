@@ -130,6 +130,25 @@ public sealed class SellRefusalTests
     }
 
     [TestMethod]
+    public void RestingSells_ExcludeOurOwnStop_AfterItTriggers()
+    {
+        // MEASURED 2026-09-22: a triggered stop leads with the long exchange id and keeps the short
+        // number we recorded in the second column. Matching the first alone listed our own stop as an
+        // order "placed elsewhere" — beside the blocking-stop entry that already named it.
+        var snapshot = Snapshot(
+            positions: [new("PAEL", 10m)],
+            openOrders:
+            [
+                new("0010TKNSH300GM0R", "PAEL", "SEL", 10, 38.55m, "LIMIT", AlternateOrderNo: "0411XK65")
+            ]);
+
+        var foreign = SellRefusalRule.RestingSellsNotPlacedHere(
+            snapshot, "PAEL", new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "0411XK65" });
+
+        Assert.AreEqual(0, foreign.Count, "our own triggered stop is not an order placed elsewhere");
+    }
+
+    [TestMethod]
     public void RestingSells_MatchTheSameSideVocabularyTheRuleCounted()
     {
         // Both spellings commit shares, so both must be nameable. A message that cannot explain a

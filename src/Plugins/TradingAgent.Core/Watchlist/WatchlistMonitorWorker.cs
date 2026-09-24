@@ -60,6 +60,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
     private readonly TradingActivityLog? _activity;
     private readonly IProtectiveStopReleaser? _stopReleaser;
     private readonly SellAvailabilityConfirmer _sellAvailability;
+    private readonly RecentPriceWindow _recentPrices;
 
     /// <summary>
     /// When a triggered SELL that was refused for want of free shares may be tried again, and how many
@@ -105,8 +106,10 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
         IOptions<TradingAgentOptions> options,
         ILogger<WatchlistMonitorWorker> logger,
         TradingActivityLog? activity = null,
-        IProtectiveStopReleaser? stopReleaser = null)
+        IProtectiveStopReleaser? stopReleaser = null,
+        RecentPriceWindow? recentPrices = null)
     {
+        _recentPrices = recentPrices ?? new RecentPriceWindow();
         _activity = activity;
         _stopReleaser = stopReleaser;
         _universe = universe;
@@ -436,6 +439,8 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
         // the next opening auction.
         var marketIsOpen = _calendar.GetStatus().IsOpen;
 
+        RecordWindowedPrices(armed, live, now, marketIsOpen);
+
         foreach (var order in armed)
         {
             ct.ThrowIfCancellationRequested();
@@ -454,8 +459,13 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
 
             var price = live.TryGetValue(order.Symbol, out var quote) ? quote.Current : null;
             var alerts = alertsBySymbol.GetValueOrDefault(order.Symbol, Array.Empty<AlertKind>());
+            var windowReference = order.IsWindowed
+                ? _recentPrices.Extreme(order.Symbol, order.TriggerWindowMinutes!.Value,
+                    PercentTrigger.WindowUsesHigh(order.TriggerKind))
+                : null;
 
-            if (!ArmedOrderEvaluator.ShouldFire(order, price, alerts, now, out var why, marketIsOpen))
+            if (!ArmedOrderEvaluator.ShouldFire(
+                    order, price, alerts, now, out var why, marketIsOpen, windowReference))
             {
                 // Not firing — so this is the moment a trailing trigger follows the price. Done after
                 // the fire check so a fire never waits on a bookkeeping write, and only when the
@@ -493,6 +503,9 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
             _logger.LogWarning("[ArmedOrders] {ArmedId} ({Symbol}) triggered: {Why}",
                 order.ArmedId, order.Symbol, why);
             _activity?.Info("Armed", $"{order.Symbol}: armed {order.Action} triggered", why);
+
+            // A windowed LIMIT is priced at the level it just fired at — see ArmedOrder.PriceAtFire.
+            var firePrice = order.PriceAtFire(windowReference);
 
             try
             {
@@ -670,7 +683,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                         Action = order.Action,
                         Quantity = effectiveQuantity,
                         OrderType = order.OrderType,
-                        Price = order.Price,
+                        Price = firePrice,
                         LimitPrice = order.LimitPrice,
                         ExpiresUtc = order.ExpiresUtc ?? DateTime.UtcNow.AddDays(30),
                         SourceArmedId = order.ArmedId,
@@ -689,7 +702,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                 }
                 else
                 {
-                    signal = order.ToSignal();
+                    signal = (order with { Price = firePrice }).ToSignal();
                     source = $"armed:{order.ArmedId}";
                 }
 
@@ -786,6 +799,38 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                     ex.Message);
             }
         }
+    }
+
+    /// <summary>
+    /// Feeds this pass's prices into the rolling window for every symbol a windowed trigger watches,
+    /// and forgets the symbols none does any more. Recorded BEFORE evaluation so the window's extreme
+    /// includes the price being judged.
+    ///
+    /// <para>
+    /// Only while the market is open — a price recorded while it is shut would count as trading time.
+    /// A gap longer than two passes (and at least five minutes) is read as the market having been shut
+    /// in between; see <see cref="RecentPriceWindow"/> for why that carries a window across the close.
+    /// </para>
+    /// </summary>
+    private void RecordWindowedPrices(
+        IReadOnlyList<ArmedOrder> armed,
+        IReadOnlyDictionary<string, PsxLiveQuote> live,
+        DateTime now,
+        bool marketIsOpen)
+    {
+        var watched = armed
+            .Where(o => o.IsWindowed)
+            .Select(o => o.Symbol)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        _recentPrices.Retain(watched);
+        if (!marketIsOpen) return;
+
+        var maxGap = RecentPriceWindow.MaxGapFor(_options.Value.Monitor.IntervalSeconds);
+
+        foreach (var symbol in watched)
+            if (live.TryGetValue(symbol, out var quote) && quote.Current is > 0)
+                _recentPrices.Record(symbol, quote.Current.Value, now, maxGap);
     }
 
     /// <summary>

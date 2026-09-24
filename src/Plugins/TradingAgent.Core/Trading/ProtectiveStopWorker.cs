@@ -1,4 +1,6 @@
-﻿using AgentFox.Plugins.Interfaces;
+﻿using System.Collections.Concurrent;
+using AgentFox.Plugins;
+using AgentFox.Plugins.Interfaces;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -76,6 +78,17 @@ public sealed class ProtectiveStopWorker
     /// the broker states it, and growing, because a shut board stays shut for a while and each retry
     /// only reproduces the same refusal. Reset by any successful placement.
     /// </summary>
+    /// <summary>
+    /// When each stop was first seen TRIGGERED and still resting unfilled, keyed on the stop id, with
+    /// the order number it was seen under. Memory only: a restart forgets it and the grace simply
+    /// starts again, which delays a market sale by one grace period and never causes one. Bounded by
+    /// the open stops — entries for stops no longer open are dropped at the start of every pass.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, (string OrderNo, DateTime SinceUtc)> _strandedSince =
+        new(StringComparer.Ordinal);
+
+    private readonly IRuntimePluginOptions<AhkConfig>? _brokerConfig;
+
     private DateTime _placementsBlockedUntilUtc = DateTime.MinValue;
     private TimeSpan _transientBackoff = TimeSpan.Zero;
 
@@ -177,8 +190,10 @@ public sealed class ProtectiveStopWorker
         ILogger<ProtectiveStopWorker> logger,
         TradingActivityLog? activity = null,
         IUserNotifier? notifier = null,
-        IEnumerable<IStopReplacementObserver>? replacementObservers = null)
+        IEnumerable<IStopReplacementObserver>? replacementObservers = null,
+        IRuntimePluginOptions<AhkConfig>? brokerConfig = null)
     {
+        _brokerConfig = brokerConfig;
         _activity    = activity;
         _notifier    = notifier;
         _replacementObservers = replacementObservers?.ToArray() ?? [];
@@ -370,6 +385,13 @@ public sealed class ProtectiveStopWorker
         var repository = scope.ServiceProvider.GetRequiredService<ITradingRepository>();
 
         var stops = await repository.GetProtectiveStopsAsync(openOnly: true, ct);
+
+        // Forget stranded-order sightings for stops that are no longer open (§0.1: every piece of
+        // state has something that removes it).
+        foreach (var key in _strandedSince.Keys)
+            if (!stops.Any(s => s.StopId == key))
+                _strandedSince.TryRemove(key, out _);
+
         if (stops.Count == 0) return;
 
         // Deliberately the CALENDAR here, not OrderWindow — unlike order placement and the take-profit
@@ -815,6 +837,13 @@ public sealed class ProtectiveStopWorker
 
         var held = holdings is null ? null : TryHeld(holdings, stop.Symbol);
 
+        // A stop that triggered and whose limit was never reached is stranded above the market, and
+        // the position is unprotected while it sits there. Handled before anything else here, because
+        // every decision below reads that order as "a stop is resting" — which is true of the order and
+        // false of the protection.
+        if (await HandleStrandedAsync(repository, stop, held, resting, today, ct))
+            return;
+
         // ── Orders that belong to a DIFFERENT stop on this symbol ────────────────────────────────
         // Two entries on one symbol produce two stop rows, and the across-session fallback in
         // FindOwnResting is the PRICE — which two stops on the same name are routinely within. Without
@@ -857,6 +886,7 @@ public sealed class ProtectiveStopWorker
                 SupersedesStopId  = stop.StopId,
                 BaselineQuantity  = stop.BaselineQuantity,
                 OperatorOriginated = stop.OperatorOriginated,
+                SellAtMarketIfMissed = stop.SellAtMarketIfMissed,
                 Note = $"Auto-shrunk from {stop.StopId}: holding is {heldForShrink:0.##}, less than "
                      + $"the {stop.PlacedQuantity} share(s) already resting under it."
             };
@@ -1046,8 +1076,7 @@ public sealed class ProtectiveStopWorker
                 // superseded_pending_cancel and warning that a cancel could not be confirmed on an
                 // operation that in fact succeeded. Found by the live host run, 2026-08-28.
                 var bookWithoutIt = resting
-                    ?.Where(r => !string.Equals(
-                        r.OrderNo?.Trim(), stop.LastOrderNo?.Trim(), StringComparison.OrdinalIgnoreCase))
+                    ?.Where(r => !r.Is(stop.LastOrderNo))
                     .ToList();
 
                 await RetireSupersededAsync(
@@ -1443,9 +1472,12 @@ public sealed class ProtectiveStopWorker
         // different symbols — a real capture had `0411XK1` as both a MARI BUY and a PAEL stop the same
         // day. Without the symbol this would read an unrelated live order as this stop's own, refuse to
         // close a row whose order really had gone, and then CANCEL THAT UNRELATED ORDER below.
+        // Either identifier: a stop that has TRIGGERED keeps its short number in the book's second
+        // column and shows the long exchange id in the first. Matching the first alone would read the
+        // triggered order as "already gone", close this row without cancelling anything, and leave a
+        // live sell resting over the position. See RestingOrder.Is.
         var stillResting = resting?.FirstOrDefault(r =>
-            r.Symbol.Equals(stop.Symbol, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(r.OrderNo?.Trim(), orderNo, StringComparison.OrdinalIgnoreCase));
+            r.Symbol.Equals(stop.Symbol, StringComparison.OrdinalIgnoreCase) && r.Is(orderNo));
 
         if (resting is not null && stillResting is null)
         {
@@ -1614,9 +1646,13 @@ public sealed class ProtectiveStopWorker
             TriggerPrice  = stop.StopTrigger,
             Action        = "SELL",
             Quantity      = quantity,
-            OrderType     = "STOPLOSS",
-            Price         = stop.StopTrigger,
-            LimitPrice    = stop.StopLimit,
+            // A stop set to sell at market if missed gets a market backstop too. The backstop is this
+            // stop expressed locally, and a stop-limit here would strand in exactly the way the
+            // operator asked not to be stranded: it fires only when the price is ALREADY at or below
+            // the trigger, which is the moment a limit is most likely to be left behind.
+            OrderType     = stop.SellAtMarketIfMissed ? "MARKET" : "STOPLOSS",
+            Price         = stop.SellAtMarketIfMissed ? null : stop.StopTrigger,
+            LimitPrice    = stop.SellAtMarketIfMissed ? null : stop.StopLimit,
             ExpiresUtc    = null,   // it lives as long as the intent does
             Note          = $"Local backstop for protective stop {stop.StopId}. Stands down while a "
                           + "native stop is resting at the broker.",
@@ -1737,14 +1773,230 @@ public sealed class ProtectiveStopWorker
 
     /// <summary>
     /// Maps the broker-neutral working-order shape onto the RestingOrder shape
-    /// <see cref="ProtectiveStopDecisions"/> was written against. OrderType and the raw row text have no
-    /// equivalent in <see cref="BrokerWorkingOrder"/> and are left null/empty — neither is read by any
-    /// decision in that type, only Symbol/Side/Price/OrderNo/Quantity are.
+    /// <see cref="ProtectiveStopDecisions"/> was written against. OrderType IS carried and IS read:
+    /// <see cref="ProtectiveStopDecisions.FindStrandedLimit"/> recognises a triggered stop by it, so an
+    /// adapter reporting the venue's raw token instead of LIMIT disables that detector silently. The raw
+    /// row text has no equivalent in <see cref="BrokerWorkingOrder"/> and is left empty.
     /// </summary>
     private static IReadOnlyList<RestingOrder> RestingFrom(BrokerReconciliationSnapshot snapshot) =>
         snapshot.OpenOrders.Select(o => new RestingOrder(
-            o.Symbol, o.Side, null, o.RemainingQuantity is { } q ? (int)q : null, o.Price, o.OrderNo, ""))
+            o.Symbol, o.Side, o.OrderType, o.RemainingQuantity is { } q ? (int)q : null, o.Price,
+            o.OrderNo, "", o.AlternateOrderNo))
             .ToList();
+
+    // ── A stop that triggered and was never filled ────────────────────────────
+
+    /// <summary>
+    /// Deals with this stop's order being stranded — triggered, turned into an ordinary limit, and left
+    /// unfilled above a market that fell through it. Returns true when it acted, or is in the middle of
+    /// acting, so the caller does nothing else with this stop this pass.
+    ///
+    /// <para>
+    /// <b>Every stop is REPORTED; only an opted-in one is SOLD.</b> A stranded stop is the most
+    /// dangerous state a position can be in while looking protected — an order is resting, so every
+    /// screen says "covered". Telling the operator costs nothing and is right for every stop. Selling at
+    /// market is a trade of price for certainty, and that is theirs to make per stock
+    /// (<see cref="ProtectiveStop.SellAtMarketIfMissed"/>).
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Cancel, CONFIRM, then sell — never the reverse.</b> Selling first would put two sells over one
+    /// holding: the broker would refuse the second for want of free shares, or worse, fill both if the
+    /// price came back. A cancel that is not confirmed gone does nothing further this pass. A cancel
+    /// that finds the order already gone WITHOUT cancelling it is the case where it filled in the
+    /// meantime — see <see cref="BrokerCancellationResult.GoneUncancelled"/> — and selling then would sell
+    /// shares the stop has just sold, so nothing is sent and the next pass reads the holding.
+    /// </para>
+    /// </summary>
+    private async Task<bool> HandleStrandedAsync(
+        ITradingRepository repository,
+        ProtectiveStop stop,
+        decimal? held,
+        IReadOnlyList<RestingOrder>? resting,
+        DateOnly today,
+        CancellationToken ct)
+    {
+        var stranded = ProtectiveStopDecisions.FindStrandedLimit(stop, resting, today);
+        if (stranded is null)
+        {
+            _strandedSince.TryRemove(stop.StopId, out _);
+            return false;
+        }
+
+        var orderNo = stop.LastOrderNo!.Trim();
+        var now = DateTime.UtcNow;
+        var seen = _strandedSince.AddOrUpdate(stop.StopId,
+            _ => (orderNo, now),
+            (_, prior) => prior.OrderNo == orderNo ? prior : (orderNo, now));
+
+        var grace = TimeSpan.FromSeconds(Math.Max(0, _options.Value.ProtectiveStopMissedGraceSeconds));
+        var strandedFor = now - seen.SinceUtc;
+        if (strandedFor < grace)
+        {
+            // Warning, not Information: the deployed host logs at Warning, and this is the only line
+            // that shows detection WORKING before the grace runs out. The stop worker's first live
+            // strand is how the unmeasured order-book column gets settled, and at Information that
+            // evidence would be below the log floor — the 2026-09-17 lesson. At most one line a pass,
+            // for a grace of a few minutes.
+            _logger.LogWarning(
+                "[ProtectiveStops] {StopId} ({Symbol}): order {OrderNo} has TRIGGERED and is resting "
+                + "unfilled at {Limit}; treated as missed if it is still there in {Remaining:mm\\:ss}.",
+                stop.StopId, stop.Symbol, orderNo, stranded.Price ?? stop.StopLimit, grace - strandedFor);
+            // Nothing else happens to this stop meanwhile: its order is resting, and every decision
+            // below would read that as protection and do nothing anyway.
+            return true;
+        }
+
+        var limit = stranded.Price ?? stop.StopLimit;
+        var remaining = stranded.Quantity;
+
+        if (!stop.SellAtMarketIfMissed)
+        {
+            _logger.LogWarning(
+                "[ProtectiveStops] {StopId} ({Symbol}): stop MISSED — order {OrderNo} triggered and has "
+                + "rested unfilled at {Limit} for {Minutes:0} minute(s); the price is below its limit. "
+                + "Not set to sell at market, so it is left resting.",
+                stop.StopId, stop.Symbol, orderNo, limit, strandedFor.TotalMinutes);
+            await AlertOnceAsync(stop, "stranded", today,
+                $"⚠️ **Stop missed — {stop.Symbol} is not protected**\n"
+                + $"• The stop triggered, but its sell limit at {limit:0.##} has not filled for "
+                + $"{strandedFor.TotalMinutes:0} minute(s): the price fell through it\n"
+                + "• The order is still resting, so the position LOOKS covered and is not\n"
+                + "_Sell by hand, or turn on \"sell at market if missed\" for this stop next time._");
+            _activity?.Error("Stops",
+                $"{stop.Symbol}: stop triggered but did NOT fill — its limit {limit:0.##} is above the market",
+                "The position is unprotected while that order rests. Sell by hand if you want out.");
+            return true;
+        }
+
+        if (_brokerConfig?.Current.AllowMarketOrders != true)
+        {
+            // Known up front rather than learned from a refusal: the risk engine refuses a MARKET order
+            // when these are disabled, and the reason would then arrive as a generic rejection.
+            await AlertOnceAsync(stop, "stranded-market-disabled", today,
+                $"⚠️ **Stop missed — {stop.Symbol} is not protected**\n"
+                + $"• The stop triggered and its limit at {limit:0.##} has not filled\n"
+                + "• It is set to sell at market if missed, but market orders are DISABLED in the broker "
+                + "settings, so nothing was sent\n"
+                + "_Sell by hand, or enable market orders._");
+            _activity?.Error("Stops",
+                $"{stop.Symbol}: stop missed, and market orders are disabled — nothing was sold",
+                $"The limit at {limit:0.##} is still resting above the market.");
+            return true;
+        }
+
+        if (held is not { } holding || holding <= 0m)
+        {
+            // Unknown is never zero, and a market sale is the last thing to size on a guess.
+            _logger.LogWarning(
+                "[ProtectiveStops] {StopId} ({Symbol}): stop missed, but the holding could not be read "
+                + "this pass; nothing is cancelled or sold until it can.", stop.StopId, stop.Symbol);
+            return true;
+        }
+
+        BrokerCancellationResult cancelled;
+        try
+        {
+            cancelled = await _canceller.CancelOrderAsync(orderNo, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "[ProtectiveStops] {StopId} ({Symbol}): cancel of stranded order {OrderNo} threw; "
+                + "nothing sold, retried next pass.", stop.StopId, stop.Symbol, orderNo);
+            return true;
+        }
+
+        if (!cancelled.Gone)
+        {
+            _logger.LogWarning(
+                "[ProtectiveStops] {StopId} ({Symbol}): stranded order {OrderNo} could NOT be confirmed "
+                + "cancelled ({Message}); nothing sold, so two sells never rest over one holding. "
+                + "Retried next pass.", stop.StopId, stop.Symbol, orderNo, cancelled.Message);
+            return true;
+        }
+
+        if (cancelled.GoneUncancelled)
+        {
+            _logger.LogWarning(
+                "[ProtectiveStops] {StopId} ({Symbol}): stranded order {OrderNo} was already gone when "
+                + "cancelled — it most likely filled in the meantime. Nothing sold; the next pass reads "
+                + "the holding.", stop.StopId, stop.Symbol, orderNo);
+            _strandedSince.TryRemove(stop.StopId, out _);
+            return true;
+        }
+
+        // What the stranded order still had to sell, never more than is held: a part-filled stop has
+        // already sold some, and the book reports what REMAINS.
+        var quantity = (int)Math.Min(holding, remaining is > 0 ? remaining.Value : holding);
+        if (quantity <= 0) return true;
+
+        var signal = new TradingSignal
+        {
+            IsSignal   = true,
+            Action     = "SELL",
+            Symbol     = stop.Symbol,
+            Quantity   = quantity,
+            OrderType  = "MARKET",
+            Confidence = "HIGH",
+            RawMessage = $"protective-stop-missed:{stop.StopId}"
+        };
+        var groups = new[] { (IReadOnlyList<TradingSignal>)[signal] };
+        var key    = $"protective-stop-missed:{stop.StopId}:{today:yyyyMMdd}:{orderNo}";
+
+        var approval = _approvals.Decide(
+            groups, key, new ApprovalContext(null, "protective-stop", stop.OperatorOriginated));
+        if (!approval.MayProceed)
+        {
+            await AlertOnceAsync(stop, "stranded-unauthorised", today,
+                $"⚠️ **Stop missed — {stop.Symbol} is not protected**\n"
+                + $"• The stranded limit at {limit:0.##} was CANCELLED, but the market sale of "
+                + $"{quantity:N0} share(s) was not authorised\n"
+                + $"• {approval.Reason}\n"
+                + "_Nothing is resting now. Sell by hand._");
+            _activity?.Error("Stops",
+                $"{stop.Symbol}: stop missed and cancelled, but the market sale was not authorised",
+                approval.Reason);
+            return true;
+        }
+
+        var result = await _manager.ExecuteGroupsAsync(groups, key, approval.Authorization, ct);
+        var order  = result.Groups.FirstOrDefault()?.FirstOrDefault();
+        _strandedSince.TryRemove(stop.StopId, out _);
+
+        if (result.Executed && order is { Success: true })
+        {
+            _logger.LogWarning(
+                "[ProtectiveStops] {StopId} ({Symbol}): stop MISSED at {Limit}; stranded order {OrderNo} "
+                + "cancelled and {Qty} share(s) sold AT MARKET as order {MarketOrder}.",
+                stop.StopId, stop.Symbol, limit, orderNo, quantity, order.OrderId ?? "(no number)");
+            _activity?.Warn("Stops",
+                $"{stop.Symbol}: stop missed — sold {quantity:N0} at market",
+                $"Its limit at {limit:0.##} was above the market, so it was cancelled and replaced "
+                + "with a market sale, as this stop was set to do.");
+            await AlertOnceAsync(stop, "stranded-sold", today,
+                $"🛡️ **Stop missed, sold at market — {stop.Symbol}**\n"
+                + $"• The stop triggered but its limit at {limit:0.##} was never reached\n"
+                + $"• The stranded order was cancelled and {quantity:N0} share(s) sold at market\n"
+                + "_The fill price is whatever the market paid; the sale itself is reported separately._");
+            return true;
+        }
+
+        var why = order?.Message ?? result.Reason ?? "no reason given";
+        _logger.LogError(
+            "[ProtectiveStops] {StopId} ({Symbol}): stop missed and its order cancelled, but the market "
+            + "sale FAILED: {Why}. Nothing is resting now.", stop.StopId, stop.Symbol, why);
+        _activity?.Error("Stops",
+            $"{stop.Symbol}: stop missed and cancelled, but the market sale failed — nothing is resting",
+            why);
+        await AlertOnceAsync(stop, "stranded-sale-failed", today,
+            $"⚠️ **Stop missed, market sale FAILED — {stop.Symbol} is not protected**\n"
+            + $"• The stranded limit at {limit:0.##} was cancelled\n"
+            + $"• The market sale of {quantity:N0} share(s) was refused: {why}\n"
+            + "_Nothing is resting now. Sell by hand. The stop is re-placed on its next pass._");
+        return true;
+    }
 
     // ── Alerts ────────────────────────────────────────────────────────────────
 

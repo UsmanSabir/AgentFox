@@ -193,6 +193,26 @@ public sealed record ProtectiveStop
     /// </para>
     /// </summary>
     public bool OperatorOriginated { get; init; }
+
+    /// <summary>
+    /// When this stop has triggered but its limit was never reached — the price fell straight through
+    /// it — cancel the stranded limit and sell what is still held AT MARKET.
+    ///
+    /// <para>
+    /// <b>Opt-in, per stop, and off by default.</b> A stop-limit's limit is a floor, not a price: in a
+    /// fast fall or a gap it becomes a sell order sitting above the market that nobody will take, and
+    /// the position is then held with no protection at all. This trades that for certainty at an
+    /// unknown price, which is a real cost on a thin stock — so the person who owns the position
+    /// chooses it, stock by stock, rather than a default choosing it for every position at once.
+    /// </para>
+    ///
+    /// <para>
+    /// It also turns this stop's LOCAL BACKSTOP into a market sell, since the backstop is the same stop
+    /// expressed locally and would otherwise strand in exactly the same way. It cannot help a stock
+    /// locked at its lower price limit, where there are no buyers at any price.
+    /// </para>
+    /// </summary>
+    public bool SellAtMarketIfMissed { get; init; }
 }
 
 /// <summary>One row read from the broker's outstanding (resting) order book.</summary>
@@ -206,7 +226,37 @@ public sealed record RestingOrder(
     int? Quantity,
     decimal? Price,
     string? OrderNo,
-    string Row);
+    string Row,
+    string? AlternateOrderNo = null)
+{
+    /// <summary>
+    /// Whether this row IS the order we recorded as <paramref name="orderNo"/> — under either
+    /// identifier the broker reports for it.
+    ///
+    /// <para>
+    /// <b>Both, because a stop's own number MOVES COLUMN when it triggers.</b> Measured on AHL
+    /// (2026-09-22, from the 2026-09-01 book and activity captures): the short
+    /// <c>{ServerCode}{UserCode}{seq}</c> number sits in field 6 for the whole of an order's life,
+    /// while field 5 — the one this record calls <see cref="OrderNo"/> — holds the short number while
+    /// a stop is ARMED and the long exchange id once it has TRIGGERED. So a stop matched on field 5
+    /// alone stops being recognisable at exactly the moment it becomes an ordinary resting limit, and
+    /// every caller here then concludes its order has left the book. What that costs is stated where
+    /// it bites: a superseded stop is closed WITHOUT its order being cancelled, and the triggered
+    /// order keeps resting and can still sell.
+    /// </para>
+    ///
+    /// <para>
+    /// The symbol is NOT checked here — callers filter by it first, and must keep doing so. Short
+    /// numbers are unique only within a connection, so one has named orders on different symbols.
+    /// </para>
+    /// </summary>
+    public bool Is(string? orderNo) =>
+        TradingAgent.Reconciliation.OrderIdentity.Matches(OrderNo, AlternateOrderNo, orderNo);
+
+    /// <summary>Whether this row is any of <paramref name="orderNumbers"/>, under either identifier.</summary>
+    public bool IsAnyOf(IReadOnlySet<string>? orderNumbers) =>
+        TradingAgent.Reconciliation.OrderIdentity.MatchesAny(OrderNo, AlternateOrderNo, orderNumbers);
+}
 
 /// <summary>What the holdings say about an entry that was submitted.</summary>
 public enum FillOutcome
@@ -286,6 +336,41 @@ public sealed record PlacementDecision(PlacementAction Action, int Quantity, str
 /// </summary>
 public static class ProtectiveStopDecisions
 {
+    /// <summary>
+    /// This stop's own order, if it has TRIGGERED and is resting in the book as an ordinary limit —
+    /// which, once it has stayed there past a grace period, means the price fell through its limit and
+    /// nobody is buying there. Null in every other case, including every case this cannot read.
+    ///
+    /// <para>
+    /// <b>Matched by the stop's own order number AND the symbol, never by price.</b> A price match is
+    /// how an unrelated order gets read as this stop's, and what follows from this is a cancel and a
+    /// market sale. Both of the broker's identifiers are tried, because a triggered stop can gain a
+    /// second one and which column carries which is not measured.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Unknown never counts.</b> A book that could not be read, a row with no order type, a type
+    /// other than LIMIT, a stop placed on an earlier session — each answers null. The one conclusion
+    /// this draws leads to selling at an unknown price, so it is drawn only from positive evidence.
+    /// </para>
+    /// </summary>
+    public static RestingOrder? FindStrandedLimit(
+        ProtectiveStop stop, IReadOnlyList<RestingOrder>? resting, DateOnly today)
+    {
+        if (resting is null) return null;
+        if (stop.State != "active") return null;
+        if (stop.LastPlacedSessionDate != today) return null;
+        if (stop.LastOrderNo is not { Length: > 0 } ours) return null;
+
+        return resting.FirstOrDefault(r =>
+            r.Symbol.Equals(stop.Symbol, StringComparison.OrdinalIgnoreCase)
+            && !(r.Side is { Length: > 0 } side && side.Contains("BUY", StringComparison.OrdinalIgnoreCase))
+            && string.Equals(r.OrderType?.Trim(), "LIMIT", StringComparison.OrdinalIgnoreCase)
+            // Either identifier: a triggered stop keeps its short number in the second column while
+            // the first becomes the long exchange id. See RestingOrder.Is.
+            && r.Is(ours));
+    }
+
     /// <summary>
     /// A placed price is compared to the requested trigger with a tolerance, because the portal
     /// re-clamps every order into that day's price band — the resting order's price is routinely a
@@ -576,7 +661,7 @@ public static class ProtectiveStopDecisions
         // refuses. What is left for this stop is custody minus what siblings already have resting.
         var (_, bySiblings) = CommittedSells(
             stop.Symbol,
-            resting.Where(r => excludedOrderNumbers?.Contains((r.OrderNo ?? "").Trim()) ?? false).ToList());
+            resting.Where(r => r.IsAnyOf(excludedOrderNumbers)).ToList());
         if (bySiblings is not { } siblingShares) return null;
 
         var ceiling = Math.Min(stop.DesiredQuantity, (int)Math.Floor(held) - siblingShares);
@@ -656,8 +741,7 @@ public static class ProtectiveStopDecisions
         // number alone would read someone else's live order as this stop's own.
         var predecessorOrder = predecessor.LastOrderNo is { Length: > 0 } no
             ? resting.FirstOrDefault(r =>
-                r.Symbol.Equals(predecessor.Symbol, StringComparison.OrdinalIgnoreCase)
-                && string.Equals(r.OrderNo?.Trim(), no.Trim(), StringComparison.OrdinalIgnoreCase))
+                r.Symbol.Equals(predecessor.Symbol, StringComparison.OrdinalIgnoreCase) && r.Is(no))
             : null;
 
         if (predecessorOrder is null)
@@ -754,8 +838,7 @@ public static class ProtectiveStopDecisions
             .Where(s => s.State == "active"
                      && s.Symbol.Equals(symbol, StringComparison.OrdinalIgnoreCase)
                      && s.LastOrderNo is { Length: > 0 })
-            .Select(s => (Stop: s, Row: sells.FirstOrDefault(r => string.Equals(
-                r.OrderNo?.Trim(), s.LastOrderNo!.Trim(), StringComparison.OrdinalIgnoreCase))))
+            .Select(s => (Stop: s, Row: sells.FirstOrDefault(r => r.Is(s.LastOrderNo))))
             .Where(x => x.Row is not null)
             .OrderByDescending(x => x.Row!.Quantity!.Value)
             .ToList();
@@ -849,7 +932,7 @@ public static class ProtectiveStopDecisions
                      // A row positively attributable to the other side of the book commits nothing.
                      && !(r.Side is { Length: > 0 } side
                           && side.Contains("BUY", StringComparison.OrdinalIgnoreCase))
-                     && !(ignoredOrderNumbers?.Contains((r.OrderNo ?? "").Trim()) ?? false))
+                     && !r.IsAnyOf(ignoredOrderNumbers))
             .ToList();
 
         return sells.Any(r => r.Quantity is null)
@@ -933,15 +1016,14 @@ public static class ProtectiveStopDecisions
     {
         var forSymbol = resting
             .Where(r => r.Symbol.Equals(stop.Symbol, StringComparison.OrdinalIgnoreCase)
-                     && !(excludedOrderNumbers?.Contains((r.OrderNo ?? "").Trim()) ?? false))
+                     && !r.IsAnyOf(excludedOrderNumbers))
             .ToList();
 
         if (forSymbol.Count == 0) return (null, false, "nothing resting");
 
         if (stop.LastOrderNo is { Length: > 0 } known)
         {
-            var byNumber = forSymbol.FirstOrDefault(r => string.Equals(
-                r.OrderNo?.Trim(), known.Trim(), StringComparison.OrdinalIgnoreCase));
+            var byNumber = forSymbol.FirstOrDefault(r => r.Is(known));
             if (byNumber is not null) return (byNumber, false, "matched by order number");
         }
 

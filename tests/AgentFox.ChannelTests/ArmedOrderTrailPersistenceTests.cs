@@ -65,6 +65,41 @@ public sealed class ArmedOrderTrailPersistenceTests
             + "the evaluator would disagree about where the order fires.");
     }
 
+    [TestMethod]
+    public async Task AWindowedTrigger_RoundTripsItsWindow()
+    {
+        var repository = NewRepository();
+        await repository.SaveArmedOrderAsync(
+            TrailingDrop() with { ArmedId = "window1", Trailing = false, TriggerWindowMinutes = 15 });
+
+        var stored = (await repository.GetArmedOrdersAsync()).Single(o => o.ArmedId == "window1");
+
+        Assert.AreEqual(15, stored.TriggerWindowMinutes);
+        Assert.IsTrue(stored.IsWindowed);
+    }
+
+    [TestMethod]
+    public async Task A_stops_sell_at_market_if_missed_flag_round_trips()
+    {
+        var repository = NewRepository();
+        await repository.SaveProtectiveStopAsync(new ProtectiveStop
+        {
+            StopId = "stop1", Symbol = "PAEL", StopTrigger = 38.55m, StopLimit = 38.40m,
+            State = "active", SellAtMarketIfMissed = true
+        });
+        await repository.SaveProtectiveStopAsync(new ProtectiveStop
+        {
+            StopId = "stop2", Symbol = "PAEL", StopTrigger = 38.55m, StopLimit = 38.40m,
+            State = "active"
+        });
+
+        var stops = await repository.GetProtectiveStopsAsync();
+
+        Assert.IsTrue(stops.Single(s => s.StopId == "stop1").SellAtMarketIfMissed);
+        Assert.IsFalse(stops.Single(s => s.StopId == "stop2").SellAtMarketIfMissed,
+            "off unless asked for, so no existing stop changes behaviour");
+    }
+
     // ── Migration ─────────────────────────────────────────────────────────────
 
     [TestMethod]

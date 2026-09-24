@@ -118,6 +118,12 @@ public sealed record ResolvePersistentAttentionRequest(
 /// Percent triggers only. The reference follows the price in the favourable direction — the high for a
 /// drop trigger, the low for a rise — making a drop trigger a trailing stop. Never moves back.
 /// </param>
+/// <param name="TriggerWindowMinutes">
+/// Percent triggers only, and not with <paramref name="Trailing"/>. Measure the move from the highest
+/// (drop) or lowest (rise) price of this many recent TRADING minutes rather than from the reference —
+/// "sell if it falls 2% from where it has just been". Counted in session time, so a window carries
+/// across the close. See <c>RecentPriceWindow</c>.
+/// </param>
 public sealed record ArmOrderRequest(
     string? Symbol,
     string? Action,
@@ -138,7 +144,8 @@ public sealed record ArmOrderRequest(
     decimal? ReferencePrice = null,
     bool Trailing = false,
     bool PersistentUntilFilled = false,
-    DateOnly? ActiveFromDate = null);
+    DateOnly? ActiveFromDate = null,
+    int? TriggerWindowMinutes = null);
 
 /// <summary>An immediate order submitted from a registry choice in the trading dashboard.</summary>
 public sealed record DashboardOrderRequest(
@@ -157,7 +164,21 @@ public sealed record DashboardOrderRequest(
     /// waiting-order path's own attachment — see <see cref="AttachStopRequest"/> and
     /// <c>TradingAgent.Watchlist.AttachedStopRule</c>.
     /// </summary>
-    AttachStopRequest? AttachStop = null);
+    AttachStopRequest? AttachStop = null,
+
+    /// <summary>
+    /// The operator has seen that a keep-working instruction on this symbol and side is still live and
+    /// still placing, and wants this order as well.
+    ///
+    /// <para>
+    /// Without it the endpoint answers 409 <c>duplicate_live_entry</c> naming what is live. It is a
+    /// warning rather than a gate — see <see cref="TradingAgent.Trading.DuplicateEntryRule"/> for the
+    /// 2026-09-21 MWMP double-fill it exists to prevent, and for why refusing outright would be worse.
+    /// A separate flag from any other confirmation on this request, because a second entry and, say, a
+    /// released protective stop are two different claims and one checkbox must not wave through both.
+    /// </para>
+    /// </summary>
+    bool AcknowledgeDuplicate = false);
 
 /// <summary>Auditable bulk alert state change. Dismiss is the UI's soft-delete operation.</summary>
 public sealed record BulkAlertActionRequest(
@@ -176,11 +197,16 @@ public sealed record BulkAlertActionRequest(
 /// orders at the close — a one-shot stop protects the position for a single day and then lapses
 /// silently.
 /// </param>
+/// <param name="SellAtMarketIfMissed">
+/// When the stop triggers but its limit is never reached, cancel it and sell at market. Opt-in; see
+/// <c>ProtectiveStop.SellAtMarketIfMissed</c> for the trade it makes.
+/// </param>
 public sealed record AttachStopRequest(
     decimal? StopTrigger,
     decimal? StopLimit = null,
     int? Quantity = null,
-    bool Recurring = true);
+    bool Recurring = true,
+    bool SellAtMarketIfMissed = false);
 
 /// <summary>
 /// A profit target attached to the same BUY entry as a protective stop. It stays dormant until the
