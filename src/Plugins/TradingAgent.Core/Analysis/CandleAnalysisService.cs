@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using TradingAgent.AhlAnalytics;
 using TradingAgent.Config;
 using TradingAgent.Persistence;
 using TradingAgent.Research;
@@ -25,6 +26,7 @@ public sealed class CandleAnalysisService
 {
     private readonly PsxDataClient _dataClient;
     private readonly CandleHistoryProvider _history;
+    private readonly AhlCandleSource _ahl;
     private readonly ITradingRepository _repository;
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly ILogger<CandleAnalysisService> _logger;
@@ -32,12 +34,14 @@ public sealed class CandleAnalysisService
     public CandleAnalysisService(
         PsxDataClient dataClient,
         CandleHistoryProvider history,
+        AhlCandleSource ahl,
         ITradingRepository repository,
         IOptions<TradingAgentOptions> options,
         ILogger<CandleAnalysisService> logger)
     {
         _dataClient = dataClient;
         _history = history;
+        _ahl = ahl;
         _repository = repository;
         _options = options;
         _logger = logger;
@@ -157,13 +161,13 @@ public sealed class CandleAnalysisService
             };
         }
 
-        var intraday = await LoadIntradayAsync(symbol, intervalMinutes, warnings, ct);
+        var (intraday, intradaySources) = await LoadIntradayAsync(symbol, intervalMinutes, warnings, ct);
         if (intraday.Count == 0)
             throw new CandleAnalysisException(
                 $"No intraday trades are available for {symbol} at " +
-                $"{PsxDataClient.IntervalLabel(intervalMinutes)}. The PSX tick feed covers the current " +
-                "session only, so this happens before the open or when the symbol has not traded today " +
-                "and no earlier session has been archived. Use interval '1D' instead.");
+                $"{PsxDataClient.IntervalLabel(intervalMinutes)}. This happens before the open or when the " +
+                "symbol has not traded today, while neither the AHL research portal nor the archive holds " +
+                "an earlier session for it. Use interval '1D' instead.");
 
         return new CandleAnalysis
         {
@@ -177,26 +181,51 @@ public sealed class CandleAnalysisService
             SessionsAvailable = fullDaily.Count,
             Quote             = quote,
             RetrievedAtUtc    = DateTime.UtcNow,
-            SourceUrls        =
-                [.. sourceUrls, $"{_options.Value.PsxDataBaseUrl.TrimEnd('/')}/timeseries/int/{symbol}"],
+            SourceUrls        = [.. sourceUrls, .. intradaySources],
             Warnings          = warnings
         };
     }
 
     /// <summary>
-    /// Builds the intraday series: archived bars from earlier sessions, plus the current session
-    /// rebuilt from the live tick tape. Today is always recomputed rather than read from the archive,
-    /// so a bar that was still forming when it was last saved is never treated as final. Completed
-    /// bars are written back (when archiving is enabled), which is how multi-session intraday history
-    /// accumulates at all — PSX serves the current session only.
+    /// Builds the intraday series: earlier sessions from the archive, plus the current session.
+    ///
+    /// <para>
+    /// <b>Today</b> comes from the AHL research portal's one-minute bars when the portal is already
+    /// signed in, and from the PSX tick tape otherwise. Both are raw traded prices: the portal's
+    /// adjustment factor for the current session is 1.0, the same fact that lets its daily series
+    /// carry a live bar. Today is always recomputed rather than read from the archive, so a bar still
+    /// forming when it was last saved is never treated as final, and completed bars are written back.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Earlier sessions</b> come from the archive. A session the archive lacks is filled from the
+    /// portal's five-day window, which is what lets a fresh install, or a day the agent was down, still
+    /// show several sessions. The fill is skipped when those bars carry sub-paisa prices, the portal's
+    /// corporate-action adjustment: they would sit on a different scale from the raw archive, and a
+    /// series must not change scale partway. Filled bars are never archived, for the same reason
+    /// adjusted daily bars never enter <c>daily_bars</c>.
+    /// </para>
     /// </summary>
-    private async Task<IReadOnlyList<PsxCandle>> LoadIntradayAsync(
+    private async Task<(IReadOnlyList<PsxCandle> Bars, IReadOnlyList<string> SourceUrls)> LoadIntradayAsync(
         string symbol, int interval, List<string> warnings, CancellationToken ct)
     {
         var scan = _options.Value.Scan;
+        var now = DateTime.UtcNow;
+        var sourceUrls = new List<string>();
 
-        var ticks = await _dataClient.GetIntradayTicksAsync(symbol, ct);
-        var live = PsxDataClient.AggregateTicks(symbol, ticks, interval);
+        IReadOnlyList<PsxCandle> live;
+        var portalToday = await _ahl.GetTodayMinuteBarsAsync(symbol, ct);
+        if (portalToday.Count > 0)
+        {
+            live = CandleResampler.ToIntraday(portalToday, interval, now);
+            sourceUrls.Add($"AHL analytics /intraday/{symbol}/1D");
+        }
+        else
+        {
+            var ticks = await _dataClient.GetIntradayTicksAsync(symbol, ct);
+            live = PsxDataClient.AggregateTicks(symbol, ticks, interval);
+            sourceUrls.Add($"{_options.Value.PsxDataBaseUrl.TrimEnd('/')}/timeseries/int/{symbol}");
+        }
 
         var earliestLive = live.Count > 0 ? live[0].BucketStartUtc : null;
         IReadOnlyList<PsxCandle> archived = [];
@@ -226,8 +255,17 @@ public sealed class CandleAnalysisService
             }
         }
 
-        var merged = archived.Concat(live).OrderBy(b => b.SortKeyUtc).ToList();
-        if (merged.Count == 0) return merged;
+        var filled = await FillMissingSessionsAsync(symbol, interval, archived, live, now, warnings, ct);
+        if (filled.Count > 0) sourceUrls.Add($"AHL analytics /intraday/{symbol}/5D");
+
+        // Earlier sessions share one bar budget whatever their source, newest kept, as the archive
+        // read alone always did.
+        var budget = Math.Clamp(scan.IntradayLookbackBars, 20, 5000);
+        var earlier = archived.Concat(filled).OrderBy(b => b.SortKeyUtc).ToList();
+        if (earlier.Count > budget) earlier = earlier.GetRange(earlier.Count - budget, budget);
+
+        var merged = earlier.Concat(live).OrderBy(b => b.SortKeyUtc).ToList();
+        if (merged.Count == 0) return (merged, sourceUrls);
 
         // Session count, not bar count, is what makes intraday levels meaningful: one session of 5m
         // bars is 76 bars and still only one day's range, so a bar-count check would stay silent
@@ -236,12 +274,39 @@ public sealed class CandleAnalysisService
         if (sessions < 3)
             warnings.Add(
                 $"Intraday history covers only {sessions} session(s) " +
-                $"({merged.Count} {PsxDataClient.IntervalLabel(interval)} bars). PSX publishes no " +
-                "historical intraday, so this builds up from the sessions this agent has archived. " +
+                $"({merged.Count} {PsxDataClient.IntervalLabel(interval)} bars). " +
                 "Levels drawn from it are weak — trade the daily levels and use these bars only " +
                 "for timing.");
 
-        return merged;
+        return (merged, sourceUrls);
+    }
+
+    /// <summary>
+    /// Earlier sessions the archive does not hold, from the portal's five-day window, at
+    /// <paramref name="interval"/>. Empty when the portal is not signed in, has nothing, or its bars
+    /// look adjusted (see <see cref="LoadIntradayAsync"/>).
+    /// </summary>
+    private async Task<IReadOnlyList<PsxCandle>> FillMissingSessionsAsync(
+        string symbol, int interval, IReadOnlyList<PsxCandle> archived, IReadOnlyList<PsxCandle> live,
+        DateTime now, List<string> warnings, CancellationToken ct)
+    {
+        var prior = await _ahl.GetPriorSessionMinuteBarsAsync(symbol, ct);
+        if (prior.Count == 0) return [];
+
+        var held = archived.Select(b => b.Date).Concat(live.Select(b => b.Date)).ToHashSet();
+        var missing = prior.Where(b => !held.Contains(b.Date)).ToList();
+        if (missing.Count == 0) return [];
+
+        if (AhlCandleSource.LooksAdjusted(missing))
+        {
+            warnings.Add(
+                $"Earlier intraday sessions for {symbol} were not filled from the AHL research portal: its " +
+                "bars are corporate-action adjusted, which would put them on a different price scale from " +
+                "the archived sessions.");
+            return [];
+        }
+
+        return CandleResampler.ToIntraday(missing, interval, now);
     }
 }
 

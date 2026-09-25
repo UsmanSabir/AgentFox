@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using Microsoft.Extensions.Logging;
 using TradingAgent.Research;
@@ -129,6 +130,145 @@ public sealed class AhlCandleSource
             _logger.LogWarning(ex, "[AhlCandles] Daily history failed for {Symbol}.", symbol);
             return [];
         }
+    }
+
+    // ── intraday ─────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Earlier sessions' one-minute bars, per symbol, for the current PKT date only. Settled bars do
+    /// not change, so one <c>5D</c> read a day is enough; re-reading 1,800 rows on every chart request
+    /// or strategy pass would spend the portal's shared 40-a-minute budget on nothing.
+    ///
+    /// <para>
+    /// Retention: memory only. The whole set is dropped on the first write of a new PKT date, and at
+    /// <see cref="PriorSessionCacheMaxSymbols"/> entries, so it holds at most one day's reads for the
+    /// symbols actually asked about. An empty read (an outage or a throttle) is never stored.
+    /// </para>
+    /// </summary>
+    private readonly ConcurrentDictionary<string, (DateOnly Day, IReadOnlyList<PsxCandle> Bars)> _priorSessions =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    private const int PriorSessionCacheMaxSymbols = 300;
+
+    /// <summary>
+    /// Today's one-minute bars, oldest first, or empty when the portal is not signed in, fails, or
+    /// has nothing for today yet. Never performs the SSO handshake (see <see cref="ReadyWithoutHandshake"/>).
+    ///
+    /// <para>
+    /// <c>1D</c> means "the latest session", which before the open is YESTERDAY's. Only bars dated
+    /// today are returned, so a pre-open read yields nothing and the caller falls back to PSX rather
+    /// than presenting yesterday's tape as today's.
+    /// </para>
+    /// </summary>
+    public async Task<IReadOnlyList<PsxCandle>> GetTodayMinuteBarsAsync(string symbol, CancellationToken ct = default)
+    {
+        if (!ReadyWithoutHandshake) return [];
+        var today = PktSessionDate(_clock.GetUtcNow());
+        var bars = await ReadMinuteBarsAsync(symbol, "1D", ct);
+        return bars.Where(b => b.Date == today).ToList();
+    }
+
+    /// <summary>
+    /// One-minute bars for the sessions BEFORE today that the portal still serves (its <c>5D</c>
+    /// window, so up to four), oldest first. Read at most once per symbol per PKT day. Empty when the
+    /// portal is not signed in or the read fails.
+    ///
+    /// <para>
+    /// These may be corporate-action ADJUSTED if an ex-date falls inside the window, like the daily
+    /// series. Check <see cref="LooksAdjusted"/> before placing them beside raw archived bars.
+    /// </para>
+    /// </summary>
+    public async Task<IReadOnlyList<PsxCandle>> GetPriorSessionMinuteBarsAsync(string symbol, CancellationToken ct = default)
+    {
+        if (!ReadyWithoutHandshake) return [];
+        var today = PktSessionDate(_clock.GetUtcNow());
+        if (_priorSessions.TryGetValue(symbol, out var held) && held.Day == today) return held.Bars;
+
+        var prior = (await ReadMinuteBarsAsync(symbol, "5D", ct)).Where(b => b.Date < today).ToList();
+        if (prior.Count == 0) return prior;
+
+        if (_priorSessions.Count >= PriorSessionCacheMaxSymbols || _priorSessions.Values.Any(e => e.Day != today))
+            _priorSessions.Clear();
+        _priorSessions[symbol] = (today, prior);
+        return prior;
+    }
+
+    /// <summary>
+    /// True when any price is finer than a paisa. PSX trades in whole paisa, so a finer price can only
+    /// be the portal's corporate-action adjustment (its documented fingerprint, e.g. LUCK's
+    /// <c>162.09221369698164</c>). Such bars sit on a different scale from raw exchange bars.
+    /// </summary>
+    public static bool LooksAdjusted(IEnumerable<PsxCandle> bars) =>
+        bars.Any(b => !WholePaisa(b.Open) || !WholePaisa(b.High) || !WholePaisa(b.Low) || !WholePaisa(b.Close));
+
+    private static bool WholePaisa(decimal price) => decimal.Round(price, 2) == price;
+
+    /// <summary>
+    /// Maps the portal's one-minute rows. <b>A row's stamp is the END of its minute</b>, in PKT
+    /// wall-clock time: the row stamped <c>09:18:00</c> holds the trades from 09:17:00 to 09:17:59.
+    /// MEASURED 2026-09-25 against the PSX tick tape for PPL and OGDC: read as the end, volume matched
+    /// exactly on 77 of 77 and 76 of 76 settled minutes; read as the start, on none. Premium's planner
+    /// reads the same rows the same way (<c>TradeCastPlannerMarketData</c>).
+    /// </summary>
+    private async Task<IReadOnlyList<PsxCandle>> ReadMinuteBarsAsync(string symbol, string range, CancellationToken ct)
+    {
+        try
+        {
+            var rows = await _client.GetIntradayCandlesAsync(symbol, range, ct);
+            if (rows.Count == 0) return [];
+
+            return MapMinuteRows(symbol, rows, _clock.GetUtcNow().UtcDateTime);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Fail soft: the caller falls back to the PSX tick tape and the archive.
+            _logger.LogWarning(ex, "[AhlCandles] Intraday {Range} bars failed for {Symbol}.", range, symbol);
+            return [];
+        }
+    }
+
+    /// <summary>
+    /// The portal's one-minute rows as bars, oldest first. Pure, so the stamp reading and the
+    /// dropped-row rules are tested rather than trusted. See <see cref="ReadMinuteBarsAsync"/> for
+    /// how the stamp is read.
+    /// </summary>
+    internal static IReadOnlyList<PsxCandle> MapMinuteRows(string symbol, IReadOnlyList<AhlCandle> rows, DateTime nowUtc)
+    {
+        var mapped = new List<PsxCandle>(rows.Count);
+        foreach (var row in rows)
+        {
+            if (row.Date is not { Length: >= 19 } stamp
+                || !DateTime.TryParseExact(stamp[..19], "yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture,
+                    DateTimeStyles.None, out var pkt))
+                continue;
+            // Dropped rather than zero-filled, as for daily bars: a zero low would invent a level.
+            if (row.Open <= 0 || row.High <= 0 || row.Low <= 0 || row.Close <= 0) continue;
+
+            // The stamp closes the minute, so the bar starts one minute earlier. PKT is UTC+5 all year,
+            // with no daylight saving. A session never crosses midnight, so the date is unaffected.
+            var startUtc = DateTime.SpecifyKind(pkt.AddHours(-5).AddMinutes(-1), DateTimeKind.Utc);
+            mapped.Add(new PsxCandle
+            {
+                Symbol          = symbol,
+                Date            = DateOnly.FromDateTime(pkt),
+                Open            = row.Open,
+                High            = row.High,
+                Low             = row.Low,
+                Close           = row.Close,
+                PreviousClose   = null,
+                Volume          = row.Volume,
+                IntervalMinutes = 1,
+                BucketStartUtc  = startUtc,
+                IsLive          = startUtc.AddMinutes(1) > nowUtc
+            });
+        }
+
+        mapped.Sort((a, b) => a.SortKeyUtc.CompareTo(b.SortKeyUtc));
+        return mapped;
     }
 
     /// <summary>
