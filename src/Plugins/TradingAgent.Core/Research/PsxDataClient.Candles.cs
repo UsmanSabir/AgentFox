@@ -227,7 +227,10 @@ public sealed partial class PsxDataClient
                 return fresh;
 
             var baseUrl = _options.Value.PsxDataBaseUrl.TrimEnd('/');
-            var html = await _http.GetStringAsync($"{baseUrl}/market-watch", ct);
+            using var response = await SendKeyedAsync(
+                () => new HttpRequestMessage(HttpMethod.Get, $"{baseUrl}/market-watch"), ct);
+            response.EnsureSuccessStatusCode();
+            var html = await response.Content.ReadAsStringAsync(ct);
             var rows = ParseMarketWatchTable(html, DateTime.UtcNow);
 
             _logger.LogDebug("[PsxCandles] Market watch returned {Count} symbols.", rows.Count);
@@ -398,9 +401,11 @@ public sealed partial class PsxDataClient
         try
         {
             var baseUrl = _options.Value.PsxDataBaseUrl.TrimEnd('/');
-            using var form = new FormUrlEncodedContent(
-                [new KeyValuePair<string, string>("date", date.ToString("yyyy-MM-dd"))]);
-            using var response = await _http.PostAsync($"{baseUrl}/historical", form, ct);
+            using var response = await SendKeyedAsync(() => new HttpRequestMessage(HttpMethod.Post, $"{baseUrl}/historical")
+            {
+                Content = new FormUrlEncodedContent(
+                    [new KeyValuePair<string, string>("date", date.ToString("yyyy-MM-dd"))])
+            }, ct);
             response.EnsureSuccessStatusCode();
 
             var html = await response.Content.ReadAsStringAsync(ct);

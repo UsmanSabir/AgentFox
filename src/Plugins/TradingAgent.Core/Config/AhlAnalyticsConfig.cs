@@ -30,8 +30,10 @@ public sealed class AhlAnalyticsConfig
     public bool Enabled { get; set; }
 
     /// <summary>
-    /// Base URL of the analytics portal. Only overridden if AHL moves the host; the SSO URL the
-    /// broker hands us is absolute, so this is used for the API calls that follow it.
+    /// Base URL of the analytics portal, and a FALLBACK only. API calls go to the host the SSO
+    /// landing page was actually served from, because that host set the session cookie the API needs.
+    /// AHL moved that host to <c>ahl.capitalstake.com</c> on 2026-09-24, and a fixed base URL then
+    /// answered 401 on every call (<c>AhlAnalyticsClient.ApiBaseFrom</c>).
     /// </summary>
     public string BaseUrl { get; set; } = "https://data.arifhabibltd.com/";
 

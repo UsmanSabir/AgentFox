@@ -221,7 +221,8 @@ public sealed partial class PsxDataClient
     private async Task<List<SeriesPoint>> FetchSeriesAsync(string path, CancellationToken ct)
     {
         var baseUrl = _options.Value.PsxDataBaseUrl.TrimEnd('/');
-        using var response = await _http.GetAsync($"{baseUrl}/{path}", ct);
+        using var response = await SendKeyedAsync(
+            () => new HttpRequestMessage(HttpMethod.Get, $"{baseUrl}/{path}"), ct);
         response.EnsureSuccessStatusCode();
 
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
