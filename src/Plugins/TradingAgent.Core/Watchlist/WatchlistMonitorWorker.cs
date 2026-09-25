@@ -1168,11 +1168,16 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
         var allStops = await _repository.GetProtectiveStopsAsync(openOnly: false, ct);
         var stop = allStops.FirstOrDefault(s => s.StopId == order.ProtectiveStopId);
 
-        if (stop is null)
-            return "the protective stop it backs no longer exists";
-
-        if (stop.State == "closed")
-            return $"the protective stop it backs is closed ({stop.StateReason})";
+        if (ProtectiveStopDecisions.OrphanedBackstopReason(stop) is { } orphaned)
+        {
+            // Retired, not merely held: a closed stop never reopens, so holding this armed only repeats
+            // the stand-down on every pass until it expires (THCCL, 2026-09-25, x41 after the sale).
+            ClearRefusedSell(order.ArmedId);
+            var retired = await _repository.TrySetArmedOrderStateAsync(
+                order.ArmedId, "armed", "cancelled",
+                $"Local backstop retired: {orphaned}.", ct: ct);
+            return retired ? $"{orphaned}; the backstop has been retired" : orphaned;
+        }
 
         IReadOnlyList<RestingOrder>? resting;
         try { resting = await _outstandingReader.GetOutstandingOrdersAsync(order.Symbol, ct); }

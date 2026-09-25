@@ -858,6 +858,24 @@ public static class ProtectiveStopDecisions
     }
 
     /// <summary>
+    /// Why a local backstop has outlived the stop it backs, or null while that stop is still open.
+    ///
+    /// <para>
+    /// A closed stop never reopens, so its backstop can never legitimately fire again: holding it armed
+    /// only means it meets its trigger and stands down again on every monitor pass, until it expires.
+    /// Such an order is retired rather than held. This is the safety net under every path that closes a
+    /// stop without cancelling the backstop. The stop worker's own close paths do cancel it, but
+    /// editions close stop rows directly too.
+    /// </para>
+    /// </summary>
+    public static string? OrphanedBackstopReason(ProtectiveStop? stop) => stop switch
+    {
+        null => "the protective stop it backs no longer exists",
+        { State: "closed" } => $"the protective stop it backs is closed ({stop.StateReason})",
+        _ => null
+    };
+
+    /// <summary>
     /// Whether the local backstop must stand down because the native stop is already resting.
     ///
     /// <para>

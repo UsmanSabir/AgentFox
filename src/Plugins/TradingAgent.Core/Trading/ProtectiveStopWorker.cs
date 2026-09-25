@@ -1459,8 +1459,7 @@ public sealed class ProtectiveStopWorker
         if (stop.LastOrderNo is not { Length: > 0 } orderNo)
         {
             // No native order was ever placed for this row — there is nothing at the broker to cancel.
-            await repository.TrySetProtectiveStopStateAsync(
-                stop.StopId, "superseded_pending_cancel", "closed",
+            await CloseSupersededAsync(repository, stop,
                 "Superseded before any native order was placed for it; nothing to cancel.", ct);
             return;
         }
@@ -1484,8 +1483,7 @@ public sealed class ProtectiveStopWorker
 
         if (resting is not null && stillResting is null)
         {
-            await repository.TrySetProtectiveStopStateAsync(
-                stop.StopId, "superseded_pending_cancel", "closed",
+            await CloseSupersededAsync(repository, stop,
                 $"Order {orderNo} is no longer in {stop.Symbol}'s outstanding book; nothing left to cancel.", ct);
             return;
         }
@@ -1506,8 +1504,7 @@ public sealed class ProtectiveStopWorker
 
         if (result.Gone)
         {
-            await repository.TrySetProtectiveStopStateAsync(
-                stop.StopId, "superseded_pending_cancel", "closed",
+            await CloseSupersededAsync(repository, stop,
                 $"Superseded order {orderNo} confirmed cancelled: {result.Message}", ct);
             _logger.LogInformation(
                 "[ProtectiveStops] {StopId} ({Symbol}): superseded order {OrderNo} cancelled and " +
@@ -1531,6 +1528,34 @@ public sealed class ProtectiveStopWorker
             + $"• {result.Message}\n"
             + "_The position is protected by both stops meanwhile — retrying automatically. If this "
             + "persists, cancel the old order manually._");
+    }
+
+    /// <summary>
+    /// Closes a superseded row AND the local backstop it owned. The two go together for the same reason
+    /// they do in <see cref="CloseAsync"/>: a backstop outliving its stop is an armed SELL that nothing
+    /// will ever fire or retire. <see cref="WatchlistMonitorWorker"/> stands it down every time its
+    /// trigger is met (the stop is closed), so it repeated "local backstop stood down" on every pass
+    /// for up to ten days, long after the position was sold. Measured 2026-09-25, THCCL, x41.
+    ///
+    /// <para>
+    /// Safe to cancel unconditionally: a successor is always built with its OWN backstop (see
+    /// <see cref="StopReplacement"/>), never the predecessor's, so this cannot remove the new stop's
+    /// cover. Only when this call closed the row, so a row some other path moved on is left to it.
+    /// </para>
+    /// </summary>
+    public static async Task<bool> CloseSupersededAsync(
+        ITradingRepository repository, ProtectiveStop stop, string reason, CancellationToken ct)
+    {
+        if (!await repository.TrySetProtectiveStopStateAsync(
+                stop.StopId, "superseded_pending_cancel", "closed", reason, ct))
+            return false;
+
+        if (stop.LocalBackstopArmedId is { } backstopId)
+            await repository.TrySetArmedOrderStateAsync(
+                backstopId, "armed", "cancelled",
+                $"The protective stop it backed was superseded and closed: {reason}", ct: ct);
+
+        return true;
     }
 
     // ── Releasing shares for a reducing SELL ──────────────────────────────────
