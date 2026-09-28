@@ -505,6 +505,10 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
                 return new(true, false, intent.State,
                     "The intent changed while resolving; refresh and retry.");
 
+            var placements = await _repository.GetPersistentOrderPlacementsAsync(intentId, ct);
+            await SettleUnobservedPlacementAsync(placements.LastOrDefault(),
+                $"Outcome resolved by {approvedBy} from a broker check: {resolution}.", ct);
+
             _activity?.Info("Orders",
                 $"{intent.Symbol}: attention resolved by {approvedBy} ({resolution})", reason);
             return new(true, true, newState, reason);
@@ -548,8 +552,9 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
             var unchanged = $"Holdings for {intent.Symbol} are unchanged since before the "
                 + $"{latestPlacement.SessionDate:yyyy-MM-dd} placement ({baseline.Value:0.##} -> "
                 + $"{current:0.##} share(s)); treating that attempt as not filled and resuming daily retries.";
-            await _repository.SetPersistentOrderProgressAsync(
-                intent.IntentId, intent.FilledQuantity, "active", unchanged, ct);
+            if (await _repository.SetPersistentOrderProgressAsync(
+                    intent.IntentId, intent.FilledQuantity, "active", unchanged, ct))
+                await SettleUnobservedPlacementAsync(latestPlacement, unchanged, ct);
             _activity?.Info("Orders", $"{intent.Symbol}: attention auto-resolved (holdings unchanged)", unchanged);
             return true;
         }
@@ -560,10 +565,29 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
         var moved = $"Holdings for {intent.Symbol} moved from {baseline.Value:0.##} to {current:0.##} "
             + $"share(s) since the {latestPlacement.SessionDate:yyyy-MM-dd} placement — consistent with "
             + $"{filled} share(s) filling.";
-        await _repository.SetPersistentOrderProgressAsync(intent.IntentId, newFilled, newState, moved, ct);
+        if (await _repository.SetPersistentOrderProgressAsync(intent.IntentId, newFilled, newState, moved, ct))
+            await SettleUnobservedPlacementAsync(latestPlacement, moved, ct);
         _activity?.Warn("Orders",
             $"{intent.Symbol}: attention auto-resolved from holdings evidence ({filled} filled)", moved);
         return true;
+    }
+
+    /// <summary>
+    /// Retires the ambiguous prior-date placement once its outcome has been settled, by an operator or
+    /// from custody. Settling only the INTENT is not enough: <see
+    /// cref="PersistentOrderDecisions.PriorOutcomeWasNotObserved"/> keys on this placement still reading
+    /// <c>accepted</c>, so leaving it there flips the intent straight back to <c>attention</c> on the next
+    /// pass and nothing is ever placed again (MLCF, 2026-09-28: resolved twice, never re-placed).
+    /// <c>lapsed</c> is the state the end-of-day path writes for exactly this row had it been observed —
+    /// a DAY order whose unfilled remainder, if any, lapsed at the close.
+    /// </summary>
+    private async Task SettleUnobservedPlacementAsync(
+        PersistentOrderPlacement? placement, string message, CancellationToken ct)
+    {
+        if (placement is null
+            || !string.Equals(placement.State, "accepted", StringComparison.OrdinalIgnoreCase))
+            return;
+        await _repository.SetPersistentOrderPlacementStateAsync(placement.PlacementId, "lapsed", message, ct);
     }
 
     private readonly record struct RetryPreparation(
