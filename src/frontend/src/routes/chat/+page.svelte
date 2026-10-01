@@ -86,7 +86,8 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
     const kinds: string[] = [];
     if (caps.textFiles) kinds.push('text & code');
     if (caps.images)    kinds.push('images');
-    if (caps.documents) kinds.push('PDFs');
+    if (caps.convertedDocuments) kinds.push('PDF, Word, PowerPoint, Excel & EPUB documents');
+    else if (caps.documents) kinds.push('PDFs');
     return kinds.join(', ') || 'nothing';
   }
 
@@ -128,11 +129,14 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
 
     const isImage = file.type.startsWith('image/');
     const isPdf   = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+    const isDoc   = /\.(docx|pptx|xlsx|xls|ods|epub)$/i.test(file.name);
     if (isImage && !attachCaps.images)
       return `${attachCaps.model || 'This model'} cannot read images.`;
-    if (isPdf && !attachCaps.documents)
+    if (isPdf && !attachCaps.documents && !attachCaps.convertedDocuments)
       return `${attachCaps.model || 'This model'} cannot read PDFs.`;
-    if (!isImage && !isPdf && !attachCaps.textFiles)
+    if (isDoc && !attachCaps.convertedDocuments)
+      return `${file.name} needs the document reader, which is not running on this server.`;
+    if (!isImage && !isPdf && !isDoc && !attachCaps.textFiles)
       return `${file.name} is not an accepted file type.`;
     return null;
   }

@@ -326,6 +326,8 @@ class Program
         builder.Services.AddSingleton(toolRegistry);
         builder.Services.AddSingleton(skillRegistry!);
         builder.Services.AddSingleton(mcpManager!);
+        // Chat attachments the model cannot read natively go to the document-reading MCP server.
+        builder.Services.AddSingleton(AttachmentDocumentReader.FromConfig(configuration, mcpManager, AppContext.BaseDirectory));
         builder.Services.AddSingleton(memory!);
         builder.Services.AddSingleton(agentMemory!);
         builder.Services.AddSingleton(memoryPolicy);

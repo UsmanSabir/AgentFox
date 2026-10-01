@@ -80,9 +80,9 @@ public class WebModule : IAppModule
         // ── Capabilities ──────────────────────────────────────────────────────
         // What the configured model accepts as chat input. The web UI reads this to decide
         // whether to offer the attachment button at all, and which file types to accept.
-        endpoints.MapGet("/capabilities", (IConfiguration config) =>
+        endpoints.MapGet("/capabilities", (IConfiguration config, HttpContext httpContext) =>
         {
-            var caps = AttachmentSupport.Resolve(config);
+            var caps = AttachmentSupport.Resolve(config, DocumentReader(httpContext));
             return Results.Ok(new
             {
                 attachments = new
@@ -91,6 +91,7 @@ public class WebModule : IAppModule
                     images             = caps.Images,
                     documents          = caps.Documents,
                     textFiles          = caps.TextFiles,
+                    convertedDocuments = caps.ConvertedDocuments,
                     maxFileSizeBytes   = caps.MaxFileSizeBytes,
                     maxFilesPerMessage = caps.MaxFilesPerMessage,
                     maxTotalBytes      = caps.MaxTotalBytes,
@@ -110,8 +111,10 @@ public class WebModule : IAppModule
             MarkdownSessionStore sessionStore,
             IConfiguration config,
             ChatRequest req,
+            HttpContext httpContext,
             CancellationToken ct) =>
         {
+            var documentReader = DocumentReader(httpContext);
             if (string.IsNullOrWhiteSpace(req.Message))
                 return Results.BadRequest(new ChatResponse
                 {
@@ -122,7 +125,7 @@ public class WebModule : IAppModule
             // Reject the whole turn on an unusable attachment rather than dropping it: a user
             // who attached a screenshot to a text-only model must be told, not left believing
             // the model looked at it.
-            if (!AttachmentSupport.TryResolve(req.Attachments, AttachmentSupport.Resolve(config), out _, out var attachmentError))
+            if (!AttachmentSupport.TryResolve(req.Attachments, AttachmentSupport.Resolve(config, documentReader), out _, out var attachmentError))
                 return Results.BadRequest(new ChatResponse { Success = false, Error = attachmentError });
 
             try
@@ -176,7 +179,7 @@ public class WebModule : IAppModule
             }
 
             // Same all-or-nothing rule as /chat — see the comment there.
-            if (!AttachmentSupport.TryResolve(req.Attachments, AttachmentSupport.Resolve(config), out _, out var attachmentError))
+            if (!AttachmentSupport.TryResolve(req.Attachments, AttachmentSupport.Resolve(config, DocumentReader(httpContext)), out _, out var attachmentError))
             {
                 httpContext.Response.StatusCode = 400;
                 await httpContext.Response.WriteAsJsonAsync(new { error = attachmentError }, ct);
@@ -1392,6 +1395,11 @@ public class WebModule : IAppModule
             return deleted ? Results.Ok(new { success = true }) : Results.NotFound();
         }).RequireAuthorization("ManagementAdministrator");
     }
+
+    /// <summary>Optional: a host without a document reader registered (tests, embedded hosts)
+    /// keeps its previous attachment behaviour rather than failing to bind the endpoint.</summary>
+    private static AttachmentDocumentReader? DocumentReader(HttpContext httpContext) =>
+        httpContext.RequestServices.GetService<AttachmentDocumentReader>();
 
     private static object BuildPluginConfigResponse(
         AgentFox.Plugins.PluginConfigManager configManager,

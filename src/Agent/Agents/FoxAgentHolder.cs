@@ -1,3 +1,4 @@
+using AgentFox.LLM;
 using AgentFox.Memory;
 using AgentFox.Plugins.Interfaces;
 using AgentFox.Plugins.Models;
@@ -46,11 +47,16 @@ internal sealed class FoxAgentService : IAgentService
 {
     private readonly FoxAgentHolder _holder;
     private readonly PendingNotificationStore? _pendingStore;
+    private readonly AttachmentDocumentReader? _documentReader;
 
-    public FoxAgentService(FoxAgentHolder holder, PendingNotificationStore? pendingStore = null)
+    public FoxAgentService(
+        FoxAgentHolder holder,
+        PendingNotificationStore? pendingStore = null,
+        AttachmentDocumentReader? documentReader = null)
     {
         _holder = holder;
         _pendingStore = pendingStore;
+        _documentReader = documentReader;
     }
 
     // A turn (e.g. one blocked on a HITL approval) must survive the caller's HTTP
@@ -74,7 +80,8 @@ internal sealed class FoxAgentService : IAgentService
     {
         var agent = await _holder.WaitAsync(ct);
         var result = await agent.ProcessAsync(
-            input, conversationId, cancellationToken: CancellationToken.None, attachments: attachments);
+            input, conversationId, cancellationToken: CancellationToken.None, attachments: attachments,
+            documentReader: _documentReader);
         var reply = new AgentReply { Output = result.Output ?? string.Empty, References = result.References };
 
         if (ct.IsCancellationRequested && conversationId != null)
@@ -143,7 +150,7 @@ internal sealed class FoxAgentService : IAgentService
             OnStatus = SafeOnStatus,
             OnToolActivity = SafeOnToolActivity
         };
-        var result = await agent.ProcessAsync(input, conversationId, streaming, ct, attachments);
+        var result = await agent.ProcessAsync(input, conversationId, streaming, ct, attachments, _documentReader);
         var reply = new AgentReply { Output = result.Output ?? string.Empty, References = result.References };
 
         if (ct.IsCancellationRequested && conversationId != null)
