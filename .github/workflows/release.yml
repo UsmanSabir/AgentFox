@@ -70,13 +70,20 @@ jobs:
       # osx-x64 (Intel Mac) is deliberately NOT built here — a macOS runner bills at 10x. install.sh
       # falls back to a source build when the archive is missing; to ship one, build it by hand on a
       # Mac and upload it (docs/DEVELOPMENT.md, "Building the macOS Intel (osx-x64) archive").
+      # anymd_asset / anymd_sha256: the bundled anymd binary for this RID (see "Bundle anymd").
+      # win-arm64 takes the x64 build on purpose: anymd publishes no Windows ARM64 binary, and
+      # Windows 11 on ARM runs x64 executables under emulation.
       matrix:
         include:
-          - { rid: win-x64,     os: ubuntu-latest,  archive: zip }
-          - { rid: win-arm64,   os: ubuntu-latest,  archive: zip }
-          - { rid: linux-x64,   os: ubuntu-latest,  archive: tar }
-          - { rid: linux-arm64, os: ubuntu-latest,  archive: tar }
-          - { rid: osx-arm64,   os: macos-latest,   archive: tar }
+          - { rid: win-x64,     os: ubuntu-latest,  archive: zip, anymd_asset: anymd-win32-x64-msvc.zip,     anymd_sha256: 2e03e7f1ea62af2d8e54a1010d5243e0ff0af0596edb5b9ca00cb4151e3c6b6c }
+          - { rid: win-arm64,   os: ubuntu-latest,  archive: zip, anymd_asset: anymd-win32-x64-msvc.zip,     anymd_sha256: 2e03e7f1ea62af2d8e54a1010d5243e0ff0af0596edb5b9ca00cb4151e3c6b6c }
+          - { rid: linux-x64,   os: ubuntu-latest,  archive: tar, anymd_asset: anymd-linux-x64-gnu.tar.gz,   anymd_sha256: e6c8ed1273e194d99de7577edbe2d860410035d50b8ec6de3ef7f8253e8a3bbd }
+          - { rid: linux-arm64, os: ubuntu-latest,  archive: tar, anymd_asset: anymd-linux-arm64-gnu.tar.gz, anymd_sha256: 695c27f8c052657888ac8028fa3b78cf22d8c0de978cc9b7f4b6b6a0aa44b1b1 }
+          - { rid: osx-arm64,   os: macos-latest,   archive: tar, anymd_asset: anymd-darwin-arm64.tar.gz,    anymd_sha256: c423fd62cbc24d001ead312367d9d7f64f06447ae2a6684cc7d321d8dc87c4ba }
+    env:
+      # anymd moves fast (six major versions in one week of Sep 2026), so it is pinned and
+      # upgraded on purpose: bump this AND every anymd_sha256 above from that release's SHA256SUMS.
+      ANYMD_VERSION: v8.2.0
     steps:
       - uses: actions/checkout@v4
 
@@ -170,6 +177,27 @@ jobs:
           -c Release -r ${{ matrix.rid }}
           --self-contained false
           -o staging/${{ matrix.rid }}/plugins/DuckDuckGoSearch
+
+      # anymd (MIT, https://github.com/SylphxAI/anymd): any document -> Markdown, run by the host
+      # as a stdio MCP server (appsettings.json, MCP:BundledServers:anymd). One native binary with
+      # no runtime of its own. Checksum-verified, so a re-tagged or tampered asset fails the build
+      # instead of shipping. Its LICENSE travels beside it, as the MIT licence requires.
+      - name: Bundle anymd
+        shell: bash
+        run: |
+          set -euo pipefail
+          dest="staging/${{ matrix.rid }}/tools/anymd"
+          mkdir -p "$dest"
+          base="https://github.com/SylphxAI/anymd/releases/download/${ANYMD_VERSION}"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/${{ matrix.anymd_asset }}" "$base/${{ matrix.anymd_asset }}"
+          echo "${{ matrix.anymd_sha256 }}  $RUNNER_TEMP/${{ matrix.anymd_asset }}" | shasum -a 256 -c -
+          case "${{ matrix.anymd_asset }}" in
+            *.zip)    unzip -q -o "$RUNNER_TEMP/${{ matrix.anymd_asset }}" -d "$dest" ;;
+            *.tar.gz) tar -xzf "$RUNNER_TEMP/${{ matrix.anymd_asset }}" -C "$dest" && chmod +x "$dest/anymd" ;;
+          esac
+          curl -fsSL --retry 3 -o "$dest/LICENSE" \
+            "https://raw.githubusercontent.com/SylphxAI/anymd/${ANYMD_VERSION}/LICENSE"
+          ls -l "$dest"
 
       - name: Package (zip)
         if: matrix.archive == 'zip'

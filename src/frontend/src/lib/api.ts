@@ -24,6 +24,9 @@ export interface AttachmentCapabilities {
   images: boolean;
   documents: boolean;
   textFiles: boolean;
+  /** Office/EPUB documents (and PDFs for a model without native PDF input) go to the
+   *  server's document reader, which the agent reads through MCP. */
+  convertedDocuments?: boolean;
   maxFileSizeBytes: number;
   maxFilesPerMessage: number;
   maxTotalBytes: number;

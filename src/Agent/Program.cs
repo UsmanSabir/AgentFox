@@ -231,7 +231,8 @@ class Program
                 {
                     ctx.Status("[dodgerblue1]Registering tools & workspace...[/]");
                     skillRegistry = await CreateSkillRegistryAsync(toolRegistry, configuration);
-                    mcpManager    = await CreateAndInitializeMcpManagerAsync(configuration);
+                    mcpManager    = await CreateAndInitializeMcpManagerAsync(
+                        configuration, loggingCfg.UseFileLogger ? new FileLogger() : null);
 
                     var longTermMemory = MemoryBackendFactory.CreateLongTermStorage(configuration, workspaceManager);
                     memory = new HybridMemory(100, longTermMemory);
@@ -325,6 +326,8 @@ class Program
         builder.Services.AddSingleton(toolRegistry);
         builder.Services.AddSingleton(skillRegistry!);
         builder.Services.AddSingleton(mcpManager!);
+        // Chat attachments the model cannot read natively go to the document-reading MCP server.
+        builder.Services.AddSingleton(AttachmentDocumentReader.FromConfig(configuration, mcpManager, AppContext.BaseDirectory));
         builder.Services.AddSingleton(memory!);
         builder.Services.AddSingleton(agentMemory!);
         builder.Services.AddSingleton(memoryPolicy);
@@ -880,17 +883,20 @@ class Program
         return registry;
     }
 
-    static async Task<McpManager> CreateAndInitializeMcpManagerAsync(IConfiguration configuration)
+    /// <param name="log">The file log, when there is one. A failed server was reported on the
+    /// console alone, which a service host does not have: the tools simply never appeared.</param>
+    static async Task<McpManager> CreateAndInitializeMcpManagerAsync(IConfiguration configuration, ILogger? log)
     {
         var mcpManager = new McpManager();
-        var servers = configuration.GetSection("MCP:Servers").Get<List<McpServerConfig>>() ?? [];
+        // MCP:Servers[] plus the MCP:BundledServers this install actually ships (McpLaunch.Compose).
+        var servers = McpLaunch.Compose(configuration, AppContext.BaseDirectory, File.Exists, out var notShipped);
+        foreach (var name in notShipped)
+            log?.LogInformation("[MCP] Bundled server {Name} is not in this build; skipped.", name);
 
-        // Only process servers that have a name and are not explicitly disabled.
+        // Only process servers that are not explicitly disabled.
         // IsEnabled returns true unless Enabled is explicitly set to false in config.
         // Absent "Enabled" key → null → treated as enabled (opt-out, not opt-in).
-        var enabledServers = servers
-            .Where(s => !string.IsNullOrWhiteSpace(s.Name) && s.IsEnabled)
-            .ToList();
+        var enabledServers = servers.Where(s => s.IsEnabled).ToList();
 
         foreach (var serverConfig in enabledServers)
         {
@@ -898,15 +904,23 @@ class Program
             {
                 var success = await mcpManager.AddServerAsync(serverConfig);
                 if (!success)
+                {
+                    var reason = mcpManager.Failures.GetValueOrDefault(serverConfig.Name) ?? "connection failed";
                     AnsiConsole.MarkupLine(
-                        $"[bold yellow]⚠[/]  MCP server [dim]{Markup.Escape(serverConfig.Name)}[/]: connection failed.");
+                        $"[bold yellow]⚠[/]  MCP server [dim]{Markup.Escape(serverConfig.Name)}[/]: {Markup.Escape(reason)}");
+                    log?.LogWarning("[MCP] Server {Name} did not start: {Reason}", serverConfig.Name, reason);
+                }
             }
             catch (Exception ex)
             {
                 AnsiConsole.MarkupLine(
                     $"[bold yellow]⚠[/]  MCP server [dim]{Markup.Escape(serverConfig.Name)}[/]: {Markup.Escape(ex.Message)}");
+                log?.LogWarning("[MCP] Server {Name} did not start: {Reason}", serverConfig.Name, ex.Message);
             }
         }
+
+        mcpManager.StartCacheSweeps(servers,
+            (name, deleted) => log?.LogInformation("[MCP] Swept {Count} expired file(s) from {Name}'s cache.", deleted, name));
 
         var skipped = servers.Count - enabledServers.Count;
         if (enabledServers.Count > 0 || skipped > 0)

@@ -515,7 +515,7 @@ public class FoxAgent
     /// Internal: external callers should route through ICommandQueue; only
     /// FoxAgentExecutor and SpawnSubAgentTool use this directly (both same assembly).
     /// </summary>
-    internal async Task<AgentResult> ProcessAsync(string task, string? conversationId = null, StreamingCallbacks? streaming = null, CancellationToken cancellationToken = default, IReadOnlyList<AgentFox.Plugins.Models.ChatAttachment>? attachments = null)
+    internal async Task<AgentResult> ProcessAsync(string task, string? conversationId = null, StreamingCallbacks? streaming = null, CancellationToken cancellationToken = default, IReadOnlyList<AgentFox.Plugins.Models.ChatAttachment>? attachments = null, AttachmentDocumentReader? documentReader = null)
     {
         conversationId ??= Guid.NewGuid().ToString("N");
         CurrentSessionKey.Value = conversationId;
@@ -598,7 +598,7 @@ public class FoxAgent
             // only gets a short note naming them: the bytes already live in the session's
             // message history, and writing base64 into a markdown transcript would bloat it
             // beyond usefulness while telling a human reader nothing.
-            var (attachmentContents, attachmentNote) = AttachmentSupport.ConvertForPrompt(attachments);
+            var (attachmentContents, attachmentNote) = AttachmentSupport.ConvertForPrompt(attachments, documentReader, conversationId);
 
             // Persist the raw user message to a sidecar .pending file *before* any
             // failure-prone work (memory recall, baseline building, the LLM call). If the
