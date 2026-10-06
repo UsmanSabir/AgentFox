@@ -2,15 +2,19 @@ import type { SerializedDockview } from 'dockview';
 
 export const WORKSPACE_RETENTION_MS = 180 * 24 * 60 * 60 * 1000;
 export const MAX_LAYOUT_LENGTH = 100_000;
-export interface AutoHideTray { ids: string[]; active: string; height: number }
+export type AutoHideEdge = 'left' | 'right' | 'bottom';
+export interface AutoHideTray { ids: string[]; active: string; size: number }
+export type AutoHideTrays = Partial<Record<AutoHideEdge, AutoHideTray>>;
 export interface WorkspaceLayout {
   version: 1;
   edition: string;
   savedAt: number;
   preset: string;
   layout: SerializedDockview;
-  /** View metadata only. No peek state or panel contents. Missing means pinned. */
-  bottomTray?: AutoHideTray;
+  /** View metadata only. No peek state or panel contents. Missing means every edge is pinned. */
+  autoHide?: AutoHideTrays;
+  /** Retired bottom-only shape, accepted on read so existing operator layouts migrate in place. */
+  bottomTray?: { ids: string[]; active: string; height: number };
   maximized?: string;
   /**
    * Panel ids the catalogue offered when this was saved — view metadata, like everything else here.
@@ -53,25 +57,59 @@ export function readWorkspaceLayout(
       value.known = value.known.filter(
         (id): id is string => typeof id === 'string' && allowedIds.includes(id));
     }
-    const tray = value.bottomTray;
     if (value.maximized !== undefined && (typeof value.maximized !== 'string' || !Object.hasOwn(layout.panels,value.maximized))) return null;
-    if (tray !== undefined && (!tray || typeof tray !== 'object' || !Array.isArray(tray.ids) || !tray.ids.length || tray.ids.length > allowedIds.length
-      || new Set(tray.ids).size !== tray.ids.length || !tray.ids.includes(tray.active)
-      || tray.ids.some(id => !allowedIds.includes(id) || id in layout.panels)
-      || !Number.isFinite(tray.height) || tray.height < 130 || tray.height > 900)) return null;
+    if (value.autoHide !== undefined && value.bottomTray !== undefined) return null;
+    if (value.bottomTray !== undefined) {
+      const tray = value.bottomTray;
+      if (!validTray(tray, 'bottom', allowedIds, layout.panels, new Set(), 'height')) return null;
+      value.autoHide = { bottom:{ ids:[...tray.ids], active:tray.active, size:tray.height } };
+      delete value.bottomTray;
+    }
+    if (value.autoHide !== undefined) {
+      if (!value.autoHide || typeof value.autoHide !== 'object' || Array.isArray(value.autoHide)) return null;
+      const keys = Object.keys(value.autoHide);
+      if (keys.some(key => !['left','right','bottom'].includes(key))) return null;
+      const parked = new Set<string>();
+      for (const edge of keys as AutoHideEdge[]) {
+        if (!validTray(value.autoHide[edge], edge, allowedIds, layout.panels, parked, 'size')) return null;
+      }
+    }
     return value;
   } catch { return null; }
 }
 
+function validTray(
+  candidate: unknown, edge: AutoHideEdge, allowedIds: readonly string[],
+  placed: Record<string, unknown>, parked: Set<string>, sizeKey: 'size' | 'height'
+) {
+  if (!candidate || typeof candidate !== 'object') return false;
+  const tray = candidate as { ids?: unknown; active?: unknown; size?: unknown; height?: unknown };
+  if (!Array.isArray(tray.ids) || !tray.ids.length || tray.ids.length > allowedIds.length
+    || new Set(tray.ids).size !== tray.ids.length || typeof tray.active !== 'string'
+    || !tray.ids.includes(tray.active)) return false;
+  for (const id of tray.ids) {
+    if (typeof id !== 'string' || !allowedIds.includes(id) || id in placed || parked.has(id)) return false;
+    parked.add(id);
+  }
+  const size = tray[sizeKey];
+  const minimum = edge === 'bottom' ? 130 : 180;
+  return typeof size === 'number' && Number.isFinite(size) && size >= minimum && size <= 900;
+}
+
 /** Only view geometry and stable metadata are persisted, never order drafts or component parameters. */
 export function saveWorkspaceLayout(
-  edition: string, preset: string, layout: SerializedDockview, now = Date.now(), bottomTray?: AutoHideTray, maximized?: string,
+  edition: string, preset: string, layout: SerializedDockview, now = Date.now(), autoHide?: AutoHideTrays, maximized?: string,
   known?: readonly string[]
 ): WorkspaceLayout {
   const copy = JSON.parse(JSON.stringify(layout)) as SerializedDockview;
   for (const panel of Object.values(copy.panels)) delete panel.params;
+  const savedTrays = Object.fromEntries(
+    (['left','right','bottom'] as const).flatMap(edge => {
+      const tray = autoHide?.[edge];
+      return tray ? [[edge,{ ids:[...tray.ids], active:tray.active, size:tray.size }]] : [];
+    })) as AutoHideTrays;
   return { version: 1, edition, savedAt: now, preset, layout: copy,
     ...(known?.length ? { known: [...known] } : {}),
     ...(maximized && Object.hasOwn(copy.panels,maximized) ? {maximized} : {}),
-    ...(bottomTray ? { bottomTray:{ ids:[...bottomTray.ids], active:bottomTray.active, height:bottomTray.height } } : {}) };
+    ...(Object.keys(savedTrays).length ? { autoHide:savedTrays } : {}) };
 }
