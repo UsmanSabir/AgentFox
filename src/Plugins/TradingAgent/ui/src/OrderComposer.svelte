@@ -253,12 +253,15 @@
   let formCard: HTMLElement | null = null;
 
   /** A card click is a decision to fill in the order, so bring its fields into view rather than
-   *  leaving them below the fold under a grid the operator has finished with. */
+   *  leaving them below the fold under a grid the operator has finished with — and move focus
+   *  with them, or Tab would scroll back up into the cards. */
   async function chooseAndReveal(intent: OrderIntentDefinition) {
     choose(intent);
     await tick();
     const reduce = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
     formCard?.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
+    // preventScroll: focusing would otherwise jump to the input and cut the scroll above short.
+    formCard?.querySelector<HTMLInputElement>('.grid input')?.focus({ preventScroll: true });
   }
 
   function choose(intent: OrderIntentDefinition) {
