@@ -250,6 +250,17 @@
     duplicateEntry = null;
   }
 
+  let formCard: HTMLElement | null = null;
+
+  /** A card click is a decision to fill in the order, so bring its fields into view rather than
+   *  leaving them below the fold under a grid the operator has finished with. */
+  async function chooseAndReveal(intent: OrderIntentDefinition) {
+    choose(intent);
+    await tick();
+    const reduce = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+    formCard?.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
+  }
+
   function choose(intent: OrderIntentDefinition) {
     choice = intent;
     activeFromDate = '';
@@ -840,7 +851,7 @@
             <h3>{category}</h3>
             <div class="choice-grid">
               {#each registry?.intents.filter(item => item.category === category) ?? [] as item (item.id)}
-                <button class="choice" class:selected={choice?.id === item.id} on:click={() => choose(item)}>
+                <button class="choice" class:selected={choice?.id === item.id} on:click={() => chooseAndReveal(item)}>
                   <b>{item.label}</b><span>{item.description}</span>
                   {#if item.submission === 'conditional'}<em><Clock3 size={11} /> {item.requiresActivationDate && item.triggerKind !== 'Scheduled' ? 'waits for a date + price' : item.triggerKind === 'Scheduled' ? 'waits for a date' : 'waits for a trigger'}</em>{/if}
                 </button>
@@ -852,7 +863,7 @@
       {/if}
 
       {#if choice}
-        <div class="form-card">
+        <div class="form-card" bind:this={formCard}>
           <div class="form-head"><div><b>{choice.label}</b><span>{choice.action} · {choice.orderType}</span></div></div>
           <details class="account-context" class:docked open={!docked}>
             <summary hidden={!docked}>{choice.action === 'BUY'
@@ -1248,7 +1259,7 @@
   .choice.selected { border-color:var(--primary); box-shadow:inset 0 0 0 1px var(--primary); }
   .choice b { font-size:.75rem; }.choice span { color:var(--text-3); font-size:.65rem; line-height:1.4; }
   .choice em { color:var(--warning); font-size:.61rem; display:flex; align-items:center; gap:.2rem; margin-top:auto; font-style:normal; }
-  .form-card { margin:0 1rem 1rem; padding:.8rem; background:var(--surface-2); border:1px solid var(--border-md); border-radius:var(--radius-sm); }
+  .form-card { scroll-margin-top:.75rem; margin:0 1rem 1rem; padding:.8rem; background:var(--surface-2); border:1px solid var(--border-md); border-radius:var(--radius-sm); }
   .form-head { display:flex; justify-content:space-between; margin-bottom:.65rem; }.form-head div { display:flex; align-items:center; gap:.5rem; }
   .form-head b { font-size:.82rem; }.form-head span { color:var(--text-3); font-size:.65rem; }
   .holding-card { margin-bottom:.75rem; padding:.7rem; border:1px solid var(--border); border-radius:var(--radius-sm);
