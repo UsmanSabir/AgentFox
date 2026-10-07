@@ -47,8 +47,9 @@ public sealed class BrokerReconciliationWorker : BackgroundService, IMarketSessi
     /// clock, so on the deployed 1260s interval roughly two thirds of ~340 daily SOAP calls asked a shut
     /// venue what had changed — and nothing can change while it is shut. What the gate KEEPS is the
     /// important half: every in-session pass, because that is the floor under the pushed order events
-    /// and a push only arrives if the socket is up. <see cref="ReconciliationSchedule"/> holds the rules
-    /// and the reasoning.
+    /// and a push only arrives if the socket is up — and, since 2026-10-07, a FAILED read, which is
+    /// retried while the venue is shut rather than left blocking execution until the next open.
+    /// <see cref="ReconciliationSchedule"/> holds the rules and the reasoning.
     /// </summary>
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -64,7 +65,7 @@ public sealed class BrokerReconciliationWorker : BackgroundService, IMarketSessi
                 var status = _calendar.GetStatus();
                 trigger = ReconciliationSchedule.Decide(
                     startup, status, _calendar.IsTradingDay(DateOnly.FromDateTime(status.PktNow)),
-                    postCloseDoneFor);
+                    postCloseDoneFor, lastReadHealthy: _state.Current.Healthy);
 
                 if (trigger == ReconciliationTrigger.PostClose)
                     postCloseDoneFor = DateOnly.FromDateTime(status.PktNow);
