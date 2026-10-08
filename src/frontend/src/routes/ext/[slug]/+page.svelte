@@ -1,7 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { page } from '$app/stores';
-  import { uiTheme, type UiTheme } from '$lib/stores';
+  import { sidebarCollapsed, uiTheme, type UiTheme } from '$lib/stores';
+  import { get } from 'svelte/store';
+  import { pluginSidebarRequest } from '$lib/pluginLayout';
   import { api, getManagementApiKey, type PluginUiPageInfo } from '$lib/api';
 
   // Generic host for a plugin-supplied UI. This file is the ONLY thing the host app knows about
@@ -15,9 +17,29 @@
   let pages: PluginUiPageInfo[] | null = null;
   let error: string | null = null;
   let frame: HTMLIFrameElement | null = null;
+  let previousSidebar: boolean | null = null;
+  function restoreSidebar() {
+    if (previousSidebar === null) return;
+    sidebarCollapsed.set(previousSidebar);
+    previousSidebar = null;
+  }
 
   $: slug    = $page.params.slug;
   $: current = pages?.find(p => p.slug === slug) ?? null;
+  // Svelte may reuse this route component for another plugin slug.
+  $: { slug; restoreSidebar(); }
+
+  onMount(() => {
+    const receive = (event: MessageEvent) => {
+      const request = pluginSidebarRequest(event.origin, window.location.origin, event.source, frame?.contentWindow, event.data);
+      if (request === 'collapsed') {
+        previousSidebar ??= get(sidebarCollapsed);
+        sidebarCollapsed.set(true);
+      } else if (request === 'default') restoreSidebar();
+    };
+    window.addEventListener('message', receive);
+    return () => { window.removeEventListener('message', receive); restoreSidebar(); };
+  });
 
   onMount(async () => {
     try {

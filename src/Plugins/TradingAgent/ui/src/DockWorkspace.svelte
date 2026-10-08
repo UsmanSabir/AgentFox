@@ -4,7 +4,7 @@
   import 'dockview/dist/styles/dockview.css';
   import { Command, PanelsTopLeft, RotateCcw, Maximize, Minimize, Keyboard, Pin, PinOff, X, Fullscreen, Shrink } from 'lucide-svelte';
   import WorkspaceShortcuts from './WorkspaceShortcuts.svelte';
-  import type { WorkspaceCommand, WorkspaceComposition, WorkspacePanel, WorkspaceRegion } from './workspaceComposition';
+  import { workspacePresetPanels, type WorkspaceCommand, type WorkspaceComposition, type WorkspacePanel, type WorkspaceRegion, type WorkspacePreset } from './workspaceComposition';
   import {
     readWorkspaceLayout, saveWorkspaceLayout,
     type AutoHideEdge, type AutoHideTrays
@@ -14,7 +14,8 @@
   export let title = 'Trading workstation';
   export let edition: string;
   export let storageKey: string;
-  export let presets: { id: string; label: string; active: Partial<Record<WorkspaceRegion, string>> }[];
+  export let presets: WorkspacePreset[];
+  export let onPresetChange: (id: string) => void = () => {};
   export let onExit: () => void;
 
   let root: HTMLElement;
@@ -49,6 +50,16 @@
   }
   let desktop = true;
   let preset = presets[0].id;
+  let mobilePresetChanged = false;
+  $: selectedPreset = presets.find(item => item.id === preset) ?? presets[0];
+  $: availablePanels = workspacePresetPanels(panels, selectedPreset);
+  function offeredPanels() { return workspacePresetPanels(panels, presets.find(item => item.id === preset)); }
+  function panelRegion(id: string) {
+    const columns = presets.find(item => item.id === preset)?.columns;
+    const index = columns?.findIndex(column => column.panels.includes(id)) ?? -1;
+    if (index >= 0) return index === 0 ? 'left' : index === columns!.length - 1 ? 'right' : 'center';
+    return panels.find(panel => panel.id === id)?.region;
+  }
   let commands: WorkspaceCommand[] = [];
   let activeId = 'chart';
   let notice = 'Workspace preview · existing trading controls retained';
@@ -153,8 +164,8 @@
   };
 
   function focusPanel(id: string) {
-    if (!panels.some(p => p.id === id)) return;
-    const region = panels.find(p => p.id === id)?.region;
+    if (!offeredPanels().some(p => p.id === id)) return;
+    const region = panelRegion(id);
     if (desktop && region && region !== 'center' && autoHide[region] && !trayForPanel(id) && !api?.getPanel(id)) {
       autoHide = { ...autoHide, [region]:{ ...autoHide[region]!, ids:[...autoHide[region]!.ids,id] } };
     }
@@ -172,8 +183,8 @@
       if (api.hasMaximizedGroup() && !api.getPanel(id)?.api.isMaximized()) api.exitMaximizedGroup();
       let panel = api.getPanel(id);
       if (!panel) {
-        const region = panels.find(p => p.id === id)?.region;
-        const peer = panels.find(p => p.region === region && api?.getPanel(p.id));
+        const region = panelRegion(id);
+        const peer = offeredPanels().find(p => panelRegion(p.id) === region && api?.getPanel(p.id));
         panel = addPanel(id, peer?.id);
       }
       panel?.api.setActive();
@@ -204,9 +215,9 @@
     const hidden = edges.flatMap(edge => autoHide[edge]?.ids ?? []);
     const seen = new Set(known ?? [...placed, ...hidden]);
     let adopted = false;
-    for (const spec of panels) {
+    for (const spec of offeredPanels()) {
       if (seen.has(spec.id) || api.getPanel(spec.id) || trayForPanel(spec.id)) continue;
-      const peer = panels.find(p => p.region === spec.region && api?.getPanel(p.id));
+      const peer = offeredPanels().find(p => panelRegion(p.id) === panelRegion(spec.id) && api?.getPanel(p.id));
       addPanel(spec.id, peer?.id);
       adopted = true;
     }
@@ -257,6 +268,23 @@
     autoHide = {};
     api.exitMaximizedGroup();
     api.clear();
+    const selected = presets.find(p => p.id === next) ?? presets[0];
+    preset = selected.id;
+    if (selected.columns?.length) {
+      let previous: string | undefined;
+      const totalWeight = selected.columns.reduce((total, column) => total + (column.weight ?? 1), 0);
+      for (const column of selected.columns) {
+        const first = column.panels[0];
+        addPanel(first, previous, previous ? 'right' : 'within');
+        for (const id of column.panels.slice(1)) addPanel(id, first);
+        api.getPanel(first)?.api.setSize({ width: dockRoot.clientWidth * (column.weight ?? 1) / totalWeight });
+        api.getPanel(column.active)?.api.setActive();
+        previous = first;
+      }
+      activeId = selected.columns[0].active;
+      api.getPanel(activeId)?.api.setActive();
+      return;
+    }
     const primary = panels.find(p => p.region === 'center')!;
     addPanel(primary.id);
     const regions = ['left', 'right', 'bottom'] as const;
@@ -274,7 +302,6 @@
     api.getPanel(leaders.left ?? '')?.api.setSize({ width: Math.max(250, Math.min(280, dockRoot.clientWidth * .2)) });
     if (dockRoot.clientWidth >= 1200) api.getPanel(leaders.right ?? '')?.api.setSize({ width: Math.max(310, Math.min(360, dockRoot.clientWidth * .25)) });
     api.getPanel(leaders.bottom ?? '')?.api.setSize({ height: Math.max(130, dockRoot.clientHeight * .24) });
-    const selected = presets.find(p => p.id === next) ?? presets[0];
     for (const id of Object.values(selected.active)) api.getPanel(id)?.api.setActive();
     const activeCenter = selected.active.center ?? primary.id;
     api.getPanel(activeCenter)?.api.setActive();
@@ -308,16 +335,19 @@
     storageWarning = '';
     dirty = false;
     suppressSave = false;
+    updateMobilePanels();
+    onPresetChange(preset);
     notice = 'Default view restored. Trading state and open forms are unchanged.';
   }
   function selectPreset(id: string) {
-    if (!api) { preset = id; return; }
+    if (!api) { preset = id; mobilePresetChanged = true; updateMobilePanels(); onPresetChange(preset); return; }
     clearTimeout(saveTimer);
     suppressSave = true;
     buildDefault(id);
     suppressSave = false;
     scheduleSave();
-    notice = 'Layout changed. Every panel remains available in Panels.';
+    onPresetChange(preset);
+    notice = 'Layout changed. This mode’s panels are available in Panels.';
   }
   function maximize() {
     if (openEdge) { notice = `Pin the ${openEdge} panels before maximizing their group.`; return; }
@@ -395,9 +425,9 @@
     }
   }
   function groupRegion(group: DockviewGroupPanel): AutoHideEdge | null {
-    const region = panels.find(spec => spec.id === group.panels[0]?.id)?.region;
+    const region = panelRegion(group.panels[0]?.id);
     if (region !== 'left' && region !== 'right' && region !== 'bottom') return null;
-    return group.panels.length && group.panels.every(panel => panels.find(spec => spec.id === panel.id)?.region === region) ? region : null;
+    return group.panels.length && group.panels.every(panel => panelRegion(panel.id) === region) ? region : null;
   }
   function unpin(edge: AutoHideEdge, groupId?: string) {
     if (!api || autoHide[edge]) return;
@@ -439,7 +469,7 @@
     closeTray(false);
   }
 
-  $: panelCommands = panels.map(p => ({ id: 'panel.' + p.id, label: 'Show ' + p.title, run: () => focusPanel(p.id) }));
+  $: panelCommands = availablePanels.map(p => ({ id: 'panel.' + p.id, label: 'Show ' + p.title, run: () => focusPanel(p.id) }));
   $: layoutCommands = [
     { id:'workspace.shortcuts', label:'Show keyboard shortcuts', run:() => shortcutsSheet.open() },
     { id:'workspace.fullscreen', label:fullscreen ? 'Exit page full screen' : 'Enter page full screen', run:toggleFullscreen,
@@ -455,7 +485,7 @@
     ...(['left', 'right', 'top', 'bottom'] as const).map(position => ({
       id:'layout.move.' + position, label:'Move active panel to ' + position + ' edge', run:() => move(position)
     })),
-    ...panels.map(p => ({
+    ...availablePanels.map(p => ({
       id:'layout.tab.' + p.id, label:'Tab active panel with ' + p.title,
       run:() => {
         if (openEdge) { notice = `Pin the ${openEdge} panels before moving their docking tabs.`; return; }
@@ -530,6 +560,14 @@
     event.preventDefault(); event.stopPropagation();
   }
 
+  function updateMobilePanels() {
+    if (desktop || !stack || !depot) return;
+    for (const p of panels) depot.appendChild(container(p.id));
+    const columns = presets.find(item => item.id === preset)?.columns;
+    const ids = columns?.flatMap(column => column.panels) ?? offeredPanels().map(panel => panel.id);
+    for (const id of ids) { stack.appendChild(container(id)); place(id); }
+  }
+
   onMount(() => {
     fullscreenSupported = typeof root.requestFullscreen === 'function' && document.fullscreenEnabled !== false;
     syncFullscreen();
@@ -557,7 +595,13 @@
       stack.classList.toggle('hidden', desktop);
       if (!desktop) {
         disconnect();
-        for (const p of panels) { stack.appendChild(container(p.id)); place(p.id); }
+        let raw: string | null = null;
+        try { raw = localStorage.getItem(storageKey); } catch { /* Browser storage is optional. */ }
+        const saved = readWorkspaceLayout(raw, edition, panels.map(p => p.id), presets.map(p => p.id));
+        if (saved && !mobilePresetChanged) preset = saved.preset;
+        else if (raw) removeSaved();
+        updateMobilePanels();
+        onPresetChange(preset);
         return;
       }
       if (api) return;
@@ -605,18 +649,25 @@
       buildDefault(preset);
       let raw: string | null = null;
       try { raw = localStorage.getItem(storageKey); } catch { /* Storage may be disabled. */ }
-      const saved = readWorkspaceLayout(raw, edition, panels.map(p => p.id), presets.map(p => p.id));
+      const saved = mobilePresetChanged ? null : readWorkspaceLayout(raw, edition, panels.map(p => p.id), presets.map(p => p.id));
       let adopted = false;
       if (saved) {
         try {
           api.fromJSON(saved.layout); preset = saved.preset; autoHide = saved.autoHide ?? {};
-          adopted = adoptNewPanels(Object.keys(saved.layout.panels), saved.known);
+          const allowed = new Set(offeredPanels().map(panel => panel.id));
+          if (Object.keys(saved.layout.panels).some(id => !allowed.has(id))
+            || edges.some(edge => autoHide[edge]?.ids.some(id => !allowed.has(id)))) {
+            buildDefault(preset);
+            adopted = true;
+          }
+          adopted = adoptNewPanels(Object.keys(saved.layout.panels), saved.known) || adopted;
           if(saved.maximized) api.getPanel(saved.maximized)?.api.maximize();
         }
         catch { removeSaved(); buildDefault(presets[0].id); }
       } else if (raw) removeSaved();
       suppressSave = false;
       dirty = false;
+      if (mobilePresetChanged) { mobilePresetChanged = false; dirty = true; persist(); }
       // Written back immediately when a panel was adopted, so the record gains its catalogue list even
       // if the operator never moves anything. Without it the adoption is harmless but endless, and a
       // panel they hide right afterwards would come back on the next load.
@@ -626,6 +677,7 @@
       subscriptions.push(api.onDidLayoutChange(scheduleSave));
       subscriptions.push(api.onDidMaximizedGroupChange(() => { maximized = api?.hasMaximizedGroup() ?? false; scheduleSave(); }));
       subscriptions.push(api.onDidActivePanelChange(() => activeId = api?.activePanel?.id ?? activeId));
+      onPresetChange(preset);
     }
     for (const id of nodes.keys()) place(id);
     connect();
@@ -654,9 +706,9 @@
   });
 </script>
 
-<section class="workstation" class:mobile={!desktop} aria-label={title} tabindex="-1" bind:this={root}>
+<section class="workstation" class:mobile={!desktop} aria-label={selectedPreset.title ?? title} tabindex="-1" bind:this={root}>
   <header class="workstation-bar">
-    <div class="workstation-brand"><PanelsTopLeft size={18}/><strong>{title}</strong><span class="preview">PREVIEW</span></div>
+    <div class="workstation-brand"><PanelsTopLeft size={18}/><strong>{selectedPreset.title ?? title}</strong><span class="preview">PREVIEW</span></div>
     <nav aria-label="Workspace layout">
       {#each presets as item}
         <button class:chosen={preset === item.id} aria-pressed={preset === item.id} on:click={() => selectPreset(item.id)}>{item.label}</button>
@@ -686,7 +738,7 @@
   </header>
   {#if storageWarning}<p class="storage-warning" role="status">{storageWarning}</p>{/if}
   <div class="workspace-operational-row">
-    <div class="core-toolbar" bind:this={toolbar}></div>
+    <div class="core-toolbar" class:hidden={selectedPreset.showToolbar === false} bind:this={toolbar}></div>
     <div class="edition-health" bind:this={health}></div>
   </div>
   <div class="dock-area" class:hidden={!desktop} bind:this={dockArea}>
