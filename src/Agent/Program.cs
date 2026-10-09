@@ -51,6 +51,10 @@ class Program
             return 0;
         }
 
+        // Before any HTTP client exists: an authenticating corporate proxy otherwise refuses every call
+        // that does not go through HttpResilienceFactory (LLM, embeddings, channel SDKs) with 407.
+        AgentFox.Http.ProxySignIn.UseWindowsIdentityForSystemProxy();
+
         var appCfgPath = AppSettingsHelper.ResolveAppSettingsPath();
         if (ConfigMigrationCommand.TryRun(args, appCfgPath, out var configCommandExitCode))
             return configCommandExitCode;
