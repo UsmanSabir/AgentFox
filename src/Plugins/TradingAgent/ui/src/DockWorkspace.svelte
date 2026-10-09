@@ -17,6 +17,11 @@
   export let presets: WorkspacePreset[];
   export let onPresetChange: (id: string) => void = () => {};
   export let onExit: () => void;
+  /**
+   * Open on this preset instead of the saved layout's, when it names one of `presets` — for a link that
+   * asks for a particular view. The choice is then saved like any other. Unset (the default) changes nothing.
+   */
+  export let initialPreset: string | null = null;
 
   let root: HTMLElement;
   let dockRoot: HTMLDivElement;
@@ -49,8 +54,11 @@
     fullscreen = document.fullscreenElement === root;
   }
   let desktop = true;
-  let preset = presets[0].id;
-  let mobilePresetChanged = false;
+  const requestedPreset = presets.some(item => item.id === initialPreset) ? initialPreset : null;
+  let preset = requestedPreset ?? presets[0].id;
+  // Set when a preset was chosen before the layout was built — by a click on a phone, or by
+  // `initialPreset` — so the saved layout is skipped once and the choice is saved instead.
+  let mobilePresetChanged = requestedPreset !== null;
   $: selectedPreset = presets.find(item => item.id === preset) ?? presets[0];
   $: availablePanels = workspacePresetPanels(panels, selectedPreset);
   function offeredPanels() { return workspacePresetPanels(panels, presets.find(item => item.id === preset)); }
