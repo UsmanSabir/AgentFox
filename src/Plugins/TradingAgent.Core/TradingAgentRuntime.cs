@@ -239,6 +239,7 @@ public sealed class TradingAgentRuntime
         // Disk-backed queue of take-profit sells awaiting retry, plus the background worker that retries
         // them while the market is open (placed via the host's IHostedService pipeline on app start).
         services.AddSingleton<PendingTakeProfitStore>();
+        services.AddSingleton<BrokerDailyBarFeeder>();
         services.AddSingleton<CandleBackfillRunner>();
         services.AddSingleton<AlertBroadcaster>();
         // What the agent has been DOING, for the dashboard's activity panel. A live view only — it

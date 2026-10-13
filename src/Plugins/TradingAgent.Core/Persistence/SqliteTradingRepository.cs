@@ -1116,6 +1116,10 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         // whole-market backfill's count down to 1 on every date this archive happens to touch. Taking
         // the larger of the two keeps the more informative number without pretending this call covered
         // a market it never read.
+        //
+        // market_closed is CLEARED: a stored bar proves the market traded that day. Until 2026-10-13 a failed
+        // backfill fetch could record a trading day as closed (CandleBackfillRunner), which covers it for every
+        // symbol for good; a real bar written later now re-opens it, so the whole-market pass asks again.
         var coverage = connection.CreateCommand();
         coverage.Transaction = (SqliteTransaction)transaction;
         coverage.CommandText = """
@@ -1123,7 +1127,8 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
             VALUES ($session, 1, $fetched, 0)
             ON CONFLICT (session_date) DO UPDATE SET
                 symbol_count = MAX(daily_bar_coverage.symbol_count, 1),
-                fetched_utc = excluded.fetched_utc
+                fetched_utc = excluded.fetched_utc,
+                market_closed = 0
             """;
         var coverDate = coverage.Parameters.Add("$session", SqliteType.Text);
         coverage.Parameters.AddWithValue("$fetched", nowUtc);

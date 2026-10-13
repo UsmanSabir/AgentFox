@@ -86,16 +86,7 @@ public sealed class CandleAnalysisService
             [symbol], sessionsWanted, includeLive,
             allowPortalFallback: !preferAvailableHistory,
             ct: ct);
-        // During the first few archived bars, the interactive chart values responsiveness over
-        // 52-week portal annotations. The forming/live candle and every deterministic indicator are
-        // still computed; only the two optional long-range extrema wait for the normal path.
-        var quoteTask = preferAvailableHistory
-            ? Task.FromResult(new PsxQuoteSummary { Symbol = symbol })
-            : _dataClient.GetQuoteSummaryAsync(symbol, ct, includeIntraday: false); // only the 52-week range is read
-        await Task.WhenAll(historyTask, quoteTask);
-
         var history = await historyTask;
-        var quote = await quoteTask;
 
         // THROWN, never defaulted to zeros. An indicator computed from no candles is a number that
         // looks like analysis and is not, and both premium strategy loops catch this per symbol and
@@ -117,6 +108,17 @@ public sealed class CandleAnalysisService
                     + "can be analysed until then; otherwise verify the ticker is listed on the PSX.")));
 
         var warnings = history.Warnings.ToList();
+
+        // The 52-week range is all this reads from a quote. Taken from the series in hand when it spans a year
+        // (2026-10-13: the PSX portal had stopped answering the hosting machine, and every analysis asked it).
+        // Closes, as the portal's summary computed it, so no level moves. A broker series is adjusted, which is
+        // the right scale here: today's price is on it, where a raw high from before a bonus issue is not.
+        // Otherwise the portal's summary — except during the first few archived bars, where the interactive
+        // chart values responsiveness over the two optional long-range extrema.
+        var quote = FiftyTwoWeekRange(symbol, fullDaily)
+            ?? (preferAvailableHistory
+                ? new PsxQuoteSummary { Symbol = symbol }
+                : await _dataClient.GetQuoteSummaryAsync(symbol, ct, includeIntraday: false));
 
         // The DAILY read stays scoped to the requested lookback — widening it silently would move
         // every level the caller asked about. Weekly resampling uses the full archived series.
@@ -307,6 +309,21 @@ public sealed class CandleAnalysisService
         }
 
         return CandleResampler.ToIntraday(missing, interval, now);
+    }
+
+    /// <summary>The 52-week range from closes, or null when the series does not reach back a year.</summary>
+    internal static PsxQuoteSummary? FiftyTwoWeekRange(string symbol, IReadOnlyList<PsxCandle> daily, DateOnly? today = null)
+    {
+        if (daily.Count == 0) return null;
+        var yearAgo = (today ?? DateOnly.FromDateTime(TradingAgent.Market.PsxTime.Now())).AddYears(-1);
+        if (daily[0].Date > yearAgo.AddDays(7)) return null;
+        var year = daily.Where(c => c.Date >= yearAgo && c.Close > 0).ToList();
+        if (year.Count == 0) return null;
+        return new PsxQuoteSummary
+        {
+            Symbol = symbol, High52Week = year.Max(c => c.Close), Low52Week = year.Min(c => c.Close),
+            LastPrice = daily[^1].Close
+        };
     }
 }
 
