@@ -28,6 +28,10 @@ public sealed class AttachmentCapabilities
     /// <summary>Text-like files, inlined into the prompt. Supported by every model.</summary>
     public bool TextFiles { get; init; } = true;
 
+    /// <summary>Word, PowerPoint, Excel, EPUB (and PDF where <see cref="Documents"/> is false) are
+    /// accepted because a document-reading MCP server is connected; see <see cref="AttachmentDocumentReader"/>.</summary>
+    public bool ConvertedDocuments { get; init; }
+
     public int MaxFileSizeBytes { get; init; } = 10 * 1024 * 1024;
     public int MaxFilesPerMessage { get; init; } = 5;
 
@@ -50,13 +54,21 @@ public sealed class AttachmentCapabilities
             var types = new List<string>();
             if (Images) types.AddRange(AttachmentSupport.ImageMediaTypes);
             if (Documents) types.Add("application/pdf");
+            if (ConvertedDocuments)
+            {
+                foreach (var (ext, mediaType) in AttachmentDocumentReader.DocumentExtensions)
+                {
+                    if (!types.Contains(mediaType)) types.Add(mediaType);
+                    types.Add(ext);
+                }
+            }
             if (TextFiles) types.AddRange(AttachmentSupport.TextAcceptHints);
             return types;
         }
     }
 
     /// <summary>True when nothing at all may be attached.</summary>
-    public bool AnySupported => Enabled && (Images || Documents || TextFiles);
+    public bool AnySupported => Enabled && (Images || Documents || TextFiles || ConvertedDocuments);
 }
 
 /// <summary>
@@ -168,9 +180,10 @@ public static class AttachmentSupport
 
     /// <summary>
     /// Resolves what may be attached, from <c>LLM:Attachments</c> overrides where present and
-    /// from the configured model name otherwise.
+    /// from the configured model name otherwise. Office and EPUB documents are accepted only
+    /// while <paramref name="documentReader"/> reports its MCP server connected.
     /// </summary>
-    public static AttachmentCapabilities Resolve(IConfiguration config)
+    public static AttachmentCapabilities Resolve(IConfiguration config, AttachmentDocumentReader? documentReader = null)
     {
         var provider = config["LLM:Provider"] ?? string.Empty;
         var model    = config["LLM:Model"] ?? string.Empty;
@@ -190,6 +203,7 @@ public static class AttachmentSupport
             Images             = images ?? detectedImages,
             Documents          = docs ?? detectedDocs,
             TextFiles          = textFiles,
+            ConvertedDocuments = documentReader?.IsAvailable == true,
             MaxFileSizeBytes   = Math.Max(1, ReadInt(section["MaxFileSizeMb"]) ?? 10) * 1024 * 1024,
             MaxFilesPerMessage = Math.Max(1, ReadInt(section["MaxFilesPerMessage"]) ?? 5),
             MaxTotalBytes      = Math.Max(1, ReadInt(section["MaxTotalSizeMb"]) ?? 20) * 1024 * 1024,
@@ -320,9 +334,20 @@ public static class AttachmentSupport
 
             if (mediaType.Equals("application/pdf", StringComparison.OrdinalIgnoreCase))
             {
-                if (!caps.Documents)
+                if (!caps.Documents && !caps.ConvertedDocuments)
                 {
                     error = $"'{name}' is a PDF, but the current model ({Describe(caps)}) does not accept document input.";
+                    return false;
+                }
+                resolved.Add(new ResolvedAttachment { Name = name, MediaType = mediaType, Bytes = bytes });
+                continue;
+            }
+
+            if (AttachmentDocumentReader.DocumentExtensions.ContainsValue(mediaType))
+            {
+                if (!caps.ConvertedDocuments)
+                {
+                    error = $"'{name}' is an Office or EPUB document, and no document reader is running on this deployment.";
                     return false;
                 }
                 resolved.Add(new ResolvedAttachment { Name = name, MediaType = mediaType, Bytes = bytes });
@@ -348,11 +373,16 @@ public static class AttachmentSupport
     /// <para>
     /// Text-like files are inlined as delimited text blocks so every model — including
     /// text-only local models — can read them. Images and PDFs become <see cref="DataContent"/>
-    /// parts, preceded by a short text label so the model knows the file's name.
+    /// parts, preceded by a short text label so the model knows the file's name. A document
+    /// <paramref name="documentReader"/> handles is saved for its MCP server instead, and the
+    /// model gets the path and how to read it; if that save fails the file is skipped and the
+    /// model is told so, rather than sent bytes it cannot read.
     /// </para>
     /// </summary>
     public static (List<AIContent> Contents, string TranscriptNote) ConvertForPrompt(
-        IReadOnlyList<ChatAttachment>? attachments)
+        IReadOnlyList<ChatAttachment>? attachments,
+        AttachmentDocumentReader? documentReader = null,
+        string? conversationId = null)
     {
         var contents = new List<AIContent>();
         var notes = new List<string>();
@@ -375,6 +405,19 @@ public static class AttachmentSupport
             {
                 contents.Add(new TextContent(
                     $"<attachment name=\"{name}\" type=\"{mediaType}\">\n{text}\n</attachment>"));
+            }
+            else if (documentReader is { IsAvailable: true } && documentReader.Handles(mediaType))
+            {
+                try
+                {
+                    var path = documentReader.Save(conversationId, name, bytes, DateTime.UtcNow);
+                    contents.Add(new TextContent(documentReader.Describe(name, mediaType, path)));
+                }
+                catch (Exception ex)
+                {
+                    contents.Add(new TextContent(
+                        $"<attachment name=\"{name}\" type=\"{mediaType}\" error=\"could not be saved for reading: {ex.Message}\" />"));
+                }
             }
             else
             {
@@ -408,6 +451,7 @@ public static class AttachmentSupport
         if (!string.IsNullOrWhiteSpace(ext))
         {
             if (BinaryExtensions.TryGetValue(ext, out var binary)) return binary;
+            if (AttachmentDocumentReader.DocumentExtensions.TryGetValue(ext, out var document)) return document;
             if (TextExtensions.TryGetValue(ext, out var text)) return text;
         }
 

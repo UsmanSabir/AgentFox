@@ -447,6 +447,17 @@ a time. `/daily/{sym}` returns 5 years of JSON in one call, and `/intraday/{sym}
 `CandleResampler`, and `AnalyzeCandlesTool` directly, and it is the change that most improves the
 charts in `ui/`.
 
+**Intraday is wired as of 2026-09-25** (`CandleAnalysisService.LoadIntradayAsync`). Today's session
+is the portal's `1D` one-minute bars rolled up by `CandleResampler.ToIntraday`; the PSX tick tape is
+the fallback when the portal is not signed in or has nothing dated today (before the open, `1D` is
+yesterday). Earlier sessions still come from the intraday archive, and a session the archive lacks is
+filled from `5D`, read once per symbol per PKT day. That fill is refused when any price is finer than a
+paisa (`AhlCandleSource.LooksAdjusted`), and filled bars are never archived.
+
+**A minute bar's stamp is the END of its minute** (PKT): `09:18:00` holds 09:17:00–09:17:59, and the
+session's first row, `09:16:00`, is the 09:15 open. MEASURED 2026-09-25 against the PSX tick tape:
+volume exact on 77/77 (PPL) and 76/76 (OGDC) settled minutes read that way, none read as the start.
+
 The adjustment caveat above is a real constraint, not a footnote: **adjusted history must not be
 mixed with broker fill prices** in the same series, or a stop computed off it will sit at the wrong
 level after any bonus issue. Keep the source tagged on the candle.
@@ -627,6 +638,13 @@ Settled against a live open session (`st: "OPN"`), so these are no longer assump
 
 ## Verification still owed
 
-1. **Confirm the websocket actually delivers ticks during market hours** — it was silent in the closed
-   capture, and a firehose that turns out to be idle would quietly starve whatever consumes it. Not
-   retried while open.
+1. ~~**Confirm the websocket actually delivers ticks during market hours**~~ — **CONFIRMED 2026-09-25,
+   10:20 PKT**, from the operator's browser DevTools on `ahl.capitalstake.com` (the dashboard's host since
+   2026-09-24). A steady stream of `tick` messages across REG and FUT, e.g.
+   `{"m":"REG","st":"OPN","s":"CPHL","t":1790313606,"o":73.9,"h":74.59,"l":73.5,"c":73.9,"v":112723,
+   "ldcp":73.92,"ch":-0.02,"pch":-0.00027,"bp":73.9,"bv":370,"ap":74.1,"av":2833,"val":8381009.24,
+   "tr":207,"lt":null}`. Two differences from the closed capture: a `tr` field (trade count) is present,
+   and `lt` can be `null`. The token's claims are unchanged (`aud: market-stream`, one-hour expiry,
+   `market:read` + `market:announcements`), and the socket is still `market.capitalstake.com`.
+   It is a LIVE feed: every tick is today's running bar. The history behind the dashboard's charts is
+   `/daily/{sym}` and `/intraday/{sym}/{1D,2D,5D}`, both above.

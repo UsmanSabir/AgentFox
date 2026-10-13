@@ -69,6 +69,7 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
     private readonly ApprovalIntentRegistry _intentRegistry;
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly TradingActivityLog? _activity;
+    private readonly IReadOnlyList<IPersistentOrderObserver> _observers;
     private readonly ILogger<PersistentOrderWorker> _logger;
     private readonly SemaphoreSlim _runGate = new(1, 1);
 
@@ -85,7 +86,8 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
         ApprovalIntentRegistry intentRegistry,
         IOptions<TradingAgentOptions> options,
         ILogger<PersistentOrderWorker> logger,
-        TradingActivityLog? activity = null)
+        TradingActivityLog? activity = null,
+        IEnumerable<IPersistentOrderObserver>? observers = null)
     {
         _repository = repository;
         _manager = manager;
@@ -100,6 +102,7 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
         _options = options;
         _logger = logger;
         _activity = activity;
+        _observers = observers?.ToArray() ?? [];
     }
 
     /// <summary>
@@ -214,9 +217,15 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
     public Task RunAtMarketOpenAsync(MarketSessionOpenContext context, CancellationToken ct) =>
         RunNowAsync(ct);
 
+    /// <param name="requestedBy">
+    /// Who asked, in the words the intent's reason should carry. Null is the operator — every caller
+    /// before pull-backs existed. A pulled-back take-profit is not the operator's doing, and recording
+    /// it as theirs would make its timeline say something that did not happen.
+    /// </param>
     public async Task<(bool Completed, string State, string Message)> CancelAsync(
-        string intentId, CancellationToken ct = default)
+        string intentId, CancellationToken ct = default, string? requestedBy = null)
     {
+        var who = requestedBy ?? "the operator";
         await _runGate.WaitAsync(ct);
         try
         {
@@ -227,7 +236,7 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
             await _repository.TrySetPersistentOrderStateAsync(
                 intentId,
                 ["active", "placing", "resting", "partial", "attention", "expiring"],
-                "cancelling", "Cancellation requested by the operator.", ct);
+                "cancelling", $"Cancellation requested by {who}.", ct);
 
             var placements = await _repository.GetPersistentOrderPlacementsAsync(intentId, ct);
             // Orders that stopped resting WITHOUT this system taking them off. An order can leave the
@@ -275,7 +284,7 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
 
             await _repository.SetPersistentOrderProgressAsync(
                 intentId, finalFilled, "cancelled",
-                "Cancelled by the operator; no broker order remains outstanding.", ct);
+                $"Cancelled by {who}; no broker order remains outstanding.", ct);
             return (true, "cancelled", "Persistent order cancelled and outstanding placements verified gone.");
         }
         finally
@@ -496,6 +505,10 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
                 return new(true, false, intent.State,
                     "The intent changed while resolving; refresh and retry.");
 
+            var placements = await _repository.GetPersistentOrderPlacementsAsync(intentId, ct);
+            await SettleUnobservedPlacementAsync(placements.LastOrDefault(),
+                $"Outcome resolved by {approvedBy} from a broker check: {resolution}.", ct);
+
             _activity?.Info("Orders",
                 $"{intent.Symbol}: attention resolved by {approvedBy} ({resolution})", reason);
             return new(true, true, newState, reason);
@@ -539,8 +552,9 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
             var unchanged = $"Holdings for {intent.Symbol} are unchanged since before the "
                 + $"{latestPlacement.SessionDate:yyyy-MM-dd} placement ({baseline.Value:0.##} -> "
                 + $"{current:0.##} share(s)); treating that attempt as not filled and resuming daily retries.";
-            await _repository.SetPersistentOrderProgressAsync(
-                intent.IntentId, intent.FilledQuantity, "active", unchanged, ct);
+            if (await _repository.SetPersistentOrderProgressAsync(
+                    intent.IntentId, intent.FilledQuantity, "active", unchanged, ct))
+                await SettleUnobservedPlacementAsync(latestPlacement, unchanged, ct);
             _activity?.Info("Orders", $"{intent.Symbol}: attention auto-resolved (holdings unchanged)", unchanged);
             return true;
         }
@@ -551,10 +565,29 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
         var moved = $"Holdings for {intent.Symbol} moved from {baseline.Value:0.##} to {current:0.##} "
             + $"share(s) since the {latestPlacement.SessionDate:yyyy-MM-dd} placement — consistent with "
             + $"{filled} share(s) filling.";
-        await _repository.SetPersistentOrderProgressAsync(intent.IntentId, newFilled, newState, moved, ct);
+        if (await _repository.SetPersistentOrderProgressAsync(intent.IntentId, newFilled, newState, moved, ct))
+            await SettleUnobservedPlacementAsync(latestPlacement, moved, ct);
         _activity?.Warn("Orders",
             $"{intent.Symbol}: attention auto-resolved from holdings evidence ({filled} filled)", moved);
         return true;
+    }
+
+    /// <summary>
+    /// Retires the ambiguous prior-date placement once its outcome has been settled, by an operator or
+    /// from custody. Settling only the INTENT is not enough: <see
+    /// cref="PersistentOrderDecisions.PriorOutcomeWasNotObserved"/> keys on this placement still reading
+    /// <c>accepted</c>, so leaving it there flips the intent straight back to <c>attention</c> on the next
+    /// pass and nothing is ever placed again (MLCF, 2026-09-28: resolved twice, never re-placed).
+    /// <c>lapsed</c> is the state the end-of-day path writes for exactly this row had it been observed —
+    /// a DAY order whose unfilled remainder, if any, lapsed at the close.
+    /// </summary>
+    private async Task SettleUnobservedPlacementAsync(
+        PersistentOrderPlacement? placement, string message, CancellationToken ct)
+    {
+        if (placement is null
+            || !string.Equals(placement.State, "accepted", StringComparison.OrdinalIgnoreCase))
+            return;
+        await _repository.SetPersistentOrderPlacementStateAsync(placement.PlacementId, "lapsed", message, ct);
     }
 
     private readonly record struct RetryPreparation(
@@ -772,6 +805,53 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
         return true;
     }
 
+    /// <summary>
+    /// Writes an intent <c>expired</c> and says so — in the activity log, and to every
+    /// <see cref="IPersistentOrderObserver"/>.
+    ///
+    /// <para>
+    /// The one place an intent expires, because there used to be three and none of them told anybody.
+    /// A fulfilled intent wrote an activity row; an expired one wrote only its own state, so a standing
+    /// instruction could end with shares unbought and the only record was a row on a screen nobody was
+    /// looking at. Expiry is the one terminal outcome no broker event reports.
+    /// </para>
+    ///
+    /// <para>
+    /// Observers are told after the write and never before it, so an announcement cannot describe an
+    /// intent that then failed to be marked. Each gets a bounded slice of time and its own try/catch: a
+    /// slow channel must not hold the run gate, and a formatter that throws must not abort the pass for
+    /// every intent after this one.
+    /// </para>
+    /// </summary>
+    private async Task MarkExpiredAsync(PersistentOrderIntent intent, string reason, CancellationToken ct)
+    {
+        await _repository.SetPersistentOrderProgressAsync(intent.IntentId,
+            intent.FilledQuantity, "expired", reason, ct);
+
+        // Re-read: the projection folds in every recorded fill, which is the figure worth reporting.
+        var expired = await _repository.GetPersistentOrderAsync(intent.IntentId, ct)
+                      ?? intent with { State = "expired", StateReason = reason };
+
+        _activity?.Warn("Orders", $"{expired.Symbol}: persistent order expired",
+            $"{expired.Action} {expired.FilledQuantity:N0}/{expired.Quantity:N0} share(s) filled; "
+            + $"{expired.RemainingQuantity:N0} unfilled. {reason}");
+
+        foreach (var observer in _observers)
+        {
+            try
+            {
+                await observer.ExpiredAsync(expired, reason, ct).WaitAsync(IPersistentOrderObserver.Budget, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            {
+                _logger.LogWarning(ex,
+                    "[PersistentOrders] {IntentId} ({Symbol}): the expiry notification failed in "
+                    + "{Observer}; the intent is expired regardless.",
+                    expired.IntentId, expired.Symbol, observer.GetType().Name);
+            }
+        }
+    }
+
     private async Task MaintainAsync(
         PersistentOrderIntent original,
         BrokerReconciliationSnapshot snapshot,
@@ -858,10 +938,14 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
                     return;
                 }
 
-                var terminal = intent.State == "cancelling" ? "cancelled" : "expired";
-                await _repository.SetPersistentOrderProgressAsync(intent.IntentId,
-                    intent.FilledQuantity, terminal,
-                    $"Intent {terminal}; no native order remains outstanding.", ct);
+                if (intent.State == "cancelling")
+                    await _repository.SetPersistentOrderProgressAsync(intent.IntentId,
+                        intent.FilledQuantity, "cancelled",
+                        "Intent cancelled; no native order remains outstanding.", ct);
+                else
+                    await MarkExpiredAsync(intent,
+                        $"Expired with {intent.RemainingQuantity} share(s) unfilled; no native order "
+                        + "remains outstanding.", ct);
             }
             return;
         }
@@ -870,8 +954,7 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
         {
             if (ownOpen.Count == 0)
             {
-                await _repository.SetPersistentOrderProgressAsync(intent.IntentId,
-                    intent.FilledQuantity, "expired",
+                await MarkExpiredAsync(intent,
                     $"Expired with {intent.RemainingQuantity} share(s) unfilled.", ct);
                 return;
             }
@@ -889,8 +972,7 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
                     return;
                 }
             }
-            await _repository.SetPersistentOrderProgressAsync(intent.IntentId,
-                intent.FilledQuantity, "expired",
+            await MarkExpiredAsync(intent,
                 $"Expired with {intent.RemainingQuantity} share(s) unfilled; resting order cancelled.", ct);
             return;
         }

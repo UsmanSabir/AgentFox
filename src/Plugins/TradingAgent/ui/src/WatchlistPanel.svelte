@@ -672,7 +672,20 @@
   {/if}
 
   {#if error}<p class="note danger" role="alert">{error}</p>{/if}
-  {#if notice}<p class="note">{notice}</p>{/if}
+  {#if notice}
+    <!-- Transient: it answers the last action, so it may be cleared here rather than lingering until
+         the next one replaces it. -->
+    <div class="note action-notice" role="status">
+      <span>{notice}</span>
+      <button
+        class="note-close"
+        type="button"
+        on:click={() => (notice = null)}
+        aria-label="Dismiss message"
+        title="Dismiss this message"
+      ><X size={13} /></button>
+    </div>
+  {/if}
 
   {#if loading}
     <!-- Rows rather than a line of text. The panel is stretched to the chart card's height by the
@@ -1077,7 +1090,7 @@
     border:1px solid color-mix(in srgb, var(--info) 28%, var(--border));
     background:color-mix(in srgb, var(--info) 7%, var(--surface-2));
   }
-  .execution-source > span { flex:1; min-width:0; }
+  .execution-source > span, .action-notice > span { flex:1; min-width:0; }
   .note-close {
     flex:0 0 auto; display:grid; place-items:center; width:22px; height:22px; padding:0;
     margin:-.18rem -.25rem 0 0; border:0; border-radius:var(--radius-sm);

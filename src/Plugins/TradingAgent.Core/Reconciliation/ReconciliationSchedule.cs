@@ -15,7 +15,13 @@ public enum ReconciliationTrigger
     InSession,
 
     /// <summary>The first pass after today's close, which is where the day's fills are captured.</summary>
-    PostClose
+    PostClose,
+
+    /// <summary>
+    /// The venue is shut, but the last read FAILED, so the account is unknown and live execution is
+    /// blocked on it. Retried every interval until a read succeeds.
+    /// </summary>
+    Recovery
 }
 
 /// <summary>
@@ -53,6 +59,17 @@ public enum ReconciliationTrigger
 /// status: before the open <see cref="MarketStatus.NextOpenPkt"/> is TODAY's open, and after the close
 /// it is a later date (or not yet computed). Nothing here infers a time of day.
 /// </para>
+///
+/// <para>
+/// <b>A failed read is retried while the venue is shut, and only then.</b> Added 2026-10-07 after a
+/// live incident: AHL refused connections from 18:29 to 18:42, the day's single post-close pass landed
+/// at 18:34, and nothing read the account again until a restart at 08:45 the next morning. The broker
+/// was reachable again by about 18:44, yet "Live execution blocked" stood for fourteen hours, and
+/// would have kept blocking pre-open orders until the 09:32 in-session pass. The closed-market economy
+/// is about not asking a shut venue what changed; it was never meant to leave an UNHEALTHY snapshot
+/// standing. So an unhealthy last read takes the pass at the ordinary interval, weekends included,
+/// and stops the moment one succeeds — a healthy closed market costs exactly what it did before.
+/// </para>
 /// </summary>
 public static class ReconciliationSchedule
 {
@@ -61,22 +78,26 @@ public static class ReconciliationSchedule
     /// <param name="tradingDay">Whether today is a session at all — holidays included, so this must
     /// come from <see cref="IMarketCalendar.IsTradingDay"/> rather than from the day of the week.</param>
     /// <param name="postCloseDoneFor">The PKT date whose post-close pass has already run, if any.</param>
+    /// <param name="lastReadHealthy">Whether the most recent account read — by this loop or by anyone
+    /// else — succeeded. False means live execution is blocked on it, so it is worth retrying even
+    /// while the venue is shut.</param>
     public static ReconciliationTrigger Decide(
         bool startup,
         MarketStatus status,
         bool tradingDay,
-        DateOnly? postCloseDoneFor)
+        DateOnly? postCloseDoneFor,
+        bool lastReadHealthy = true)
     {
         if (startup) return ReconciliationTrigger.Startup;
         if (status.IsOpen) return ReconciliationTrigger.InSession;
-        if (!tradingDay) return ReconciliationTrigger.None;
 
+        // Post-close first, so a retry never spends the day's slot under another name and the
+        // slot is not then taken a second time once the read recovers.
         var today = DateOnly.FromDateTime(status.PktNow);
-        if (postCloseDoneFor == today) return ReconciliationTrigger.None;
+        if (tradingDay && postCloseDoneFor != today && AfterTodaysClose(status))
+            return ReconciliationTrigger.PostClose;
 
-        return AfterTodaysClose(status)
-            ? ReconciliationTrigger.PostClose
-            : ReconciliationTrigger.None;
+        return lastReadHealthy ? ReconciliationTrigger.None : ReconciliationTrigger.Recovery;
     }
 
     /// <summary>
@@ -92,6 +113,7 @@ public static class ReconciliationSchedule
         ReconciliationTrigger.Startup   => "the agent has just started",
         ReconciliationTrigger.InSession => "the session is open",
         ReconciliationTrigger.PostClose => "the session has closed, so this pass captures the day",
+        ReconciliationTrigger.Recovery  => "the last account read failed, so it is retried while the market is closed",
         _                               => "no reason"
     };
 }

@@ -138,6 +138,13 @@ public sealed class AhlAnalyticsClient : IDisposable
     private DateTimeOffset _bearerObtainedAt;
 
     /// <summary>
+    /// The host the SSO landing page was actually served from, which is where every API call must go.
+    /// Null until a handshake succeeds, and then <see cref="AhlAnalyticsConfig.BaseUrl"/> is only a
+    /// fallback. See <see cref="ApiBaseFrom"/> for why.
+    /// </summary>
+    private Uri? _landingBase;
+
+    /// <summary>
     /// Why the last call failed, in the caller's words rather than the log's. Surfaced through the
     /// management API and the tools so a failure reports its actual status code instead of a guess:
     /// "the portal could not be reached" is indistinguishable between no session, a throttle, and a
@@ -263,7 +270,27 @@ public sealed class AhlAnalyticsClient : IDisposable
         _bearer is not null &&
         DateTimeOffset.UtcNow - _bearerObtainedAt < TimeSpan.FromHours(Math.Max(1, Config.TokenLifetimeHours));
 
-    private Uri BaseUri => new(Config.BaseUrl.TrimEnd('/') + "/");
+    private Uri BaseUri => _landingBase ?? new(Config.BaseUrl.TrimEnd('/') + "/");
+
+    /// <summary>
+    /// The API base for a session whose SSO landing page ended at <paramref name="landing"/>: that
+    /// page's scheme and host, or <paramref name="configured"/> when the landing is unknown.
+    ///
+    /// <para>
+    /// <b>The API has to be called on the host that set the cookie.</b> Every <c>/api/v3</c> call needs
+    /// the <c>laravel_session</c> cookie as well as the Bearer token, and that cookie is scoped to
+    /// whichever host served the landing page. On 2026-09-24 AHL moved its dashboard to its vendor's
+    /// host, <c>ahl.capitalstake.com</c>, while <see cref="AhlAnalyticsConfig.BaseUrl"/> still named
+    /// <c>data.arifhabibltd.com</c>. Measured 2026-09-25 with one token: <b>200</b> on the landing
+    /// host and <b>401 Unauthenticated</b> on the configured one, because no cookie was ever set
+    /// there. Every call failed for a whole session. The 401s were logged as rate limiting, which
+    /// this portal also answers with 401.
+    /// </para>
+    /// </summary>
+    public static Uri ApiBaseFrom(Uri? landing, string configured) =>
+        landing is { IsAbsoluteUri: true } && (landing.Scheme == Uri.UriSchemeHttps || landing.Scheme == Uri.UriSchemeHttp)
+            ? new Uri(landing.GetLeftPart(UriPartial.Authority) + "/")
+            : new Uri(configured.TrimEnd('/') + "/");
 
     // ── authentication ────────────────────────────────────────────────────────
 
@@ -302,6 +329,7 @@ public sealed class AhlAnalyticsClient : IDisposable
 
             // Hop ②: follow it. The response is HTML; the token is a meta tag in <head>.
             string html;
+            Uri? landedOn;
             try
             {
                 using var response = await _http.GetAsync(ssoUrl, ct);
@@ -312,6 +340,8 @@ public sealed class AhlAnalyticsClient : IDisposable
                     return null;
                 }
                 html = await response.Content.ReadAsStringAsync(ct);
+                // After redirects: the page that set the session cookie, not the URL we asked for.
+                landedOn = response.RequestMessage?.RequestUri;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception ex)
@@ -339,6 +369,15 @@ public sealed class AhlAnalyticsClient : IDisposable
                                    "POST endpoints (market snapshot, news) will likely be refused.");
             }
             _bearerObtainedAt = DateTimeOffset.UtcNow;
+            var apiBase = ApiBaseFrom(landedOn, Config.BaseUrl);
+            if (!string.Equals(apiBase.Host, new Uri(Config.BaseUrl).Host, StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogWarning(
+                    "[AhlAnalytics] The analytics sign-in landed on {Landed}, not the configured {Configured}; " +
+                    "API calls will go to {Landed} because that is where the session cookie was set.",
+                    apiBase.Host, new Uri(Config.BaseUrl).Host, apiBase.Host);
+            }
+            _landingBase = apiBase;
             _handshakeError = null;
             LastError = null;
             _logger.LogInformation("[AhlAnalytics] Obtained an analytics API token via SSO.");

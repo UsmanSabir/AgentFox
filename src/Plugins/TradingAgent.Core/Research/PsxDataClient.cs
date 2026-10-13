@@ -165,13 +165,18 @@ public sealed partial class PsxDataClient
     /// <summary>
     /// Builds a quote summary from the portal's EOD series (trend, 52-week range) topped up with the
     /// latest intraday tick when available. Series shape: {"status":1,"data":[[unixTs, price, volume],…]}.
+    /// Both series are cached (<see cref="CachedSeriesAsync"/>); a caller that needs only the EOD figures (the
+    /// 52-week range) passes <paramref name="includeIntraday"/> false and costs one cached request, not two.
     /// </summary>
-    public async Task<PsxQuoteSummary> GetQuoteSummaryAsync(string symbol, CancellationToken ct = default)
+    public async Task<PsxQuoteSummary> GetQuoteSummaryAsync(string symbol, CancellationToken ct = default,
+        bool includeIntraday = true)
     {
         try
         {
-            var eod = await FetchSeriesAsync($"timeseries/eod/{symbol}", ct);
-            var intraday = await FetchSeriesAsync($"timeseries/int/{symbol}", ct);
+            var eod = await CachedSeriesAsync($"timeseries/eod/{symbol}", EodSeriesTtl, ct);
+            var intraday = includeIntraday
+                ? await CachedSeriesAsync($"timeseries/int/{symbol}", IntradaySeriesTtl, ct)
+                : [];
 
             if (eod.Count == 0 && intraday.Count == 0)
                 return new PsxQuoteSummary
@@ -209,6 +214,11 @@ public sealed partial class PsxDataClient
                 AverageDailyVolume30D = AverageVolume(eod, 30)
             };
         }
+        catch (PsxPortalUnavailableException ex)
+        {
+            // Already reported when the portal refused; nothing was asked this time.
+            return new PsxQuoteSummary { Symbol = symbol, Error = ex.Message };
+        }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "[PsxData] Quote fetch failed for {Symbol}.", symbol);
@@ -221,7 +231,8 @@ public sealed partial class PsxDataClient
     private async Task<List<SeriesPoint>> FetchSeriesAsync(string path, CancellationToken ct)
     {
         var baseUrl = _options.Value.PsxDataBaseUrl.TrimEnd('/');
-        using var response = await _http.GetAsync($"{baseUrl}/{path}", ct);
+        using var response = await SendKeyedAsync(
+            () => new HttpRequestMessage(HttpMethod.Get, $"{baseUrl}/{path}"), ct);
         response.EnsureSuccessStatusCode();
 
         await using var stream = await response.Content.ReadAsStreamAsync(ct);

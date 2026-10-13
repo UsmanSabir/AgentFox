@@ -381,6 +381,10 @@
               {#if order.trailing}<span class="chip trail">trailing</span>{/if}
               {#if order.triggerWindowMinutes}<span class="chip trail">recent {order.triggerWindowMinutes}-min window</span>{/if}
               {#if order.persistentUntilFilled}<span class="chip">keep working after trigger</span>{/if}
+              {#if order.pullbackPrice != null}
+                · pulls back below {num(order.pullbackPrice)}
+                <span class="chip" title="Fires ahead of its limit for a place in the queue. If the price falls to this level while the sell rests, it is cancelled, the protective stop is put back over the whole holding, and the order re-arms.">early fire{order.pullbackCount ? ` · pulled back ${order.pullbackCount}×` : ''}</span>
+              {/if}
               {#if order.orderType === 'STOPLOSS' && order.limitPrice != null}
                 · stop limit {num(order.limitPrice)}
               {/if}

@@ -89,6 +89,66 @@ public sealed class ReconciliationScheduleTests
                 startup: true, AfterClose(Sunday, 10, 59), tradingDay: false, postCloseDoneFor: null));
     }
 
+    [TestMethod]
+    public void AFailedReadIsRetriedWhileTheMarketIsShut()
+    {
+        // 2026-10-07: the day's only post-close pass hit a 13-minute AHL outage at 18:34, and nothing
+        // read the account again until a restart fourteen hours later — live execution stayed
+        // blocked the whole time, and would have through pre-open.
+        Assert.AreEqual(ReconciliationTrigger.Recovery,
+            ReconciliationSchedule.Decide(
+                startup: false, AfterClose(Monday, 18, 55), tradingDay: true,
+                postCloseDoneFor: Monday, lastReadHealthy: false),
+            "After the post-close pass failed.");
+
+        Assert.AreEqual(ReconciliationTrigger.Recovery,
+            ReconciliationSchedule.Decide(
+                startup: false, BeforeOpen(Monday, 9, 0), tradingDay: true,
+                postCloseDoneFor: null, lastReadHealthy: false),
+            "Before the open, where a blocked gate costs pre-open orders.");
+
+        Assert.AreEqual(ReconciliationTrigger.Recovery,
+            ReconciliationSchedule.Decide(
+                startup: false, AfterClose(Sunday, 10, 59), tradingDay: false,
+                postCloseDoneFor: null, lastReadHealthy: false),
+            "At the weekend too: an unknown account is unknown whatever the day.");
+    }
+
+    [TestMethod]
+    public void AHealthyClosedMarketCostsNothingExtra()
+    {
+        // The retry must not quietly undo the 2026-09-08 economy: once a read succeeds, the shut
+        // venue is left alone again.
+        Assert.AreEqual(ReconciliationTrigger.None,
+            ReconciliationSchedule.Decide(
+                startup: false, AfterClose(Monday, 18, 55), tradingDay: true,
+                postCloseDoneFor: Monday, lastReadHealthy: true));
+        Assert.AreEqual(ReconciliationTrigger.None,
+            ReconciliationSchedule.Decide(
+                startup: false, AfterClose(Sunday, 10, 59), tradingDay: false,
+                postCloseDoneFor: null, lastReadHealthy: true));
+    }
+
+    [TestMethod]
+    public void ARetryNeverSpendsThePostCloseSlotUnderAnotherName()
+    {
+        // An in-session failure at 15:20 is still unhealthy at 15:45. That pass must be recorded as
+        // the post-close one, or the slot is taken AGAIN once the read recovers.
+        Assert.AreEqual(ReconciliationTrigger.PostClose,
+            ReconciliationSchedule.Decide(
+                startup: false, AfterClose(Monday, 15, 45), tradingDay: true,
+                postCloseDoneFor: null, lastReadHealthy: false));
+    }
+
+    [TestMethod]
+    public void AnInSessionPassIsNotRelabelledARetry()
+    {
+        Assert.AreEqual(ReconciliationTrigger.InSession,
+            ReconciliationSchedule.Decide(
+                startup: false, Open(Monday, 11, 00), tradingDay: true,
+                postCloseDoneFor: null, lastReadHealthy: false));
+    }
+
     /// <summary>Open: the calendar names the session it is inside and no next open.</summary>
     private static MarketStatus Open(DateOnly day, int hour, int minute) =>
         new(true, At(day, hour, minute), "open",

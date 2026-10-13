@@ -11,7 +11,12 @@ This produces the prebuilt archives that `install.ps1` / `install.sh` download:
 | `osx-x64` | macOS Intel | `agentfox-osx-x64.tar.gz` — **not built by CI**, see below |
 | `osx-arm64` | macOS Apple Silicon | `agentfox-osx-arm64.tar.gz` |
 
-Each archive contains the AgentFox binary **plus the Trading plugin** under `plugins/TradingAgent/`.
+Each archive contains the AgentFox binary **plus the Trading plugin** under `plugins/TradingAgent/`,
+and the bundled [anymd](https://github.com/SylphxAI/anymd) document converter (MIT, with its
+`LICENSE`) under `tools/anymd/`. The host runs it as an MCP server from `MCP:BundledServers:anymd`,
+reading only `<install>/documents`. It is pinned in `release.yml` (`ANYMD_VERSION` plus one checksum
+per RID); to upgrade, change both from that release's `SHA256SUMS`. A hand-built archive from the
+steps below has no `tools/` folder, so the host skips anymd and logs that it is not in this build.
 
 > **Automated path (recommended):** run the workflow by hand — GitHub → **Actions → Release → Run
 > workflow**, optionally entering a tag such as `v1.0.0` (blank auto-increments), or:

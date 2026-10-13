@@ -115,6 +115,14 @@ var mcpClient = new MCPClient(toolRegistry);
 await mcpClient.AddServerAsync("my-mcp-server", "http://localhost:3000");
 ```
 
+Servers the release ships go in `MCP:BundledServers` (keyed by name), not `MCP:Servers[]`:
+config layers merge arrays by index, so a user's own `Servers[0]` would overwrite a shipped entry
+field by field. Stdio paths may use `{workspace}` for the install directory, and a relative
+`Command` resolves against it rather than the CWD. A bundled server whose binary is missing is
+skipped, which is the normal state in a dev checkout. To try anymd locally, put its binary at
+`src/Agent/bin/<config>/net10.0/tools/anymd/anymd(.exe)`. Rules and tests: `MCP/McpLaunch.cs`,
+`McpLaunchTests`.
+
 ### Channel Integration
 
 ```csharp

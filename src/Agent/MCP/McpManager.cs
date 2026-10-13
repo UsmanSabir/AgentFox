@@ -38,6 +38,10 @@ public class McpTransportConfig
     public int MaxReconnectionAttempts { get; set; } = 5;
 
     // ── Stdio ─────────────────────────────────────────────────────────────────
+    // Command, Arguments, WorkingDirectory and Env values may use {workspace} for the install
+    // directory. A Command containing a path separator is resolved against the install directory,
+    // never the process CWD (System32 under a Windows service); a bare name ("npx") stays a PATH
+    // lookup. See McpLaunch.
     /// <summary>Executable to launch. Required for Stdio transport.</summary>
     public string? Command { get; set; }
     /// <summary>Command-line arguments passed to the process.</summary>
@@ -49,6 +53,8 @@ public class McpTransportConfig
     /// <summary>Graceful shutdown timeout for the process (default 5 s).</summary>
     public int ShutdownTimeoutSeconds { get; set; } = 5;
     public int TimeoutSeconds { get; set; } = 30;
+
+    internal McpTransportConfig Copy() => (McpTransportConfig)MemberwiseClone();
 }
 
 /// <summary>
@@ -86,6 +92,19 @@ public class McpServerConfig
 
     /// <summary>Structured transport config (new format).</summary>
     public McpTransportConfig? Transport { get; set; }
+
+    /// <summary>Directories created before the server starts ({workspace} allowed). A server that
+    /// refuses to start when a folder it is pointed at is missing (anymd's --allow-dir) needs this.</summary>
+    public string[]? CreateDirectories { get; set; }
+
+    /// <summary>A folder the server writes to on its own ({workspace} allowed), swept of files older
+    /// than <see cref="CacheRetentionDays"/> at startup and daily after. Ignored unless both are set.</summary>
+    public string? CacheDirectory { get; set; }
+    public int CacheRetentionDays { get; set; }
+
+    /// <summary>True for an entry from <c>MCP:BundledServers</c>, i.e. one this release ships.
+    /// Not bindable: only <see cref="McpLaunch.Compose"/> sets it.</summary>
+    internal bool Bundled { get; set; }
 
     // ── Legacy flat fields ────────────────────────────────────────────────────
     public string? Url { get; set; }
@@ -176,7 +195,47 @@ public sealed class McpManager : IAsyncDisposable
             Headers = config.Headers,
             TimeoutSeconds = config.TimeoutSeconds
         };
+        try
+        {
+            transport = McpLaunch.Prepare(config, transport, AppContext.BaseDirectory);
+        }
+        catch (Exception ex)
+        {
+            _failures[config.Name] = ex.Message;
+            return Task.FromResult(false);
+        }
         return AddServerCoreAsync(config.Name, transport, ct);
+    }
+
+    // ── Cache retention ───────────────────────────────────────────────────────
+
+    private Timer? _cacheSweep;
+
+    /// <summary>
+    /// Sweeps every configured <see cref="McpServerConfig.CacheDirectory"/> now and once a day
+    /// after, for the life of the manager. A server's cache is data this host causes to be written,
+    /// so it gets an expiry and something that enforces it; a restart-only sweep would let a host
+    /// that runs for weeks grow it without bound.
+    /// </summary>
+    public void StartCacheSweeps(IEnumerable<McpServerConfig> servers, Action<string, int>? onSwept = null)
+    {
+        var caches = servers
+            .Where(s => !string.IsNullOrWhiteSpace(s.CacheDirectory) && s.CacheRetentionDays > 0)
+            .Select(s => (s.Name,
+                          Dir: McpLaunch.Expand(s.CacheDirectory!, AppContext.BaseDirectory),
+                          Days: s.CacheRetentionDays))
+            .ToList();
+        if (caches.Count == 0) return;
+
+        _cacheSweep?.Dispose();
+        _cacheSweep = new Timer(_ =>
+        {
+            foreach (var (name, dir, days) in caches)
+            {
+                var deleted = McpLaunch.SweepCache(dir, days, DateTime.UtcNow);
+                if (deleted > 0) onSwept?.Invoke(name, deleted);
+            }
+        }, null, TimeSpan.Zero, TimeSpan.FromDays(1));
     }
 
     /// <summary>
@@ -316,6 +375,7 @@ public sealed class McpManager : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        _cacheSweep?.Dispose();
         foreach (var entry in _servers.Values)
             await entry.Client.DisposeAsync();
         _servers.Clear();

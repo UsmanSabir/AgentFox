@@ -9,6 +9,21 @@ export interface WorkspacePanel {
   region: WorkspaceRegion;
   description: string;
 }
+/** Optional focused layouts reuse producer instances while limiting the panels they expose. */
+export interface WorkspacePreset {
+  id: string;
+  label: string;
+  title?: string;
+  showToolbar?: boolean;
+  active: Partial<Record<WorkspaceRegion, string>>;
+  columns?: { panels: string[]; active: string; weight?: number }[];
+}
+
+export function workspacePresetPanels(panels: WorkspacePanel[], preset?: WorkspacePreset): WorkspacePanel[] {
+  if (!preset?.columns) return panels;
+  const ids = new Set(preset.columns.flatMap(column => column.panels));
+  return panels.filter(panel => ids.has(panel.id));
+}
 export interface WorkspaceCommand {
   id: string;
   label: string;

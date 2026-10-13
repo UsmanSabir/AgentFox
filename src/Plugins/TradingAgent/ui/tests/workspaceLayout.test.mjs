@@ -62,19 +62,36 @@ test('rejects floating, pop-out and excessively large saved views', () => {
   assert.equal(readWorkspaceLayout(' '.repeat(MAX_LAYOUT_LENGTH + 1), 'premium', ['chart'], ['trading'], now), null);
 });
 
-test('auto-hidden view restores only known unique panels outside the grid and a bounded height', () => {
-  const tray = {ids:['watchlist'],active:'watchlist',height:250};
-  const value = saveWorkspaceLayout('premium','trading',layout(),now,tray);
-  assert.deepEqual(read(value).bottomTray,tray);
-  tray.ids.push('chart');
-  assert.deepEqual(value.bottomTray.ids,['watchlist']);
-  for (const bottomTray of [
+test('auto-hidden edges restore only known unique panels outside the grid and bounded sizes', () => {
+  const autoHide = {left:{ids:['watchlist'],active:'watchlist',size:250}};
+  const value = saveWorkspaceLayout('premium','trading',layout(),now,autoHide);
+  assert.deepEqual(read(value).autoHide,autoHide);
+  autoHide.left.ids.push('chart');
+  assert.deepEqual(value.autoHide.left.ids,['watchlist']);
+  for (const tray of [
     null, false, 0,
-    {ids:[],active:'watchlist',height:250}, {ids:['chart'],active:'chart',height:250},
-    {ids:['watchlist','watchlist'],active:'watchlist',height:250},
-    {ids:['watchlist'],active:'unknown',height:250},
-    {ids:['unknown'],active:'unknown',height:250},
-    {ids:['watchlist'],active:'watchlist',height:Infinity},
-    {ids:['watchlist'],active:'watchlist',height:10}
-  ]) assert.equal(read({...value,bottomTray}),null);
+    {ids:[],active:'watchlist',size:250}, {ids:['chart'],active:'chart',size:250},
+    {ids:['watchlist','watchlist'],active:'watchlist',size:250},
+    {ids:['watchlist'],active:'unknown',size:250},
+    {ids:['unknown'],active:'unknown',size:250},
+    {ids:['watchlist'],active:'watchlist',size:Infinity},
+    {ids:['watchlist'],active:'watchlist',size:10}
+  ]) assert.equal(read({...value,autoHide:{left:tray}}),null);
+  assert.equal(read({...value,autoHide:{top:{ids:['watchlist'],active:'watchlist',size:250}}}),null);
+});
+
+test('auto-hidden edges cannot overlap one another', () => {
+  const value = saved();
+  value.autoHide = {
+    left:{ids:['watchlist'],active:'watchlist',size:250},
+    right:{ids:['watchlist'],active:'watchlist',size:300}
+  };
+  assert.equal(read(value),null);
+});
+
+test('the retired bottom tray shape migrates to the edge-neutral shape', () => {
+  const value = saved();
+  value.bottomTray = {ids:['watchlist'],active:'watchlist',height:250};
+  assert.deepEqual(read(value).autoHide,{bottom:{ids:['watchlist'],active:'watchlist',size:250}});
+  assert.equal(read(value).bottomTray,undefined);
 });

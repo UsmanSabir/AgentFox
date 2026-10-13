@@ -268,6 +268,46 @@ public sealed record ArmedOrder
     public bool PersistentUntilFilled { get; init; }
 
     /// <summary>
+    /// For a take-profit SELL fired AHEAD of its limit: the price at or below which the resting sell is
+    /// pulled back and this order returns to <c>armed</c>. Null is the original behaviour — once fired,
+    /// the order works until it fills. See <see cref="ArmedOrderPullback"/>.
+    ///
+    /// <para>
+    /// <b>Why a take-profit needs one.</b> A target limit that fires only when the price REACHES it
+    /// arrives after the touch and joins the back of the queue, so a brief touch is missed. Firing it a
+    /// little early fixes that — the limit still refuses to sell below itself — but firing is also what
+    /// stands the protective stop down over those shares (a SELL is bounded by FREE shares), and a
+    /// resting sell above a falling market protects nothing. This level is where that trade stops being
+    /// worth it: the sell is cancelled, verified, and the stop re-placed over the whole holding.
+    /// </para>
+    /// </summary>
+    public decimal? PullbackPrice { get; init; }
+
+    /// <summary>
+    /// How many times this order has been pulled back after firing. Bounded by
+    /// <see cref="ArmedOrderPullback.MaxPullbacks"/>: a price hovering between the fire level and the
+    /// pull-back level would otherwise cycle stop-off, sell-on, sell-off, stop-on, each costing broker
+    /// order numbers. On reaching the cap the order is re-armed AT its limit with no pull-back, which is
+    /// exactly the behaviour an order had before this existed.
+    /// </summary>
+    public int PullbackCount { get; init; }
+
+    /// <summary>
+    /// Every time this order has been re-armed after firing — pull-backs and hand-backs at the close
+    /// alike. Exists only to keep the persistent order id deterministic AND unique per firing; see
+    /// <see cref="ArmedOrderPullback.IntentIdFor"/>.
+    /// </summary>
+    public int RearmCount { get; init; }
+
+    /// <summary>
+    /// Set while a pull-back is in progress: the resting sell has been asked to cancel and this order
+    /// waits to be re-armed. The row stays <c>fired</c> throughout, so every reader that already knows
+    /// what "fired with a working order" means keeps reading it correctly; this marker is what tells the
+    /// re-arm apart from an operator cancelling the same persistent order, which must NOT re-arm.
+    /// </summary>
+    public DateTime? PullbackRequestedUtc { get; init; }
+
+    /// <summary>
     /// A person armed this order by hand, rather than a strategy arming it as part of a plan.
     ///
     /// <para>

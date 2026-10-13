@@ -96,6 +96,54 @@ public static class CandleResampler
         return months;
     }
 
+    /// <summary>
+    /// Rolls fine intraday bars (the analytics portal's one-minute bars) up into
+    /// <paramref name="intervalMinutes"/>-wide bars, oldest first.
+    ///
+    /// <para>
+    /// Buckets are epoch-aligned exactly as <see cref="PsxDataClient.AggregateTicks"/> aligns them, so a
+    /// 15-minute bar built from minute bars and one built from the PSX tick tape start at the same
+    /// instant and an archive holding both never carries two bars for one slot. A source bar belongs
+    /// to the bucket its START falls in. A bucket is live while its window has not elapsed at
+    /// <paramref name="nowUtc"/>, or while any bar inside it is still forming.
+    /// </para>
+    /// </summary>
+    public static IReadOnlyList<PsxCandle> ToIntraday(
+        IReadOnlyList<PsxCandle> fineBars, int intervalMinutes, DateTime nowUtc)
+    {
+        if (fineBars is null || fineBars.Count == 0 || intervalMinutes <= 0) return [];
+
+        var width = intervalMinutes * 60L;
+        var bars = new List<PsxCandle>();
+
+        foreach (var group in fineBars
+            .Where(b => b.BucketStartUtc is not null)
+            .OrderBy(b => b.BucketStartUtc)
+            .GroupBy(b => new DateTimeOffset(DateTime.SpecifyKind(b.BucketStartUtc!.Value, DateTimeKind.Utc))
+                .ToUnixTimeSeconds() / width * width)
+            .OrderBy(g => g.Key))
+        {
+            var ordered = group.ToList();
+            var start = DateTimeOffset.FromUnixTimeSeconds(group.Key).UtcDateTime;
+
+            bars.Add(new PsxCandle
+            {
+                Symbol          = ordered[0].Symbol,
+                Date            = ordered[0].Date,
+                BucketStartUtc  = start,
+                IntervalMinutes = intervalMinutes,
+                Open            = ordered[0].Open,
+                High            = ordered.Max(b => b.High),
+                Low             = ordered.Min(b => b.Low),
+                Close           = ordered[^1].Close,
+                Volume          = ordered.Sum(b => b.Volume),
+                IsLive          = start.AddMinutes(intervalMinutes) > nowUtc || ordered.Any(b => b.IsLive)
+            });
+        }
+
+        return bars;
+    }
+
     private static (int Year, int Week) IsoWeekKey(DateOnly date)
     {
         var value = date.ToDateTime(TimeOnly.MinValue);

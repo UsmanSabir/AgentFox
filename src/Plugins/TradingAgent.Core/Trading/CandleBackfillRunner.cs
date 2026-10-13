@@ -114,6 +114,7 @@ public sealed class CandleBackfillRunner
     private readonly IOptions<TradingAgentOptions> _options;
     private readonly IHostApplicationLifetime _lifetime;
     private readonly ILogger<CandleBackfillRunner> _logger;
+    private readonly BrokerDailyBarFeeder? _brokerFeeder;
 
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly object _progressLock = new();
@@ -126,8 +127,10 @@ public sealed class CandleBackfillRunner
         IMarketCalendar calendar,
         IOptions<TradingAgentOptions> options,
         IHostApplicationLifetime lifetime,
-        ILogger<CandleBackfillRunner> logger)
+        ILogger<CandleBackfillRunner> logger,
+        BrokerDailyBarFeeder? brokerFeeder = null)
     {
+        _brokerFeeder = brokerFeeder;
         _dataClient = dataClient;
         _repository = repository;
         _universe = universe;
@@ -352,6 +355,23 @@ public sealed class CandleBackfillRunner
         var settledThrough = LastSettledSession();
         await _repository.ClearDailyCoverageAfterAsync(settledThrough, ct);
 
+        // Recent gaps from the broker first, per symbol (BrokerDailyBarFeeder). It answers where the exchange's
+        // portal may not (it refused the hosting machine from 2026-10-12), and it never stands in for the deep
+        // history below. A full pass only: a scoped pass is someone asking for particular symbols' PSX history.
+        if (_brokerFeeder is not null && symbolScope is not { Count: > 0 })
+        {
+            try
+            {
+                var fed = await _brokerFeeder.FillAsync(settledThrough, ct);
+                if (fed.Skipped is not null)
+                    _logger.LogInformation("[CandleBackfill] Broker fill skipped: {Reason}.", fed.Skipped);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "[CandleBackfill] Broker fill failed; the PSX pass continues.");
+            }
+        }
+
         var from = settledThrough.AddYears(-Math.Clamp(years, 1, 15));
         var weekdays = Weekdays(from, settledThrough);
         var covered = await _repository.GetCoveredDailyDatesAsync(from, settledThrough, scope, ct);
@@ -409,6 +429,22 @@ public sealed class CandleBackfillRunner
             SetProgress(p => p with { CurrentDate = date });
 
             var rows = await FetchWithRetryAsync(date, ct);
+
+            // A request that FAILED is not an empty table. Read as one, a single refused day was recorded as a
+            // non-trading day for good: 2026-10-12, when the portal stopped answering the hosting machine, became
+            // a permanent hole on every hosted agent. Nothing is recorded; the next pass asks again.
+            if (rows is null)
+            {
+                var message =
+                    $"Stopped: the PSX data portal did not answer for {date:yyyy-MM-dd}. {stored} sessions stored; " +
+                    "nothing was recorded for the date, so the next pass asks for it again.";
+                _logger.LogWarning("[CandleBackfill] {Message}", message);
+                SetProgress(p => p with
+                {
+                    IsRunning = false, CompletedUtc = DateTime.UtcNow, CurrentDate = null, Message = message
+                });
+                return;
+            }
 
             if (rows.Count == 0)
             {
@@ -473,7 +509,8 @@ public sealed class CandleBackfillRunner
         });
     }
 
-    private async Task<IReadOnlyDictionary<string, PsxCandle>> FetchWithRetryAsync(
+    /// <summary>The session's rows, an empty table, or NULL when the portal could not be asked at all.</summary>
+    private async Task<IReadOnlyDictionary<string, PsxCandle>?> FetchWithRetryAsync(
         DateOnly date, CancellationToken ct)
     {
         for (var attempt = 1; attempt <= 2; attempt++)
@@ -489,7 +526,7 @@ public sealed class CandleBackfillRunner
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 _logger.LogDebug(ex, "[CandleBackfill] Fetch attempt {Attempt} failed for {Date}.", attempt, date);
-                if (attempt == 2) return new Dictionary<string, PsxCandle>();
+                if (attempt == 2) return null;
                 await Task.Delay(AfterEmpty, ct);
             }
         }

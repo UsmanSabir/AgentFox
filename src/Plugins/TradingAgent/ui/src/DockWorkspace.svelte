@@ -1,18 +1,27 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { createDockview, themeDark, themeLight, type DockviewApi, type IContentRenderer } from 'dockview';
+  import { createDockview, themeDark, themeLight, type DockviewApi, type DockviewGroupPanel, type IContentRenderer } from 'dockview';
   import 'dockview/dist/styles/dockview.css';
   import { Command, PanelsTopLeft, RotateCcw, Maximize, Minimize, Keyboard, Pin, PinOff, X, Fullscreen, Shrink } from 'lucide-svelte';
   import WorkspaceShortcuts from './WorkspaceShortcuts.svelte';
-  import type { WorkspaceCommand, WorkspaceComposition, WorkspacePanel, WorkspaceRegion } from './workspaceComposition';
-  import { readWorkspaceLayout, saveWorkspaceLayout, type AutoHideTray } from './workspaceLayout';
+  import { workspacePresetPanels, type WorkspaceCommand, type WorkspaceComposition, type WorkspacePanel, type WorkspaceRegion, type WorkspacePreset } from './workspaceComposition';
+  import {
+    readWorkspaceLayout, saveWorkspaceLayout,
+    type AutoHideEdge, type AutoHideTrays
+  } from './workspaceLayout';
 
   export let panels: WorkspacePanel[];
   export let title = 'Trading workstation';
   export let edition: string;
   export let storageKey: string;
-  export let presets: { id: string; label: string; active: Partial<Record<WorkspaceRegion, string>> }[];
+  export let presets: WorkspacePreset[];
+  export let onPresetChange: (id: string) => void = () => {};
   export let onExit: () => void;
+  /**
+   * Open on this preset instead of the saved layout's, when it names one of `presets` — for a link that
+   * asks for a particular view. The choice is then saved like any other. Unset (the default) changes nothing.
+   */
+  export let initialPreset: string | null = null;
 
   let root: HTMLElement;
   let dockRoot: HTMLDivElement;
@@ -45,7 +54,20 @@
     fullscreen = document.fullscreenElement === root;
   }
   let desktop = true;
-  let preset = presets[0].id;
+  const requestedPreset = presets.some(item => item.id === initialPreset) ? initialPreset : null;
+  let preset = requestedPreset ?? presets[0].id;
+  // Set when a preset was chosen before the layout was built — by a click on a phone, or by
+  // `initialPreset` — so the saved layout is skipped once and the choice is saved instead.
+  let mobilePresetChanged = requestedPreset !== null;
+  $: selectedPreset = presets.find(item => item.id === preset) ?? presets[0];
+  $: availablePanels = workspacePresetPanels(panels, selectedPreset);
+  function offeredPanels() { return workspacePresetPanels(panels, presets.find(item => item.id === preset)); }
+  function panelRegion(id: string) {
+    const columns = presets.find(item => item.id === preset)?.columns;
+    const index = columns?.findIndex(column => column.panels.includes(id)) ?? -1;
+    if (index >= 0) return index === 0 ? 'left' : index === columns!.length - 1 ? 'right' : 'center';
+    return panels.find(panel => panel.id === id)?.region;
+  }
   let commands: WorkspaceCommand[] = [];
   let activeId = 'chart';
   let notice = 'Workspace preview · existing trading controls retained';
@@ -58,15 +80,34 @@
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
   let dirty = false;
   let disposed = false;
-  let bottomTray: AutoHideTray | undefined;
-  let trayOpen = false;
+  let autoHide: AutoHideTrays = {};
+  let openEdge: AutoHideEdge | null = null;
   let trayHost: HTMLDivElement;
   let trayShell: HTMLDivElement;
-  let trayStrip: HTMLElement;
+  let leftTrayStrip: HTMLElement;
+  let rightTrayStrip: HTMLElement;
+  let bottomTrayStrip: HTMLElement;
   let trayReturnFocus: HTMLElement | null = null;
   const nodes = new Map<string, HTMLElement>();
   const containers = new Map<string, HTMLDivElement>();
   const special = new Set(['core-toolbar', 'edition-health', 'core-dialogs']);
+  const edges: AutoHideEdge[] = ['left','right','bottom'];
+
+  function trayForPanel(id: string) {
+    return edges.find(edge => autoHide[edge]?.ids.includes(id));
+  }
+
+  function trayStrip(edge: AutoHideEdge) {
+    return edge === 'left' ? leftTrayStrip : edge === 'right' ? rightTrayStrip : bottomTrayStrip;
+  }
+
+  function currentTray() {
+    return openEdge ? autoHide[openEdge] : undefined;
+  }
+
+  function pinOpenTray() {
+    if (openEdge) pin(openEdge);
+  }
 
   function container(id: string) {
     let element = containers.get(id);
@@ -131,23 +172,27 @@
   };
 
   function focusPanel(id: string) {
-    if (!panels.some(p => p.id === id)) return;
-    if (desktop && bottomTray && !bottomTray.ids.includes(id) && !api?.getPanel(id)
-      && panels.find(p => p.id === id)?.region === 'bottom') bottomTray = { ...bottomTray, ids:[...bottomTray.ids,id] };
-    if (desktop && bottomTray?.ids.includes(id)) {
-      if (trayOpen && bottomTray.active !== id) depot.appendChild(container(bottomTray.active));
-      if (!trayOpen) trayReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-      bottomTray = { ...bottomTray, active:id };
-      trayOpen = true;
+    if (!offeredPanels().some(p => p.id === id)) return;
+    const region = panelRegion(id);
+    if (desktop && region && region !== 'center' && autoHide[region] && !trayForPanel(id) && !api?.getPanel(id)) {
+      autoHide = { ...autoHide, [region]:{ ...autoHide[region]!, ids:[...autoHide[region]!.ids,id] } };
+    }
+    const edge = trayForPanel(id);
+    if (desktop && edge) {
+      const tray = autoHide[edge]!;
+      if (openEdge && (openEdge !== edge || tray.active !== id)) depot.appendChild(container(autoHide[openEdge]!.active));
+      if (!openEdge) trayReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      autoHide = { ...autoHide, [edge]:{ ...tray, active:id } };
+      openEdge = edge;
       scheduleSave();
-      void tick().then(() => { if (!disposed && trayOpen && bottomTray?.active === id) trayHost.appendChild(container(id)); });
+      void tick().then(() => { if (!disposed && openEdge === edge && autoHide[edge]?.active === id) trayHost.appendChild(container(id)); });
     } else if (api) {
       closeTray(false);
       if (api.hasMaximizedGroup() && !api.getPanel(id)?.api.isMaximized()) api.exitMaximizedGroup();
       let panel = api.getPanel(id);
       if (!panel) {
-        const region = panels.find(p => p.id === id)?.region;
-        const peer = panels.find(p => p.region === region && api?.getPanel(p.id));
+        const region = panelRegion(id);
+        const peer = offeredPanels().find(p => panelRegion(p.id) === region && api?.getPanel(p.id));
         panel = addPanel(id, peer?.id);
       }
       panel?.api.setActive();
@@ -170,16 +215,17 @@
    * known exactly what it placed. That adopts a deliberately hidden panel once, on the first load after
    * this shipped, and never again — the save below records the catalogue in full.
    *
-   * Ids parked in the auto-hide tray are skipped: readWorkspaceLayout refuses a record that has an id
+   * Ids parked in any auto-hide tray are skipped: readWorkspaceLayout refuses a record that has an id
    * in both, so their absence from the layout is a placement rather than a gap.
    */
   function adoptNewPanels(placed: readonly string[], known?: readonly string[]) {
     if (!api) return false;
-    const seen = new Set(known ?? [...placed, ...(bottomTray?.ids ?? [])]);
+    const hidden = edges.flatMap(edge => autoHide[edge]?.ids ?? []);
+    const seen = new Set(known ?? [...placed, ...hidden]);
     let adopted = false;
-    for (const spec of panels) {
-      if (seen.has(spec.id) || api.getPanel(spec.id) || bottomTray?.ids.includes(spec.id)) continue;
-      const peer = panels.find(p => p.region === spec.region && api?.getPanel(p.id));
+    for (const spec of offeredPanels()) {
+      if (seen.has(spec.id) || api.getPanel(spec.id) || trayForPanel(spec.id)) continue;
+      const peer = offeredPanels().find(p => panelRegion(p.id) === panelRegion(spec.id) && api?.getPanel(p.id));
       addPanel(spec.id, peer?.id);
       adopted = true;
     }
@@ -226,10 +272,27 @@
 
   function buildDefault(next: string) {
     if (!api) return;
-    parkTray();
-    bottomTray = undefined;
+    parkTrays();
+    autoHide = {};
     api.exitMaximizedGroup();
     api.clear();
+    const selected = presets.find(p => p.id === next) ?? presets[0];
+    preset = selected.id;
+    if (selected.columns?.length) {
+      let previous: string | undefined;
+      const totalWeight = selected.columns.reduce((total, column) => total + (column.weight ?? 1), 0);
+      for (const column of selected.columns) {
+        const first = column.panels[0];
+        addPanel(first, previous, previous ? 'right' : 'within');
+        for (const id of column.panels.slice(1)) addPanel(id, first);
+        api.getPanel(first)?.api.setSize({ width: dockRoot.clientWidth * (column.weight ?? 1) / totalWeight });
+        api.getPanel(column.active)?.api.setActive();
+        previous = first;
+      }
+      activeId = selected.columns[0].active;
+      api.getPanel(activeId)?.api.setActive();
+      return;
+    }
     const primary = panels.find(p => p.region === 'center')!;
     addPanel(primary.id);
     const regions = ['left', 'right', 'bottom'] as const;
@@ -247,7 +310,6 @@
     api.getPanel(leaders.left ?? '')?.api.setSize({ width: Math.max(250, Math.min(280, dockRoot.clientWidth * .2)) });
     if (dockRoot.clientWidth >= 1200) api.getPanel(leaders.right ?? '')?.api.setSize({ width: Math.max(310, Math.min(360, dockRoot.clientWidth * .25)) });
     api.getPanel(leaders.bottom ?? '')?.api.setSize({ height: Math.max(130, dockRoot.clientHeight * .24) });
-    const selected = presets.find(p => p.id === next) ?? presets[0];
     for (const id of Object.values(selected.active)) api.getPanel(id)?.api.setActive();
     const activeCenter = selected.active.center ?? primary.id;
     api.getPanel(activeCenter)?.api.setActive();
@@ -261,7 +323,7 @@
   function persist() {
     if (!api || suppressSave || !dirty) return;
     try {
-      localStorage.setItem(storageKey, JSON.stringify(saveWorkspaceLayout(edition, preset, api.toJSON(), Date.now(), bottomTray, api.hasMaximizedGroup() ? api.activePanel?.id : undefined, panels.map(p => p.id))));
+      localStorage.setItem(storageKey, JSON.stringify(saveWorkspaceLayout(edition, preset, api.toJSON(), Date.now(), autoHide, api.hasMaximizedGroup() ? api.activePanel?.id : undefined, panels.map(p => p.id))));
       dirty = false;
       storageWarning = '';
     } catch { storageWarning = 'Layout could not be saved in this browser; trading is unaffected.'; }
@@ -276,24 +338,27 @@
     clearTimeout(saveTimer);
     suppressSave = true;
     if (api) buildDefault(presets[0].id);
-    else { preset = presets[0].id; bottomTray = undefined; }
+    else { preset = presets[0].id; autoHide = {}; }
     removeSaved();
     storageWarning = '';
     dirty = false;
     suppressSave = false;
+    updateMobilePanels();
+    onPresetChange(preset);
     notice = 'Default view restored. Trading state and open forms are unchanged.';
   }
   function selectPreset(id: string) {
-    if (!api) { preset = id; return; }
+    if (!api) { preset = id; mobilePresetChanged = true; updateMobilePanels(); onPresetChange(preset); return; }
     clearTimeout(saveTimer);
     suppressSave = true;
     buildDefault(id);
     suppressSave = false;
     scheduleSave();
-    notice = 'Layout changed. Every panel remains available in Panels.';
+    onPresetChange(preset);
+    notice = 'Layout changed. This mode’s panels are available in Panels.';
   }
   function maximize() {
-    if (trayOpen) { notice = 'Pin the bottom tools before maximizing their group.'; return; }
+    if (openEdge) { notice = `Pin the ${openEdge} panels before maximizing their group.`; return; }
     if (!api?.activePanel) return;
     if (api.hasMaximizedGroup()) api.exitMaximizedGroup();
     else api.activePanel.api.maximize();
@@ -302,8 +367,11 @@
     scheduleSave();
   }
   function resize(width: number, height: number) {
-    if (trayOpen && bottomTray) {
-      bottomTray = { ...bottomTray, height:Math.min(900, Math.max(130, bottomTray.height + height)) };
+    if (openEdge) {
+      const tray = autoHide[openEdge]!;
+      const delta = openEdge === 'bottom' ? height : width;
+      const minimum = openEdge === 'bottom' ? 130 : 180;
+      autoHide = { ...autoHide, [openEdge]:{ ...tray, size:Math.min(900, Math.max(minimum, tray.size + delta)) } };
       scheduleSave(); return;
     }
     const panel = api?.getPanel(activeId);
@@ -311,7 +379,7 @@
     panel.api.setSize({ width: Math.max(180, panel.api.width + width), height: Math.max(100, panel.api.height + height) });
   }
   function move(position: 'left' | 'right' | 'top' | 'bottom') {
-    if (trayOpen) { notice = 'Pin bottom tools before moving their docking tabs.'; return; }
+    if (openEdge) { notice = `Pin the ${openEdge} panels before moving their docking tabs.`; return; }
     const panel = api?.getPanel(activeId);
     if (!api || !panel) return;
     const direction = position === 'top' ? 'above' : position === 'bottom' ? 'below' : position;
@@ -320,29 +388,23 @@
     focusPanel(panel.id);
   }
   function hideActive() {
-    if (trayOpen) { closeTray(); return; }
+    if (openEdge) { closeTray(); return; }
     api?.getPanel(activeId)?.api.close();
     if (api?.activePanel) focusPanel(api.activePanel.id);
     else root.focus();
   }
   function cycleGroup(delta: number) {
-    if (trayOpen) {
-      closeTray(false);
-      const group = delta > 0 ? api?.groups[0] : api?.groups.at(-1);
-      if (group?.activePanel) focusPanel(group.activePanel.id);
-      return;
-    }
-    if (!api?.groups.length) return;
-    const groups = api.groups;
-    const index = groups.findIndex(g => g === api?.activeGroup);
-    if (bottomTray && (index + delta < 0 || index + delta >= groups.length)) { focusPanel(bottomTray.active); return; }
-    const next = groups[(index + delta + groups.length) % groups.length].activePanel;
-    if (next) focusPanel(next.id);
+    const targets = [autoHide.left?.active, ...((api?.groups ?? []).map(group => group.activePanel?.id)), autoHide.right?.active, autoHide.bottom?.active]
+      .filter((id): id is string => !!id);
+    if (!targets.length) return;
+    const index = Math.max(0, targets.indexOf(activeId));
+    focusPanel(targets[(index + delta + targets.length) % targets.length]);
   }
   function cycleTab(delta: number) {
-    if (trayOpen && bottomTray) {
-      const index = bottomTray.ids.indexOf(bottomTray.active);
-      focusPanel(bottomTray.ids[(index + delta + bottomTray.ids.length) % bottomTray.ids.length]);
+    if (openEdge) {
+      const tray = autoHide[openEdge]!;
+      const index = tray.ids.indexOf(tray.active);
+      focusPanel(tray.ids[(index + delta + tray.ids.length) % tray.ids.length]);
       return;
     }
     const group = api?.activeGroup;
@@ -352,60 +414,75 @@
   }
 
   // App-owned auto-hide: only docking wrappers are removed. Producer nodes/readers stay mounted.
-  // One tool group at a time; repinning puts it at the bottom without resetting the main grid.
-  function parkTray() {
-    for (const id of bottomTray?.ids ?? []) if (containers.has(id)) depot.appendChild(container(id));
-    trayOpen = false;
+  // One group per edge; repinning restores that edge without resetting the rest of the grid.
+  function parkTray(edge: AutoHideEdge) {
+    for (const id of autoHide[edge]?.ids ?? []) if (containers.has(id)) depot.appendChild(container(id));
+    if (openEdge === edge) openEdge = null;
+  }
+  function parkTrays() {
+    for (const edge of edges) parkTray(edge);
   }
   function closeTray(restore = true) {
-    if (!trayOpen) return;
-    parkTray();
+    if (!openEdge) return;
+    const edge = openEdge;
+    const active = autoHide[edge]?.active;
+    parkTray(edge);
     if (restore) {
-      const trigger = trayStrip?.querySelector<HTMLElement>(`[data-tray-id="${bottomTray?.active}"]`);
+      const trigger = trayStrip(edge)?.querySelector<HTMLElement>(`[data-tray-id="${active}"]`);
       (trigger ?? (trayReturnFocus?.isConnected ? trayReturnFocus : root)).focus();
     }
   }
-  function unpinBottom(groupId?: string) {
-    if (!api || bottomTray) return;
-    const eligible = api.groups.filter(g => g.panels.length && g.panels.every(p => panels.find(s => s.id === p.id)?.region === 'bottom'));
+  function groupRegion(group: DockviewGroupPanel): AutoHideEdge | null {
+    const region = panelRegion(group.panels[0]?.id);
+    if (region !== 'left' && region !== 'right' && region !== 'bottom') return null;
+    return group.panels.length && group.panels.every(panel => panelRegion(panel.id) === region) ? region : null;
+  }
+  function unpin(edge: AutoHideEdge, groupId?: string) {
+    if (!api || autoHide[edge]) return;
+    const eligible = api.groups.filter(group => groupRegion(group) === edge);
     const group = groupId ? eligible.find(g => g.id === groupId) : eligible.includes(api.activeGroup!) ? api.activeGroup! : eligible.sort((a,b) => (b.api.boundingBox?.top ?? 0) - (a.api.boundingBox?.top ?? 0))[0];
-    if (!group) { notice = 'No bottom tool group to unpin. Tab bottom tools together, or use Reset view.'; return; }
+    if (!group) { notice = `No ${edge} panel group to unpin. Tab its panels together, or use Reset view.`; return; }
     if (api.hasMaximizedGroup()) api.exitMaximizedGroup();
-    bottomTray = { ids:group.panels.map(p => p.id), active:group.activePanel!.id, height:Math.min(900, Math.max(260, group.api.height)) };
+    const dimension = edge === 'bottom' ? group.api.height : group.api.width;
+    autoHide = { ...autoHide, [edge]:{
+      ids:group.panels.map(p => p.id), active:group.activePanel!.id,
+      size:Math.min(900, Math.max(edge === 'bottom' ? 260 : 240, dimension))
+    } };
     suppressSave = true;
-    for (const id of bottomTray.ids) api.getPanel(id)?.api.close();
+    for (const id of autoHide[edge]!.ids) api.getPanel(id)?.api.close();
     suppressSave = false;
     scheduleSave();
-    void tick().then(() => trayStrip?.querySelector<HTMLElement>('button[data-tray-id]')?.focus());
-    notice = 'Bottom tools unpinned. Open from the bottom strip or Panels; Escape closes the peek.';
+    void tick().then(() => trayStrip(edge)?.querySelector<HTMLElement>('button[data-tray-id]')?.focus());
+    notice = `${edge[0].toUpperCase() + edge.slice(1)} panels unpinned. Open them from the edge strip or Panels; Escape closes the peek.`;
   }
-  function pinBottom() {
-    if (!api || !bottomTray) return;
-    const saved = bottomTray;
-    parkTray();
-    bottomTray = undefined;
+  function pin(edge: AutoHideEdge) {
+    const saved = autoHide[edge];
+    if (!api || !saved) return;
+    parkTray(edge);
+    autoHide = Object.fromEntries(Object.entries(autoHide).filter(([key]) => key !== edge)) as AutoHideTrays;
     suppressSave = true;
-    const first = addPanel(saved.ids[0], undefined, 'below');
+    const direction = edge === 'bottom' ? 'below' : edge;
+    const first = addPanel(saved.ids[0], undefined, direction);
     for (const id of saved.ids.slice(1)) addPanel(id, saved.ids[0]);
-    first?.api.setSize({ height:saved.height });
+    first?.api.setSize(edge === 'bottom' ? { height:saved.size } : { width:saved.size });
     suppressSave = false;
     focusPanel(saved.active);
     scheduleSave();
-    notice = 'Bottom tools pinned. Other groups and trading forms are unchanged.';
+    notice = `${edge[0].toUpperCase() + edge.slice(1)} panels pinned. Other groups and trading forms are unchanged.`;
   }
   function outsideTray(event: Event) {
     const target = event.target;
-    if (!trayOpen || !(target instanceof Node) || trayShell?.contains(target) || trayStrip?.contains(target)
+    if (!openEdge || !(target instanceof Node) || trayShell?.contains(target) || trayStrip(openEdge)?.contains(target)
       || (target instanceof Element && target.closest('dialog, [role="dialog"], [role="alertdialog"]'))) return;
     closeTray(false);
   }
 
-  $: panelCommands = panels.map(p => ({ id: 'panel.' + p.id, label: 'Show ' + p.title, run: () => focusPanel(p.id) }));
+  $: panelCommands = availablePanels.map(p => ({ id: 'panel.' + p.id, label: 'Show ' + p.title, run: () => focusPanel(p.id) }));
   $: layoutCommands = [
     { id:'workspace.shortcuts', label:'Show keyboard shortcuts', run:() => shortcutsSheet.open() },
     { id:'workspace.fullscreen', label:fullscreen ? 'Exit page full screen' : 'Enter page full screen', run:toggleFullscreen,
       disabled:() => fullscreenSupported ? null : 'Page full screen is unavailable in this browser or host frame.' },
-    { id:'layout.bottom', label:bottomTray ? 'Pin bottom tools' : 'Unpin bottom tools (auto-hide)', run:() => bottomTray ? pinBottom() : unpinBottom() },
+    ...edges.map(edge => ({ id:'layout.' + edge, label:autoHide[edge] ? `Pin ${edge} panels` : `Unpin ${edge} panels (auto-hide)`, run:() => autoHide[edge] ? pin(edge) : unpin(edge) })),
     { id:'layout.reset', label:'Reset view to default', run:resetView },
     { id:'layout.maximize', label:'Maximize / restore active group', run:maximize },
     { id:'layout.hide', label:'Hide active panel (restore from Panels)', run:hideActive },
@@ -416,10 +493,10 @@
     ...(['left', 'right', 'top', 'bottom'] as const).map(position => ({
       id:'layout.move.' + position, label:'Move active panel to ' + position + ' edge', run:() => move(position)
     })),
-    ...panels.map(p => ({
+    ...availablePanels.map(p => ({
       id:'layout.tab.' + p.id, label:'Tab active panel with ' + p.title,
       run:() => {
-        if (trayOpen) { notice = 'Pin bottom tools before moving their docking tabs.'; return; }
+        if (openEdge) { notice = `Pin the ${openEdge} panels before moving their docking tabs.`; return; }
         const current = api?.getPanel(activeId);
         const target = api?.getPanel(p.id);
         if (current && target && current !== target) current.api.moveTo({ group:target.group });
@@ -466,7 +543,7 @@
     if (event.defaultPrevented || event.isComposing || event.repeat) return;
     const target = event.target instanceof HTMLElement ? event.target : null;
     if (palette?.open || target?.closest('dialog, [role="dialog"], [role="alertdialog"]')) return;
-    if (event.key === 'Escape' && trayOpen) { event.preventDefault(); event.stopPropagation(); closeTray(); return; }
+    if (event.key === 'Escape' && openEdge) { event.preventDefault(); event.stopPropagation(); closeTray(); return; }
     if (event.ctrlKey && !event.altKey && !event.shiftKey && event.code === 'Slash') {
       event.preventDefault(); event.stopPropagation(); void shortcutsSheet.open(); return;
     }
@@ -491,6 +568,14 @@
     event.preventDefault(); event.stopPropagation();
   }
 
+  function updateMobilePanels() {
+    if (desktop || !stack || !depot) return;
+    for (const p of panels) depot.appendChild(container(p.id));
+    const columns = presets.find(item => item.id === preset)?.columns;
+    const ids = columns?.flatMap(column => column.panels) ?? offeredPanels().map(panel => panel.id);
+    for (const id of ids) { stack.appendChild(container(id)); place(id); }
+  }
+
   onMount(() => {
     fullscreenSupported = typeof root.requestFullscreen === 'function' && document.fullscreenEnabled !== false;
     syncFullscreen();
@@ -502,7 +587,7 @@
     function disconnect() {
       clearTimeout(saveTimer);
       persist();
-      parkTray();
+      parkTrays();
       for (const s of subscriptions) s.dispose();
       subscriptions = [];
       api?.dispose();
@@ -518,7 +603,13 @@
       stack.classList.toggle('hidden', desktop);
       if (!desktop) {
         disconnect();
-        for (const p of panels) { stack.appendChild(container(p.id)); place(p.id); }
+        let raw: string | null = null;
+        try { raw = localStorage.getItem(storageKey); } catch { /* Browser storage is optional. */ }
+        const saved = readWorkspaceLayout(raw, edition, panels.map(p => p.id), presets.map(p => p.id));
+        if (saved && !mobilePresetChanged) preset = saved.preset;
+        else if (raw) removeSaved();
+        updateMobilePanels();
+        onPresetChange(preset);
         return;
       }
       if (api) return;
@@ -528,17 +619,21 @@
           element.className = 'group-actions';
           const pin = document.createElement('button');
           pin.className = 'group-control group-unpin';
-          pin.title = 'Auto-hide this bottom tool group';
-          pin.setAttribute('aria-label','Auto-hide this bottom tool group');
           drawUnpinIcon(pin);
-          pin.onclick = () => unpinBottom(group.id);
+          pin.onclick = () => {
+            const edge = groupRegion(group);
+            if (edge) unpin(edge, group.id);
+          };
           const expand = document.createElement('button'); expand.className = 'group-control';
           expand.onclick = () => { group.activePanel?.api.setActive(); maximize(); };
           element.onpointerdown = event => event.stopPropagation();
           element.append(pin,expand);
           const refresh = () => {
-            pin.hidden = !group.panels.length || !group.panels.every(p => panels.find(s => s.id === p.id)?.region === 'bottom');
-            pin.disabled = !!bottomTray;
+            const edge = groupRegion(group);
+            pin.hidden = !edge;
+            pin.disabled = !!edge && !!autoHide[edge];
+            pin.setAttribute('aria-label', edge ? `Unpin ${edge} panel group` : 'Unpin panel group');
+            pin.title = pin.getAttribute('aria-label')!;
             const restoring = group.api.isMaximized();
             drawMaximizeIcon(expand,restoring);
             expand.setAttribute('aria-label',(restoring ? 'Restore ' : 'Maximize ') + (group.activePanel?.title ?? 'group'));
@@ -562,18 +657,25 @@
       buildDefault(preset);
       let raw: string | null = null;
       try { raw = localStorage.getItem(storageKey); } catch { /* Storage may be disabled. */ }
-      const saved = readWorkspaceLayout(raw, edition, panels.map(p => p.id), presets.map(p => p.id));
+      const saved = mobilePresetChanged ? null : readWorkspaceLayout(raw, edition, panels.map(p => p.id), presets.map(p => p.id));
       let adopted = false;
       if (saved) {
         try {
-          api.fromJSON(saved.layout); preset = saved.preset; bottomTray = saved.bottomTray;
-          adopted = adoptNewPanels(Object.keys(saved.layout.panels), saved.known);
+          api.fromJSON(saved.layout); preset = saved.preset; autoHide = saved.autoHide ?? {};
+          const allowed = new Set(offeredPanels().map(panel => panel.id));
+          if (Object.keys(saved.layout.panels).some(id => !allowed.has(id))
+            || edges.some(edge => autoHide[edge]?.ids.some(id => !allowed.has(id)))) {
+            buildDefault(preset);
+            adopted = true;
+          }
+          adopted = adoptNewPanels(Object.keys(saved.layout.panels), saved.known) || adopted;
           if(saved.maximized) api.getPanel(saved.maximized)?.api.maximize();
         }
         catch { removeSaved(); buildDefault(presets[0].id); }
       } else if (raw) removeSaved();
       suppressSave = false;
       dirty = false;
+      if (mobilePresetChanged) { mobilePresetChanged = false; dirty = true; persist(); }
       // Written back immediately when a panel was adopted, so the record gains its catalogue list even
       // if the operator never moves anything. Without it the adoption is harmless but endless, and a
       // panel they hide right afterwards would come back on the next load.
@@ -583,6 +685,7 @@
       subscriptions.push(api.onDidLayoutChange(scheduleSave));
       subscriptions.push(api.onDidMaximizedGroupChange(() => { maximized = api?.hasMaximizedGroup() ?? false; scheduleSave(); }));
       subscriptions.push(api.onDidActivePanelChange(() => activeId = api?.activePanel?.id ?? activeId));
+      onPresetChange(preset);
     }
     for (const id of nodes.keys()) place(id);
     connect();
@@ -611,9 +714,9 @@
   });
 </script>
 
-<section class="workstation" class:mobile={!desktop} aria-label={title} tabindex="-1" bind:this={root}>
+<section class="workstation" class:mobile={!desktop} aria-label={selectedPreset.title ?? title} tabindex="-1" bind:this={root}>
   <header class="workstation-bar">
-    <div class="workstation-brand"><PanelsTopLeft size={18}/><strong>{title}</strong><span class="preview">PREVIEW</span></div>
+    <div class="workstation-brand"><PanelsTopLeft size={18}/><strong>{selectedPreset.title ?? title}</strong><span class="preview">PREVIEW</span></div>
     <nav aria-label="Workspace layout">
       {#each presets as item}
         <button class:chosen={preset === item.id} aria-pressed={preset === item.id} on:click={() => selectPreset(item.id)}>{item.label}</button>
@@ -631,33 +734,60 @@
         {#if fullscreen}<Shrink size={16}/>{:else}<Fullscreen size={16}/>{/if}
       </button>
       <button on:click={() => shortcutsSheet.open()} title="Keyboard shortcuts (Ctrl+/)"><Keyboard size={14}/> Shortcuts</button>
-      <button on:click={() => bottomTray ? pinBottom() : unpinBottom()} disabled={!desktop} title="Auto-hide a bottom tool group without closing its contents">
-        {#if bottomTray}<Pin size={14}/> Pin bottom{:else}<PinOff size={14}/> Unpin bottom{/if}
-      </button>
+      {#each edges as edge}
+        <button on:click={() => autoHide[edge] ? pin(edge) : unpin(edge)} disabled={!desktop}
+          title={`Auto-hide or pin the ${edge} panel group without closing its contents`}>
+          {#if autoHide[edge]}<Pin size={14}/> Pin {edge}{:else}<PinOff size={14}/> Unpin {edge}{/if}
+        </button>
+      {/each}
       <button on:click={resetView}><RotateCcw size={14}/> Reset view</button>
       <button on:click={onExit}>Classic view</button>
     </nav>
   </header>
   {#if storageWarning}<p class="storage-warning" role="status">{storageWarning}</p>{/if}
   <div class="workspace-operational-row">
-    <div class="core-toolbar" bind:this={toolbar}></div>
+    <div class="core-toolbar" class:hidden={selectedPreset.showToolbar === false} bind:this={toolbar}></div>
     <div class="edition-health" bind:this={health}></div>
   </div>
   <div class="dock-area" class:hidden={!desktop} bind:this={dockArea}>
+    {#if autoHide.left}
+      <nav class="tray-strip side left" aria-label="Auto-hidden left panels" bind:this={leftTrayStrip}>
+        {#each autoHide.left.ids as id}
+          <button data-tray-id={id} aria-expanded={openEdge === 'left' && autoHide.left.active === id} class:chosen={openEdge === 'left' && autoHide.left.active === id}
+            on:click={() => openEdge === 'left' && autoHide.left?.active === id ? closeTray() : focusPanel(id)}>{panels.find(p => p.id === id)?.title}</button>
+        {/each}
+      </nav>
+    {/if}
     <div class="workspace-dock" bind:this={dockRoot}></div>
-    <div class="tray-peek" class:hidden={!trayOpen} bind:this={trayShell} style:height={bottomTray?.height + 'px'}>
-      <div class="tray-heading"><strong>{panels.find(p => p.id === bottomTray?.active)?.title}</strong><span>Auto-hidden · Esc to close</span>
-        <button aria-label="Make bottom peek shorter" on:click={() => resize(0,-80)}>−</button><button aria-label="Make bottom peek taller" on:click={() => resize(0,80)}>+</button>
-        <button on:click={pinBottom}><Pin size={14}/> Pin bottom</button><button aria-label="Close bottom peek" on:click={() => closeTray()}><X size={14}/></button>
+    {#if autoHide.right}
+      <nav class="tray-strip side right" aria-label="Auto-hidden right panels" bind:this={rightTrayStrip}>
+        {#each autoHide.right.ids as id}
+          <button data-tray-id={id} aria-expanded={openEdge === 'right' && autoHide.right.active === id} class:chosen={openEdge === 'right' && autoHide.right.active === id}
+            on:click={() => openEdge === 'right' && autoHide.right?.active === id ? closeTray() : focusPanel(id)}>{panels.find(p => p.id === id)?.title}</button>
+        {/each}
+      </nav>
+    {/if}
+    {#if openEdge}
+      <div class="tray-peek" class:left={openEdge === 'left'} class:right={openEdge === 'right'} class:bottom={openEdge === 'bottom'} bind:this={trayShell}
+        style:width={openEdge === 'bottom' ? undefined : currentTray()?.size + 'px'}
+        style:height={openEdge === 'bottom' ? currentTray()?.size + 'px' : undefined}>
+        <div class="tray-heading"><strong>{panels.find(p => p.id === currentTray()?.active)?.title}</strong><span>Auto-hidden · Esc to close</span>
+          {#if openEdge === 'bottom'}
+            <button aria-label="Make bottom peek shorter" on:click={() => resize(0,-80)}>−</button><button aria-label="Make bottom peek taller" on:click={() => resize(0,80)}>+</button>
+          {:else}
+            <button aria-label={`Make ${openEdge} peek narrower`} on:click={() => resize(-80,0)}>−</button><button aria-label={`Make ${openEdge} peek wider`} on:click={() => resize(80,0)}>+</button>
+          {/if}
+          <button on:click={pinOpenTray}><Pin size={14}/> Pin {openEdge}</button><button aria-label={`Close ${openEdge} peek`} on:click={() => closeTray()}><X size={14}/></button>
+        </div>
+        <div class="tray-content" bind:this={trayHost}></div>
       </div>
-      <div class="tray-content" bind:this={trayHost}></div>
-    </div>
+    {/if}
   </div>
-  {#if desktop && bottomTray}
-    <nav class="tray-strip" aria-label="Auto-hidden bottom panels" bind:this={trayStrip}>
-      {#each bottomTray.ids as id}
-        <button data-tray-id={id} aria-expanded={trayOpen && bottomTray.active === id} class:chosen={trayOpen && bottomTray.active === id}
-          on:click={() => trayOpen && bottomTray?.active === id ? closeTray() : focusPanel(id)}>{panels.find(p => p.id === id)?.title}</button>
+  {#if desktop && autoHide.bottom}
+    <nav class="tray-strip bottom" aria-label="Auto-hidden bottom panels" bind:this={bottomTrayStrip}>
+      {#each autoHide.bottom.ids as id}
+        <button data-tray-id={id} aria-expanded={openEdge === 'bottom' && autoHide.bottom.active === id} class:chosen={openEdge === 'bottom' && autoHide.bottom.active === id}
+          on:click={() => openEdge === 'bottom' && autoHide.bottom?.active === id ? closeTray() : focusPanel(id)}>{panels.find(p => p.id === id)?.title}</button>
       {/each}
     </nav>
   {/if}
@@ -702,14 +832,27 @@
   .edition-health { padding:0 .7rem; }
   .workspace-dock { flex:1 1 0; min-height:0; min-width:0; overflow:hidden; }
   .dock-area { position:relative; display:flex; flex:1 1 0; min-height:0; overflow:hidden; }
-  .tray-peek { position:absolute; inset:auto 0 0; max-height:90%; min-height:0; display:flex; flex-direction:column; background:var(--surface); border:1px solid var(--primary); box-shadow:0 -8px 28px #0005; z-index:5; }
+  .tray-peek { position:absolute; min-height:0; min-width:0; display:flex; flex-direction:column; background:var(--surface); border:1px solid var(--primary); z-index:5; }
+  .tray-peek.bottom { inset:auto 0 0; max-height:90%; box-shadow:0 -8px 28px #0005; }
+  .tray-peek.left { inset:0 auto 0 30px; max-width:90%; box-shadow:8px 0 28px #0005; }
+  .tray-peek.right { inset:0 30px 0 auto; max-width:90%; box-shadow:-8px 0 28px #0005; }
   .tray-heading { display:flex; align-items:center; gap:.5rem; padding:.25rem .6rem; flex:none; background:var(--surface-2); font-size:.75rem; }
   .tray-heading span { flex:1; color:var(--text-2); font-size:.65rem; }
   .tray-content { flex:1; min-height:0; overflow:hidden; }
   .tray-content :global(.workstation-panel) { height:100%; overflow:auto; padding:.65rem; box-sizing:border-box; }
   .tray-content :global(.mobile-panel-title) { display:none; }
   .tray-content :global(.workstation-panel:focus-visible) { outline:2px solid var(--primary); outline-offset:-2px; }
-  .tray-strip { flex:none; flex-wrap:nowrap; overflow-x:auto; gap:0; border-top:1px solid var(--border-md); background:var(--surface-2); }
+  .tray-content :global([data-workspace-panel='watchlist'] > div) { height:100%; min-height:0; }
+  .tray-content :global([data-workspace-panel='watchlist'] .watchlist) { height:100%; min-height:320px; contain:size; border:0; padding:0; }
+  .tray-content :global([data-workspace-panel='watchlist'] .filter-row) { flex-wrap:wrap; }
+  .tray-content :global([data-workspace-panel='watchlist'] .search-row) { flex-basis:100%; }
+  .tray-strip { flex:none; flex-wrap:nowrap; gap:0; background:var(--surface-2); }
+  .tray-strip.bottom { overflow-x:auto; border-top:1px solid var(--border-md); }
+  .tray-strip.side { width:30px; overflow-y:auto; overflow-x:hidden; flex-direction:column; align-items:stretch; border-color:var(--border-md); }
+  .tray-strip.side.left { border-right:1px solid var(--border-md); }
+  .tray-strip.side.right { border-left:1px solid var(--border-md); }
+  .tray-strip.side button { min-width:29px; min-height:72px; padding:.5rem .25rem; writing-mode:vertical-rl; text-orientation:mixed; justify-content:flex-start; }
+  .tray-strip.side.left button { transform:rotate(180deg); }
   .tray-strip button { flex:none; border-radius:0; border-color:transparent; }
   .hidden { display:none; }
   footer { display:flex; justify-content:space-between; gap:1rem; padding:.25rem .7rem; border-top:1px solid var(--border); font-size:.61rem; color:var(--text-3); flex:none; }

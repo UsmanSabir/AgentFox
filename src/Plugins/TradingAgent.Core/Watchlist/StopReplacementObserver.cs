@@ -125,4 +125,12 @@ public interface IProtectiveStopReleaser
     /// </summary>
     Task<StopReleaseResult> ReleaseForSellAsync(
         string symbol, int quantityNeeded, CancellationToken ct = default);
+
+    /// <summary>
+    /// The shares a release freed are free again — the sell that needed them was pulled back — so put
+    /// the stop back over the whole holding NOW rather than on the next periodic pass. Fire-and-forget;
+    /// the periodic pass remains the fallback. Default no-op, so an implementation that re-places on
+    /// its own clock needs nothing.
+    /// </summary>
+    void RestoreSoon() { }
 }
