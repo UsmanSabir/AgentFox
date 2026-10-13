@@ -91,7 +91,7 @@ public sealed class CandleAnalysisService
         // still computed; only the two optional long-range extrema wait for the normal path.
         var quoteTask = preferAvailableHistory
             ? Task.FromResult(new PsxQuoteSummary { Symbol = symbol })
-            : _dataClient.GetQuoteSummaryAsync(symbol, ct);
+            : _dataClient.GetQuoteSummaryAsync(symbol, ct, includeIntraday: false); // only the 52-week range is read
         await Task.WhenAll(historyTask, quoteTask);
 
         var history = await historyTask;

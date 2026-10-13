@@ -165,13 +165,18 @@ public sealed partial class PsxDataClient
     /// <summary>
     /// Builds a quote summary from the portal's EOD series (trend, 52-week range) topped up with the
     /// latest intraday tick when available. Series shape: {"status":1,"data":[[unixTs, price, volume],…]}.
+    /// Both series are cached (<see cref="CachedSeriesAsync"/>); a caller that needs only the EOD figures (the
+    /// 52-week range) passes <paramref name="includeIntraday"/> false and costs one cached request, not two.
     /// </summary>
-    public async Task<PsxQuoteSummary> GetQuoteSummaryAsync(string symbol, CancellationToken ct = default)
+    public async Task<PsxQuoteSummary> GetQuoteSummaryAsync(string symbol, CancellationToken ct = default,
+        bool includeIntraday = true)
     {
         try
         {
-            var eod = await FetchSeriesAsync($"timeseries/eod/{symbol}", ct);
-            var intraday = await FetchSeriesAsync($"timeseries/int/{symbol}", ct);
+            var eod = await CachedSeriesAsync($"timeseries/eod/{symbol}", EodSeriesTtl, ct);
+            var intraday = includeIntraday
+                ? await CachedSeriesAsync($"timeseries/int/{symbol}", IntradaySeriesTtl, ct)
+                : [];
 
             if (eod.Count == 0 && intraday.Count == 0)
                 return new PsxQuoteSummary
@@ -208,6 +213,11 @@ public sealed partial class PsxDataClient
                 LastVolume            = eod.FirstOrDefault()?.Volume,
                 AverageDailyVolume30D = AverageVolume(eod, 30)
             };
+        }
+        catch (PsxPortalUnavailableException ex)
+        {
+            // Already reported when the portal refused; nothing was asked this time.
+            return new PsxQuoteSummary { Symbol = symbol, Error = ex.Message };
         }
         catch (Exception ex)
         {

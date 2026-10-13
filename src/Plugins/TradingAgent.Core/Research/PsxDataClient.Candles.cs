@@ -288,7 +288,7 @@ public sealed partial class PsxDataClient
         string symbol, CancellationToken ct = default)
     {
         symbol = NormalizeStockSymbol(symbol);
-        var points = await FetchSeriesAsync($"timeseries/int/{symbol}", ct);
+        var points = await CachedSeriesAsync($"timeseries/int/{symbol}", IntradaySeriesTtl, ct);
 
         return points
             .Where(p => p.Price > 0)
