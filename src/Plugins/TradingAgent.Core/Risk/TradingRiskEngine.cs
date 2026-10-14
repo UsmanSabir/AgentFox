@@ -1,4 +1,7 @@
 using System.Text.RegularExpressions;
+using System.Globalization;
+using System.Text.Json;
+using AgentFox.Plugins;
 using Microsoft.Extensions.Options;
 using TradingAgent.Config;
 using TradingAgent.Models;
@@ -10,14 +13,48 @@ public sealed partial class TradingRiskEngine : ITradingRiskEngine
 {
     private readonly IOptions<AhkConfig> _options;
     private readonly IOptions<TradingAgentOptions> _agentOptions;
+    private readonly IRuntimePluginOptions<AhkConfig>? _liveBroker;
+    private readonly PluginConfigManager? _configs;
 
+    /// <param name="liveBroker">The broker settings as edited in the browser. The order-value cap is read from here
+    /// so a change in Settings applies to the next order; without it only the startup file counted, and a hosted
+    /// user, who cannot edit that file, could never raise the cap (2026-10-14).</param>
+    /// <param name="configs">For the batch cap's browser override, the "trading-agent" settings.</param>
     public TradingRiskEngine(
         IOptions<AhkConfig> options,
-        IOptions<TradingAgentOptions> agentOptions)
+        IOptions<TradingAgentOptions> agentOptions,
+        IRuntimePluginOptions<AhkConfig>? liveBroker = null,
+        PluginConfigManager? configs = null)
     {
         _options = options;
         _agentOptions = agentOptions;
+        _liveBroker = liveBroker;
+        _configs = configs;
     }
+
+    /// <summary>The largest batch value allowed, browser setting first; 0 or less means no cap.</summary>
+    private decimal MaxBatchValue(TradingAgentOptions agent)
+    {
+        if (_configs?.GetConfig("trading-agent") is { } runtime
+            && runtime.TryGetValue("maxBatchValuePkr", out var raw) && ToDecimal(raw) is { } overridden)
+            return overridden;
+        return agent.MaxBatchValuePkr;
+    }
+
+    private static decimal? ToDecimal(object? value) => value switch
+    {
+        null => null,
+        decimal d => d,
+        double d => (decimal)d,
+        float f => (decimal)f,
+        long l => l,
+        int i => i,
+        JsonElement { ValueKind: JsonValueKind.Number } e when e.TryGetDecimal(out var d) => d,
+        JsonElement { ValueKind: JsonValueKind.String } e
+            when decimal.TryParse(e.GetString(), NumberStyles.Number, CultureInfo.InvariantCulture, out var d) => d,
+        string s when decimal.TryParse(s, NumberStyles.Number, CultureInfo.InvariantCulture, out var d) => d,
+        _ => null
+    };
 
     public RiskValidationResult Validate(
         IReadOnlyList<IReadOnlyList<TradingSignal>> groups,
@@ -25,8 +62,9 @@ public sealed partial class TradingRiskEngine : ITradingRiskEngine
         IReadOnlyCollection<string>? executionUniverseOverride = null,
         IReadOnlyCollection<string>? liquidationUniverseOverride = null)
     {
-        var cfg = _options.Value;
+        var cfg = _liveBroker?.Current ?? _options.Value;
         var agent = _agentOptions.Value;
+        var maxBatch = MaxBatchValue(agent);
         var violations = new List<string>();
         var orderCount = groups.Sum(group => group.Count);
         if (killSwitchOverride ?? agent.KillSwitch)
@@ -99,7 +137,8 @@ public sealed partial class TradingRiskEngine : ITradingRiskEngine
             {
                 violations.Add($"{label}: a positive limit price is required.");
             }
-            else if (order.Quantity is > 0
+            // 0 (or less) means no cap: a hosted user sets it in Settings, and "unlimited" is a value they can type.
+            else if (order.Quantity is > 0 && cfg.MaxOrderValuePkr > 0
                      && order.Quantity.Value * order.EntryPrice.Value > cfg.MaxOrderValuePkr)
             {
                 violations.Add(
@@ -110,9 +149,9 @@ public sealed partial class TradingRiskEngine : ITradingRiskEngine
                 batchValue += order.Quantity.Value * order.EntryPrice.Value;
         }
 
-        if (batchValue > agent.MaxBatchValuePkr)
+        if (maxBatch > 0 && batchValue > maxBatch)
             violations.Add(
-                $"Batch value {batchValue:N0} PKR exceeds MaxBatchValuePkr ({agent.MaxBatchValuePkr:N0} PKR).");
+                $"Batch value {batchValue:N0} PKR exceeds MaxBatchValuePkr ({maxBatch:N0} PKR).");
 
         return violations.Count == 0
             ? RiskValidationResult.Allow()

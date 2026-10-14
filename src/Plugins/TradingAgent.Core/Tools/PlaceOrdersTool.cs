@@ -367,7 +367,7 @@ public sealed class PlaceOrdersTool : BaseTool
         else
         {
             var value = qty * price!.Value;
-            if (value > ahk.MaxOrderValuePkr)
+            if (ahk.MaxOrderValuePkr > 0 && value > ahk.MaxOrderValuePkr)
                 return new(null, $"Order value {value:N0} PKR exceeds limit of {ahk.MaxOrderValuePkr:N0} PKR.", false, resolvedFromMarket);
         }
 

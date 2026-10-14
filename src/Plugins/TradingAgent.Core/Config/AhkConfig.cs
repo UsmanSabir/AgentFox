@@ -17,6 +17,7 @@ public class AhkConfig
     public string Password { get; set; } = "";
     public string TradingPin { get; set; } = "";
     public int DefaultQty { get; set; } = 100;
+    /// <summary>Largest value one order may have; 0 or less means no cap. Editable in Settings (AHK Broker Connection).</summary>
     public decimal MaxOrderValuePkr { get; set; } = 50_000m;
 
     /// <summary>

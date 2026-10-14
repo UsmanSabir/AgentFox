@@ -65,6 +65,15 @@ public sealed class TradingPluginConfigDefinitionProvider : IPluginConfigDefinit
                 },
                 new PluginConfigFieldDefinition
                 {
+                    Key = "maxBatchValuePkr",
+                    Label = "Max batch value (PKR)",
+                    Description = "Largest total value of the orders sent together, a single order included. "
+                                + "0 means no limit. Takes effect on the next order.",
+                    Type = "number",
+                    DefaultValue = options.MaxBatchValuePkr
+                },
+                new PluginConfigFieldDefinition
+                {
                     Key = "killSwitch",
                     Label = "Kill switch",
                     Description = "Emergency stop — blocks every order immediately, independent of AutoExecute, " +
@@ -107,6 +116,15 @@ public sealed class TradingPluginConfigDefinitionProvider : IPluginConfigDefinit
                     Sensitive = true,
                     // Never expose the appsettings secret itself; the mask only signals "configured".
                     DefaultValue = string.IsNullOrEmpty(ahk.Password) ? null : PluginConfigSecrets.Mask
+                },
+                new PluginConfigFieldDefinition
+                {
+                    Key = "maxOrderValuePkr",
+                    Label = "Max order value (PKR)",
+                    Description = "Largest value one order may have (quantity × price). 0 means no limit. "
+                                + "Takes effect on the next order.",
+                    Type = "number",
+                    DefaultValue = ahk.MaxOrderValuePkr
                 },
                 new PluginConfigFieldDefinition
                 {
