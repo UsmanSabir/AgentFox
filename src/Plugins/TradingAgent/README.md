@@ -455,7 +455,7 @@ Nothing to enable — every discovered module runs by default. Turn one OFF with
     "ManualOnlySymbols":      [],
     "RequireConfiguredSymbols": true,
     "MaxOrdersPerBatch":      10,
-    "MaxBatchValuePkr":       250000,
+    "MaxBatchValuePkr":       1000000,
     "RequireReconciliationHealthy": true,
     "ReconciliationIntervalSeconds": 60,
     "ReconciliationMaxAgeSeconds": 180,

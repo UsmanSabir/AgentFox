@@ -200,7 +200,7 @@ public class TradingAgentOptions
     public List<string> ManualOnlySymbols { get; set; } = [];
 
     public int MaxOrdersPerBatch { get; set; } = 10;
-    public decimal MaxBatchValuePkr { get; set; } = 250_000m;
+    public decimal MaxBatchValuePkr { get; set; } = 1_000_000m;
 
     /// <summary>Block ApprovalRequired and BoundedAuto unless broker reconciliation is healthy.</summary>
     public bool RequireReconciliationHealthy { get; set; } = true;
