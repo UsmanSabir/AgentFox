@@ -14,6 +14,7 @@
    */
   import { createEventDispatcher } from 'svelte';
   import { ApiError, trading, type WorkingOrderOwner } from './api';
+  import { announceAccountChanged } from './accountSignal';
 
   export let symbol: string;
   export let orderNo: string;
@@ -50,7 +51,7 @@
       tone = result.outcome === 'cancelled' || result.outcome === 'fulfilled' ? 'good'
         : result.gone || result.outcome === 'not_resting' ? 'warn' : 'bad';
       phase = 'done';
-      if (result.gone || result.outcome === 'not_resting') dispatch('changed');
+      if (result.gone || result.outcome === 'not_resting') { dispatch('changed'); announceAccountChanged('order cancelled'); }
     } catch (e) {
       if (e instanceof ApiError && e.code === 'needs_acknowledgement') {
         owners = (e.detail?.owners as WorkingOrderOwner[] | undefined) ?? [];

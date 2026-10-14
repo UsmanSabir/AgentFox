@@ -1,6 +1,7 @@
 <script lang="ts">
   import { describePsxDate } from './orderSchedule';
   import { onMount } from 'svelte';
+  import { onAccountChanged } from './accountSignal';
   import { trading, type ArmedOrdersResponse, type ArmedOrder, type ProtectiveStop } from './api';
   import {
     Crosshair, Trash2, RefreshCw, Zap, ShieldAlert, Clock, Shield, ShieldOff, ListChecks
@@ -264,7 +265,8 @@
   let lastTick = 0;
   $: if (refreshTick !== lastTick) { lastTick = refreshTick; if (!loading) load(); }
 
-  onMount(load);
+  // A fired order, a filled entry or a cancelled stop changes this list too: re-read with the portfolio.
+  onMount(() => { load(); return onAccountChanged(load); });
 </script>
 
 <section class="armed" use:orderListNavigation={keyboardMode}>

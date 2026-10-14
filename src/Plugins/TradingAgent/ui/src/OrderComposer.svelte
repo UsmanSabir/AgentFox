@@ -13,6 +13,7 @@
     ShoppingCart, X, AlertTriangle, RefreshCw, CheckCircle2, Clock3, BriefcaseBusiness, Wallet
   } from 'lucide-svelte';
   import { livePriceLabel, useLivePrices } from './livePrices';
+  import { announceAccountChanged } from './accountSignal';
 
   export let selectedSymbol: string | null = null;
   /**
@@ -656,6 +657,7 @@
     try {
       if (immediate) {
         const placed = await trading.placeOrder(immediateRequest);
+        announceAccountChanged('order placed');
         result = persistentUntilFilled && !placed.accepted && placed.persistentOrder != null
           && placed.persistentOrder.state !== 'attention' && !placed.reason.toLowerCase().includes('unknown')
           ? {
