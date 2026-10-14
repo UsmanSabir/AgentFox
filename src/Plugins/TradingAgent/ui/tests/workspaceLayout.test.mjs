@@ -95,3 +95,18 @@ test('the retired bottom tray shape migrates to the edge-neutral shape', () => {
   assert.deepEqual(read(value).autoHide,{bottom:{ids:['watchlist'],active:'watchlist',size:250}});
   assert.equal(read(value).bottomTray,undefined);
 });
+
+test('My view is kept beside the working layout, never in its place', async () => {
+  const { myViewStorageKey } = await import('../src/workspaceLayout.ts');
+  assert.equal(myViewStorageKey('trading.premium-workstation.layout.v1'), 'trading.premium-workstation.layout.v1.my-view');
+  assert.notEqual(myViewStorageKey('k'), 'k');
+});
+
+test('My view is read with the same rules as the working layout, and a restore renews its 180 days', () => {
+  const view = saved();
+  assert.deepEqual(read(view)?.layout.panels, layout().panels);
+  const lapsed = { ...view, savedAt: now - WORKSPACE_RETENTION_MS - 1 };
+  assert.equal(read(lapsed), null, 'unused for 180 days, it lapses like the working layout');
+  const renewed = { ...lapsed, savedAt: now };
+  assert.ok(read(renewed), 'each restore writes it back with a fresh savedAt');
+});

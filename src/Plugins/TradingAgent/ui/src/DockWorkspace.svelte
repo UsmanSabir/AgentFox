@@ -2,12 +2,12 @@
   import { onMount, tick } from 'svelte';
   import { createDockview, themeDark, themeLight, type DockviewApi, type DockviewGroupPanel, type IContentRenderer } from 'dockview';
   import 'dockview/dist/styles/dockview.css';
-  import { Command, PanelsTopLeft, RotateCcw, Maximize, Minimize, Keyboard, Pin, PinOff, X, Fullscreen, Shrink } from 'lucide-svelte';
+  import { Command, PanelsTopLeft, RotateCcw, Maximize, Minimize, Keyboard, Pin, PinOff, X, Fullscreen, Shrink, Save } from 'lucide-svelte';
   import WorkspaceShortcuts from './WorkspaceShortcuts.svelte';
   import { workspacePresetPanels, type WorkspaceCommand, type WorkspaceComposition, type WorkspacePanel, type WorkspaceRegion, type WorkspacePreset } from './workspaceComposition';
   import {
-    readWorkspaceLayout, saveWorkspaceLayout,
-    type AutoHideEdge, type AutoHideTrays
+    readWorkspaceLayout, saveWorkspaceLayout, myViewStorageKey,
+    type AutoHideEdge, type AutoHideTrays, type WorkspaceLayout
   } from './workspaceLayout';
 
   export let panels: WorkspacePanel[];
@@ -72,6 +72,12 @@
   let activeId = 'chart';
   let notice = 'Workspace preview · existing trading controls retained';
   let storageWarning = '';
+  // "My view": one layout the operator saved on purpose, restored in one click. Kept apart from the layout that
+  // follows every change (storageKey), so working in another mode or pressing Reset view never loses it.
+  // Browser storage only, one record replaced whole on Save; it lapses after the same 180 days as the working
+  // layout, counted from its last use (each restore renews it), and Forget removes it.
+  let myView: WorkspaceLayout | null = null;
+  let onMyView = false;
   let query = '';
   let panelsOnly = false;
   let resultIndex = 0;
@@ -335,6 +341,7 @@
     saveTimer = setTimeout(persist, 250);
   }
   function resetView() {
+    onMyView = false;
     clearTimeout(saveTimer);
     suppressSave = true;
     if (api) buildDefault(presets[0].id);
@@ -347,7 +354,65 @@
     onPresetChange(preset);
     notice = 'Default view restored. Trading state and open forms are unchanged.';
   }
+  function readMyView() {
+    let raw: string | null = null;
+    try { raw = localStorage.getItem(myViewStorageKey(storageKey)); } catch { /* Browser storage is optional. */ }
+    myView = readWorkspaceLayout(raw, edition, panels.map(p => p.id), presets.map(p => p.id));
+    if (!myView && raw) { try { localStorage.removeItem(myViewStorageKey(storageKey)); } catch { /* optional */ } }
+  }
+  function writeMyView(record: WorkspaceLayout) {
+    try { localStorage.setItem(myViewStorageKey(storageKey), JSON.stringify(record)); return true; }
+    catch { storageWarning = 'My view could not be saved in this browser; your layout is unchanged.'; return false; }
+  }
+  function saveMyView() {
+    if (!api) { notice = 'My view is saved from the full-width workstation.'; return; }
+    if (openEdge) { notice = `Pin the ${openEdge} panels before saving My view.`; return; }
+    const record = saveWorkspaceLayout(edition, preset, api.toJSON(), Date.now(), autoHide,
+      api.hasMaximizedGroup() ? api.activePanel?.id : undefined, panels.map(p => p.id));
+    if (!writeMyView(record)) return;
+    myView = record;
+    onMyView = true;
+    notice = 'Saved as My view. One click on My view brings this layout back.';
+  }
+  function restoreMyView() {
+    if (!api || !myView) return;
+    if (openEdge) closeTray();
+    const view = myView;
+    clearTimeout(saveTimer);
+    suppressSave = true;
+    try {
+      parkTrays();
+      api.exitMaximizedGroup();
+      api.fromJSON(view.layout);
+      preset = view.preset;
+      autoHide = view.autoHide ?? {};
+      const allowed = new Set(offeredPanels().map(panel => panel.id));
+      if (Object.keys(view.layout.panels).some(id => !allowed.has(id))
+        || edges.some(edge => autoHide[edge]?.ids.some(id => !allowed.has(id)))) throw new Error('panels changed');
+      if (view.maximized) api.getPanel(view.maximized)?.api.maximize();
+      maximized = api.hasMaximizedGroup();
+      activeId = api.activePanel?.id ?? activeId;
+      onMyView = true;
+      const renewed = { ...view, savedAt: Date.now() };
+      if (writeMyView(renewed)) myView = renewed;
+      notice = 'My view restored.';
+    } catch {
+      buildDefault(preset);
+      onMyView = false;
+      notice = 'My view no longer matches the panels on offer. Arrange the layout again and save it.';
+    }
+    suppressSave = false;
+    scheduleSave();
+    onPresetChange(preset);
+  }
+  function forgetMyView() {
+    try { localStorage.removeItem(myViewStorageKey(storageKey)); } catch { /* optional */ }
+    myView = null;
+    onMyView = false;
+    notice = 'My view forgotten.';
+  }
   function selectPreset(id: string) {
+    onMyView = false;
     if (!api) { preset = id; mobilePresetChanged = true; updateMobilePanels(); onPresetChange(preset); return; }
     clearTimeout(saveTimer);
     suppressSave = true;
@@ -484,6 +549,12 @@
       disabled:() => fullscreenSupported ? null : 'Page full screen is unavailable in this browser or host frame.' },
     ...edges.map(edge => ({ id:'layout.' + edge, label:autoHide[edge] ? `Pin ${edge} panels` : `Unpin ${edge} panels (auto-hide)`, run:() => autoHide[edge] ? pin(edge) : unpin(edge) })),
     { id:'layout.reset', label:'Reset view to default', run:resetView },
+    { id:'layout.myview.save', label:myView ? 'Save this layout as My view (replaces the saved one)' : 'Save this layout as My view', run:saveMyView,
+      disabled:() => desktop ? null : 'My view is saved from the full-width workstation.' },
+    { id:'layout.myview.restore', label:'Restore My view', run:restoreMyView,
+      disabled:() => myView ? (desktop ? null : 'My view opens on the full-width workstation.') : 'No layout has been saved as My view yet.' },
+    { id:'layout.myview.forget', label:'Forget My view', run:forgetMyView,
+      disabled:() => myView ? null : 'No layout has been saved as My view yet.' },
     { id:'layout.maximize', label:'Maximize / restore active group', run:maximize },
     { id:'layout.hide', label:'Hide active panel (restore from Panels)', run:hideActive },
     { id:'layout.wider', label:'Make active panel wider', run:() => resize(80, 0) },
@@ -682,6 +753,7 @@
       if (adopted) { dirty = true; persist(); }
       activeId = api.activePanel?.id ?? activeId;
       maximized = api.hasMaximizedGroup();
+      readMyView();
       subscriptions.push(api.onDidLayoutChange(scheduleSave));
       subscriptions.push(api.onDidMaximizedGroupChange(() => { maximized = api?.hasMaximizedGroup() ?? false; scheduleSave(); }));
       subscriptions.push(api.onDidActivePanelChange(() => activeId = api?.activePanel?.id ?? activeId));
@@ -719,8 +791,14 @@
     <div class="workstation-brand"><PanelsTopLeft size={18}/><strong>{selectedPreset.title ?? title}</strong><span class="preview">PREVIEW</span></div>
     <nav aria-label="Workspace layout">
       {#each presets as item}
-        <button class:chosen={preset === item.id} aria-pressed={preset === item.id} on:click={() => selectPreset(item.id)}>{item.label}</button>
+        <button class:chosen={preset === item.id && !onMyView} aria-pressed={preset === item.id && !onMyView} on:click={() => selectPreset(item.id)}>{item.label}</button>
       {/each}
+      {#if myView}
+        <button class:chosen={onMyView} aria-pressed={onMyView} on:click={restoreMyView} disabled={!desktop}
+          title="Restore the layout you saved as My view">My view</button>
+      {/if}
+      <button on:click={saveMyView} disabled={!desktop}
+        title={myView ? 'Save the current layout as My view, replacing the saved one' : 'Save the current layout as My view'}><Save size={14}/> Save view</button>
       <button on:click={() => openPalette(true)}><PanelsTopLeft size={14}/> Panels</button>
       <button on:click={() => openPalette()} title="Search commands (Ctrl+K)"><Command size={14}/> Commands <kbd>Ctrl K</kbd></button>
       <button class="icon-control" on:click={maximize} disabled={!desktop} aria-pressed={maximized}

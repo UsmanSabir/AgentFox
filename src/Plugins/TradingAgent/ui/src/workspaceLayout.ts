@@ -2,6 +2,8 @@ import type { SerializedDockview } from 'dockview';
 
 export const WORKSPACE_RETENTION_MS = 180 * 24 * 60 * 60 * 1000;
 export const MAX_LAYOUT_LENGTH = 100_000;
+/** Where a workstation keeps the layout saved as "My view": beside its working layout, never in place of it. */
+export const myViewStorageKey = (storageKey: string) => `${storageKey}.my-view`;
 export type AutoHideEdge = 'left' | 'right' | 'bottom';
 export interface AutoHideTray { ids: string[]; active: string; size: number }
 export type AutoHideTrays = Partial<Record<AutoHideEdge, AutoHideTray>>;
