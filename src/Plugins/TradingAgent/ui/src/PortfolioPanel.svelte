@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
+  import { createEventDispatcher, onDestroy } from 'svelte';
+  import { onAccountChanged } from './accountSignal';
   import {
     trading,
     type BrokerAccountSnapshot
@@ -60,6 +61,13 @@
     open = !open;
     if (open && !loaded) load();
   }
+
+  // An order placed, filled, cancelled or refused anywhere on the page: re-read while open, so a filled order leaves
+  // Working orders and joins the holdings without a Refresh. Closed, the next open reads afresh instead.
+  onDestroy(onAccountChanged(() => {
+    if (open && loaded) load();
+    else loaded = false;
+  }));
 
   const hidden = '••••••';
   const text = (value?: string | null) => value?.trim() || '—';

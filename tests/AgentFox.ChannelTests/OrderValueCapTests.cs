@@ -52,8 +52,8 @@ public sealed class OrderValueCapTests
     public void The_batch_cap_still_refuses_a_single_order_above_it()
     {
         var engine = new TradingRiskEngine(Options.Create(new AhkConfig { MaxOrderValuePkr = 0 }), Agent);
-        var result = engine.Validate(Order(300_000));
-        Assert.IsFalse(result.Allowed, "the default batch cap is PKR 250,000, and one order is a batch of one");
+        var result = engine.Validate(Order(1_200_000));
+        Assert.IsFalse(result.Allowed, "the default batch cap is PKR 1,000,000, and one order is a batch of one");
         Assert.IsTrue(result.Violations.Any(v => v.Contains("MaxBatchValuePkr")));
     }
 }
