@@ -381,8 +381,15 @@ export function resolveDisplayQuote(
     // does not repeat a tag its sibling cell already carries.
     : showPrice && price !== null ? 'delayed' : null;
 
-  return { price, change, tag, label: view.quote ? livePriceLabel(view) : 'Delayed market snapshot' };
+  return { price, change, tag, label: view.quote ? livePriceLabel(view) : DELAYED_SNAPSHOT_LABEL };
 }
+
+// Names the cause, because "delayed" alone reads as a fault. Live ticks arrive only for stocks the
+// feed is subscribed to AND that have traded recently; anything else falls back to the cached
+// market-watch snapshot (about a minute old).
+const DELAYED_SNAPSHOT_LABEL =
+  'Delayed price: no live tick for this stock yet, so this is the market snapshot (about 1 minute old). '
+  + 'Common reasons: it has not traded recently, it was just added to the watchlist, or the live feed is not subscribed to it.';
 
 export function livePriceLabel(view: LivePriceView): string {
   if (!view.quote) return 'Price unavailable';
