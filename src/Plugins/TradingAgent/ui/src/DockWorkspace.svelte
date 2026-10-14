@@ -4,7 +4,7 @@
   import 'dockview/dist/styles/dockview.css';
   import { Command, PanelsTopLeft, RotateCcw, Maximize, Minimize, Keyboard, Pin, PinOff, X, Fullscreen, Shrink, Save } from 'lucide-svelte';
   import WorkspaceShortcuts from './WorkspaceShortcuts.svelte';
-  import { workspacePresetPanels, type WorkspaceCommand, type WorkspaceComposition, type WorkspacePanel, type WorkspaceRegion, type WorkspacePreset } from './workspaceComposition';
+  import { presetPlacedPanels, workspacePresetPanels, type WorkspaceCommand, type WorkspaceComposition, type WorkspacePanel, type WorkspaceRegion, type WorkspacePreset } from './workspaceComposition';
   import {
     readWorkspaceLayout, saveWorkspaceLayout, myViewStorageKey,
     type AutoHideEdge, type AutoHideTrays, type WorkspaceLayout
@@ -295,6 +295,14 @@
         api.getPanel(column.active)?.api.setActive();
         previous = first;
       }
+      // Edges the preset starts auto-hidden: never added to the grid, opened from the edge strip, exactly as Unpin
+      // leaves them.
+      const trays = Object.entries(selected.autoHide ?? {}).flatMap(([edge, tray]) => {
+        const ids = (tray?.panels ?? []).filter(id => panels.some(p => p.id === id) && !api!.getPanel(id));
+        return ids.length ? [[edge, { ids, active: ids.includes(tray!.active) ? tray!.active : ids[0],
+          size: Math.min(900, Math.max(edge === 'bottom' ? 260 : 240, tray!.size ?? 260)) }]] : [];
+      });
+      autoHide = Object.fromEntries(trays) as AutoHideTrays;
       activeId = selected.columns[0].active;
       api.getPanel(activeId)?.api.setActive();
       return;
@@ -660,8 +668,10 @@
   function updateMobilePanels() {
     if (desktop || !stack || !depot) return;
     for (const p of panels) depot.appendChild(container(p.id));
-    const columns = presets.find(item => item.id === preset)?.columns;
-    const ids = columns?.flatMap(column => column.panels) ?? offeredPanels().map(panel => panel.id);
+    const selected = presets.find(item => item.id === preset);
+    const placed = presetPlacedPanels(selected);
+    const ids = selected?.columns && !selected.offersUnplaced
+      ? placed : [...new Set([...placed, ...offeredPanels().map(panel => panel.id)])];
     for (const id of ids) { stack.appendChild(container(id)); place(id); }
   }
 

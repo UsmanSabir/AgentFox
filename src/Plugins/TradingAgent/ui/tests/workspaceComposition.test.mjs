@@ -11,3 +11,16 @@ test('focused modes cannot expose panels outside their column definitions', () =
   assert.equal(workspacePresetPanels(panels, {id:'default',label:'Default',active:{}}), panels);
   assert.equal(workspacePresetPanels(panels), panels);
 });
+
+test('a layout may start an edge auto-hidden, and may keep every other panel on offer', async () => {
+  const { presetPlacedPanels } = await import('../src/workspaceComposition.ts');
+  const panels = ['list','chart','ledger','plan','logs'].map(id => ({id,title:id,region:'center',description:id}));
+  const trading = {id:'trading',label:'Trading',active:{},columns:[
+    {panels:['list'],active:'list'}, {panels:['chart'],active:'chart'}
+  ], autoHide:{bottom:{panels:['ledger','plan'],active:'plan'}}};
+  assert.deepEqual(presetPlacedPanels(trading), ['list','chart','ledger','plan']);
+  assert.deepEqual(workspacePresetPanels(panels, trading).map(p => p.id), ['list','chart','ledger','plan'],
+    'a columns layout still offers only what it places unless it says otherwise');
+  assert.equal(workspacePresetPanels(panels, {...trading, offersUnplaced:true}), panels,
+    'offersUnplaced keeps logs reachable from Panels');
+});
