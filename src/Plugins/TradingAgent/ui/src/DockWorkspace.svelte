@@ -497,7 +497,25 @@
       (trigger ?? (trayReturnFocus?.isConnected ? trayReturnFocus : root)).focus();
     }
   }
+  /** Which edge a group sits on, by where it IS: a group touching the bottom (and not the top) across at least half
+   *  the width is the bottom group, whatever its panels' home regions are. Until 2026-10-14 only the panels' home
+   *  regions counted, so a bottom group holding Trade plan (a right panel) could never be unpinned. A position that
+   *  says nothing clear (two equal columns, say) falls back to the home regions. */
+  function edgeByPosition(group: DockviewGroupPanel): AutoHideEdge | null {
+    const outer = dockRoot?.getBoundingClientRect(), box = group.element?.getBoundingClientRect();
+    if (!outer || !box || !outer.width || !box.width) return null;
+    const near = (a: number, b: number) => Math.abs(a - b) <= 3;
+    const top = near(box.top, outer.top), bottom = near(box.bottom, outer.bottom);
+    const left = near(box.left, outer.left), right = near(box.right, outer.right);
+    const wide = box.width >= outer.width * .5, narrow = box.width < outer.width * .5;
+    if (bottom && !top && wide) return 'bottom';
+    if (left && !right && narrow) return 'left';
+    if (right && !left && narrow) return 'right';
+    return null;
+  }
   function groupRegion(group: DockviewGroupPanel): AutoHideEdge | null {
+    const placed = edgeByPosition(group);
+    if (placed) return placed;
     const region = panelRegion(group.panels[0]?.id);
     if (region !== 'left' && region !== 'right' && region !== 'bottom') return null;
     return group.panels.length && group.panels.every(panel => panelRegion(panel.id) === region) ? region : null;
