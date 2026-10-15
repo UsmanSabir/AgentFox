@@ -217,6 +217,9 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
     public Task RunAtMarketOpenAsync(MarketSessionOpenContext context, CancellationToken ct) =>
         RunNowAsync(ct);
 
+    /// <summary>Today's PSX trading date — the date a placement's <c>SessionDate</c> is written in.</summary>
+    private DateOnly Today() => DateOnly.FromDateTime(_calendar.GetStatus().PktNow);
+
     /// <param name="requestedBy">
     /// Who asked, in the words the intent's reason should carry. Null is the operator — every caller
     /// before pull-backs existed. A pulled-back take-profit is not the operator's doing, and recording
@@ -239,6 +242,16 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
                 "cancelling", $"Cancellation requested by {who}.", ct);
 
             var placements = await _repository.GetPersistentOrderPlacementsAsync(intentId, ct);
+
+            // Cancel the number the broker uses NOW. After the open a pre-open order's pending number is
+            // refused as invalid — read as "gone" — while the order itself rests under its exchange id.
+            // The last reconciliation is enough to know the link; it is a fact, and age does not undo it.
+            // SettleVanishedOnCancelAsync repeats this on a fresh read for a link this one predates.
+            // Best effort: it improves which number is cancelled, so its absence must never stop a cancel.
+            if (_reconciliation?.Current is { Supported: true } known && _calendar is not null
+                && (await AdoptRenumberingsAsync(intent, placements, known, Today(), ct)).Count > 0)
+                placements = await _repository.GetPersistentOrderPlacementsAsync(intentId, ct);
+
             // Orders that stopped resting WITHOUT this system taking them off. An order can leave the
             // book by filling, so these are not evidence of a cancellation and must be settled against
             // the broker before this intent is written terminal — see the check below.
@@ -345,6 +358,30 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
 
         _reconciliation.Update(snapshot);
         if (snapshot.Fills.Count > 0) await _repository.RecordFillsAsync(snapshot.Fills, ct);
+
+        // A vanished number may only have been RENUMBERED: the venue refuses a pre-open pending number
+        // once the order has reached the exchange, and the order may still be resting there. Move to the
+        // new number and cancel that before anything is written terminal — "cancelled" over a live
+        // order is a sell or buy nothing tracks.
+        var placements = await _repository.GetPersistentOrderPlacementsAsync(intent.IntentId, ct);
+        var renumbered = _calendar is null
+            ? []
+            : await AdoptRenumberingsAsync(intent, placements, snapshot, Today(), ct);
+        foreach (var (from, to) in renumbered)
+        {
+            if (!vanished.Contains(from, StringComparer.OrdinalIgnoreCase)) continue;
+            if (!snapshot.OpenOrders.Any(o => o.Is(to)
+                    && string.Equals(o.Symbol?.Trim(), intent.Symbol.Trim(), StringComparison.OrdinalIgnoreCase)))
+                continue;
+
+            var cancelled = await _cancellations.CancelExactAsync(to, ct);
+            if (!cancelled.Gone)
+            {
+                await _repository.SetPersistentOrderProgressAsync(
+                    intent.IntentId, intent.FilledQuantity, "cancelling", cancelled.Message, ct);
+                return (false, "cancelling", cancelled.Message);
+            }
+        }
 
         // The projection folds the fills just recorded into FilledQuantity, which is what makes this a
         // measurement rather than a guess about what the vanished order did.
@@ -588,6 +625,99 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
             || !string.Equals(placement.State, "accepted", StringComparison.OrdinalIgnoreCase))
             return;
         await _repository.SetPersistentOrderPlacementStateAsync(placement.PlacementId, "lapsed", message, ct);
+    }
+
+    /// <summary>
+    /// Moves today's placements onto the number the broker now uses for their order, and returns what
+    /// moved.
+    ///
+    /// <para>
+    /// <b>The incident.</b> 2026-10-15, AHL, CNERGY: a keep-working SELL of 161 placed at 08:47, before
+    /// the open, was acknowledged as pending order <c>5460</c>. At the open the exchange gave it
+    /// <c>0010TMX4O3000PRF</c>, and it filled at 10:31 under that id — the only one the trade log ever
+    /// reports. The placement still said <c>5460</c>, so the fill join found nothing, the card read
+    /// "recorded no fill", the duplicate-entry warning fired on every new sell, and at the next open the
+    /// intent would have sold the same 161 shares again. Every keep-working order from its SECOND day is
+    /// placed pre-open, so this was every multi-day instruction that ever filled, not a corner. The same
+    /// stale number also made Stop &amp; cancel ask the venue to cancel <c>5460</c>, which it refused as
+    /// invalid — "gone" — while the real order could still be resting.
+    /// </para>
+    ///
+    /// <para>
+    /// Announced once per placement: the move is a compare-and-set on the old number, so the next pass
+    /// finds nothing to move.
+    /// </para>
+    /// </summary>
+    private async Task<IReadOnlyList<(string From, string To)>> AdoptRenumberingsAsync(
+        PersistentOrderIntent intent,
+        IReadOnlyList<PersistentOrderPlacement> placements,
+        BrokerReconciliationSnapshot snapshot,
+        DateOnly today,
+        CancellationToken ct)
+    {
+        var moved = new List<(string, string)>();
+        foreach (var (placement, to) in PersistentOrderDecisions.FindRenumberings(intent, placements, snapshot, today))
+        {
+            var from = placement.BrokerOrderNo!.Trim();
+            if (!await _repository.RenumberPersistentOrderPlacementAsync(placement.PlacementId, from, to, ct))
+                continue;
+
+            moved.Add((from, to));
+            var detail = $"The broker now reports order #{from} as #{to} (it was placed before the open, "
+                + "and the exchange numbered it on arrival). Fills, the outstanding book and cancels are "
+                + "matched on the new number from now on.";
+            _logger.LogWarning("[PersistentOrders] {IntentId} ({Symbol}): {Detail}",
+                intent.IntentId, intent.Symbol, detail);
+            _activity?.Info("Orders", $"{intent.Symbol}: keep-working order #{from} is now #{to}", detail);
+        }
+        return moved;
+    }
+
+    /// <summary>
+    /// The end-of-day backstop for a placement whose fill this ledger could not link. Returns true when
+    /// the intent was held in <c>attention</c> instead of being lapsed.
+    ///
+    /// <para>
+    /// <see cref="AdoptRenumberingsAsync"/> is the fix; this is for the day it does not apply — an
+    /// adapter that cannot see the link, or a broker that renumbers some new way. Lapsing an unlinked
+    /// fill is not a display bug: the next open places the whole quantity AGAIN. So a fill today on a
+    /// number no order of this system owns, matching this placement's symbol, side, size and limit, holds
+    /// the intent for a person. Nothing is credited — shape is not identity — and the existing next-day
+    /// path settles an <c>attention</c> intent from custody, as it already does for any unobserved outcome.
+    /// </para>
+    /// </summary>
+    private async Task<bool> HoldForUnlinkedFillAsync(
+        PersistentOrderIntent intent,
+        PersistentOrderPlacement placement,
+        IReadOnlySet<string> ownNumbers,
+        BrokerReconciliationSnapshot snapshot,
+        CancellationToken ct)
+    {
+        var candidates = PersistentOrderDecisions.FindUnlinkedMatchingFills(intent, placement, ownNumbers, snapshot);
+        if (candidates.Count == 0) return false;
+
+        // A fill on another order THIS system placed (a dashboard order on the same stock) is not a
+        // candidate; only the ledger can say which numbers those are.
+        var ours = await _repository.FindOwnBrokerOrderNumbersAsync(
+            candidates.Select(f => f.OrderNo).ToList(), ct);
+        var unlinked = candidates.Where(f => !ours.Contains(f.OrderNo.Trim())).ToList();
+        if (unlinked.Count == 0) return false;
+
+        var described = string.Join("; ", unlinked.Select(f =>
+            $"{f.Quantity:N0} at {f.Price:0.####} on order #{f.OrderNo}"));
+        var reason =
+            $"Not re-placed: today's order #{placement.BrokerOrderNo ?? "unknown"} is linked to no fill, but "
+            + $"the broker reported {intent.Action.ToUpperInvariant()} {intent.Symbol} fill(s) that no order of "
+            + $"this system placed and that match this one's side, size and limit ({described}). If that was "
+            + $"this order, placing it again tomorrow would {intent.Action.ToLowerInvariant()} the same "
+            + "shares twice, so it is held for review. It is settled from holdings on the next trading day, "
+            + "or resolve it now.";
+        await _repository.SetPersistentOrderProgressAsync(
+            intent.IntentId, intent.FilledQuantity, "attention", reason, ct);
+        _logger.LogWarning("[PersistentOrders] {IntentId} ({Symbol}): {Reason}",
+            intent.IntentId, intent.Symbol, reason);
+        _activity?.Warn("Orders", $"{intent.Symbol}: keep-working order held — a fill could not be linked", reason);
+        return true;
     }
 
     private readonly record struct RetryPreparation(
@@ -861,6 +991,16 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
         // Re-read because repository projection folds newly-recorded fills into FilledQuantity.
         var intent = await _repository.GetPersistentOrderAsync(original.IntentId, ct) ?? original;
         var placements = await _repository.GetPersistentOrderPlacementsAsync(intent.IntentId, ct);
+
+        // FIRST, before anything reads a placement's number: a number the broker has since replaced
+        // matches no fill, no resting order and no cancel, so every decision below would be taken
+        // about an order that, as far as this ledger can see, has vanished. See AdoptRenumberingsAsync.
+        if ((await AdoptRenumberingsAsync(intent, placements, snapshot, today, ct)).Count > 0)
+        {
+            intent = await _repository.GetPersistentOrderAsync(original.IntentId, ct) ?? intent;
+            placements = await _repository.GetPersistentOrderPlacementsAsync(intent.IntentId, ct);
+        }
+
         var ownNumbers = placements
             .Select(p => p.BrokerOrderNo?.Trim())
             .Where(n => !string.IsNullOrWhiteSpace(n))
@@ -1038,6 +1178,11 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
 
             if (latestPlacement?.State == "accepted" && dayEnded)
             {
+                // Lapsing is what makes tomorrow place the whole quantity again, so it must not happen
+                // on the strength of a fill this ledger merely failed to link. See HoldForUnlinkedFillAsync.
+                if (await HoldForUnlinkedFillAsync(intent, latestPlacement, ownNumbers, snapshot, ct))
+                    return;
+
                 await _repository.SetPersistentOrderPlacementStateAsync(
                     latestPlacement.PlacementId, "lapsed",
                     "The trading date ended with no native order outstanding; its unfilled remainder lapsed.", ct);

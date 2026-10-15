@@ -752,6 +752,114 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         return await command.ExecuteNonQueryAsync(ct) == 1;
     }
 
+    public async Task<bool> RenumberPersistentOrderPlacementAsync(
+        string placementId, string from, string to, CancellationToken ct = default)
+    {
+        from = from.Trim();
+        to = to.Trim();
+        if (from.Length == 0 || to.Length == 0
+            || string.Equals(from, to, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        var tx = (Microsoft.Data.Sqlite.SqliteTransaction)transaction;
+        var now = DateTime.UtcNow.ToString("O");
+
+        var read = connection.CreateCommand();
+        read.Transaction = tx;
+        read.CommandText = """
+            SELECT intent_id, execution_id FROM persistent_order_placements
+             WHERE placement_id = $id AND broker_order_no = $from
+            """;
+        read.Parameters.AddWithValue("$id", placementId);
+        read.Parameters.AddWithValue("$from", from);
+        string intentId;
+        string? executionId;
+        await using (var reader = await read.ExecuteReaderAsync(ct))
+        {
+            if (!await reader.ReadAsync(ct)) return false;
+            intentId = reader.GetString(0);
+            executionId = reader.IsDBNull(1) ? null : reader.GetString(1);
+        }
+
+        var move = connection.CreateCommand();
+        move.Transaction = tx;
+        move.CommandText = """
+            UPDATE persistent_order_placements SET broker_order_no = $to
+             WHERE placement_id = $id AND broker_order_no = $from;
+            UPDATE persistent_order_intents SET last_order_no = $to, updated_utc = $now
+             WHERE intent_id = $intent AND last_order_no = $from;
+            """;
+        move.Parameters.AddWithValue("$id", placementId);
+        move.Parameters.AddWithValue("$from", from);
+        move.Parameters.AddWithValue("$to", to);
+        move.Parameters.AddWithValue("$intent", intentId);
+        move.Parameters.AddWithValue("$now", now);
+        await move.ExecuteNonQueryAsync(ct);
+
+        if (!string.IsNullOrWhiteSpace(executionId))
+        {
+            // The new number's broker-order row belongs to the placement's execution. A fill recorded
+            // before this ran filed it as `external:` (RecordFillsAsync); one recorded after finds this
+            // row and keeps it, because that insert is OR IGNORE. The row under the OLD number stays: it
+            // is the record of what the broker acknowledged at placement.
+            var claim = connection.CreateCommand();
+            claim.Transaction = tx;
+            claim.CommandText = """
+                UPDATE broker_orders SET execution_id = $exec, updated_utc = $now
+                 WHERE broker_order_id = $to AND execution_id = 'external:' || $to;
+                INSERT OR IGNORE INTO broker_orders
+                    (broker_order_id, execution_id, client_order_id, state, order_json, created_utc, updated_utc)
+                SELECT $to, execution_id, 'renumbered:' || $to, state, order_json, $now, $now
+                  FROM broker_orders
+                 WHERE execution_id = $exec
+                   AND (broker_order_id = $from OR broker_order_id LIKE $fromQualified)
+                 LIMIT 1;
+                """;
+            claim.Parameters.AddWithValue("$exec", executionId);
+            claim.Parameters.AddWithValue("$from", from);
+            claim.Parameters.AddWithValue("$fromQualified", from + "#%");
+            claim.Parameters.AddWithValue("$to", to);
+            claim.Parameters.AddWithValue("$now", now);
+            await claim.ExecuteNonQueryAsync(ct);
+        }
+
+        await transaction.CommitAsync(ct);
+        return true;
+    }
+
+    public async Task<IReadOnlySet<string>> FindOwnBrokerOrderNumbersAsync(
+        IReadOnlyCollection<string> orderNumbers, CancellationToken ct = default)
+    {
+        var wanted = orderNumbers
+            .Select(n => n?.Trim())
+            .Where(n => !string.IsNullOrEmpty(n))
+            .Select(n => n!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var own = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (wanted.Count == 0) return own;
+
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        foreach (var number in wanted)
+        {
+            var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT 1 FROM broker_orders
+                 WHERE (broker_order_id = $no OR broker_order_id LIKE $qualified)
+                   AND execution_id NOT LIKE 'external:%'
+                 LIMIT 1
+                """;
+            command.Parameters.AddWithValue("$no", number);
+            command.Parameters.AddWithValue("$qualified", number + "#%");
+            if (await command.ExecuteScalarAsync(ct) is not null) own.Add(number);
+        }
+        return own;
+    }
+
     public async Task<bool> TrySetPersistentOrderStateAsync(
         string intentId, IReadOnlyCollection<string> expectedStates, string newState,
         string? reason = null, CancellationToken ct = default)

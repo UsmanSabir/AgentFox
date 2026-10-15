@@ -672,6 +672,12 @@ public sealed class WatchlistUniverseTests
         public Task<bool> SetPersistentOrderProgressAsync(
             string id, int filled, string state, string? reason, CancellationToken ct = default) =>
             throw new NotSupportedException();
+        public Task<bool> RenumberPersistentOrderPlacementAsync(
+            string placementId, string from, string to, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+        public Task<IReadOnlySet<string>> FindOwnBrokerOrderNumbersAsync(
+            IReadOnlyCollection<string> orderNumbers, CancellationToken ct = default) =>
+            throw new NotSupportedException();
         public Task<bool> TrySetPersistentOrderStateAsync(
             string id, IReadOnlyCollection<string> expected, string state, string? reason = null,
             CancellationToken ct = default) => throw new NotSupportedException();

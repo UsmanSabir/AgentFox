@@ -209,6 +209,35 @@ public interface ITradingRepository
         string? reason,
         CancellationToken ct = default);
 
+    /// <summary>
+    /// Moves a placement from the number the broker first gave its order to the number the broker uses
+    /// now (see <see cref="TradingAgent.Reconciliation.BrokerReconciliationSnapshot.OrderRenumberings"/>),
+    /// so fills, the outstanding book and a cancel all name the same order again. Also moves the
+    /// intent's displayed number, and claims the new number's broker-order row for the placement's own
+    /// execution — a fill reconciliation already recorded under it was filed as an <c>external:</c>
+    /// order, which is exactly the misattribution being corrected.
+    ///
+    /// <para>
+    /// Compare-and-set on <paramref name="from"/>: false, and nothing written, when the placement no
+    /// longer carries it — so a second caller with the same renumbering is a no-op.
+    /// </para>
+    /// </summary>
+    Task<bool> RenumberPersistentOrderPlacementAsync(
+        string placementId,
+        string from,
+        string to,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Which of <paramref name="orderNumbers"/> belong to an order THIS system placed — a broker-order
+    /// row under a real execution, as opposed to one reconciliation filed as <c>external:</c> because no
+    /// execution of ours claimed it. A colliding number stored qualified as <c>{orderNo}#{clientOrderId}</c>
+    /// counts under its bare number.
+    /// </summary>
+    Task<IReadOnlySet<string>> FindOwnBrokerOrderNumbersAsync(
+        IReadOnlyCollection<string> orderNumbers,
+        CancellationToken ct = default);
+
     Task<bool> TrySetPersistentOrderStateAsync(
         string intentId,
         IReadOnlyCollection<string> expectedStates,

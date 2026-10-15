@@ -525,6 +525,85 @@ public static class PersistentOrderDecisions
             reason);
     }
 
+    /// <summary>
+    /// Today's placements whose recorded order number the broker has since replaced, and the number it
+    /// uses now. See <see cref="BrokerReconciliationSnapshot.OrderRenumberings"/> for the incident.
+    ///
+    /// <para>
+    /// <b>Today only.</b> A renumbering is read from the broker's own day — at AHL a pending number is
+    /// a server sequence and the link is today's activity log — so a number recorded on an earlier
+    /// date is never matched against today's, however equal the strings.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Ambiguity is refused, never resolved.</b> Two renumberings of one number to different
+    /// targets means the adapter could not tell which order is ours; following either would attribute
+    /// somebody else's fill to this intent. The adapter is already required to report only an
+    /// unambiguous link; this is the second half of the same rule.
+    /// </para>
+    /// </summary>
+    public static IReadOnlyList<(PersistentOrderPlacement Placement, string To)> FindRenumberings(
+        PersistentOrderIntent intent,
+        IReadOnlyList<PersistentOrderPlacement> placements,
+        BrokerReconciliationSnapshot snapshot,
+        DateOnly today)
+    {
+        if (snapshot.OrderRenumberings.Count == 0) return [];
+
+        var found = new List<(PersistentOrderPlacement, string)>();
+        foreach (var placement in placements)
+        {
+            if (placement.SessionDate != today) continue;
+            var recorded = placement.BrokerOrderNo?.Trim();
+            if (string.IsNullOrEmpty(recorded)) continue;
+
+            var targets = snapshot.OrderRenumberings
+                .Where(r => string.Equals(r.From?.Trim(), recorded, StringComparison.OrdinalIgnoreCase)
+                            && string.Equals(r.Symbol?.Trim(), intent.Symbol.Trim(), StringComparison.OrdinalIgnoreCase))
+                .Select(r => r.To?.Trim())
+                .Where(to => !string.IsNullOrEmpty(to)
+                             && !string.Equals(to, recorded, StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (targets.Count == 1) found.Add((placement, targets[0]!));
+        }
+        return found;
+    }
+
+    /// <summary>
+    /// Today's fills that could be <paramref name="placement"/>'s although no recorded number links
+    /// them: same symbol and side, after the placement, no larger than it, at or better than its
+    /// limit, and on an order number this intent never recorded. The caller removes the numbers some
+    /// OTHER order of this system owns — only the ledger knows that.
+    ///
+    /// <para>
+    /// This is the backstop for the day the link fails. A placement whose fill is never linked reads
+    /// as "no fill", and the end-of-day path would then lapse it and place the whole quantity again
+    /// at the next open — buying or selling the same shares twice. A candidate here is not proof the
+    /// fill was ours (shape is not identity), so it holds the intent for a person rather than
+    /// crediting anything.
+    /// </para>
+    /// </summary>
+    public static IReadOnlyList<BrokerFill> FindUnlinkedMatchingFills(
+        PersistentOrderIntent intent,
+        PersistentOrderPlacement placement,
+        IReadOnlySet<string> ownNumbers,
+        BrokerReconciliationSnapshot snapshot)
+    {
+        var limit = placement.SubmittedPrice ?? placement.RequestedPrice ?? intent.Price ?? intent.LimitPrice;
+        var isBuy = intent.Action.Equals("BUY", StringComparison.OrdinalIgnoreCase);
+
+        return snapshot.Fills
+            .Where(fill => fill.FilledUtc >= placement.CreatedUtc.AddMinutes(-1)
+                           && SameSymbolAndSide(intent, fill.Symbol, fill.Side)
+                           && fill.Quantity > 0
+                           && fill.Quantity <= placement.Quantity
+                           && !ownNumbers.Contains(fill.OrderNo.Trim())
+                           && (limit is not > 0m
+                               || (isBuy ? fill.Price <= limit.Value + 0.01m : fill.Price >= limit.Value - 0.01m)))
+            .ToList();
+    }
+
     private static bool CompatiblePrice(
         PersistentOrderIntent intent,
         PersistentOrderPlacement placement,
