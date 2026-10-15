@@ -4,6 +4,16 @@ export const WORKSPACE_RETENTION_MS = 180 * 24 * 60 * 60 * 1000;
 export const MAX_LAYOUT_LENGTH = 100_000;
 /** Where a workstation keeps the layout saved as "My view": beside its working layout, never in place of it. */
 export const myViewStorageKey = (storageKey: string) => `${storageKey}.my-view`;
+
+/** Aliases rename view metadata only; an unknown id or a retired target remains invalid. */
+export function resolveWorkspacePreset(
+  id: string | null, presets: readonly string[], aliases: Readonly<Record<string, string>> = {}
+): string | null {
+  if (id === null) return null;
+  if (presets.includes(id)) return id;
+  const renamed = Object.hasOwn(aliases, id) ? aliases[id] : undefined;
+  return renamed && presets.includes(renamed) ? renamed : null;
+}
 export type AutoHideEdge = 'left' | 'right' | 'bottom';
 export interface AutoHideTray { ids: string[]; active: string; size: number }
 export type AutoHideTrays = Partial<Record<AutoHideEdge, AutoHideTray>>;
@@ -34,14 +44,16 @@ export interface WorkspaceLayout {
 /** Validate before handing browser preferences to Dockview; never accept components/params as code. */
 export function readWorkspaceLayout(
   raw: string | null, edition: string, allowedIds: readonly string[], presets: readonly string[],
-  now = Date.now()
+  now = Date.now(), presetAliases: Readonly<Record<string, string>> = {}
 ): WorkspaceLayout | null {
   if (!raw || raw.length > MAX_LAYOUT_LENGTH) return null;
   try {
     const value = JSON.parse(raw) as WorkspaceLayout;
-    if (value.version !== 1 || value.edition !== edition || !presets.includes(value.preset)
+    const preset = resolveWorkspacePreset(value.preset, presets, presetAliases);
+    if (value.version !== 1 || value.edition !== edition || !preset
       || !Number.isFinite(value.savedAt) || value.savedAt > now
       || now - value.savedAt > WORKSPACE_RETENTION_MS) return null;
+    value.preset = preset;
     const layout = value.layout;
     if (!layout || !layout.grid || !layout.panels || Array.isArray(layout.panels)) return null;
     // Floating/pop-out windows are not part of this first full-page contract.
