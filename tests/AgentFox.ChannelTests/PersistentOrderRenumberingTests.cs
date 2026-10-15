@@ -2,6 +2,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using TradingAgent.Broker;
 using TradingAgent.Config;
 using TradingAgent.Market;
 using TradingAgent.Models;
@@ -334,6 +335,126 @@ public sealed class PersistentOrderRenumberingTests
 
         Assert.AreEqual("active", (await repository.GetPersistentOrderAsync(intentId))!.State);
         Assert.AreEqual("lapsed", (await repository.GetPersistentOrderPlacementsAsync(intentId)).Single().State);
+    }
+
+    // ── Stop & cancel ─────────────────────────────────────────────────────────
+    //
+    // The venue refuses a pending number once the order has reached the exchange
+    // (`Invalid Order[5460] to cancel`, 2026-10-15), which reads as "gone". Before the fix that wrote
+    // `cancelled` while the order kept resting under its exchange id.
+
+    /// <summary>Records every cancel. The pending number is refused as invalid, as the venue does.</summary>
+    private sealed class VenueCanceller(bool exchangeIdCancels = true) : IBrokerNativeOrderCanceller
+    {
+        public List<string> Asked { get; } = [];
+
+        public Task<BrokerCancellationResult> CancelOrderAsync(string orderNo, CancellationToken ct = default)
+        {
+            Asked.Add(orderNo);
+            if (orderNo == Pending)
+                return Task.FromResult(new BrokerCancellationResult(true, false, true, $"Invalid Order[{orderNo}] to cancel"));
+            return Task.FromResult(exchangeIdCancels
+                ? new BrokerCancellationResult(true, true, true, $"Order #{orderNo} cancelled.")
+                : new BrokerCancellationResult(false, false, false, $"Cancel of #{orderNo} was not confirmed."));
+        }
+    }
+
+    private sealed class FixedReader(BrokerReconciliationSnapshot snapshot) : IBrokerStateReader
+    {
+        public Task<BrokerReconciliationSnapshot> ReadSnapshotAsync(CancellationToken ct = default) =>
+            Task.FromResult(snapshot);
+    }
+
+    /// <summary>The worker as Stop &amp; cancel uses it: the last reconciliation, a fresh read, a canceller.</summary>
+    private static PersistentOrderWorker CancelWorker(
+        ITradingRepository repository, BrokerReconciliationSnapshot current, BrokerReconciliationSnapshot fresh,
+        IBrokerNativeOrderCanceller canceller)
+    {
+        var reconciliation = new TradingReconciliationState();
+        reconciliation.Update(current);
+        var cancellations = new BrokerOrderCancellationService(
+            null!, null!, NullLogger<BrokerOrderCancellationService>.Instance, canceller);
+        return new PersistentOrderWorker(
+            repository, null!, null!, null!, new FixedCalendar(open: true, dayEnded: false), reconciliation,
+            new FixedReader(fresh), cancellations, null!, null!,
+            Options.Create(new TradingAgentOptions()), NullLogger<PersistentOrderWorker>.Instance,
+            new TradingActivityLog());
+    }
+
+    private static BrokerWorkingOrder Resting(string orderNo) =>
+        new(orderNo, "CNERGY", "SEL", 161, 12.97m, "LIMIT", "0911XK2O");
+
+    [TestMethod]
+    public async Task A_cancel_after_the_open_cancels_the_exchange_id_the_last_reconciliation_linked()
+    {
+        var repository = NewRepository();
+        var (intentId, _, _) = await PlacePreOpenAsync(repository);
+        var renumbered = Snapshot(renumberings: [new BrokerOrderRenumbering(Pending, Exchange, "CNERGY")])
+            with { OpenOrders = [Resting(Exchange)] };
+        var canceller = new VenueCanceller();
+
+        var (completed, state, message) =
+            await CancelWorker(repository, renumbered, renumbered, canceller).CancelAsync(intentId);
+
+        Assert.IsTrue(completed, message);
+        Assert.AreEqual("cancelled", state);
+        CollectionAssert.AreEqual(new[] { Exchange }, canceller.Asked,
+            "the pending number is not asked at all: the broker would refuse it and the order would keep resting");
+    }
+
+    [TestMethod]
+    public async Task A_link_seen_only_on_the_fresh_read_still_cancels_the_order_resting_under_it()
+    {
+        // The last reconciliation predates the open, so the cancel goes to the pending number, which the
+        // venue refuses. The settle step's fresh read shows the order resting under its exchange id.
+        var repository = NewRepository();
+        var (intentId, _, _) = await PlacePreOpenAsync(repository);
+        var fresh = Snapshot(renumberings: [new BrokerOrderRenumbering(Pending, Exchange, "CNERGY")])
+            with { OpenOrders = [Resting(Exchange)] };
+        var canceller = new VenueCanceller();
+
+        var (completed, state, message) =
+            await CancelWorker(repository, Snapshot(), fresh, canceller).CancelAsync(intentId);
+
+        Assert.IsTrue(completed, message);
+        Assert.AreEqual("cancelled", state);
+        CollectionAssert.AreEqual(new[] { Pending, Exchange }, canceller.Asked);
+        Assert.AreEqual(Exchange, (await repository.GetPersistentOrderPlacementsAsync(intentId)).Single().BrokerOrderNo);
+    }
+
+    [TestMethod]
+    public async Task A_renumbered_order_that_will_not_cancel_is_never_written_cancelled()
+    {
+        var repository = NewRepository();
+        var (intentId, _, _) = await PlacePreOpenAsync(repository);
+        var fresh = Snapshot(renumberings: [new BrokerOrderRenumbering(Pending, Exchange, "CNERGY")])
+            with { OpenOrders = [Resting(Exchange)] };
+
+        var (completed, state, _) = await CancelWorker(repository, Snapshot(), fresh,
+            new VenueCanceller(exchangeIdCancels: false)).CancelAsync(intentId);
+
+        Assert.IsFalse(completed);
+        Assert.AreEqual("cancelling", state);
+        Assert.AreEqual("cancelling", (await repository.GetPersistentOrderAsync(intentId))!.State,
+            "a live order under the exchange id must not be recorded as cancelled");
+    }
+
+    [TestMethod]
+    public async Task A_cancel_that_finds_the_renumbered_order_filled_records_the_fill_not_a_cancel()
+    {
+        // The incident's own shape: Stop & cancel at 10:42 on an order that filled at 10:31.
+        var repository = NewRepository();
+        var (intentId, _, _) = await PlacePreOpenAsync(repository);
+        var fresh = Snapshot([CnergyFill(Exchange)], [new BrokerOrderRenumbering(Pending, Exchange, "CNERGY")]);
+        var canceller = new VenueCanceller();
+
+        var (completed, state, message) =
+            await CancelWorker(repository, Snapshot(), fresh, canceller).CancelAsync(intentId);
+
+        Assert.AreEqual("fulfilled", state, message);
+        Assert.IsTrue(completed);
+        Assert.AreEqual(161, (await repository.GetPersistentOrderAsync(intentId))!.FilledQuantity);
+        CollectionAssert.AreEqual(new[] { Pending }, canceller.Asked, "nothing rests, so nothing more is cancelled");
     }
 
     [TestMethod]
