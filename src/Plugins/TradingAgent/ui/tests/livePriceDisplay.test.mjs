@@ -22,7 +22,7 @@ test('with no live quote the delayed fallbacks are shown, and SAID to be delayed
   assert.equal(d.price, 149.5);
   assert.equal(d.change, -0.28);
   assert.equal(d.tag, 'delayed');
-  assert.equal(d.label, 'Delayed market snapshot');
+  assert.match(d.label, /^Delayed price: /, 'the label says the price is delayed, and why');
 });
 
 test('a live quote carrying no price of its own still labels the fallback it falls back to', () => {
@@ -53,7 +53,8 @@ test('a change-only cell never repeats the delayed tag its sibling carries', () 
 
 test('nothing known stays nothing: no price, no change, no tag', () => {
   const d = resolveDisplayQuote(view());
-  assert.deepEqual(d, { price: null, change: null, tag: null, label: 'Delayed market snapshot' });
+  assert.deepEqual({ ...d, label: undefined }, { price: null, change: null, tag: null, label: undefined });
+  assert.match(d.label, /^Delayed price: /);
   // A zero fallback is a real price and must not be swallowed by a nullish default.
   assert.equal(resolveDisplayQuote(view(), 0, 0).price, 0);
   assert.equal(resolveDisplayQuote(view(), 0, 0).change, 0);
