@@ -111,6 +111,8 @@
   let trayReturnFocus: HTMLElement | null = null;
   const nodes = new Map<string, HTMLElement>();
   const containers = new Map<string, HTMLDivElement>();
+  // One prior width per panel, this page only. Actual geometry is saved by the existing layout writer.
+  const previousPanelWidths = new Map<string, number>();
   const special = new Set(['core-toolbar', 'edition-health', 'core-dialogs']);
   const edges: AutoHideEdge[] = ['left','right','bottom'];
 
@@ -189,8 +191,31 @@
       commands = [...commands, command];
       return () => commands = commands.filter(c => c !== command);
     },
-    focusPanel
+    focusPanel,
+    setPanelWidth
   };
+
+  function setPanelWidth(id: string, width: number | null) {
+    if (!desktop || !offeredPanels().some(panel => panel.id === id) || (width !== null && !Number.isFinite(width))) return;
+    const edge = trayForPanel(id);
+    if (edge === 'bottom') return; // A bottom drawer spans the workspace; its adjustable dimension is height.
+    const panel = api?.getPanel(id);
+    if (panel && api?.hasMaximizedGroup()) {
+      api.exitMaximizedGroup();
+      // Remember the ordinary group width, after its maximized geometry has been restored.
+      requestAnimationFrame(() => { if (!disposed) setPanelWidth(id, width); });
+      return;
+    }
+    const current = edge ? autoHide[edge]!.size : panel?.api.width;
+    if (current == null) return;
+    if (width !== null && current > width) previousPanelWidths.set(id, current);
+    const maximum = edge ? 900 : Math.max(180, dockRoot.clientWidth);
+    const target = Math.max(180, Math.min(maximum, width ?? previousPanelWidths.get(id) ?? 360));
+    if (width === null) previousPanelWidths.delete(id);
+    if (edge) autoHide = { ...autoHide, [edge]:{ ...autoHide[edge]!, size:target } };
+    else panel?.api.setSize({ width:target });
+    scheduleSave();
+  }
 
   function focusPanel(id: string) {
     if (!offeredPanels().some(p => p.id === id)) return;
@@ -293,6 +318,7 @@
 
   function buildDefault(next: string) {
     if (!api) return;
+    previousPanelWidths.clear();
     parkTrays();
     autoHide = {};
     api.exitMaximizedGroup();
@@ -412,6 +438,7 @@
     try {
       parkTrays();
       api.exitMaximizedGroup();
+      previousPanelWidths.clear();
       api.fromJSON(view.layout);
       preset = view.preset;
       autoHide = view.autoHide ?? {};
@@ -1005,9 +1032,12 @@
   .tray-content :global(.mobile-panel-title) { display:none; }
   .tray-content :global(.workstation-panel:focus-visible) { outline:2px solid var(--primary); outline-offset:-2px; }
   .tray-content :global([data-workspace-panel='watchlist'] > div) { height:100%; min-height:0; }
+  .tray-content :global([data-workspace-panel='watchlist']) { padding:.35rem .25rem; }
   .tray-content :global([data-workspace-panel='watchlist'] .watchlist) { height:100%; min-height:320px; contain:size; border:0; padding:0; }
   .tray-content :global([data-workspace-panel='watchlist'] .filter-row) { flex-wrap:wrap; }
   .tray-content :global([data-workspace-panel='watchlist'] .search-row) { flex-basis:100%; }
+  /* A bottom peek spans the workspace and cannot give width back to its neighbours. */
+  .tray-peek.bottom :global([data-workspace-panel='watchlist'] .density) { display:none; }
   .tray-strip { flex:none; flex-wrap:nowrap; gap:0; background:var(--surface-2); }
   .tray-strip.bottom { overflow-x:auto; border-top:1px solid var(--border-md); }
   .tray-strip.side { width:30px; overflow-y:auto; overflow-x:hidden; flex-direction:column; align-items:stretch; border-color:var(--border-md); }
@@ -1024,6 +1054,7 @@
   .workspace-dock :global(.mobile-panel-title) { display:none; }
   .workspace-dock :global(.panel-placeholder) { color:var(--text-3); font-size:.75rem; padding:1rem; }
   .workspace-dock :global([data-workspace-panel='watchlist'] > div) { height:100%; min-height:0; }
+  .workspace-dock :global([data-workspace-panel='watchlist']) { padding:.35rem .25rem; }
   .workspace-dock :global([data-workspace-panel='watchlist'] .watchlist) { height:100%; min-height:320px; contain:size; border:0; padding:0; }
   .workspace-dock :global([data-workspace-panel='watchlist'] .filter-row) { flex-wrap:wrap; }
   .workspace-dock :global([data-workspace-panel='watchlist'] .search-row) { flex-basis:100%; }

@@ -555,7 +555,8 @@
     {:else}
       <WorkspacePanel {workspace} id="watchlist">
         <WatchlistPanel bind:this={workspaceWatchlist} bind:selected={selectedSymbol} bind:selectedCompany
-          allowCompact={false} dense refreshTick={marketTick} marketOpen={status.market.isOpen}
+          allowCompact={!!workspace.setPanelWidth} dense refreshTick={marketTick} marketOpen={status.market.isOpen}
+          on:compactChange={event => workspace?.setPanelWidth?.('watchlist', event.detail ? 180 : null)}
           on:newOrder={event => {selectedSymbol = event.detail.symbol; openNewOrderDialog();}}
           rowStatus={symbolExtension?.rowStatus ?? null}/>
       </WorkspacePanel>

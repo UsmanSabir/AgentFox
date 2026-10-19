@@ -46,4 +46,6 @@ export interface WorkspaceComposition {
   attachPanel: (id: string, element: HTMLElement) => () => void;
   registerCommand: (command: WorkspaceCommand) => () => void;
   focusPanel: (id: string) => void;
+  /** Resize a panel's group/side drawer; null restores its prior width. Geometry uses the existing layout record. */
+  setPanelWidth?: (id: string, width: number | null) => void;
 }
