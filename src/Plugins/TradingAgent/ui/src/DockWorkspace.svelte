@@ -110,6 +110,8 @@
   let bottomTrayStrip: HTMLElement;
   let trayReturnFocus: HTMLElement | null = null;
   const nodes = new Map<string, HTMLElement>();
+  // One listener per mounted producer, removed with attachPanel's existing cleanup.
+  const visibilityListeners = new Map<string, (visible: boolean) => void>();
   const containers = new Map<string, HTMLDivElement>();
   // One prior width per panel, this page only. Actual geometry is saved by the existing layout writer.
   const previousPanelWidths = new Map<string, number>();
@@ -172,15 +174,18 @@
   }
 
   const workspace: WorkspaceComposition = {
-    attachPanel(id, node) {
+    attachPanel(id, node, onVisibility) {
       if (!special.has(id) && !panels.some(p => p.id === id)) throw new Error('Unknown panel: ' + id);
       if (nodes.has(id)) throw new Error('Duplicate workspace owner: ' + id);
       const marker = document.createComment('workspace-source:' + id);
       node.before(marker);
       nodes.set(id, node);
+      if (onVisibility) visibilityListeners.set(id, onVisibility);
       place(id);
+      refreshPanelVisibility();
       return () => {
         nodes.delete(id);
+        visibilityListeners.delete(id);
         if (marker.parentNode) marker.replaceWith(node);
         const placeholder = containers.get(id)?.querySelector<HTMLElement>(':scope > .panel-placeholder');
         if (placeholder) placeholder.hidden = false;
@@ -194,6 +199,16 @@
     focusPanel,
     setPanelWidth
   };
+
+  function publishPanelVisibility(isDesktop: boolean, shownEdge: AutoHideEdge | null, trays: AutoHideTrays, dock: DockviewApi | null, suppressed: boolean) {
+    if (suppressed) return;
+    for (const [id, listener] of visibilityListeners) {
+      const edge = edges.find(edge => trays[edge]?.ids.includes(id));
+      listener(!isDesktop || (edge ? shownEdge === edge && trays[edge]?.active === id : dock?.getPanel(id)?.api.isVisible ?? false));
+    }
+  }
+  function refreshPanelVisibility() { publishPanelVisibility(desktop, openEdge, autoHide, api, suppressSave); }
+  $: publishPanelVisibility(desktop, openEdge, autoHide, api, suppressSave);
 
   function setPanelWidth(id: string, width: number | null) {
     if (!desktop || !offeredPanels().some(panel => panel.id === id) || (width !== null && !Number.isFinite(width))) return;
@@ -842,9 +857,10 @@
       activeId = api.activePanel?.id ?? activeId;
       maximized = api.hasMaximizedGroup();
       readMyView();
-      subscriptions.push(api.onDidLayoutChange(scheduleSave));
-      subscriptions.push(api.onDidMaximizedGroupChange(() => { maximized = api?.hasMaximizedGroup() ?? false; scheduleSave(); }));
-      subscriptions.push(api.onDidActivePanelChange(() => activeId = api?.activePanel?.id ?? activeId));
+      subscriptions.push(api.onDidLayoutChange(() => { scheduleSave(); refreshPanelVisibility(); }));
+      subscriptions.push(api.onDidMaximizedGroupChange(() => { maximized = api?.hasMaximizedGroup() ?? false; scheduleSave(); refreshPanelVisibility(); }));
+      subscriptions.push(api.onDidActivePanelChange(() => { activeId = api?.activePanel?.id ?? activeId; refreshPanelVisibility(); }));
+      refreshPanelVisibility();
       onPresetChange(preset);
     }
     for (const id of nodes.keys()) place(id);

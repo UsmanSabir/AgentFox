@@ -525,10 +525,10 @@
     </section>
 
     </WorkspacePanel>
-    <WorkspacePanel {workspace} id="portfolio">
+    <WorkspacePanel {workspace} id="portfolio" let:visible>
     <div id="trading-portfolio" class="section-anchor">
       <PortfolioPanel holdingStatus={symbolExtension?.holdingStatus ?? null}
-        orderAction={symbolExtension?.orderAction ?? null} keyboardMode={!!workspace}
+        orderAction={symbolExtension?.orderAction ?? null} keyboardMode={!!workspace} embedded={!!workspace} active={visible}
         on:order={event => beginOrder(event.detail.symbol, event.detail.action)}/>
     </div>
 
@@ -577,11 +577,10 @@
       {/if}
     {/if}
 
-    <!-- Directly under the status grid: this answers "what is it doing", which is the question the
-         metrics above raise and none of them answers. Collapsed, so it costs a row of chips. -->
-    <WorkspacePanel {workspace} id="activity">
+    <!-- Classic keeps the compact disclosure; workspace tabs already control visibility. -->
+    <WorkspacePanel {workspace} id="activity" let:visible>
     <div id="trading-activity" class="section-anchor">
-      <ActivityPanel />
+      <ActivityPanel embedded={!!workspace} active={visible}/>
     </div>
 
     </WorkspacePanel>

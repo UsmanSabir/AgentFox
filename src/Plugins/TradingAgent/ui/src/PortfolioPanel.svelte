@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createEventDispatcher, onDestroy } from 'svelte';
+  import { createEventDispatcher, onMount, onDestroy } from 'svelte';
   import { onAccountChanged } from './accountSignal';
   import {
     trading,
@@ -16,6 +16,9 @@
   import WorkingOrderCancel from './WorkingOrderCancel.svelte';
   import { orderListNavigation } from './orderListNavigation';
   export let keyboardMode = false;
+  /** Workspace tabs own visibility; classic keeps its disclosure and explicit first read. */
+  export let embedded = false;
+  export let active = true;
   const dispatch = createEventDispatcher<{
     order: { symbol: string; action: 'BUY' | 'SELL' };
   }>();
@@ -39,7 +42,9 @@
   export let orderAction: SymbolExtensionComponent | null = null;
   $: cancelControl = orderAction ?? WorkingOrderCancel;
 
-  let open = false;
+  let expanded = false;
+  $: open = embedded || expanded;
+  let mounted = false;
   let showValues = false;
   let loading = false;
   let loaded = false;
@@ -61,14 +66,19 @@
   }
 
   function toggleOpen() {
-    open = !open;
-    if (open && !loaded) load();
+    expanded = !expanded;
+    if (expanded && !loaded) load();
   }
 
-  // An order placed, filled, cancelled or refused anywhere on the page: re-read while open, so a filled order leaves
-  // Working orders and joins the holdings without a Refresh. Closed, the next open reads afresh instead.
+  onMount(() => { mounted = true; });
+  // Opening a workspace tab replaces the old disclosure click. Hidden mounted tabs do not read it.
+  // A failed read stays visible until Refresh rather than causing a reactive retry loop.
+  $: if (mounted && embedded && active && !loaded && !loading && !error) void load();
+
+  // An order placed, filled, cancelled or refused anywhere on the page: re-read while visible, so a filled order
+  // leaves Working orders and joins the holdings. Hidden/collapsed, mark stale for the next opening.
   onDestroy(onAccountChanged(() => {
-    if (open && loaded) load();
+    if (open && (!embedded || active) && loaded) load();
     else loaded = false;
   }));
 
@@ -111,10 +121,8 @@
   };
 </script>
 
-<section class="portfolio" class:open use:orderListNavigation={keyboardMode}>
-  <header>
-    <button class="toggle" on:click={toggleOpen} aria-expanded={open} aria-controls="portfolio-content">
-      {#if open}<ChevronDown size={15}/>{:else}<ChevronRight size={15}/>{/if}
+{#snippet portfolioHeading()}
+      {#if !embedded}{#if open}<ChevronDown size={15}/>{:else}<ChevronRight size={15}/>{/if}{/if}
       <WalletCards size={17}/>
       <span class="title">
         <b>Your portfolio</b>
@@ -126,7 +134,15 @@
           {/if}
         </small>
       </span>
-    </button>
+{/snippet}
+
+<section class="portfolio" class:open class:embedded use:orderListNavigation={keyboardMode}>
+  <header>
+    {#if embedded}
+      <div class="panel-heading">{@render portfolioHeading()}</div>
+    {:else}
+      <button class="toggle" on:click={toggleOpen} aria-expanded={open} aria-controls="portfolio-content">{@render portfolioHeading()}</button>
+    {/if}
     <div class="header-actions">
       <button class="action" on:click={() => showValues = !showValues} aria-pressed={showValues} title={showValues ? 'Hide financial values' : 'Show financial values'}>
         {#if showValues}<EyeOff size={14}/> Hide values{:else}<Eye size={14}/> Show values{/if}
@@ -255,9 +271,11 @@
   .order-filter input { min-width:0; padding:.35rem; border:1px solid var(--border-md); background:var(--surface-2); color:var(--text); border-radius:4px; }
   .portfolio { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); margin-bottom:1.25rem; overflow:hidden; }
   .portfolio.open { border-color:color-mix(in srgb,var(--primary) 25%,var(--border)); }
+  .portfolio.embedded { border:0; border-radius:0; margin-bottom:0; }
   header { display:flex; align-items:center; justify-content:space-between; gap:.7rem; padding:.15rem .45rem .15rem 0; }
   button { font-family:inherit; }
-  .toggle { flex:1; min-width:0; display:flex; align-items:center; gap:.65rem; padding:.8rem 1rem; border:0; background:none; color:var(--text-2); text-align:left; cursor:pointer; }
+  .toggle,.panel-heading { flex:1; min-width:0; display:flex; align-items:center; gap:.65rem; padding:.8rem 1rem; color:var(--text-2); text-align:left; }
+  .toggle { border:0; background:none; cursor:pointer; }
   .title { display:flex; min-width:0; flex-direction:column; gap:.15rem; }.title b { color:var(--text); font-size:.82rem; }.title small { color:var(--text-3); font-size:.68rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .header-actions { display:flex; align-items:center; gap:.35rem; }
   .action { display:flex; align-items:center; gap:.35rem; border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--surface-2); color:var(--text-2); padding:.4rem .55rem; font-size:.68rem; cursor:pointer; white-space:nowrap; }
