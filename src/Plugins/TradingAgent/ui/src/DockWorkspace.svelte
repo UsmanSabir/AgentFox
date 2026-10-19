@@ -2,8 +2,9 @@
   import { onMount, tick } from 'svelte';
   import { createDockview, themeDark, themeLight, type DockviewApi, type DockviewGroupPanel, type IContentRenderer } from 'dockview';
   import 'dockview/dist/styles/dockview.css';
-  import { Command, PanelsTopLeft, RotateCcw, Maximize, Minimize, Keyboard, Pin, PinOff, X, Fullscreen, Shrink, Save, Settings2, ChevronDown } from 'lucide-svelte';
+  import { Command, Search, RotateCcw, Maximize, Minimize, Keyboard, Pin, PinOff, X, Fullscreen, Shrink, Save, Settings2, ChevronDown } from 'lucide-svelte';
   import WorkspaceShortcuts from './WorkspaceShortcuts.svelte';
+  import { searchWorkspaceCommands } from './workspaceSearch';
   import { presetPlacedPanels, workspacePresetPanels, type WorkspaceCommand, type WorkspaceComposition, type WorkspacePanel, type WorkspaceRegion, type WorkspacePreset } from './workspaceComposition';
   import {
     readWorkspaceLayout, saveWorkspaceLayout, myViewStorageKey, resolveWorkspacePreset,
@@ -448,7 +449,7 @@
     suppressSave = false;
     scheduleSave();
     onPresetChange(preset);
-    notice = 'Layout changed. This mode’s panels are available in Panels.';
+    notice = 'Layout changed. This mode’s panels are available in Find panel.';
   }
   function maximize() {
     if (openEdge) { notice = `Pin the ${openEdge} panels before maximizing their group.`; return; }
@@ -564,7 +565,7 @@
     suppressSave = false;
     scheduleSave();
     void tick().then(() => trayStrip(edge)?.querySelector<HTMLElement>('button[data-tray-id]')?.focus());
-    notice = `${edge[0].toUpperCase() + edge.slice(1)} panels unpinned. Open them from the edge strip or Panels; Escape closes the peek.`;
+    notice = `${edge[0].toUpperCase() + edge.slice(1)} panels unpinned. Open them from the edge strip or Find panel; Escape closes the peek.`;
   }
   function pin(edge: AutoHideEdge) {
     const saved = autoHide[edge];
@@ -588,7 +589,7 @@
     closeTray(false);
   }
 
-  $: panelCommands = availablePanels.map(p => ({ id: 'panel.' + p.id, label: 'Show ' + p.title, run: () => focusPanel(p.id) }));
+  $: panelCommands = availablePanels.map(p => ({ id: 'panel.' + p.id, label: 'Show ' + p.title, keywords:p.description, run: () => focusPanel(p.id) }));
   $: layoutCommands = [
     { id:'workspace.shortcuts', label:'Show keyboard shortcuts', run:() => shortcutsSheet.open() },
     { id:'workspace.fullscreen', label:fullscreen ? 'Exit page full screen' : 'Enter page full screen', run:toggleFullscreen,
@@ -602,7 +603,7 @@
     { id:'layout.myview.forget', label:'Forget My view', run:forgetMyView,
       disabled:() => myView ? null : 'No layout has been saved as My view yet.' },
     { id:'layout.maximize', label:'Maximize / restore active group', run:maximize },
-    { id:'layout.hide', label:'Hide active panel (restore from Panels)', run:hideActive },
+    { id:'layout.hide', label:'Hide active panel (restore from Find panel)', run:hideActive },
     { id:'layout.wider', label:'Make active panel wider', run:() => resize(80, 0) },
     { id:'layout.narrower', label:'Make active panel narrower', run:() => resize(-80, 0) },
     { id:'layout.taller', label:'Make active panel taller', run:() => resize(0, 80) },
@@ -621,7 +622,7 @@
     }))
   ];
   $: allCommands = [...panelCommands, ...commands, ...layoutCommands];
-  $: results = (panelsOnly ? panelCommands : allCommands).filter(c => c.label.toLowerCase().includes(query.toLowerCase()));
+  $: results = searchWorkspaceCommands(panelsOnly ? panelCommands : allCommands, query);
   $: if (resultIndex >= results.length) resultIndex = Math.max(0, results.length - 1);
 
   async function openPalette(onlyPanels = false) {
@@ -655,6 +656,7 @@
     catch (e) { notice = e instanceof Error ? e.message : String(e); }
   }
   function paletteKey(event: KeyboardEvent) {
+    if (event.isComposing || event.target !== search) return;
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault();
       resultIndex = (resultIndex + (event.key === 'ArrowDown' ? 1 : -1) + Math.max(1, results.length)) % Math.max(1, results.length);
@@ -676,7 +678,7 @@
       event.preventDefault(); event.stopPropagation(); void shortcutsSheet.open(); return;
     }
     if ((event.ctrlKey || event.metaKey) && !event.altKey && event.code === 'KeyK') {
-      event.preventDefault(); event.stopPropagation(); void openPalette(); return;
+      event.preventDefault(); event.stopPropagation(); void openPalette(event.shiftKey); return;
     }
     if (event.key === 'F6' && !event.ctrlKey && !event.metaKey && !event.altKey) {
       event.preventDefault(); event.stopPropagation(); cycleGroup(event.shiftKey ? -1 : 1); return;
@@ -857,7 +859,8 @@
         title={myView ? 'Restore the layout you saved as My view' : 'Save an arrangement using Layout → Save as My view'}>My view</button>
     </nav>
     <div class="workspace-tools">
-      <button on:click={() => openPalette(true)}><PanelsTopLeft size={14}/> Panels</button>
+      <button class="panel-finder" on:click={() => openPalette(true)} aria-haspopup="dialog"
+        aria-keyshortcuts="Control+Shift+K Meta+Shift+K" title="Find and open a panel (Ctrl+Shift+K)"><Search size={14}/> Find panel <kbd>Ctrl ⇧ K</kbd></button>
       <details class="layout-menu" bind:this={layoutMenu}>
         <summary bind:this={layoutSummary}><Settings2 size={14}/> Layout <ChevronDown size={12}/></summary>
         <div class="layout-actions" role="group" aria-label="Layout actions">
@@ -936,25 +939,29 @@
     </nav>
   {/if}
   <div class="workspace-stack" class:hidden={desktop} bind:this={stack}></div>
-  <footer><span>Focus: {panels.find(p => p.id === activeId)?.title ?? 'Workspace'}</span><span>F6 panels · Ctrl [ / ] tabs · Ctrl Shift 1/2/3/4/5 Watchlist / Chart / Plan / Ticket / Logs</span></footer>
+  <footer><span>Focus: {panels.find(p => p.id === activeId)?.title ?? 'Workspace'}</span><button class="workspace-help" on:click={() => shortcutsSheet.open()} aria-label="Workspace keyboard shortcuts" title="Keyboard shortcuts">?</button></footer>
   <p class="sr-only" role="status">{notice}</p>
   <div hidden bind:this={depot}><slot {workspace}/></div>
 </section>
 <div class="workstation-overlays" bind:this={overlays}></div>
 <WorkspaceShortcuts bind:this={shortcutsSheet}/>
 
-<dialog class="command-palette" bind:this={palette} on:cancel={() => previousFocus?.focus()} on:keydown={paletteKey} aria-label={panelsOnly ? 'Panels' : 'Workspace commands'}>
-  <div class="palette-heading"><strong>{panelsOnly ? 'All panels' : 'Workspace commands'}</strong><button on:click={closePalette} aria-label="Close commands"><X size={16}/></button></div>
-  <input bind:this={search} bind:value={query} on:input={() => resultIndex = 0} aria-label="Search commands" placeholder={panelsOnly ? 'Find a panel…' : 'Find an action or panel…'} role="combobox" aria-expanded="true" aria-controls="workspace-results" aria-activedescendant={results.length ? 'workspace-result-' + resultIndex : undefined} autocomplete="off"/>
-  <div class="command-results" id="workspace-results" role="listbox" aria-label="Matching commands">
+<dialog class="command-palette" bind:this={palette} on:cancel={() => previousFocus?.focus()} on:keydown={paletteKey} aria-label={panelsOnly ? 'Find panel' : 'Workspace commands'}>
+  <div class="palette-heading"><strong>{panelsOnly ? 'Find panel' : 'Workspace commands'}</strong>
+    <details class="palette-help"><summary aria-label={panelsOnly ? 'Help finding panels' : 'Help searching commands'}>?</summary>
+      <p>{panelsOnly ? 'Search by panel name or purpose. Selecting a result focuses its tab, reveals its drawer or opens the hidden panel.' : 'Search actions and panels. Layout actions do not change trading state.'} ↑ ↓ select · Enter open · Esc return.</p>
+    </details>
+    <button on:click={closePalette} aria-label={panelsOnly ? 'Close panel search' : 'Close commands'}><X size={16}/></button></div>
+  <input bind:this={search} bind:value={query} on:input={() => resultIndex = 0} aria-label={panelsOnly ? 'Search panels' : 'Search commands'} placeholder={panelsOnly ? 'Panel name or purpose…' : 'Find an action or panel…'} role="combobox" aria-expanded="true" aria-controls="workspace-results" aria-activedescendant={results.length ? 'workspace-result-' + resultIndex : undefined} autocomplete="off"/>
+  <span class="sr-only" role="status">{results.length} matching {panelsOnly ? (results.length === 1 ? 'panel' : 'panels') : (results.length === 1 ? 'command' : 'commands')}</span>
+  <div class="command-results" id="workspace-results" role="listbox" aria-label={panelsOnly ? 'Matching panels' : 'Matching commands'}>
     {#each results as command, index (command.id)}
       <button id={'workspace-result-' + index} role="option" aria-selected={index === resultIndex} tabindex="-1" class:highlighted={index === resultIndex} on:click={() => execute(command)}>
         <span>{command.label}</span>
         {#if panelsOnly}<small class="panel-location">{panelLocations[command.id.slice(6)]}</small>{/if}
       </button>
-    {:else}<p>No matching commands.</p>{/each}
+    {:else}<p>{panelsOnly ? 'No panels match this search.' : 'No matching commands.'}</p>{/each}
   </div>
-  <small>↑ ↓ select · Enter run · Esc return. Layout actions do not change trading state.</small>
 </dialog>
 
 <style>
@@ -964,6 +971,7 @@
   .workspace-views { flex:1; min-width:0; flex-wrap:nowrap; overflow-x:auto; }
   .workspace-views button { flex:none; white-space:nowrap; }
   .workspace-tools { flex:none; }
+  .panel-finder { white-space:nowrap; }
   .layout-menu { position:relative; }
   summary { min-height:30px; padding:.25rem .5rem; box-sizing:border-box; border:1px solid var(--border-md); border-radius:4px; background:var(--surface); color:var(--text-2); cursor:pointer; font-size:.7rem; list-style:none; }
   summary::-webkit-details-marker { display:none; }
@@ -1009,7 +1017,8 @@
   .tray-strip.side.left button { transform:rotate(180deg); }
   .tray-strip button { flex:none; border-radius:0; border-color:transparent; }
   .hidden { display:none; }
-  footer { display:flex; justify-content:space-between; gap:1rem; padding:.25rem .7rem; border-top:1px solid var(--border); font-size:.61rem; color:var(--text-3); flex:none; }
+  footer { display:flex; align-items:center; justify-content:space-between; gap:1rem; padding:.25rem .7rem; border-top:1px solid var(--border); font-size:.61rem; color:var(--text-3); flex:none; }
+  .workspace-help { min-height:20px; min-width:20px; padding:0; justify-content:center; font-weight:700; }
   .workspace-dock :global(.workstation-panel) { height:100%; width:100%; min-height:0; min-width:0; overflow:auto; overscroll-behavior:contain; background:var(--surface); padding:.65rem; box-sizing:border-box; }
   .workspace-dock :global(.workstation-panel:focus-visible) { outline:2px solid var(--primary); outline-offset:-2px; }
   .workspace-dock :global(.mobile-panel-title) { display:none; }
@@ -1032,9 +1041,13 @@
   .workspace-dock :global(.group-control:disabled) { opacity:.5; cursor:default; }
   .workspace-dock :global(.dv-tab.dv-active-tab) { box-shadow:inset 0 2px var(--primary); }
   .workspace-dock { --dv-group-view-background-color:var(--surface); --dv-tabs-and-actions-container-background-color:var(--surface-2); --dv-activegroup-visiblepanel-tab-background-color:var(--surface); --dv-activegroup-visiblepanel-tab-color:var(--text); --dv-separator-border:var(--border-md); --dv-active-sash-color:var(--primary); --dv-tabs-and-actions-container-height:32px; }
-  .command-palette { width:min(580px,calc(100vw - 2rem)); max-height:75dvh; padding:1rem; margin:10dvh auto auto; border:1px solid var(--border-high); border-radius:10px; background:var(--surface); color:var(--text); box-shadow:0 20px 70px #0008; }
+  .command-palette { box-sizing:border-box; width:min(580px,calc(100vw - 2rem)); max-height:75dvh; padding:1rem; margin:10dvh auto auto; border:1px solid var(--border-high); border-radius:10px; background:var(--surface); color:var(--text); box-shadow:0 20px 70px #0008; }
   .command-palette::backdrop { background:#0008; }
-  .palette-heading { display:flex; align-items:center; justify-content:space-between; margin-bottom:.75rem; }
+  .palette-heading { display:flex; align-items:center; gap:.5rem; margin-bottom:.75rem; }
+  .palette-heading strong { flex:1; }
+  .palette-help { position:relative; }
+  .palette-help summary { justify-content:center; min-width:30px; font-weight:700; }
+  .palette-help p { position:absolute; top:100%; right:0; z-index:1; width:min(320px,calc(100vw - 6rem)); box-sizing:border-box; margin:.3rem 0 0; padding:.7rem; border:1px solid var(--border-md); border-radius:5px; background:var(--surface-2); color:var(--text-2); font-size:.75rem; line-height:1.5; box-shadow:0 8px 28px #0005; }
   .command-palette input { width:100%; box-sizing:border-box; padding:.7rem; background:var(--surface-2); border:1px solid var(--border-md); color:var(--text); border-radius:5px; }
   .command-results { max-height:48dvh; overflow:auto; margin:.5rem 0; }
   .command-results button { width:100%; border-color:transparent; text-align:left; padding:.6rem; }
@@ -1047,6 +1060,9 @@
   .workspace-stack :global(.mobile-panel-title) { font-size:1rem; margin:.4rem 0; }
   .mobile footer { display:none; }
   @media (max-width:900px) {
+    .panel-finder kbd { display:none; }
+    .command-results button { flex-wrap:wrap; }
+    .panel-location { flex-basis:100%; margin-left:0; }
     .workspace-operational-row { align-items:flex-start; flex-wrap:wrap; }
     .core-toolbar { flex-basis:100%; }
     .edition-health { padding-bottom:.25rem; }

@@ -20,6 +20,9 @@
     order: { symbol: string; action: 'BUY' | 'SELL' };
   }>();
   let query = '';
+  let holdingQuery = '';
+  $: visibleHoldings = (account?.holdings ?? []).filter(holding =>
+    `${holding.symbol ?? ''} ${holding.instrumentId}`.toLowerCase().includes(holdingQuery.trim().toLowerCase()));
   $: visibleOrders = (account?.orders ?? []).filter(o => !keyboardMode || `${o.symbol ?? o.instrumentId} ${o.side} ${o.status}`.toLowerCase().includes(query.trim().toLowerCase()));
 
   /**
@@ -176,9 +179,13 @@
             <div class="empty">The broker reports no current holdings.</div>
           {:else}
             <PortfolioAllocationChart holdings={account.holdings} {showValues} />
+            <label class="order-filter">Find holding <input type="search" bind:value={holdingQuery} aria-label="Find holding" placeholder="Symbol or instrument"/></label>
+            {#if !visibleHoldings.length}
+              <div class="empty" role="status">No holdings match this filter.</div>
+            {:else}
             <div class="table-wrap"><table>
               <thead><tr><th>Instrument</th><th>Quantity</th><th>Average cost</th><th>Market price</th><th>Market value</th><th>Unrealized P/L</th><th>Trade</th></tr></thead>
-              <tbody>{#each account.holdings as holding}
+              <tbody>{#each visibleHoldings as holding}
                 <tr>
                   <td><b>{text(holding.symbol ?? holding.instrumentId)}</b><small>{text(holding.exchange)} · {text(holding.assetType)}</small>{#if holdingStatus && holding.symbol}<div class="holding-extension"><svelte:component this={holdingStatus} symbol={holding.symbol} /></div>{/if}{#if extras(holding.attributes).length}<details class="broker-details"><summary>Details</summary><dl>{#each extras(holding.attributes) as [label, value]}<dt>{label}</dt><dd>{attributeValue(value, showValues)}</dd>{/each}</dl></details>{/if}</td>
                   <td>{quantity(holding.quantity, showValues)}</td>
@@ -203,6 +210,7 @@
                 </tr>
               {/each}</tbody>
             </table></div>
+            {/if}
           {/if}
         </section>
 

@@ -19,7 +19,7 @@ export interface WorkspacePreset {
   columns?: { panels: string[]; active: string; weight?: number }[];
   /** Panels the layout starts with auto-hidden on an edge (the edge strip opens them), like Unpin does. */
   autoHide?: Partial<Record<'left' | 'right' | 'bottom', { panels: string[]; active: string; size?: number }>>;
-  /** A columns layout offers only the panels it places by default. True keeps every panel in Panels. */
+  /** A columns layout offers only the panels it places by default. True keeps every panel in Find panel. */
   offersUnplaced?: boolean;
 }
 
@@ -37,6 +37,8 @@ export function workspacePresetPanels(panels: WorkspacePanel[], preset?: Workspa
 export interface WorkspaceCommand {
   id: string;
   label: string;
+  /** Optional search terms supplied by the producer, such as a panel's description. */
+  keywords?: string;
   run: () => void | Promise<void>;
   disabled?: () => string | null;
 }
