@@ -2,11 +2,11 @@
   import { onMount, tick } from 'svelte';
   import { createDockview, themeDark, themeLight, type DockviewApi, type DockviewGroupPanel, type IContentRenderer } from 'dockview';
   import 'dockview/dist/styles/dockview.css';
-  import { Command, PanelsTopLeft, RotateCcw, Maximize, Minimize, Keyboard, Pin, PinOff, X, Fullscreen, Shrink, Save } from 'lucide-svelte';
+  import { Command, PanelsTopLeft, RotateCcw, Maximize, Minimize, Keyboard, Pin, PinOff, X, Fullscreen, Shrink, Save, Settings2, ChevronDown } from 'lucide-svelte';
   import WorkspaceShortcuts from './WorkspaceShortcuts.svelte';
   import { presetPlacedPanels, workspacePresetPanels, type WorkspaceCommand, type WorkspaceComposition, type WorkspacePanel, type WorkspaceRegion, type WorkspacePreset } from './workspaceComposition';
   import {
-    readWorkspaceLayout, saveWorkspaceLayout, myViewStorageKey,
+    readWorkspaceLayout, saveWorkspaceLayout, myViewStorageKey, resolveWorkspacePreset,
     type AutoHideEdge, type AutoHideTrays, type WorkspaceLayout
   } from './workspaceLayout';
 
@@ -15,6 +15,8 @@
   export let edition: string;
   export let storageKey: string;
   export let presets: WorkspacePreset[];
+  /** Producer-owned names for retired views; applies to deep links, working layouts and My view. */
+  export let presetAliases: Readonly<Record<string, string>> = {};
   export let onPresetChange: (id: string) => void = () => {};
   export let onExit: () => void;
   /**
@@ -35,6 +37,17 @@
   let search: HTMLInputElement;
   let api: DockviewApi | null = null;
   let shortcutsSheet: WorkspaceShortcuts;
+  let layoutMenu: HTMLDetailsElement;
+  let layoutSummary: HTMLElement;
+  async function runLayout(action: () => void | Promise<void>) {
+    layoutMenu.open = false;
+    layoutSummary.focus();
+    await tick();
+    await action();
+  }
+  function outsideLayoutMenu(event: PointerEvent) {
+    if (layoutMenu.open && event.target instanceof Node && !layoutMenu.contains(event.target)) layoutMenu.open = false;
+  }
   let maximized = false;
   let fullscreen = false;
   let fullscreenSupported = false;
@@ -54,7 +67,7 @@
     fullscreen = document.fullscreenElement === root;
   }
   let desktop = true;
-  const requestedPreset = presets.some(item => item.id === initialPreset) ? initialPreset : null;
+  const requestedPreset = resolveWorkspacePreset(initialPreset, presets.map(item => item.id), presetAliases);
   let preset = requestedPreset ?? presets[0].id;
   // Set when a preset was chosen before the layout was built — by a click on a phone, or by
   // `initialPreset` — so the saved layout is skipped once and the choice is saved instead.
@@ -80,6 +93,7 @@
   let onMyView = false;
   let query = '';
   let panelsOnly = false;
+  let panelLocations: Record<string, string> = {};
   let resultIndex = 0;
   let previousFocus: HTMLElement | null = null;
   let suppressSave = false;
@@ -291,9 +305,12 @@
         const first = column.panels[0];
         addPanel(first, previous, previous ? 'right' : 'within');
         for (const id of column.panels.slice(1)) addPanel(id, first);
-        api.getPanel(first)?.api.setSize({ width: dockRoot.clientWidth * (column.weight ?? 1) / totalWeight });
         api.getPanel(column.active)?.api.setActive();
         previous = first;
+      }
+      // Adding a group redistributes its siblings. Apply proportions only after every column exists.
+      for (const column of selected.columns) {
+        api.getPanel(column.panels[0])?.api.setSize({ width: dockRoot.clientWidth * (column.weight ?? 1) / totalWeight });
       }
       // Edges the preset starts auto-hidden: never added to the grid, opened from the edge strip, exactly as Unpin
       // leaves them.
@@ -365,8 +382,11 @@
   function readMyView() {
     let raw: string | null = null;
     try { raw = localStorage.getItem(myViewStorageKey(storageKey)); } catch { /* Browser storage is optional. */ }
-    myView = readWorkspaceLayout(raw, edition, panels.map(p => p.id), presets.map(p => p.id));
+    myView = readLayout(raw);
     if (!myView && raw) { try { localStorage.removeItem(myViewStorageKey(storageKey)); } catch { /* optional */ } }
+  }
+  function readLayout(raw: string | null) {
+    return readWorkspaceLayout(raw, edition, panels.map(p => p.id), presets.map(p => p.id), Date.now(), presetAliases);
   }
   function writeMyView(record: WorkspaceLayout) {
     try { localStorage.setItem(myViewStorageKey(storageKey), JSON.stringify(record)); return true; }
@@ -605,6 +625,14 @@
   $: if (resultIndex >= results.length) resultIndex = Math.max(0, results.length - 1);
 
   async function openPalette(onlyPanels = false) {
+    panelLocations = Object.fromEntries(offeredPanels().map(panel => {
+      const edge = trayForPanel(panel.id);
+      const placed = api?.getPanel(panel.id);
+      const region = placed ? groupRegion(placed.group) ?? 'center' : null;
+      const location = !desktop ? 'Page panel' : edge ? `${edge[0].toUpperCase() + edge.slice(1)} drawer`
+        : placed ? `${placed.group.activePanel?.id === panel.id ? 'Visible' : 'Tab'} · ${region} group` : 'Hidden · open to show';
+      return [panel.id,location];
+    }));
     previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     panelsOnly = onlyPanels;
     query = '';
@@ -640,6 +668,9 @@
     if (event.defaultPrevented || event.isComposing || event.repeat) return;
     const target = event.target instanceof HTMLElement ? event.target : null;
     if (palette?.open || target?.closest('dialog, [role="dialog"], [role="alertdialog"]')) return;
+    if (event.key === 'Escape' && layoutMenu?.open) {
+      event.preventDefault(); event.stopPropagation(); layoutMenu.open = false; layoutSummary.focus(); return;
+    }
     if (event.key === 'Escape' && openEdge) { event.preventDefault(); event.stopPropagation(); closeTray(); return; }
     if (event.ctrlKey && !event.altKey && !event.shiftKey && event.code === 'Slash') {
       event.preventDefault(); event.stopPropagation(); void shortcutsSheet.open(); return;
@@ -704,7 +735,7 @@
         disconnect();
         let raw: string | null = null;
         try { raw = localStorage.getItem(storageKey); } catch { /* Browser storage is optional. */ }
-        const saved = readWorkspaceLayout(raw, edition, panels.map(p => p.id), presets.map(p => p.id));
+        const saved = readLayout(raw);
         if (saved && !mobilePresetChanged) preset = saved.preset;
         else if (raw) removeSaved();
         updateMobilePanels();
@@ -756,7 +787,7 @@
       buildDefault(preset);
       let raw: string | null = null;
       try { raw = localStorage.getItem(storageKey); } catch { /* Storage may be disabled. */ }
-      const saved = mobilePresetChanged ? null : readWorkspaceLayout(raw, edition, panels.map(p => p.id), presets.map(p => p.id));
+      const saved = mobilePresetChanged ? null : readLayout(raw);
       let adopted = false;
       if (saved) {
         try {
@@ -799,6 +830,7 @@
     document.addEventListener('fullscreenchange', syncFullscreen);
     window.addEventListener('pagehide', persist);
     window.addEventListener('pointerdown', outsideTray);
+    window.addEventListener('pointerdown', outsideLayoutMenu);
     window.addEventListener('focusin', outsideTray);
     return () => {
       disposed = true;
@@ -809,6 +841,7 @@
       document.removeEventListener('fullscreenchange', syncFullscreen);
       window.removeEventListener('pagehide', persist);
       window.removeEventListener('pointerdown', outsideTray);
+      window.removeEventListener('pointerdown', outsideLayoutMenu);
       window.removeEventListener('focusin', outsideTray);
     };
   });
@@ -816,39 +849,44 @@
 
 <section class="workstation" class:mobile={!desktop} aria-label={selectedPreset.title ?? title} tabindex="-1" bind:this={root}>
   <header class="workstation-bar">
-    <div class="workstation-brand"><PanelsTopLeft size={18}/><strong>{selectedPreset.title ?? title}</strong><span class="preview">PREVIEW</span></div>
-    <nav aria-label="Workspace layout">
+    <nav class="workspace-views" aria-label="Workspace layout">
       {#each presets as item}
-        <button class:chosen={preset === item.id && !onMyView} aria-pressed={preset === item.id && !onMyView} on:click={() => selectPreset(item.id)}>{item.label}</button>
+        <button data-workspace-preset={item.id} class:chosen={preset === item.id && !onMyView} aria-pressed={preset === item.id && !onMyView} on:click={() => selectPreset(item.id)}>{item.label}</button>
       {/each}
-      {#if myView}
-        <button class:chosen={onMyView} aria-pressed={onMyView} on:click={restoreMyView} disabled={!desktop}
-          title="Restore the layout you saved as My view">My view</button>
-      {/if}
-      <button on:click={saveMyView} disabled={!desktop}
-        title={myView ? 'Save the current layout as My view, replacing the saved one' : 'Save the current layout as My view'}><Save size={14}/> Save view</button>
+      <button class:chosen={onMyView} aria-pressed={onMyView} on:click={restoreMyView} disabled={!desktop || !myView}
+        title={myView ? 'Restore the layout you saved as My view' : 'Save an arrangement using Layout → Save as My view'}>My view</button>
+    </nav>
+    <div class="workspace-tools">
       <button on:click={() => openPalette(true)}><PanelsTopLeft size={14}/> Panels</button>
-      <button on:click={() => openPalette()} title="Search commands (Ctrl+K)"><Command size={14}/> Commands <kbd>Ctrl K</kbd></button>
-      <button class="icon-control" on:click={maximize} disabled={!desktop} aria-pressed={maximized}
+      <details class="layout-menu" bind:this={layoutMenu}>
+        <summary bind:this={layoutSummary}><Settings2 size={14}/> Layout <ChevronDown size={12}/></summary>
+        <div class="layout-actions" role="group" aria-label="Layout actions">
+      <button on:click={() => runLayout(saveMyView)} disabled={!desktop}
+        title={myView ? 'Replace your saved My view with the current arrangement' : 'Save the current arrangement as My view'}><Save size={14}/> Save as My view</button>
+      {#if myView}<button on:click={() => runLayout(forgetMyView)}>Forget My view</button>{/if}
+      <button on:click={() => runLayout(() => openPalette())} title="Search commands (Ctrl+K)"><Command size={14}/> Commands <kbd>Ctrl K</kbd></button>
+      <button on:click={() => runLayout(maximize)} disabled={!desktop} aria-pressed={maximized}
               aria-label={maximized ? 'Restore active group' : 'Maximize active group'}
               title={`${maximized ? 'Restore' : 'Maximize'} active group (Ctrl+Shift+Space)`}>
-        {#if maximized}<Minimize size={16}/>{:else}<Maximize size={16}/>{/if}
+        {#if maximized}<Minimize size={16}/> Restore active group{:else}<Maximize size={16}/> Maximize active group{/if}
       </button>
-      <button class="icon-control" on:click={toggleFullscreen} disabled={!desktop || !fullscreenSupported}
+      <button on:click={() => runLayout(toggleFullscreen)} disabled={!desktop || !fullscreenSupported}
               aria-pressed={fullscreen} aria-label={fullscreen ? 'Exit page full screen' : 'Page full screen'}
               title={fullscreen ? 'Exit page full screen (Escape)' : 'Page full screen (Ctrl+Shift+F; browser F11 is separate)'}>
-        {#if fullscreen}<Shrink size={16}/>{:else}<Fullscreen size={16}/>{/if}
+        {#if fullscreen}<Shrink size={16}/> Exit full screen{:else}<Fullscreen size={16}/> Full screen{/if}
       </button>
-      <button on:click={() => shortcutsSheet.open()} title="Keyboard shortcuts (Ctrl+/)"><Keyboard size={14}/> Shortcuts</button>
+      <button on:click={() => runLayout(() => shortcutsSheet.open())} title="Keyboard shortcuts (Ctrl+/)"><Keyboard size={14}/> Shortcuts</button>
       {#each edges as edge}
-        <button on:click={() => autoHide[edge] ? pin(edge) : unpin(edge)} disabled={!desktop}
+        <button on:click={() => runLayout(() => autoHide[edge] ? pin(edge) : unpin(edge))} disabled={!desktop}
           title={`Auto-hide or pin the ${edge} panel group without closing its contents`}>
           {#if autoHide[edge]}<Pin size={14}/> Pin {edge}{:else}<PinOff size={14}/> Unpin {edge}{/if}
         </button>
       {/each}
-      <button on:click={resetView}><RotateCcw size={14}/> Reset view</button>
-      <button on:click={onExit}>Classic view</button>
-    </nav>
+      <button on:click={() => runLayout(resetView)}><RotateCcw size={14}/> Reset view</button>
+      <button on:click={() => runLayout(onExit)}>Classic view</button>
+        </div>
+      </details>
+    </div>
   </header>
   {#if storageWarning}<p class="storage-warning" role="status">{storageWarning}</p>{/if}
   <div class="workspace-operational-row">
@@ -911,7 +949,8 @@
   <div class="command-results" id="workspace-results" role="listbox" aria-label="Matching commands">
     {#each results as command, index (command.id)}
       <button id={'workspace-result-' + index} role="option" aria-selected={index === resultIndex} tabindex="-1" class:highlighted={index === resultIndex} on:click={() => execute(command)}>
-        {command.label}
+        <span>{command.label}</span>
+        {#if panelsOnly}<small class="panel-location">{panelLocations[command.id.slice(6)]}</small>{/if}
       </button>
     {:else}<p>No matching commands.</p>{/each}
   </div>
@@ -920,10 +959,19 @@
 
 <style>
   .workstation { height:100dvh; min-width:0; min-height:0; display:flex; flex-direction:column; overflow:hidden; background:var(--bg); color:var(--text); }
-  .workstation-bar { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:.5rem; padding:.55rem .75rem; flex:none; border-bottom:1px solid var(--border-md); background:var(--surface-2); }
-  .workstation-brand, nav, button { display:flex; align-items:center; gap:.4rem; }
-  .workstation-brand { font-size:.85rem; }
-  .preview { color:var(--warning); font-size:.55rem; letter-spacing:.1em; }
+  .workstation-bar { display:flex; align-items:center; justify-content:space-between; gap:.5rem; padding:.55rem .75rem; flex:none; min-width:0; border-bottom:1px solid var(--border-md); background:var(--surface-2); }
+  nav, button, .workspace-tools, summary { display:flex; align-items:center; gap:.4rem; }
+  .workspace-views { flex:1; min-width:0; flex-wrap:nowrap; overflow-x:auto; }
+  .workspace-views button { flex:none; white-space:nowrap; }
+  .workspace-tools { flex:none; }
+  .layout-menu { position:relative; }
+  summary { min-height:30px; padding:.25rem .5rem; box-sizing:border-box; border:1px solid var(--border-md); border-radius:4px; background:var(--surface); color:var(--text-2); cursor:pointer; font-size:.7rem; list-style:none; }
+  summary::-webkit-details-marker { display:none; }
+  summary:hover, .layout-menu[open] summary { color:var(--text); border-color:var(--primary); background:var(--primary-dim); }
+  summary:focus-visible { outline:2px solid var(--primary); outline-offset:2px; }
+  .layout-actions { position:absolute; inset:calc(100% + .4rem) 0 auto auto; z-index:20; display:flex; flex-direction:column; gap:.2rem; min-width:min(250px,calc(100vw - 2rem)); max-height:70dvh; overflow-y:auto; padding:.5rem; border:1px solid var(--border-high); border-radius:6px; background:var(--surface); box-shadow:0 8px 28px #0005; }
+  .layout-actions button { flex:none; width:100%; border-color:transparent; text-align:left; }
+  .layout-actions kbd { margin-left:auto; }
   nav { flex-wrap:wrap; }
   button { min-height:30px; padding:.25rem .5rem; font:inherit; font-size:.7rem; border:1px solid var(--border-md); border-radius:4px; background:var(--surface); color:var(--text-2); cursor:pointer; }
   button:hover, button.chosen { color:var(--text); border-color:var(--primary); background:var(--primary-dim); }
@@ -984,7 +1032,6 @@
   .workspace-dock :global(.group-control:disabled) { opacity:.5; cursor:default; }
   .workspace-dock :global(.dv-tab.dv-active-tab) { box-shadow:inset 0 2px var(--primary); }
   .workspace-dock { --dv-group-view-background-color:var(--surface); --dv-tabs-and-actions-container-background-color:var(--surface-2); --dv-activegroup-visiblepanel-tab-background-color:var(--surface); --dv-activegroup-visiblepanel-tab-color:var(--text); --dv-separator-border:var(--border-md); --dv-active-sash-color:var(--primary); --dv-tabs-and-actions-container-height:32px; }
-  .icon-control { min-width:30px; justify-content:center; padding-inline:.4rem; }
   .command-palette { width:min(580px,calc(100vw - 2rem)); max-height:75dvh; padding:1rem; margin:10dvh auto auto; border:1px solid var(--border-high); border-radius:10px; background:var(--surface); color:var(--text); box-shadow:0 20px 70px #0008; }
   .command-palette::backdrop { background:#0008; }
   .palette-heading { display:flex; align-items:center; justify-content:space-between; margin-bottom:.75rem; }
@@ -992,6 +1039,7 @@
   .command-results { max-height:48dvh; overflow:auto; margin:.5rem 0; }
   .command-results button { width:100%; border-color:transparent; text-align:left; padding:.6rem; }
   .command-results button.highlighted { background:var(--primary-dim); border-color:var(--primary); color:var(--text); }
+  .panel-location { margin-left:auto; flex:none; }
   .command-palette small { font-size:.65rem; color:var(--text-3); }
   .sr-only { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
   .mobile { height:auto; overflow:visible; }

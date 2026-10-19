@@ -19,7 +19,7 @@ export interface WorkspacePreset {
   columns?: { panels: string[]; active: string; weight?: number }[];
   /** Panels the layout starts with auto-hidden on an edge (the edge strip opens them), like Unpin does. */
   autoHide?: Partial<Record<'left' | 'right' | 'bottom', { panels: string[]; active: string; size?: number }>>;
-  /** A columns layout offers only the panels it places (Trade Hub hides the rest). True keeps every panel in Panels. */
+  /** A columns layout offers only the panels it places by default. True keeps every panel in Panels. */
   offersUnplaced?: boolean;
 }
 

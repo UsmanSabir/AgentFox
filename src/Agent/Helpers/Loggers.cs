@@ -11,6 +11,13 @@ internal class LoggingConfig
     public LogLevel MinLevel { get; set; } = LogLevel.Warning;
     /// <summary>Log files older than this many days are deleted on startup. 0 = disabled.</summary>
     public int RetentionDays { get; set; } = 3;
+    /// <summary>
+    /// The live log is moved aside (to "agentfox.1.log", replacing the previous one) when it reaches this size,
+    /// so the two files together never exceed twice it. RetentionDays alone never trimmed the live file: it is
+    /// written every day, so it was never old enough to delete (hosted agents: 3.9 MB in six days, 2026-10-15).
+    /// 0 = no cap.
+    /// </summary>
+    public int MaxFileMegabytes { get; set; } = 5;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -57,11 +64,13 @@ internal class FileLogger : ILogger
     private static readonly object _fileLock = new();
     private static string _filePath = "logs/agentfox.log";
     private static LogLevel _minLevel = LogLevel.Warning;
+    private static long _maxBytes;
 
-    public static void Configure(string filePath, LogLevel minLevel)
+    public static void Configure(string filePath, LogLevel minLevel, int maxFileMegabytes = 0)
     {
         _filePath = filePath;
         _minLevel = minLevel;
+        _maxBytes = Math.Max(0, maxFileMegabytes) * 1024L * 1024L;
         var dir = Path.GetDirectoryName(filePath);
         if (!string.IsNullOrEmpty(dir))
             Directory.CreateDirectory(dir);
@@ -84,6 +93,27 @@ internal class FileLogger : ILogger
         }
     }
 
+    /// <summary>
+    /// The file a full log is moved to: "logs/agentfox.log" -> "logs/agentfox.1.log". Still a *.log, so
+    /// DeleteOldLogs removes it once nothing has rolled into it for RetentionDays.
+    /// </summary>
+    internal static string RolledPath(string filePath) =>
+        Path.Combine(Path.GetDirectoryName(filePath) ?? "",
+            Path.GetFileNameWithoutExtension(filePath) + ".1" + Path.GetExtension(filePath));
+
+    /// <summary>Moves the log aside when it has reached <paramref name="maxBytes"/>. Best effort: logging never fails on it.</summary>
+    internal static void RollIfFull(string filePath, long maxBytes)
+    {
+        if (maxBytes <= 0) return;
+        try
+        {
+            var info = new FileInfo(filePath);
+            if (!info.Exists || info.Length < maxBytes) return;
+            File.Move(filePath, RolledPath(filePath), overwrite: true);
+        }
+        catch { /* best effort: a failed roll keeps appending to the same file */ }
+    }
+
     public IDisposable BeginScope<TState>(TState state) where TState : notnull => null!;
     public bool IsEnabled(LogLevel logLevel) => logLevel >= _minLevel;
 
@@ -103,7 +133,10 @@ internal class FileLogger : ILogger
         if (exception != null)
             line += $"\n       ↳ {exception}";
         lock (_fileLock)
+        {
+            RollIfFull(_filePath, _maxBytes);
             File.AppendAllText(_filePath, line + "\n");
+        }
     }
 }
 

@@ -1,4 +1,4 @@
-using AgentFox.Agents;
+﻿using AgentFox.Agents;
 using AgentFox.Doctor;
 using AgentFox.Hitl;
 using AgentFox.Doctor.Checks;
@@ -157,7 +157,7 @@ class Program
 
         if (loggingCfg.UseFileLogger)
         {
-            FileLogger.Configure(loggingCfg.FilePath, loggingCfg.MinLevel);
+            FileLogger.Configure(loggingCfg.FilePath, loggingCfg.MinLevel, loggingCfg.MaxFileMegabytes);
             FileLogger.DeleteOldLogs(loggingCfg.FilePath, loggingCfg.RetentionDays);
 
             // Route everything (ILogger<T> via DI + ILoggerFactory) to the file logger.

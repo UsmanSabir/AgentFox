@@ -270,6 +270,9 @@
   let overlayMarkers: ISeriesMarkersPluginApi<Time> | null = null;
   let markers: ISeriesMarkersPluginApi<Time> | null = null;
   let resizeObserver: ResizeObserver | null = null;
+  // A docked tab can receive data before it has any width. Apply its range only after layout;
+  // otherwise the chart clamps bar spacing to half a pixel and keeps that spacing when revealed.
+  let pendingVisibleRange: { from: number; to: number } | null = null;
 
   // Set from the response before the chart is built, so the RSI bands drawn are the ones the backend
   // actually classified against. The defaults match TradingScanOptions.
@@ -303,7 +306,8 @@
       // rightOffset keeps a few bars of empty space so the entry/stop/target markers on the LAST bar
       // are not clipped by the price axis.
       timeScale: {
-        borderColor: grid, timeVisible: isIntraday(interval), secondsVisible: false, rightOffset: 6
+        borderColor: grid, timeVisible: isIntraday(interval), secondsVisible: false, rightOffset: 6,
+        lockVisibleTimeRangeOnResize: true
       },
       crosshair: { mode: 0 },
       autoSize: false,
@@ -364,9 +368,16 @@
     resizeObserver = new ResizeObserver(() => {
       if (chart && el.clientWidth > 0) {
         chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
+        applyPendingVisibleRange();
       }
     });
     resizeObserver.observe(el);
+  }
+
+  function applyPendingVisibleRange() {
+    if (!chart || !pendingVisibleRange || !container || container.clientWidth <= 0) return;
+    chart.timeScale().setVisibleLogicalRange(pendingVisibleRange);
+    pendingVisibleRange = null;
   }
 
   function render(d: ChartData) {
@@ -407,12 +418,13 @@
     // instead of being compressed into the right half of the plot by calendar time.
     if (d.candles.length > 0) {
       const visibleBars = expanded ? 110 : 72;
-      chart.timeScale().setVisibleLogicalRange({
+      pendingVisibleRange = {
         from: Math.max(-1, d.candles.length - visibleBars),
         // Room for whatever projects past the last bar. Without this the projected tail renders
         // off-screen and the feature reads as broken rather than as absent.
         to: d.candles.length + Math.max(4, projectedBars + 2)
-      });
+      };
+      applyPendingVisibleRange();
     }
     applyLiveQuote(livePriceView.quote);
   }

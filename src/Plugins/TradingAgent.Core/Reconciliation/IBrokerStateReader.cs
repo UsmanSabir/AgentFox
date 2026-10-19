@@ -30,6 +30,29 @@ public sealed record BrokerReconciliationSnapshot(
     /// </summary>
     public IReadOnlyList<BrokerOrderEvent> OrderEvents { get; init; } = [];
 
+    /// <summary>
+    /// Orders the broker has given a NEW number since this system was told the old one. Empty when the
+    /// broker never renumbers, or the adapter cannot tell.
+    ///
+    /// <para>
+    /// <b>Why it exists.</b> An order placed before the open is acknowledged under a temporary pending
+    /// number, and once it reaches the exchange every later report (the book, the trade log, a cancel)
+    /// uses the exchange's own id instead. MEASURED at AHL 2026-10-15: a keep-working SELL of 161 CNERGY
+    /// was acknowledged pre-open as <c>5460</c>, filled at 10:31 as <c>0010TMX4O3000PRF</c>, and the
+    /// intent — which joins fills on the number it recorded — reported "no fill" and would have sold
+    /// the same 161 shares again at the next open. A cancel of <c>5460</c> was refused as invalid at the
+    /// same time, so the same gap also lets a cancel "succeed" while the real order keeps resting.
+    /// </para>
+    ///
+    /// <para>
+    /// Only the adapter can know how its broker links the two numbers, so it states the conclusion
+    /// here and core does nothing broker-specific with it: a caller holding <see cref="BrokerOrderRenumbering.From"/>
+    /// moves to <see cref="BrokerOrderRenumbering.To"/>. An adapter must report one only when the link
+    /// is unambiguous — a wrong one would attribute somebody else's fill to an order of ours.
+    /// </para>
+    /// </summary>
+    public IReadOnlyList<BrokerOrderRenumbering> OrderRenumberings { get; init; } = [];
+
     /// <summary>Current custody positions used to keep recurring SELLs within available holdings.</summary>
     public IReadOnlyList<BrokerPosition> Positions { get; init; } = [];
 
@@ -118,6 +141,12 @@ public sealed record BrokerOrderEvent(
     int? Quantity,
     decimal? Price,
     DateTime ObservedUtc);
+
+/// <summary>
+/// The broker now reports the order this system recorded as <paramref name="From"/> under
+/// <paramref name="To"/>. See <see cref="BrokerReconciliationSnapshot.OrderRenumberings"/>.
+/// </summary>
+public sealed record BrokerOrderRenumbering(string From, string To, string Symbol);
 
 public sealed record BrokerPosition(string Symbol, decimal Quantity);
 

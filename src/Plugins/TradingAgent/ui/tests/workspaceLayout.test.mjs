@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readWorkspaceLayout, saveWorkspaceLayout, WORKSPACE_RETENTION_MS, MAX_LAYOUT_LENGTH } from '../src/workspaceLayout.ts';
+import { readWorkspaceLayout, saveWorkspaceLayout, resolveWorkspacePreset, WORKSPACE_RETENTION_MS, MAX_LAYOUT_LENGTH } from '../src/workspaceLayout.ts';
 
 const now = Date.parse('2026-09-03T12:00:00Z');
 const layout = () => ({
@@ -109,4 +109,27 @@ test('My view is read with the same rules as the working layout, and a restore r
   assert.equal(read(lapsed), null, 'unused for 180 days, it lapses like the working layout');
   const renewed = { ...lapsed, savedAt: now };
   assert.ok(read(renewed), 'each restore writes it back with a fresh savedAt');
+});
+
+test('renamed presets retain saved geometry, drawers and age for working layouts and My view', () => {
+  const aliases = {market:'trading',review:'portfolio','trade-hub':'copy-trading'};
+  const ids = ['trading','portfolio','copy-trading'];
+  for (const [oldId,newId] of Object.entries(aliases)) {
+    const value = saveWorkspaceLayout('premium',oldId,layout(),now - 1000,
+      {bottom:{ids:['watchlist'],active:'watchlist',size:282}},'chart',['chart','watchlist']);
+    const restored = readWorkspaceLayout(JSON.stringify(value),'premium',['chart','watchlist'],ids,now,aliases);
+    assert.deepEqual(restored,{...value,preset:newId});
+    assert.equal(resolveWorkspacePreset(oldId,ids,aliases),newId,'deep links follow the same alias');
+    assert.equal(readWorkspaceLayout(JSON.stringify({...value,savedAt:now-WORKSPACE_RETENTION_MS-1}),
+      'premium',['chart','watchlist'],ids,now,aliases),null,'a rename must not renew expired layouts');
+  }
+});
+
+test('preset aliases cannot revive unregistered views or weaken saved-layout validation', () => {
+  assert.equal(resolveWorkspacePreset('old',['trading'],{old:'missing'}),null);
+  assert.equal(resolveWorkspacePreset('toString',['trading']),null);
+  assert.equal(resolveWorkspacePreset('trading',['trading'],{trading:'missing'}),'trading');
+  assert.equal(resolveWorkspacePreset(null,['trading']),null);
+  const invalid = {...saved(),preset:'old',edition:'other'};
+  assert.equal(readWorkspaceLayout(JSON.stringify(invalid),'premium',['chart'],['trading'],now,{old:'trading'}),null);
 });
