@@ -81,7 +81,7 @@ public sealed record ChartOverlaySeries(
 /// <param name="Time">Seconds since the epoch, matching the candle series.</param>
 public sealed record ChartOverlayPoint(long Time, decimal Value);
 
-/// <param name="Position">"aboveBar" or "belowBar".</param>
+/// <param name="Position"><see cref="ChartOverlayPosition"/>.</param>
 /// <param name="Shape">
 /// <see cref="ChartOverlayShape"/>; null draws the default circle. A shape, like a kind, is a token the
 /// client maps — never a drawing instruction.
@@ -99,6 +99,20 @@ public sealed record ChartOverlayMarker(
     decimal? Value = null,
     string? Shape = null,
     string? Detail = null);
+
+/// <summary>Where a marker sits on its bar.</summary>
+public static class ChartOverlayPosition
+{
+    public const string AboveBar = "aboveBar";
+    public const string BelowBar = "belowBar";
+    /// <summary>
+    /// In a strip along the foot of the price pane, under every candle and the volume — for an event
+    /// that belongs to a DAY rather than a price (an ex-dividend date, a results announcement), so it
+    /// stays readable instead of crowding the candles. A client that predates it draws the marker
+    /// above the bar.
+    /// </summary>
+    public const string Bottom = "bottom";
+}
 
 /// <summary>The marker shapes the client can draw. An unrecognised one is drawn as a circle.</summary>
 public static class ChartOverlayShape
