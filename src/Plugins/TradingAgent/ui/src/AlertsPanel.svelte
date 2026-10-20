@@ -35,6 +35,9 @@
   let showDismissed = false;
   let selectedAlertIds = new Set<string>();
   let live = false;
+  // Component-local only: closing/reopening the page restores the explanation. A changed market
+  // state also restores it, because the forming-candle explanation is different after the close.
+  let dismissedCandleContext: boolean | undefined;
   let stopStream: (() => void) | null = null;
 
   /**
@@ -220,12 +223,12 @@
       <Bell size={15} />
       <div>
         <b>Alerts {#if openCount}<span class="count">{openCount}</span>{/if}</b>
-        <span>
+        <span title={status?.lastPassUtc ? `Last pass ${when(status.lastPassUtc)}` : undefined}>
           {#if status}
             {status.enabled
-              ? `Monitoring every ${status.intervalSeconds}s · ${status.confirmPasses} confirming passes`
+              ? `Every ${status.intervalSeconds}s · ${status.confirmPasses} confirming passes`
               : 'Monitoring is disabled'}
-            {#if status.lastPassUtc} · last pass {when(status.lastPassUtc)}{/if}
+            {#if status.lastPassUtc} · {new Date(status.lastPassUtc).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}{/if}
           {:else}Trend, support, and resistance transitions{/if}
         </span>
       </div>
@@ -241,12 +244,18 @@
     </div>
   </header>
 
-  {#if status?.message}
-    <p class="status-line" class:warn={status.alertsSuppressed > 0}>{status.message}</p>
+  {#if status?.message || status?.warnings?.length}
+    <details class="monitor-details">
+      <summary>Monitor details {#if status?.warnings?.length}<span class="warning-count"><AlertTriangle size={12}/> {status.warnings.length}</span>{/if}</summary>
+      {#if status?.message}<p class="status-line" class:warn={status.alertsSuppressed > 0}>{status.message}</p>{/if}
+      {#if status?.warnings?.length}<div class="warnings">
+        {#each status.warnings as warning}<p><AlertTriangle size={12} /> {warning}</p>{/each}
+      </div>{/if}
+    </details>
   {/if}
   {#if error}<p class="status-line danger">{error}</p>{/if}
 
-  {#if liveBarCount > 0}
+  {#if liveBarCount > 0 && dismissedCandleContext !== !!status?.marketOpen}
     <p class="live-bar-note">
       <AlertTriangle size={13} />
       {#if status?.marketOpen}
@@ -256,6 +265,7 @@
         <span><b>Some alerts were raised from a forming candle.</b> The market is now closed; these
         records keep their original context and the chart is showing settled prices.</span>
       {/if}
+      <button class="icon close-note" aria-label="Close candle notice" title="Close candle notice" on:click={() => dismissedCandleContext = !!status?.marketOpen}><X size={13}/></button>
     </p>
   {/if}
 
@@ -265,6 +275,7 @@
         <input type="checkbox" checked={allVisibleSelected} on:change={toggleSelectAll} />
         {allVisibleSelected ? 'Clear selection' : 'Select all'}
       </label>
+      {#if selectedVisibleCount}
       <span>{selectedVisibleCount} selected</span>
       <button class="btn btn-ghost" on:click={() => bulkAction('acknowledge')} disabled={!selectedVisibleCount || busy}>
         <CheckCheck size={13} /> Mark read
@@ -272,6 +283,7 @@
       <button class="btn btn-ghost danger-action" on:click={() => bulkAction('dismiss')} disabled={!selectedVisibleCount || busy}>
         <Trash2 size={13} /> Delete
       </button>
+      {/if}
       <button class="btn btn-ghost danger-action push" on:click={() => bulkAction('dismiss', true)} disabled={busy}>
         <Trash2 size={13} /> Clear all
       </button>
@@ -344,19 +356,14 @@
     </ul>
   {/if}
 
-  {#if status?.warnings?.length}
-    <div class="warnings">
-      {#each status.warnings as warning}<p><AlertTriangle size={12} /> {warning}</p>{/each}
-    </div>
-  {/if}
 </section>
 
 <style>
   .alerts {
     background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 1rem; display: flex; flex-direction: column; gap: .7rem; margin-bottom: 1.25rem;
+    padding: .65rem; display: flex; flex-direction: column; gap: .45rem; margin-bottom: 1.25rem;
   }
-  header { display:flex; justify-content:space-between; align-items:flex-start; gap:1rem; flex-wrap:wrap; }
+  header { display:flex; justify-content:space-between; align-items:flex-start; gap:.5rem; flex-wrap:wrap; }
   .head-copy { display:flex; gap:.55rem; align-items:flex-start; color:var(--primary); }
   .head-copy div { display:flex; flex-direction:column; gap:.2rem; }
   .head-copy b { color:var(--text); font-size:.9rem; display:flex; align-items:center; gap:.4rem; }
@@ -375,6 +382,12 @@
   .live-bar-note { margin:0; padding:.55rem .65rem; border:1px solid color-mix(in srgb,var(--warning) 32%,var(--border)); border-radius:var(--radius-sm); background:color-mix(in srgb,var(--warning) 7%,transparent); color:var(--text-2); font-size:.7rem; line-height:1.4; display:flex; align-items:flex-start; gap:.45rem; }
   .live-bar-note :global(svg) { color:var(--warning); flex:0 0 auto; margin-top:.1rem; }
   .live-bar-note b { color:var(--warning); }
+  .close-note { flex:none; margin:-.25rem -.3rem 0 auto; min-width:24px; min-height:24px; align-items:center; justify-content:center; }
+  .monitor-details { color:var(--text-3); font-size:.7rem; }
+  .monitor-details summary { cursor:pointer; width:fit-content; }
+  .monitor-details[open] > :not(summary) { margin-top:.35rem; }
+  .warning-count { display:inline-flex; align-items:center; gap:.2rem; margin-left:.3rem; color:var(--warning); }
+  .monitor-details summary:focus-visible, .icon:focus-visible { outline:2px solid var(--primary); outline-offset:2px; }
 
   .bulk-actions {
     display:flex; align-items:center; gap:.45rem; flex-wrap:wrap; padding:.4rem .5rem;
