@@ -9,10 +9,9 @@
   /**
    * What the trading agent is doing, and what it just did.
    *
-   * <p>Collapsed by default and it stays that way: this is a reassurance surface, not a working one.
-   * The header carries the two things worth knowing without opening it — whether a browser window on
-   * screen is this system's, and whether anything has gone wrong — so the panel only needs opening
-   * when one of those says so.</p>
+   * <p>The classic dashboard starts collapsed. Workspace tabs already own visibility and show the
+   * content directly, polling only while the panel is on screen. The classic header carries browser
+   * ownership and issue counts without needing to expand its list.</p>
    *
    * <p>Polling follows the same logic: every 4s while open, every 30s while closed and then only for
    * the counts behind the header chips. The list is always taken whole from the server rather than
@@ -24,8 +23,14 @@
    * click away without pushing order and protection activity out of the readable view.</p>
    */
 
-  /** Collapsed by default — see above. */
-  let open = false;
+  export let embedded = false;
+  export let active = true;
+  let expanded = false;
+  $: open = embedded || expanded;
+  let mounted = false;
+  let inFlight = false;
+  type PollMode = 'off' | 'counts' | 'full';
+  let pollMode: PollMode = 'off';
 
   let feed: TradingActivityFeed | null = null;
   let entries: TradingActivity[] = [];
@@ -38,28 +43,39 @@
   const CLOSED_POLL_MS = 30_000;
 
   async function poll() {
+    if (!mounted || pollMode === 'off' || inFlight) return;
+    const requestedMode = pollMode;
+    inFlight = true;
     try {
       // A collapsed panel asks for the counts only; the entry list behind them is not on screen.
-      const next = await trading.activity(open ? undefined : 1);
+      const next = await trading.activity(requestedMode === 'full' ? undefined : 1);
+      if (!mounted) return;
       error = null;
-      if (open) entries = next.activities;
+      if (requestedMode === 'full') entries = next.activities;
       feed = next;
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      if (mounted) error = e instanceof Error ? e.message : String(e);
     } finally {
+      inFlight = false;
       loading = false;
-      timer = setTimeout(poll, open ? OPEN_POLL_MS : CLOSED_POLL_MS);
+      if (mounted) {
+        if (pollMode !== requestedMode) void poll();
+        else timer = setTimeout(poll, requestedMode === 'full' ? OPEN_POLL_MS : CLOSED_POLL_MS);
+      }
     }
   }
 
-  function toggle() {
-    open = !open;
+  function setPollingMode(mode: PollMode) {
+    if (pollMode === mode) return;
+    pollMode = mode;
     if (timer) clearTimeout(timer);
-    poll();
+    timer = null;
+    if (mode !== 'off') void poll();
   }
 
-  onMount(poll);
-  onDestroy(() => { if (timer) clearTimeout(timer); });
+  onMount(() => { mounted = true; });
+  $: if (mounted) setPollingMode(embedded && !active ? 'off' : open ? 'full' : 'counts');
+  onDestroy(() => { mounted = false; if (timer) clearTimeout(timer); });
 
   const time = (iso: string) =>
     new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -85,10 +101,9 @@
   $: visibleEntries = filterActivity(entries, showRoutineCandles);
 </script>
 
-<section class="activity" class:open>
-  <button class="head" on:click={toggle} aria-expanded={open}>
+{#snippet activityHeading()}
     <span class="head-copy">
-      {#if open}<ChevronDown size={14} />{:else}<ChevronRight size={14} />{/if}
+      {#if !embedded}{#if open}<ChevronDown size={14} />{:else}<ChevronRight size={14} />{/if}{/if}
       <Activity size={15} />
       <b>Activity</b>
       <span class="sub">What the trading agent is doing</span>
@@ -116,7 +131,14 @@
       {/if}
       {#if loading}<span class="chip"><Loader size={11} /> …</span>{/if}
     </span>
-  </button>
+{/snippet}
+
+<section class="activity" class:open class:embedded>
+  {#if embedded}
+    <div class="head static-head">{@render activityHeading()}</div>
+  {:else}
+    <button class="head" on:click={() => expanded = !expanded} aria-expanded={open}>{@render activityHeading()}</button>
+  {/if}
 
   {#if open}
     {#if error}
@@ -151,7 +173,9 @@
       </div>
     {/if}
 
-    {#if visibleEntries.length === 0}
+    {#if loading && !feed}
+      <p class="empty" role="status">Loading activity…</p>
+    {:else if !error && visibleEntries.length === 0}
       <p class="empty">
         {#if routineCandleUpdates > 0 && !showRoutineCandles}
           No other activity recorded in the last {feed?.retentionMinutes ?? 120} minutes.
@@ -161,7 +185,7 @@
           <small>Activity appears when the agent reads the portal, places an order, or manages a stop.</small>
         {/if}
       </p>
-    {:else}
+    {:else if visibleEntries.length}
       <ul class="list">
         {#each visibleEntries as item (item.seq)}
           <li class="row {item.level}">
@@ -195,12 +219,14 @@
     background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
     margin-bottom: 1.25rem; overflow: hidden;
   }
+  .activity.embedded { border:0; border-radius:0; margin-bottom:0; }
   .head {
     width: 100%; background: none; border: 0; cursor: pointer; font: inherit; color: var(--text);
     display: flex; align-items: center; justify-content: space-between; gap: 1rem;
     padding: .7rem 1rem; text-align: left;
   }
-  .head:hover { background: var(--surface-2); }
+  .head:not(.static-head):hover { background: var(--surface-2); }
+  .static-head { box-sizing:border-box; cursor:default; }
   .head-copy { display: flex; align-items: center; gap: .45rem; color: var(--primary); min-width: 0; }
   .head-copy b { color: var(--text); font-size: .85rem; }
   .sub { color: var(--text-3); font-size: .7rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

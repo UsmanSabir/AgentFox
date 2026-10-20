@@ -12,6 +12,8 @@
   export let archive: CandleArchiveStatus | null;
   export let rowStatus: SymbolExtensionComponent | null = null;
   export let busy = false;
+  /** Narrow workspace rail: symbol, price and daily move; details remain in row actions. */
+  export let compact = false;
   export let canReorder = false;
   export let onSelect: (symbol:string) => void;
   export let onAction: (action:WatchlistAction, symbol:string) => Promise<void>;
@@ -118,10 +120,10 @@
   }
 </script>
 
-<div class="table-shell">
+<div class="table-shell" class:compact>
   <div class="grid" role="grid" tabindex="-1" aria-label="Watched symbols" aria-colcount="3" aria-rowcount={entries.length + 1} aria-describedby="watchlist-key-help" bind:this={grid} on:keydown={gridKey}>
     <div class="grid-head" role="row" aria-rowindex="1">
-      <span role="columnheader">Symbol / status</span><span role="columnheader">Price / change</span><span role="columnheader" class="sr-only">Actions</span>
+      <span role="columnheader">{compact ? 'Stock' : 'Symbol / status'}</span><span role="columnheader">{compact ? 'Price / %' : 'Price / change'}</span><span role="columnheader" class="sr-only">Actions</span>
     </div>
     {#each entries as entry, index (entry.symbol)}
       <div class="grid-row" role="row" tabindex="-1" data-symbol={entry.symbol} aria-rowindex={index + 2} aria-selected={selected === entry.symbol}
@@ -134,7 +136,7 @@
           on:click={event => {if (!(event.target as HTMLElement).closest('button,a,input,select,textarea')) onSelect(entry.symbol);}}
           on:contextmenu|preventDefault={() => openActions(entry.symbol,0)}
           aria-label={`${entry.symbol}, ${entry.companyName ?? 'company name unavailable'}, ${!entry.tradable ? 'monitor only' : entry.manualOnly ? 'manual only' : 'automation allowed'}${entry.manualOnlyLocked ? ', configuration locked' : ''}, ${entry.openAlerts} alerts${!entry.alertsEnabled ? ', alerts muted' : ''}`}>
-          <span class="symbol">{#if entry.pinned}<Pin size={10}/>{/if}{entry.symbol}{#if entry.manualOnlyLocked}<Lock size={10}/>{/if}</span>
+          <span class="symbol" title={`${entry.symbol} · ${entry.companyName ?? 'Name unavailable'} · ${!entry.tradable ? 'Monitor only' : entry.manualOnly ? 'Manual only' : 'Automation allowed'}`}>{#if entry.pinned}<Pin size={10}/>{/if}{entry.symbol}{#if entry.manualOnlyLocked}<Lock size={10}/>{/if}</span>
           <span class="company" title={entry.companyName ?? ''}>{entry.companyName ?? 'Name unavailable'}</span>
           <span class="tags"><span>{!entry.tradable ? 'Monitor' : entry.manualOnly ? 'Manual' : 'Auto'}</span>
             {#if entry.openAlerts > 0}<span class="alert-count"><Bell size={10}/>{entry.openAlerts}</span>{/if}
@@ -210,6 +212,17 @@
   .actions-toggle { align-self:center; height:30px; border:0; background:transparent; color:var(--text-2); cursor:pointer; }
   .actions-toggle:hover { color:var(--primary); }
   .table-footer { display:flex; flex-direction:column; gap:.15rem; flex:none; padding:.35rem .1rem 0; color:var(--text-3); font-size:.57rem; }
+  .compact .grid-row { grid-template-columns:minmax(0,1fr) 20px; grid-template-areas:'stock actions' 'quote quote'; }
+  .compact .grid-head { position:absolute; width:1px; height:1px; padding:0; border:0; overflow:hidden; clip-path:inset(50%); }
+  .compact [role='gridcell'] { padding:.15rem .25rem; }
+  .compact .identity { grid-area:stock; justify-content:center; padding-bottom:0; }
+  .compact .quote { grid-area:quote; justify-content:flex-start; padding-top:0; }
+  .compact .company,.compact .tags,.compact .extension,.compact .table-footer { display:none; }
+  .compact .symbol { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:.7rem; }
+  .compact .quote :global(.live-quote) { width:100%; gap:.2rem; justify-content:flex-start; }
+  .compact .quote :global(small) { margin-left:auto; }
+  .compact .quote :global(.change) { padding:.08rem .12rem; }
+  .compact .actions-toggle { grid-area:actions; height:20px; padding:0; }
   .row-menu { width:min(340px,calc(100vw - 2rem)); max-height:80dvh; overflow:auto; padding:.85rem; color:var(--text); background:var(--surface); border:1px solid var(--border-high); border-radius:8px; }
   .row-menu::backdrop { background:#0007; }
   .row-menu header { display:flex; justify-content:space-between; gap:.5rem; margin-bottom:.5rem; }

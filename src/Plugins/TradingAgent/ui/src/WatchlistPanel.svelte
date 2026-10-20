@@ -20,12 +20,13 @@
   export let selectedCompany: string | null = null;
   /** Collapses the panel horizontally so the chart receives most of the workspace width. */
   export let compact = false;
-  /** A docked workspace resizes the whole panel, so its legacy narrow-rail control is not applicable. */
+  /** The containing layout may disable the toggle when it cannot resize the panel. */
   export let allowCompact = true;
   /** Dense workstation presentation; classic retains its existing cards and controls. */
   export let dense = false;
   let managementOpen = false;
-  const dispatch = createEventDispatcher<{ newOrder:{symbol:string} }>();
+  const dispatch = createEventDispatcher<{ newOrder:{symbol:string}; compactChange:boolean }>();
+  let panelElement: HTMLElement;
   /** Shared dashboard clock; used to refresh live session moves without adding another timer. */
   export let refreshTick = 0;
   /** Session gate supplied by the dashboard status endpoint. Closed-market moves do not change. */
@@ -81,6 +82,12 @@
 
   function toggleCompact() {
     if (!allowCompact) return;
+    if (dense) {
+      managementOpen = false;
+      // The observer updates presentation once Dockview has applied the new width.
+      dispatch('compactChange', !compact);
+      return;
+    }
     compact = !compact;
     localStorage.setItem('trading-watchlist-density', compact ? 'compact' : 'comfortable');
   }
@@ -493,10 +500,18 @@
   }
 
   onMount(() => {
-    compact = allowCompact && localStorage.getItem('trading-watchlist-density') === 'compact';
+    // Dense workspace presentation follows saved/dragged geometry, without a second density preference.
+    compact = !dense && allowCompact && localStorage.getItem('trading-watchlist-density') === 'compact';
+    const observer = dense ? new ResizeObserver(entries => {
+      const width = entries[0]?.contentRect.width ?? 0;
+      // Dockview parks hidden panels at zero width; keep their last presentation until shown again.
+      if (width > 0) compact = window.matchMedia('(min-width: 901px)').matches && width < 240;
+    }) : null;
+    observer?.observe(panelElement);
     configuredListNoteDismissed = localStorage.getItem(configuredListNoteStorageKey) === 'true';
     executionSourceNoteDismissed = localStorage.getItem(executionSourceNoteStorageKey) === 'true';
     load();
+    return () => observer?.disconnect();
   });
 
   // Resetting adopts the configured list and clears the server flag. Clear the local dismissal at
@@ -533,7 +548,7 @@
 
 </script>
 
-<section class="watchlist" class:compact class:dense>
+<section class="watchlist" class:compact class:dense bind:this={panelElement}>
   <header>
     <div class="head-copy">
       <b>
@@ -709,7 +724,7 @@
         <input
           bind:this={searchInput}
           class="search-input"
-          placeholder="Search watched symbols…"
+          placeholder={dense && compact ? 'Find stock…' : 'Search watched symbols…'}
           bind:value={search}
           spellcheck="false"
           aria-label="Search watched symbols"
@@ -743,6 +758,9 @@
         <Bell size={13} /> Alerts only
       </button>
     </div>
+    {#if dense && compact && (autoTradeFilter !== 'all' || alertsOnly)}
+      <button class="compact-filters" on:click={() => { autoTradeFilter = 'all'; alertsOnly = false; }}>Clear active filters</button>
+    {/if}
     {#if !dense || managementOpen}
     <div class="automation-actions" aria-label="Bulk auto-trading actions">
       <span><Bot size={13} aria-hidden="true" /> Auto trading</span>
@@ -775,7 +793,7 @@
         {/if}
       </p>
     {:else if dense}
-      <WatchlistTable entries={filteredEntries} {selected} {archive} {rowStatus} {busy} {dragOverSymbol}
+      <WatchlistTable entries={filteredEntries} {selected} {archive} {rowStatus} {busy} {dragOverSymbol} {compact}
         canReorder={!search.trim() && !alertsOnly && autoTradeFilter === 'all'}
         onSelect={symbol => selected = symbol} onAction={tableAction} onSearch={focusSearch}
         onDragStart={startDrag} onDragOver={dragOver} onDrop={dropOn}
@@ -1220,7 +1238,7 @@
     opacity:1; transform:translateY(-50%) translateX(0);
   }
 
-  /* Compact mode is a narrow rail, not merely shorter rows. Editing/search controls remain one click
+  /* Classic compact mode is a narrow rail, not merely shorter rows. Editing/search controls remain one click
      away in the expanded view while selection, pinning, alerts, and drag sorting stay visible. */
   .watchlist.compact { gap:.45rem; padding:.6rem .4rem; }
   .watchlist.compact header { align-items:center; gap:.25rem; }
@@ -1249,8 +1267,20 @@
   .watchlist.compact .row-actions { flex:0 0 auto; }
   .watchlist.compact .row-actions .icon { width:22px; height:22px; }
 
+  /* Workspace rail keeps stock search and feedback visible; management is one Expand away. */
+  .watchlist.compact.dense { padding:0; }
+  .watchlist.compact.dense .filter-row { display:flex; }
+  .watchlist.compact.dense .automation-filter,
+  .watchlist.compact.dense .alerts-filter,
+  .watchlist.compact.dense .management { display:none; }
+  .watchlist.compact.dense .note[role='alert'],
+  .watchlist.compact.dense .note[role='status'] { display:flex; }
+  .compact-filters { flex:none; align-self:flex-start; padding:.25rem; border:1px solid var(--border); border-radius:4px; background:var(--surface-2); color:var(--text-2); font:inherit; font-size:.65rem; cursor:pointer; }
+  .compact-filters:focus-visible { outline:2px solid var(--primary); outline-offset:2px; }
+
   /* In the stacked mobile layout the chart no longer establishes this panel's height. */
   @media (max-width: 900px) {
+    .dense .density { display:none; }
     .watchlist { height:auto; max-height:none; overflow:visible; contain:none; }
     .rows { flex:none; max-height:min(52vh, 420px); }
   }

@@ -82,13 +82,32 @@ public sealed record ChartOverlaySeries(
 public sealed record ChartOverlayPoint(long Time, decimal Value);
 
 /// <param name="Position">"aboveBar" or "belowBar".</param>
+/// <param name="Shape">
+/// <see cref="ChartOverlayShape"/>; null draws the default circle. A shape, like a kind, is a token the
+/// client maps — never a drawing instruction.
+/// </param>
+/// <param name="Detail">
+/// One plain-text line the chart shows while the pointer is on this marker's bar, e.g. "Ex-dividend
+/// 8 Oct 2026: Rs 6.00 a share". Null shows nothing. Public like everything else here.
+/// </param>
 public sealed record ChartOverlayMarker(
     string Id,
     long Time,
     string Text,
     string Kind,
     string Position = "aboveBar",
-    decimal? Value = null);
+    decimal? Value = null,
+    string? Shape = null,
+    string? Detail = null);
+
+/// <summary>The marker shapes the client can draw. An unrecognised one is drawn as a circle.</summary>
+public static class ChartOverlayShape
+{
+    public const string Circle = "circle";
+    public const string Square = "square";
+    public const string ArrowUp = "arrowUp";
+    public const string ArrowDown = "arrowDown";
+}
 
 /// <summary>An upper/lower envelope — a confidence or probability band around a projection.</summary>
 public sealed record ChartOverlayBand(
@@ -113,6 +132,10 @@ public static class ChartOverlayKind
     public const string Stop = "stop";
     public const string Support = "support";
     public const string Resistance = "resistance";
+    /// <summary>A corporate event on a bar: the day a stock went ex-dividend.</summary>
+    public const string Dividend = "dividend";
+    /// <summary>A corporate event on a bar: the day financial results were announced.</summary>
+    public const string Earnings = "earnings";
     public const string Neutral = "neutral";
 }
 
@@ -131,6 +154,11 @@ public static class ChartOverlayKind
 /// risks anchoring an overlay to a slightly different price than the candles show — which renders as
 /// a projection that visibly does not meet the series it projects from.
 /// </param>
+/// <param name="BarTimes">
+/// Every bar's time, oldest first, in the candle series' units. A weekly or monthly bar is stamped
+/// with the START of its period, so a provider marking a dated event finds its bar here rather than
+/// guessing which bar a date falls in. Null only from a caller that predates it.
+/// </param>
 public sealed record ChartOverlayRequest(
     string Symbol,
     string Interval,
@@ -138,7 +166,8 @@ public sealed record ChartOverlayRequest(
     long LastBarTime,
     int BarCount,
     decimal LastClose,
-    IReadOnlyList<long> NextSessionTimes);
+    IReadOnlyList<long> NextSessionTimes,
+    IReadOnlyList<long>? BarTimes = null);
 
 /// <summary>
 /// Supplies overlays for one chart. Register an implementation in DI and the <c>/trading/candles</c>

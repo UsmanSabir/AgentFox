@@ -30,7 +30,7 @@
 
 - The dashboard account endpoint and `PortfolioPanel.svelte` consume `IBrokerAccountReader` and the broker-neutral `BrokerAccountSnapshot`. Broker adapters translate their native balance, position, and order-book payloads into the common fields and preserve provider-only fields in `Attributes`; never make the Svelte panel depend on AHK DTOs.
 - Preserve `BalancesAvailable`, `HoldingsAvailable`, and `OrdersAvailable` separately from list counts. An unreadable section is unknown, not empty—especially the working order book.
-- The portfolio panel is privacy-first: values start masked, the account is not read merely because the dashboard loaded, and refresh is explicit. New numeric account fields must obey the same show/hide control.
+- The portfolio panel is privacy-first: values start masked, the account is not read merely because the dashboard loaded, and refresh is explicit. In the workspace, making the portfolio panel visible replaces the classic disclosure click for its first read; hidden mounted tabs must not trigger that read. New numeric account fields must obey the same show/hide control.
 
 ## Verification
 

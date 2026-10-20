@@ -74,6 +74,20 @@ public class ChartOverlayTests
         Assert.AreEqual("b", overlays.Levels[1].Id);
     }
 
+    [TestMethod]
+    public async Task AProvider_IsToldEveryBarTime()
+    {
+        // A weekly or monthly bar is stamped with the start of its period, so a provider marking a
+        // dated event needs the bars themselves to find the one a date falls in.
+        var provider = new RecordingProvider();
+        var bars = new long[] { FridayBar - 86_400 * 7, FridayBar };
+
+        await Collector([provider]).CollectAsync("ATRL", "1W", bars, LastClose, CancellationToken.None);
+
+        CollectionAssert.AreEqual(bars, provider.Seen!.BarTimes!.ToArray());
+        Assert.AreEqual(FridayBar, provider.Seen.LastBarTime);
+    }
+
     // ── failure isolation: the chart renders regardless ───────────────────────
 
     [TestMethod]
@@ -184,7 +198,8 @@ public class ChartOverlayTests
                 [new ChartOverlayLevel("l", "Next target", 142.30m, ChartOverlayKind.Target, 2, true)],
                 [new ChartOverlaySeries("s", "Projection", ChartOverlayKind.Projection, true,
                     [new ChartOverlayPoint(FridayBar, 140m)])],
-                [new ChartOverlayMarker("m", FridayBar, "T1", ChartOverlayKind.Target)],
+                [new ChartOverlayMarker("m", FridayBar, "D", ChartOverlayKind.Dividend, "belowBar",
+                    Shape: ChartOverlayShape.Square, Detail: "Ex-dividend: Rs 6.00 a share")],
                 [new ChartOverlayBand("b", "Confidence", ChartOverlayKind.Prediction,
                     [new ChartOverlayBandPoint(FridayBar, 138m, 146m)])]),
             System.Text.Json.JsonSerializerOptions.Web);
@@ -202,6 +217,12 @@ public class ChartOverlayTests
         Assert.IsTrue(point.TryGetProperty("time", out _));
         Assert.IsTrue(point.TryGetProperty("value", out _));
 
+        var marker = root.GetProperty("markers")[0];
+        foreach (var key in new[] { "id", "time", "text", "kind", "position", "shape", "detail" })
+            Assert.IsTrue(marker.TryGetProperty(key, out _), $"marker missing '{key}'");
+        Assert.AreEqual("square", marker.GetProperty("shape").GetString());
+        Assert.AreEqual("dividend", marker.GetProperty("kind").GetString());
+
         var band = root.GetProperty("bands")[0].GetProperty("points")[0];
         Assert.IsTrue(band.TryGetProperty("lower", out _));
         Assert.IsTrue(band.TryGetProperty("upper", out _));
@@ -217,6 +238,17 @@ public class ChartOverlayTests
         public string Id => id;
         public Task<ChartOverlaySet?> GetOverlaysAsync(ChartOverlayRequest r, CancellationToken ct) =>
             Task.FromResult<ChartOverlaySet?>(set);
+    }
+
+    private sealed class RecordingProvider : IChartOverlayProvider
+    {
+        public ChartOverlayRequest? Seen { get; private set; }
+        public string Id => "recording";
+        public Task<ChartOverlaySet?> GetOverlaysAsync(ChartOverlayRequest r, CancellationToken ct)
+        {
+            Seen = r;
+            return Task.FromResult<ChartOverlaySet?>(ChartOverlaySet.Empty);
+        }
     }
 
     private sealed class ThrowingProvider(string id) : IChartOverlayProvider

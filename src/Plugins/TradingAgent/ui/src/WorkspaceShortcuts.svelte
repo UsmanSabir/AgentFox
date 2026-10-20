@@ -9,6 +9,7 @@
   }
   function close() { dialog.close(); if (previous?.isConnected) previous.focus(); }
   const shortcuts = [
+    ['Ctrl+Shift+K','Find and focus or open a panel by name or purpose (also from inputs)'],
     ['Ctrl+K','Search commands and open any panel (also from inputs)'],
     ['Ctrl+/','Open this shortcuts sheet'],
     ['F6 / Shift+F6','Next / previous panel group, including auto-hidden tools'],
@@ -33,7 +34,7 @@
 </script>
 <dialog bind:this={dialog} aria-label="Keyboard shortcuts" on:cancel={event => {event.preventDefault();close();}}>
   <header><h2>Keyboard shortcuts</h2><button bind:this={back} on:click={close}>Close shortcuts</button></header>
-  <p>Layout shortcuts do not place orders. Number, tab-cycle and maximize shortcuts are ignored while typing. Commands and F6 remain available from inputs. On Mac, Cmd also works for the Ctrl+K, number and maximize shortcuts.</p>
+  <p>Layout shortcuts do not place orders. Number, tab-cycle and maximize shortcuts are ignored while typing. Panel search, Commands and F6 remain available from inputs. On Mac, Cmd also works for panel search, Ctrl+K, number and maximize shortcuts.</p>
   <table><caption>Workstation keyboard reference</caption><tbody>{#each shortcuts as [keys,description]}<tr><th scope="row"><kbd>{keys}</kbd></th><td>{description}</td></tr>{/each}</tbody></table>
   <p>Use <b>Commands</b> for pin/unpin, resizing and moving panels. The workstation follows the AgentFox theme. Browser/OS shortcuts may take priority; every action also has an on-screen control. Native order controls retain explicit confirmation.</p>
 </dialog>
