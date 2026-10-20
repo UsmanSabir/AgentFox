@@ -115,6 +115,9 @@
   const containers = new Map<string, HTMLDivElement>();
   // One prior width per panel, this page only. Actual geometry is saved by the existing layout writer.
   const previousPanelWidths = new Map<string, number>();
+  // Bounded by the panel catalogue; stored in the existing 180-day layout record. Presets change
+  // placement, but must not discard an explicit compact/expanded choice.
+  let panelWidths: Record<string, number> = {};
   const special = new Set(['core-toolbar', 'edition-health', 'core-dialogs']);
   const edges: AutoHideEdge[] = ['left','right','bottom'];
 
@@ -227,9 +230,15 @@
     const maximum = edge ? 900 : Math.max(180, dockRoot.clientWidth);
     const target = Math.max(180, Math.min(maximum, width ?? previousPanelWidths.get(id) ?? 360));
     if (width === null) previousPanelWidths.delete(id);
+    panelWidths = { ...panelWidths, [id]: target };
     if (edge) autoHide = { ...autoHide, [edge]:{ ...autoHide[edge]!, size:target } };
     else panel?.api.setSize({ width:target });
     scheduleSave();
+    persist(); // A reload immediately after the toggle must keep the choice too.
+  }
+
+  function restorePanelWidths() {
+    for (const [id, width] of Object.entries(panelWidths)) setPanelWidth(id, width);
   }
 
   function focusPanel(id: string) {
@@ -364,6 +373,7 @@
       autoHide = Object.fromEntries(trays) as AutoHideTrays;
       activeId = selected.columns[0].active;
       api.getPanel(activeId)?.api.setActive();
+      restorePanelWidths();
       return;
     }
     const primary = panels.find(p => p.region === 'center')!;
@@ -388,6 +398,7 @@
     api.getPanel(activeCenter)?.api.setActive();
     preset = selected.id;
     activeId = activeCenter;
+    restorePanelWidths();
   }
 
   function removeSaved() {
@@ -395,8 +406,17 @@
   }
   function persist() {
     if (!api || suppressSave || !dirty) return;
+    // A manual splitter drag may change the same choice. Keep that actual width, but never
+    // mistake a maximized group's temporary full-screen width for the operator's preference.
+    if (!api.hasMaximizedGroup()) {
+      for (const id of Object.keys(panelWidths)) {
+        const edge = trayForPanel(id);
+        const width = edge && edge !== 'bottom' ? autoHide[edge]?.size : api.getPanel(id)?.api.width;
+        if (width && width >= 180) panelWidths[id] = width;
+      }
+    }
     try {
-      localStorage.setItem(storageKey, JSON.stringify(saveWorkspaceLayout(edition, preset, api.toJSON(), Date.now(), autoHide, api.hasMaximizedGroup() ? api.activePanel?.id : undefined, panels.map(p => p.id))));
+      localStorage.setItem(storageKey, JSON.stringify(saveWorkspaceLayout(edition, preset, api.toJSON(), Date.now(), autoHide, api.hasMaximizedGroup() ? api.activePanel?.id : undefined, panels.map(p => p.id), panelWidths)));
       dirty = false;
       storageWarning = '';
     } catch { storageWarning = 'Layout could not be saved in this browser; trading is unaffected.'; }
@@ -411,6 +431,7 @@
     onMyView = false;
     clearTimeout(saveTimer);
     suppressSave = true;
+    panelWidths = {};
     if (api) buildDefault(presets[0].id);
     else { preset = presets[0].id; autoHide = {}; }
     removeSaved();
@@ -438,7 +459,7 @@
     if (!api) { notice = 'My view is saved from the full-width workstation.'; return; }
     if (openEdge) { notice = `Pin the ${openEdge} panels before saving My view.`; return; }
     const record = saveWorkspaceLayout(edition, preset, api.toJSON(), Date.now(), autoHide,
-      api.hasMaximizedGroup() ? api.activePanel?.id : undefined, panels.map(p => p.id));
+      api.hasMaximizedGroup() ? api.activePanel?.id : undefined, panels.map(p => p.id), panelWidths);
     if (!writeMyView(record)) return;
     myView = record;
     onMyView = true;
@@ -454,6 +475,7 @@
       parkTrays();
       api.exitMaximizedGroup();
       previousPanelWidths.clear();
+      panelWidths = { ...view.panelWidths };
       api.fromJSON(view.layout);
       preset = view.preset;
       autoHide = view.autoHide ?? {};
@@ -828,10 +850,12 @@
       // otherwise redistributes a zero-size grid into equal columns on initial mount.
       api.layout(dockRoot.clientWidth, dockRoot.clientHeight);
       suppressSave = true;
-      buildDefault(preset);
       let raw: string | null = null;
       try { raw = localStorage.getItem(storageKey); } catch { /* Storage may be disabled. */ }
-      const saved = mobilePresetChanged ? null : readLayout(raw);
+      const stored = readLayout(raw);
+      panelWidths = { ...stored?.panelWidths };
+      const saved = mobilePresetChanged ? null : stored;
+      buildDefault(preset);
       let adopted = false;
       if (saved) {
         try {
@@ -843,6 +867,7 @@
             adopted = true;
           }
           adopted = adoptNewPanels(Object.keys(saved.layout.panels), saved.known) || adopted;
+          restorePanelWidths();
           if(saved.maximized) api.getPanel(saved.maximized)?.api.maximize();
         }
         catch { removeSaved(); buildDefault(presets[0].id); }
