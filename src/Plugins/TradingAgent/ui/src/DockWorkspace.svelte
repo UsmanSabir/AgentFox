@@ -893,7 +893,7 @@
 </script>
 
 <section class="workstation" class:mobile={!desktop} aria-label={selectedPreset.title ?? title} tabindex="-1" bind:this={root}>
-  <header class="workstation-bar">
+  <header class="workstation-bar" class:has-toolbar={!!$$slots.toolbar}>
     <nav class="workspace-views" aria-label="Workspace layout">
       {#each presets as item}
         <button data-workspace-preset={item.id} class:chosen={preset === item.id && !onMyView} aria-pressed={preset === item.id && !onMyView} on:click={() => selectPreset(item.id)}>{item.label}</button>
@@ -901,6 +901,7 @@
       <button class:chosen={onMyView} aria-pressed={onMyView} on:click={restoreMyView} disabled={!desktop || !myView}
         title={myView ? 'Restore the layout you saved as My view' : 'Save an arrangement using Layout → Save as My view'}>My view</button>
     </nav>
+    <slot name="toolbar"/>
     <div class="workspace-tools">
       <button class="panel-finder" on:click={() => openPalette(true)} aria-haspopup="dialog"
         aria-keyshortcuts="Control+Shift+K Meta+Shift+K" title="Find and open a panel (Ctrl+Shift+K)"><Search size={14}/> Find panel <kbd>Ctrl ⇧ K</kbd></button>
@@ -1012,6 +1013,7 @@
   .workstation-bar { display:flex; align-items:center; justify-content:space-between; gap:.5rem; padding:.55rem .75rem; flex:none; min-width:0; border-bottom:1px solid var(--border-md); background:var(--surface-2); }
   nav, button, .workspace-tools, summary { display:flex; align-items:center; gap:.4rem; }
   .workspace-views { flex:1; min-width:0; flex-wrap:nowrap; overflow-x:auto; }
+  .has-toolbar .workspace-views { flex:0 1 auto; }
   .workspace-views button { flex:none; white-space:nowrap; }
   .workspace-tools { flex:none; }
   .panel-finder { white-space:nowrap; }
