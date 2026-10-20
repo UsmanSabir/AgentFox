@@ -72,7 +72,8 @@ public sealed class ChartOverlayCollector
             barTimes[^1],
             barTimes.Count,
             lastClose,
-            NextSessionTimes(barTimes[^1], interval));
+            NextSessionTimes(barTimes[^1], interval),
+            barTimes);
 
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
         budget.CancelAfter(Budget);

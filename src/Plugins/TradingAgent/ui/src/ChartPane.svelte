@@ -10,9 +10,13 @@
     type ISeriesApi,
     type ISeriesMarkersPluginApi,
     type IPriceLine,
+    type MouseEventParams,
     type Time,
     type UTCTimestamp
   } from 'lightweight-charts';
+  import {
+    detailCardPosition, markerDetailsByTime, markerShape, type MarkerDetailLine
+  } from './chartOverlayMarkers';
   import {
     trading, CHART_INTERVALS,
     type ArmOrderDialogContext, type CandleArchiveStatus, type ChartData, type ChartInterval,
@@ -268,6 +272,11 @@
   let overlaySeries: ISeriesApi<'Line'>[] = [];
   let overlayPriceLines: IPriceLine[] = [];
   let overlayMarkers: ISeriesMarkersPluginApi<Time> | null = null;
+  // Overlay markers that carry a line of detail (an ex-dividend's amount, a result's period), by bar
+  // time, and the card showing them while the pointer is on such a bar. Markers on a canvas cannot
+  // be hovered themselves, so the card follows the crosshair's BAR rather than the marker's pixels.
+  let markerDetails = new Map<number, MarkerDetailLine[]>();
+  let detailCard: { left: number; top: number; lines: MarkerDetailLine[] } | null = null;
   let markers: ISeriesMarkersPluginApi<Time> | null = null;
   let resizeObserver: ResizeObserver | null = null;
   // A docked tab can receive data before it has any width. Apply its range only after layout;
@@ -314,6 +323,8 @@
       height: el.clientHeight,
       width: el.clientWidth
     });
+    // Released with the chart: remove() drops every subscription, so no teardown site needs it.
+    chart.subscribeCrosshairMove(showMarkerDetail);
 
     candleSeries = chart.addSeries(CandlestickSeries, {
       upColor: token('--success', '#34d399'),
@@ -465,6 +476,21 @@
     overlaySeries = [];
     overlayPriceLines = [];
     overlayMarkers = null;
+    markerDetails = new Map();
+    detailCard = null;
+  }
+
+  /** The crosshair is on a bar: show that bar's marker detail, or nothing when it has none. */
+  function showMarkerDetail(param: MouseEventParams<Time>) {
+    const lines = param.time != null ? markerDetails.get(param.time as number) : undefined;
+    if (!lines || !param.point || !container) {
+      detailCard = null;
+      return;
+    }
+    detailCard = {
+      ...detailCardPosition(param.point, { width: container.clientWidth, height: container.clientHeight }),
+      lines
+    };
   }
 
   /**
@@ -481,6 +507,9 @@
       case 'entry':      return token('--primary', '#818cf8');
       case 'support':    return token('--success', '#34d399');
       case 'resistance': return token('--danger', '#f87171');
+      // Corporate events sit under the candles, so neither borrows a candle's own green or red.
+      case 'dividend':   return token('--info', '#60a5fa');
+      case 'earnings':   return token('--warning', '#fbbf24');
       default:           return token('--info', '#60a5fa');
     }
   }
@@ -569,9 +598,10 @@
       time: m.time as UTCTimestamp,
       position: (m.position === 'belowBar' ? 'belowBar' : 'aboveBar') as 'aboveBar' | 'belowBar',
       color: overlayColor(m.kind),
-      shape: 'circle' as const,
+      shape: markerShape(m.shape),
       text: m.text
     })).sort((a, b) => (a.time as number) - (b.time as number));
+    markerDetails = markerDetailsByTime(o.markers ?? []);
     if (markerList.length > 0) {
       for (const m of markerList) if ((m.time as number) > furthest) furthest = m.time as number;
       if (overlayMarkers) overlayMarkers.setMarkers(markerList);
@@ -996,7 +1026,18 @@
       <button class="retry" on:click={() => load()}>Retry</button>
     </p>
   {:else}
-    <div class="plot" class:loading class:tall={expanded} bind:this={container}></div>
+    <div class="plot-frame">
+      <div class="plot" class:loading class:tall={expanded} bind:this={container}></div>
+      {#if detailCard}
+        <div class="marker-detail" role="tooltip" style="left:{detailCard.left}px; top:{detailCard.top}px">
+          {#each detailCard.lines as line}
+            <div class="marker-detail-line">
+              <span class="marker-detail-dot" style="background:{overlayColor(line.kind)}"></span>{line.text}
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </div>
 
     {#if data}
       <div class="readout">
@@ -1173,7 +1214,14 @@
 
   /* The price action, volume, and RSI share this canvas. Give them enough vertical separation for
      level labels and recent candles to remain legible on ordinary desktop screens. */
+  .plot-frame { position:relative; width:100%; min-width:0; flex-shrink:0; }
   .plot { width:100%; height:580px; min-width:0; flex-shrink:0; }
+  /* 240px matches detailCardPosition's assumed width, so the flip keeps it inside the plot. */
+  .marker-detail { position:absolute; z-index:3; max-width:240px; pointer-events:none;
+    padding:6px 8px; border-radius:6px; background:var(--surface-2); border:1px solid var(--border-high);
+    color:var(--text); font-size:11px; line-height:1.4; box-shadow:0 4px 14px rgba(0,0,0,.25); }
+  .marker-detail-line { display:flex; align-items:baseline; gap:6px; }
+  .marker-detail-dot { width:7px; height:7px; border-radius:50%; flex-shrink:0; }
   /* A fixed height rather than a vh clamp: this renders inside an iframe whose viewport is shorter
      than the browser window, so a vh-based value collapsed back to its minimum and the expand button
      gained width but almost no height. The page scrolls, so a definite 680px is the honest choice. */

@@ -606,6 +606,10 @@ export interface ChartOverlays {
   markers: {
     id: string; time: number; text: string; kind: ChartOverlayKind;
     position: 'aboveBar' | 'belowBar'; value: number | null;
+    /** 'circle' | 'square' | 'arrowUp' | 'arrowDown'; absent or unknown draws a circle. */
+    shape?: string | null;
+    /** One line shown while the pointer is on this marker's bar; absent shows nothing. */
+    detail?: string | null;
   }[];
   /** Upper/lower envelope drawn as two lines — a confidence band around a projection. */
   bands: {
