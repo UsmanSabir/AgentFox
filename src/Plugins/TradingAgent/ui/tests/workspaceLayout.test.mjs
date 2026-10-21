@@ -10,6 +10,19 @@ const layout = () => ({
 const saved = () => saveWorkspaceLayout('premium', 'trading', layout(), now);
 const read = (value) => readWorkspaceLayout(JSON.stringify(value), 'premium', ['chart', 'watchlist'], ['trading'], now);
 
+test('explicit compact and expanded widths survive serialization, including an unplaced watchlist', () => {
+  for (const width of [180, 395]) {
+    const widths = {watchlist:width};
+    const value = saveWorkspaceLayout('premium','trading',layout(),now,undefined,undefined,undefined,widths);
+    assert.deepEqual(read(value).panelWidths, {watchlist:width});
+    widths.watchlist = 600;
+    assert.equal(value.panelWidths.watchlist, width, 'saved preferences are independent of live state');
+  }
+  assert.equal(read(saved()).panelWidths, undefined, 'older layouts still restore');
+  for (const panelWidths of [null, [], {unknown:180}, {watchlist:179}, {watchlist:100001},
+    {watchlist:'180'}, {watchlist:null}]) assert.equal(read({...saved(),panelWidths}), null);
+});
+
 test('maximized panel restores only a panel still in the docked grid', () => {
   const value = saveWorkspaceLayout('premium','trading',layout(),now,undefined,'chart');
   assert.equal(read(value).maximized,'chart');

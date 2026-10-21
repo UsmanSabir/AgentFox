@@ -605,7 +605,8 @@ export interface ChartOverlays {
   }[];
   markers: {
     id: string; time: number; text: string; kind: ChartOverlayKind;
-    position: 'aboveBar' | 'belowBar'; value: number | null;
+    /** 'bottom' draws it in a strip along the foot of the price pane, for an event on a day. */
+    position: 'aboveBar' | 'belowBar' | 'bottom'; value: number | null;
     /** 'circle' | 'square' | 'arrowUp' | 'arrowDown'; absent or unknown draws a circle. */
     shape?: string | null;
     /** One line shown while the pointer is on this marker's bar; absent shows nothing. */
