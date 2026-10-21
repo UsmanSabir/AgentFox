@@ -22,7 +22,7 @@ namespace TradingAgent.Manager;
 /// Deterministic execution boundary. It re-checks policy and market eligibility, claims durable
 /// idempotency, records transitions, and is the only service allowed to call the broker adapter.
 /// </summary>
-public sealed class TradingManager
+public sealed partial class TradingManager
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private readonly IBrokerAdapter _broker;
@@ -112,11 +112,16 @@ public sealed class TradingManager
     /// and the one an operator should be reading.
     /// </para>
     /// </summary>
-    public async Task<TradingExecutionResult> ExecuteGroupsAsync(
+    public Task<TradingExecutionResult> ExecuteGroupsAsync(
         IReadOnlyList<IReadOnlyList<TradingSignal>> groups,
         string? sourceMessage,
         ExecutionAuthorization? authorization = null,
         CancellationToken ct = default)
+        => ExecuteTrackedAsync(groups, sourceMessage, authorization, ct, null);
+
+    private async Task<TradingExecutionResult> ExecuteTrackedAsync(
+        IReadOnlyList<IReadOnlyList<TradingSignal>> groups, string? sourceMessage,
+        ExecutionAuthorization? authorization, CancellationToken ct, ClientOrderContext? clientOrder)
     {
         // Ensure() rather than Begin(): a submission caused by an agent turn keeps that turn's id,
         // while one raised by a background worker (armed order, protective stop, strategy pass)
@@ -131,7 +136,7 @@ public sealed class TradingManager
 
         try
         {
-            var result = await ExecuteGroupsCoreAsync(groups, sourceMessage, authorization, ct);
+            var result = await ExecuteGroupsCoreAsync(groups, sourceMessage, authorization, ct, clientOrder);
 
             span?.SetTag("agentfox.trading.execution_id", result.ExecutionId);
             span?.SetTag("agentfox.trading.policy_version", result.PolicyVersion);
@@ -161,7 +166,7 @@ public sealed class TradingManager
         IReadOnlyList<IReadOnlyList<TradingSignal>> groups,
         string? sourceMessage,
         ExecutionAuthorization? authorization = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default, ClientOrderContext? clientOrder = null)
     {
         var policy = _policyProvider.Current();
         if (!policy.AutoExecute)
@@ -319,9 +324,20 @@ public sealed class TradingManager
         }
 
         var requestJson = JsonSerializer.Serialize(groups, Json);
-        var idempotencyKey = BuildIdempotencyKey(sourceMessage, requestJson, policy.Version);
-        var claim = await _repository.TryBeginExecutionAsync(
-            idempotencyKey, requestJson, policy.Version, ct);
+        ExecutionClaim claim;
+        if (clientOrder is null)
+        {
+            var idempotencyKey = BuildIdempotencyKey(sourceMessage, requestJson, policy.Version);
+            claim = await _repository.TryBeginExecutionAsync(idempotencyKey, requestJson, policy.Version, ct);
+        }
+        else
+        {
+            var acquired = await ((IClientOrderOperationRepository)_repository).TryBeginClientOrderOperationAsync(
+                clientOrder.RequestId, clientOrder.RequestHash, requestJson, policy.Version, ct);
+            if (acquired.Conflict) throw new ClientOrderConflictException();
+            if (!acquired.Acquired) return ReplayClientOrder(acquired.Operation);
+            claim = new(true, acquired.Operation.ExecutionId, acquired.Operation.State, acquired.Operation.ResultJson);
+        }
 
         if (!claim.Acquired)
         {
