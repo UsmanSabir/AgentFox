@@ -163,6 +163,32 @@ public sealed partial class PsxDataClient
     // ── PSX data portal ───────────────────────────────────────────────────────
 
     /// <summary>
+    /// Previous-session close for a verified intraday session. A date-less broker chart must not
+    /// borrow a baseline from an older PSX session. Reuses the existing expiring series caches.
+    /// </summary>
+    public async Task<decimal?> GetSessionPreviousCloseAsync(string symbol, DateOnly sessionDate,
+        CancellationToken ct = default)
+    {
+        symbol = NormalizePortalSymbol(symbol, "index");
+        try
+        {
+            var intraday = await CachedSeriesAsync($"timeseries/int/{symbol}", IntradaySeriesTtl, ct);
+            static DateOnly PktDay(long ts) => DateOnly.FromDateTime(
+                DateTimeOffset.FromUnixTimeSeconds(ts).ToOffset(TimeSpan.FromHours(5)).DateTime);
+            if (intraday.Count == 0 || PktDay(intraday.Max(p => p.Ts)) != sessionDate) return null;
+            var eod = await CachedSeriesAsync($"timeseries/eod/{symbol}", EodSeriesTtl, ct);
+            return eod.Where(p => p.Price > 0 && PktDay(p.Ts) < sessionDate)
+                .OrderByDescending(p => p.Ts).FirstOrDefault()?.Price;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[PsxData] Previous-session close unavailable for {Symbol}.", symbol);
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Builds a quote summary from the portal's EOD series (trend, 52-week range) topped up with the
     /// latest intraday tick when available. Series shape: {"status":1,"data":[[unixTs, price, volume],…]}.
     /// Both series are cached (<see cref="CachedSeriesAsync"/>); a caller that needs only the EOD figures (the

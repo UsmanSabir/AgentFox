@@ -2237,6 +2237,12 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
 
             await AddColumnIfMissingAsync(connection, "trade_proposals", "correlation_id", "TEXT NULL", ct);
             await AddColumnIfMissingAsync(connection, "trading_executions", "correlation_id", "TEXT NULL", ct);
+            await AddColumnIfMissingAsync(connection, "trading_executions", "client_operation_id", "TEXT NULL", ct);
+            await AddColumnIfMissingAsync(connection, "trading_executions", "client_request_hash", "TEXT NULL", ct);
+            await AddColumnIfMissingAsync(connection, "trading_executions", "client_operation_expires_utc", "TEXT NULL", ct);
+            var operationIndex = connection.CreateCommand();
+            operationIndex.CommandText = "CREATE UNIQUE INDEX IF NOT EXISTS ix_execution_client_operation ON trading_executions(client_operation_id) WHERE client_operation_id IS NOT NULL";
+            await operationIndex.ExecuteNonQueryAsync(ct);
             await AddColumnIfMissingAsync(connection, "trading_order_events", "correlation_id", "TEXT NULL", ct);
             await AddColumnIfMissingAsync(connection, "reconciliation_runs", "correlation_id", "TEXT NULL", ct);
 
@@ -3901,7 +3907,7 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
 
         await using var transaction = await connection.BeginTransactionAsync(ct);
 
-        const string terminal = "state NOT IN ('submitting','unknown') AND updated_utc < $before";
+        const string terminal = "state NOT IN ('submitting','unknown') AND updated_utc < $before AND (client_operation_expires_utc IS NULL OR client_operation_expires_utc <= $now)";
 
         // Children first: fills -> broker_orders -> trading_order_events -> trading_executions.
         var statements = new[]
@@ -3923,12 +3929,14 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         };
 
         var removed = 0;
+        var operationPruneAt = DateTime.UtcNow.ToString("O");
         foreach (var sql in statements)
         {
             var command = connection.CreateCommand();
             command.Transaction = (SqliteTransaction)transaction;
             command.CommandText = sql;
             command.Parameters.AddWithValue("$before", before.ToString("O"));
+            command.Parameters.AddWithValue("$now", operationPruneAt);
             var affected = await command.ExecuteNonQueryAsync(ct);
 
             // Report the parent count as "executions pruned"; the children are consequences of it.

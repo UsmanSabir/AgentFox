@@ -47,6 +47,7 @@ public sealed class PsxSeriesCacheTests
                 {
                     "/" => (200, """<script>window.__ps = {"_k":"test-key"};</script>"""),
                     _ when path.EndsWith("/REFUSED", StringComparison.Ordinal) => (404, "{}"),
+                    "/timeseries/eod/KSE100" => (200, $$"""{"status":1,"data":[[{{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}},165363.11,1000],[{{DateTimeOffset.UtcNow.AddDays(-1).ToUnixTimeSeconds()}},165966.08,900]]}"""),
                     _ when path.StartsWith("/timeseries/eod/", StringComparison.Ordinal) =>
                         (200, $$"""{"status":1,"data":[[{{DateTimeOffset.UtcNow.AddDays(-1).ToUnixTimeSeconds()}},101.5,1000],[{{DateTimeOffset.UtcNow.AddDays(-2).ToUnixTimeSeconds()}},99,900]]}"""),
                     _ when path.StartsWith("/timeseries/int/", StringComparison.Ordinal) =>
@@ -66,6 +67,31 @@ public sealed class PsxSeriesCacheTests
 
     private static PsxDataClient Client(FakePortal portal) => new(
         Options.Create(new TradingAgentOptions { PsxDataBaseUrl = portal.BaseUrl }), NullLogger<PsxDataClient>.Instance);
+
+    [TestMethod]
+    public async Task Index_daily_change_uses_previous_close_even_when_today_has_an_EOD_row()
+    {
+        using var portal = new FakePortal();
+        var client = Client(portal);
+        var today = DateOnly.FromDateTime(DateTime.UtcNow.AddHours(5));
+        var close = await client.GetSessionPreviousCloseAsync("KSE100", today);
+        Assert.AreEqual(165966.08m, close);
+        Assert.AreEqual(-602.97m, 165363.11m - close);
+        Assert.AreEqual(-667.95m, 165298.13m - close);
+        Assert.AreEqual(close, await client.GetSessionPreviousCloseAsync("KSE100", today));
+        Assert.AreEqual(1, portal.HitsOn("/timeseries/eod/KSE100"));
+    }
+
+    [TestMethod]
+    public async Task A_different_intraday_session_cannot_supply_the_toolbar_baseline()
+    {
+        using var portal = new FakePortal();
+        var client = Client(portal);
+        var tomorrow = DateOnly.FromDateTime(DateTime.UtcNow.AddHours(5)).AddDays(1);
+        Assert.IsNull(await client.GetSessionPreviousCloseAsync("KSE100", tomorrow));
+        Assert.AreEqual(0, portal.HitsOn("/timeseries/eod/KSE100"));
+        Assert.IsNull(await client.GetSessionPreviousCloseAsync("REFUSED", tomorrow));
+    }
 
     [TestMethod]
     public async Task An_analysis_asks_for_the_end_of_day_series_once_and_never_for_the_intraday_one()

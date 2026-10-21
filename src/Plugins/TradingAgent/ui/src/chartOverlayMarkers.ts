@@ -13,6 +13,15 @@ export function markerShape(shape: string | null | undefined): MarkerShape {
   return SHAPES.includes(shape as MarkerShape) ? (shape as MarkerShape) : 'circle';
 }
 
+/**
+ * Where a marker is drawn: on its bar (above or below the candle), or in the event strip along the
+ * foot of the price pane. An unknown position is above the bar, as it always was.
+ */
+export function markerPlacement(position: string | null | undefined): 'aboveBar' | 'belowBar' | 'strip' {
+  if (position === 'bottom') return 'strip';
+  return position === 'belowBar' ? 'belowBar' : 'aboveBar';
+}
+
 export interface MarkerDetailLine { text: string; kind: string; }
 
 /**

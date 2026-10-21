@@ -39,6 +39,8 @@ export interface WorkspaceLayout {
    * DockWorkspace.</p>
    */
   known?: string[];
+  /** Explicit panel widths (for example the watchlist's compact toggle), retained across presets. */
+  panelWidths?: Record<string, number>;
 }
 
 /** Validate before handing browser preferences to Dockview; never accept components/params as code. */
@@ -54,6 +56,11 @@ export function readWorkspaceLayout(
       || !Number.isFinite(value.savedAt) || value.savedAt > now
       || now - value.savedAt > WORKSPACE_RETENTION_MS) return null;
     value.preset = preset;
+    if (value.panelWidths !== undefined) {
+      if (!value.panelWidths || typeof value.panelWidths !== 'object' || Array.isArray(value.panelWidths)
+        || Object.entries(value.panelWidths).some(([id, width]) => !allowedIds.includes(id)
+          || !Number.isFinite(width) || width < 180 || width > 100_000)) return null;
+    }
     const layout = value.layout;
     if (!layout || !layout.grid || !layout.panels || Array.isArray(layout.panels)) return null;
     // Floating/pop-out windows are not part of this first full-page contract.
@@ -113,7 +120,7 @@ function validTray(
 /** Only view geometry and stable metadata are persisted, never order drafts or component parameters. */
 export function saveWorkspaceLayout(
   edition: string, preset: string, layout: SerializedDockview, now = Date.now(), autoHide?: AutoHideTrays, maximized?: string,
-  known?: readonly string[]
+  known?: readonly string[], panelWidths?: Readonly<Record<string, number>>
 ): WorkspaceLayout {
   const copy = JSON.parse(JSON.stringify(layout)) as SerializedDockview;
   for (const panel of Object.values(copy.panels)) delete panel.params;
@@ -124,6 +131,7 @@ export function saveWorkspaceLayout(
     })) as AutoHideTrays;
   return { version: 1, edition, savedAt: now, preset, layout: copy,
     ...(known?.length ? { known: [...known] } : {}),
+    ...(panelWidths && Object.keys(panelWidths).length ? { panelWidths: { ...panelWidths } } : {}),
     ...(maximized && Object.hasOwn(copy.panels,maximized) ? {maximized} : {}),
     ...(Object.keys(savedTrays).length ? { autoHide:savedTrays } : {}) };
 }

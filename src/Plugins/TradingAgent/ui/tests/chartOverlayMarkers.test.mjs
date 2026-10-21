@@ -1,6 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { detailCardPosition, markerDetailsByTime, markerShape } from '../src/chartOverlayMarkers.ts';
+import { detailCardPosition, markerDetailsByTime, markerPlacement, markerShape } from '../src/chartOverlayMarkers.ts';
+
+test('a bottom marker goes in the event strip, and an unknown position above its bar', () => {
+  assert.equal(markerPlacement('bottom'), 'strip');
+  assert.equal(markerPlacement('belowBar'), 'belowBar');
+  assert.equal(markerPlacement('aboveBar'), 'aboveBar');
+  assert.equal(markerPlacement(undefined), 'aboveBar');
+  assert.equal(markerPlacement('sideways'), 'aboveBar');
+});
 
 test('a marker draws the shape it asks for, and a circle when it asks for none or an unknown one', () => {
   assert.equal(markerShape('square'), 'square');

@@ -11,11 +11,12 @@
     type ISeriesMarkersPluginApi,
     type IPriceLine,
     type MouseEventParams,
+    type SeriesMarker,
     type Time,
     type UTCTimestamp
   } from 'lightweight-charts';
   import {
-    detailCardPosition, markerDetailsByTime, markerShape, type MarkerDetailLine
+    detailCardPosition, markerDetailsByTime, markerPlacement, markerShape, type MarkerDetailLine
   } from './chartOverlayMarkers';
   import {
     trading, CHART_INTERVALS,
@@ -69,9 +70,9 @@
    *   all → the nearest three each side   key → weekly-confirmed only   off → clean price action
    * The full list is always in the legend below the chart, so nothing is actually hidden from view.
    */
-  // Weekly-confirmed structure is the readable default. All nearby levels remain one click away and
-  // are always listed below, but no longer cover the price axis on first render.
-  let levelMode: 'all' | 'key' | 'off' = 'key';
+  // Clean price action is the default: every horizontal line, an edition's own levels included, is
+  // one click away and the levels are always listed below, but none covers the candles on first render.
+  let levelMode: 'all' | 'key' | 'off' = 'off';
 
   /**
    * An optional per-symbol detail from whoever is hosting this dashboard, rendered under the plot.
@@ -272,6 +273,10 @@
   let overlaySeries: ISeriesApi<'Line'>[] = [];
   let overlayPriceLines: IPriceLine[] = [];
   let overlayMarkers: ISeriesMarkersPluginApi<Time> | null = null;
+  // The event strip: an invisible series pinned to the foot of the price pane, carrying the markers
+  // an edition places at 'bottom' (an ex-dividend date, a results day). Created only when there are
+  // some, so a chart without events keeps its layout exactly.
+  let eventStrip: ISeriesApi<'Line'> | null = null;
   // Overlay markers that carry a line of detail (an ex-dividend's amount, a result's period), by bar
   // time, and the card showing them while the pointer is on such a bar. Markers on a canvas cannot
   // be hovered themselves, so the card follows the crosshair's BAR rather than the marker's pixels.
@@ -476,8 +481,40 @@
     overlaySeries = [];
     overlayPriceLines = [];
     overlayMarkers = null;
+    eventStrip = null;
     markerDetails = new Map();
     detailCard = null;
+  }
+
+  /** How much of the price pane, from the bottom, the event strip takes; volume sits above it. */
+  const EVENT_STRIP_HEIGHT = 0.07;
+
+  /**
+   * Draws the 'bottom' markers on their own strip at the foot of the price pane, under the candles
+   * and the volume and above the RSI pane, where a day's event stays readable instead of sitting in
+   * the candles' wicks. The strip is an invisible line on a private price scale, with a point on
+   * every bar so a marker can sit on any of them.
+   */
+  function drawEventStrip(d: ChartData, list: SeriesMarker<Time>[]) {
+    chart!.priceScale('volume').applyOptions({
+      scaleMargins: { top: 0.8, bottom: list.length ? EVENT_STRIP_HEIGHT : 0 }
+    });
+    if (list.length === 0 || d.candles.length === 0) return;
+
+    eventStrip = chart!.addSeries(LineSeries, {
+      priceScaleId: 'events',
+      lineVisible: false,
+      color: 'transparent',
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false
+    });
+    chart!.priceScale('events').applyOptions({
+      scaleMargins: { top: 1 - EVENT_STRIP_HEIGHT + 0.01, bottom: 0.01 }
+    });
+    eventStrip.setData(d.candles.map(c => ({ time: c.time as UTCTimestamp, value: 0 })));
+    // The markers belong to the strip's series and go when it is removed; no handle is kept.
+    createSeriesMarkers(eventStrip, list);
   }
 
   /** The crosshair is on a bar: show that bar's marker detail, or nothing when it has none. */
@@ -537,6 +574,7 @@
       for (const s of overlaySeries) chart!.removeSeries(s);
       for (const line of overlayPriceLines) candleSeries!.removePriceLine(line);
       overlayMarkers?.setMarkers([]);
+      if (eventStrip) chart!.removeSeries(eventStrip);
     } catch {
       // handles from a disposed chart; nothing to clean up
     }
@@ -548,7 +586,8 @@
     const lastBar = d.candles.length ? d.candles[d.candles.length - 1].time : 0;
     let furthest = lastBar;
 
-    for (const level of o.levels ?? []) {
+    // An edition's horizontal levels are level lines like any other, so the Levels control hides them.
+    for (const level of levelMode === 'off' ? [] : o.levels ?? []) {
       overlayPriceLines.push(candleSeries!.createPriceLine({
         price: level.price,
         color: overlayColor(level.kind),
@@ -594,14 +633,26 @@
       addLine(`${band.id}:lower`, band.kind, true, pts.map(pt => ({ time: pt.time, value: pt.lower })));
     }
 
-    const markerList = (o.markers ?? []).map(m => ({
+    const toMarker = (
+      m: ChartData['overlays']['markers'][number], position: 'aboveBar' | 'belowBar' | 'inBar'
+    ): SeriesMarker<Time> => ({
       time: m.time as UTCTimestamp,
-      position: (m.position === 'belowBar' ? 'belowBar' : 'aboveBar') as 'aboveBar' | 'belowBar',
+      position,
       color: overlayColor(m.kind),
       shape: markerShape(m.shape),
       text: m.text
-    })).sort((a, b) => (a.time as number) - (b.time as number));
+    });
+    const byTime = (a: SeriesMarker<Time>, b: SeriesMarker<Time>) => (a.time as number) - (b.time as number);
+    const markerList: SeriesMarker<Time>[] = [], stripList: SeriesMarker<Time>[] = [];
+    for (const m of o.markers ?? []) {
+      const placement = markerPlacement(m.position);
+      if (placement === 'strip') stripList.push(toMarker(m, 'inBar'));
+      else markerList.push(toMarker(m, placement));
+    }
+    markerList.sort(byTime);
+    stripList.sort(byTime);
     markerDetails = markerDetailsByTime(o.markers ?? []);
+    drawEventStrip(d, stripList);
     if (markerList.length > 0) {
       for (const m of markerList) if ((m.time as number) > furthest) furthest = m.time as number;
       if (overlayMarkers) overlayMarkers.setMarkers(markerList);
@@ -680,8 +731,12 @@
 
   function cycleLevels() {
     levelMode = LEVEL_MODES[(LEVEL_MODES.indexOf(levelMode) + 1) % LEVEL_MODES.length];
-    // Levels are price lines on an existing series, so this needs no rebuild.
-    if (data) drawLevels(data);
+    // Levels are price lines on an existing series, so this needs no rebuild. The edition's levels
+    // follow the same control, and live with its other overlays.
+    if (data) {
+      drawLevels(data);
+      drawOverlays(data);
+    }
   }
 
   function toggleRsi() {
