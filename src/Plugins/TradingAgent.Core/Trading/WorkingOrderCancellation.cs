@@ -236,9 +236,7 @@ public sealed class WorkingOrderCancellationService
         if (request.ExpectedTarget is { } expected && !SameReviewedTarget(expected, target))
             return new("needs_acknowledgement", "The order changed since review. Read and review the current order before cancelling.", orderNo, symbol);
 
-        var owners = new List<WorkingOrderOwner>(await CoreOwnersAsync(target, ct));
-        if (editionOwners is not null)
-            owners.AddRange(await editionOwners(target, ct));
+        var owners = await InspectOwnersAsync(target, editionOwners, ct);
         if (request.ExpectedOwners is { } reviewedOwners && !SameReviewedOwners(reviewedOwners, owners))
             return new("needs_acknowledgement", "Order ownership changed since review. Review its current consequences before cancelling.", orderNo, symbol, owners);
 
@@ -273,6 +271,17 @@ public sealed class WorkingOrderCancellationService
             _activity?.Warn("Orders", $"{target.Symbol}: cancel of order #{target.OrderNo} not confirmed", result.Message);
 
         return result;
+    }
+
+    /// <summary>Read-only consequences for a caller's freshly read exact target. Confirmation still
+    /// re-reads the broker and these owners; this inspection is not cancellation authority.</summary>
+    public async Task<IReadOnlyList<WorkingOrderOwner>> InspectOwnersAsync(BrokerWorkingOrder target,
+        Func<BrokerWorkingOrder, CancellationToken, Task<IReadOnlyList<WorkingOrderOwner>>>? editionOwners = null,
+        CancellationToken ct = default)
+    {
+        var owners = new List<WorkingOrderOwner>(await CoreOwnersAsync(target, ct));
+        if (editionOwners is not null) owners.AddRange(await editionOwners(target, ct));
+        return owners;
     }
 
     internal static bool SameReviewedTarget(BrokerWorkingOrder expected, BrokerWorkingOrder current)
