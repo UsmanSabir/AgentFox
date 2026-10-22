@@ -1013,8 +1013,11 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         {
             "placed"     => "resolved_placed",
             "not_placed" => "resolved_not_placed",
+            "cancelled" => "resolved_cancelled",
+            "not_cancelled" => "resolved_not_cancelled",
+            "filled" => "resolved_filled",
             _ => throw new ArgumentOutOfRangeException(nameof(resolution), resolution,
-                "Unknown executions can only be resolved as placed or not_placed.")
+                "Choose a resolution matching the original order or cancellation action.")
         };
 
         await EnsureInitializedAsync(ct);
@@ -1026,11 +1029,12 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         update.CommandText = """
             UPDATE trading_executions
             SET state = $state, updated_utc = $now
-            WHERE execution_id = $id AND state = 'unknown'
+            WHERE execution_id = $id AND state = 'unknown' AND client_operation_kind = $kind
             """;
         update.Parameters.AddWithValue("$state", state);
         update.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("O"));
         update.Parameters.AddWithValue("$id", executionId);
+        update.Parameters.AddWithValue("$kind", resolution is "placed" or "not_placed" ? "order" : "cancel");
         if (await update.ExecuteNonQueryAsync(ct) != 1)
         {
             await transaction.RollbackAsync(ct);
@@ -2240,6 +2244,7 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
             await AddColumnIfMissingAsync(connection, "trading_executions", "client_operation_id", "TEXT NULL", ct);
             await AddColumnIfMissingAsync(connection, "trading_executions", "client_request_hash", "TEXT NULL", ct);
             await AddColumnIfMissingAsync(connection, "trading_executions", "client_operation_expires_utc", "TEXT NULL", ct);
+            await AddColumnIfMissingAsync(connection, "trading_executions", "client_operation_kind", "TEXT NOT NULL DEFAULT 'order'", ct);
             var operationIndex = connection.CreateCommand();
             operationIndex.CommandText = "CREATE UNIQUE INDEX IF NOT EXISTS ix_execution_client_operation ON trading_executions(client_operation_id) WHERE client_operation_id IS NOT NULL";
             await operationIndex.ExecuteNonQueryAsync(ct);

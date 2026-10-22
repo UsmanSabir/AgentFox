@@ -1,0 +1,39 @@
+name: PR tests
+
+on:
+  pull_request:
+    branches: [dev, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  trading:
+    name: Core, channels and trading UI
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: src/Plugins/TradingAgent/ui/package-lock.json
+      - name: Trading UI
+        working-directory: src/Plugins/TradingAgent/ui
+        run: |
+          npm ci
+          npm run check
+          npm run build
+      - name: Core and channel tests
+        run: |
+          dotnet build tests/AgentFox.ChannelTests -nologo -v q
+          ./tests/AgentFox.ChannelTests/bin/Debug/net10.0/AgentFox.ChannelTests

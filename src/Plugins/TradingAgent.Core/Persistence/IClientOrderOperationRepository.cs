@@ -14,8 +14,17 @@ public interface IClientOrderOperationRepository
         string effectiveRequestJson, string policyVersion, CancellationToken ct = default);
 }
 
+/// <summary>Optional typed action claims sharing the order ledger's unique request-ID namespace.
+/// Implementations must refuse another kind even when its caller supplies the same fingerprint.</summary>
+public interface IClientActionOperationRepository : IClientOrderOperationRepository
+{
+    Task<ClientOrderOperationClaim> TryBeginClientActionOperationAsync(string kind, string requestId,
+        string requestHash, string requestJson, string policyVersion, CancellationToken ct = default);
+}
+
 public sealed record ClientOrderOperation(string RequestId, string RequestHash, string ExecutionId,
-    string State, string PolicyVersion, string? ResultJson, DateTime CreatedUtc, DateTime UpdatedUtc, DateTime ExpiresUtc);
+    string State, string PolicyVersion, string? ResultJson, DateTime CreatedUtc, DateTime UpdatedUtc, DateTime ExpiresUtc,
+    string Kind = "order");
 public sealed record ClientOrderOperationClaim(bool Acquired, bool Conflict, ClientOrderOperation Operation);
 
 /// <summary>
