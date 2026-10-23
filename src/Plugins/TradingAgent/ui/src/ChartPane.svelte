@@ -906,6 +906,7 @@
 </script>
 
 <section class="chart-card">
+  <div class="chart-viewport">
   <header>
     <div class="title">
       <LineChart size={16} />
@@ -1102,14 +1103,16 @@
       {/if}
     </div>
 
-    {#if data}
+  {/if}
+  <!-- Keep live quote detail with the plot so a bounded workspace can reserve its actual height
+       before sizing the canvas. Supporting metrics remain below this first viewport. -->
+  {#if data && quoteDetail && symbol}
+    <div class="quote-detail"><svelte:component this={quoteDetail} {symbol} /></div>
+  {/if}
+  </div>
+
+    {#if symbol && data}
       <div class="readout">
-        <!-- Above the chart's own metrics because it is the only row here that is a live tape: it
-             changes while the rest of the readout holds still, and burying a moving number under
-             static ones is how it stops being read. -->
-        {#if quoteDetail && symbol}
-          <svelte:component this={quoteDetail} {symbol} />
-        {/if}
         {#if chartError}
           <p class="inline-error">Chart refresh failed; showing the last successful data. {chartError}
             <button class="retry" on:click={() => load(true)}>Retry</button>
@@ -1228,7 +1231,6 @@
         {/if}
       </div>
     {/if}
-  {/if}
 </section>
 
 <style>
@@ -1239,6 +1241,8 @@
     background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
     padding: 1rem; display: flex; flex-direction: column; gap: .75rem; min-width: 0;
   }
+  .chart-viewport { display:flex; flex-direction:column; gap:.75rem; min-width:0; }
+  .quote-detail:empty { display:none; }
   header { display:flex; justify-content:space-between; align-items:flex-start; gap:1rem; flex-wrap:wrap; }
   .title { display:flex; gap:.6rem; align-items:flex-start; color:var(--primary); min-width:0; }
   .title div { display:flex; flex-direction:column; gap:.2rem; min-width:0; }
