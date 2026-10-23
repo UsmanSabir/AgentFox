@@ -1103,12 +1103,12 @@
   .workspace-dock :global([data-workspace-panel='watchlist'] .search-row) { flex-basis:100%; }
   .workspace-dock :global([data-workspace-panel='chart']) { container-type:size; }
   .workspace-dock :global([data-workspace-panel='chart'] .chart-card) { border:0; border-radius:0; padding:0; }
-  /* Reserve the actual wrapped header and quote-detail heights. A fixed subtraction pushed the
-     bid/ask strip below the fold whenever the controls wrapped. Other readings scroll below. */
-  .workspace-dock :global([data-workspace-panel='chart'] .chart-viewport) { height:100cqh; }
+  /* Fill the panel while collapsed, but grow with expanded quote detail. A fixed height lets a
+     populated depth book overflow into the metrics that follow this section. */
+  .workspace-dock :global([data-workspace-panel='chart'] .chart-viewport) { min-height:100cqh; }
   .workspace-dock :global([data-workspace-panel='chart'] .chart-viewport > :not(.plot-frame)) { flex-shrink:0; }
-  .workspace-dock :global([data-workspace-panel='chart'] .plot-frame) { flex:1 1 0; min-height:200px; }
-  .workspace-dock :global([data-workspace-panel='chart'] .plot) { height:100%; }
+  .workspace-dock :global([data-workspace-panel='chart'] .plot-frame) { flex:1 0 200px; min-height:200px; }
+  .workspace-dock :global([data-workspace-panel='chart'] .plot-frame .plot) { position:absolute; inset:0; height:100%; }
   .workspace-dock :global(.dv-tab) { font-size:.7rem; }
   .workspace-dock :global(.group-actions) { display:flex; align-items:center; }
   .workspace-dock :global(.group-control) { align-self:center; display:inline-flex; align-items:center; justify-content:center; cursor:pointer; margin:0 .05rem; min-width:26px; min-height:26px; padding:.25rem; border:1px solid transparent; border-radius:3px; background:transparent; color:var(--text-2); font-size:.65rem; transition:color 150ms ease,background-color 150ms ease; }
