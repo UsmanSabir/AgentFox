@@ -910,7 +910,7 @@
   <header>
     <div class="title">
       <LineChart size={16} />
-      <div>
+      <div class="instrument-summary">
         <div class="instrument">
           <b>{symbol ?? 'Chart'}</b>
           {#if companyName}<strong>{companyName}</strong>{/if}
@@ -937,10 +937,6 @@
               <span title="Day low">L <strong>{dayLow?.toFixed(2) ?? '—'}</strong></span>
               <span title="Day high">H <strong>{dayHigh?.toFixed(2) ?? '—'}</strong></span>
             </span>
-            <span>{data.snapshot.setup} · {data.barsAnalyzed} bars · as of {data.snapshot.asOf}</span>
-            {#if data.usesLiveBar}
-              <em title="The exchange is open and this candle is still forming">live candle</em>
-            {/if}
           </div>
         {:else}
           <span>Candles, support/resistance, and indicators</span>
@@ -1001,6 +997,14 @@
         >
           {#if expanded}<Minimize2 size={13} />{:else}<Maximize2 size={13} />{/if}
         </button>
+      {/if}
+      {#if data}
+        <span class="chart-context">
+          <span>{data.snapshot.setup} · {data.barsAnalyzed} bars · as of {data.snapshot.asOf}</span>
+          {#if data.usesLiveBar}
+            <em title="The exchange is open and this candle is still forming">live candle</em>
+          {/if}
+        </span>
       {/if}
     </div>
   </header>
@@ -1241,16 +1245,16 @@
     background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
     padding: 1rem; display: flex; flex-direction: column; gap: .75rem; min-width: 0;
   }
-  .chart-viewport { display:flex; flex-direction:column; gap:.75rem; min-width:0; }
+  .chart-viewport { display:flex; flex-direction:column; gap:.4rem; min-width:0; }
   .quote-detail:empty { display:none; }
-  header { display:flex; justify-content:space-between; align-items:flex-start; gap:1rem; flex-wrap:wrap; }
-  .title { display:flex; gap:.6rem; align-items:flex-start; color:var(--primary); min-width:0; }
+  header { display:flex; flex-direction:column; gap:.4rem; }
+  .title { display:flex; gap:.6rem; align-items:flex-start; color:var(--primary); min-width:0; width:100%; }
   .title div { display:flex; flex-direction:column; gap:.2rem; min-width:0; }
+  .title .instrument-summary { flex-direction:row; align-items:center; flex-wrap:wrap; gap:.3rem .8rem; }
   .title .instrument { flex-direction:row; align-items:baseline; gap:.45rem; flex-wrap:wrap; }
   .title b { color:var(--text); font-size:.9rem; font-family:ui-monospace, monospace; }
   .title .instrument strong { color:var(--text-2); font-size:.72rem; font-weight:500; }
   .title span { color:var(--text-3); font-size:.72rem; }
-  .title em { color:var(--warning); font-style:normal; }
   .title .quote-line {
     display:flex; flex-direction:row; align-items:center; gap:.42rem; flex-wrap:wrap;
     font-variant-numeric:tabular-nums;
@@ -1266,7 +1270,10 @@
   .day-range { display:inline-flex; gap:.55rem; white-space:nowrap; }
   .title .day-range strong { color:var(--text); font-size:.72rem; font-weight:650; }
 
-  .head-actions { display:flex; align-items:center; gap:.5rem; flex-wrap:wrap; }
+  .head-actions { display:flex; align-items:center; gap:.4rem; flex-wrap:wrap; width:100%; }
+  .chart-context { display:flex; align-items:center; gap:.45rem; flex-wrap:wrap; margin-left:auto;
+    color:var(--text-3); font-size:.65rem; }
+  .chart-context em { color:var(--warning); font-style:normal; }
   .intervals { display:flex; padding:2px; border:1px solid var(--border-md); border-radius:8px; background:var(--surface-2); }
   .intervals button {
     border:0; border-radius:5px; padding:.25rem .5rem; background:transparent;
