@@ -19,7 +19,7 @@ public sealed partial class SqliteTradingRepository : IClientActionOperationRepo
         Begin("order", requestId, requestHash, effectiveRequestJson, policyVersion, ct);
 
     public Task<ClientOrderOperationClaim> TryBeginClientActionOperationAsync(string kind, string requestId, string requestHash,
-        string requestJson, string policyVersion, CancellationToken ct = default) => kind is "cancel"
+        string requestJson, string policyVersion, CancellationToken ct = default) => kind is "cancel" or "modify"
             ? Begin(kind, requestId, requestHash, requestJson, policyVersion, ct)
             : throw new ArgumentException("Unsupported client action.", nameof(kind));
 
@@ -68,13 +68,13 @@ public sealed partial class SqliteTradingRepository : IClientActionOperationRepo
         var command = connection.CreateCommand(); command.Transaction = transaction;
         command.CommandText = """
             SELECT client_operation_id, client_request_hash, execution_id, state, policy_version, result_json,
-                   created_utc, updated_utc, client_operation_expires_utc, client_operation_kind
+                   created_utc, updated_utc, client_operation_expires_utc, client_operation_kind, request_json
             FROM trading_executions WHERE client_operation_id = $operation
             """;
         command.Parameters.AddWithValue("$operation", requestId);
         await using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct)) return null;
         return new(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4),
-            reader.IsDBNull(5) ? null : reader.GetString(5), ParseUtc(reader.GetString(6)), ParseUtc(reader.GetString(7)), ParseUtc(reader.GetString(8)), reader.GetString(9));
+            reader.IsDBNull(5) ? null : reader.GetString(5), ParseUtc(reader.GetString(6)), ParseUtc(reader.GetString(7)), ParseUtc(reader.GetString(8)), reader.GetString(9), reader.GetString(10));
     }
 }

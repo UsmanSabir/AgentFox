@@ -283,6 +283,7 @@ public sealed class TradingAgentRuntime
         // the broker reader and the persistent worker without adding an edge to any worker's graph.
         services.AddSingleton<WorkingOrderCancellationService>();
         services.AddSingleton<ClientCancellationService>();
+        services.AddSingleton<ClientModificationService>();
         // Registered last so its participant enumeration includes every core worker above and any
         // edition-specific participant added after AddCore returns.
         services.AddSingleton<MarketSessionOpenCoordinator>();
