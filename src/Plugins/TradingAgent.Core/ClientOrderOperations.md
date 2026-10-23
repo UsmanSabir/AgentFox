@@ -91,3 +91,11 @@ orders use placed / not_placed, cancellations use cancelled / not_cancelled / fi
 remain intact. Wrong-kind resolutions fail; a resolved cancellation cannot become a placed order.
 The trading UI exposes matching labels. Submitting records never become permission to retry; they
 require operator investigation. No market-time or age rule silently clears uncertainty.
+
+## Reviewed modification parent
+
+`ClientModificationService.CancelOriginalAsync` claims a typed `modify` parent in the same request-ID namespace before its authorized caller can attempt cancellation. The caller supplies server-reviewed terms, verified scope and actor; these are fingerprinted before IO, never accepted as approval authority. The callback must use the existing ownership-aware cancellation path. Parent replay/restart only returns the recorded state, including when cancellation failed or its reply/result write was lost.
+
+Deterministic cancellation/replacement child IDs retain the parent's original 24-hour new-claim deadline. A cancelled parent is labelled `cancelled-awaiting-review`, with executed=false: it is neither a placed replacement nor a fill. This service never calls order execution. Replacement still requires a separately confirmed exact child order, current Core policy/risk/approval, confirmed original cancellation and complete fresh post-cancellation fill reconciliation. Gone/unknown/manual-resolution states do not establish that permission.
+
+The existing execution row holds <=16 KiB of parent binding (review terms <=12 KiB), no new table or worker. Existing client-operation expiry and execution retention apply; uncertain rows retain the explicit-reconciliation posture. Repository lookups now include server-only RequestJson for rebuilding a review after restart. HTTP projections must continue to omit request/result JSON, scope, actor, raw references and fingerprints. No new HTTP endpoint or live action is introduced by this Core seam.

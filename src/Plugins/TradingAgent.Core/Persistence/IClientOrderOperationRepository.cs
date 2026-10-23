@@ -24,7 +24,7 @@ public interface IClientActionOperationRepository : IClientOrderOperationReposit
 
 public sealed record ClientOrderOperation(string RequestId, string RequestHash, string ExecutionId,
     string State, string PolicyVersion, string? ResultJson, DateTime CreatedUtc, DateTime UpdatedUtc, DateTime ExpiresUtc,
-    string Kind = "order");
+    string Kind = "order", string? RequestJson = null);
 public sealed record ClientOrderOperationClaim(bool Acquired, bool Conflict, ClientOrderOperation Operation);
 
 /// <summary>
