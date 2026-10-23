@@ -63,6 +63,10 @@
   $: livePriceView = $livePriceStore;
   $: displayedPrice = livePriceView.quote?.current ?? data?.snapshot.close ?? null;
   $: displayedChange = livePriceView.quote?.changePercent ?? data?.snapshot.dayChangePercent ?? null;
+  // Session extremes come from the same quote as the headline price, regardless of chart interval.
+  // A historical or intraday candle's range would answer a different question; absent quotes stay unknown.
+  $: dayHigh = livePriceView.quote?.high ?? null;
+  $: dayLow = livePriceView.quote?.low ?? null;
 
   /**
    * How much level detail to draw. Six labelled price lines plus the axis chips is more than a small
@@ -928,6 +932,10 @@
               class:negative={(displayedChange ?? 0) < 0}>
               {pct(displayedChange)}
             </span>
+            <span class="day-range" title={livePriceView.quote ? `${livePriceLabel(livePriceView)} · session high and low` : 'Session high and low unavailable'}>
+              <span title="Day low">L <strong>{dayLow?.toFixed(2) ?? '—'}</strong></span>
+              <span title="Day high">H <strong>{dayHigh?.toFixed(2) ?? '—'}</strong></span>
+            </span>
             <span>{data.snapshot.setup} · {data.barsAnalyzed} bars · as of {data.snapshot.asOf}</span>
             {#if data.usesLiveBar}
               <em title="The exchange is open and this candle is still forming">live candle</em>
@@ -1251,6 +1259,8 @@
   .title .price-readout strong { color:var(--text); font-size:1rem; font-weight:750; line-height:1; }
   .quote-line .positive { color:var(--success); font-weight:700; }
   .quote-line .negative { color:var(--danger); font-weight:700; }
+  .day-range { display:inline-flex; gap:.55rem; white-space:nowrap; }
+  .title .day-range strong { color:var(--text); font-size:.72rem; font-weight:650; }
 
   .head-actions { display:flex; align-items:center; gap:.5rem; flex-wrap:wrap; }
   .intervals { display:flex; padding:2px; border:1px solid var(--border-md); border-radius:8px; background:var(--surface-2); }
