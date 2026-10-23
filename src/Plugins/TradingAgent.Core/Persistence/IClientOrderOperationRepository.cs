@@ -22,6 +22,15 @@ public interface IClientActionOperationRepository : IClientOrderOperationReposit
         string requestHash, string requestJson, string policyVersion, CancellationToken ct = default);
 }
 
+/// <summary>Optional compare-and-set progress on one accepted modification parent. Implementations
+/// must match kind, state and the exact previous result in the same transaction as the update.
+/// No new claim or broker authority is granted by recording already observed fill evidence.</summary>
+public interface IClientModificationOperationRepository : IClientActionOperationRepository
+{
+    Task<bool> CompareExchangeModificationResultAsync(string requestId, string expectedResultJson,
+        string resultJson, CancellationToken ct = default);
+}
+
 public sealed record ClientOrderOperation(string RequestId, string RequestHash, string ExecutionId,
     string State, string PolicyVersion, string? ResultJson, DateTime CreatedUtc, DateTime UpdatedUtc, DateTime ExpiresUtc,
     string Kind = "order", string? RequestJson = null);

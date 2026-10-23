@@ -103,4 +103,41 @@ public sealed class ClientModificationTests
         Assert.AreEqual("unconfirmed", (await Run(new(Repository()), id, (_, _) => throw new AssertFailedException())).CancellationOutcome);
         Assert.IsFalse((await Repository().FindClientOrderOperationAsync(id))!.ResultJson!.Contains("private"));
     }
+
+    [TestMethod]
+    public async Task RecordedPostCancellationFillsSurviveRestartAndCannotDisappearChangeOrBeOverwrittenByOldProgress()
+    {
+        var repo = Repository(); var service = new ClientModificationService(repo); var id = Id(); await Run(service, id, (_, _) => Task.FromResult("cancelled"));
+        var fill = new ClientModificationFillEvidence("fill1_" + new string('a',64), 20, 10, DateTime.UtcNow.AddMinutes(-1), 80);
+        var before = (await repo.FindClientOrderOperationAsync(id))!;
+        var first = await service.RememberPostCancellationFillsAsync(id, [fill]);
+        Assert.AreEqual("cancelled", ClientModificationService.Project(first).CancellationOutcome);
+        var restarted = new ClientModificationService(Repository());
+        Assert.AreEqual(first.ResultJson, (await restarted.RememberPostCancellationFillsAsync(id, [fill])).ResultJson);
+        await Assert.ThrowsAsync<ClientModificationEvidenceException>(() => restarted.RememberPostCancellationFillsAsync(id, []));
+        await Assert.ThrowsAsync<ClientModificationEvidenceException>(() => restarted.RememberPostCancellationFillsAsync(id, [fill with { Quantity = 21 }]));
+        var second = await restarted.RememberPostCancellationFillsAsync(id, [fill, fill with { Id = "fill1_" + new string('b',64), Quantity = 30, RemainingQuantity = 50 }]);
+        Assert.IsFalse(await repo.CompareExchangeModificationResultAsync(id, before.ResultJson!, first.ResultJson!));
+        Assert.AreEqual(second.ResultJson, (await repo.FindClientOrderOperationAsync(id))!.ResultJson);
+    }
+    [TestMethod]
+    public async Task ConcurrentProgressHasOneMonotonicWinnerAndFailureNeverGrantsReplacementPermission()
+    {
+        var repo = Repository(); var id = Id(); var service = new ClientModificationService(repo); await Run(service, id, (_, _) => Task.FromResult("cancelled"));
+        var a = new ClientModificationFillEvidence("fill1_" + new string('a',64), 20, 10, DateTime.UtcNow.AddMinutes(-1), 80);
+        var b = a with { Id = "fill1_" + new string('b',64), Quantity = 30, RemainingQuantity = 50 };
+        var results = await Task.WhenAll(new[] { new[] { a }, new[] { a,b } }.Select(async fills => {
+            try { await new ClientModificationService(Repository()).RememberPostCancellationFillsAsync(id, fills); return true; }
+            catch (ClientModificationEvidenceException) { return false; }
+        }));
+        Assert.IsTrue(results.Any(v => v));
+        using var stored = System.Text.Json.JsonDocument.Parse((await repo.FindClientOrderOperationAsync(id))!.ResultJson!);
+        Assert.AreEqual(2, stored.RootElement.GetProperty("postCancelFills").GetArrayLength());
+        var failedId = Id(); await Run(service, failedId, (_, _) => Task.FromResult("cancelled"));
+        await using var db = new SqliteConnection($"Data Source={Path.Combine(root,"test.db")};Pooling=False"); await db.OpenAsync();
+        var command = db.CreateCommand(); command.CommandText = "CREATE TRIGGER reject_progress BEFORE UPDATE OF result_json ON trading_executions WHEN NEW.state='accepted' BEGIN SELECT RAISE(ABORT,'synthetic'); END;"; await command.ExecuteNonQueryAsync();
+        await Assert.ThrowsAsync<ClientModificationEvidenceException>(() => service.RememberPostCancellationFillsAsync(failedId, [a]));
+        var failed = (await repo.FindClientOrderOperationAsync(failedId))!;
+        Assert.AreEqual("unknown", failed.State); Assert.AreEqual("unconfirmed", ClientModificationService.Project(failed).CancellationOutcome);
+    }
 }

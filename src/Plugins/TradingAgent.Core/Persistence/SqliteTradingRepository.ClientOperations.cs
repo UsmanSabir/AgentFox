@@ -2,7 +2,7 @@ using Microsoft.Data.Sqlite;
 
 namespace TradingAgent.Persistence;
 
-public sealed partial class SqliteTradingRepository : IClientActionOperationRepository
+public sealed partial class SqliteTradingRepository : IClientModificationOperationRepository
 {
     // Nullable columns on trading_executions share that row's retention. Terminal rows cannot be
     // swept before operation expiry; submitting/unknown retain their existing explicit-resolution rule.
@@ -22,6 +22,22 @@ public sealed partial class SqliteTradingRepository : IClientActionOperationRepo
         string requestJson, string policyVersion, CancellationToken ct = default) => kind is "cancel" or "modify"
             ? Begin(kind, requestId, requestHash, requestJson, policyVersion, ct)
             : throw new ArgumentException("Unsupported client action.", nameof(kind));
+
+    public async Task<bool> CompareExchangeModificationResultAsync(string requestId, string expectedResultJson,
+        string resultJson, CancellationToken ct = default)
+    {
+        if (!ClientOrderRequestId.TryGetExpiry(requestId, out _) || expectedResultJson is not { Length: > 0 and <= 16_384 }
+            || resultJson is not { Length: > 0 and <= 16_384 } || System.Text.Encoding.UTF8.GetByteCount(resultJson) > 16_384)
+            throw new ArgumentException("Invalid modification progress.");
+        await EnsureInitializedAsync(ct); await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand(); command.CommandText = """
+            UPDATE trading_executions SET result_json=$result, updated_utc=$now
+            WHERE client_operation_id=$id AND client_operation_kind='modify' AND state='accepted' AND result_json=$expected
+            """;
+        command.Parameters.AddWithValue("$result", resultJson); command.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("O"));
+        command.Parameters.AddWithValue("$id", requestId); command.Parameters.AddWithValue("$expected", expectedResultJson);
+        return await command.ExecuteNonQueryAsync(ct) == 1;
+    }
 
     private async Task<ClientOrderOperationClaim> Begin(string kind, string requestId, string requestHash,
         string effectiveRequestJson, string policyVersion, CancellationToken ct)
