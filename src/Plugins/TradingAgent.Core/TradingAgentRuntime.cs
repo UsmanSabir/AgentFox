@@ -282,6 +282,7 @@ public sealed class TradingAgentRuntime
         // The portfolio's per-row Cancel. Resolved only by endpoints, never by a worker, so it can take
         // the broker reader and the persistent worker without adding an edge to any worker's graph.
         services.AddSingleton<WorkingOrderCancellationService>();
+        services.AddSingleton<ClientCancellationService>();
         // Registered last so its participant enumeration includes every core worker above and any
         // edition-specific participant added after AddCore returns.
         services.AddSingleton<MarketSessionOpenCoordinator>();

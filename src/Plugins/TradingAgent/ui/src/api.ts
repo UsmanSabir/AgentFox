@@ -1286,7 +1286,7 @@ export const trading = {
     post<{ proposalId: string; status: string }>(
       `/trading/proposals/${encodeURIComponent(proposalId)}/reject`, { reason }),
   executions:     (limit = 100) => get<TradingExecution[]>(`/trading/executions?limit=${limit}`),
-  resolveUnknownExecution: (executionId: string, resolution: 'placed' | 'not_placed', note: string) =>
+  resolveUnknownExecution: (executionId: string, resolution: 'placed' | 'not_placed' | 'cancelled' | 'not_cancelled' | 'filled', note: string) =>
     post<{ executionId: string; state: string; resolvedUtc: string }>(
       `/trading/executions/${encodeURIComponent(executionId)}/resolve`, { resolution, note }),
   events:         (limit = 200) => get<TradingEvent[]>(`/trading/events?limit=${limit}`),

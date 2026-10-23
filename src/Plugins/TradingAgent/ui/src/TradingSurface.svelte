@@ -285,6 +285,8 @@
     const result = item.result as { reason?: string } | null | undefined;
     return result?.reason ?? null;
   };
+  const isCancellation = (item: TradingExecution) => !!item.request && typeof item.request === 'object'
+    && 'operationKind' in item.request && item.request.operationKind === 'cancel';
 
   $: unknownExecutions = executions.filter(item => item.state === 'unknown');
 
@@ -304,11 +306,11 @@
     }
   }
 
-  async function resolveUnknown(item: TradingExecution, resolution: 'placed' | 'not_placed') {
+  async function resolveUnknown(item: TradingExecution, resolution: 'placed' | 'not_placed' | 'cancelled' | 'not_cancelled' | 'filled') {
     if (resolvingExecution) return;
-    const outcome = resolution === 'placed'
-      ? 'the broker shows this order or fill'
-      : 'the broker confirms no order was placed';
+    const outcome = { placed: 'the broker shows this order or fill', not_placed: 'the broker confirms no order was placed',
+      cancelled: 'the broker confirms cancellation of the original order', not_cancelled: 'the broker confirms the cancellation did not occur',
+      filled: 'the broker confirms the original order filled' }[resolution];
     if (!confirm(
       `Resolve ${item.executionId}?\n\nChoose this only after checking the broker’s own activity ` +
       `and order book and confirming that ${outcome}. This does not place or retry an order.`
@@ -798,7 +800,7 @@
               {#if unknownExecutions.length}
                 <div class="unknown-help"><AlertTriangle size={14} /><span><b>{unknownExecutions.length} outcome(s) need checking.</b> “Unknown” means submission began but no reliable broker reply came back. Do not repeat the order until the broker activity/order book confirms whether it exists.</span></div>
               {/if}
-              {#each executions as item}<article class="record" class:unknown={item.state === 'unknown'}><header><b>{item.executionId}</b><span class="state">{item.state.replaceAll('_', ' ')}</span></header><div class="meta">{date(item.createdUtc)} · policy {item.policyVersion}</div>{#if executionReason(item)}<p class="reason">{executionReason(item)}</p>{/if}<details class="record-details" open={item.state === 'unknown'}><summary>View execution data</summary><pre>{json(item.result ?? item.request)}</pre></details>{#if item.state === 'unknown'}<div class="record-actions"><button class="btn btn-primary" on:click={() => resolveUnknown(item, 'placed')} disabled={resolvingExecution !== null}>Broker shows order/fill</button><button class="btn btn-ghost" on:click={() => resolveUnknown(item, 'not_placed')} disabled={resolvingExecution !== null}>Broker confirms not placed</button></div>{/if}</article>{:else}<div class="empty">No executions recorded</div>{/each}
+              {#each executions as item}<article class="record" class:unknown={item.state === 'unknown'}><header><b>{item.executionId}</b><span class="state">{item.state.replaceAll('_', ' ')}</span></header><div class="meta">{date(item.createdUtc)} · policy {item.policyVersion}</div>{#if executionReason(item)}<p class="reason">{executionReason(item)}</p>{/if}<details class="record-details" open={item.state === 'unknown'}><summary>View execution data</summary><pre>{json(item.result ?? item.request)}</pre></details>{#if item.state === 'unknown'}<div class="record-actions">{#if isCancellation(item)}<button class="btn btn-primary" on:click={() => resolveUnknown(item, 'cancelled')} disabled={resolvingExecution !== null}>Broker confirms cancellation</button><button class="btn btn-ghost" on:click={() => resolveUnknown(item, 'not_cancelled')} disabled={resolvingExecution !== null}>Broker confirms not cancelled</button><button class="btn btn-ghost" on:click={() => resolveUnknown(item, 'filled')} disabled={resolvingExecution !== null}>Broker confirms order filled</button>{:else}<button class="btn btn-primary" on:click={() => resolveUnknown(item, 'placed')} disabled={resolvingExecution !== null}>Broker shows order/fill</button><button class="btn btn-ghost" on:click={() => resolveUnknown(item, 'not_placed')} disabled={resolvingExecution !== null}>Broker confirms not placed</button>{/if}</div>{/if}</article>{:else}<div class="empty">No executions recorded</div>{/each}
             </div>
           {:else if tab === 'reconciliation'}
             <div class="records">
