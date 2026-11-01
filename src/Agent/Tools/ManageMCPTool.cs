@@ -20,8 +20,8 @@ namespace AgentFox.Tools;
 /// Stdio transport is startup-only (requires a Command path); this tool supports
 /// Http (AutoDetect) and Sse transports for runtime adds.
 ///
-/// A server that signs in with OAuth (auth = oauth) is saved at once and connects when the user approves the
-/// sign-in page this tool returns; 'sign_in' starts that again for a configured server whose sign-in lapsed, and
+/// OAuth is on by default (auth = none opts out). A server that asks for a sign-in is saved at once and connects
+/// when the user approves the sign-in page this tool returns; 'sign_in' starts that again for a configured server whose sign-in lapsed, and
 /// 'complete_sign_in' takes the address a browser on another device landed on.
 /// </summary>
 public class ManageMCPTool : BaseTool
@@ -42,8 +42,8 @@ public class ManageMCPTool : BaseTool
     public override string Description =>
         "Add or remove an external MCP server at runtime without restarting. " +
         "Changes are persisted to appsettings.json under MCP:Servers and take effect immediately. " +
-        "For 'add': provide server_name, url, and optionally transport_mode and headers_json, or auth='oauth' for a " +
-        "server that signs in with OAuth (hosted Stockji agents do): the result is a sign-in link to give the user. " +
+        "For 'add': provide server_name, url, and optionally transport_mode and headers_json. A server that signs in " +
+        "with OAuth (hosted Stockji agents do) answers with a sign-in link to give the user; auth='none' turns that off. " +
         "For 'sign_in': server_name of a configured OAuth server that needs signing in again. " +
         "For 'complete_sign_in': server_name and redirect_url, the full address the user's browser landed on after " +
         "approving, when that browser was on another device. " +
@@ -89,9 +89,9 @@ public class ManageMCPTool : BaseTool
         ["auth"] = new()
         {
             Type        = "string",
-            Description = "For 'add': 'oauth' when the server signs in with OAuth instead of a fixed header. Default 'none'.",
+            Description = "For 'add': 'oauth' (default) signs in when the server asks for it; 'none' never offers a sign-in.",
             Required    = false,
-            EnumValues  = ["none", "oauth"]
+            EnumValues  = ["oauth", "none"]
         },
         ["redirect_url"] = new()
         {
@@ -137,16 +137,17 @@ public class ManageMCPTool : BaseTool
         if (headerError != null)
             return ToolResult.Fail(headerError);
 
-        if (string.Equals(arguments.GetValueOrDefault("auth")?.ToString(), "oauth", StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(arguments.GetValueOrDefault("auth")?.ToString(), "none", StringComparison.OrdinalIgnoreCase))
             return await AddOAuthServerAsync(serverName, url, transportType, headers);
 
-        var connected = await _mcpManager.AddServerAsync(serverName, url, transportType, headers);
+        var connected = await _mcpManager.AddServerAsync(serverName, url, transportType, headers,
+            oauth: new McpOAuthConfig { Enabled = false });
         if (!connected)
             return ToolResult.Fail(
                 $"MCP server '{serverName}' failed to connect. Check the URL and credentials, " +
                 $"or review the server log. Error: {_mcpManager.Failures.GetValueOrDefault(serverName, "unknown")}");
 
-        var persistError = PersistServerAdd(serverName, url, transportType, headers);
+        var persistError = PersistServerAdd(serverName, url, transportType, headers, oauth: false);
         if (persistError != null)
             _logger?.LogWarning("manage_mcp_server add: connected but could not save config — {Error}", persistError);
 
@@ -164,7 +165,8 @@ public class ManageMCPTool : BaseTool
             return ToolResult.Fail("server_name is required for 'remove'");
 
         var actualName = _mcpManager.Servers.Keys.Concat(_mcpManager.AwaitingSignIn)
-            .FirstOrDefault(k => k.Equals(serverName, StringComparison.OrdinalIgnoreCase));
+            .FirstOrDefault(k => k.Equals(serverName, StringComparison.OrdinalIgnoreCase))
+            ?? (_mcpManager.IsOAuthServer(serverName) ? serverName : null);
         if (actualName == null)
         {
             var registered = string.Join(", ", _mcpManager.Servers.Keys);
@@ -188,8 +190,8 @@ public class ManageMCPTool : BaseTool
 
     // ── OAuth ─────────────────────────────────────────────────────────────────
 
-    /// <summary>Saved before the user approves, so a restart remembers the server and reports it as waiting for a
-    /// sign-in rather than forgetting it was asked for.</summary>
+    /// <summary>Connects at once when the server needs no sign-in; otherwise saved before the user approves, so a
+    /// restart remembers the server and reports it as waiting for a sign-in rather than forgetting it was asked for.</summary>
     private async Task<ToolResult> AddOAuthServerAsync(
         string serverName, string url, McpTransportType transportType, Dictionary<string, string>? headers)
     {
@@ -239,7 +241,7 @@ public class ManageMCPTool : BaseTool
     internal static string SignInMessage(string serverName, McpManager.SignInStart started)
     {
         if (started.Connected)
-            return $"MCP server '{serverName}' connected with its stored sign-in.";
+            return $"MCP server '{serverName}' added and connected.";
 
         var how = started.BrowserOpened
             ? "It has been opened in this computer's browser."
@@ -276,7 +278,7 @@ public class ManageMCPTool : BaseTool
         string serverName, string url,
         McpTransportType transportType,
         Dictionary<string, string>? headers,
-        bool oauth = false)
+        bool oauth)
     {
         try
         {
@@ -317,8 +319,7 @@ public class ManageMCPTool : BaseTool
                 transportObj["Headers"] = headersObj;
             }
 
-            if (oauth)
-                transportObj["OAuth"] = new JObject { ["Enabled"] = true };
+            transportObj["OAuth"] = new JObject { ["Enabled"] = oauth };
 
             servers.Add(new JObject
             {
