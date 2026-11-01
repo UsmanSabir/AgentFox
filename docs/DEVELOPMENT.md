@@ -123,6 +123,26 @@ skipped, which is the normal state in a dev checkout. To try anymd locally, put 
 `src/Agent/bin/<config>/net10.0/tools/anymd/anymd(.exe)`. Rules and tests: `MCP/McpLaunch.cs`,
 `McpLaunchTests`.
 
+An HTTP server that signs in with OAuth (the MCP authorization spec: OAuth 2.1, PKCE, dynamic client
+registration) needs no key, only `"OAuth": { "Enabled": true }` in its `Transport`. A hosted Stockji
+agent is one:
+
+```json
+{ "Name": "stockji", "Transport": { "Type": "Http", "Url": "https://<name>.stockji.pk/api/trading/premium/mcp",
+  "OAuth": { "Enabled": true } } }
+```
+
+Or ask the agent: `manage_mcp_server` with `action: add, auth: oauth` returns a sign-in link and opens
+it in this machine's browser. The browser returns to `http://127.0.0.1:33418/callback`
+(`OAuth.RedirectPort` moves it). A browser on another device lands on an address that does not load;
+giving that address back (`complete_sign_in`) finishes the sign-in. Startup never opens a browser: a
+server with no stored sign-in is reported as needing one, and `sign_in` starts it again.
+
+Tokens are kept encrypted in `{workspace}/mcp-auth/` under that folder's own key, so a restart
+refreshes instead of asking again. A file goes when its server is removed (which also signs out),
+when the server is no longer configured, or 180 days after it was last written; swept at startup and
+daily. Rules and tests: `MCP/McpOAuth.cs`, `McpOAuthTests`.
+
 ### Channel Integration
 
 ```csharp

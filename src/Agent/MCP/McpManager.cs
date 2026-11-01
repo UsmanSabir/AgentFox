@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
+using AgentFox.Plugins;
 using Microsoft.Extensions.AI;
+using ModelContextProtocol.Authentication;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
 
@@ -36,6 +38,10 @@ public class McpTransportConfig
     public Dictionary<string, string>? Headers { get; set; }
     /// <summary>Max SSE reconnection attempts (Sse mode only, default 5).</summary>
     public int MaxReconnectionAttempts { get; set; } = 5;
+    /// <summary>Sign in with OAuth instead of a fixed header (Http and Sse). See <see cref="McpOAuthConfig"/>.</summary>
+    public McpOAuthConfig? OAuth { get; set; }
+
+    internal bool UsesOAuth => Type != McpTransportType.Stdio && OAuth is { Enabled: true };
 
     // ── Stdio ─────────────────────────────────────────────────────────────────
     // Command, Arguments, WorkingDirectory and Env values may use {workspace} for the install
@@ -146,6 +152,26 @@ public sealed class McpManager : IAsyncDisposable
 
     private volatile int _version;
 
+    /// <summary>OAuth servers this manager knows, connected or waiting for a sign-in, so a sign-in can be started
+    /// by name and a token file is kept only while its server is configured.</summary>
+    private readonly ConcurrentDictionary<string, McpTransportConfig> _oauthServers
+        = new(StringComparer.OrdinalIgnoreCase);
+
+    private readonly ConcurrentDictionary<string, PendingSignIn> _signIns
+        = new(StringComparer.OrdinalIgnoreCase);
+
+    private readonly McpTokenStore? _tokens;
+
+    /// <summary>How long a started sign-in waits for the user to approve it.</summary>
+    internal static readonly TimeSpan SignInTimeout = TimeSpan.FromMinutes(10);
+
+    public McpManager() { }
+
+    /// <param name="tokenDirectory">Where OAuth servers' tokens are kept, encrypted, so a restart does not ask the
+    /// user to sign in again. Without one, a sign-in lasts until the process ends.</param>
+    public McpManager(string tokenDirectory, IPluginSecretProtector protector)
+        => _tokens = new McpTokenStore(tokenDirectory, protector);
+
     // ── Public surface ────────────────────────────────────────────────────────
 
     /// <summary>
@@ -204,8 +230,143 @@ public sealed class McpManager : IAsyncDisposable
             _failures[config.Name] = ex.Message;
             return Task.FromResult(false);
         }
-        return AddServerCoreAsync(config.Name, transport, ct);
+        if (transport.UsesOAuth)
+        {
+            _oauthServers[config.Name] = transport;
+            // Startup never opens a browser: with no stored sign-in there is nothing to try, and registering a new
+            // client on every start would only litter the authorization server.
+            if (_tokens is null || transport.Url is null || !_tokens.Has(config.Name, transport.Url))
+            {
+                _failures[config.Name] = new McpSignInRequiredException(config.Name).Message;
+                return Task.FromResult(false);
+            }
+        }
+        return AddServerCoreAsync(config.Name, transport, interactive: false, ct);
     }
+
+    /// <summary>OAuth servers configured but not connected — they need the user to sign in.</summary>
+    public IReadOnlyCollection<string> AwaitingSignIn =>
+        _oauthServers.Keys.Where(k => !_servers.ContainsKey(k)).ToList();
+
+    /// <summary>True when <paramref name="name"/> is an OAuth server this manager knows, connected or not.</summary>
+    public bool IsOAuthServer(string name) => _oauthServers.ContainsKey(name);
+
+    // ── OAuth sign-in ─────────────────────────────────────────────────────────
+
+    /// <summary>What starting a sign-in produced: the page the user must approve, or — when a stored sign-in was
+    /// still good — a connection straight away, or the reason it failed.</summary>
+    public sealed record SignInStart(bool Connected, Uri? SignInUrl, bool BrowserOpened, string? CallbackProblem, string? Error);
+
+    private sealed class PendingSignIn
+    {
+        public readonly TaskCompletionSource<(Uri Url, bool Opened, string? Problem)> Page =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly TaskCompletionSource<AuthorizationResult> Pasted =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    /// <summary>
+    /// Starts signing in to an OAuth server and returns as soon as the sign-in page is known, so the caller can pass
+    /// it on; the connection completes in the background once the user approves (within <see cref="SignInTimeout"/>).
+    /// The page opens in this machine's browser when there is one, and the browser returns to a listener on
+    /// 127.0.0.1. A browser on another device lands on an address that does not load: <see cref="CompleteSignIn"/>
+    /// takes that address instead.
+    /// </summary>
+    /// <param name="config">For a new server; omitted, the configured server of that name.</param>
+    public async Task<SignInStart> BeginSignInAsync(string name, McpTransportConfig? config = null, CancellationToken ct = default)
+    {
+        config ??= _oauthServers.GetValueOrDefault(name);
+        if (config is not { UsesOAuth: true, Url: not null })
+            return new(false, null, false, null, $"'{name}' is not an MCP server configured to sign in with OAuth.");
+
+        _oauthServers[name] = config;
+        var pending = new PendingSignIn();
+        if (_signIns.TryRemove(name, out var previous))
+            previous.Pasted.TrySetCanceled();
+        _signIns[name] = pending;
+
+        if (_servers.TryRemove(name, out var stale))
+            await stale.Client.DisposeAsync();
+
+        var connecting = Task.Run(async () =>
+        {
+            try { return await AddServerCoreAsync(name, config, interactive: true, CancellationToken.None); }
+            finally { _signIns.TryRemove(new KeyValuePair<string, PendingSignIn>(name, pending)); }
+        }, CancellationToken.None);
+
+        Task first;
+        try
+        {
+            first = await Task.WhenAny(pending.Page.Task, connecting).WaitAsync(TimeSpan.FromMinutes(1), ct);
+        }
+        catch (TimeoutException)
+        {
+            return new(false, null, false, null, $"'{name}' did not answer within a minute.");
+        }
+        if (first == pending.Page.Task)
+        {
+            var (url, opened, problem) = await pending.Page.Task;
+            return new(false, url, opened, problem, null);
+        }
+        return await connecting
+            ? new(true, null, false, null, null)
+            : new(false, null, false, null, _failures.GetValueOrDefault(name) ?? "connection failed");
+    }
+
+    /// <summary>Finishes a started sign-in with the address the browser landed on, for a browser on another device.</summary>
+    public bool CompleteSignIn(string name, string redirectAddress, out string? error)
+    {
+        error = null;
+        if (!_signIns.TryGetValue(name, out var pending))
+        {
+            error = $"No sign-in to '{name}' is waiting. Start one first.";
+            return false;
+        }
+        if (!Uri.TryCreate(redirectAddress.Trim(), UriKind.Absolute, out var address))
+        {
+            error = "That is not a full address. Copy the whole address from the browser's address bar.";
+            return false;
+        }
+        try
+        {
+            pending.Pasted.TrySetResult(McpLoopbackCallback.Parse(address));
+            return true;
+        }
+        catch (McpSignInDeclinedException ex)
+        {
+            error = ex.Message;
+            return false;
+        }
+    }
+
+    private Func<AuthorizationCallbackContext, CancellationToken, Task<AuthorizationResult>> AuthorizationHandler(
+        string name, McpOAuthConfig oauth, bool interactive) => async (context, ct) =>
+    {
+        if (!interactive || !_signIns.TryGetValue(name, out var pending))
+            throw new McpSignInRequiredException(name);
+
+        using var callback = McpLoopbackCallback.TryListen(oauth.RedirectUri, out var problem);
+        var opened = callback is not null && McpBrowser.TryOpen(context.AuthorizationUri);
+        pending.Page.TrySetResult((context.AuthorizationUri, opened, problem));
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(SignInTimeout);
+        var waits = new List<Task<AuthorizationResult>> { pending.Pasted.Task.WaitAsync(timeout.Token) };
+        if (callback is not null) waits.Add(callback.WaitAsync(timeout.Token));
+        var done = await Task.WhenAny(waits);
+        try
+        {
+            return await done;
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            throw new TimeoutException($"Nobody approved the sign-in to '{name}' within {SignInTimeout.TotalMinutes:0} minutes.");
+        }
+        finally
+        {
+            timeout.Cancel();
+        }
+    };
 
     // ── Cache retention ───────────────────────────────────────────────────────
 
@@ -225,7 +386,7 @@ public sealed class McpManager : IAsyncDisposable
                           Dir: McpLaunch.Expand(s.CacheDirectory!, AppContext.BaseDirectory),
                           Days: s.CacheRetentionDays))
             .ToList();
-        if (caches.Count == 0) return;
+        if (caches.Count == 0 && _tokens is null) return;
 
         _cacheSweep?.Dispose();
         _cacheSweep = new Timer(_ =>
@@ -235,6 +396,8 @@ public sealed class McpManager : IAsyncDisposable
                 var deleted = McpLaunch.SweepCache(dir, days, DateTime.UtcNow);
                 if (deleted > 0) onSwept?.Invoke(name, deleted);
             }
+            var signIns = _tokens?.Sweep(_oauthServers.Keys, DateTime.UtcNow) ?? 0;
+            if (signIns > 0) onSwept?.Invoke("OAuth sign-ins", signIns);
         }, null, TimeSpan.Zero, TimeSpan.FromDays(1));
     }
 
@@ -253,11 +416,18 @@ public sealed class McpManager : IAsyncDisposable
             Type = transportType,
             Url = url,
             Headers = headers
-        }, ct);
+        }, interactive: false, ct);
 
-    /// <summary>Disconnects a server and removes all its tools.</summary>
+    /// <summary>Disconnects a server and removes all its tools. An OAuth server is also signed out: its stored
+    /// tokens are deleted and any sign-in still waiting is abandoned.</summary>
     public async Task RemoveServerAsync(string name, CancellationToken ct = default)
     {
+        if (_oauthServers.TryRemove(name, out _))
+        {
+            if (_signIns.TryRemove(name, out var pending)) pending.Pasted.TrySetCanceled();
+            _tokens?.Delete(name);
+            _failures.TryRemove(name, out _);
+        }
         if (_servers.TryRemove(name, out var entry))
         {
             await entry.Client.DisposeAsync();
@@ -290,12 +460,14 @@ public sealed class McpManager : IAsyncDisposable
 
     // ── Core implementation ───────────────────────────────────────────────────
 
+    /// <param name="interactive">True only for a sign-in the user started: an OAuth server may then show its sign-in
+    /// page. Otherwise a missing or refused sign-in fails the connection instead.</param>
     private async Task<bool> AddServerCoreAsync(
-        string name, McpTransportConfig config, CancellationToken ct)
+        string name, McpTransportConfig config, bool interactive, CancellationToken ct)
     {
         try
         {
-            IClientTransport transport = CreateTransport(config);
+            IClientTransport transport = CreateTransport(name, config, interactive);
             var client = await McpClient.CreateAsync(transport, cancellationToken: ct);
             var tools = (await client.ListToolsAsync(cancellationToken: ct)).ToList();
 
@@ -322,12 +494,32 @@ public sealed class McpManager : IAsyncDisposable
         }
         catch (Exception ex)
         {
-            _failures[name] = ex.Message;
+            // The SDK wraps what the authorization handler threw; the user needs the sign-in sentence, not the wrapper.
+            var cause = ex;
+            for (var e = ex; e is not null; e = e.InnerException)
+                if (e is McpSignInRequiredException or McpSignInDeclinedException or TimeoutException) { cause = e; break; }
+            _failures[name] = cause.Message;
             return false;
         }
     }
 
-    private static IClientTransport CreateTransport(McpTransportConfig config) =>
+    private ClientOAuthOptions? OAuthOptions(string name, McpTransportConfig config, bool interactive) =>
+        config is { UsesOAuth: true, OAuth: { } oauth, Url: { } url }
+            ? new ClientOAuthOptions
+            {
+                RedirectUri = oauth.RedirectUri,
+                ClientId = string.IsNullOrWhiteSpace(oauth.ClientId) ? null : oauth.ClientId,
+                Scopes = oauth.Scopes,
+                DynamicClientRegistration = new DynamicClientRegistrationOptions
+                {
+                    ClientName = string.IsNullOrWhiteSpace(oauth.ClientName) ? "AgentFox" : oauth.ClientName
+                },
+                AuthorizationCallbackHandler = AuthorizationHandler(name, oauth, interactive),
+                TokenCache = _tokens?.CacheFor(name, url)
+            }
+            : null;
+
+    private IClientTransport CreateTransport(string name, McpTransportConfig config, bool interactive) =>
         config.Type switch
         {
             McpTransportType.Stdio => new StdioClientTransport(new StdioClientTransportOptions
@@ -349,6 +541,7 @@ public sealed class McpManager : IAsyncDisposable
                                             "SSE transport requires 'Url' to be set")),
                 TransportMode = HttpTransportMode.Sse,
                 AdditionalHeaders = config.Headers,
+                OAuth = OAuthOptions(name, config, interactive),
                 MaxReconnectionAttempts = config.MaxReconnectionAttempts,
                 //ConnectionTimeout = TimeSpan.FromSeconds(config.TimeoutSeconds)
             }),
@@ -361,6 +554,7 @@ public sealed class McpManager : IAsyncDisposable
                                         "Http transport requires 'Url' to be set")),
                 TransportMode = HttpTransportMode.AutoDetect,
                 AdditionalHeaders = config.Headers,
+                OAuth = OAuthOptions(name, config, interactive),
                 //ConnectionTimeout = TimeSpan.FromSeconds(config.TimeoutSeconds)
             })
         };
