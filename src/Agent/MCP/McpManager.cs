@@ -38,10 +38,11 @@ public class McpTransportConfig
     public Dictionary<string, string>? Headers { get; set; }
     /// <summary>Max SSE reconnection attempts (Sse mode only, default 5).</summary>
     public int MaxReconnectionAttempts { get; set; } = 5;
-    /// <summary>Sign in with OAuth instead of a fixed header (Http and Sse). See <see cref="McpOAuthConfig"/>.</summary>
+    /// <summary>OAuth sign-in (Http and Sse). On unless set <c>"Enabled": false</c>: it engages only when the server
+    /// answers 401 with OAuth metadata, so a server reached by a fixed header is unaffected. See <see cref="McpOAuthConfig"/>.</summary>
     public McpOAuthConfig? OAuth { get; set; }
 
-    internal bool UsesOAuth => Type != McpTransportType.Stdio && OAuth is { Enabled: true };
+    internal bool UsesOAuth => Type != McpTransportType.Stdio && OAuth?.Enabled != false;
 
     // ── Stdio ─────────────────────────────────────────────────────────────────
     // Command, Arguments, WorkingDirectory and Env values may use {workspace} for the install
@@ -152,10 +153,19 @@ public sealed class McpManager : IAsyncDisposable
 
     private volatile int _version;
 
-    /// <summary>OAuth servers this manager knows, connected or waiting for a sign-in, so a sign-in can be started
-    /// by name and a token file is kept only while its server is configured.</summary>
+    /// <summary>Servers that may sign in with OAuth (every HTTP server unless opted out), connected or not, so a
+    /// sign-in can be started by name and a token file is kept only while its server is configured.</summary>
     private readonly ConcurrentDictionary<string, McpTransportConfig> _oauthServers
         = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Servers whose last connection stopped at "sign in first".</summary>
+    private readonly ConcurrentDictionary<string, byte> _needsSignIn
+        = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The client id a connection nobody asked to sign in presents when it holds no sign-in. It is never
+    /// registered: it stops the SDK registering a new client on every start, only to be refused at the sign-in page
+    /// it may not open anyway.</summary>
+    internal const string UnregisteredClientId = "agentfox-unregistered";
 
     private readonly ConcurrentDictionary<string, PendingSignIn> _signIns
         = new(StringComparer.OrdinalIgnoreCase);
@@ -230,25 +240,17 @@ public sealed class McpManager : IAsyncDisposable
             _failures[config.Name] = ex.Message;
             return Task.FromResult(false);
         }
+        // Startup never opens a browser: a server that asks for a sign-in is reported as needing one.
         if (transport.UsesOAuth)
-        {
             _oauthServers[config.Name] = transport;
-            // Startup never opens a browser: with no stored sign-in there is nothing to try, and registering a new
-            // client on every start would only litter the authorization server.
-            if (_tokens is null || transport.Url is null || !_tokens.Has(config.Name, transport.Url))
-            {
-                _failures[config.Name] = new McpSignInRequiredException(config.Name).Message;
-                return Task.FromResult(false);
-            }
-        }
         return AddServerCoreAsync(config.Name, transport, interactive: false, ct);
     }
 
-    /// <summary>OAuth servers configured but not connected — they need the user to sign in.</summary>
+    /// <summary>Servers that asked for a sign-in nobody has given yet.</summary>
     public IReadOnlyCollection<string> AwaitingSignIn =>
-        _oauthServers.Keys.Where(k => !_servers.ContainsKey(k)).ToList();
+        _needsSignIn.Keys.Where(k => !_servers.ContainsKey(k)).ToList();
 
-    /// <summary>True when <paramref name="name"/> is an OAuth server this manager knows, connected or not.</summary>
+    /// <summary>True when <paramref name="name"/> is a server that may sign in with OAuth, connected or not.</summary>
     public bool IsOAuthServer(string name) => _oauthServers.ContainsKey(name);
 
     // ── OAuth sign-in ─────────────────────────────────────────────────────────
@@ -410,18 +412,19 @@ public sealed class McpManager : IAsyncDisposable
         string url,
         McpTransportType transportType = McpTransportType.Http,
         Dictionary<string, string>? headers = null,
-        CancellationToken ct = default)
-        => AddServerCoreAsync(name, new McpTransportConfig
-        {
-            Type = transportType,
-            Url = url,
-            Headers = headers
-        }, interactive: false, ct);
+        CancellationToken ct = default,
+        McpOAuthConfig? oauth = null)
+    {
+        var config = new McpTransportConfig { Type = transportType, Url = url, Headers = headers, OAuth = oauth };
+        if (config.UsesOAuth) _oauthServers[name] = config;
+        return AddServerCoreAsync(name, config, interactive: false, ct);
+    }
 
     /// <summary>Disconnects a server and removes all its tools. An OAuth server is also signed out: its stored
     /// tokens are deleted and any sign-in still waiting is abandoned.</summary>
     public async Task RemoveServerAsync(string name, CancellationToken ct = default)
     {
+        _needsSignIn.TryRemove(name, out _);
         if (_oauthServers.TryRemove(name, out _))
         {
             if (_signIns.TryRemove(name, out var pending)) pending.Pasted.TrySetCanceled();
@@ -488,6 +491,7 @@ public sealed class McpManager : IAsyncDisposable
 
             _servers[name] = new ServerEntry(client, tools, config.Type, displayUrl);
             _failures.TryRemove(name, out _);
+            _needsSignIn.TryRemove(name, out _);
             BumpVersion();
             await RaiseToolsChanged();
             return true;
@@ -499,16 +503,19 @@ public sealed class McpManager : IAsyncDisposable
             for (var e = ex; e is not null; e = e.InnerException)
                 if (e is McpSignInRequiredException or McpSignInDeclinedException or TimeoutException) { cause = e; break; }
             _failures[name] = cause.Message;
+            if (cause is McpSignInRequiredException) _needsSignIn[name] = 0;
             return false;
         }
     }
 
     private ClientOAuthOptions? OAuthOptions(string name, McpTransportConfig config, bool interactive) =>
-        config is { UsesOAuth: true, OAuth: { } oauth, Url: { } url }
+        config is { UsesOAuth: true, Url: { } url } && (config.OAuth ?? new McpOAuthConfig()) is var oauth
             ? new ClientOAuthOptions
             {
                 RedirectUri = oauth.RedirectUri,
-                ClientId = string.IsNullOrWhiteSpace(oauth.ClientId) ? null : oauth.ClientId,
+                ClientId = !string.IsNullOrWhiteSpace(oauth.ClientId) ? oauth.ClientId
+                    : !interactive && _tokens?.Has(name, url) != true ? UnregisteredClientId
+                    : null,
                 Scopes = oauth.Scopes,
                 DynamicClientRegistration = new DynamicClientRegistrationOptions
                 {

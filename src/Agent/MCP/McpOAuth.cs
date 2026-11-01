@@ -11,14 +11,15 @@ namespace AgentFox.MCP;
 
 /// <summary>
 /// OAuth sign-in for one HTTP MCP server, as the MCP authorization spec defines it (OAuth 2.1 with PKCE, dynamic
-/// client registration). A server that advertises its own authorization server — a hosted Stockji agent does — needs
-/// only <c>"OAuth": { "Enabled": true }</c>; the SDK discovers the rest from the server's 401.
+/// client registration). On by default for every HTTP server: it engages only when the server answers 401 with OAuth
+/// metadata — a hosted Stockji agent does — and the SDK discovers the rest from that answer. A server that must never
+/// be offered a sign-in sets <c>"OAuth": { "Enabled": false }</c>.
 /// </summary>
 public class McpOAuthConfig
 {
     public const int DefaultRedirectPort = 33418;
 
-    public bool Enabled { get; set; }
+    public bool Enabled { get; set; } = true;
 
     /// <summary>A client id issued in advance. Left empty, AgentFox registers itself (RFC 7591).</summary>
     public string? ClientId { get; set; }

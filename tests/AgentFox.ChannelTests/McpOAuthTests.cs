@@ -2,6 +2,10 @@ using System.Net;
 using System.Net.Sockets;
 using AgentFox.MCP;
 using AgentFox.Plugins;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using ModelContextProtocol.Authentication;
 
@@ -179,14 +183,75 @@ public sealed class McpOAuthTests
     };
 
     [TestMethod]
-    public async Task Startup_with_no_stored_sign_in_reports_it_and_contacts_nothing()
+    public void OAuth_is_on_unless_a_server_opts_out_and_never_for_stdio()
     {
+        Assert.IsTrue(new McpTransportConfig { Url = Url }.UsesOAuth);
+        Assert.IsTrue(new McpOAuthConfig().Enabled);
+        Assert.IsFalse(new McpTransportConfig { Url = Url, OAuth = new McpOAuthConfig { Enabled = false } }.UsesOAuth);
+        Assert.IsFalse(new McpTransportConfig { Type = McpTransportType.Stdio, Command = "x" }.UsesOAuth);
+    }
+
+    [TestMethod]
+    public async Task Startup_reports_a_server_that_asks_for_a_sign_in_and_registers_nothing()
+    {
+        await using var server = await FakeOAuthServer.StartAsync();
         await using var manager = new McpManager(_dir, Protector());
 
-        Assert.IsFalse(await manager.AddServerAsync(OAuthServer("stockji")));
+        Assert.IsFalse(await manager.AddServerAsync(new McpServerConfig
+        {
+            Name = "stockji", Transport = new McpTransportConfig { Url = server.McpUrl }
+        }));
+
         StringAssert.Contains(manager.Failures["stockji"], "Not signed in");
         CollectionAssert.AreEqual(new[] { "stockji" }, manager.AwaitingSignIn.ToArray());
-        Assert.IsTrue(manager.IsOAuthServer("STOCKJI"));
+        Assert.AreEqual(0, server.Registrations, "a start nobody asked to sign in must not register a client");
+    }
+
+    [TestMethod]
+    public async Task A_sign_in_the_user_starts_registers_once_and_returns_the_consent_page()
+    {
+        await using var server = await FakeOAuthServer.StartAsync();
+        await using var manager = new McpManager(_dir, Protector());
+        var holder = new TcpListener(IPAddress.Loopback, 0); // taken: no listener, so no browser either
+        holder.Start();
+        try
+        {
+            var port = ((IPEndPoint)holder.LocalEndpoint).Port;
+            var started = await manager.BeginSignInAsync("stockji", new McpTransportConfig
+            {
+                Url = server.McpUrl, OAuth = new McpOAuthConfig { RedirectPort = port }
+            });
+
+            Assert.IsNull(started.Error, started.Error);
+            StringAssert.StartsWith(started.SignInUrl?.AbsoluteUri, server.Base + "/authorize?");
+            StringAssert.Contains(started.SignInUrl?.Query, "code_challenge_method=S256");
+            Assert.IsFalse(started.BrowserOpened);
+            StringAssert.Contains(started.CallbackProblem, port.ToString());
+            Assert.AreEqual(1, server.Registrations);
+        }
+        finally
+        {
+            holder.Stop();
+            await manager.RemoveServerAsync("stockji");
+        }
+    }
+
+    [TestMethod]
+    public async Task A_server_that_opted_out_is_never_offered_a_sign_in()
+    {
+        await using var server = await FakeOAuthServer.StartAsync();
+        await using var manager = new McpManager(_dir, Protector());
+
+        Assert.IsFalse(await manager.AddServerAsync(new McpServerConfig
+        {
+            Name = "keyed",
+            Transport = new McpTransportConfig { Url = server.McpUrl, OAuth = new McpOAuthConfig { Enabled = false } }
+        }));
+
+        Assert.IsFalse(manager.Failures["keyed"].Contains("Not signed in"));
+        Assert.AreEqual(0, manager.AwaitingSignIn.Count);
+        Assert.AreEqual(0, server.Registrations);
+        StringAssert.Contains((await manager.BeginSignInAsync("keyed")).Error, "not an MCP server configured");
     }
 
     [TestMethod]
@@ -214,6 +279,67 @@ public sealed class McpOAuthTests
 
         Assert.IsFalse(manager.CompleteSignIn("nothing", "http://127.0.0.1:33418/callback?code=x", out var error));
         StringAssert.Contains(error, "No sign-in");
+    }
+
+    /// <summary>An MCP endpoint that answers every request 401 and advertises an authorization server, as a hosted
+    /// Stockji agent does; it counts client registrations.</summary>
+    private sealed class FakeOAuthServer : IAsyncDisposable
+    {
+        private readonly WebApplication _app;
+        private int _registrations;
+
+        private FakeOAuthServer(WebApplication app) => _app = app;
+
+        public string Base { get; private set; } = string.Empty;
+        public string McpUrl => Base + "/mcp";
+        public int Registrations => Volatile.Read(ref _registrations);
+
+        public static async Task<FakeOAuthServer> StartAsync()
+        {
+            var builder = WebApplication.CreateSlimBuilder();
+            builder.WebHost.UseUrls("http://127.0.0.1:0");
+            builder.Logging.ClearProviders();
+            var app = builder.Build();
+            var fake = new FakeOAuthServer(app);
+            app.Map("/mcp", (HttpContext http) =>
+            {
+                http.Response.Headers.WWWAuthenticate =
+                    $"Bearer resource_metadata=\"{fake.Base}/.well-known/oauth-protected-resource/mcp\"";
+                return Results.Unauthorized();
+            });
+            app.MapGet("/.well-known/oauth-protected-resource/mcp", () => Results.Json(new Dictionary<string, object>
+            {
+                ["resource"] = fake.McpUrl,
+                ["authorization_servers"] = new[] { fake.Base },
+                ["scopes_supported"] = new[] { "read" }
+            }));
+            app.MapGet("/.well-known/oauth-authorization-server", () => Results.Json(new Dictionary<string, object>
+            {
+                ["issuer"] = fake.Base,
+                ["authorization_endpoint"] = fake.Base + "/authorize",
+                ["token_endpoint"] = fake.Base + "/token",
+                ["registration_endpoint"] = fake.Base + "/register",
+                ["response_types_supported"] = new[] { "code" },
+                ["code_challenge_methods_supported"] = new[] { "S256" },
+                ["token_endpoint_auth_methods_supported"] = new[] { "none" }
+            }));
+            app.MapPost("/register", async (HttpContext http) =>
+            {
+                Interlocked.Increment(ref fake._registrations);
+                var body = await System.Text.Json.JsonDocument.ParseAsync(http.Request.Body);
+                return Results.Json(new Dictionary<string, object>
+                {
+                    ["client_id"] = "client-" + fake.Registrations,
+                    ["redirect_uris"] = body.RootElement.GetProperty("redirect_uris"),
+                    ["token_endpoint_auth_method"] = "none"
+                }, statusCode: 201);
+            });
+            await app.StartAsync();
+            fake.Base = app.Urls.Single().TrimEnd('/');
+            return fake;
+        }
+
+        public async ValueTask DisposeAsync() => await _app.DisposeAsync();
     }
 
     private static int FreePort()
