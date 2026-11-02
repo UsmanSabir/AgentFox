@@ -28,6 +28,7 @@
     Activity, Crosshair, BarChart3, TrendingDown, CalendarClock, Download, ExternalLink
   } from 'lucide-svelte';
   import AssessmentCard from './AssessmentCard.svelte';
+  import { chartTimeFormatters } from './chartTime';
   import { livePriceLabel, useLivePrices, type LivePrice } from './livePrices';
   import type { SymbolExtensionComponent } from './symbolExtensions';
 
@@ -310,6 +311,7 @@
   function buildChart(el: HTMLDivElement) {
     const text = token('--text-3', '#5f6377');
     const grid = token('--border', 'rgba(255,255,255,0.06)');
+    const timeFormatters = chartTimeFormatters(isIntraday(interval));
 
     chart = createChart(el, {
       layout: {
@@ -321,11 +323,13 @@
       },
       grid: { vertLines: { color: grid }, horzLines: { color: grid } },
       rightPriceScale: { borderColor: grid },
+      localization: { timeFormatter: timeFormatters.timeFormatter },
       // rightOffset keeps a few bars of empty space so the entry/stop/target markers on the LAST bar
       // are not clipped by the price axis.
       timeScale: {
         borderColor: grid, timeVisible: isIntraday(interval), secondsVisible: false, rightOffset: 6,
-        lockVisibleTimeRangeOnResize: true
+        lockVisibleTimeRangeOnResize: true,
+        tickMarkFormatter: timeFormatters.tickMarkFormatter
       },
       crosshair: { mode: 0 },
       autoSize: false,
@@ -405,7 +409,14 @@
     if (!chart) buildChart(container);
     if (!chart || !candleSeries || !volumeSeries || !sma20Series || !sma50Series) return;
 
-    chart.applyOptions({ timeScale: { timeVisible: isIntraday(d.interval), secondsVisible: false } });
+    const timeFormatters = chartTimeFormatters(isIntraday(d.interval));
+    chart.applyOptions({
+      localization: { timeFormatter: timeFormatters.timeFormatter },
+      timeScale: {
+        timeVisible: isIntraday(d.interval), secondsVisible: false,
+        tickMarkFormatter: timeFormatters.tickMarkFormatter
+      }
+    });
 
     const up = token('--success', '#34d399');
     const down = token('--danger', '#f87171');
