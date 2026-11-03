@@ -11,6 +11,7 @@
   } from 'lucide-svelte';
   import type { SymbolExtensionComponent } from './symbolExtensions';
   import LiveHoldingCells from './LiveHoldingCells.svelte';
+  import LiveHoldingName from './LiveHoldingName.svelte';
   import PortfolioAllocationChart from './PortfolioAllocationChart.svelte';
   import PortfolioPnlSummary from './PortfolioPnlSummary.svelte';
   import WorkingOrderCancel from './WorkingOrderCancel.svelte';
@@ -203,7 +204,7 @@
               <thead><tr><th>Instrument</th><th>Quantity</th><th>Average cost</th><th>Market price</th><th>Market value</th><th>Unrealized P/L</th><th>Trade</th></tr></thead>
               <tbody>{#each visibleHoldings as holding}
                 <tr>
-                  <td><b>{text(holding.symbol ?? holding.instrumentId)}</b><small>{text(holding.exchange)} · {text(holding.assetType)}</small>{#if holdingStatus && holding.symbol}<div class="holding-extension"><svelte:component this={holdingStatus} symbol={holding.symbol} /></div>{/if}{#if extras(holding.attributes).length}<details class="broker-details"><summary>Details</summary><dl>{#each extras(holding.attributes) as [label, value]}<dt>{label}</dt><dd>{attributeValue(value, showValues)}</dd>{/each}</dl></details>{/if}</td>
+                  <td><LiveHoldingName {holding} {showValues}/><small>{text(holding.exchange)} · {text(holding.assetType)}</small>{#if holdingStatus && holding.symbol}<div class="holding-extension"><svelte:component this={holdingStatus} symbol={holding.symbol} /></div>{/if}{#if extras(holding.attributes).length}<details class="broker-details"><summary>Details</summary><dl>{#each extras(holding.attributes) as [label, value]}<dt>{label}</dt><dd>{attributeValue(value, showValues)}</dd>{/each}</dl></details>{/if}</td>
                   <td>{quantity(holding.quantity, showValues)}</td>
                   <td>{money(holding.averageCost, holding.currency, showValues)}</td>
                   <LiveHoldingCells {holding} {showValues} />
