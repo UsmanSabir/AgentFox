@@ -13,6 +13,7 @@
   import LiveHoldingCells from './LiveHoldingCells.svelte';
   import LiveHoldingName from './LiveHoldingName.svelte';
   import PortfolioAllocationChart from './PortfolioAllocationChart.svelte';
+  import { OTHER_SECTORS, filterPortfolioHoldings, holdingSectorOptions, sectorFilterKey } from './portfolioSectorFilter';
   import PortfolioPnlSummary from './PortfolioPnlSummary.svelte';
   import WorkingOrderCancel from './WorkingOrderCancel.svelte';
   import { orderListNavigation } from './orderListNavigation';
@@ -25,8 +26,13 @@
   }>();
   let query = '';
   let holdingQuery = '';
-  $: visibleHoldings = (account?.holdings ?? []).filter(holding =>
-    `${holding.symbol ?? ''} ${holding.instrumentId}`.toLowerCase().includes(holdingQuery.trim().toLowerCase()));
+  // Local view state only; released with the panel, never persisted or sent to the broker.
+  let holdingSector = '';
+  let otherSectors: string[] = [];
+  $: sectorOptions = holdingSectorOptions(account?.holdings ?? []);
+  $: if (holdingSector && holdingSector !== OTHER_SECTORS && !sectorOptions.some(label => sectorFilterKey(label) === holdingSector)) holdingSector = '';
+  $: if (holdingSector === OTHER_SECTORS && !otherSectors.length) holdingSector = '';
+  $: visibleHoldings = filterPortfolioHoldings(account?.holdings ?? [], holdingQuery, holdingSector, otherSectors);
   $: visibleOrders = (account?.orders ?? []).filter(o => !keyboardMode || `${o.symbol ?? o.instrumentId} ${o.side} ${o.status}`.toLowerCase().includes(query.trim().toLowerCase()));
 
   /**
@@ -195,8 +201,20 @@
           {:else if !account.holdings.length}
             <div class="empty">The broker reports no current holdings.</div>
           {:else}
-            <PortfolioAllocationChart holdings={account.holdings} {showValues} />
-            <label class="order-filter">Find holding <input type="search" bind:value={holdingQuery} aria-label="Find holding" placeholder="Symbol or instrument"/></label>
+            <PortfolioAllocationChart holdings={account.holdings} {showValues} bind:otherSectors selectedSector={holdingSector}
+              on:sectorSelect={event => holdingSector = event.detail === holdingSector ? '' : event.detail} />
+            <div class="holding-filters">
+              <label class="order-filter">Find holding <input type="search" bind:value={holdingQuery} aria-label="Find holding" placeholder="Symbol or instrument"/></label>
+              <label class="order-filter">Sector <select bind:value={holdingSector}>
+                <option value="">All sectors</option>
+                {#if otherSectors.length}<option value={OTHER_SECTORS}>Other (chart group)</option>{/if}
+                {#each sectorOptions as label}<option value={sectorFilterKey(label)}>{label}</option>{/each}
+              </select></label>
+              {#if holdingSector || holdingQuery}
+                <button type="button" class="action" on:click={() => { holdingSector = ''; holdingQuery = ''; }}>Clear filters</button>
+              {/if}
+              <span class="filter-count" role="status" aria-atomic="true">Showing {visibleHoldings.length} of {account.holdings.length} holdings</span>
+            </div>
             {#if !visibleHoldings.length}
               <div class="empty" role="status">No holdings match this filter.</div>
             {:else}
@@ -267,9 +285,13 @@
 </section>
 
 <style>
-  [data-order-row]:focus-visible, input:focus-visible, .trade:focus-visible { outline:2px solid var(--primary); outline-offset:2px; }
+  [data-order-row]:focus-visible, input:focus-visible, select:focus-visible, button:focus-visible { outline:2px solid var(--primary); outline-offset:2px; }
+  .holding-filters { display:flex; flex-wrap:wrap; align-items:center; gap:.55rem 1rem; }
+  .holding-filters .order-filter { min-width:0; max-width:100%; }
+  .filter-count { color:var(--text-2); font-size:.7rem; }
   .order-filter { display:flex; gap:.5rem; align-items:center; color:var(--text-2); font-size:.75rem; }
-  .order-filter input { min-width:0; padding:.35rem; border:1px solid var(--border-md); background:var(--surface-2); color:var(--text); border-radius:4px; }
+  .order-filter input,.order-filter select { min-width:0; max-width:100%; padding:.35rem; border:1px solid var(--border-md); background:var(--surface-2); color:var(--text); border-radius:4px; font:inherit; }
+  .order-filter select { max-width:20rem; }
   .portfolio { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); margin-bottom:1.25rem; overflow:hidden; }
   .portfolio.open { border-color:color-mix(in srgb,var(--primary) 25%,var(--border)); }
   .portfolio.embedded { border:0; border-radius:0; margin-bottom:0; }
