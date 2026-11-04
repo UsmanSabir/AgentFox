@@ -16,12 +16,12 @@
   $: description = known ? `Unrealized ${percent! > 0 ? 'gain' : percent! < 0 ? 'loss' : 'P/L'} ${Math.abs(percent!).toFixed(2)}% · ${valuation.hasLiveMark ? 'estimated from live mark and broker average cost' : 'broker account snapshot'}` : '';
 </script>
 
-<span class="holding-name {tone}">
+<span class="holding-name">
   {#if url}
     <a href={url} target="_blank" rel="noopener noreferrer" aria-label={`${symbol} on PSX (opens in a new tab)`}>{symbol}</a>
   {:else}<b>{symbol}</b>{/if}
   {#if known}
-    <span class="indicator" role="img" title={description} aria-label={description}>
+    <span class="indicator {tone}" role="img" title={description} aria-label={description}>
       {#if percent !== 0}<svg width="10" height="8" viewBox="0 0 10 8" aria-hidden="true"><path d={percent! > 0 ? 'M0 8 L5 0 L10 8 Z' : 'M0 0 L10 0 L5 8 Z'}/></svg>{/if}
       <span aria-hidden="true">({Math.abs(percent!).toFixed(2)}%)</span>
     </span>
