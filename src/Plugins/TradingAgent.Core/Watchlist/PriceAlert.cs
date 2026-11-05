@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace TradingAgent.Watchlist;
 
 public sealed record PriceAlertInput(string? Symbol, string? Direction, decimal Target);
@@ -7,7 +9,10 @@ public sealed record PriceAlertObservation(decimal Value, DateTime ObservedUtc, 
 public sealed record PriceAlert(
     Guid Id, string Symbol, string Direction, decimal Target, DateTime CreatedUtc, DateTime ExpiresUtc,
     string State = "watching", PriceAlertObservation? Trigger = null, DateTime? FinishedUtc = null,
-    DateTime? NextDeliveryUtc = null, int RecipientCount = 0, bool PushQueued = false)
+    DateTime? NextDeliveryUtc = null, int RecipientCount = 0, bool PushQueued = false,
+    // Omitted while false: the repository's compare-and-set matches the stored JSON exactly,
+    // so a newly serialized member would make rows written before it unwritable.
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] bool ChannelUnconfirmed = false)
 {
     public const string Index = "KSE100";
     public bool Matches(decimal value) => Direction == "above" ? value >= Target : value <= Target;

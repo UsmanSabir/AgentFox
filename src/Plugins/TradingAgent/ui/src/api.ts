@@ -1233,7 +1233,7 @@ export interface PriceAlertInput { symbol: string; direction: 'above' | 'below';
 export interface PriceAlertObservation { value: number; observedUtc: string; source: string }
 export interface PriceAlert extends PriceAlertInput {
   id: string; state: string; createdUtc: string; expiresUtc: string; trigger: PriceAlertObservation | null;
-  recipientCount: number; pushQueued: boolean;
+  recipientCount: number; pushQueued: boolean; channelUnconfirmed?: boolean;
 }
 export interface PriceAlertsPage {
   marketOpen: boolean;

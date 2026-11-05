@@ -84,6 +84,77 @@ public sealed class PriceAlertTests
         finally { directory.Delete(recursive: true); }
     }
 
+    [TestMethod]
+    public async Task QueuedAppPushIsDeliveredAndAChannelWithNoRecipientsIsTriedOnce()
+    {
+        await WithTriggeredAlertAsync(new Notifier(), new Push(), async (worker, db, notifier, clock) =>
+        {
+            var delivered = (await db.ReadPriceAlertsAsync(default)).Single();
+            Assert.AreEqual("delivered", delivered.State);
+            Assert.IsTrue(delivered.PushQueued);
+            Assert.AreEqual(0, delivered.RecipientCount);
+            Assert.IsNull(delivered.NextDeliveryUtc);
+
+            foreach (var minutes in new[] { 2, 31 })
+            {
+                clock.Now = Open.AddMinutes(minutes);
+                await worker.TickAsync(clock.Now, default);
+            }
+            Assert.AreEqual(1, notifier.Attempts);
+            Assert.AreEqual("delivered", (await db.ReadPriceAlertsAsync(default)).Single().State);
+        });
+    }
+
+    [TestMethod]
+    public async Task ATimedOutChannelIsUnconfirmedAndNeverResent()
+    {
+        await WithTriggeredAlertAsync(new Notifier { Throw = new TimeoutException() }, null, async (worker, db, notifier, clock) =>
+        {
+            var alert = (await db.ReadPriceAlertsAsync(default)).Single();
+            Assert.AreEqual("delivered", alert.State);
+            Assert.IsTrue(alert.ChannelUnconfirmed);
+            Assert.IsNull(alert.NextDeliveryUtc);
+
+            clock.Now = Open.AddMinutes(2);
+            await worker.TickAsync(clock.Now, default);
+            Assert.AreEqual(1, notifier.Attempts);
+        });
+    }
+
+    [TestMethod]
+    public void UnsetChannelFlagIsNotStoredSoEarlierRowsStillMatch()
+    {
+        var alert = PriceAlert.Create(new("OGDC", "above", 250m), Open)!;
+        StringAssert.DoesNotMatch(System.Text.Json.JsonSerializer.Serialize(alert), new System.Text.RegularExpressions.Regex("ChannelUnconfirmed"));
+        StringAssert.Contains(System.Text.Json.JsonSerializer.Serialize(alert with { ChannelUnconfirmed = true }), "\"ChannelUnconfirmed\":true");
+    }
+
+    private static async Task WithTriggeredAlertAsync(Notifier notifier, IPriceAlertPush? push,
+        Func<PriceAlertWorker, SqliteTradingRepository, Notifier, Clock, Task> assert)
+    {
+        var directory = Directory.CreateTempSubdirectory("price-alerts-");
+        try
+        {
+            var options = Options.Create(new TradingAgentOptions { DatabasePath = Path.Combine(directory.FullName, "alerts.db") });
+            var db = new SqliteTradingRepository(options, new ConfigurationBuilder().Build(), NullLogger<SqliteTradingRepository>.Instance);
+            var quotes = new Quotes { Quote = new() { Current = 251m, Volume = 10, RetrievedAtUtc = Open, Source = "ahk" } };
+            var composite = new CompositeLiveQuoteSource([quotes], NullLogger<CompositeLiveQuoteSource>.Instance);
+            var clock = new Clock { Now = Open };
+            using var worker = new PriceAlertWorker(db, composite, new PsxDataClient(options, NullLogger<PsxDataClient>.Instance),
+                new Calendar(), NullLogger<PriceAlertWorker>.Instance, notifier, push, clock);
+            Assert.IsTrue(await db.WritePriceAlertAsync(PriceAlert.Create(new("OGDC", "above", 250m), Open.AddHours(-1))!, null, default));
+            await worker.TickAsync(Open, default);
+            Assert.AreEqual(1, notifier.Attempts);
+            await assert(worker, db, notifier, clock);
+        }
+        finally { directory.Delete(recursive: true); }
+    }
+
+    private sealed class Push : IPriceAlertPush
+    {
+        public Task<bool> TryQueueAsync(PriceAlert alert, CancellationToken ct) => Task.FromResult(true);
+    }
+
     private sealed class Quotes : ILiveQuoteSource
     {
         public PsxLiveQuote Quote { get; set; } = new();
@@ -109,6 +180,7 @@ public sealed class PriceAlertTests
     {
         public int Attempts { get; private set; }
         public int Recipients { get; set; }
+        public Exception? Throw { get; set; }
         public string Message { get; private set; } = "";
         public Task<int> NotifyAsync(string message, CancellationToken ct = default) => throw new InvalidOperationException();
         public Task<int> NotifyAsync(string message, string? topic, CancellationToken ct = default)
@@ -116,7 +188,7 @@ public sealed class PriceAlertTests
             Assert.AreEqual(TradingAgent.TradingTopics.PriceAlert, topic);
             Attempts++;
             Message = message;
-            return Task.FromResult(Recipients);
+            return Throw is null ? Task.FromResult(Recipients) : Task.FromException<int>(Throw);
         }
     }
 }

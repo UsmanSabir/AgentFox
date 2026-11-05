@@ -77,7 +77,11 @@
     switch (rule.state) {
       case 'watching': return !page?.marketOpen ? 'Market closed' : hasQuote ? 'Watching' : 'Waiting for fresh data';
       case 'pending': return rule.pushQueued ? 'Target reached · App push queued' : 'Target reached · Waiting for delivery';
-      case 'delivered': return `Delivered to ${rule.recipientCount} ${rule.recipientCount === 1 ? 'channel' : 'channels'}${rule.pushQueued ? ' · App push queued' : ''}`;
+      case 'delivered': return [
+        rule.recipientCount > 0 ? `Delivered to ${rule.recipientCount} ${rule.recipientCount === 1 ? 'channel' : 'channels'}` : '',
+        rule.channelUnconfirmed ? 'Channel delivery unconfirmed' : '',
+        rule.pushQueued ? 'App push queued' : ''
+      ].filter(Boolean).join(' · ') || 'Delivered';
       case 'delivery-failed': return rule.pushQueued ? 'App push queued · Channel delivery failed' : 'Channel delivery failed';
       case 'cancelled': return 'Cancelled';
       case 'expired': return 'Expired';

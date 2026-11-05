@@ -203,13 +203,22 @@ public sealed class PriceAlertWorker(
             }
         }
 
+        // A channel is retried only after a clear zero. A timeout may still be sending, so it is
+        // recorded as unconfirmed and never retried: retrying every minute repeated the same alert
+        // up to 30 times on a channel that is slow rather than broken.
         var sent = claim.RecipientCount;
-        if (sent == 0 && notifier is not null)
+        var unconfirmed = claim.ChannelUnconfirmed;
+        if (sent == 0 && !unconfirmed && notifier is not null)
         {
             try
             {
                 var topic = claim.Symbol == PriceAlert.Index ? TradingTopics.IndexAlert : TradingTopics.PriceAlert;
                 sent = await notifier.NotifyAsync(Message(claim), topic, ct).WaitAsync(TimeSpan.FromSeconds(5), ct);
+            }
+            catch (TimeoutException ex)
+            {
+                unconfirmed = true;
+                logger.LogWarning(ex, "Price alert {AlertId} channel delivery is unconfirmed; it will not be resent.", claim.Id);
             }
             catch (Exception ex) when (!ct.IsCancellationRequested)
             {
@@ -217,12 +226,17 @@ public sealed class PriceAlertWorker(
             }
         }
 
+        // A queued app push is a delivery. With one queued, a zero-recipient channel is not
+        // retried: zero is also what a deployment with no channel subscribed reports, and
+        // retrying it marked every phone-only alert "delivery-failed" after 30 minutes.
+        var delivered = sent > 0 || unconfirmed || queued;
         await repository.WritePriceAlertAsync(claim with
         {
-            State = sent > 0 ? "delivered" : "pending",
+            State = delivered ? "delivered" : "pending",
             RecipientCount = sent,
+            ChannelUnconfirmed = unconfirmed,
             PushQueued = queued,
-            NextDeliveryUtc = sent > 0 && (push is null || queued) ? null : claim.NextDeliveryUtc
+            NextDeliveryUtc = delivered && (push is null || queued) ? null : claim.NextDeliveryUtc
         }, claim, ct);
     }
 
