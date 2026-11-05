@@ -25,7 +25,7 @@
   /** Dense workstation presentation; classic retains its existing cards and controls. */
   export let dense = false;
   let managementOpen = false;
-  const dispatch = createEventDispatcher<{ newOrder:{symbol:string}; compactChange:boolean }>();
+  const dispatch = createEventDispatcher<{ newOrder:{symbol:string}; priceAlert:{symbol:string}; compactChange:boolean }>();
   let panelElement: HTMLElement;
   /** Shared dashboard clock; used to refresh live session moves without adding another timer. */
   export let refreshTick = 0;
@@ -478,6 +478,7 @@
     // Resolve the identity against the current list, never an index captured before a refresh.
     switch (action) {
       case 'order': dispatch('newOrder',{symbol}); return;
+      case 'priceAlert': dispatch('priceAlert',{symbol}); return;
       case 'pin': await togglePin(entry); return;
       case 'alerts': await toggleAlerts(entry); return;
       case 'automation': if (entry.tradable) await toggleAutoTrade(entry); return;
@@ -907,6 +908,8 @@
                 <Download size={13} />
               </button>
             {/if}
+            <button class="icon" title="Set price alert" aria-label={`Set price alert for ${entry.symbol}`}
+              on:click={() => dispatch('priceAlert', {symbol: entry.symbol})}><Bell size={13}/></button>
             <button
               class="icon"
               title={entry.alertsEnabled ? 'Mute alerts for this symbol' : 'Unmute alerts'}

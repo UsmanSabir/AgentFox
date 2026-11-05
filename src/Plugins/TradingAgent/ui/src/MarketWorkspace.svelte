@@ -14,7 +14,7 @@
   export let marketOpen = false;
   export let symbolExtension: SymbolExtension | null = null;
 
-  const dispatch = createEventDispatcher<{ arm: ArmOrderDialogContext }>();
+  const dispatch = createEventDispatcher<{ arm: ArmOrderDialogContext; priceAlert: {symbol: string; target?: number; direction?: 'above' | 'below'} }>();
   const DESKTOP_QUERY = '(min-width: 901px)';
   let desktop = typeof window !== 'undefined' && window.matchMedia(DESKTOP_QUERY).matches;
   let selectedCompany: string | null = null;
@@ -47,6 +47,7 @@
     {archive}
     {marketOpen}
     {symbolExtension}
+    on:priceAlert={(event) => dispatch('priceAlert', event.detail)}
     on:arm={(event) => dispatch('arm', event.detail)}
   />
 {:else}
@@ -71,6 +72,7 @@
         bind:compact={watchlistCompact}
         {refreshTick}
         {marketOpen}
+        on:priceAlert={(event) => dispatch('priceAlert', event.detail)}
         rowStatus={symbolExtension?.rowStatus ?? null}
       />
     </svelte:fragment>
@@ -85,6 +87,7 @@
         {historyRefreshTick}
         {archive}
         {marketOpen}
+        on:priceAlert={(event) => dispatch('priceAlert', event.detail)}
         on:arm={(event) => dispatch('arm', event.detail)}
       />
     </svelte:fragment>

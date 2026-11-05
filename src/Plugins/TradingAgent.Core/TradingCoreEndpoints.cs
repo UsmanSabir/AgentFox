@@ -1,4 +1,4 @@
-﻿using AgentFox.Plugins.Interfaces;
+using AgentFox.Plugins.Interfaces;
 using AgentFox.Plugins.Research;
 using AgentFox.Plugins;
 using Microsoft.AspNetCore.Routing;
@@ -64,6 +64,7 @@ public sealed partial class TradingCoreEndpoints
         MapArmedOrdersEndpoints(trading);
         MapMarketEndpoints(trading);
         MapAlertsEndpoints(trading);
+        MapPriceAlertsEndpoints(trading);
         MapAssessmentEndpoints(trading);
         MapChartsEndpoints(trading);
         MapWatchlistEndpoints(trading);

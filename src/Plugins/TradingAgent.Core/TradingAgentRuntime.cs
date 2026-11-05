@@ -263,6 +263,8 @@ public sealed class TradingAgentRuntime
         // Its BUY-side counterpart, and the same ordering constraint for the same reason.
         services.AddSingleton<BuyAffordabilityConfirmer>();
         services.AddHostedService<TradingRetentionWorker>();
+        services.AddSingleton<PriceAlertWorker>();
+        services.AddHostedService(sp => sp.GetRequiredService<PriceAlertWorker>());
         services.AddHostedService<TakeProfitRetryWorker>();
         // Singleton AND hosted service, so the arm endpoint can kick an immediate baseline capture on
         // the same instance the timer drives.

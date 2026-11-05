@@ -25,7 +25,7 @@
   export let marketOpen = false;
   export let symbolExtension: SymbolExtension | null = null;
 
-  const dispatch = createEventDispatcher<{ arm: ArmOrderDialogContext }>();
+  const dispatch = createEventDispatcher<{ arm: ArmOrderDialogContext; priceAlert: {symbol: string; target?: number; direction?: 'above' | 'below'} }>();
   const STORAGE_KEY = 'trading.market-workstation.layout.v1';
   const OLD_SPLITTER_KEY = 'trading.market-workspace.split.v1';
   const RETENTION_MS = 180 * 24 * 60 * 60 * 1000;
@@ -344,6 +344,7 @@
         allowCompact={false}
         {refreshTick}
         {marketOpen}
+        on:priceAlert={(event) => dispatch('priceAlert', event.detail)}
         rowStatus={symbolExtension?.rowStatus ?? null}
       />
     </div>
@@ -359,6 +360,7 @@
         {historyRefreshTick}
         {archive}
         {marketOpen}
+        on:priceAlert={(event) => dispatch('priceAlert', event.detail)}
         on:arm={(event) => dispatch('arm', event.detail)}
       />
     </div>

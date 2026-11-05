@@ -22,6 +22,9 @@ public static class TradingTopics
     /// <summary>Root of every subject below. Subscribe with <c>trading.&gt;</c> for all of it.</summary>
     public const string Root = "trading";
 
+    public const string PriceAlert = "trading.alert.price";
+    public const string IndexAlert = "trading.alert.index";
+
     /// <summary>Order execution outcomes: <c>trading.order.{accepted|failed|unknown|simulated}</c>.</summary>
     public const string OrderPrefix = "trading.order";
 
@@ -42,6 +45,8 @@ public static class TradingTopics
     /// </summary>
     public static void RegisterAll()
     {
+        NotificationTopics.Register(PriceAlert, "A stock reached a price alert target.");
+        NotificationTopics.Register(IndexAlert, "The KSE 100 reached an index alert target.");
         NotificationTopics.Register(Order("accepted"), "Orders were accepted by the broker.");
         NotificationTopics.Register(Order("failed"), "One or more orders failed at the broker.");
         NotificationTopics.Register(Order("unknown"), "Broker outcome is unknown — needs manual reconciliation.");

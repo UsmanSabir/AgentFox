@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import {
     trading,
     type ArmOrderDialogContext, type TradingStatus, type TradeProposal, type TradingExecution,
@@ -19,6 +19,15 @@
   let selectedCompany: string | null = null;
   let workspaceWatchlist: WatchlistPanel | null = null;
   import AlertsPanel from './AlertsPanel.svelte';
+  import PriceAlertsPanel from './PriceAlertsPanel.svelte';
+  let showPriceAlerts = false;
+  let priceAlerts: PriceAlertsPanel;
+  export async function openPriceAlert(symbol: string, target = 0, direction: 'above' | 'below' = 'above') {
+    workspace?.focusPanel('alerts');
+    showPriceAlerts = true;
+    await tick();
+    await priceAlerts?.open(symbol, target, undefined, direction);
+  }
   import ArmedOrdersPanel from './ArmedOrdersPanel.svelte';
   import ArmOrderDialog from './ArmOrderDialog.svelte';
   import ActivityPanel from './ActivityPanel.svelte';
@@ -552,6 +561,7 @@
       {archive}
       marketOpen={status.market.isOpen}
       {symbolExtension}
+      on:priceAlert={event => openPriceAlert(event.detail.symbol, event.detail.target, event.detail.direction)}
       on:arm={(event) => armContext = event.detail}
     />
     {:else}
@@ -560,6 +570,7 @@
           allowCompact={!!workspace.setPanelWidth} dense refreshTick={marketTick} marketOpen={status.market.isOpen}
           on:compactChange={event => workspace?.setPanelWidth?.('watchlist', event.detail ? 180 : null)}
           on:newOrder={event => {selectedSymbol = event.detail.symbol; openNewOrderDialog();}}
+          on:priceAlert={event => openPriceAlert(event.detail.symbol)}
           rowStatus={symbolExtension?.rowStatus ?? null}/>
       </WorkspacePanel>
       <WorkspacePanel {workspace} id="chart">
@@ -567,7 +578,7 @@
           quoteDetail={symbolExtension?.quoteDetail ?? null}
           instrumentLinks={symbolExtension?.instrumentLinks ?? null}
           refreshTick={marketTick} historyRefreshTick={archiveTick} {archive}
-          marketOpen={status.market.isOpen} on:arm={(event) => armContext = event.detail}/>
+          marketOpen={status.market.isOpen} on:priceAlert={event => openPriceAlert(event.detail.symbol, event.detail.target, event.detail.direction)} on:arm={(event) => armContext = event.detail}/>
       </WorkspacePanel>
       {#if symbolExtension?.plan}
         <WorkspacePanel {workspace} id="plan">
@@ -614,11 +625,20 @@
       <ArmedOrdersPanel bind:this={armedPanel} refreshTick={marketTick} keyboardMode={!!workspace}/>
       </WorkspacePanel>
       <WorkspacePanel {workspace} id="alerts">
+      <div class="price-alert-tabs">
+        <button class="btn" aria-pressed={!showPriceAlerts} on:click={() => showPriceAlerts = false}>Technical signals</button>
+        <button class="btn" aria-pressed={showPriceAlerts} on:click={() => showPriceAlerts = true}>Price alerts</button>
+      </div>
+      {#if showPriceAlerts}
+        <PriceAlertsPanel bind:this={priceAlerts}/>
+      {:else}
       <AlertsPanel
+
         on:select={(e) => selectedSymbol = e.detail}
         on:arm={(e) => armContext = e.detail}
         on:alertsChanged={refreshWatchlist}
       />
+      {/if}
       </WorkspacePanel>
     </div>
 
@@ -820,6 +840,8 @@
 </div>
 
 <style>
+  .price-alert-tabs { display:flex; gap:.4rem; padding:.5rem .75rem; }
+  .price-alert-tabs [aria-pressed="true"] { border-color:var(--primary); }
   .ticket-empty { padding:1rem; color:var(--text-2); font-size:.8rem; line-height:1.6; }
   .ticket-empty h2 { font-size:1rem; color:var(--text); }
   .hosted { display:contents; }
