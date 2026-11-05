@@ -1,5 +1,5 @@
 /** View-only keyboard helpers: identities survive quote refreshes and reordering. */
-export type WatchlistAction = 'order' | 'pin' | 'alerts' | 'automation' | 'history' | 'remove' | 'up' | 'down';
+export type WatchlistAction = 'order' | 'priceAlert' | 'pin' | 'alerts' | 'automation' | 'history' | 'remove' | 'up' | 'down';
 
 export function retainedWatchlistFocus(symbols: readonly string[], focused: string | null, selected: string | null) {
   return (focused && symbols.includes(focused) ? focused : null)

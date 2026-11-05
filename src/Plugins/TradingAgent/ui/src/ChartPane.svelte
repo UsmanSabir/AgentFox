@@ -25,7 +25,7 @@
   } from './api';
   import {
     LineChart, AlertTriangle, Eye, RefreshCw, Brain, Maximize2, Minimize2,
-    Activity, Crosshair, BarChart3, TrendingDown, CalendarClock, Download, ExternalLink
+    Activity, Bell, Crosshair, BarChart3, TrendingDown, CalendarClock, Download, ExternalLink
   } from 'lucide-svelte';
   import AssessmentCard from './AssessmentCard.svelte';
   import { chartTimeFormatters } from './chartTime';
@@ -36,7 +36,7 @@
   export let companyName: string | null = null;
 
   /** Raised when the user clicks a level to arm an order at it; the dashboard opens the dialog. */
-  const dispatch = createEventDispatcher<{ arm: ArmOrderDialogContext }>();
+  const dispatch = createEventDispatcher<{ arm: ArmOrderDialogContext; priceAlert: { symbol: string; target?: number; direction?: 'above' | 'below' } }>();
 
   /** Full-width mode: the chart takes the row and the watchlist stacks beneath it. Bound by the parent. */
   export let expanded = false;
@@ -996,6 +996,8 @@
         on:click={assess}
         disabled={assessing || loading || !symbol}
       ><Brain size={13} /> {assessing ? 'Assessing…' : 'Assess'}</button>
+      <button class="icon" title="Set price alert" aria-label="Set price alert" disabled={!symbol}
+        on:click={() => { if (symbol) dispatch('priceAlert', { symbol }); }}><Bell size={15}/></button>
       <button class="icon" title="Refresh" on:click={() => load()} disabled={loading || !symbol}>
         <RefreshCw size={13} />
       </button>
@@ -1206,6 +1208,7 @@
           <div>
             <b>Resistance <em class="hint">click to create order</em></b>
             {#each data.levels.resistances.slice(0, 3) as level}
+              <div class="level-row">
               <button
                 class="level armable"
                 title="Arm a SELL when price rises to resistance at {level.price}"
@@ -1214,11 +1217,15 @@
                 <span class="action sell">SELL</span> {level.price}
                 <em>{pct(level.distancePercent)} · ×{level.touches}{level.weeklyConfirmed ? ' · weekly ✓' : ''}</em>
               </button>
+              <button class="level-alert" aria-label={`Set alert at ${level.price}`} title={`Set alert at ${level.price}`}
+                on:click={() => { if (symbol) dispatch('priceAlert', { symbol, target: level.price, direction: 'above' }); }}><Bell size={13}/></button>
+              </div>
             {:else}<span class="level muted">none above price</span>{/each}
           </div>
           <div>
             <b>Support <em class="hint">click to create order</em></b>
             {#each data.levels.supports.slice(0, 3) as level}
+              <div class="level-row">
               <button
                 class="level armable"
                 title="Arm a BUY when price falls to support at {level.price}"
@@ -1227,6 +1234,9 @@
                 <span class="action buy">BUY</span> {level.price}
                 <em>−{level.distancePercent ?? '—'}% · ×{level.touches}{level.weeklyConfirmed ? ' · weekly ✓' : ''}</em>
               </button>
+              <button class="level-alert" aria-label={`Set alert at ${level.price}`} title={`Set alert at ${level.price}`}
+                on:click={() => { if (symbol) dispatch('priceAlert', { symbol, target: level.price, direction: 'below' }); }}><Bell size={13}/></button>
+              </div>
             {:else}<span class="level muted">none below price</span>{/each}
           </div>
         </div>
@@ -1412,6 +1422,10 @@
   .drop-hint { color:var(--text-3); font-size:.62rem; }
 
   .levels { display:grid; grid-template-columns:1fr 1fr; gap:.5rem; }
+  .level-row { display:flex; align-items:center; flex-wrap:wrap; gap:.25rem; }
+  .level-alert { display:grid; place-items:center; color:var(--text-2); background:transparent; border:0; border-radius:var(--radius-sm); cursor:pointer; min-width:24px; min-height:24px; }
+  .level-alert:hover { background:var(--surface-3); color:var(--primary); }
+  @media (pointer:coarse) { .level-alert { min-width:44px; min-height:44px; } }
   .levels > div { display:flex; flex-direction:column; gap:.2rem; }
   .levels b { color:var(--text-3); font-size:.65rem; text-transform:uppercase; letter-spacing:.04em; }
   .level { font-size:.72rem; color:var(--text); font-family:ui-monospace, monospace; }

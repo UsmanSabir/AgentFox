@@ -1,4 +1,4 @@
-﻿using AgentFox.Plugins.Observability;
+using AgentFox.Plugins.Observability;
 ﻿using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -1980,6 +1980,12 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                 );
                 -- Append-only record of what the monitor raised. evidence_json is snapshotted at raise
                 -- time so an alert stays explicable after the market has moved on.
+                CREATE TABLE IF NOT EXISTS price_alerts (
+                    id TEXT PRIMARY KEY,
+                    data_json TEXT NOT NULL,
+                    changed_utc TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS watchlist_alerts (
                     alert_id        TEXT PRIMARY KEY,
                     symbol          TEXT NOT NULL,
