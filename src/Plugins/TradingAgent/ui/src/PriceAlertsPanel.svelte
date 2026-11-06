@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { Bell, Plus } from 'lucide-svelte';
-  import { trading, type PriceAlert, type PriceAlertInput, type PriceAlertObservation, type PriceAlertsPage } from './api';
+  import { trading, type PriceAlert, type PriceAlertInput, type PriceAlertObservation, type PriceAlertsPage, type WatchlistEntry } from './api';
 
   let page: PriceAlertsPage | null = null;
   let dialog: HTMLDialogElement;
@@ -16,12 +16,23 @@
   let error = '';
   let formError = '';
   let notice = '';
+  let symbols: WatchlistEntry[] = [];
+  let instrumentRequest = 0;
+  let showInstruments = false;
+  let highlighted = -1;
+  let helpOpen = false;
   let visible: PriceAlertsPage['rules'] = [];
   $: visible = (page?.rules ?? []).filter(({rule}) => (rule.state !== 'watching') === history);
   $: index = /^KSE[ -]?100$/i.test(draft.symbol.trim());
   $: current = page?.rules.find(row => row.rule.symbol === (index ? 'KSE100' : draft.symbol.trim().toUpperCase()) && row.latest)?.latest ?? null;
   const stamp = (at: string) => new Date(at).toLocaleTimeString('en-GB', { timeZone: 'Asia/Karachi', hour: '2-digit', minute: '2-digit' }) + ' PKT';
   const instrument = (symbol: string) => symbol === 'KSE100' ? 'KSE 100' : symbol;
+  $: instrumentQuery = draft.symbol.trim().toUpperCase();
+  $: instrumentOptions = [{ symbol: 'KSE100', companyName: 'KSE 100' }, ...symbols.filter(entry => entry.symbol !== 'KSE100')]
+    .filter(entry => entry.symbol.toUpperCase().includes(instrumentQuery)
+      || entry.companyName?.toUpperCase().includes(instrumentQuery))
+    .slice(0, 8);
+  $: instrumentsExpanded = showInstruments && instrumentOptions.length > 0;
   const value = (symbol: string, price: number) => {
     const formatted = price.toLocaleString('en-PK', { minimumFractionDigits: 2, maximumFractionDigits: 4 });
     return symbol === 'KSE100' ? formatted + ' points' : 'PKR ' + formatted;
@@ -43,15 +54,64 @@
   onMount(() => {
     void load();
     const timer = setInterval(() => { if (!document.hidden) void load(); }, 30_000);
-    return () => { clearInterval(timer); loadVersion++; };
+    return () => { clearInterval(timer); loadVersion++; instrumentRequest++; };
   });
+
+  async function loadInstruments() {
+    const request = ++instrumentRequest;
+    try {
+      const { entries } = await trading.watchlist.list();
+      if (request === instrumentRequest && dialog.open) symbols = entries;
+    } catch {
+      // Keep manual ticker entry available if the watchlist is unavailable.
+    }
+  }
+
+  function clearInstrumentSuggestions() {
+    instrumentRequest++;
+    symbols = [];
+    hideInstruments();
+    helpOpen = false;
+  }
+
+  function hideInstruments() {
+    showInstruments = false;
+    highlighted = -1;
+  }
+
+  function selectInstrument(symbol: string) {
+    draft.symbol = instrument(symbol);
+    hideInstruments();
+  }
+
+  function instrumentKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape' && instrumentsExpanded) {
+      event.preventDefault();
+      hideInstruments();
+    } else if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && instrumentOptions.length) {
+      event.preventDefault();
+      showInstruments = true;
+      const last = instrumentOptions.length - 1;
+      highlighted = event.key === 'ArrowDown'
+        ? (highlighted >= last ? 0 : highlighted + 1)
+        : (highlighted <= 0 ? last : highlighted - 1);
+      void tick().then(() => document.getElementById('price-alert-option-' + highlighted)?.scrollIntoView({ block: 'nearest' }));
+    } else if (event.key === 'Enter' && instrumentsExpanded) {
+      event.preventDefault();
+      const selected = instrumentOptions[highlighted] ?? (instrumentOptions.length === 1 ? instrumentOptions[0] : null);
+      if (selected) selectInstrument(selected.symbol);
+    }
+  }
 
   export async function open(symbol = '', target = 0, rule?: PriceAlert, direction: PriceAlertInput['direction'] = 'above') {
     editing = rule?.id ?? null;
     draft = rule ? {symbol: rule.symbol, direction: rule.direction, target: rule.target} : { symbol, direction, target };
     formError = '';
     await tick();
-    if (!dialog.open) dialog.showModal();
+    if (!dialog.open) {
+      dialog.showModal();
+      void loadInstruments();
+    }
   }
   async function save() {
     if (busy || !draft.target) return;
@@ -128,11 +188,26 @@
   {#if visible.length > limit}<button type="button" on:click={() => limit += 25}>Show more</button>{/if}
 </section>
 
-<dialog bind:this={dialog} aria-labelledby="price-alert-title" on:cancel={event => { if (busy) event.preventDefault(); }}>
+<dialog bind:this={dialog} aria-labelledby="price-alert-title" on:close={clearInstrumentSuggestions} on:cancel={event => { if (busy) event.preventDefault(); }}>
   <form on:submit|preventDefault={save}>
     <h3 id="price-alert-title"><Bell size={18}/> {editing ? 'Edit price alert' : 'Set price alert'}</h3>
-    <label>Instrument <input bind:value={draft.symbol} list="price-alert-instruments" placeholder="Stock symbol or KSE 100" required maxlength="16" autocomplete="off"/></label>
-    <datalist id="price-alert-instruments"><option value="KSE 100"></option></datalist>
+    <div class="instrument-picker">
+      <label for="price-alert-instrument">Instrument</label>
+      <input id="price-alert-instrument" role="combobox" aria-autocomplete="list" aria-expanded={instrumentsExpanded}
+        aria-controls="price-alert-instruments" aria-activedescendant={instrumentsExpanded && highlighted >= 0 ? 'price-alert-option-' + highlighted : undefined}
+        bind:value={draft.symbol} placeholder="Stock symbol or KSE 100" required autocomplete="off"
+        on:input={() => { showInstruments = true; highlighted = -1; }}
+        on:click={() => showInstruments = true} on:blur={hideInstruments} on:keydown={instrumentKeydown}/>
+      <div id="price-alert-instruments" class="instrument-options" role="listbox" aria-label="Matching instruments" hidden={!instrumentsExpanded}>
+        {#each instrumentOptions as entry, i (entry.symbol)}
+          <button type="button" role="option" id={'price-alert-option-' + i} tabindex="-1" aria-selected={highlighted === i}
+            on:mousedown|preventDefault on:click={() => selectInstrument(entry.symbol)}>
+            <strong>{instrument(entry.symbol)}</strong>
+            {#if entry.companyName && entry.symbol !== 'KSE100'}<span>{entry.companyName}</span>{/if}
+          </button>
+        {/each}
+      </div>
+    </div>
     {#if current}<p class="muted">Latest {value(index ? 'KSE100' : draft.symbol, current.value)} · {stamp(current.observedUtc)}</p>{/if}
     <label>Notify when
       <select bind:value={draft.direction}><option value="above">At or above</option><option value="below">At or below</option></select>
@@ -141,10 +216,19 @@
       <input type="number" min="0.0001" max="100000000" step="0.0001" bind:value={draft.target} required/>
     </label>
     {#if current && draft.target > 0 && (draft.direction === 'above' ? current.value >= draft.target : current.value <= draft.target)}
-      <p role="status">Target already met. This alert may send immediately.</p>
+      <p role="status">Target already met.</p>
     {/if}
-    <p class="muted">Delivery · Configured channels <a href="/channels" target="_top">Manage channels</a></p>
-    <details><summary aria-label="Help about price alerts">?</summary>Alerts fire once on the first fresh reading that meets the target. An already-met target can send immediately. Active alerts expire after 30 days.</details>
+    <div class="delivery-actions">
+      <a href="/channels" target="_top">Manage channels</a>
+      <div class="alert-help">
+        <button type="button" aria-label="Help about price alerts" aria-controls="price-alert-help" aria-expanded={helpOpen}
+          on:click={() => helpOpen = !helpOpen}>?</button>
+        <div id="price-alert-help" class="help-popup" class:helpOpen>
+          Alerts fire once on the first fresh reading that meets the target. An already-met target can send immediately.
+          Active alerts expire after 30 days. Messages go to configured channels subscribed to price alerts.
+        </div>
+      </div>
+    </div>
     {#if formError}<p role="alert">{formError}</p>{/if}
     <footer><button type="button" disabled={busy} on:click={() => dialog.close()}>Close</button><button class="primary" type="submit" disabled={busy}>{busy ? 'Saving…' : editing ? 'Save changes' : 'Set alert'}</button></footer>
   </form>
@@ -169,6 +253,18 @@
   input, select { color:inherit; background:var(--surface-2, Canvas); padding:.45rem; border:1px solid var(--border, var(--line)); border-radius:.3rem; font:inherit; }
   p { margin:.3rem 0; }
   .muted { color:var(--text-2, var(--muted)); }
+  .instrument-picker { display:grid; gap:.45rem; position:relative; }
+  .instrument-options { position:absolute; z-index:2; top:100%; inset-inline:0; max-height:11rem; overflow:auto;
+    padding:.2rem; background:var(--surface); border:1px solid var(--border-md); border-radius:.4rem; }
+  .instrument-options button { display:flex; width:100%; align-items:center; gap:.45rem; text-align:left; background:transparent; border:0; }
+  .instrument-options button:hover, .instrument-options button[aria-selected="true"] { background:var(--surface-2); }
+  .instrument-options span { color:var(--text-2); font-size:.85em; }
+  .delivery-actions { display:flex; align-items:center; gap:.5rem; }
+  .alert-help { position:relative; }
+  .help-popup { display:none; position:absolute; z-index:1; bottom:100%; left:50%; transform:translateX(-50%);
+    width:min(16rem, 56vw); padding:.65rem; border:1px solid var(--border-md); border-radius:.4rem;
+    background:var(--surface); color:var(--text); box-shadow:0 4px 16px #0006; }
+  .alert-help:hover .help-popup, .alert-help:focus-within .help-popup, .help-popup.helpOpen { display:block; }
   footer { justify-content:flex-end; }
   @media (pointer: coarse) { button, input, select { min-height:44px; } }
 </style>
