@@ -48,6 +48,7 @@
   $: actions = menuEntry ? [
     { id:'order' as const, label:'New Order…', reason:'' },
     { id:'pin' as const, label:menuEntry.pinned ? 'Unpin from top' : 'Pin to top', reason:'' },
+    { id:'priceAlert' as const, label:'Set price alert', reason:'' },
     { id:'alerts' as const, label:menuEntry.alertsEnabled ? 'Mute alerts' : 'Enable alerts', reason:'' },
     ...(menuEntry.tradable ? [{ id:'automation' as const, label:menuEntry.autoTradeEnabled ? 'Set manual-only' : 'Allow automation', reason:menuEntry.manualOnlyLocked ? 'Locked by ManualOnlySymbols configuration' : '' }] : []),
     ...(!menuEntry.hasWeeklyHistory ? [{ id:'history' as const, label:'Fetch missing history', reason:gaps.get(menuEntry.symbol)?.noEarlierHistory ? 'New listing — no earlier sessions exist' : archive?.progress.isRunning ? 'Backfill already running' : '' }] : []),

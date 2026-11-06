@@ -236,7 +236,7 @@ class Program
                     ctx.Status("[dodgerblue1]Registering tools & workspace...[/]");
                     skillRegistry = await CreateSkillRegistryAsync(toolRegistry, configuration);
                     mcpManager    = await CreateAndInitializeMcpManagerAsync(
-                        configuration, loggingCfg.UseFileLogger ? new FileLogger() : null);
+                        configuration, workspaceManager.ResolvePath(""), loggingCfg.UseFileLogger ? new FileLogger() : null);
 
                     var longTermMemory = MemoryBackendFactory.CreateLongTermStorage(configuration, workspaceManager);
                     memory = new HybridMemory(100, longTermMemory);
@@ -889,9 +889,14 @@ class Program
 
     /// <param name="log">The file log, when there is one. A failed server was reported on the
     /// console alone, which a service host does not have: the tools simply never appeared.</param>
-    static async Task<McpManager> CreateAndInitializeMcpManagerAsync(IConfiguration configuration, ILogger? log)
+    static async Task<McpManager> CreateAndInitializeMcpManagerAsync(IConfiguration configuration, string workspaceDirectory, ILogger? log)
     {
-        var mcpManager = new McpManager();
+        // OAuth servers' tokens, encrypted under a key of their own (not the plugin-config key, which a hosted
+        // deployment mounts read-only and which has nothing to do with these).
+        var tokenDirectory = Path.Combine(workspaceDirectory, "mcp-auth");
+        var mcpManager = new McpManager(tokenDirectory, new AgentFox.Plugins.AesPluginSecretProtector(
+            Path.Combine(tokenDirectory, ".mcp-auth.key"),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<AgentFox.Plugins.AesPluginSecretProtector>.Instance));
         // MCP:Servers[] plus the MCP:BundledServers this install actually ships (McpLaunch.Compose).
         var servers = McpLaunch.Compose(configuration, AppContext.BaseDirectory, File.Exists, out var notShipped);
         foreach (var name in notShipped)

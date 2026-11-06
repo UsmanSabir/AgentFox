@@ -69,11 +69,11 @@ public sealed partial class TradingCoreEndpoints
             CancellationToken ct) =>
         {
             var resolution = body.Resolution?.Trim().ToLowerInvariant();
-            if (resolution is not ("placed" or "not_placed"))
+            if (resolution is not ("placed" or "not_placed" or "cancelled" or "not_cancelled" or "filled"))
                 return Results.BadRequest(new
                 {
                     error = "invalid_resolution",
-                    message = "Choose placed or not_placed after checking the broker's own order book/activity."
+                    message = "Choose an order or cancellation resolution after checking the broker's own order book/activity."
                 });
 
             var note = body.Note?.Trim();
@@ -99,7 +99,7 @@ public sealed partial class TradingCoreEndpoints
                 return Results.Conflict(new
                 {
                     error = "not_unknown",
-                    message = "This execution does not exist or is no longer unresolved. Refresh before acting again."
+                    message = "This execution is no longer unresolved or that resolution does not match its action. Refresh before acting again."
                 });
 
             logger.LogWarning(
@@ -108,7 +108,7 @@ public sealed partial class TradingCoreEndpoints
             return Results.Ok(new
             {
                 executionId,
-                state = resolution == "placed" ? "resolved_placed" : "resolved_not_placed",
+                state = "resolved_" + resolution,
                 resolvedUtc
             });
         }).RequireAuthorization("TradingTrader");

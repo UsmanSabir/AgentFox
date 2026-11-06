@@ -1229,7 +1229,24 @@ export interface MoversQuery {
 
 // ── Endpoints ─────────────────────────────────────────────────────────────
 
+export interface PriceAlertInput { symbol: string; direction: 'above' | 'below'; target: number }
+export interface PriceAlertObservation { value: number; observedUtc: string; source: string }
+export interface PriceAlert extends PriceAlertInput {
+  id: string; state: string; createdUtc: string; expiresUtc: string; trigger: PriceAlertObservation | null;
+  recipientCount: number; pushQueued: boolean; channelUnconfirmed?: boolean;
+}
+export interface PriceAlertsPage {
+  marketOpen: boolean;
+  rules: { rule: PriceAlert; latest: PriceAlertObservation | null }[];
+}
+
 export const trading = {
+  priceAlerts: {
+    list: () => get<PriceAlertsPage>('/trading/price-alerts'),
+    create: (draft: PriceAlertInput) => post<PriceAlert>('/trading/price-alerts', draft),
+    edit: (id: string, draft: PriceAlertInput) => send<PriceAlert>('PUT', '/trading/price-alerts/' + id, draft),
+    cancel: (id: string) => del<PriceAlert>('/trading/price-alerts/' + id)
+  },
   status:         ()            => get<TradingStatus>('/trading/status'),
   account:        ()            => get<BrokerAccountSnapshot>('/trading/account', 60_000),
   orderIntents:   ()            => get<OrderIntentRegistryResponse>('/trading/order-intents'),
@@ -1286,7 +1303,7 @@ export const trading = {
     post<{ proposalId: string; status: string }>(
       `/trading/proposals/${encodeURIComponent(proposalId)}/reject`, { reason }),
   executions:     (limit = 100) => get<TradingExecution[]>(`/trading/executions?limit=${limit}`),
-  resolveUnknownExecution: (executionId: string, resolution: 'placed' | 'not_placed', note: string) =>
+  resolveUnknownExecution: (executionId: string, resolution: 'placed' | 'not_placed' | 'cancelled' | 'not_cancelled' | 'filled', note: string) =>
     post<{ executionId: string; state: string; resolvedUtc: string }>(
       `/trading/executions/${encodeURIComponent(executionId)}/resolve`, { resolution, note }),
   events:         (limit = 200) => get<TradingEvent[]>(`/trading/events?limit=${limit}`),

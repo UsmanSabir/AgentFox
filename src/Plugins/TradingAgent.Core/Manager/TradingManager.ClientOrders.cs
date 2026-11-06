@@ -46,7 +46,7 @@ public sealed partial class TradingManager
         var prior = await operations.FindClientOrderOperationAsync(requestId, ct);
         if (prior is not null)
         {
-            if (prior.RequestHash != hash) throw new ClientOrderConflictException();
+            if (prior.Kind != "order" || prior.RequestHash != hash) throw new ClientOrderConflictException();
             return ReplayClientOrder(prior);
         }
         if (!ClientOrderRequestId.CanStart(requestId, DateTime.UtcNow))

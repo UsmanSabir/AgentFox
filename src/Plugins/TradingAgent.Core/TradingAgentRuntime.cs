@@ -263,6 +263,8 @@ public sealed class TradingAgentRuntime
         // Its BUY-side counterpart, and the same ordering constraint for the same reason.
         services.AddSingleton<BuyAffordabilityConfirmer>();
         services.AddHostedService<TradingRetentionWorker>();
+        services.AddSingleton<PriceAlertWorker>();
+        services.AddHostedService(sp => sp.GetRequiredService<PriceAlertWorker>());
         services.AddHostedService<TakeProfitRetryWorker>();
         // Singleton AND hosted service, so the arm endpoint can kick an immediate baseline capture on
         // the same instance the timer drives.
@@ -282,6 +284,8 @@ public sealed class TradingAgentRuntime
         // The portfolio's per-row Cancel. Resolved only by endpoints, never by a worker, so it can take
         // the broker reader and the persistent worker without adding an edge to any worker's graph.
         services.AddSingleton<WorkingOrderCancellationService>();
+        services.AddSingleton<ClientCancellationService>();
+        services.AddSingleton<ClientModificationService>();
         // Registered last so its participant enumeration includes every core worker above and any
         // edition-specific participant added after AddCore returns.
         services.AddSingleton<MarketSessionOpenCoordinator>();

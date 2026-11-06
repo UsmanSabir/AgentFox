@@ -25,9 +25,10 @@
   } from './api';
   import {
     LineChart, AlertTriangle, Eye, RefreshCw, Brain, Maximize2, Minimize2,
-    Activity, Crosshair, BarChart3, TrendingDown, CalendarClock, Download, ExternalLink
+    Activity, Bell, Crosshair, BarChart3, TrendingDown, CalendarClock, Download, ExternalLink
   } from 'lucide-svelte';
   import AssessmentCard from './AssessmentCard.svelte';
+  import { chartTimeFormatters } from './chartTime';
   import { livePriceLabel, useLivePrices, type LivePrice } from './livePrices';
   import type { SymbolExtensionComponent } from './symbolExtensions';
 
@@ -35,7 +36,7 @@
   export let companyName: string | null = null;
 
   /** Raised when the user clicks a level to arm an order at it; the dashboard opens the dialog. */
-  const dispatch = createEventDispatcher<{ arm: ArmOrderDialogContext }>();
+  const dispatch = createEventDispatcher<{ arm: ArmOrderDialogContext; priceAlert: { symbol: string; target?: number; direction?: 'above' | 'below' } }>();
 
   /** Full-width mode: the chart takes the row and the watchlist stacks beneath it. Bound by the parent. */
   export let expanded = false;
@@ -63,6 +64,10 @@
   $: livePriceView = $livePriceStore;
   $: displayedPrice = livePriceView.quote?.current ?? data?.snapshot.close ?? null;
   $: displayedChange = livePriceView.quote?.changePercent ?? data?.snapshot.dayChangePercent ?? null;
+  // Session extremes come from the same quote as the headline price, regardless of chart interval.
+  // A historical or intraday candle's range would answer a different question; absent quotes stay unknown.
+  $: dayHigh = livePriceView.quote?.high ?? null;
+  $: dayLow = livePriceView.quote?.low ?? null;
 
   /**
    * How much level detail to draw. Six labelled price lines plus the axis chips is more than a small
@@ -306,6 +311,7 @@
   function buildChart(el: HTMLDivElement) {
     const text = token('--text-3', '#5f6377');
     const grid = token('--border', 'rgba(255,255,255,0.06)');
+    const timeFormatters = chartTimeFormatters(isIntraday(interval));
 
     chart = createChart(el, {
       layout: {
@@ -317,11 +323,13 @@
       },
       grid: { vertLines: { color: grid }, horzLines: { color: grid } },
       rightPriceScale: { borderColor: grid },
+      localization: { timeFormatter: timeFormatters.timeFormatter },
       // rightOffset keeps a few bars of empty space so the entry/stop/target markers on the LAST bar
       // are not clipped by the price axis.
       timeScale: {
         borderColor: grid, timeVisible: isIntraday(interval), secondsVisible: false, rightOffset: 6,
-        lockVisibleTimeRangeOnResize: true
+        lockVisibleTimeRangeOnResize: true,
+        tickMarkFormatter: timeFormatters.tickMarkFormatter
       },
       crosshair: { mode: 0 },
       autoSize: false,
@@ -401,7 +409,14 @@
     if (!chart) buildChart(container);
     if (!chart || !candleSeries || !volumeSeries || !sma20Series || !sma50Series) return;
 
-    chart.applyOptions({ timeScale: { timeVisible: isIntraday(d.interval), secondsVisible: false } });
+    const timeFormatters = chartTimeFormatters(isIntraday(d.interval));
+    chart.applyOptions({
+      localization: { timeFormatter: timeFormatters.timeFormatter },
+      timeScale: {
+        timeVisible: isIntraday(d.interval), secondsVisible: false,
+        tickMarkFormatter: timeFormatters.tickMarkFormatter
+      }
+    });
 
     const up = token('--success', '#34d399');
     const down = token('--danger', '#f87171');
@@ -902,10 +917,11 @@
 </script>
 
 <section class="chart-card">
+  <div class="chart-viewport">
   <header>
     <div class="title">
       <LineChart size={16} />
-      <div>
+      <div class="instrument-summary">
         <div class="instrument">
           <b>{symbol ?? 'Chart'}</b>
           {#if companyName}<strong>{companyName}</strong>{/if}
@@ -928,10 +944,10 @@
               class:negative={(displayedChange ?? 0) < 0}>
               {pct(displayedChange)}
             </span>
-            <span>{data.snapshot.setup} · {data.barsAnalyzed} bars · as of {data.snapshot.asOf}</span>
-            {#if data.usesLiveBar}
-              <em title="The exchange is open and this candle is still forming">live candle</em>
-            {/if}
+            <span class="day-range" title={livePriceView.quote ? `${livePriceLabel(livePriceView)} · session high and low` : 'Session high and low unavailable'}>
+              <span title="Day low">L <strong>{dayLow?.toFixed(2) ?? '—'}</strong></span>
+              <span title="Day high">H <strong>{dayHigh?.toFixed(2) ?? '—'}</strong></span>
+            </span>
           </div>
         {:else}
           <span>Candles, support/resistance, and indicators</span>
@@ -980,6 +996,8 @@
         on:click={assess}
         disabled={assessing || loading || !symbol}
       ><Brain size={13} /> {assessing ? 'Assessing…' : 'Assess'}</button>
+      <button class="icon" title="Set price alert" aria-label="Set price alert" disabled={!symbol}
+        on:click={() => { if (symbol) dispatch('priceAlert', { symbol }); }}><Bell size={15}/></button>
       <button class="icon" title="Refresh" on:click={() => load()} disabled={loading || !symbol}>
         <RefreshCw size={13} />
       </button>
@@ -992,6 +1010,14 @@
         >
           {#if expanded}<Minimize2 size={13} />{:else}<Maximize2 size={13} />{/if}
         </button>
+      {/if}
+      {#if data}
+        <span class="chart-context">
+          <span>{data.snapshot.setup} · {data.barsAnalyzed} bars · as of {data.snapshot.asOf}</span>
+          {#if data.usesLiveBar}
+            <em title="The exchange is open and this candle is still forming">live candle</em>
+          {/if}
+        </span>
       {/if}
     </div>
   </header>
@@ -1094,14 +1120,16 @@
       {/if}
     </div>
 
-    {#if data}
+  {/if}
+  <!-- Keep live quote detail with the plot so a bounded workspace can reserve its actual height
+       before sizing the canvas. Supporting metrics remain below this first viewport. -->
+  {#if data && quoteDetail && symbol}
+    <div class="quote-detail"><svelte:component this={quoteDetail} {symbol} /></div>
+  {/if}
+  </div>
+
+    {#if symbol && data}
       <div class="readout">
-        <!-- Above the chart's own metrics because it is the only row here that is a live tape: it
-             changes while the rest of the readout holds still, and burying a moving number under
-             static ones is how it stops being read. -->
-        {#if quoteDetail && symbol}
-          <svelte:component this={quoteDetail} {symbol} />
-        {/if}
         {#if chartError}
           <p class="inline-error">Chart refresh failed; showing the last successful data. {chartError}
             <button class="retry" on:click={() => load(true)}>Retry</button>
@@ -1180,6 +1208,7 @@
           <div>
             <b>Resistance <em class="hint">click to create order</em></b>
             {#each data.levels.resistances.slice(0, 3) as level}
+              <div class="level-row">
               <button
                 class="level armable"
                 title="Arm a SELL when price rises to resistance at {level.price}"
@@ -1188,11 +1217,15 @@
                 <span class="action sell">SELL</span> {level.price}
                 <em>{pct(level.distancePercent)} · ×{level.touches}{level.weeklyConfirmed ? ' · weekly ✓' : ''}</em>
               </button>
+              <button class="level-alert" aria-label={`Set alert at ${level.price}`} title={`Set alert at ${level.price}`}
+                on:click={() => { if (symbol) dispatch('priceAlert', { symbol, target: level.price, direction: 'above' }); }}><Bell size={13}/></button>
+              </div>
             {:else}<span class="level muted">none above price</span>{/each}
           </div>
           <div>
             <b>Support <em class="hint">click to create order</em></b>
             {#each data.levels.supports.slice(0, 3) as level}
+              <div class="level-row">
               <button
                 class="level armable"
                 title="Arm a BUY when price falls to support at {level.price}"
@@ -1201,6 +1234,9 @@
                 <span class="action buy">BUY</span> {level.price}
                 <em>−{level.distancePercent ?? '—'}% · ×{level.touches}{level.weeklyConfirmed ? ' · weekly ✓' : ''}</em>
               </button>
+              <button class="level-alert" aria-label={`Set alert at ${level.price}`} title={`Set alert at ${level.price}`}
+                on:click={() => { if (symbol) dispatch('priceAlert', { symbol, target: level.price, direction: 'below' }); }}><Bell size={13}/></button>
+              </div>
             {:else}<span class="level muted">none below price</span>{/each}
           </div>
         </div>
@@ -1220,7 +1256,6 @@
         {/if}
       </div>
     {/if}
-  {/if}
 </section>
 
 <style>
@@ -1231,14 +1266,16 @@
     background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
     padding: 1rem; display: flex; flex-direction: column; gap: .75rem; min-width: 0;
   }
-  header { display:flex; justify-content:space-between; align-items:flex-start; gap:1rem; flex-wrap:wrap; }
-  .title { display:flex; gap:.6rem; align-items:flex-start; color:var(--primary); min-width:0; }
+  .chart-viewport { display:flex; flex-direction:column; gap:.4rem; min-width:0; }
+  .quote-detail:empty { display:none; }
+  header { display:flex; flex-direction:column; gap:.4rem; }
+  .title { display:flex; gap:.6rem; align-items:flex-start; color:var(--primary); min-width:0; width:100%; }
   .title div { display:flex; flex-direction:column; gap:.2rem; min-width:0; }
+  .title .instrument-summary { flex-direction:row; align-items:center; flex-wrap:wrap; gap:.3rem .8rem; }
   .title .instrument { flex-direction:row; align-items:baseline; gap:.45rem; flex-wrap:wrap; }
   .title b { color:var(--text); font-size:.9rem; font-family:ui-monospace, monospace; }
   .title .instrument strong { color:var(--text-2); font-size:.72rem; font-weight:500; }
   .title span { color:var(--text-3); font-size:.72rem; }
-  .title em { color:var(--warning); font-style:normal; }
   .title .quote-line {
     display:flex; flex-direction:row; align-items:center; gap:.42rem; flex-wrap:wrap;
     font-variant-numeric:tabular-nums;
@@ -1251,8 +1288,13 @@
   .title .price-readout strong { color:var(--text); font-size:1rem; font-weight:750; line-height:1; }
   .quote-line .positive { color:var(--success); font-weight:700; }
   .quote-line .negative { color:var(--danger); font-weight:700; }
+  .day-range { display:inline-flex; gap:.55rem; white-space:nowrap; }
+  .title .day-range strong { color:var(--text); font-size:.72rem; font-weight:650; }
 
-  .head-actions { display:flex; align-items:center; gap:.5rem; flex-wrap:wrap; }
+  .head-actions { display:flex; align-items:center; gap:.4rem; flex-wrap:wrap; width:100%; }
+  .chart-context { display:flex; align-items:center; gap:.45rem; flex-wrap:wrap; margin-left:auto;
+    color:var(--text-3); font-size:.65rem; }
+  .chart-context em { color:var(--warning); font-style:normal; }
   .intervals { display:flex; padding:2px; border:1px solid var(--border-md); border-radius:8px; background:var(--surface-2); }
   .intervals button {
     border:0; border-radius:5px; padding:.25rem .5rem; background:transparent;
@@ -1380,6 +1422,10 @@
   .drop-hint { color:var(--text-3); font-size:.62rem; }
 
   .levels { display:grid; grid-template-columns:1fr 1fr; gap:.5rem; }
+  .level-row { display:flex; align-items:center; flex-wrap:wrap; gap:.25rem; }
+  .level-alert { display:grid; place-items:center; color:var(--text-2); background:transparent; border:0; border-radius:var(--radius-sm); cursor:pointer; min-width:24px; min-height:24px; }
+  .level-alert:hover { background:var(--surface-3); color:var(--primary); }
+  @media (pointer:coarse) { .level-alert { min-width:44px; min-height:44px; } }
   .levels > div { display:flex; flex-direction:column; gap:.2rem; }
   .levels b { color:var(--text-3); font-size:.65rem; text-transform:uppercase; letter-spacing:.04em; }
   .level { font-size:.72rem; color:var(--text); font-family:ui-monospace, monospace; }

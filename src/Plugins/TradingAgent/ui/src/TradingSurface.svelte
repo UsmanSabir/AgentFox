@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import {
     trading,
     type ArmOrderDialogContext, type TradingStatus, type TradeProposal, type TradingExecution,
@@ -19,6 +19,15 @@
   let selectedCompany: string | null = null;
   let workspaceWatchlist: WatchlistPanel | null = null;
   import AlertsPanel from './AlertsPanel.svelte';
+  import PriceAlertsPanel from './PriceAlertsPanel.svelte';
+  let showPriceAlerts = false;
+  let priceAlerts: PriceAlertsPanel;
+  export async function openPriceAlert(symbol: string, target = 0, direction: 'above' | 'below' = 'above') {
+    workspace?.focusPanel('alerts');
+    showPriceAlerts = true;
+    await tick();
+    await priceAlerts?.open(symbol, target, undefined, direction);
+  }
   import ArmedOrdersPanel from './ArmedOrdersPanel.svelte';
   import ArmOrderDialog from './ArmOrderDialog.svelte';
   import ActivityPanel from './ActivityPanel.svelte';
@@ -285,6 +294,8 @@
     const result = item.result as { reason?: string } | null | undefined;
     return result?.reason ?? null;
   };
+  const isCancellation = (item: TradingExecution) => !!item.request && typeof item.request === 'object'
+    && 'operationKind' in item.request && item.request.operationKind === 'cancel';
 
   $: unknownExecutions = executions.filter(item => item.state === 'unknown');
 
@@ -304,11 +315,11 @@
     }
   }
 
-  async function resolveUnknown(item: TradingExecution, resolution: 'placed' | 'not_placed') {
+  async function resolveUnknown(item: TradingExecution, resolution: 'placed' | 'not_placed' | 'cancelled' | 'not_cancelled' | 'filled') {
     if (resolvingExecution) return;
-    const outcome = resolution === 'placed'
-      ? 'the broker shows this order or fill'
-      : 'the broker confirms no order was placed';
+    const outcome = { placed: 'the broker shows this order or fill', not_placed: 'the broker confirms no order was placed',
+      cancelled: 'the broker confirms cancellation of the original order', not_cancelled: 'the broker confirms the cancellation did not occur',
+      filled: 'the broker confirms the original order filled' }[resolution];
     if (!confirm(
       `Resolve ${item.executionId}?\n\nChoose this only after checking the broker’s own activity ` +
       `and order book and confirming that ${outcome}. This does not place or retry an order.`
@@ -550,6 +561,7 @@
       {archive}
       marketOpen={status.market.isOpen}
       {symbolExtension}
+      on:priceAlert={event => openPriceAlert(event.detail.symbol, event.detail.target, event.detail.direction)}
       on:arm={(event) => armContext = event.detail}
     />
     {:else}
@@ -558,6 +570,7 @@
           allowCompact={!!workspace.setPanelWidth} dense refreshTick={marketTick} marketOpen={status.market.isOpen}
           on:compactChange={event => workspace?.setPanelWidth?.('watchlist', event.detail ? 180 : null)}
           on:newOrder={event => {selectedSymbol = event.detail.symbol; openNewOrderDialog();}}
+          on:priceAlert={event => openPriceAlert(event.detail.symbol)}
           rowStatus={symbolExtension?.rowStatus ?? null}/>
       </WorkspacePanel>
       <WorkspacePanel {workspace} id="chart">
@@ -565,7 +578,7 @@
           quoteDetail={symbolExtension?.quoteDetail ?? null}
           instrumentLinks={symbolExtension?.instrumentLinks ?? null}
           refreshTick={marketTick} historyRefreshTick={archiveTick} {archive}
-          marketOpen={status.market.isOpen} on:arm={(event) => armContext = event.detail}/>
+          marketOpen={status.market.isOpen} on:priceAlert={event => openPriceAlert(event.detail.symbol, event.detail.target, event.detail.direction)} on:arm={(event) => armContext = event.detail}/>
       </WorkspacePanel>
       {#if symbolExtension?.plan}
         <WorkspacePanel {workspace} id="plan">
@@ -612,11 +625,20 @@
       <ArmedOrdersPanel bind:this={armedPanel} refreshTick={marketTick} keyboardMode={!!workspace}/>
       </WorkspacePanel>
       <WorkspacePanel {workspace} id="alerts">
+      <div class="price-alert-tabs">
+        <button class="btn" aria-pressed={!showPriceAlerts} on:click={() => showPriceAlerts = false}>Technical signals</button>
+        <button class="btn" aria-pressed={showPriceAlerts} on:click={() => showPriceAlerts = true}>Price alerts</button>
+      </div>
+      {#if showPriceAlerts}
+        <PriceAlertsPanel bind:this={priceAlerts}/>
+      {:else}
       <AlertsPanel
+
         on:select={(e) => selectedSymbol = e.detail}
         on:arm={(e) => armContext = e.detail}
         on:alertsChanged={refreshWatchlist}
       />
+      {/if}
       </WorkspacePanel>
     </div>
 
@@ -798,7 +820,7 @@
               {#if unknownExecutions.length}
                 <div class="unknown-help"><AlertTriangle size={14} /><span><b>{unknownExecutions.length} outcome(s) need checking.</b> “Unknown” means submission began but no reliable broker reply came back. Do not repeat the order until the broker activity/order book confirms whether it exists.</span></div>
               {/if}
-              {#each executions as item}<article class="record" class:unknown={item.state === 'unknown'}><header><b>{item.executionId}</b><span class="state">{item.state.replaceAll('_', ' ')}</span></header><div class="meta">{date(item.createdUtc)} · policy {item.policyVersion}</div>{#if executionReason(item)}<p class="reason">{executionReason(item)}</p>{/if}<details class="record-details" open={item.state === 'unknown'}><summary>View execution data</summary><pre>{json(item.result ?? item.request)}</pre></details>{#if item.state === 'unknown'}<div class="record-actions"><button class="btn btn-primary" on:click={() => resolveUnknown(item, 'placed')} disabled={resolvingExecution !== null}>Broker shows order/fill</button><button class="btn btn-ghost" on:click={() => resolveUnknown(item, 'not_placed')} disabled={resolvingExecution !== null}>Broker confirms not placed</button></div>{/if}</article>{:else}<div class="empty">No executions recorded</div>{/each}
+              {#each executions as item}<article class="record" class:unknown={item.state === 'unknown'}><header><b>{item.executionId}</b><span class="state">{item.state.replaceAll('_', ' ')}</span></header><div class="meta">{date(item.createdUtc)} · policy {item.policyVersion}</div>{#if executionReason(item)}<p class="reason">{executionReason(item)}</p>{/if}<details class="record-details" open={item.state === 'unknown'}><summary>View execution data</summary><pre>{json(item.result ?? item.request)}</pre></details>{#if item.state === 'unknown'}<div class="record-actions">{#if isCancellation(item)}<button class="btn btn-primary" on:click={() => resolveUnknown(item, 'cancelled')} disabled={resolvingExecution !== null}>Broker confirms cancellation</button><button class="btn btn-ghost" on:click={() => resolveUnknown(item, 'not_cancelled')} disabled={resolvingExecution !== null}>Broker confirms not cancelled</button><button class="btn btn-ghost" on:click={() => resolveUnknown(item, 'filled')} disabled={resolvingExecution !== null}>Broker confirms order filled</button>{:else}<button class="btn btn-primary" on:click={() => resolveUnknown(item, 'placed')} disabled={resolvingExecution !== null}>Broker shows order/fill</button><button class="btn btn-ghost" on:click={() => resolveUnknown(item, 'not_placed')} disabled={resolvingExecution !== null}>Broker confirms not placed</button>{/if}</div>{/if}</article>{:else}<div class="empty">No executions recorded</div>{/each}
             </div>
           {:else if tab === 'reconciliation'}
             <div class="records">
@@ -818,6 +840,8 @@
 </div>
 
 <style>
+  .price-alert-tabs { display:flex; gap:.4rem; padding:.5rem .75rem; }
+  .price-alert-tabs [aria-pressed="true"] { border-color:var(--primary); }
   .ticket-empty { padding:1rem; color:var(--text-2); font-size:.8rem; line-height:1.6; }
   .ticket-empty h2 { font-size:1rem; color:var(--text); }
   .hosted { display:contents; }

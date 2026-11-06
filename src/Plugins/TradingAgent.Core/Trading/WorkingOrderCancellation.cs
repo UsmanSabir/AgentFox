@@ -19,7 +19,8 @@ namespace TradingAgent.Trading;
 /// The operator has been told this order is managed by something in this system and wants it cancelled
 /// anyway. Without it, a managed order is refused with the explanation, and nothing is sent.
 /// </param>
-public sealed record WorkingOrderCancelRequest(string? OrderNo, string? Symbol, bool AcknowledgeManaged = false);
+public sealed record WorkingOrderCancelRequest(string? OrderNo, string? Symbol, bool AcknowledgeManaged = false,
+    BrokerWorkingOrder? ExpectedTarget = null, IReadOnlyList<WorkingOrderOwner>? ExpectedOwners = null);
 
 /// <summary>Which part of this system owns a resting order, if any — and therefore what cancels it.</summary>
 public enum WorkingOrderOwnerKind
@@ -222,17 +223,22 @@ public sealed class WorkingOrderCancellationService
         _reconciliation.Update(snapshot);
 
         // Symbol first, then number: a number resting on a DIFFERENT symbol is not this order.
-        var target = snapshot.OpenOrders.FirstOrDefault(order =>
-            string.Equals(order.Symbol.Trim(), symbol, StringComparison.OrdinalIgnoreCase) && order.Is(orderNo));
-        if (target is null)
+        var targets = snapshot.OpenOrders.Where(order =>
+            string.Equals(order.Symbol.Trim(), symbol, StringComparison.OrdinalIgnoreCase) && order.Is(orderNo)).ToArray();
+        if (targets.Length == 0)
             return new("not_resting",
                 $"Order #{orderNo} is no longer resting on {symbol}, so nothing was cancelled. It may "
                 + "already have filled or been cancelled — refresh the portfolio to see the current book.",
                 orderNo, symbol);
+        if (targets.Length != 1)
+            return new("ambiguous", "More than one broker row matches this target. Nothing was cancelled.", orderNo, symbol);
+        var target = targets[0];
+        if (request.ExpectedTarget is { } expected && !SameReviewedTarget(expected, target))
+            return new("needs_acknowledgement", "The order changed since review. Read and review the current order before cancelling.", orderNo, symbol);
 
-        var owners = new List<WorkingOrderOwner>(await CoreOwnersAsync(target, ct));
-        if (editionOwners is not null)
-            owners.AddRange(await editionOwners(target, ct));
+        var owners = await InspectOwnersAsync(target, editionOwners, ct);
+        if (request.ExpectedOwners is { } reviewedOwners && !SameReviewedOwners(reviewedOwners, owners))
+            return new("needs_acknowledgement", "Order ownership changed since review. Review its current consequences before cancelling.", orderNo, symbol, owners);
 
         if (WorkingOrderCancelRule.IsAmbiguous(owners))
             return new("ambiguous",
@@ -266,6 +272,30 @@ public sealed class WorkingOrderCancellationService
 
         return result;
     }
+
+    /// <summary>Read-only consequences for a caller's freshly read exact target. Confirmation still
+    /// re-reads the broker and these owners; this inspection is not cancellation authority.</summary>
+    public async Task<IReadOnlyList<WorkingOrderOwner>> InspectOwnersAsync(BrokerWorkingOrder target,
+        Func<BrokerWorkingOrder, CancellationToken, Task<IReadOnlyList<WorkingOrderOwner>>>? editionOwners = null,
+        CancellationToken ct = default)
+    {
+        var owners = new List<WorkingOrderOwner>(await CoreOwnersAsync(target, ct));
+        if (editionOwners is not null) owners.AddRange(await editionOwners(target, ct));
+        return owners;
+    }
+
+    internal static bool SameReviewedTarget(BrokerWorkingOrder expected, BrokerWorkingOrder current)
+    {
+        static string Side(string? s) => s?.Trim().ToUpperInvariant() switch { "BUY" => "BUY", "SELL" or "SEL" => "SELL", _ => "" };
+        return (expected.Is(current.OrderNo) || current.Is(expected.OrderNo)) && string.Equals(expected.Symbol.Trim(), current.Symbol.Trim(), StringComparison.OrdinalIgnoreCase)
+            && Side(expected.Side).Length > 0 && Side(expected.Side) == Side(current.Side) && expected.Price == current.Price
+            && string.Equals(expected.OrderType?.Trim(), current.OrderType?.Trim(), StringComparison.OrdinalIgnoreCase);
+        // Remaining quantity may decrease through fills. Cancelling that same order is still intended;
+        // a replacement must separately reconcile those fills before sizing anything new.
+    }
+    internal static bool SameReviewedOwners(IReadOnlyList<WorkingOrderOwner> expected, IReadOnlyList<WorkingOrderOwner> current) =>
+        expected.OrderBy(o => o.Kind).ThenBy(o => o.Id, StringComparer.Ordinal).ThenBy(o => o.Consequence, StringComparer.Ordinal)
+            .SequenceEqual(current.OrderBy(o => o.Kind).ThenBy(o => o.Id, StringComparer.Ordinal).ThenBy(o => o.Consequence, StringComparer.Ordinal));
 
     private async Task<IReadOnlyList<WorkingOrderOwner>> CoreOwnersAsync(
         BrokerWorkingOrder target, CancellationToken ct)

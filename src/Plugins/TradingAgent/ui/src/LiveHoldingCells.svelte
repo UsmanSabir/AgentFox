@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { BrokerAccountHolding } from './api';
   import { livePriceLabel, useLivePrices } from './livePrices';
+  import { holdingValuation } from './holdingValuation';
 
   export let holding: BrokerAccountHolding;
   export let showValues = false;
@@ -11,14 +12,7 @@
   let priceStore = livePrices.quote(symbol);
   $: priceStore = livePrices.quote(symbol);
   $: view = $priceStore;
-  $: hasLiveMark = view.quote?.current != null;
-  $: mark = view.quote?.current ?? holding.marketPrice;
-  $: marketValue = hasLiveMark && mark != null && holding.quantity != null
-    ? mark * holding.quantity : holding.marketValue;
-  $: profitLoss = hasLiveMark && mark != null && holding.quantity != null && holding.averageCost != null
-    ? (mark - holding.averageCost) * holding.quantity : holding.unrealizedProfitLoss;
-  $: profitLossPercent = hasLiveMark && mark != null && holding.averageCost != null && holding.averageCost > 0
-    ? (mark - holding.averageCost) / holding.averageCost * 100 : holding.unrealizedProfitLossPercent;
+  $: ({ hasLiveMark, mark, marketValue, profitLoss, profitLossPercent } = holdingValuation(holding, view.quote?.current));
   $: tone = !showValues || profitLoss == null ? '' : profitLoss > 0 ? 'positive' : profitLoss < 0 ? 'negative' : '';
 
   // Visibility and currency are explicit arguments rather than closures over the props, for the

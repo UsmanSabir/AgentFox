@@ -19,6 +19,10 @@ namespace AgentFox.Tools;
 ///
 /// Stdio transport is startup-only (requires a Command path); this tool supports
 /// Http (AutoDetect) and Sse transports for runtime adds.
+///
+/// OAuth is on by default (auth = none opts out). A server that asks for a sign-in is saved at once and connects
+/// when the user approves the sign-in page this tool returns; 'sign_in' starts that again for a configured server whose sign-in lapsed, and
+/// 'complete_sign_in' takes the address a browser on another device landed on.
 /// </summary>
 public class ManageMCPTool : BaseTool
 {
@@ -38,17 +42,23 @@ public class ManageMCPTool : BaseTool
     public override string Description =>
         "Add or remove an external MCP server at runtime without restarting. " +
         "Changes are persisted to appsettings.json under MCP:Servers and take effect immediately. " +
-        "For 'add': provide server_name, url, and optionally transport_mode and headers_json. " +
-        "For 'remove': provide server_name only.";
+        "For 'add': provide server_name, url, and optionally transport_mode and headers_json. A server that signs in " +
+        "with OAuth (hosted Stockji agents do) answers with a sign-in link to give the user; auth='none' turns that off. " +
+        "For 'sign_in': server_name of a configured OAuth server that needs signing in again. " +
+        "For 'complete_sign_in': server_name and redirect_url, the full address the user's browser landed on after " +
+        "approving, when that browser was on another device. " +
+        "For 'remove': provide server_name only (an OAuth server is also signed out).";
 
     public override Dictionary<string, ToolParameter> Parameters => new()
     {
         ["action"] = new()
         {
             Type        = "string",
-            Description = "'add' to configure a new MCP server, 'remove' to disconnect an existing one.",
+            Description = "'add' to configure a new MCP server, 'remove' to disconnect an existing one, " +
+                          "'sign_in' to sign in to a configured OAuth server, 'complete_sign_in' to finish one " +
+                          "with the address the browser landed on.",
             Required    = true,
-            EnumValues  = ["add", "remove"]
+            EnumValues  = ["add", "remove", "sign_in", "complete_sign_in"]
         },
         ["server_name"] = new()
         {
@@ -75,6 +85,19 @@ public class ManageMCPTool : BaseTool
             Type        = "string",
             Description = "Optional JSON object of additional HTTP headers (e.g. '{\"Authorization\":\"Bearer …\"}').",
             Required    = false
+        },
+        ["auth"] = new()
+        {
+            Type        = "string",
+            Description = "For 'add': 'oauth' (default) signs in when the server asks for it; 'none' never offers a sign-in.",
+            Required    = false,
+            EnumValues  = ["oauth", "none"]
+        },
+        ["redirect_url"] = new()
+        {
+            Type        = "string",
+            Description = "For 'complete_sign_in': the full address shown in the browser after approving the sign-in.",
+            Required    = false
         }
     };
 
@@ -83,9 +106,11 @@ public class ManageMCPTool : BaseTool
         var action = arguments.GetValueOrDefault("action")?.ToString()?.ToLowerInvariant();
         return action switch
         {
-            "add"    => await AddServerAsync(arguments),
-            "remove" => await RemoveServerAsync(arguments),
-            _        => ToolResult.Fail("action must be 'add' or 'remove'")
+            "add"              => await AddServerAsync(arguments),
+            "remove"           => await RemoveServerAsync(arguments),
+            "sign_in"          => await SignInAsync(arguments),
+            "complete_sign_in" => CompleteSignIn(arguments),
+            _                  => ToolResult.Fail("action must be 'add', 'remove', 'sign_in' or 'complete_sign_in'")
         };
     }
 
@@ -101,7 +126,8 @@ public class ManageMCPTool : BaseTool
         if (string.IsNullOrWhiteSpace(url))
             return ToolResult.Fail("url is required for 'add'");
 
-        if (_mcpManager.Servers.Keys.Any(k => k.Equals(serverName, StringComparison.OrdinalIgnoreCase)))
+        if (_mcpManager.Servers.Keys.Any(k => k.Equals(serverName, StringComparison.OrdinalIgnoreCase))
+            || _mcpManager.IsOAuthServer(serverName))
             return ToolResult.Fail(
                 $"An MCP server named '{serverName}' is already configured. Remove it first with action='remove'.");
 
@@ -111,13 +137,17 @@ public class ManageMCPTool : BaseTool
         if (headerError != null)
             return ToolResult.Fail(headerError);
 
-        var connected = await _mcpManager.AddServerAsync(serverName, url, transportType, headers);
+        if (!string.Equals(arguments.GetValueOrDefault("auth")?.ToString(), "none", StringComparison.OrdinalIgnoreCase))
+            return await AddOAuthServerAsync(serverName, url, transportType, headers);
+
+        var connected = await _mcpManager.AddServerAsync(serverName, url, transportType, headers,
+            oauth: new McpOAuthConfig { Enabled = false });
         if (!connected)
             return ToolResult.Fail(
                 $"MCP server '{serverName}' failed to connect. Check the URL and credentials, " +
                 $"or review the server log. Error: {_mcpManager.Failures.GetValueOrDefault(serverName, "unknown")}");
 
-        var persistError = PersistServerAdd(serverName, url, transportType, headers);
+        var persistError = PersistServerAdd(serverName, url, transportType, headers, oauth: false);
         if (persistError != null)
             _logger?.LogWarning("manage_mcp_server add: connected but could not save config — {Error}", persistError);
 
@@ -134,8 +164,9 @@ public class ManageMCPTool : BaseTool
         if (string.IsNullOrWhiteSpace(serverName))
             return ToolResult.Fail("server_name is required for 'remove'");
 
-        var actualName = _mcpManager.Servers.Keys
-            .FirstOrDefault(k => k.Equals(serverName, StringComparison.OrdinalIgnoreCase));
+        var actualName = _mcpManager.Servers.Keys.Concat(_mcpManager.AwaitingSignIn)
+            .FirstOrDefault(k => k.Equals(serverName, StringComparison.OrdinalIgnoreCase))
+            ?? (_mcpManager.IsOAuthServer(serverName) ? serverName : null);
         if (actualName == null)
         {
             var registered = string.Join(", ", _mcpManager.Servers.Keys);
@@ -155,6 +186,72 @@ public class ManageMCPTool : BaseTool
             : $"NOT removed from appsettings.json ({persistError})";
 
         return ToolResult.Ok($"MCP server '{serverName}' disconnected and {saveNote}.");
+    }
+
+    // ── OAuth ─────────────────────────────────────────────────────────────────
+
+    /// <summary>Connects at once when the server needs no sign-in; otherwise saved before the user approves, so a
+    /// restart remembers the server and reports it as waiting for a sign-in rather than forgetting it was asked for.</summary>
+    private async Task<ToolResult> AddOAuthServerAsync(
+        string serverName, string url, McpTransportType transportType, Dictionary<string, string>? headers)
+    {
+        var config = new McpTransportConfig
+        {
+            Type = transportType, Url = url, Headers = headers, OAuth = new McpOAuthConfig { Enabled = true }
+        };
+        var started = await _mcpManager.BeginSignInAsync(serverName, config);
+        if (started.Error is { } error)
+        {
+            await _mcpManager.RemoveServerAsync(serverName);
+            return ToolResult.Fail($"MCP server '{serverName}' could not start a sign-in: {error}");
+        }
+
+        var persistError = PersistServerAdd(serverName, url, transportType, headers, oauth: true);
+        if (persistError != null)
+            _logger?.LogWarning("manage_mcp_server add: could not save config — {Error}", persistError);
+        var saveNote = persistError == null ? "Saved to appsettings.json." : $"NOT saved to appsettings.json ({persistError}).";
+
+        return ToolResult.Ok(SignInMessage(serverName, started) + " " + saveNote);
+    }
+
+    private async Task<ToolResult> SignInAsync(Dictionary<string, object?> arguments)
+    {
+        var serverName = arguments.GetValueOrDefault("server_name")?.ToString();
+        if (string.IsNullOrWhiteSpace(serverName))
+            return ToolResult.Fail("server_name is required for 'sign_in'");
+
+        var started = await _mcpManager.BeginSignInAsync(serverName);
+        return started.Error is { } error
+            ? ToolResult.Fail($"Could not sign in to '{serverName}': {error}")
+            : ToolResult.Ok(SignInMessage(serverName, started));
+    }
+
+    private ToolResult CompleteSignIn(Dictionary<string, object?> arguments)
+    {
+        var serverName = arguments.GetValueOrDefault("server_name")?.ToString();
+        var redirect = arguments.GetValueOrDefault("redirect_url")?.ToString();
+        if (string.IsNullOrWhiteSpace(serverName) || string.IsNullOrWhiteSpace(redirect))
+            return ToolResult.Fail("server_name and redirect_url are required for 'complete_sign_in'");
+
+        return _mcpManager.CompleteSignIn(serverName, redirect, out var error)
+            ? ToolResult.Ok($"Sign-in to '{serverName}' handed over; its tools appear once the server accepts it.")
+            : ToolResult.Fail(error ?? "The sign-in could not be completed.");
+    }
+
+    internal static string SignInMessage(string serverName, McpManager.SignInStart started)
+    {
+        if (started.Connected)
+            return $"MCP server '{serverName}' added and connected.";
+
+        var how = started.BrowserOpened
+            ? "It has been opened in this computer's browser."
+            : started.CallbackProblem is { } problem
+                ? $"This computer cannot receive the browser's answer ({problem}), so after approving, copy the full " +
+                  "address the browser lands on and give it back (complete_sign_in)."
+                : "Open it in a browser.";
+        return $"Sign in to '{serverName}' at: {started.SignInUrl} — {how} The server connects by itself once the user " +
+               $"approves (within {McpManager.SignInTimeout.TotalMinutes:0} minutes). If the browser is on another device, " +
+               "the page it lands on will not load: copy that page's full address and give it back (complete_sign_in).";
     }
 
     private static Dictionary<string, string>? ParseHeaders(string? headersJson, out string? error)
@@ -180,7 +277,8 @@ public class ManageMCPTool : BaseTool
     private string? PersistServerAdd(
         string serverName, string url,
         McpTransportType transportType,
-        Dictionary<string, string>? headers)
+        Dictionary<string, string>? headers,
+        bool oauth)
     {
         try
         {
@@ -220,6 +318,8 @@ public class ManageMCPTool : BaseTool
                     headersObj[key] = value;
                 transportObj["Headers"] = headersObj;
             }
+
+            transportObj["OAuth"] = new JObject { ["Enabled"] = oauth };
 
             servers.Add(new JObject
             {

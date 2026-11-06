@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { createEventDispatcher, onMount, onDestroy } from 'svelte';
+  import { Filter } from 'lucide-svelte';
+  import { OTHER_SECTORS, otherSectorLabels, sectorFilterKey } from './portfolioSectorFilter';
   import type { BrokerAccountHolding } from './api';
   import { usePortfolioCosts } from './portfolioCosts';
   import {
@@ -12,6 +14,9 @@
 
   export let holdings: BrokerAccountHolding[] = [];
   export let showValues = false;
+  export let selectedSector = '';
+  export let otherSectors: string[] = [];
+  const dispatch = createEventDispatcher<{ sectorSelect: string }>();
 
   let dimension: AllocationDimension = 'stock';
   let basis: AllocationBasis = 'market';
@@ -49,6 +54,13 @@
   $: market = buildPortfolioAllocation(holdings, dimension);
   $: invested = buildPortfolioAllocation(holdings, dimension, 6, { basis: 'invested', costs });
   $: allocation = basis === 'market' ? market : invested;
+  // The filter uses this same basis even in Stocks view; the chart always keeps the full portfolio.
+  $: sectorAllocation = buildPortfolioAllocation(holdings, 'sector', 6, { basis, costs });
+  // Do not drop the user's selection while an invested-cost refresh has only temporary fallback data.
+  $: if (!loadingCosts) otherSectors = otherSectorLabels(sectorAllocation);
+  $: sliceSectorKeys = allocation.slices.map((slice, index) =>
+    allocation.rows.length > allocation.slices.length && index === allocation.slices.length - 1
+      ? OTHER_SECTORS : sectorFilterKey(slice.label));
   $: valueLabel = basis === 'market' ? 'Market value' : 'Invested amount';
   $: totalLabel = allocation.unavailableCount > 0
     ? basis === 'market' ? 'Known market value' : 'Known invested'
@@ -88,7 +100,7 @@
             on:blur={() => { helpFocused = false; helpPinned = false; if (!helpHovering) closeHelp(); }}
             on:click={() => { if (helpPinned) closeHelp(); else { helpPinned = true; helpOpen = true; } }}
             on:keydown={(event) => { if (event.key === 'Escape' && helpOpen) { event.preventDefault(); event.stopPropagation(); closeHelp(); } }}>?</button>
-          <div id="allocation-help" class="help-popup" role="tooltip">Market value shows what your holdings are worth in the broker account snapshot. Invested shows the purchase cost of the shares you still hold, including known purchase charges. Where supplied, costs use the remaining purchase lots after selling the oldest shares first. Estimated marks costs with incomplete records, pending charges, or a broker-average fallback. Missing amounts are excluded; “Known” totals and percentages cover only holdings with an available amount.</div>
+          <div id="allocation-help" class="help-popup" role="tooltip">Market value shows what your holdings are worth in the broker account snapshot. Invested shows the purchase cost of the shares you still hold, including known purchase charges. Where supplied, costs use the remaining purchase lots after selling the oldest shares first. Estimated marks costs with incomplete records, pending charges, or a broker-average fallback. Missing amounts are excluded; “Known” totals and percentages cover only holdings with an available amount. Select a sector name to filter holdings below; select it again to clear. Other groups the smaller sectors for the selected value basis. Unclassified means sector metadata is missing. The chart always shows the whole portfolio.</div>
         </div>
       </div>
       <p>{basis === 'market' ? 'Market value' : 'Invested amount'} · {dimension === 'stock' ? 'Stocks' : 'Sectors'}</p>
@@ -138,7 +150,16 @@
         {#each allocation.slices as slice, index}
           <tr style={`--row-color:${colors[index]}`}>
             <th scope="row" class="legend-label">
-              <span class="legend-key"><span class="swatch" aria-hidden="true"></span><span>{slice.label}</span></span>
+              {#if dimension === 'sector'}
+                <button type="button" class="legend-key sector-choice" aria-pressed={selectedSector === sliceSectorKeys[index]}
+                  aria-label={`Filter holdings: ${sliceSectorKeys[index] === OTHER_SECTORS ? 'Other (chart group)' : slice.label}`}
+                  on:click={() => dispatch('sectorSelect', sliceSectorKeys[index])}>
+                  <span class="swatch" aria-hidden="true"></span><span class="sector-name">{sliceSectorKeys[index] === OTHER_SECTORS && allocation.rows.some(row => row.label === 'Other') ? 'Other (chart group)' : slice.label}</span>
+                  <span class="filter-icon" aria-hidden="true"><Filter size={12}/></span>
+                </button>
+              {:else}
+                <span class="legend-key"><span class="swatch" aria-hidden="true"></span><span>{slice.label}</span></span>
+              {/if}
             </th>
             <td><b class="percent-pill">{percent(slice.percent)}</b></td>
             <td>{money(slice.value, allocation.currency)}{#if slice.estimated}<small class="estimate">Estimated</small>{/if}</td>
@@ -155,7 +176,7 @@
           <thead><tr><th>{dimension === 'stock' ? 'Stock' : 'Sector'}</th><th>Share</th><th>{valueLabel}</th></tr></thead>
           <tbody>
             {#each allocation.rows as row}
-              <tr><td>{row.label}</td><td>{percent(row.percent)}</td><td>{money(row.value, allocation.currency)}{#if row.estimated}<small class="estimate">Estimated</small>{/if}</td></tr>
+              <tr><td>{#if dimension === 'sector'}<button type="button" class="sector-choice" aria-label={`Filter holdings: ${row.label}`} aria-pressed={selectedSector === sectorFilterKey(row.label)} on:click={() => dispatch('sectorSelect', sectorFilterKey(row.label))}><span class="sector-name">{row.label}</span><span class="filter-icon" aria-hidden="true"><Filter size={12}/></span></button>{:else}{row.label}{/if}</td><td>{percent(row.percent)}</td><td>{money(row.value, allocation.currency)}{#if row.estimated}<small class="estimate">Estimated</small>{/if}</td></tr>
             {/each}
           </tbody>
         </table>
@@ -229,7 +250,14 @@
   .legend tbody th { text-align:left; font-weight:600; }
   .legend td { font-variant-numeric:tabular-nums; }
   .legend-key { display:flex; align-items:center; gap:.55rem; min-width:0; }
-  .legend-key > span:last-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .sector-choice { display:inline-flex; align-items:center; gap:.55rem; max-width:100%; min-height:24px; padding:.15rem; border:1px solid transparent; border-radius:var(--radius-sm); background:none; color:var(--text-2); font:inherit; text-align:left; cursor:pointer; }
+  .filter-icon { display:inline-flex; flex:none; color:var(--primary); opacity:0; }
+  tr:hover .filter-icon,tr:focus-within .filter-icon,.sector-choice[aria-pressed="true"] .filter-icon { opacity:1; }
+  @media (hover:none) { .filter-icon { opacity:1; } }
+  .sector-choice:hover { color:var(--primary); text-decoration:underline; }
+  .sector-choice[aria-pressed="true"] { color:var(--primary); border-color:var(--primary); background:color-mix(in srgb,var(--primary) 12%,var(--surface)); }
+  .sector-choice:focus-visible { outline:2px solid var(--primary); outline-offset:2px; }
+  .legend-key > span:not(.swatch):not(.filter-icon) { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .swatch { display:inline-block; flex:0 0 14px; width:14px; height:14px; border-radius:4px; background:var(--row-color); border:1px solid color-mix(in srgb,var(--row-color) 72%,white); box-shadow:0 0 10px color-mix(in srgb,var(--row-color) 42%,transparent),inset 0 1px 1px rgba(255,255,255,.28); }
   .percent-pill { display:inline-block; min-width:3.3rem; padding:.18rem .4rem; border:1px solid color-mix(in srgb,var(--row-color) 42%,var(--border)); border-radius:999px; background:color-mix(in srgb,var(--row-color) 14%,transparent); color:var(--text); text-align:center; font-variant-numeric:tabular-nums; }
   .full-breakdown { color:var(--text-3); font-size:.66rem; }
