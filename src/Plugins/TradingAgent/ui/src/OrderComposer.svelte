@@ -10,10 +10,11 @@
     type LiveEntryConflict
   } from './api';
   import {
-    ShoppingCart, X, AlertTriangle, RefreshCw, CheckCircle2, Clock3, BriefcaseBusiness, Wallet
+    ShoppingCart, X, AlertTriangle, RefreshCw, CheckCircle2, BriefcaseBusiness, Wallet
   } from 'lucide-svelte';
   import { livePriceLabel, useLivePrices } from './livePrices';
   import { announceAccountChanged } from './accountSignal';
+  import { holdingValuation } from './holdingValuation';
 
   export let selectedSymbol: string | null = null;
   /**
@@ -169,7 +170,52 @@
   $: latestPriceLabel = livePriceView.quote?.current != null
     ? livePriceLabel(livePriceView)
     : 'Latest available price';
-  $: categories = [...new Set((registry?.intents ?? []).map(item => item.category))];
+  type Side = OrderIntentDefinition['action'];
+  const commonGroups = ['limit', 'market', 'trailing', 'price'];
+  const groupLabels: Record<string, string> = {
+    limit: 'At my price', market: 'At market', trailing: 'Trailing',
+    price: 'Wait for a price', schedule: 'Schedule', recent: 'Recent % move'
+  };
+  let side: Side = 'BUY';
+  $: sideIntents = (registry?.intents ?? []).filter(item => item.action === side && item.id !== 'profit-book');
+  $: groupKeys = [...new Set(sideIntents.map(intentGroup))];
+  $: selectedGroup = choice ? intentGroup(choice) : null;
+  $: variants = sideIntents.filter(item => intentGroup(item) === selectedGroup);
+
+  function intentGroup(intent: OrderIntentDefinition): string {
+    if (intent.requiresActivationDate) return 'schedule';
+    if (intent.trailing) return 'trailing';
+    if (intent.defaultWindowMinutes != null) return 'recent';
+    if (intent.priceField === 'trigger-and-limit') return 'price';
+    if (intent.submission === 'immediate' && intent.orderType === 'LIMIT') return 'limit';
+    if (intent.submission === 'immediate' && intent.orderType === 'MARKET') return 'market';
+    return intent.id;
+  }
+
+  function chooseSide(next: Side) {
+    if (next === side) return;
+    side = next;
+    choice = null;
+    quantity = null;
+    quantityWasEdited = false;
+    sizeMode = 'shares';
+    orderValue = null;
+    persistentUntilFilled = false;
+    blockedSell = null;
+    duplicateEntry = null;
+    error = null;
+  }
+
+  function chooseGroup(group: string) {
+    if (selectedGroup === group) return;
+    const intent = sideIntents.find(item => intentGroup(item) === group);
+    if (intent) choose(intent);
+  }
+
+  function variantLabel(intent: OrderIntentDefinition): string {
+    if (intentGroup(intent) !== 'price') return intent.label;
+    return intent.triggerKind === 'PriceAbove' ? 'At or above' : 'At or below';
+  }
 
   onMount(async () => {
     dialogElement.focus();
@@ -185,6 +231,7 @@
       if (intentResult.status === 'rejected') throw intentResult.reason;
       registry = intentResult.value;
       if (selectedAction) {
+        side = selectedAction;
         const initialIntent = registry.intents.find(item => item.action === selectedAction);
         if (initialIntent) choose(initialIntent);
       }
@@ -253,21 +300,8 @@
     duplicateEntry = null;
   }
 
-  let formCard: HTMLElement | null = null;
-
-  /** A card click is a decision to fill in the order, so bring its fields into view rather than
-   *  leaving them below the fold under a grid the operator has finished with — and move focus
-   *  with them, or Tab would scroll back up into the cards. */
-  async function chooseAndReveal(intent: OrderIntentDefinition) {
-    choose(intent);
-    await tick();
-    const reduce = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
-    formCard?.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
-    // preventScroll: focusing would otherwise jump to the input and cut the scroll above short.
-    formCard?.querySelector<HTMLInputElement>('.grid input')?.focus({ preventScroll: true });
-  }
-
   function choose(intent: OrderIntentDefinition) {
+    if (choice?.keepWorking && !intent.keepWorking) persistentUntilFilled = false;
     choice = intent;
     activeFromDate = '';
     blockedSell = null;
@@ -407,6 +441,11 @@
   $: selectedTicker = symbol.trim().toUpperCase();
   $: matchingHoldings = account?.holdings.filter(
     holding => sameSymbol(holding.symbol ?? holding.instrumentId, selectedTicker)) ?? [];
+  $: holdingValues = matchingHoldings.map(holding => holdingValuation(holding, livePriceView.quote?.current));
+  $: holdingPnl = holdingValues.length && holdingValues.every(value => value.profitLoss != null && Number.isFinite(value.profitLoss))
+    ? holdingValues.reduce((sum, value) => sum + (value.profitLoss ?? 0), 0)
+    : null;
+  $: holdingPnlPercent = holdingValues.length === 1 ? holdingValues[0].profitLossPercent : null;
   $: matchingSellOrders = account?.orders.filter(order =>
     sameSymbol(order.symbol ?? order.instrumentId, selectedTicker)
     && (order.side?.toUpperCase() === 'SELL' || order.side?.toUpperCase() === 'SEL')) ?? [];
@@ -842,7 +881,7 @@
 <!-- Order intent must not disappear because of a stray backdrop click or Escape press. The visible
      Close, Cancel and Done controls are the only dismissal paths. -->
 <div class="backdrop" class:embedded={docked} role="presentation">
-  <div class="dialog" bind:this={dialogElement} role={docked ? 'region' : 'dialog'} aria-modal={docked ? undefined : true} aria-label={docked ? 'Order ticket draft' : 'New order'}
+  <div class="dialog" class:sell={side === 'SELL'} bind:this={dialogElement} role={docked ? 'region' : 'dialog'} aria-modal={docked ? undefined : true} aria-label={docked ? 'Order ticket draft' : 'New order'}
        tabindex="-1" on:keydown={composerKey}>
     <header>
       <div class="title"><ShoppingCart size={17} /><div><b>{docked ? `Order ticket · ${symbol || 'new'}` : 'New Order'}</b><span>{docked ? 'Ctrl Enter reviews · never submits directly' : 'Choose what you want to happen'}</span></div></div>
@@ -867,37 +906,53 @@
           <span>{latestPriceLabel}</span><b>{latestPrice != null ? money(latestPrice) : '—'}</b>
           <button class="icon" on:click={refreshQuote} disabled={quoteBusy} title="Refresh latest price"><RefreshCw size={13} /></button>
         </div>
+        <div class="side-picker" role="group" aria-label="Order side">
+          <button type="button" class:active={side === 'BUY'} aria-pressed={side === 'BUY'} on:click={() => chooseSide('BUY')}>Buy</button>
+          <button type="button" class:active={side === 'SELL'} aria-pressed={side === 'SELL'} on:click={() => chooseSide('SELL')}>Sell</button>
+        </div>
       </div>
 
-      {#if docked}
-        <div class="ticket-choice"><label><span>Order instruction</span>
-          <select value={choice?.id ?? ''} on:change={event => {const intent = registry?.intents.find(item => item.id === event.currentTarget.value); if (intent) choose(intent);}}>
-            <option value="" disabled>Choose what you want to happen</option>
-            {#each categories as category}<optgroup label={category}>{#each registry?.intents.filter(item => item.category === category) ?? [] as item}<option value={item.id}>{item.label}</option>{/each}</optgroup>{/each}
-          </select></label>
-          {#if choice}<p>{choice.description} {scheduled && exactPriceTrigger ? 'Waits for your PSX date and price condition.' : scheduled ? 'Waits for your PSX date.' : choice.submission === 'conditional' ? 'Waits for a trigger.' : 'Sent after your confirmation.'}</p>{/if}
-        </div>
-      {:else}
       <div class="choices">
-        {#each categories as category}
-          <section>
-            <h3>{category}</h3>
+        <h3>Order type</h3>
+        <div class="choice-grid">
+          {#each commonGroups.filter(group => groupKeys.includes(group)) as group}
+            <button type="button" class="choice" class:selected={selectedGroup === group}
+              aria-pressed={selectedGroup === group} on:click={() => chooseGroup(group)}>{groupLabels[group]}</button>
+          {/each}
+        </div>
+        {#if groupKeys.some(group => !commonGroups.includes(group))}
+          <details class="more-types">
+            <summary>More order types</summary>
             <div class="choice-grid">
-              {#each registry?.intents.filter(item => item.category === category) ?? [] as item (item.id)}
-                <button class="choice" class:selected={choice?.id === item.id} on:click={() => chooseAndReveal(item)}>
-                  <b>{item.label}</b><span>{item.description}</span>
-                  {#if item.submission === 'conditional'}<em><Clock3 size={11} /> {item.requiresActivationDate && item.triggerKind !== 'Scheduled' ? 'waits for a date + price' : item.triggerKind === 'Scheduled' ? 'waits for a date' : 'waits for a trigger'}</em>{/if}
+              {#each groupKeys.filter(group => !commonGroups.includes(group)) as group}
+                <button type="button" class="choice" class:selected={selectedGroup === group}
+                  aria-pressed={selectedGroup === group} on:click={() => chooseGroup(group)}>
+                  {groupLabels[group] ?? sideIntents.find(item => item.id === group)?.label}
                 </button>
               {/each}
             </div>
-          </section>
-        {/each}
+          </details>
+        {/if}
       </div>
-      {/if}
 
       {#if choice}
-        <div class="form-card" bind:this={formCard}>
-          <div class="form-head"><div><b>{choice.label}</b><span>{choice.action} · {choice.orderType}</span></div></div>
+        <div class="form-card">
+          <div class="form-head"><div><b>{choice.label}</b><span>{choice.action} · {choice.orderType}</span></div>
+            {#if !boundedTrail}
+              <details class="intent-help"><summary aria-label="Help for this order type">?</summary><p>{choice.description}</p></details>
+            {/if}
+          </div>
+          {#if variants.length > 1}
+            <label class="intent-variant">
+              <span>{selectedGroup === 'price' ? 'Trigger when the price is' : 'Order instruction'}</span>
+              <select value={choice.id} on:change={event => {
+                const intent = variants.find(item => item.id === event.currentTarget.value);
+                if (intent) choose(intent);
+              }}>
+                {#each variants as intent}<option value={intent.id}>{variantLabel(intent)}</option>{/each}
+              </select>
+            </label>
+          {/if}
           <details class="account-context" class:docked open={!docked}>
             <summary hidden={!docked}>{choice.action === 'BUY'
               ? `Buying power: ${buyingPower == null ? 'unknown' : money(buyingPower) + ' PKR'}`
@@ -978,6 +1033,14 @@
                   <div><span>Owned</span><b>{heldQuantity == null ? 'Unknown' : `${money(heldQuantity)} shares`}</b></div>
                   <div><span>In working SELLs</span><b>{committedSellQuantity == null ? 'Unknown' : `${money(committedSellQuantity)} shares`}</b></div>
                   <div><span>Available now</span><b>{availableSellQuantity == null ? 'Unknown' : `${money(availableSellQuantity)} shares`}</b></div>
+                  {#if matchingHoldings.length}
+                    <div><span>Unrealized P/L (broker basis)</span><b class:gain={holdingPnl != null && holdingPnl > 0} class:loss={holdingPnl != null && holdingPnl < 0}>
+                      {holdingPnl == null ? 'Unavailable' : `${holdingPnl > 0 ? '+' : ''}${money(holdingPnl)} PKR`}
+                      {#if holdingPnl != null && holdingPnlPercent != null && Number.isFinite(holdingPnlPercent)}
+                        · {holdingPnlPercent > 0 ? '+' : ''}{holdingPnlPercent.toFixed(2)}%
+                      {/if}
+                    </b></div>
+                  {/if}
                 </div>
 
                 {#if !account.ordersAvailable}
@@ -1143,7 +1206,7 @@
           {#if exactPriceTrigger}
             <p class="estimate">AgentFox waits locally and submits only after observing the trigger while running with monitoring active and the market open. Approval and risk checks still apply. A price already beyond the trigger can activate on the next check.</p>
           {/if}
-          {#if summary}<p class="summary">{summary}</p>{/if}
+          {#if summary}<p class="summary" class:trail-summary={boundedTrail}>{summary}</p>{/if}
           {#if estimatedValue}<p class="estimate">Estimated value: <b>{money(estimatedValue)} PKR</b>{choice.orderType === 'MARKET' ? ' at the latest price; actual value can move.' : ''}</p>{/if}
           {#if sizeMode === 'shares' && estimatedValue}<AmountInWords value={estimatedValue} />{/if}
           <!--
@@ -1207,7 +1270,7 @@
       <div class="footer">
         <button class="btn btn-ghost" on:click={closeComposer} disabled={busy || releasing || reviewing}>{docked ? 'Discard draft' : 'Cancel'}</button>
         <button class="btn btn-primary" on:click={reviewOrder} disabled={!choice || busy || releasing || reviewing || quoteBusy || marketDisabled}>
-          {busy ? 'Submitting…' : docked ? 'Review order' : scheduled ? 'Review & schedule' : choice?.submission === 'conditional' ? 'Arm waiting order' : 'Review & submit'}
+          {busy ? 'Submitting…' : boundedTrail ? `Review trailing ${side.toLowerCase()}` : docked ? 'Review order' : scheduled ? 'Review & schedule' : choice?.submission === 'conditional' ? 'Arm waiting order' : 'Review & submit'}
         </button>
       </div>
     {/if}
@@ -1215,7 +1278,7 @@
 </div>
 
 {#if docked}
-  <dialog class="review-dialog" bind:this={reviewDialog} aria-label={reviewTitle} on:cancel|preventDefault={() => finishReview(false)} on:keydown={reviewKey}>
+  <dialog class="review-dialog" class:sell={side === 'SELL'} bind:this={reviewDialog} aria-label={reviewTitle} on:cancel|preventDefault={() => finishReview(false)} on:keydown={reviewKey}>
     <h2>{reviewTitle}</h2><p>{reviewText}</p>
     <div class="footer"><button class="btn btn-ghost" on:click={() => finishReview(false)}>Back to ticket</button><button class="btn btn-primary" on:click={() => finishReview(true)}>{reviewAction}</button></div>
   </dialog>
@@ -1231,9 +1294,7 @@
   .account-context summary { cursor:pointer; font-size:.72rem; color:var(--text-2); line-height:1.5; padding:.4rem 0; }
   .account-context summary:focus-visible { outline:2px solid var(--primary); outline-offset:2px; }
   .draft-note { margin:.6rem .7rem; color:var(--text-2); font-size:.7rem; line-height:1.45; }
-  .ticket-choice { padding:.3rem .7rem .7rem; }
-  .ticket-choice select { width:100%; min-width:0; color:var(--text); background:var(--surface-2); border:1px solid var(--border-md); border-radius:var(--radius-sm); padding:.5rem; }
-  .ticket-choice p { color:var(--text-2); font-size:.7rem; line-height:1.45; }
+  .intent-variant select { width:100%; min-width:0; color:var(--text); background:var(--surface-2); border:1px solid var(--border-md); border-radius:var(--radius-sm); padding:.5rem; }
   .embedded input { min-width:0; width:100%; box-sizing:border-box; }
   .embedded input[type=checkbox] { width:auto; }
   .embedded .symbol-row { padding:.7rem; gap:.5rem; }
@@ -1286,15 +1347,32 @@
           color:var(--text); padding:.5rem .6rem; font:inherit; min-width:150px; }
   .quote { display:grid; grid-template-columns:auto auto auto; align-items:center; gap:.45rem; color:var(--text-3); font-size:.68rem; }
   .quote b { color:var(--text); font-size:.85rem; }
-  .choices { padding:.3rem 1rem .8rem; }.choices section { margin-top:.8rem; }
-  h3 { margin:0 0 .4rem; color:var(--text-2); font-size:.7rem; text-transform:uppercase; letter-spacing:.06em; }
+  .dialog,.review-dialog { --side-color:var(--success); --side-tint:color-mix(in srgb,var(--side-color) 14%,var(--surface-2)); }
+  .sell { --side-color:var(--danger); }
+  .dialog header { border-top:3px solid var(--side-color); }
+  .dialog .btn-primary,.review-dialog .btn-primary { background:var(--side-color); color:#101114; }
+  .choices { padding:.7rem 1rem .8rem; }
+  .side-picker { display:flex; width:fit-content; gap:.2rem; padding:.2rem; margin-left:auto;
+                 background:var(--surface-2); border:1px solid var(--border-md); border-radius:var(--radius); }
+  .side-picker button { min-width:5rem; min-height:44px; padding:.45rem; border:1px solid transparent;
+                        background:transparent; color:var(--text); border-radius:var(--radius-sm); cursor:pointer; font-weight:600; }
+  .side-picker .active { border-color:var(--side-color); background:var(--side-tint); }
+  h3 { margin:0 0 .4rem; color:var(--text-2); font-size:.7rem; }
   .choice-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:.45rem; }
-  .choice { min-height:88px; text-align:left; display:flex; flex-direction:column; gap:.3rem; border:1px solid var(--border);
-            background:var(--surface-2); color:var(--text); border-radius:var(--radius-sm); padding:.65rem; cursor:pointer; }
-  .choice:hover { border-color:var(--border-md); background:var(--surface-3); }
-  .choice.selected { border-color:var(--primary); box-shadow:inset 0 0 0 1px var(--primary); }
-  .choice b { font-size:.75rem; }.choice span { color:var(--text-3); font-size:.65rem; line-height:1.4; }
-  .choice em { color:var(--warning); font-size:.61rem; display:flex; align-items:center; gap:.2rem; margin-top:auto; font-style:normal; }
+  .choice { min-height:44px; text-align:left; border:1px solid var(--border-md); font-size:.78rem; font-weight:600;
+            background:var(--surface-2); color:var(--text); border-radius:var(--radius-sm); padding:.55rem; cursor:pointer; }
+  .choice:hover { background:var(--surface-3); }
+  .choice.selected { border-color:var(--side-color); background:var(--side-tint); }
+  .side-picker button:focus-visible, .more-types summary:focus-visible, .intent-help summary:focus-visible {
+    outline:2px solid var(--primary); outline-offset:2px;
+  }
+  .more-types summary { width:fit-content; padding:.6rem 0; color:var(--primary); cursor:pointer; font-size:.78rem; }
+  .intent-variant { margin:.6rem 0; }
+  .intent-help { position:relative; }
+  .intent-help summary { cursor:pointer; list-style:none; text-align:center; width:1.4rem; color:var(--text); border:1px solid var(--border-md); border-radius:50%; }
+  .intent-help p { position:absolute; right:0; z-index:1; width:min(16rem,60vw); padding:.55rem;
+                   background:var(--surface); border:1px solid var(--border-md); border-radius:var(--radius-sm); color:var(--text); font-size:.75rem; }
+  .embedded .choice-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
   .form-card { scroll-margin-top:.75rem; margin:0 1rem 1rem; padding:.8rem; background:var(--surface-2); border:1px solid var(--border-md); border-radius:var(--radius-sm); }
   .form-head { display:flex; justify-content:space-between; margin-bottom:.65rem; }.form-head div { display:flex; align-items:center; gap:.5rem; }
   .form-head b { font-size:.82rem; }.form-head span { color:var(--text-3); font-size:.65rem; }
@@ -1321,6 +1399,8 @@
                        border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--surface-2); }
   .holding-stats span { color:var(--text-3); font-size:.61rem; }
   .holding-stats b { color:var(--text); font-size:.72rem; }
+  .holding-stats .gain { color:var(--success); }
+  .holding-stats .loss { color:var(--danger); }
   .holding-actions { display:flex; flex-wrap:wrap; gap:.35rem; margin-top:.6rem; }
   .holding-actions button { border:1px solid var(--border-md); border-radius:var(--radius-sm); padding:.35rem .55rem;
                             background:var(--surface-2); color:var(--text-2); font:inherit; font-size:.65rem; cursor:pointer; }
@@ -1344,6 +1424,7 @@
                  background:color-mix(in srgb,var(--primary) 7%,transparent); color:var(--text-2);
                  font-size:.7rem; line-height:1.45; }
   .sizing-note b { color:var(--text); }
+  .trail-summary { border-left:3px solid var(--side-color); background:var(--side-tint); padding:.55rem; border-radius:var(--radius-sm); }
   .summary { margin:.7rem 0 0; color:var(--text); font-size:.75rem; line-height:1.5; font-weight:600; }
   .estimate { margin:.3rem 0 0; color:var(--text-3); font-size:.68rem; }.estimate b { color:var(--text-2); }
   .blocked-sell {
