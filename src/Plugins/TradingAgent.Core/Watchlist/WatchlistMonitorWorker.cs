@@ -474,8 +474,19 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                     PercentTrigger.WindowUsesHigh(order.TriggerKind))
                 : null;
 
-            if (!ArmedOrderEvaluator.ShouldFire(
-                    order, price, alerts, now, out var why, marketIsOpen, windowReference))
+            var outcome = ArmedOrderEvaluator.Evaluate(
+                order, price, alerts, now, out var why, marketIsOpen, windowReference);
+
+            if (outcome == ArmedOrderOutcome.SkipMove)
+            {
+                // A bounded trail met its trigger outside its price range. Nothing is sent; the move is
+                // locked out until a strictly new extreme. No ratchet either: a price on the far side
+                // of the trigger is by definition not a new low (or high).
+                await SkipTrailMoveAsync(order, why, ct);
+                continue;
+            }
+
+            if (outcome != ArmedOrderOutcome.Fire)
             {
                 // Not firing — so this is the moment a trailing trigger follows the price. Done after
                 // the fire check so a fire never waits on a bookkeeping write, and only when the
@@ -514,8 +525,10 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                 order.ArmedId, order.Symbol, why);
             _activity?.Info("Armed", $"{order.Symbol}: armed {order.Action} triggered", why);
 
-            // A windowed LIMIT is priced at the level it just fired at — see ArmedOrder.PriceAtFire.
-            var firePrice = order.PriceAtFire(windowReference);
+            // A windowed LIMIT is priced at the level it just fired at, and a trailing LIMIT at the
+            // price that met its trigger, inside its bound — see ArmedOrder.PriceAtFire. Frozen from
+            // here: the persistent order below re-places this same price every session.
+            var firePrice = order.PriceAtFire(windowReference, price);
 
             try
             {
@@ -1059,6 +1072,38 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
             _logger.LogWarning(ex,
                 "[ArmedOrders] Could not trail {ArmedId} ({Symbol}); its trigger stays at {Level}.",
                 order.ArmedId, order.Symbol, order.EffectiveTriggerPrice);
+        }
+    }
+
+    /// <summary>
+    /// Records that a bounded trail's current move triggered outside its price range, so it waits for a
+    /// strictly new extreme before it can submit.
+    ///
+    /// <para>
+    /// A failed or missed write is logged and otherwise ignored, like a missed ratchet. Nothing was sent
+    /// on this pass either way; the cost of a lost write is that the lock is absent, so a later price
+    /// back inside the range could submit on the same move — still within the operator's bound, which
+    /// is why losing it is a lapse in the skip rule rather than a breach of the price.
+    /// </para>
+    /// </summary>
+    private async Task SkipTrailMoveAsync(ArmedOrder order, string why, CancellationToken ct)
+    {
+        if (order.ReferencePrice is not { } reference) return;
+
+        try
+        {
+            if (!await _repository.TrySetArmedOrderTrailSkipAsync(order.ArmedId, reference, why, ct))
+                return;
+
+            _logger.LogWarning("[ArmedOrders] {ArmedId} ({Symbol}) skipped a move: {Why}",
+                order.ArmedId, order.Symbol, why);
+            _activity?.Info("Armed", $"{order.Symbol}: trailing {order.Action} skipped a move", why);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex,
+                "[ArmedOrders] Could not record a skipped move on {ArmedId} ({Symbol}).",
+                order.ArmedId, order.Symbol);
         }
     }
 

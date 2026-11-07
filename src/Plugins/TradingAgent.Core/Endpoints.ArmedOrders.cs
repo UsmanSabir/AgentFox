@@ -118,7 +118,11 @@ public sealed partial class TradingCoreEndpoints
                     o.ProtectiveStopId,
                     o.PersistentUntilFilled,
                     o.PullbackPrice,
-                    o.PullbackCount
+                    o.PullbackCount,
+                    // A bounded trail: the worst price it may trade at, and — when a move triggered
+                    // outside it — the low or high it now needs a strictly new one beyond.
+                    o.PriceBound,
+                    o.SkippedReference
                     };
                 }),
                 // Sent with the orders because a stop and the entry it protects are one thing to
@@ -382,6 +386,31 @@ public sealed partial class TradingCoreEndpoints
                     message = $"This order would be refused when it fired: {stopProblem}"
                 });
 
+            // A price bound belongs to a trailing LIMIT and to nothing else. It is the fill bound AND the
+            // submission condition, so it is refused anywhere it could only be half of that: a MARKET
+            // order has no limit to clamp, and a fixed or windowed trigger has no trail to skip a move of.
+            // It rides the keep-working lifecycle because that is the path whose limit is frozen at the
+            // bounded price and carried across sessions.
+            decimal? priceBound = null;
+            if (body.PriceBound is { } bound)
+            {
+                var orderType = (body.OrderType ?? "LIMIT").Trim().ToUpperInvariant();
+                string? boundProblem =
+                    bound <= 0 ? "A price bound must be a positive price."
+                    : !PercentTrigger.IsPercent(kind) || !trailing
+                        ? "A maximum buy or minimum sell price applies only to a trailing order."
+                    : orderType != "LIMIT" ? "A maximum buy or minimum sell price needs a LIMIT order."
+                    : !body.PersistentUntilFilled
+                        ? "A trailing order with a price bound keeps its unfilled remainder working; "
+                          + "set persistentUntilFilled."
+                    : null;
+
+                if (boundProblem is not null)
+                    return Results.BadRequest(new { error = "invalid_price_bound", message = boundProblem });
+
+                priceBound = Math.Round(bound, 2, MidpointRounding.AwayFromZero);
+            }
+
             if (body.PersistentUntilFilled
                 && PersistentOrderDecisions.ValidateEligibility(body.OrderType) is { } persistenceProblem)
             {
@@ -409,6 +438,7 @@ public sealed partial class TradingCoreEndpoints
                 Price            = body.Price,
                 LimitPrice       = body.LimitPrice,
                 PersistentUntilFilled = body.PersistentUntilFilled,
+                PriceBound       = priceBound,
                 // Someone is standing at the dashboard arming this. That is what lets it fire on a
                 // manual-only symbol — see ArmedOrder.OperatorOriginated.
                 OperatorOriginated = true,
@@ -423,6 +453,18 @@ public sealed partial class TradingCoreEndpoints
 
             // Validated by AttachedStopRule, which the immediate-order path uses too so the two cannot
             // drift on what an attachable stop is. It owns the BUY-only rule and both level checks.
+            // A trailing order's entry price is unknown until it triggers, and by then the trail has moved
+            // away from the level known now — for a trailing buy, usually well below it. Both attachment
+            // rules check against that level, so an attached stop could rest above the real fill and sell
+            // the moment it was placed. Refused rather than checked against a number that is not the entry.
+            if (trailing && (body.AttachStop is not null || body.AttachTakeProfit is not null))
+                return Results.BadRequest(new
+                {
+                    error = "invalid_attached_stop",
+                    message = "A protective stop or target cannot be attached to a trailing order: its "
+                            + "entry price is not known until it triggers. Add a stop after it fills."
+                });
+
             ProtectiveStop? attached = null;
             if (body.AttachStop is { } attach)
             {
@@ -512,6 +554,7 @@ public sealed partial class TradingCoreEndpoints
                     ? ""
                     : $" ({triggerPercent}% from {referencePrice}"
                       + (trailing ? ", trailing" : "")
+                      + (priceBound is { } b ? $", {(action == "BUY" ? "max" : "min")} {b}" : "")
                       + (windowMinutes is { } w ? $", from the {w}-minute extreme" : "") + ")",
                 options.Value.Approval.Mode);
 
@@ -530,6 +573,7 @@ public sealed partial class TradingCoreEndpoints
                     order.Trailing,
                     order.TriggerWindowMinutes,
                     order.PersistentUntilFilled,
+                    order.PriceBound,
                     order.Action,
                     order.Quantity,
                     order.OrderType,

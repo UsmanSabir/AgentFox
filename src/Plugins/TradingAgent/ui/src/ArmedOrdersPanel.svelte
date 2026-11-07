@@ -173,7 +173,9 @@
       ? ` ${drop ? 'below the high' : 'above the low'} of the last ${o.triggerWindowMinutes} min`
         + (o.windowReference != null ? ` (${num(o.windowReference)})` : ' (waiting for prices)')
       : o.referencePrice != null
-        ? ` ${drop ? 'below' : 'above'} ${o.trailing ? 'peak ' : ''}${num(o.referencePrice)}`
+        // A trailing reference is the highest price seen since arming for a drop and the LOWEST for a
+        // rise. It read "peak" for both, which called a trailing buy's tracked low a peak.
+        ? ` ${drop ? 'below' : 'above'} ${o.trailing ? (drop ? 'the high ' : 'the low ') : ''}${num(o.referencePrice)}`
         : '';
     return `${comparator} ${level} — ${o.triggerPercent}%${basis}`;
   };
@@ -194,16 +196,38 @@
    * A limit with no price is called out rather than papered over with the trigger level: the two are
    * separate numbers, and an armed limit that never had a price set will not go in as intended.
    */
+  /**
+   * A trailing LIMIT is priced when it TRIGGERS, at the price that met the trigger inside its bound —
+   * its stored price is only the level as it stood at arming, which the trail has since moved away from.
+   */
+  const pricedAtTrigger = (o: ArmedOrder) =>
+    o.trailing && o.orderType === 'LIMIT'
+    && (o.triggerKind === 'PercentDrop' || o.triggerKind === 'PercentRise');
+
   const describeFill = (o: ArmedOrder) =>
     o.orderType === 'MARKET' ? 'at market'
+      : pricedAtTrigger(o) && o.state === 'armed' ? 'limit at the trigger price'
       : o.price != null ? `@ ${num(o.price)}`
       : 'no price set';
 
   /** What the order actually commits, which is the number the size is really chosen against. */
-  const describeValue = (o: ArmedOrder) =>
-    o.price != null && o.price > 0
-      ? `${num(o.quantity * o.price, 0)} PKR`
-      : null;
+  const describeValue = (o: ArmedOrder) => {
+    const basis = pricedAtTrigger(o) && o.state === 'armed' ? o.triggerPrice : o.price;
+    return basis != null && basis > 0 ? `${num(o.quantity * basis, 0)} PKR` : null;
+  };
+
+  /** The optional price rule on a trailing order: a buy's maximum, a sell's minimum. */
+  const describeBound = (o: ArmedOrder) =>
+    o.priceBound == null ? null
+      : o.action === 'BUY' ? `buys only at or below ${num(o.priceBound)}`
+      : `sells only at or above ${num(o.priceBound)}`;
+
+  /** A move that triggered outside the price rule, and what unlocks the order again. */
+  const describeSkip = (o: ArmedOrder) =>
+    o.skippedReference == null ? null
+      : o.triggerKind === 'PercentRise'
+        ? `Waiting for a new low below ${num(o.skippedReference)} after a skip`
+        : `Waiting for a new high above ${num(o.skippedReference)} after a skip`;
 
   const when = (iso: string | null) => iso ? new Date(iso).toLocaleString() : '—';
 
@@ -383,6 +407,10 @@
               {#if order.trailing}<span class="chip trail">trailing</span>{/if}
               {#if order.triggerWindowMinutes}<span class="chip trail">recent {order.triggerWindowMinutes}-min window</span>{/if}
               {#if order.persistentUntilFilled}<span class="chip">keep working after trigger</span>{/if}
+              {#if describeBound(order)} · {describeBound(order)}{/if}
+              {#if order.state === 'armed' && describeSkip(order)}
+                <span class="chip scheduled" title="The trail triggered outside your price range, so that move was skipped. It submits only after a strictly new {order.triggerKind === 'PercentRise' ? 'low' : 'high'} and a fresh move from it.">{describeSkip(order)}</span>
+              {/if}
               {#if order.pullbackPrice != null}
                 · pulls back below {num(order.pullbackPrice)}
                 <span class="chip" title="Fires ahead of its limit for a place in the queue. If the price falls to this level while the sell rests, it is cancelled, the protective stop is put back over the whole holding, and the order re-arms.">early fire{order.pullbackCount ? ` · pulled back ${order.pullbackCount}×` : ''}</span>

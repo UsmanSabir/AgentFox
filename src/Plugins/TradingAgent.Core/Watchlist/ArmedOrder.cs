@@ -199,6 +199,37 @@ public sealed record ArmedOrder
     /// <summary>A percent trigger measured from a rolling window of recent prices.</summary>
     public bool IsWindowed => PercentTrigger.IsPercent(TriggerKind) && TriggerWindowMinutes is > 0;
 
+    /// <summary>
+    /// For a trailing percent LIMIT order: the worst price it may trade at — the MAXIMUM for a BUY, the
+    /// MINIMUM for a SELL. Null is the ordinary one-way trail with no bound.
+    ///
+    /// <para>
+    /// It is two rules at once, and both are inclusive. It is a SUBMISSION condition: a trail that
+    /// triggers at a price outside it does not submit, and that move is skipped — see
+    /// <see cref="SkippedReference"/>. And it is a FILL bound: the limit sent is clamped to it and
+    /// rounded towards it, so neither the observed price nor the rounding can breach it. See
+    /// <see cref="TrailingPriceBound"/>.
+    /// </para>
+    /// </summary>
+    public decimal? PriceBound { get; init; }
+
+    /// <summary>
+    /// Set when this bounded trail triggered OUTSIDE <see cref="PriceBound"/>: the tracked low (BUY) or
+    /// high (SELL) the skipped move was measured from. While set, the order does not submit — not when
+    /// the price comes back inside the range, and not when it matches that extreme again. Only a
+    /// STRICTLY new extreme clears it, in the same write that ratchets the reference, so the next fire
+    /// is always a fresh move measured from the updated low or high.
+    ///
+    /// <para>
+    /// A quote outside the range BEFORE the trail triggers sets nothing: it is not a move that was
+    /// skipped, just a price the order was never going to act on.
+    /// </para>
+    /// </summary>
+    public decimal? SkippedReference { get; init; }
+
+    /// <summary>The trail triggered outside its price range and is waiting for a new extreme.</summary>
+    public bool AwaitingNewExtreme => SkippedReference is > 0;
+
     // ── The order to place when it fires ──────────────────────────────────────
     public required string Action { get; init; }        // BUY | SELL
     public required int Quantity { get; init; }
@@ -363,10 +394,22 @@ public sealed record ArmedOrder
     /// the stored price rather than sending none.
     /// </para>
     /// </summary>
-    public decimal? PriceAtFire(decimal? windowReference) =>
-        IsWindowed && OrderType.Equals("LIMIT", StringComparison.OrdinalIgnoreCase)
+    /// <remarks>
+    /// A TRAILING LIMIT order is priced at <paramref name="observedPrice"/> — the price that met the
+    /// trigger — clamped to <see cref="PriceBound"/> and rounded towards it. The stored price is the
+    /// level worked out at arming, which the trail has since moved away from in exactly the direction
+    /// that makes it wrong: a buy would rest below a rebound, a sell above a drop.
+    /// </remarks>
+    public decimal? PriceAtFire(decimal? windowReference, decimal? observedPrice = null)
+    {
+        var isLimit = OrderType.Equals("LIMIT", StringComparison.OrdinalIgnoreCase);
+        if (isLimit && Trailing && PercentTrigger.IsPercent(TriggerKind))
+            return TrailingPriceBound.LimitAt(Action, observedPrice, PriceBound) ?? Price;
+
+        return IsWindowed && isLimit
             ? PercentTrigger.Level(TriggerKind, windowReference, TriggerPercent) ?? Price
             : Price;
+    }
 
     /// <summary>Projects the armed order onto the signal the trading manager executes.</summary>
     public TradingSignal ToSignal() => new()
@@ -386,13 +429,90 @@ public sealed record ArmedOrder
 }
 
 /// <summary>
+/// The optional worst price on a trailing LIMIT order. Pure, and the ONE place that answers both
+/// questions about it, so the price that decides whether a trigger submits and the price the limit is
+/// sent at cannot disagree.
+/// </summary>
+public static class TrailingPriceBound
+{
+    /// <summary>
+    /// Whether <paramref name="price"/> is inside the bound, inclusively: at or below a BUY's maximum,
+    /// at or above a SELL's minimum. No bound allows everything.
+    /// </summary>
+    public static bool Allows(string action, decimal? bound, decimal price) =>
+        bound is not > 0
+        || (IsBuy(action) ? price <= bound.Value : price >= bound.Value);
+
+    /// <summary>
+    /// The limit to send for a trail that triggered at <paramref name="observedPrice"/>, or null when
+    /// there is no usable price.
+    ///
+    /// <para>
+    /// The observed price is clamped to the bound and then rounded to the 0.01 PSX quotes in, TOWARDS
+    /// the bound: down for a BUY, up for a SELL. Rounding the other way could put a limit one paisa past
+    /// a maximum or minimum the operator set, which is the one thing the bound exists to rule out. A
+    /// bound that is itself not a whole paisa is therefore also rounded inwards.
+    /// </para>
+    /// </summary>
+    public static decimal? LimitAt(string action, decimal? observedPrice, decimal? bound)
+    {
+        if (observedPrice is not { } observed || observed <= 0) return null;
+
+        var buy = IsBuy(action);
+        var clamped = bound is { } b && b > 0
+            ? buy ? Math.Min(observed, b) : Math.Max(observed, b)
+            : observed;
+
+        var rounded = buy
+            ? Math.Floor(clamped * 100m) / 100m
+            : Math.Ceiling(clamped * 100m) / 100m;
+
+        return rounded > 0 ? rounded : null;
+    }
+
+    private static bool IsBuy(string action) => action.Equals("BUY", StringComparison.OrdinalIgnoreCase);
+}
+
+/// <summary>What an armed order should do with this pass's price.</summary>
+public enum ArmedOrderOutcome
+{
+    /// <summary>The condition is not met, or cannot be judged; nothing changes.</summary>
+    Wait,
+
+    /// <summary>Submit it.</summary>
+    Fire,
+
+    /// <summary>
+    /// A bounded trail met its trigger outside its price range. Nothing is submitted; the move is
+    /// recorded as skipped and the order waits for a new extreme. See <see cref="ArmedOrder.SkippedReference"/>.
+    /// </summary>
+    SkipMove
+}
+
+/// <summary>
 /// Decides whether an armed order's condition is met. Pure, so every rule below is table-testable
 /// rather than something to be discovered in a live market.
 /// </summary>
 public static class ArmedOrderEvaluator
 {
     /// <summary>
-    /// True when <paramref name="order"/> should fire now. <paramref name="reason"/> always describes
+    /// As <see cref="Evaluate"/>, reduced to whether to submit. Every caller that only needs that keeps
+    /// using this.
+    /// </summary>
+    public static bool ShouldFire(
+        ArmedOrder order,
+        decimal? lastPrice,
+        IReadOnlyCollection<AlertKind> alertsFiredForSymbol,
+        DateTime nowUtc,
+        out string reason,
+        bool marketIsOpen = false,
+        decimal? windowReference = null) =>
+        Evaluate(order, lastPrice, alertsFiredForSymbol, nowUtc, out reason, marketIsOpen, windowReference)
+            == ArmedOrderOutcome.Fire;
+
+    /// <summary>
+    /// What <paramref name="order"/> should do now: fire, wait, or — for a trailing order with a price
+    /// bound — skip a move that triggered outside its range. <paramref name="reason"/> always describes
     /// the decision, including when the answer is no and why.
     /// </summary>
     /// <param name="marketIsOpen">
@@ -414,7 +534,7 @@ public static class ArmedOrderEvaluator
     /// order then declines rather than falling back to its arm-time reference. Ignored by every other
     /// order.
     /// </param>
-    public static bool ShouldFire(
+    public static ArmedOrderOutcome Evaluate(
         ArmedOrder order,
         decimal? lastPrice,
         IReadOnlyCollection<AlertKind> alertsFiredForSymbol,
@@ -426,13 +546,13 @@ public static class ArmedOrderEvaluator
         if (order.State != "armed")
         {
             reason = $"Not armed (state: {order.State}).";
-            return false;
+            return ArmedOrderOutcome.Wait;
         }
 
         if (order.ExpiresUtc is { } expiry && nowUtc >= expiry)
         {
             reason = $"Expired at {expiry:u} without triggering.";
-            return false;
+            return ArmedOrderOutcome.Wait;
         }
 
         // Checked AFTER expiry so the two orderings agree: the worker ages an order out before it
@@ -442,13 +562,13 @@ public static class ArmedOrderEvaluator
         if (order.ActiveFromUtc is { } activeFrom && nowUtc < activeFrom)
         {
             reason = $"Scheduled: not active until {activeFrom:u}.";
-            return false;
+            return ArmedOrderOutcome.Wait;
         }
 
         if (order.ActiveFromUtc is { } scheduledFrom && !marketIsOpen)
         {
             reason = $"Scheduled from {scheduledFrom:u}, but the market is closed; waiting for the open.";
-            return false;
+            return ArmedOrderOutcome.Wait;
         }
 
         switch (order.TriggerKind)
@@ -475,7 +595,7 @@ public static class ArmedOrderEvaluator
                         : percent
                             ? "Percent trigger has no usable reference price or percentage."
                             : "Price trigger has no usable level.";
-                    return false;
+                    return ArmedOrderOutcome.Wait;
                 }
 
                 if (lastPrice is not { } price || price <= 0)
@@ -483,7 +603,7 @@ public static class ArmedOrderEvaluator
                     // No price is NOT a reason to fire, and it is not a reason to expire either — the
                     // feed can lapse for a pass. Firing on a missing price would be the worst of both.
                     reason = "No live price this pass; cannot evaluate.";
-                    return false;
+                    return ArmedOrderOutcome.Wait;
                 }
 
                 var falling = PercentTrigger.FiresOnRisingPrice(order.TriggerKind) == false;
@@ -498,23 +618,44 @@ public static class ArmedOrderEvaluator
                         : $" ({order.TriggerPercent}% {(falling ? "below" : "above")} "
                           + $"{(order.Trailing ? "trailing reference " : "")}{order.ReferencePrice})";
 
+                // A bounded trail that has skipped a move submits nothing until a strictly new
+                // extreme clears the mark — which happens in the ratchet's own write, never here.
+                // Checked after the price so a lapsed feed still reports itself as such.
+                if (order.Trailing && order.AwaitingNewExtreme)
+                {
+                    reason = $"A move from {(falling ? "the high" : "the low")} {order.SkippedReference} "
+                           + "was skipped because it triggered outside your price range. Waiting for a "
+                           + $"new {(falling ? "high above" : "low below")} {order.SkippedReference}.";
+                    return ArmedOrderOutcome.Wait;
+                }
+
+                if (hit && order.Trailing
+                    && !TrailingPriceBound.Allows(order.Action, order.PriceBound, price))
+                {
+                    reason = $"Last {price} {how} trigger {trigger}{basis}, but it is "
+                           + $"{(falling ? "below your minimum sell price" : "above your maximum buy price")} "
+                           + $"{order.PriceBound}. This move is skipped; waiting for a new "
+                           + $"{(falling ? "high" : "low")}.";
+                    return ArmedOrderOutcome.SkipMove;
+                }
+
                 reason = hit
                     ? $"Last {price} {how} trigger {trigger}{basis}."
                     : $"Last {price} has not reached trigger {trigger}{basis}.";
-                return hit;
+                return hit ? ArmedOrderOutcome.Fire : ArmedOrderOutcome.Wait;
 
             case ArmedTriggerKind.Event:
                 if (order.TriggerAlertKind is not { } kind)
                 {
                     reason = "Event trigger has no alert kind.";
-                    return false;
+                    return ArmedOrderOutcome.Wait;
                 }
 
                 var fired = alertsFiredForSymbol.Contains(kind);
                 reason = fired
                     ? $"{kind} raised for {order.Symbol} this pass."
                     : $"{kind} has not been raised.";
-                return fired;
+                return fired ? ArmedOrderOutcome.Fire : ArmedOrderOutcome.Wait;
 
             case ArmedTriggerKind.Scheduled:
                 // Reaching here means both common date checks above have passed. There is no second
@@ -526,15 +667,15 @@ public static class ArmedOrderEvaluator
                     // database or a downgrade. Firing an order of unknown intent is the one outcome
                     // worse than never firing it.
                     reason = "Scheduled order has no activation date.";
-                    return false;
+                    return ArmedOrderOutcome.Wait;
                 }
 
                 reason = $"Scheduled for {scheduledFor:u}; that date has arrived and the market is open.";
-                return true;
+                return ArmedOrderOutcome.Fire;
 
             default:
                 reason = $"Unknown trigger kind {order.TriggerKind}.";
-                return false;
+                return ArmedOrderOutcome.Wait;
         }
     }
 

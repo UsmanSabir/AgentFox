@@ -610,6 +610,22 @@ public interface ITradingRepository
         bool ratchetUp,
         CancellationToken ct = default);
 
+    /// <summary>
+    /// Marks a bounded trailing order's current move as SKIPPED: it triggered outside its price range,
+    /// so it must not submit until a strictly new extreme. The mark is the current reference, and the
+    /// ratchet clears it in the same write that moves the reference on.
+    ///
+    /// <para>
+    /// A compare-and-set on <paramref name="reference"/>: false when another pass has already ratcheted
+    /// past it or already recorded the skip, neither of which is an error.
+    /// </para>
+    /// </summary>
+    Task<bool> TrySetArmedOrderTrailSkipAsync(
+        string armedId,
+        decimal reference,
+        string reason,
+        CancellationToken ct = default);
+
     /// <summary>Raises an armed backstop's quantity as additional entry fills are confirmed.</summary>
     Task<bool> TrySetArmedOrderQuantityAsync(
         string armedId,

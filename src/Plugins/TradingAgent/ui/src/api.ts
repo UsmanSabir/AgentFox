@@ -180,6 +180,11 @@ export interface OrderIntentDefinition {
   defaultWindowMinutes?: number | null;
   /** This intent cannot become active until the operator's selected PKT calendar date. */
   requiresActivationDate?: boolean;
+  /**
+   * Once triggered, the order always keeps its unfilled remainder working across sessions; the
+   * ticket does not offer that as a choice. Optional so an older server's reply still type-checks.
+   */
+  keepWorking?: boolean;
 }
 
 export interface OrderIntentRegistryResponse {
@@ -855,6 +860,13 @@ export interface ArmedOrder {
    */
   pullbackPrice?: number | null;
   pullbackCount?: number;
+  /** A trailing LIMIT's worst price: the maximum for a BUY, the minimum for a SELL. */
+  priceBound?: number | null;
+  /**
+   * Set when the trail triggered outside `priceBound`: the low (BUY) or high (SELL) of the skipped
+   * move. The order waits for a strictly new one before it can submit.
+   */
+  skippedReference?: number | null;
 }
 
 /**
@@ -940,6 +952,11 @@ export interface ArmOrderRequest {
   triggerWindowMinutes?: number | null;
   /** After the trigger, keep re-placing a LIMIT/STOPLOSS each trading day until filled or expired. */
   persistentUntilFilled?: boolean;
+  /**
+   * Trailing LIMIT only: a BUY's maximum or a SELL's minimum price. A trigger outside it skips that
+   * move; the limit sent never crosses it. Requires `trailing` and `persistentUntilFilled`.
+   */
+  priceBound?: number | null;
 
   /**
    * A PSX calendar date (`YYYY-MM-DD`) before which this order does nothing — "buy ABC on the 22nd".

@@ -60,10 +60,17 @@ public static class OrderIntentRegistry
         new("stop-loss", "Stop loss held by the broker",
             "Rests at the exchange and sells when the price falls to your level — it works even when AgentFox is not running.",
             "Protect & exit", "immediate", "SELL", "STOPLOSS", PriceField: "stop"),
-        new("trailing-stop", "Trailing stop",
-            "The sell level follows the highest price since arming and never drops. Sells the whole quantity at once; AgentFox must be running.",
-            "Protect & exit", "conditional", "SELL", "MARKET", "PercentDrop",
-            PriceField: "none", DefaultPercent: 3m, Trailing: true),
+        // Replaced the one-shot MARKET "Trailing stop" card on 2026-11-07 (owner). Orders already saved
+        // from that card keep working: an armed order stores its trigger, not the card it came from, so
+        // the engine's market trailing path is untouched — only the ticket stops offering it.
+        //
+        // A trailing LIMIT is priced at the price that met its trigger, clamped to the optional
+        // minimum, and keeps its unfilled remainder working across sessions. A trigger below that
+        // minimum skips the move until a new high — see ArmedOrder.SkippedReference.
+        new("trailing-sell", "Trailing sell",
+            "Follows the highest price since arming and places a limit sell when it falls your chosen % from that high, never below your minimum. AgentFox must be running.",
+            "Protect & exit", "conditional", "SELL", "LIMIT", "PercentDrop",
+            PriceField: "trail-bound", DefaultPercent: 3m, Trailing: true, KeepWorking: true),
         // Measured from the recent HIGH, not from the price at arming: "it has fallen 3% from where
         // it just was". A fixed arm-time reference let a stock rise 5% and then need an ~8% fall to
         // fire; the trailing stop above covers "the highest since I armed it". Owner, 2026-09-22.
@@ -99,6 +106,12 @@ public static class OrderIntentRegistry
             "Buy at market once the price rises your chosen % above its lowest price of the recent window.",
             "React to a move", "conditional", "BUY", "MARKET", "PercentRise",
             PriceField: "none", DefaultPercent: 3m, DefaultWindowMinutes: 15),
+        // The mirror of "Trailing sell". Distinct from "Buy if it rises by a %" above, which measures
+        // from a ROLLING 15-minute low that ages out; this one follows the lowest price since arming.
+        new("trailing-buy", "Trailing buy",
+            "Follows the lowest price since arming and places a limit buy when it rises your chosen % from that low, never above your maximum. AgentFox must be running.",
+            "React to a move", "conditional", "BUY", "LIMIT", "PercentRise",
+            PriceField: "trail-bound", DefaultPercent: 3m, Trailing: true, KeepWorking: true),
         new("buy-after-drop", "Buy if it drops by a %",
             "Once the price falls your chosen % below its highest price of the recent window, place a limit buy at that level.",
             "React to a move", "conditional", "BUY", "LIMIT", "PercentDrop",
@@ -128,4 +141,7 @@ public sealed record OrderIntentDefinition(
     decimal? DefaultPercent = null,
     bool Trailing = false,
     bool RequiresActivationDate = false,
-    int? DefaultWindowMinutes = null);
+    int? DefaultWindowMinutes = null,
+    // Once triggered, the order always rides the keep-working lifecycle: the ticket does not offer the
+    // choice, because the intent's price rule depends on it.
+    bool KeepWorking = false);
