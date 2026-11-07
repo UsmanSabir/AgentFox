@@ -453,6 +453,18 @@ public sealed partial class TradingCoreEndpoints
 
             // Validated by AttachedStopRule, which the immediate-order path uses too so the two cannot
             // drift on what an attachable stop is. It owns the BUY-only rule and both level checks.
+            // A trailing order's entry price is unknown until it triggers, and by then the trail has moved
+            // away from the level known now — for a trailing buy, usually well below it. Both attachment
+            // rules check against that level, so an attached stop could rest above the real fill and sell
+            // the moment it was placed. Refused rather than checked against a number that is not the entry.
+            if (trailing && (body.AttachStop is not null || body.AttachTakeProfit is not null))
+                return Results.BadRequest(new
+                {
+                    error = "invalid_attached_stop",
+                    message = "A protective stop or target cannot be attached to a trailing order: its "
+                            + "entry price is not known until it triggers. Add a stop after it fills."
+                });
+
             ProtectiveStop? attached = null;
             if (body.AttachStop is { } attach)
             {

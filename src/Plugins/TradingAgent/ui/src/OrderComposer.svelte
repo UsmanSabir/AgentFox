@@ -510,7 +510,10 @@
   // Any BUY, waiting or immediate. It was 'conditional' only, which meant the three most-used ways to
   // buy -- "Buy at my price", "Buy now", "Buy if it rises to a price" -- offered no protection at all
   // and said nothing about it. The server validates both paths through one shared rule.
-  $: canAttachStop = choice?.action === 'BUY';
+  // Not on a trailing buy: its entry price is unknown until it triggers, and it triggers after the low
+  // has moved, usually well below the level shown now. A stop checked against (and defaulted from) that
+  // level could sit above the real fill and sell as soon as it was placed. The server refuses it too.
+  $: canAttachStop = choice?.action === 'BUY' && !choice?.trailing;
   $: if (!canAttachStop) attachStop = false;
   $: if (attachStop && stopTrigger == null && estimatedPrice && estimatedPrice > 0)
     stopTrigger = Number((estimatedPrice * .98).toFixed(2));
@@ -563,7 +566,7 @@
       const extreme = buy ? 'lowest' : 'highest';
       const bound = priceBound != null && priceBound > 0 ? priceBound : null;
       return `Tracks the ${extreme} price of ${symbol} from now. When it ${buy ? 'rises' : 'falls'} `
-        + `${triggerPercent}% from that ${buy ? 'low' : 'high'} (${money(conditionalLevel)} today), `
+        + `${triggerPercent}% from that ${buy ? 'low' : 'high'} (${money(conditionalLevel)} now; it moves with the ${buy ? 'low' : 'high'}), `
         + `AgentFox places a limit ${buy ? 'buy' : 'sell'} for ${effectiveQuantity} shares at the price `
         + `that triggered it`
         + (bound == null ? '. '
