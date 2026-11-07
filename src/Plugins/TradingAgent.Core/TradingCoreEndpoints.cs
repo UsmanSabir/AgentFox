@@ -146,7 +146,12 @@ public sealed record ArmOrderRequest(
     bool Trailing = false,
     bool PersistentUntilFilled = false,
     DateOnly? ActiveFromDate = null,
-    int? TriggerWindowMinutes = null);
+    int? TriggerWindowMinutes = null,
+    /// <summary>
+    /// Trailing LIMIT only: the worst price it may trade at — a BUY's maximum, a SELL's minimum. Both a
+    /// submission condition and a fill bound; see <c>ArmedOrder.PriceBound</c>.
+    /// </summary>
+    decimal? PriceBound = null);
 
 /// <summary>An immediate order submitted from a registry choice in the trading dashboard.</summary>
 public sealed record DashboardOrderRequest(

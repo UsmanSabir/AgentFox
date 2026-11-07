@@ -820,6 +820,9 @@ public sealed class WatchlistUniverseTests
         public Task<bool> TrySetArmedOrderTrailAsync(
             string id, decimal reference, decimal triggerPrice, bool ratchetUp,
             CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<bool> TrySetArmedOrderTrailSkipAsync(
+            string id, decimal reference, string reason, CancellationToken ct = default) =>
+            throw new NotSupportedException();
         public Task<bool> TrySetArmedOrderQuantityAsync(
             string id, int quantity, CancellationToken ct = default) =>
             throw new NotSupportedException();

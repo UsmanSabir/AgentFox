@@ -112,6 +112,8 @@
   let activeFromDate = '';
   let expiresInDays = 30;
   let persistentUntilFilled = false;
+  /** A trailing order's optional worst price: the maximum for a BUY, the minimum for a SELL. */
+  let priceBound: number | null = null;
   let loading = true;
   let quoteBusy = false;
   let holdingBusy = false;
@@ -275,6 +277,7 @@
     limitPrice = null;
     triggerPercent = intent.defaultPercent ?? null;
     triggerWindowMinutes = intent.defaultWindowMinutes ?? null;
+    priceBound = null;
     result = null;
     error = null;
     attachStop = false;
@@ -395,6 +398,12 @@
     && registry != null && !registry.capabilities.marketOrdersEnabled;
   $: persistable = choice != null && choice.orderType !== 'MARKET';
   $: if (!persistable) persistentUntilFilled = false;
+  // A trailing buy or sell always keeps its remainder working: its limit is frozen at the price that
+  // triggered it, inside the optional bound, and carried across sessions. So it is not a choice there.
+  $: keepWorking = choice?.keepWorking === true;
+  $: if (keepWorking) persistentUntilFilled = true;
+  $: boundedTrail = choice?.priceField === 'trail-bound';
+  $: boundIsBuyMax = choice?.action === 'BUY';
   $: selectedTicker = symbol.trim().toUpperCase();
   $: matchingHoldings = account?.holdings.filter(
     holding => sameSymbol(holding.symbol ?? holding.instrumentId, selectedTicker)) ?? [];
@@ -510,6 +519,20 @@
         ? `Wait until ${symbol} is ${comparison} ${triggerPrice ?? '—'} PKR, then submit a market ${side.toLowerCase()} for ${effectiveQuantity} shares. The fill price can move.`
         : `Wait until ${symbol} is ${comparison} ${triggerPrice ?? '—'} PKR, then submit a limit ${side.toLowerCase()} for ${effectiveQuantity} shares at ${price ?? '—'} PKR or better. Filling is not guaranteed.`;
     }
+    if (boundedTrail && conditionalLevel != null) {
+      const buy = choice.action === 'BUY';
+      const extreme = buy ? 'lowest' : 'highest';
+      const bound = priceBound != null && priceBound > 0 ? priceBound : null;
+      return `Tracks the ${extreme} price of ${symbol} from now. When it ${buy ? 'rises' : 'falls'} `
+        + `${triggerPercent}% from that ${buy ? 'low' : 'high'} (${money(conditionalLevel)} today), `
+        + `AgentFox places a limit ${buy ? 'buy' : 'sell'} for ${effectiveQuantity} shares at the price `
+        + `that triggered it`
+        + (bound == null ? '. '
+          : `, never ${buy ? 'above' : 'below'} ${money(bound)}. If it triggers ${buy ? 'above' : 'below'} `
+            + `${money(bound)}, that move is skipped and it waits for a new ${buy ? 'low' : 'high'}. `)
+        + `The unfilled remainder keeps working each trading day until filled, cancelled or `
+        + `${expiresInDays} day(s) pass. AgentFox must be running to watch prices.`;
+    }
     if (choice.submission === 'conditional' && conditionalLevel != null) {
       const move = choice.triggerKind === 'PercentDrop' ? 'falls' : 'rises';
       if (windowed) {
@@ -588,6 +611,10 @@
       if (!triggerReferencePrice || !conditionalLevel) {
         error = 'A current price is required to arm a percentage trigger.'; return;
       }
+      if (boundedTrail && priceBound != null && (!Number.isFinite(priceBound) || priceBound <= 0)) {
+        error = `Enter a positive ${boundIsBuyMax ? 'maximum buy' : 'minimum sell'} price, or leave it blank.`;
+        return;
+      }
       if (windowed && (!Number.isInteger(triggerWindowMinutes)
           || triggerWindowMinutes! < 1 || triggerWindowMinutes! > 240)) {
         error = 'Enter a price window between 1 and 240 whole minutes.'; return;
@@ -629,6 +656,7 @@
       referencePrice: exactPriceTrigger || dateOnlySchedule ? null : triggerReferencePrice,
       activeFromDate: scheduled ? activeFromDate : null,
       trailing: choice.trailing, orderType: choice.orderType,
+      priceBound: boundedTrail && priceBound != null && priceBound > 0 ? priceBound : null,
       triggerWindowMinutes: windowed ? triggerWindowMinutes : null,
       price: choice.orderType === 'MARKET' ? null : exactPriceTrigger || dateOnlySchedule ? price : conditionalLevel, expiresInDays, persistentUntilFilled,
       attachStop: attachStop && stopTrigger
@@ -1004,6 +1032,9 @@
               {#if windowed}
                 <label><span>{choice.triggerKind === 'PercentDrop' ? 'Fall from the recent high' : 'Rise from the recent low'} (%)</span><input type="number" min="0.1" max="50" step="0.1" bind:value={triggerPercent} /></label>
                 <label><span>Recent window (trading minutes)</span><input type="number" min="1" max="240" step="1" bind:value={triggerWindowMinutes} /></label>
+              {:else if boundedTrail}
+                <label><span>Trail (%)</span><input type="number" min="0.1" max="50" step="0.1" bind:value={triggerPercent} /></label>
+                <label><span>{boundIsBuyMax ? 'Maximum buy price' : 'Minimum sell price'} (optional)</span><input type="number" min="0.01" step="0.01" bind:value={priceBound} placeholder="No limit" /></label>
               {:else}
                 <label><span>Move from {triggerReferencePrice ?? 'latest price'} (%)</span><input type="number" min="0.1" max="50" step="0.1" bind:value={triggerPercent} /></label>
               {/if}
@@ -1074,7 +1105,7 @@
             </section>
           {/if}
 
-          {#if persistable}
+          {#if persistable && !keepWorking}
             <label class="persist-check">
               <input type="checkbox" bind:checked={persistentUntilFilled} />
               <span>

@@ -2048,7 +2048,12 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                     pullback_price TEXT NULL,
                     pullback_count INTEGER NOT NULL DEFAULT 0,
                     rearm_count    INTEGER NOT NULL DEFAULT 0,
-                    pullback_requested_utc TEXT NULL
+                    pullback_requested_utc TEXT NULL,
+                    -- Trailing LIMIT only: the worst price it may trade at (BUY maximum, SELL minimum),
+                    -- and the tracked extreme of a move that triggered outside it. See
+                    -- ArmedOrder.PriceBound / SkippedReference. Retention is the table's own.
+                    price_bound TEXT NULL,
+                    skipped_reference TEXT NULL
                 );
                 CREATE INDEX IF NOT EXISTS ix_armed_orders_state
                     ON armed_orders(state, symbol);
@@ -2304,6 +2309,12 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                 connection, "armed_orders", "rearm_count", "INTEGER NOT NULL DEFAULT 0", ct);
             await AddColumnIfMissingAsync(
                 connection, "armed_orders", "pullback_requested_utc", "TEXT NULL", ct);
+            // NULL for every existing row: an order armed before price bounds existed is the ordinary
+            // one-way trail, unbounded and never skipped.
+            await AddColumnIfMissingAsync(
+                connection, "armed_orders", "price_bound", "TEXT NULL", ct);
+            await AddColumnIfMissingAsync(
+                connection, "armed_orders", "skipped_reference", "TEXT NULL", ct);
             await AddColumnIfMissingAsync(
                 connection, "protective_stops", "operator_originated", "INTEGER NOT NULL DEFAULT 0", ct);
             await AddColumnIfMissingAsync(
@@ -2953,11 +2964,11 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                  order_type, price, limit_price, state, armed_utc, expires_utc, note, source_alert,
                  protective_stop_id, trigger_percent, reference_price, trailing,
                  persistent_until_filled, operator_originated, active_from_utc, trigger_window_minutes,
-                 pullback_price, pullback_count, rearm_count)
+                 pullback_price, pullback_count, rearm_count, price_bound, skipped_reference)
             VALUES ($id, $symbol, $kind, $tprice, $talert, $action, $qty,
                     $otype, $price, $limit, $state, $armed, $expires, $note, $alert, $stop,
                     $tpercent, $reference, $trailing, $persistent, $operator, $activeFrom, $window,
-                    $pullback, $pullbacks, $rearms)
+                    $pullback, $pullbacks, $rearms, $bound, $skipped)
             """;
         command.Parameters.AddWithValue("$id", order.ArmedId);
         command.Parameters.AddWithValue("$symbol", order.Symbol);
@@ -2989,6 +3000,8 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         command.Parameters.AddWithValue("$pullback", Money(order.PullbackPrice));
         command.Parameters.AddWithValue("$pullbacks", order.PullbackCount);
         command.Parameters.AddWithValue("$rearms", order.RearmCount);
+        command.Parameters.AddWithValue("$bound", Money(order.PriceBound));
+        command.Parameters.AddWithValue("$skipped", Money(order.SkippedReference));
         await command.ExecuteNonQueryAsync(ct);
         return order.ArmedId;
     }
@@ -3005,7 +3018,8 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                    execution_id, state_reason, note, source_alert, protective_stop_id,
                    trigger_percent, reference_price, trailing, persistent_until_filled,
                    operator_originated, active_from_utc, trigger_window_minutes,
-                   pullback_price, pullback_count, rearm_count, pullback_requested_utc
+                   pullback_price, pullback_count, rearm_count, pullback_requested_utc,
+                   price_bound, skipped_reference
             FROM armed_orders
             {(armedOnly ? "WHERE state = 'armed'" : "")}
             ORDER BY armed_utc DESC
@@ -3064,8 +3078,12 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         var command = connection.CreateCommand();
         command.CommandText = $"""
             UPDATE armed_orders
-               SET reference_price = $reference,
-                   trigger_price   = $trigger
+               SET reference_price   = $reference,
+                   trigger_price     = $trigger,
+                   -- A strictly new extreme is exactly what releases a skipped move, so the release
+                   -- rides in the same guarded write: no pass can see the new low without the lock
+                   -- being gone, or the lock gone without the new low.
+                   skipped_reference = NULL
              WHERE armed_id = $id
                AND state    = 'armed'
                AND trailing = 1
@@ -3075,6 +3093,36 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         command.Parameters.AddWithValue("$id", armedId);
         command.Parameters.AddWithValue("$reference", Money(reference));
         command.Parameters.AddWithValue("$trigger", Money(triggerPrice));
+        return await command.ExecuteNonQueryAsync(ct) == 1;
+    }
+
+    public async Task<bool> TrySetArmedOrderTrailSkipAsync(
+        string armedId,
+        decimal reference,
+        string reason,
+        CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+
+        // Compare-and-set on the reference the skip was measured from. A pass that ratcheted to a new
+        // extreme in between has already made the move this one would lock out stale, so the write
+        // must miss rather than lock the order against a low (or high) it has since left behind.
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE armed_orders
+               SET skipped_reference = reference_price,
+                   state_reason      = $reason
+             WHERE armed_id = $id
+               AND state    = 'armed'
+               AND trailing = 1
+               AND skipped_reference IS NULL
+               AND reference_price IS NOT NULL
+               AND CAST(reference_price AS REAL) = CAST($reference AS REAL)
+            """;
+        command.Parameters.AddWithValue("$id", armedId);
+        command.Parameters.AddWithValue("$reference", Money(reference));
+        command.Parameters.AddWithValue("$reason", reason);
         return await command.ExecuteNonQueryAsync(ct) == 1;
     }
 
@@ -3090,7 +3138,8 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                    execution_id, state_reason, note, source_alert, protective_stop_id,
                    trigger_percent, reference_price, trailing, persistent_until_filled,
                    operator_originated, active_from_utc, trigger_window_minutes,
-                   pullback_price, pullback_count, rearm_count, pullback_requested_utc
+                   pullback_price, pullback_count, rearm_count, pullback_requested_utc,
+                   price_bound, skipped_reference
             FROM armed_orders
             WHERE state = 'fired' AND pullback_price IS NOT NULL
             ORDER BY armed_utc DESC
@@ -3236,7 +3285,9 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         PullbackPrice         = ParseDecimal(reader, 26),
         PullbackCount         = reader.IsDBNull(27) ? 0 : reader.GetInt32(27),
         RearmCount            = reader.IsDBNull(28) ? 0 : reader.GetInt32(28),
-        PullbackRequestedUtc  = reader.IsDBNull(29) ? null : ParseUtc(reader.GetString(29))
+        PullbackRequestedUtc  = reader.IsDBNull(29) ? null : ParseUtc(reader.GetString(29)),
+        PriceBound            = ParseDecimal(reader, 30),
+        SkippedReference      = ParseDecimal(reader, 31)
     };
 
     // ── Protective stops ──────────────────────────────────────────────────────
