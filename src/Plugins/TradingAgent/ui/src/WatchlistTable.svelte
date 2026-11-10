@@ -210,6 +210,7 @@
   .extension :global(span) { white-space:normal; max-width:100%; }
   .quote { display:flex; align-items:center; justify-content:flex-end; flex-wrap:wrap; }
   .quote :global(.live-quote) { flex-wrap:wrap; justify-content:flex-end; }
+  .table-shell:not(.compact) .quote :global(.live-quote > small) { flex-basis:100%; text-align:right; }
   .actions-toggle { align-self:center; height:30px; border:0; background:transparent; color:var(--text-2); cursor:pointer; }
   .actions-toggle:hover { color:var(--primary); }
   .table-footer { display:flex; flex-direction:column; gap:.15rem; flex:none; padding:.35rem .1rem 0; color:var(--text-3); font-size:.57rem; }
