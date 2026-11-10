@@ -1,6 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher, onMount, onDestroy, tick } from 'svelte';
   import { psxDateInput, scheduleDateError } from './orderSchedule';
+  import { trailBoundBlock } from './trailingBound';
   import AmountInWords from './AmountInWords.svelte';
   import { uncertainOrderFailure, isOrderReviewKey } from './orderReview';
   import {
@@ -438,6 +439,11 @@
   $: if (keepWorking) persistentUntilFilled = true;
   $: boundedTrail = choice?.priceField === 'trail-bound';
   $: boundIsBuyMax = choice?.action === 'BUY';
+  // A bound on the wrong side of the trigger means no move can trade until the trail travels a long
+  // way — shown as a warning, never a refusal, because it can be what the operator wants.
+  $: trailBlock = boundedTrail
+    ? trailBoundBlock(choice?.action, conditionalLevel, priceBound, triggerPercent)
+    : null;
   $: selectedTicker = symbol.trim().toUpperCase();
   $: matchingHoldings = account?.holdings.filter(
     holding => sameSymbol(holding.symbol ?? holding.instrumentId, selectedTicker)) ?? [];
@@ -565,8 +571,13 @@
       const buy = choice.action === 'BUY';
       const extreme = buy ? 'lowest' : 'highest';
       const bound = priceBound != null && priceBound > 0 ? priceBound : null;
-      return `Tracks the ${extreme} price of ${symbol} from now. When it ${buy ? 'rises' : 'falls'} `
-        + `${triggerPercent}% from that ${buy ? 'low' : 'high'} (${money(conditionalLevel)} now; it moves with the ${buy ? 'low' : 'high'}), `
+      // The level in brackets is the TRIGGER, and it must say so: "falls 3% from that high (75.36
+      // now…)" was read as a high of 75.36 when the high was 77.69.
+      const start = triggerReferencePrice != null && triggerReferencePrice > 0
+        ? ` (${money(triggerReferencePrice)} now)` : '';
+      return `Tracks the ${extreme} price of ${symbol} from now${start}. When it ${buy ? 'rises' : 'falls'} `
+        + `${triggerPercent}% from that ${buy ? 'low' : 'high'} — the trigger, ${money(conditionalLevel)} now, `
+        + `${buy ? 'falls with each new low' : 'rises with each new high'} — `
         + `AgentFox places a limit ${buy ? 'buy' : 'sell'} for ${effectiveQuantity} shares at the price `
         + `that triggered it`
         + (bound == null ? '. '
@@ -588,7 +599,7 @@
       }
       const trail = choice.trailing ? ' from the highest price seen after arming' : '';
       return `${side} ${effectiveQuantity} ${symbol} if it ${move} ${triggerPercent}%${trail} `
-        + `(currently ${money(conditionalLevel)}).`;
+        + `(trigger ${money(conditionalLevel)} now).`;
     }
     if (choice.orderType === 'MARKET')
       return `${side} ${effectiveQuantity} ${symbol} now at the best available price.`;
@@ -1209,6 +1220,13 @@
           {#if exactPriceTrigger}
             <p class="estimate">AgentFox waits locally and submits only after observing the trigger while running with monitoring active and the market open. Approval and risk checks still apply. A price already beyond the trigger can activate on the next check.</p>
           {/if}
+          {#if trailBlock}
+            <p class="warning" role="alert"><AlertTriangle size={13} />
+              {boundIsBuyMax
+                ? `Your maximum ${money(trailBlock.bound)} is below the trigger ${money(trailBlock.trigger)}, so nothing buys until ${selectedTicker} makes a low of ${money(trailBlock.neededExtreme)} or less; every rise before that is skipped. Leave it empty, or set it at or above ${money(trailBlock.trigger)}, to buy on the next rise.`
+                : `Your minimum ${money(trailBlock.bound)} is above the trigger ${money(trailBlock.trigger)}, so nothing sells until ${selectedTicker} makes a high of ${money(trailBlock.neededExtreme)} or more; every drop before that is skipped. Leave it empty, or set it at or below ${money(trailBlock.trigger)}, to be protected from a fall.`}
+            </p>
+          {/if}
           {#if summary}<p class="summary" class:trail-summary={boundedTrail}>{summary}</p>{/if}
           {#if estimatedValue}<p class="estimate">Estimated value: <b>{money(estimatedValue)} PKR</b>{choice.orderType === 'MARKET' ? ' at the latest price; actual value can move.' : ''}</p>{/if}
           {#if sizeMode === 'shares' && estimatedValue}<AmountInWords value={estimatedValue} />{/if}
@@ -1217,6 +1235,11 @@
             order being composed and takes no view on what, if anything, is rendered — this repo models
             no fee schedule, and a host that does (a broker integration, an edition with a cost model)
             can show one here without this component learning about it. Renders nothing when unfilled.
+
+            `conditional` says nothing is sent to the broker now: the order waits for a trigger (or a
+            date), and `triggerLevel` is that trigger's level when it has one. Without them a host can
+            only judge `price` as if the order were placed now — which told a waiting trailing sell it
+            "should fill now" at its trigger.
           -->
           <slot name="order-detail"
                 symbol={selectedTicker}
@@ -1224,7 +1247,9 @@
                 orderType={choice.orderType}
                 quantity={effectiveQuantity}
                 price={estimatedPrice}
-                value={estimatedValue} />
+                value={estimatedValue}
+                conditional={choice.submission === 'conditional' || scheduled}
+                triggerLevel={conditionalLevel} />
         </div>
       {/if}
 

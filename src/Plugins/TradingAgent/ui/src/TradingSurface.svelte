@@ -427,8 +427,8 @@
     <!-- Every prop the composer offers, not the three that happened to be needed first. A
          half-forwarded slot is indistinguishable from a host that does not want the rest, so the
          next detail to need the symbol would look like a slot that cannot supply one. -->
-    <svelte:fragment slot="order-detail" let:symbol let:action let:orderType let:quantity let:price let:value>
-      <slot name="order-detail" {symbol} {action} {orderType} {quantity} {price} {value}/>
+    <svelte:fragment slot="order-detail" let:symbol let:action let:orderType let:quantity let:price let:value let:conditional let:triggerLevel>
+      <slot name="order-detail" {symbol} {action} {orderType} {quantity} {price} {value} {conditional} {triggerLevel}/>
     </svelte:fragment>
   </NewOrderDialog>
 {/if}
@@ -440,8 +440,8 @@
       <OrderComposer docked bind:this={ticket} {selectedSymbol}
         on:changed={() => { load(); armedPanel?.load(); persistentPanel?.load(); }}
         on:attention={() => workspace?.focusPanel('ticket')} on:close={closeOrderTicket}>
-        <svelte:fragment slot="order-detail" let:symbol let:action let:orderType let:quantity let:price let:value>
-          <slot name="order-detail" {symbol} {action} {orderType} {quantity} {price} {value}/>
+        <svelte:fragment slot="order-detail" let:symbol let:action let:orderType let:quantity let:price let:value let:conditional let:triggerLevel>
+          <slot name="order-detail" {symbol} {action} {orderType} {quantity} {price} {value} {conditional} {triggerLevel}/>
         </svelte:fragment>
       </OrderComposer>
     {:else}
