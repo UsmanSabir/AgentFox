@@ -43,10 +43,12 @@ public class AhkConfig
     public decimal DipDiscountPercent { get; set; } = 1m;
 
     /// <summary>
-    /// Clamp a limit price into the day's price band before submitting: a SELL above the Upper Cap is
-    /// lowered to the cap, a BUY below the Lower Lock is raised to the lock. PSX rejects any order outside
-    /// the band (so e.g. a take-profit above today's cap would fail). Default true. When the band can't be
-    /// read from the dialog, the price is left as-is. Set false to always submit the exact requested price.
+    /// Clamp a limit price into the day's price band before submitting, but only in the operator's
+    /// favour: a BUY above the Upper Cap is lowered to the cap, a SELL below the Lower Lock is raised to
+    /// the lock. A SELL is never lowered and a BUY never raised — an order does not sell below, or buy
+    /// above, the price it was given, so e.g. a take-profit above today's cap is sent unchanged and the
+    /// exchange refuses it. Default true. When the band can't be read from the dialog, the price is left
+    /// as-is. Set false to always submit the exact requested price.
     /// </summary>
     public bool ClampPriceToBand { get; set; } = true;
 

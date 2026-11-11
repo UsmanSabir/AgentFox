@@ -63,8 +63,10 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
     private readonly RecentPriceWindow _recentPrices;
 
     /// <summary>
-    /// When a triggered SELL that was refused for want of free shares may be tried again, and how many
-    /// times in a row it has been refused. Keyed on the armed id.
+    /// When a triggered order that was refused may be tried again, and how many times in a row it has
+    /// been refused. Keyed on the armed id. It began as the SELL-with-no-free-shares backoff below and
+    /// since 2026-11-10 covers every refusal that returns an order to "armed" — a BUY as well, and a
+    /// refusal by the approval gate or by the broker — because each of those repeated on every pass.
     ///
     /// <para>
     /// <b>Why it is needed even after ArmedSellOutlook.</b> That rule RETIRES an order whose position
@@ -83,7 +85,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
     /// the loop, so it cannot grow (§0.1).
     /// </para>
     /// </summary>
-    private readonly ConcurrentDictionary<string, (DateTime NextUtc, int Failures)> _refusedSells =
+    private readonly ConcurrentDictionary<string, (DateTime NextUtc, int Failures)> _refusedFires =
         new(StringComparer.Ordinal);
 
     private readonly object _statusLock = new();
@@ -147,8 +149,64 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
         get { lock (_statusLock) return _status; }
     }
 
+    /// <summary>
+    /// Ends every order a previous run left in <c>firing</c>.
+    ///
+    /// <para>
+    /// <c>firing</c> is the claim taken before the broker is touched, and it is released by whatever
+    /// the submission returns. A process stopped in between never releases it — and nothing else ever
+    /// looked: every reader, the expiry sweep and the panel's default view ask for <c>armed</c> rows
+    /// only, so the order simply vanished and stayed claimed for good.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>To <c>failed</c>, never back to <c>armed</c>.</b> Nobody knows whether the submission reached
+    /// the broker, which is the same state as a submission that threw, and gets the same answer: a
+    /// person checks the broker's book before arming it again. Re-arming would let a timer send an
+    /// order that may already be resting.
+    /// </para>
+    /// </summary>
+    internal async Task RecoverInterruptedFiresAsync(CancellationToken ct)
+    {
+        await _runGate.WaitAsync(ct);
+        try
+        {
+            var interrupted = (await _repository.GetArmedOrdersAsync(armedOnly: false, ct))
+                .Where(order => order.State == "firing")
+                .ToList();
+
+            foreach (var order in interrupted)
+            {
+                const string reason =
+                    "This order was being submitted when AgentFox stopped, so whether it reached the "
+                    + "broker is unknown. Check the broker's order book before arming it again.";
+                if (!await _repository.TrySetArmedOrderStateAsync(
+                        order.ArmedId, "firing", "failed", reason, ct: ct))
+                    continue;
+
+                _logger.LogError(
+                    "[ArmedOrders] {ArmedId} ({Symbol} {Action}) was left mid-submission by a previous "
+                    + "run and is now failed. Verify it at the broker.",
+                    order.ArmedId, order.Symbol, order.Action);
+                _activity?.Error("Armed",
+                    $"{order.Symbol}: armed {order.Action} was interrupted mid-submission — check the broker",
+                    reason);
+            }
+        }
+        finally { _runGate.Release(); }
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Before the enabled check and before any delay: an interrupted order is stuck whether or not
+        // monitoring is on, and nothing in this process can be firing one yet.
+        try { await RecoverInterruptedFiresAsync(stoppingToken); }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[ArmedOrders] Could not check for orders interrupted mid-submission.");
+        }
+
         var monitor = _options.Value.Monitor;
         if (!monitor.Enabled)
         {
@@ -458,7 +516,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
             // Age it out first, so an expired trigger cannot fire on a late price tick.
             if (order.ExpiresUtc is { } expiry && now >= expiry)
             {
-                ClearRefusedSell(order.ArmedId);
+                ClearRefusal(order.ArmedId);
                 await _repository.TrySetArmedOrderStateAsync(
                     order.ArmedId, "armed", "expired",
                     $"Expired at {expiry:u} without triggering.", ct: ct);
@@ -491,7 +549,11 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                 // Not firing — so this is the moment a trailing trigger follows the price. Done after
                 // the fire check so a fire never waits on a bookkeeping write, and only when the
                 // reference actually moves, which keeps a flat symbol from writing every 30 seconds.
-                await TrailAsync(order, price, ct);
+                //
+                // Not before its start date: an order that begins watching on the 22nd must measure
+                // its move from the 22nd, not arrive there anchored to a high from the week before.
+                if (order.ActiveFromUtc is not { } activeFrom || now >= activeFrom)
+                    await TrailAsync(order, price, ct);
                 continue;
             }
 
@@ -509,11 +571,12 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                 continue;
             }
 
-            // A SELL refused for want of free shares waits before it is tried again. Placed BEFORE the
-            // claim, so a held order costs no state write, no broker read and no log line — the whole
-            // sequence behind one trigger is five SOAP calls for the availability confirmation and
-            // five more at the execution boundary.
-            if (_refusedSells.TryGetValue(order.ArmedId, out var held) && now < held.NextUtc)
+            // An order that was refused waits before it is tried again — a SELL with no free shares, a
+            // BUY or SELL a gate or the broker said no to. Placed BEFORE the claim, so a held order
+            // costs no state write, no broker read and no log line — the whole sequence behind one
+            // triggered SELL is five SOAP calls for the availability confirmation and five more at the
+            // execution boundary.
+            if (_refusedFires.TryGetValue(order.ArmedId, out var held) && now < held.NextUtc)
                 continue;
 
             // Claim it before the broker sees anything.
@@ -562,7 +625,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                         // "expired", the same terminal state an unfired order ages into, rather than
                         // "failed": nothing went wrong here and nothing needs verifying at the broker.
                         // The position was closed by something else and this instruction is spent.
-                        ClearRefusedSell(order.ArmedId);
+                        ClearRefusal(order.ArmedId);
                         await _repository.TrySetArmedOrderStateAsync(
                             order.ArmedId, "firing", "expired", outlook.Reason, ct: ct);
                         _logger.LogWarning(
@@ -591,16 +654,16 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                 // system recorded when it placed it, not by the armed order asking: an unreadable
                 // book, an unreadable quantity, or shares held by somebody else's order all come back
                 // "not released", and the caller leaves the sell armed rather than forcing anything.
-                var releasedForThisOrder = false;
-                if (sellAvailability is not null
-                    && _stopReleaser is not null
-                    && await ReleaseOwnStopIfBlockingAsync(order, sellAvailability, ct) is { } releaseNote)
-                {
-                    releasedForThisOrder = true;
-                    _activity?.Warn("Armed",
-                        $"{order.Symbol}: a protective stop stood down so this sell could go through",
-                        releaseNote);
-                }
+                //
+                // DECIDED here, DONE after approval. Standing a stop down is the one step on this path
+                // that removes protection, and it used to run before the approval gate was asked — so a
+                // sell the gate then refused (approval mode Always, no window open, the auto cap used
+                // up, the kill switch) went back to "armed" with its stop already cancelled, and did
+                // the same again on the next trigger once the stop had been re-placed. The order is
+                // built below on the assumption the release will succeed, and the release itself
+                // happens only once the gate has said yes.
+                var needsRelease = _stopReleaser is not null
+                    && sellAvailability is { MustDeferSizing: false, Decision: { Known: true, AvailableQuantity: <= 0 } };
 
                 if (order.PersistentUntilFilled)
                 {
@@ -646,23 +709,23 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                             await _repository.TrySetArmedOrderStateAsync(
                                 order.ArmedId, "firing", "armed",
                                 $"Trigger met, but SELL availability was unknown: {availability.Reason} "
-                                + NoteRefusedSell(order),
+                                + NoteRefusal(order),
                                 ct: ct);
                             continue;
                         }
                         else
                         {
-                            // The release itself has already been attempted, before this branch, for
-                            // every triggered SELL. What is left here is the consequence for SIZING,
-                            // and it is specific to the persistent path: a book read before the release
-                            // still shows the released stop's order resting, so it would answer 0
-                            // again. Carry the full quantity and let TradingManager decide — it
-                            // re-reads the broker book for exactly this reason, and it is the single
-                            // execution boundary every other caller is already sized by.
-                            if (availability.AvailableQuantity <= 0 && releasedForThisOrder)
+                            // Our own stop holds these shares and will be asked for them once the
+                            // approval gate has said yes (see needsRelease). What is left here is the
+                            // consequence for SIZING, and it is specific to the persistent path: a book
+                            // read before the release shows the stop's order resting, so it answers 0.
+                            // Carry the full quantity and let TradingManager decide — it re-reads the
+                            // broker book for exactly this reason, and it is the single execution
+                            // boundary every other caller is already sized by.
+                            if (availability.AvailableQuantity <= 0 && needsRelease)
                                 availability = new SellAvailabilityDecision(
                                     true, order.Quantity,
-                                    "A protective stop was stood down to free these shares; the final "
+                                    "A protective stop is stood down to free these shares; the final "
                                     + "size is set at the execution boundary against a fresh book.");
 
                             if (availability.AvailableQuantity <= 0)
@@ -682,7 +745,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                                 await _repository.TrySetArmedOrderStateAsync(
                                     order.ArmedId, "firing", "armed",
                                     $"Trigger met, but every {order.Symbol} share is committed to a "
-                                    + $"resting SELL — {availability.Reason} " + NoteRefusedSell(order),
+                                    + $"resting SELL — {availability.Reason} " + NoteRefusal(order),
                                     ct: ct);
                                 continue;
                             }
@@ -729,7 +792,15 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                 else
                 {
                     signal = (order with { Price = firePrice }).ToSignal();
-                    source = $"armed:{order.ArmedId}";
+                    // A retry after a refusal is a NEW submission and says so. The execution boundary
+                    // keys idempotency on the source and the request, and a MARKET exit's request is
+                    // identical every time — so without this a retry of an order the broker refused
+                    // would be answered with a replay of that refusal and never reach the broker
+                    // again. Double submission is already ruled out by the armed→firing claim above,
+                    // and an outcome that is UNKNOWN ends the order rather than retrying it.
+                    source = _refusedFires.ContainsKey(order.ArmedId)
+                        ? $"armed:{order.ArmedId}:retry-{DateTime.UtcNow:yyyyMMddHHmmss}"
+                        : $"armed:{order.ArmedId}";
                 }
 
                 var groups = new[] { (IReadOnlyList<TradingSignal>)[signal] };
@@ -749,9 +820,15 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                     // Not authorised to act unattended. Re-arm rather than consume: the condition may
                     // still hold next pass, and losing a protective stop because approval was in
                     // Always mode would be the worst possible outcome of a config choice.
+                    //
+                    // Spaced by a flat minute, never the growing backoff: nothing was sent, so there
+                    // is nothing to protect the broker from, and an operator who opens an approval
+                    // window must not then wait half an hour for the order they opened it for. The
+                    // minute is what keeps this from being logged on every pass and every tick.
                     await _repository.TrySetArmedOrderStateAsync(
                         order.ArmedId, "firing", "armed",
-                        $"Trigger met but not sent: {approvalReason}", ct: ct);
+                        $"Trigger met but not sent: {approvalReason} "
+                        + NoteRefusal(order, escalate: false), ct: ct);
                     _logger.LogWarning(
                         "[ArmedOrders] {ArmedId} met its trigger but was NOT sent: {Reason} "
                         + "(it remains armed).", order.ArmedId, approvalReason);
@@ -760,9 +837,33 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                     continue;
                 }
 
+                // Approved — only now may our own stop give up its shares. See needsRelease.
+                if (needsRelease)
+                {
+                    if (await ReleaseOwnStopIfBlockingAsync(order, sellAvailability!, ct) is { } releaseNote)
+                    {
+                        _activity?.Warn("Armed",
+                            $"{order.Symbol}: a protective stop stood down so this sell could go through",
+                            releaseNote);
+                    }
+                    else if (persistent is not null)
+                    {
+                        // Nothing could be stood down, so every share is still committed. Back to
+                        // "armed", NOT "failed": that clears when the commitment does, or at the close.
+                        // (The one-shot path below carries on to the execution boundary instead, which
+                        // sizes against a fresh book and refuses for itself — as it always has.)
+                        await _repository.TrySetArmedOrderStateAsync(
+                            order.ArmedId, "firing", "armed",
+                            $"Trigger met, but every {order.Symbol} share is committed to a resting "
+                            + "SELL that could not be stood down. " + NoteRefusal(order),
+                            ct: ct);
+                        continue;
+                    }
+                }
+
                 if (persistent is not null)
                 {
-                    ClearRefusedSell(order.ArmedId);
+                    ClearRefusal(order.ArmedId);
                     var submission = await _persistentOrders.CreateAndSubmitAsync(
                         persistent, decision.Authorization, ct);
                     await _repository.TrySetArmedOrderStateAsync(
@@ -785,32 +886,50 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                 var result = await _manager.ExecuteGroupsAsync(
                     groups, source, decision.Authorization, ct);
 
-                // A refused SELL is spaced out; anything else keeps the behaviour it had. The backoff
-                // is applied without asking WHY it was refused, deliberately: this is the path a
-                // trailing MARKET exit takes, it is the one that spun 29 times on 2026-09-11, and a
-                // refusal this code cannot classify is precisely the one that must not loop.
-                var spacing = !result.Executed && sellAvailability is not null
-                    ? " " + NoteRefusedSell(order)
-                    : "";
-                if (result.Executed) ClearRefusedSell(order.ArmedId);
+                // Read by ArmedFireOutcome, not by result.Executed: that flag means the broker
+                // ANSWERED, and a venue rejection is an answer. Keying on it recorded a refused exit
+                // as "fired" with nothing resting and nothing retrying.
+                var (disposition, outcome2) = ArmedFireOutcome.For(result);
+                var executionId = string.IsNullOrWhiteSpace(result.ExecutionId) ? null : result.ExecutionId;
 
-                await _repository.TrySetArmedOrderStateAsync(
-                    order.ArmedId, "firing",
-                    result.Executed ? "fired" : "armed",
-                    result.Executed
-                        ? $"{why} {approvalReason}"
-                        : $"Trigger met but execution refused: {result.Reason}{spacing}",
-                    string.IsNullOrWhiteSpace(result.ExecutionId) ? null : result.ExecutionId, ct);
+                switch (disposition)
+                {
+                    case ArmedFireDisposition.Fired:
+                        ClearRefusal(order.ArmedId);
+                        await _repository.TrySetArmedOrderStateAsync(
+                            order.ArmedId, "firing", "fired", $"{why} {approvalReason}", executionId, ct);
+                        _logger.LogWarning("[ArmedOrders] {ArmedId} FIRED: {Reason}",
+                            order.ArmedId, result.Reason);
+                        _activity?.Info("Armed", $"{order.Symbol}: armed {order.Action} fired", result.Reason);
+                        break;
 
-                _logger.LogWarning(
-                    "[ArmedOrders] {ArmedId} {Outcome}: {Reason}",
-                    order.ArmedId, result.Executed ? "FIRED" : "refused", result.Reason);
-                _activity?.Record(
-                    result.Executed ? ActivityLevel.Info : ActivityLevel.Warn, "Armed",
-                    result.Executed
-                        ? $"{order.Symbol}: armed {order.Action} fired"
-                        : $"{order.Symbol}: armed {order.Action} refused",
-                    result.Reason);
+                    case ArmedFireDisposition.Rearm:
+                        // Spaced out for a BUY and a SELL alike, and without asking WHY it was refused,
+                        // deliberately: this is the path a trailing MARKET exit takes, it is the one
+                        // that spun 29 times on 2026-09-11, and a refusal this code cannot classify is
+                        // precisely the one that must not loop.
+                        await _repository.TrySetArmedOrderStateAsync(
+                            order.ArmedId, "firing", "armed",
+                            $"Trigger met but not placed: {outcome2} {NoteRefusal(order)}",
+                            executionId, ct);
+                        _logger.LogWarning("[ArmedOrders] {ArmedId} refused: {Reason}",
+                            order.ArmedId, outcome2);
+                        _activity?.Warn("Armed",
+                            $"{order.Symbol}: armed {order.Action} refused — it stays armed", outcome2);
+                        break;
+
+                    default:
+                        // The broker may hold this order, or will never take it. Neither is a timer's
+                        // to retry, so the order ends here and says why.
+                        ClearRefusal(order.ArmedId);
+                        await _repository.TrySetArmedOrderStateAsync(
+                            order.ArmedId, "firing", "failed", outcome2, executionId, ct);
+                        _logger.LogError("[ArmedOrders] {ArmedId} stopped: {Reason}",
+                            order.ArmedId, outcome2);
+                        _activity?.Error("Armed",
+                            $"{order.Symbol}: armed {order.Action} stopped — check the broker", outcome2);
+                        break;
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -1146,15 +1265,20 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
     /// <c>OrderRejectionOutlook</c>'s default has, and for the same reason.
     /// </para>
     /// </summary>
-    private string NoteRefusedSell(ArmedOrder order)
+    /// <param name="escalate">
+    /// False holds the wait at the first step (one minute) however often it repeats. For a refusal that
+    /// sent nothing and that the operator can lift at any moment — the approval gate.
+    /// </param>
+    private string NoteRefusal(ArmedOrder order, bool escalate = true)
     {
-        var entry = _refusedSells.AddOrUpdate(
+        var entry = _refusedFires.AddOrUpdate(
             order.ArmedId,
             _ => (DateTime.UtcNow + PersistentOrderDecisions.AutoRetryDelayFor(1), 1),
             (_, previous) =>
             {
-                var failures = previous.Failures + 1;
-                return (DateTime.UtcNow + PersistentOrderDecisions.AutoRetryDelayFor(failures), failures);
+                var failures = escalate ? previous.Failures + 1 : Math.Max(1, previous.Failures);
+                return (DateTime.UtcNow + PersistentOrderDecisions.AutoRetryDelayFor(escalate ? failures : 1),
+                    failures);
             });
 
         var wait = entry.NextUtc - DateTime.UtcNow;
@@ -1168,7 +1292,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
     /// it was retired, or it aged out — so a later refusal starts at one minute rather than inheriting
     /// a ceiling earned hours earlier, and so the dictionary cannot accumulate ids (§0.1).
     /// </summary>
-    private void ClearRefusedSell(string armedId) => _refusedSells.TryRemove(armedId, out _);
+    private void ClearRefusal(string armedId) => _refusedFires.TryRemove(armedId, out _);
 
     private async Task<string?> ReleaseOwnStopIfBlockingAsync(
         ArmedOrder order, ConfirmedSellAvailability confirmed, CancellationToken ct)
@@ -1217,7 +1341,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
         {
             // Retired, not merely held: a closed stop never reopens, so holding this armed only repeats
             // the stand-down on every pass until it expires (THCCL, 2026-09-25, x41 after the sale).
-            ClearRefusedSell(order.ArmedId);
+            ClearRefusal(order.ArmedId);
             var retired = await _repository.TrySetArmedOrderStateAsync(
                 order.ArmedId, "armed", "cancelled",
                 $"Local backstop retired: {orphaned}.", ct: ct);

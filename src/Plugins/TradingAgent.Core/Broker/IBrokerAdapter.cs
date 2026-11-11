@@ -230,7 +230,7 @@ public sealed class AhkBrowserBrokerAdapter :
         }
         else
         {
-            (price, adjustment) = ClampToBand(price, band);
+            (price, adjustment) = PriceBandClamp.Apply(isBuy, price, band.LowerLock, band.UpperCap);
         }
 
         decimal? limitPrice = null;
@@ -238,7 +238,9 @@ public sealed class AhkBrowserBrokerAdapter :
         {
             var raw = signal.LimitPrice
                 ?? decimal.Round(price * (1m - Math.Clamp(cfg.StopLimitSlippagePercent, 0m, 20m) / 100m), 2);
-            limitPrice = band is null ? raw : ClampToBand(raw, band).Price;
+            limitPrice = band is null
+                ? raw
+                : PriceBandClamp.Apply(isBuy, raw, band.LowerLock, band.UpperCap).Price;
         }
 
         if (PriceIntentRule.Validate(signal, price, limitPrice) is { } priceProblem)
@@ -333,23 +335,6 @@ public sealed class AhkBrowserBrokerAdapter :
                 Symbol = signal.Symbol,
                 Message = "The browser path returned no result for this order."
             };
-    }
-
-    /// <summary>
-    /// Clamps a price into the day's band, returning the note to record when it moved. PSX rejects
-    /// anything outside the band, and on the JSON path nothing else is checking.
-    /// </summary>
-    private static (decimal Price, string? Adjustment) ClampToBand(decimal price, AhkPriceBand band)
-    {
-        if (band.UpperCap is > 0m && price > band.UpperCap)
-            return (band.UpperCap.Value,
-                $"Limit clamped down from {price:F2} to the day's Upper Cap {band.UpperCap:F2}.");
-
-        if (band.LowerLock is > 0m && price < band.LowerLock)
-            return (band.LowerLock.Value,
-                $"Limit clamped up from {price:F2} to the day's Lower Lock {band.LowerLock:F2}.");
-
-        return (price, null);
     }
 
     /// <summary>

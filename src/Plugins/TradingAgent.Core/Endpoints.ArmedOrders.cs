@@ -288,6 +288,17 @@ public sealed partial class TradingCoreEndpoints
                                 + "price level."
                     });
 
+                // A move too small for the price rounds onto the price it is measured from: 0.04% under
+                // 12.04 is 12.04. Such a trigger is met the moment it is armed, which is an immediate
+                // order wearing a waiting order's label.
+                if (PercentTriggerRule.LevelIsAtReference(kind, referencePrice.Value, triggerLevel.Value))
+                    return Results.BadRequest(new
+                    {
+                        error = "invalid_trigger_percent",
+                        message = $"{triggerPercent}% of {referencePrice} is less than one paisa, so this "
+                                + "would trigger at once. Use a larger move."
+                    });
+
                 trailing = body.Trailing;
 
                 if (body.TriggerWindowMinutes is { } minutes)
