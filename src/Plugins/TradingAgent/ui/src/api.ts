@@ -596,7 +596,7 @@ export interface ChartLevel {
  */
 export type ChartOverlayKind =
   | 'projection' | 'prediction' | 'target' | 'entry' | 'stop'
-  | 'support' | 'resistance' | 'neutral' | string;
+  | 'support' | 'resistance' | 'circuit' | 'neutral' | string;
 
 export interface ChartOverlayPoint { time: number; value: number; }
 
