@@ -2,6 +2,7 @@
   import { createEventDispatcher, onMount, onDestroy, tick } from 'svelte';
   import { psxDateInput, scheduleDateError } from './orderSchedule';
   import { trailBoundBlock } from './trailingBound';
+  import { startingPriceDrift } from './startingPrice';
   import AmountInWords from './AmountInWords.svelte';
   import { uncertainOrderFailure, isOrderReviewKey } from './orderReview';
   import {
@@ -444,6 +445,15 @@
   $: trailBlock = boundedTrail
     ? trailBoundBlock(choice?.action, conditionalLevel, priceBound, triggerPercent)
     : null;
+  // The starting price is read once, when the order type is chosen. Compared only with a LIVE quote —
+  // never with the `currentPrice` prop the ticket fell back to, which can be older than the start.
+  $: startDrift = choice?.submission === 'conditional' && !scheduled && !windowed && !exactPriceTrigger
+    ? startingPriceDrift(choice.triggerKind, choice.trailing === true, triggerReferencePrice,
+        livePriceView.quote?.current, triggerPercent, conditionalLevel)
+    : null;
+  function useLiveStartingPrice() {
+    if (startDrift) triggerReferencePrice = startDrift.live;
+  }
   $: selectedTicker = symbol.trim().toUpperCase();
   $: matchingHoldings = account?.holdings.filter(
     holding => sameSymbol(holding.symbol ?? holding.instrumentId, selectedTicker)) ?? [];
@@ -1220,6 +1230,16 @@
           {#if exactPriceTrigger}
             <p class="estimate">AgentFox waits locally and submits only after observing the trigger while running with monitoring active and the market open. Approval and risk checks still apply. A price already beyond the trigger can activate on the next check.</p>
           {/if}
+          {#if startDrift}
+            <p class="warning" role="alert"><AlertTriangle size={13} />
+              <span>
+                {startDrift.triggersNow
+                  ? `This order starts from ${money(startDrift.reference)}, but ${selectedTicker} now trades at ${money(startDrift.live)}, which already meets its trigger ${conditionalLevel != null ? money(conditionalLevel) : '—'}. Armed like this, it fires on the next check.`
+                  : `This order starts from ${money(startDrift.reference)}, the price when this ticket opened; ${selectedTicker} now trades at ${money(startDrift.live)}, so its trigger ${conditionalLevel != null ? money(conditionalLevel) : '—'} is not where you would set it now.`}
+                <button type="button" class="start-from-live" on:click={useLiveStartingPrice}>Start from {money(startDrift.live)}</button>
+              </span>
+            </p>
+          {/if}
           {#if trailBlock}
             <p class="warning" role="alert"><AlertTriangle size={13} />
               {boundIsBuyMax
@@ -1470,6 +1490,10 @@
   .duplicate-entry ul { margin:0; padding-left:1.1rem; font-size:.75rem; line-height:1.5; color:var(--text-2); }
   .warning,.error { margin:.65rem 1rem; padding:.55rem .65rem; border-radius:var(--radius-sm); display:flex; gap:.35rem;
                     align-items:flex-start; color:var(--warning); background:color-mix(in srgb,var(--warning) 8%,transparent); font-size:.7rem; line-height:1.4; }
+  .start-from-live { margin-left:.35rem; border:1px solid currentColor; border-radius:var(--radius-sm);
+                     padding:.15rem .45rem; background:transparent; color:inherit; font:inherit; cursor:pointer; }
+  .start-from-live:hover { background:color-mix(in srgb,var(--warning) 14%,transparent); }
+  .start-from-live:focus-visible { outline:2px solid var(--primary); outline-offset:2px; }
   .form-card .warning { margin:.65rem 0 0; }.error { color:var(--danger); background:color-mix(in srgb,var(--danger) 8%,transparent); }
   .footer { display:flex; justify-content:flex-end; gap:.5rem; padding:.8rem 1rem; border-top:1px solid var(--border); }
   .outcome { margin:1rem; padding:1rem; display:flex; gap:.7rem; border:1px solid color-mix(in srgb,var(--danger) 35%,transparent);
