@@ -4,13 +4,14 @@
   import type { SymbolExtension } from './symbolExtensions';
   import type { SectionNavigationItem } from './sectionNavigation';
   export let symbolExtension: SymbolExtension | null = null;
+  export let portfolioExtraBalance: any | null = null;
   export let showSideNavigation = true;
   export let navigationItems: SectionNavigationItem[] | undefined = undefined;
   export let archiveAvailable = false;
   export let selectedSymbol: string | null = null;
 </script>
 
-<TradingSurface {symbolExtension} {showSideNavigation} {navigationItems}
+<TradingSurface {symbolExtension} {portfolioExtraBalance} {showSideNavigation} {navigationItems}
   bind:archiveAvailable bind:selectedSymbol>
   <svelte:fragment slot="order-detail" let:symbol let:action let:orderType let:quantity let:price let:value let:conditional let:triggerLevel>
     <slot name="order-detail" {symbol} {action} {orderType} {quantity} {price} {value} {conditional} {triggerLevel}/>
