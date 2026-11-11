@@ -126,6 +126,19 @@ public static class PercentTrigger
     }
 }
 
+/// <summary>What the arm endpoint refuses about a percent trigger beyond its range. Pure.</summary>
+public static class PercentTriggerRule
+{
+    /// <summary>
+    /// Whether a percent trigger's level has rounded onto (or past) the price it is measured from, so
+    /// that the reference itself already meets it: a drop level at or above the reference, a rise level
+    /// at or below it.
+    /// </summary>
+    public static bool LevelIsAtReference(ArmedTriggerKind kind, decimal reference, decimal level) =>
+        kind == ArmedTriggerKind.PercentDrop ? level >= reference
+        : kind == ArmedTriggerKind.PercentRise && level <= reference;
+}
+
 /// <summary>
 /// An order waiting for a condition, plus everything needed to explain it later.
 ///

@@ -1607,9 +1607,10 @@ public sealed class AhkBroker : IAsyncDisposable
     /// <summary>
     /// Resolves the limit price to submit, clamping it into the day's price band (Lower Lock / Upper Cap)
     /// when <see cref="AhkConfig.ClampPriceToBand"/> is on and the band can be read from the open dialog.
-    /// A price above the Upper Cap is lowered to the cap; a price below the Lower Lock is raised to the
-    /// lock (PSX rejects anything outside the band). Returns the (possibly unchanged) price and a note
-    /// describing any clamp, or null. ASSUMES the dialog is open and the symbol resolved.
+    /// Only ever in the operator's favour — a BUY above the Upper Cap is lowered to the cap, a SELL below
+    /// the Lower Lock is raised to the lock; a SELL is never lowered and a BUY never raised, see
+    /// <see cref="PriceBandClamp"/>. Returns the (possibly unchanged) price and a note describing any
+    /// clamp, or null. ASSUMES the dialog is open and the symbol resolved.
     /// </summary>
     private async Task<(decimal price, string? note)> ResolveLimitPriceAsync(
         decimal requested, string side, bool hasFreshBand)
@@ -1619,21 +1620,10 @@ public sealed class AhkBroker : IAsyncDisposable
 
         var (lowerLock, upperCap) = await ReadPriceBandAsync(side);
 
-        if (upperCap is > 0 && requested > upperCap.Value)
-        {
-            var note = $"Limit clamped down from {requested:F2} to the day's Upper Cap {upperCap.Value:F2}.";
-            _logger.LogWarning("[AhkBroker] {Note}", note);
-            return (upperCap.Value, note);
-        }
-
-        if (lowerLock is > 0 && requested < lowerLock.Value)
-        {
-            var note = $"Limit clamped up from {requested:F2} to the day's Lower Lock {lowerLock.Value:F2}.";
-            _logger.LogWarning("[AhkBroker] {Note}", note);
-            return (lowerLock.Value, note);
-        }
-
-        return (requested, null);
+        var isBuy = side.StartsWith("b", StringComparison.OrdinalIgnoreCase);
+        var (price, note) = PriceBandClamp.Apply(isBuy, requested, lowerLock, upperCap);
+        if (note is not null) _logger.LogWarning("[AhkBroker] {Note}", note);
+        return (price, note);
     }
 
     /// <summary>
