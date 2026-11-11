@@ -1224,7 +1224,7 @@
             <p class="warning" role="alert"><AlertTriangle size={13} />
               {boundIsBuyMax
                 ? `Your maximum ${money(trailBlock.bound)} is below the trigger ${money(trailBlock.trigger)}, so nothing buys until ${selectedTicker} makes a low of ${money(trailBlock.neededExtreme)} or less; every rise before that is skipped. Leave it empty, or set it at or above ${money(trailBlock.trigger)}, to buy on the next rise.`
-                : `Your minimum ${money(trailBlock.bound)} is above the trigger ${money(trailBlock.trigger)}, so nothing sells until ${selectedTicker} makes a high of ${money(trailBlock.neededExtreme)} or more; every drop before that is skipped. Leave it empty, or set it at or below ${money(trailBlock.trigger)}, to be protected from a fall.`}
+                : `Your minimum ${money(trailBlock.bound)} is above the trigger ${money(trailBlock.trigger)}, so nothing sells until ${selectedTicker} makes a high of ${money(trailBlock.neededExtreme)} or more; every drop before that is skipped. Leave it empty, or set it at or below ${money(trailBlock.trigger)}, to sell on the next fall.`}
             </p>
           {/if}
           {#if summary}<p class="summary" class:trail-summary={boundedTrail}>{summary}</p>{/if}
