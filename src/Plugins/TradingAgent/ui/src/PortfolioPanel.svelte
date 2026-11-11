@@ -42,6 +42,11 @@
    */
   export let holdingStatus: SymbolExtensionComponent | null = null;
 
+  /** Optional account-level card beside the broker balances. Receives showValues and refreshKey;
+   * the latter changes whenever this panel starts a fresh account read. Renders
+   * nothing when it has no current reading to show. Null in the community build. */
+  export let extraBalance: SymbolExtensionComponent | null = null;
+
   /**
    * Replaces the Cancel control in each working-order row. Null means the community
    * `WorkingOrderCancel`. See `symbolExtensions.ts` for the props it receives.
@@ -57,10 +62,12 @@
   let loaded = false;
   let error: string | null = null;
   let account: BrokerAccountSnapshot | null = null;
+  let balanceRevision = 0;
 
   async function load() {
     if (loading) return;
     loading = true;
+    balanceRevision += 1;
     error = null;
     try {
       account = await trading.account();
@@ -192,6 +199,7 @@
           {#if account.holdingsAvailable && account.holdings.length}
             <PortfolioPnlSummary holdings={account.holdings} {showValues} />
           {/if}
+          {#if extraBalance}<svelte:component this={extraBalance} {showValues} refreshKey={balanceRevision}/>{/if}
         </div>
 
         <section class="account-section">
