@@ -396,7 +396,7 @@ public sealed partial class TradingManager
             var result = new TradingExecutionResult(true, false, claim.ExecutionId,
                 policy.Version,
                 WithSellAdjustment(
-                    success ? "Broker accepted all attempted orders." : "One or more broker orders failed.",
+                    success ? "Broker accepted all attempted orders." : BrokerFailureReason(brokerResults),
                     sellAdjustments),
                 brokerResults);
 
@@ -485,6 +485,25 @@ public sealed partial class TradingManager
                 ? adjustment.Message
                 : result.Message.TrimEnd() + " " + adjustment.Message;
         }
+    }
+
+    /// <summary>
+    /// The summary of a submission the broker refused, carrying the broker's own words for each refused order. The order
+    /// dialog shows this summary and nothing else, so without them a refusal with a clear reason ("shares bought today can
+    /// be sold from the next trading day") reached the operator as "One or more broker orders failed." and nothing more.
+    /// At most three distinct messages, so one order's long text cannot crowd the rest out.
+    /// </summary>
+    internal static string BrokerFailureReason(IEnumerable<IReadOnlyList<OrderResult>> groups)
+    {
+        var said = groups.SelectMany(group => group)
+            .Where(order => !order.Success && !string.IsNullOrWhiteSpace(order.Message))
+            .Select(order => order.Message.Trim())
+            .Distinct(StringComparer.Ordinal)
+            .Take(3)
+            .ToList();
+        return said.Count == 0
+            ? "One or more broker orders failed."
+            : "One or more broker orders failed: " + string.Join(" | ", said);
     }
 
     private static string WithSellAdjustment(
