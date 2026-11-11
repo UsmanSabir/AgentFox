@@ -10,6 +10,8 @@
  * the page is opened standalone during development.
  */
 
+import { percentLevel } from './percentLevel';
+
 const BASE = '/api';
 const KEY_STORAGE = 'agentfox.managementApiKey';
 
@@ -790,19 +792,14 @@ export const isPercentTrigger = (kind: TriggerKind | string) =>
 export const PERCENT_PRESETS = [2, 3, 5, 10] as const;
 
 /**
- * The level a percent trigger works out to. Mirrors the backend's PercentTrigger.Level, including its
- * 2-decimal rounding — the dialog quotes this number to the operator, and a client that rounded
- * differently would quote a level the server never armed.
+ * The level a percent trigger works out to. Mirrors the backend's PercentTrigger.Level, including the
+ * arm endpoint's rounding of the percent — the dialog quotes this number to the operator, and a client
+ * that rounded differently would quote a level the server never armed. See percentLevel.ts.
  */
 export function percentTriggerLevel(
   kind: TriggerKind | string, reference: number | null, percent: number | null
 ): number | null {
-  if (!isPercentTrigger(kind)) return null;
-  if (!reference || reference <= 0) return null;
-  if (!percent || percent <= 0 || percent > 50) return null;
-  const factor = kind === 'PercentDrop' ? 1 - percent / 100 : 1 + percent / 100;
-  const level = Math.round(reference * factor * 100) / 100;
-  return level > 0 ? level : null;
+  return percentLevel(kind, reference, percent);
 }
 
 /** Alert kinds an Event trigger can key off — must match the backend's AlertKind enum. */

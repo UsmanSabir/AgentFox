@@ -46,6 +46,8 @@
    * `symbolExtensions.ts` for the contract and the reasoning behind it.
    */
   export let symbolExtension: SymbolExtension | null = null;
+  /** Optional account-level card in Portfolio; absent in the community edition. */
+  export let portfolioExtraBalance: any | null = null;
 
   /**
    * The community page owns the default destinations. A composing edition may hide this rail and
@@ -538,7 +540,7 @@
     </WorkspacePanel>
     <WorkspacePanel {workspace} id="portfolio" let:visible>
     <div id="trading-portfolio" class="section-anchor">
-      <PortfolioPanel holdingStatus={symbolExtension?.holdingStatus ?? null}
+      <PortfolioPanel holdingStatus={symbolExtension?.holdingStatus ?? null} extraBalance={portfolioExtraBalance}
         orderAction={symbolExtension?.orderAction ?? null} keyboardMode={!!workspace} embedded={!!workspace} active={visible}
         on:order={event => beginOrder(event.detail.symbol, event.detail.action)}/>
     </div>
