@@ -150,6 +150,12 @@ public static class ChartOverlayKind
     public const string Dividend = "dividend";
     /// <summary>A corporate event on a bar: the day financial results were announced.</summary>
     public const string Earnings = "earnings";
+    /// <summary>
+    /// A price the exchange will not let the stock trade beyond for one session (a circuit breaker). Drawn by
+    /// the client as a thin dashed line that never widens the price scale: a cap far from the price is simply
+    /// off-screen, so the chart looks the same until the price gets close to one.
+    /// </summary>
+    public const string Circuit = "circuit";
     public const string Neutral = "neutral";
 }
 

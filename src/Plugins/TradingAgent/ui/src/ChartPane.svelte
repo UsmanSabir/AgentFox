@@ -562,6 +562,7 @@
       // Corporate events sit under the candles, so neither borrows a candle's own green or red.
       case 'dividend':   return token('--info', '#60a5fa');
       case 'earnings':   return token('--warning', '#fbbf24');
+      case 'circuit':    return token('--warning', '#fbbf24');
       default:           return token('--info', '#60a5fa');
     }
   }
@@ -615,16 +616,22 @@
 
     const addLine = (
       id: string, kind: string, dashed: boolean,
-      points: { time: number; value: number }[]
+      points: { time: number; value: number }[], label = ''
     ) => {
       if (points.length === 0) return;
+      // A circuit breaker is a fact about the session, not a forecast: thin, labelled on the price axis, and
+      // EXCLUDED from autoscale — a cap 10% away must not squash the candles to make room for itself. Off-screen
+      // it draws nothing, so the chart only changes when the price is actually near one.
+      const circuit = kind === 'circuit';
       const series = chart!.addSeries(LineSeries, {
         color: overlayColor(kind),
-        lineWidth: 2,
+        lineWidth: circuit ? 1 : 2,
         lineStyle: dashed ? 2 : 0,
         priceLineVisible: false,
-        lastValueVisible: false,
-        crosshairMarkerVisible: false
+        lastValueVisible: circuit,
+        title: circuit ? label : '',
+        crosshairMarkerVisible: false,
+        ...(circuit ? { autoscaleInfoProvider: () => null } : {})
       });
       // Sorted and de-duplicated by time: lightweight-charts requires strictly ascending times and
       // throws on an out-of-order point, which would take down the whole chart for one bad overlay.
@@ -633,12 +640,14 @@
         .filter((pt, i, all) => i === 0 || pt.time !== all[i - 1].time);
       series.setData(clean.map(pt => ({ time: pt.time as UTCTimestamp, value: pt.value })));
       overlaySeries.push(series);
+      // A cap's stub past a single daily bar is not a projection, so it asks for no extra room on the right.
+      if (circuit) return;
       const last = clean[clean.length - 1].time;
       if (last > furthest) furthest = last;
     };
 
     for (const series of o.series ?? [])
-      addLine(series.id, series.kind, series.dashed, series.points ?? []);
+      addLine(series.id, series.kind, series.dashed, series.points ?? [], series.label ?? '');
 
     // A band is two lines. Drawn as an upper and a lower edge rather than a filled area because
     // lightweight-charts has no band primitive, and two dashed edges read correctly either way.
