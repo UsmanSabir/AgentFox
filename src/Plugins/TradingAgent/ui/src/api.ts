@@ -1251,6 +1251,8 @@ export interface PriceAlert extends PriceAlertInput {
 }
 export interface PriceAlertsPage {
   marketOpen: boolean;
+  /** No source has a current KSE 100 reading, so KSE 100 alerts cannot fire. Absent on older agents. */
+  indexUnavailable?: boolean;
   rules: { rule: PriceAlert; latest: PriceAlertObservation | null }[];
 }
 

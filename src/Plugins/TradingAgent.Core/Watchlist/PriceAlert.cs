@@ -37,3 +37,13 @@ public interface IPriceAlertPush
 {
     Task<bool> TryQueueAsync(PriceAlert alert, CancellationToken ct);
 }
+
+/// <summary>
+/// Optional edition-specific KSE 100 reading for index alerts, asked before PSX's intraday series. Null means it has
+/// no current reading; the worker then reads PSX. A reading must carry the time the index had that value, not the
+/// time it was fetched, because the worker's freshness rule is what stops a previous session's value firing.
+/// </summary>
+public interface IIndexAlertSource
+{
+    Task<PriceAlertObservation?> ObserveIndexAsync(CancellationToken ct);
+}

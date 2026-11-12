@@ -16,12 +16,20 @@ public sealed class PriceAlertWorker(
     ILogger<PriceAlertWorker> logger,
     IUserNotifier? notifier = null,
     IPriceAlertPush? push = null,
-    TimeProvider? clock = null) : BackgroundService
+    TimeProvider? clock = null,
+    IIndexAlertSource? indexSource = null) : BackgroundService
 {
     private static readonly TimeSpan Interval = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan QuoteAge = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan IndexReadDeadline = TimeSpan.FromSeconds(8);
     public static readonly TimeSpan DeliveryWindow = TimeSpan.FromMinutes(30);
     private int _verificationOffset;
+    // Whether the last pass that needed the KSE 100 found no fresh reading anywhere. One bool, so an outage logs one
+    // Warning when it starts and one when it ends, and the alert list can say why an index alert is not watching.
+    private int _indexUnavailable;
+
+    /// <summary>True while the market is open, an index alert is watching, and no source has a fresh KSE 100 reading.</summary>
+    public bool IndexUnavailable => Volatile.Read(ref _indexUnavailable) == 1;
     private DateTime Now() => (clock ?? TimeProvider.System).GetUtcNow().UtcDateTime;
     private IReadOnlyDictionary<string, PriceAlertObservation> _latest = new Dictionary<string, PriceAlertObservation>();
 
@@ -60,12 +68,15 @@ public sealed class PriceAlertWorker(
         if (alerts.Count == 0)
         {
             Volatile.Write(ref _latest, new Dictionary<string, PriceAlertObservation>());
+            Volatile.Write(ref _indexUnavailable, 0);
             return;
         }
         var market = calendar.GetStatus(now);
         var latest = new Dictionary<string, PriceAlertObservation>();
         var watching = alerts.Where(a => a.State == "watching").ToArray();
         var active = watching.Where(a => a.ExpiresUtc > now).ToArray();
+        // Nothing is asked while the market is shut or no index alert is watching, so there is nothing to report.
+        if (!market.IsOpen || active.All(a => a.Symbol != PriceAlert.Index)) Volatile.Write(ref _indexUnavailable, 0);
         var observations = market.IsOpen ? await ObserveAsync(active, ct) : new Dictionary<string, PriceAlertObservation>();
         now = Now();
         market = calendar.GetStatus(now);
@@ -120,7 +131,7 @@ public sealed class PriceAlertWorker(
         var observations = new Dictionary<string, PriceAlertObservation>(StringComparer.OrdinalIgnoreCase);
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         deadline.CancelAfter(TimeSpan.FromSeconds(10));
-        var index = alerts.Any(a => a.Symbol == PriceAlert.Index) ? ObserveIndexAsync(deadline.Token, ct) : null;
+        var index = alerts.Any(a => a.Symbol == PriceAlert.Index) ? ObserveIndexAsync(ct) : null;
         if (alerts.Any(a => a.Symbol != PriceAlert.Index))
         {
             LiveQuoteSnapshot snapshot;
@@ -135,14 +146,69 @@ public sealed class PriceAlertWorker(
         return observations;
     }
 
-    private async Task<PriceAlertObservation?> ObserveIndexAsync(CancellationToken deadline, CancellationToken ct)
+    // The edition's own index reading first (the broker's feed), PSX's intraday series when it has nothing fresh. Each
+    // gets its own deadline, so a broker feed that accepts and never answers still leaves PSX time to be asked.
+    private async Task<PriceAlertObservation?> ObserveIndexAsync(CancellationToken ct)
     {
-        try { return await psx.GetAlertObservationAsync(PriceAlert.Index, deadline); }
-        catch (Exception ex) when (!ct.IsCancellationRequested)
+        string? brokerProblem = null;
+        if (indexSource is not null)
         {
-            logger.LogDebug(ex, "KSE 100 alert data unavailable.");
-            return null;
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            deadline.CancelAfter(IndexReadDeadline);
+            try
+            {
+                var reading = await indexSource.ObserveIndexAsync(deadline.Token);
+                if (reading is not null && IsFresh(reading, Now()))
+                {
+                    ReportIndex(available: true);
+                    return reading;
+                }
+                brokerProblem = reading is null ? "no readings for today" : $"its last reading is from {PsxTime.Now(reading.ObservedUtc):HH:mm:ss} PKT";
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                brokerProblem = ex.Message;
+            }
         }
+
+        string psxProblem;
+        using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct))
+        {
+            deadline.CancelAfter(IndexReadDeadline);
+            try
+            {
+                var reading = await psx.GetAlertObservationAsync(PriceAlert.Index, deadline.Token);
+                if (reading is not null && IsFresh(reading, Now()))
+                {
+                    ReportIndex(available: true);
+                    return reading;
+                }
+                psxProblem = reading is null ? "no readings for today" : $"its last reading is from {PsxTime.Now(reading.ObservedUtc):HH:mm:ss} PKT";
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                psxProblem = ex.Message;
+            }
+        }
+
+        ReportIndex(available: false, brokerProblem is null
+            ? $"PSX: {psxProblem}"
+            : $"broker feed: {brokerProblem}; PSX: {psxProblem}");
+        return null;
+    }
+
+    private void ReportIndex(bool available, string? problem = null)
+    {
+        if (available)
+        {
+            if (Interlocked.Exchange(ref _indexUnavailable, 0) == 1)
+                logger.LogWarning("KSE 100 price alerts have a current reading again.");
+            return;
+        }
+        if (Interlocked.Exchange(ref _indexUnavailable, 1) == 0)
+            logger.LogWarning("KSE 100 price alerts cannot fire: no current KSE 100 reading ({Problem}).", problem);
+        else
+            logger.LogDebug("KSE 100 alert data still unavailable ({Problem}).", problem);
     }
 
     private static DateTime ObservedAt(PsxLiveQuote quote)
