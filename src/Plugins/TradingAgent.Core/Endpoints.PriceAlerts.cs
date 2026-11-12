@@ -26,6 +26,7 @@ public sealed partial class TradingCoreEndpoints
         return Results.Ok(new
         {
             marketOpen = calendar.GetStatus().IsOpen,
+            indexUnavailable = worker.IndexUnavailable,
             rules = rules.Select(rule => new { rule, latest = rule.State == "watching" ? worker.Latest(rule) : null })
         });
     }

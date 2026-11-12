@@ -46,12 +46,12 @@
     const initialTheme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
     applyTheme(initialTheme, false);
 
-    // An explicit user choice wins on every viewport. Without one, narrow screens start on the
-    // compact rail so plugin dashboards and chat retain usable width.
+    // An explicit user choice wins on every viewport. Without one, start on the compact rail so
+    // plugin dashboards and chat retain usable width.
     let savedSidebar: boolean | null = null;
     try { savedSidebar = parseSidebarCollapsed(localStorage.getItem(SIDEBAR_COLLAPSED_KEY)); }
     catch { /* Browser storage is optional. */ }
-    sidebarCollapsed.set(savedSidebar ?? window.matchMedia('(max-width: 760px)').matches);
+    sidebarCollapsed.set(savedSidebar ?? true);
 
     const savedMode = localStorage.getItem(UI_MODE_KEY);
     if (savedMode === 'simple' || savedMode === 'advanced') {

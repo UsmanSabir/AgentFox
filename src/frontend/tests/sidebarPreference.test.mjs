@@ -7,7 +7,7 @@ test('sidebar collapse preference round-trips both explicit states', () => {
   assert.equal(parseSidebarCollapsed(serializeSidebarCollapsed(false)),false);
 });
 
-test('missing or malformed sidebar preferences fall back to responsive defaults', () => {
+test('missing or malformed sidebar preferences have no explicit choice', () => {
   for (const value of [null,'','1','TRUE','collapsed','{}'])
     assert.equal(parseSidebarCollapsed(value),null);
 });

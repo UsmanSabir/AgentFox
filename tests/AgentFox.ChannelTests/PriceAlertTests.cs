@@ -129,6 +129,49 @@ public sealed class PriceAlertTests
         StringAssert.Contains(System.Text.Json.JsonSerializer.Serialize(alert with { ChannelUnconfirmed = true }), "\"ChannelUnconfirmed\":true");
     }
 
+    [TestMethod]
+    public async Task AnIndexAlertFiresOnTheEditionsIndexReadingAndSaysWhenNoSourceHasOne()
+    {
+        var directory = Directory.CreateTempSubdirectory("price-alerts-");
+        try
+        {
+            // PSX is unreachable here (nothing listens on port 9), as it was on 2026-11-12 when every timeseries path
+            // answered "Not Found"; the index alert must still fire on the edition's own reading.
+            var options = Options.Create(new TradingAgentOptions
+            {
+                DatabasePath = Path.Combine(directory.FullName, "alerts.db"),
+                PsxDataBaseUrl = "http://127.0.0.1:9"
+            });
+            var db = new SqliteTradingRepository(options, new ConfigurationBuilder().Build(), NullLogger<SqliteTradingRepository>.Instance);
+            var composite = new CompositeLiveQuoteSource([new Quotes()], NullLogger<CompositeLiveQuoteSource>.Instance);
+            var index = new IndexSource();
+            var clock = new Clock { Now = Open };
+            using var worker = new PriceAlertWorker(db, composite, new PsxDataClient(options, NullLogger<PsxDataClient>.Instance),
+                new Calendar(), NullLogger<PriceAlertWorker>.Instance, null, new Push(), clock, index);
+            Assert.IsTrue(await db.WritePriceAlertAsync(PriceAlert.Create(new("KSE 100", "above", 175_000m), Open.AddHours(-1))!, null, default));
+
+            index.Reading = new(177_506.81m, Open.AddMinutes(-5), "broker");
+            await worker.TickAsync(Open, default);
+            Assert.AreEqual("watching", (await db.ReadPriceAlertsAsync(default)).Single().State, "a stale reading never fires");
+            Assert.IsTrue(worker.IndexUnavailable);
+
+            index.Reading = new(177_506.81m, Open.AddSeconds(-20), "broker");
+            await worker.TickAsync(Open, default);
+            var fired = (await db.ReadPriceAlertsAsync(default)).Single();
+            Assert.AreNotEqual("watching", fired.State);
+            Assert.AreEqual(177_506.81m, fired.Trigger!.Value);
+            Assert.AreEqual("broker", fired.Trigger.Source);
+            Assert.IsFalse(worker.IndexUnavailable);
+        }
+        finally { directory.Delete(recursive: true); }
+    }
+
+    private sealed class IndexSource : IIndexAlertSource
+    {
+        public PriceAlertObservation? Reading { get; set; }
+        public Task<PriceAlertObservation?> ObserveIndexAsync(CancellationToken ct) => Task.FromResult(Reading);
+    }
+
     private static async Task WithTriggeredAlertAsync(Notifier notifier, IPriceAlertPush? push,
         Func<PriceAlertWorker, SqliteTradingRepository, Notifier, Clock, Task> assert)
     {

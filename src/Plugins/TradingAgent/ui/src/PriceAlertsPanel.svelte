@@ -135,7 +135,8 @@
   }
   function status(rule: PriceAlert, hasQuote: boolean) {
     switch (rule.state) {
-      case 'watching': return !page?.marketOpen ? 'Market closed' : hasQuote ? 'Watching' : 'Waiting for fresh data';
+      case 'watching': return !page?.marketOpen ? 'Market closed' : hasQuote ? 'Watching'
+        : rule.symbol === 'KSE100' && page.indexUnavailable ? 'KSE 100 readings unavailable' : 'Waiting for fresh data';
       case 'pending': return rule.pushQueued ? 'Target reached · App push queued' : 'Target reached · Waiting for delivery';
       case 'delivered': return [
         rule.recipientCount > 0 ? `Delivered to ${rule.recipientCount} ${rule.recipientCount === 1 ? 'channel' : 'channels'}` : '',

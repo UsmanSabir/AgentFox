@@ -8,7 +8,7 @@ import type {
 export const agentStatus = writable<AgentStatus | null>(null);
 
 // ── Sidebar collapsed state ───────────────────────────────────────────────
-export const sidebarCollapsed = writable(false);
+export const sidebarCollapsed = writable(true);
 
 // Advanced is the safe default for existing installations. The root layout
 // restores the user's persisted preference once the browser is available.
