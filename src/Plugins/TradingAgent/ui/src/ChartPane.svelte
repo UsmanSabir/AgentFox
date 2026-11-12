@@ -90,6 +90,8 @@
   /** RSI in its own pane costs ~90px of candles; worth reclaiming when the pane is small. */
   let showRsi = true;
   let showVolume = true;
+  // Keep the plan readable below the plot without covering the latest candles by default.
+  let showPlanMarkers = false;
 
   const LEVEL_MODES = ['all', 'key', 'off'] as const;
 
@@ -773,14 +775,23 @@
     volumeSeries?.applyOptions({ visible: showVolume });
   }
 
+  function togglePlanMarkers() {
+    showPlanMarkers = !showPlanMarkers;
+    if (data) drawPlanMarkers(data);
+  }
+
   function toggleExpand() {
     expanded = !expanded;
     rebuild();
   }
 
-  /** Entry / stop / target from the deterministic plan, anchored on the last bar. */
+  /** Optional entry / stop / target markers from the deterministic plan, anchored on the last bar. */
   function drawPlanMarkers(d: ChartData) {
-    if (!candleSeries || !d.candles.length) return;
+    if (!candleSeries) return;
+    if (!showPlanMarkers || !d.candles.length) {
+      markers?.setMarkers([]);
+      return;
+    }
     const time = d.candles[d.candles.length - 1].time as UTCTimestamp;
     const points = [
       { value: d.plan.entry, text: 'Entry', color: token('--primary', '#818cf8'), position: 'belowBar' },
@@ -989,6 +1000,11 @@
                : levelMode === 'key' ? 'Showing weekly-confirmed levels only — click to hide all lines'
                : 'Level lines hidden — click to show all'}
         >Levels: {levelMode}</button>
+        <button class:muted={!showPlanMarkers} aria-pressed={showPlanMarkers}
+          on:click={togglePlanMarkers} disabled={!symbol}
+          title={showPlanMarkers ? 'Hide entry, stop, and target markers' : 'Show entry, stop, and target markers'}>
+          Markers: {showPlanMarkers ? 'on' : 'off'}
+        </button>
         <button class:muted={!showRsi} on:click={toggleRsi} disabled={!symbol}
           title={showRsi ? 'Hide the RSI pane and give the height back to the candles' : 'Show the RSI pane'}>
           <Activity size={11} /> RSI
