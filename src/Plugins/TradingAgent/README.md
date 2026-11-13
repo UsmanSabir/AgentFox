@@ -106,7 +106,7 @@ Then build the plugin. At startup the module contributes the page via
 The page shows the watchlist beside a **chart pane**: candlesticks with a direction-tinted volume
 overlay, SMA20/50, an RSI sub-pane with the *configured* oversold/overbought bands (not the textbook
 30/70), horizontal support/resistance lines whose width encodes touch count and whose style shows
-weekly confirmation, entry/stop/target markers, and an interval switcher (1M / 1W / 1D / 60m / 30m / 15m / 5m).
+weekly confirmation, plus an interval switcher (1M / 1W / 1D / 60m / 30m / 15m / 5m).
 
 ### Making room
 

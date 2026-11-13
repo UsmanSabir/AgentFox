@@ -90,8 +90,6 @@
   /** RSI in its own pane costs ~90px of candles; worth reclaiming when the pane is small. */
   let showRsi = true;
   let showVolume = true;
-  // Keep the plan readable below the plot without covering the latest candles by default.
-  let showPlanMarkers = false;
 
   const LEVEL_MODES = ['all', 'key', 'off'] as const;
 
@@ -276,7 +274,7 @@
   let rsiSeries: ISeriesApi<'Line'> | null = null;
   let priceLines: IPriceLine[] = [];
   // Overlay artefacts are owned separately from the core ones so a render can replace them without
-  // disturbing the support/resistance lines or the plan markers.
+  // disturbing the support/resistance lines.
   let overlaySeries: ISeriesApi<'Line'>[] = [];
   let overlayPriceLines: IPriceLine[] = [];
   let overlayMarkers: ISeriesMarkersPluginApi<Time> | null = null;
@@ -289,7 +287,6 @@
   // be hovered themselves, so the card follows the crosshair's BAR rather than the marker's pixels.
   let markerDetails = new Map<number, MarkerDetailLine[]>();
   let detailCard: { left: number; top: number; lines: MarkerDetailLine[] } | null = null;
-  let markers: ISeriesMarkersPluginApi<Time> | null = null;
   let resizeObserver: ResizeObserver | null = null;
   // A docked tab can receive data before it has any width. Apply its range only after layout;
   // otherwise the chart clamps bar spacing to half a pixel and keeps that spacing when revealed.
@@ -326,8 +323,7 @@
       grid: { vertLines: { color: grid }, horzLines: { color: grid } },
       rightPriceScale: { borderColor: grid },
       localization: { timeFormatter: timeFormatters.timeFormatter },
-      // rightOffset keeps a few bars of empty space so the entry/stop/target markers on the LAST bar
-      // are not clipped by the price axis.
+      // Keep room to the right of the latest candle for projected overlay points.
       timeScale: {
         borderColor: grid, timeVisible: isIntraday(interval), secondsVisible: false, rightOffset: 6,
         lockVisibleTimeRangeOnResize: true,
@@ -445,7 +441,6 @@
       .map(c => ({ time: c.time as UTCTimestamp, value: c.rsi14! })));
 
     drawLevels(d);
-    drawPlanMarkers(d);
     const projectedBars = drawOverlays(d);
     // Logical range ignores weekends and archive gaps, so the latest candles use the available width
     // instead of being compressed into the right half of the plot by calendar time.
@@ -750,7 +745,6 @@
     chart = null;
     candleSeries = volumeSeries = sma20Series = sma50Series = rsiSeries = null;
     priceLines = [];
-    markers = null;
     forgetOverlayArtifacts();
     if (data) render(data);
   }
@@ -775,40 +769,9 @@
     volumeSeries?.applyOptions({ visible: showVolume });
   }
 
-  function togglePlanMarkers() {
-    showPlanMarkers = !showPlanMarkers;
-    if (data) drawPlanMarkers(data);
-  }
-
   function toggleExpand() {
     expanded = !expanded;
     rebuild();
-  }
-
-  /** Optional entry / stop / target markers from the deterministic plan, anchored on the last bar. */
-  function drawPlanMarkers(d: ChartData) {
-    if (!candleSeries) return;
-    if (!showPlanMarkers || !d.candles.length) {
-      markers?.setMarkers([]);
-      return;
-    }
-    const time = d.candles[d.candles.length - 1].time as UTCTimestamp;
-    const points = [
-      { value: d.plan.entry, text: 'Entry', color: token('--primary', '#818cf8'), position: 'belowBar' },
-      { value: d.plan.stop, text: 'Stop', color: token('--danger', '#f87171'), position: 'belowBar' },
-      { value: d.plan.target, text: 'Target', color: token('--success', '#34d399'), position: 'aboveBar' }
-    ].filter(p => p.value != null);
-
-    const list = points.map(p => ({
-      time,
-      position: p.position as 'aboveBar' | 'belowBar',
-      color: p.color,
-      shape: 'circle' as const,
-      text: `${p.text} ${p.value}`
-    }));
-
-    if (markers) markers.setMarkers(list);
-    else markers = createSeriesMarkers(candleSeries, list);
   }
 
   /**
@@ -841,7 +804,6 @@
       chart = null;
       candleSeries = volumeSeries = sma20Series = sma50Series = rsiSeries = null;
       priceLines = [];
-      markers = null;
       forgetOverlayArtifacts();
       data = null;
     }
@@ -1000,11 +962,6 @@
                : levelMode === 'key' ? 'Showing weekly-confirmed levels only — click to hide all lines'
                : 'Level lines hidden — click to show all'}
         >Levels: {levelMode}</button>
-        <button class:muted={!showPlanMarkers} aria-pressed={showPlanMarkers}
-          on:click={togglePlanMarkers} disabled={!symbol}
-          title={showPlanMarkers ? 'Hide entry, stop, and target markers' : 'Show entry, stop, and target markers'}>
-          Markers: {showPlanMarkers ? 'on' : 'off'}
-        </button>
         <button class:muted={!showRsi} on:click={toggleRsi} disabled={!symbol}
           title={showRsi ? 'Hide the RSI pane and give the height back to the candles' : 'Show the RSI pane'}>
           <Activity size={11} /> RSI
