@@ -46,6 +46,8 @@
    * the latter changes whenever this panel starts a fresh account read. Renders
    * nothing when it has no current reading to show. Null in the community build. */
   export let extraBalance: SymbolExtensionComponent | null = null;
+  /** Optional edition-owned heading action; receives the current privacy choice, renders nothing by default. */
+  export let headerAction: SymbolExtensionComponent | null = null;
 
   /**
    * Replaces the Cancel control in each working-order row. Null means the community
@@ -158,6 +160,7 @@
       <button class="toggle" on:click={toggleOpen} aria-expanded={open} aria-controls="portfolio-content">{@render portfolioHeading()}</button>
     {/if}
     <div class="header-actions">
+      {#if headerAction}<svelte:component this={headerAction} {showValues}/>{/if}
       <button class="action" on:click={() => showValues = !showValues} aria-pressed={showValues} title={showValues ? 'Hide financial values' : 'Show financial values'}>
         {#if showValues}<EyeOff size={14}/> Hide values{:else}<Eye size={14}/> Show values{/if}
       </button>
