@@ -12,7 +12,7 @@
     type LiveEntryConflict
   } from './api';
   import {
-    ShoppingCart, X, AlertTriangle, RefreshCw, CheckCircle2, BriefcaseBusiness, Wallet
+    ShoppingCart, X, AlertTriangle, RefreshCw, Check, CheckCircle2, BriefcaseBusiness, Wallet
   } from 'lucide-svelte';
   import { livePriceLabel, useLivePrices } from './livePrices';
   import { announceAccountChanged } from './accountSignal';
@@ -26,6 +26,8 @@
    */
   export let selectedAction: 'BUY' | 'SELL' | null = null;
   export let docked = false;
+  /** Compact, shares-only limit ticket. Validation, confirmation and submission stay shared. */
+  export let quick = false;
 
   const dispatch = createEventDispatcher<{ close: void; changed: void; attention: void }>();
   let dialogElement: HTMLDivElement;
@@ -178,7 +180,7 @@
     limit: 'At my price', market: 'At market', trailing: 'Trailing',
     price: 'Wait for a price', schedule: 'Schedule', recent: 'Recent % move'
   };
-  let side: Side = 'BUY';
+  let side: Side = selectedAction ?? 'BUY';
   $: sideIntents = (registry?.intents ?? []).filter(item => item.action === side && item.id !== 'profit-book');
   $: groupKeys = [...new Set(sideIntents.map(intentGroup))];
   $: selectedGroup = choice ? intentGroup(choice) : null;
@@ -234,8 +236,10 @@
       registry = intentResult.value;
       if (selectedAction) {
         side = selectedAction;
-        const initialIntent = registry.intents.find(item => item.action === selectedAction);
+        const initialIntent = registry.intents.find(item => item.action === selectedAction
+          && (!quick || (item.submission === 'immediate' && item.orderType === 'LIMIT' && item.priceField === 'limit')));
         if (initialIntent) choose(initialIntent);
+        else if (quick) throw new Error(`A quick ${selectedAction.toLowerCase()} limit order is unavailable. Use New Order to see the available choices.`);
       }
       if (watchlistResult.status === 'fulfilled') {
         symbols = watchlistResult.value.entries.filter(entry => entry.tradable);
@@ -905,11 +909,14 @@
 <!-- Order intent must not disappear because of a stray backdrop click or Escape press. The visible
      Close, Cancel and Done controls are the only dismissal paths. -->
 <div class="backdrop" class:embedded={docked} role="presentation">
-  <div class="dialog" class:sell={side === 'SELL'} bind:this={dialogElement} role={docked ? 'region' : 'dialog'} aria-modal={docked ? undefined : true} aria-label={docked ? 'Order ticket draft' : 'New order'}
+  <div class="dialog" class:sell={side === 'SELL'} class:quick bind:this={dialogElement} role={docked ? 'region' : 'dialog'} aria-modal={docked ? undefined : true} aria-label={quick ? `Quick ${side.toLowerCase()}` : docked ? 'Order ticket draft' : 'New order'}
        tabindex="-1" on:keydown={composerKey}>
     <header>
-      <div class="title"><ShoppingCart size={17} /><div><b>{docked ? `Order ticket · ${symbol || 'new'}` : 'New Order'}</b><span>{docked ? 'Ctrl Enter reviews · never submits directly' : 'Choose what you want to happen'}</span></div></div>
-      <button class="icon" on:click={closeComposer} aria-label={docked ? 'Close order draft' : 'Close'} disabled={busy || releasing || reviewing}><X size={15} /></button>
+      <div class="title"><ShoppingCart size={17} /><div><b>{quick ? `Quick ${side === 'BUY' ? 'Buy' : 'Sell'}` : docked ? `Order ticket · ${symbol || 'new'}` : 'New Order'}</b>{#if !quick}<span>{docked ? 'Ctrl Enter reviews · never submits directly' : 'Choose what you want to happen'}</span>{/if}</div></div>
+      <div class="header-actions">
+        {#if !quick}<span class="side-badge">{side} ORDER</span>{/if}
+        <button class="icon" on:click={closeComposer} aria-label={docked ? 'Close order draft' : 'Close'} disabled={busy || releasing || reviewing}><X size={15} /></button>
+      </div>
     </header>
 
     {#if loading}
@@ -923,16 +930,38 @@
     {:else}
       {#if docked}<p class="draft-note">Draft for <b>{symbol || 'a new symbol'}</b>. Chart selection does not change this ticket. Hiding it preserves the draft; reload does not.</p>{/if}
       <fieldset class="draft-fields" disabled={busy || releasing || reviewing} on:input={() => { blockedSell = null; duplicateEntry = null; }}>
+      {#if quick}
+        <div class="quick-fields">
+          <div class="quick-stock"><span class="field-label">Stock</span><div><b>{symbol.trim().toUpperCase() || 'No stock selected'}</b><small>LIMIT ORDER</small></div></div>
+          <label><span>Number of shares</span>
+            <div class="input-with-unit"><input type="number" min="1" step="1" bind:value={quantity} on:input={() => quantityWasEdited = true} /><span aria-hidden="true">shares</span></div>
+          </label>
+          <label><span>Limit price per share (PKR)</span>
+            <div class="input-with-unit"><input type="number" min="0.01" step="0.01" bind:value={price} /><span aria-hidden="true">PKR / share</span></div>
+            <AmountInWords value={price} />
+          </label>
+          {#if estimatedValue != null && estimatedValue > 0}
+            <div class="quick-total"><div class="size-result"><span>Order amount before charges</span><b>{money(estimatedValue)} PKR</b></div><AmountInWords value={estimatedValue} /></div>
+          {/if}
+        </div>
+      {:else}
+      <div class="side-control">
+        <span class="field-label">Order side</span>
+        <div class="side-picker" role="group" aria-label="Order side">
+          <button type="button" class:active={side === 'BUY'} aria-pressed={side === 'BUY'} on:click={() => chooseSide('BUY')}>
+            <span class="selection-mark" aria-hidden="true">{#if side === 'BUY'}<Check size={18} />{/if}</span>Buy
+          </button>
+          <button type="button" class:active={side === 'SELL'} aria-pressed={side === 'SELL'} on:click={() => chooseSide('SELL')}>
+            <span class="selection-mark" aria-hidden="true">{#if side === 'SELL'}<Check size={18} />{/if}</span>Sell
+          </button>
+        </div>
+      </div>
       <div class="symbol-row">
         <label><span>Symbol</span><input list="new-order-symbols" bind:value={symbol} on:input={event => editSymbol(event.currentTarget.value)} on:change={event => {symbol = event.currentTarget.value; void refreshQuote();}} /></label>
         <datalist id="new-order-symbols">{#each symbols as entry}<option value={entry.symbol}>{entry.companyName ?? ''}</option>{/each}</datalist>
         <div class="quote">
           <span>{latestPriceLabel}</span><b>{latestPrice != null ? money(latestPrice) : '—'}</b>
           <button class="icon" on:click={refreshQuote} disabled={quoteBusy} title="Refresh latest price"><RefreshCw size={13} /></button>
-        </div>
-        <div class="side-picker" role="group" aria-label="Order side">
-          <button type="button" class:active={side === 'BUY'} aria-pressed={side === 'BUY'} on:click={() => chooseSide('BUY')}>Buy</button>
-          <button type="button" class:active={side === 'SELL'} aria-pressed={side === 'SELL'} on:click={() => chooseSide('SELL')}>Sell</button>
         </div>
       </div>
 
@@ -1086,42 +1115,51 @@
             </section>
           {/if}
           </details>
-          <div class="grid">
-            <div class="size-control">
-              <span class="field-label">Order size</span>
-              <div class="size-tabs" role="group" aria-label="Choose how to size the order">
+          <div class="size-control">
+              <span class="field-label">Size order by</span>
+              <div class="size-tabs" role="group" aria-label="Size order by">
                 <button type="button" class:active={sizeMode === 'shares'} aria-pressed={sizeMode === 'shares'}
-                        on:click={() => sizeMode = 'shares'}>Shares</button>
+                        on:click={() => sizeMode = 'shares'}>
+                  <span class="selection-mark" aria-hidden="true">{#if sizeMode === 'shares'}<Check size={15} />{/if}</span>Number of shares
+                </button>
                 <button type="button" class:active={sizeMode === 'value'} aria-pressed={sizeMode === 'value'}
-                        on:click={() => sizeMode = 'value'}>Value (PKR)</button>
+                        on:click={() => sizeMode = 'value'}>
+                  <span class="selection-mark" aria-hidden="true">{#if sizeMode === 'value'}<Check size={15} />{/if}</span>Total amount (PKR)
+                </button>
               </div>
+            <div class="grid">
               {#if sizeMode === 'shares'}
-                <label><span>Quantity (shares)</span><input type="number" min="1" step="1" bind:value={quantity}
-                       on:input={() => quantityWasEdited = true} /></label>
+                <label><span>Quantity to {side.toLowerCase()} (shares)</span>
+                  <div class="input-with-unit"><input type="number" min="1" step="1" bind:value={quantity}
+                       on:input={() => quantityWasEdited = true} /><span aria-hidden="true">shares</span></div>
+                </label>
               {:else}
-                <label><span>Order value (PKR)</span><input type="number" min="1" step="1" bind:value={orderValue} />
+                <label><span>Amount to {side.toLowerCase()} (PKR)</span>
+                  <div class="input-with-unit"><input type="number" min="1" step="1" bind:value={orderValue} /><span aria-hidden="true">PKR</span></div>
                   <AmountInWords value={orderValue} />
                 </label>
               {/if}
-            </div>
             {#if choice.priceField === 'limit' || choice.priceField === 'target' || exactPriceTrigger}
-              <label><span>{choice.priceField === 'target' ? 'Target sell price' : 'Limit price'}</span><input type="number" min="0.01" step="0.01" bind:value={price} /></label>
+              <label><span>{choice.priceField === 'target' ? 'Target sell price' : 'Limit price'} per share (PKR)</span>
+                <div class="input-with-unit per-share"><input type="number" min="0.01" step="0.01" bind:value={price} /><span aria-hidden="true">PKR / share</span></div>
+                <AmountInWords value={price} />
+              </label>
             {/if}
             {#if choice.priceField === 'stop'}
-              <label><span>Trigger price</span><input type="number" min="0.01" step="0.01" bind:value={triggerPrice} /></label>
-              <label><span>Worst acceptable price after trigger</span><input type="number" min="0.01" step="0.01" bind:value={limitPrice} /></label>
+              <label><span>Trigger price per share (PKR)</span><input type="number" min="0.01" step="0.01" bind:value={triggerPrice} /><AmountInWords value={triggerPrice} /></label>
+              <label><span>Worst acceptable price after trigger (PKR / share)</span><input type="number" min="0.01" step="0.01" bind:value={limitPrice} /><AmountInWords value={limitPrice} /></label>
             {/if}
             {#if exactPriceTrigger}
               <label><span>{scheduled && choice.orderType === 'MARKET'
-                ? 'Minimum price before market sell'
-                : `Trigger price (${choice.triggerKind === 'PriceBelow' ? 'at or below' : 'at or above'})`}</span><input type="number" min="0.01" step="0.01" bind:value={triggerPrice} /></label>
+                ? 'Minimum price before market sell (PKR / share)'
+                : `Trigger price (${choice.triggerKind === 'PriceBelow' ? 'at or below' : 'at or above'}, PKR / share)`}</span><input type="number" min="0.01" step="0.01" bind:value={triggerPrice} /><AmountInWords value={triggerPrice} /></label>
             {:else if choice.submission === 'conditional' && !scheduled}
               {#if windowed}
                 <label><span>{choice.triggerKind === 'PercentDrop' ? 'Fall from the recent high' : 'Rise from the recent low'} (%)</span><input type="number" min="0.1" max="50" step="0.1" bind:value={triggerPercent} /></label>
                 <label><span>Recent window (trading minutes)</span><input type="number" min="1" max="240" step="1" bind:value={triggerWindowMinutes} /></label>
               {:else if boundedTrail}
                 <label><span>Trail (%)</span><input type="number" min="0.1" max="50" step="0.1" bind:value={triggerPercent} /></label>
-                <label><span>{boundIsBuyMax ? 'Maximum buy price' : 'Minimum sell price'} (optional)</span><input type="number" min="0.01" step="0.01" bind:value={priceBound} placeholder="No limit" /></label>
+                <label><span>{boundIsBuyMax ? 'Maximum buy price' : 'Minimum sell price'} (PKR / share, optional)</span><input type="number" min="0.01" step="0.01" bind:value={priceBound} placeholder="No limit" /><AmountInWords value={priceBound} /></label>
               {:else}
                 <label><span>Move from {triggerReferencePrice ?? 'latest price'} (%)</span><input type="number" min="0.1" max="50" step="0.1" bind:value={triggerPercent} /></label>
               {/if}
@@ -1131,6 +1169,12 @@
             {/if}
             {#if choice.submission === 'conditional' || persistentUntilFilled}
               <label><span>{scheduled ? 'Expires after activation (days)' : 'Expires in (days)'}</span><input type="number" min="1" max="365" bind:value={expiresInDays} /></label>
+            {/if}
+            </div>
+            {#if sizeMode === 'shares' && estimatedValue != null && estimatedValue > 0}
+              <div class="size-result"><span>Order amount before charges</span><b>{money(estimatedValue)} PKR</b></div>
+            {:else if sizeMode === 'value' && valueSizedQuantity != null && valueSizedQuantity > 0}
+              <div class="size-result"><span>Estimated quantity</span><b>{money(valueSizedQuantity)} shares</b></div>
             {/if}
           </div>
 
@@ -1159,8 +1203,8 @@
               </label>
               {#if attachStop}
                 <div class="grid stop-grid">
-                  <label><span>Protective stop trigger</span><input type="number" min="0.01" step="0.01" bind:value={stopTrigger} /></label>
-                  <label><span>Worst acceptable price</span><input type="number" min="0.01" step="0.01" bind:value={stopLimit} /></label>
+                  <label><span>Protective stop trigger (PKR / share)</span><input type="number" min="0.01" step="0.01" bind:value={stopTrigger} /><AmountInWords value={stopTrigger} /></label>
+                  <label><span>Worst acceptable price (PKR / share)</span><input type="number" min="0.01" step="0.01" bind:value={stopLimit} /><AmountInWords value={stopLimit} /></label>
                 </div>
                 <label class="attach-check recurring">
                   <input type="checkbox" bind:checked={stopRecurring} />
@@ -1273,6 +1317,7 @@
         </div>
       {/if}
 
+      {/if}
       </fieldset>
       {#if error}<p class="error" role="alert" tabindex="-1"><AlertTriangle size={13} /> {error}</p>{/if}
 
@@ -1318,7 +1363,7 @@
       <div class="footer">
         <button class="btn btn-ghost" on:click={closeComposer} disabled={busy || releasing || reviewing}>{docked ? 'Discard draft' : 'Cancel'}</button>
         <button class="btn btn-primary" on:click={reviewOrder} disabled={!choice || busy || releasing || reviewing || quoteBusy || marketDisabled}>
-          {busy ? 'Submitting…' : boundedTrail ? `Review trailing ${side.toLowerCase()}` : docked ? 'Review order' : scheduled ? 'Review & schedule' : choice?.submission === 'conditional' ? 'Arm waiting order' : 'Review & submit'}
+          {busy ? 'Submitting…' : side}
         </button>
       </div>
     {/if}
@@ -1334,6 +1379,16 @@
 
 <style>
   .draft-fields { border:0; padding:0; margin:0; min-width:0; }
+  .dialog.quick { width:min(460px,96vw); }
+  .quick-fields { display:flex; flex-direction:column; gap:1rem; padding:1.1rem; }
+  .quick-fields label { color:var(--text-2); font-size:.8rem; }
+  .quick-fields input { font-size:1rem; padding:.7rem; }
+  .quick-stock { display:flex; flex-direction:column; gap:.4rem; }
+  .quick-stock > div { display:flex; justify-content:space-between; align-items:center; gap:.5rem; padding:.7rem;
+                       border:1px solid var(--border-md); border-radius:var(--radius-sm); background:var(--surface-2); }
+  .quick-stock b { font-size:1rem; }
+  .quick-stock small { font-size:.65rem; color:var(--text-2); }
+  .quick-total { display:flex; flex-direction:column; gap:.4rem; border-top:1px solid var(--border); padding-top:.85rem; }
   .backdrop.embedded { position:static; display:block; padding:0; background:none; }
   .embedded .dialog { width:100%; max-height:none; border:0; border-radius:0; box-shadow:none; overflow:visible; }
   .embedded header { padding:.7rem; }
@@ -1367,6 +1422,9 @@
   .title { display:flex; align-items:center; gap:.55rem; color:var(--primary); }
   .title div { display:flex; flex-direction:column; gap:.12rem; }.title b { color:var(--text); font-size:.96rem; }
   .title span { color:var(--text-3); font-size:.68rem; }
+  .header-actions { display:flex; align-items:center; gap:.7rem; }
+  .side-badge { color:var(--side-color); background:var(--side-tint); border:1px solid var(--side-color);
+                border-radius:var(--radius-sm); padding:.3rem .5rem; font-size:.65rem; font-weight:700; white-space:nowrap; }
   .icon { border:0; background:none; color:var(--text-3); cursor:pointer; padding:.3rem; display:flex; border-radius:var(--radius-sm); }
   .icon:hover { background:var(--surface-3); color:var(--text); }.icon:disabled { opacity:.5; cursor:wait; }
   .icon:focus-visible,.choice:focus-visible,input:focus-visible,.persist-check:focus-within,
@@ -1397,14 +1455,22 @@
   .quote b { color:var(--text); font-size:.85rem; }
   .dialog,.review-dialog { --side-color:var(--success); --side-tint:color-mix(in srgb,var(--side-color) 14%,var(--surface-2)); }
   .sell { --side-color:var(--danger); }
+  :global(html[data-theme='light']) .dialog,
+  :global(html[data-theme='light']) .review-dialog { --side-color:color-mix(in srgb,var(--success) 80%,var(--text)); }
+  :global(html[data-theme='light']) .sell { --side-color:color-mix(in srgb,var(--danger) 80%,var(--text)); }
   .dialog header { border-top:3px solid var(--side-color); }
-  .dialog .btn-primary,.review-dialog .btn-primary { background:var(--side-color); color:#101114; }
+  .dialog .btn-primary,.review-dialog .btn-primary { background:var(--side-color); color:var(--bg); }
+  .dialog .footer > .btn-primary { justify-content:center; font-weight:700; }
   .choices { padding:.7rem 1rem .8rem; }
-  .side-picker { display:flex; width:fit-content; gap:.2rem; padding:.2rem; margin-left:auto;
+  .side-control { display:flex; flex-direction:column; gap:.5rem; padding:1rem 1rem 0; }
+  .embedded .side-control { padding:.7rem .7rem 0; }
+  .side-picker { display:flex; width:100%; gap:.3rem; padding:.25rem;
                  background:var(--surface-2); border:1px solid var(--border-md); border-radius:var(--radius); }
-  .side-picker button { min-width:5rem; min-height:44px; padding:.45rem; border:1px solid transparent;
-                        background:transparent; color:var(--text); border-radius:var(--radius-sm); cursor:pointer; font-weight:600; }
-  .side-picker .active { border-color:var(--side-color); background:var(--side-tint); }
+  .side-picker button { flex:1; display:flex; align-items:center; justify-content:center; gap:.5rem;
+                        min-height:48px; padding:.55rem; border:1px solid transparent;
+                        background:transparent; color:var(--text-2); border-radius:var(--radius-sm); cursor:pointer; font:inherit; font-weight:700; }
+  .side-picker .active { border-color:var(--side-color); background:var(--side-color); color:var(--bg); }
+  .selection-mark { display:inline-flex; align-items:center; justify-content:center; width:18px; height:18px; flex:none; }
   h3 { margin:0 0 .4rem; color:var(--text-2); font-size:.7rem; }
   .choice-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:.45rem; }
   .choice { min-height:44px; text-align:left; border:1px solid var(--border-md); font-size:.78rem; font-weight:600;
@@ -1459,15 +1525,28 @@
   .holding-note { margin:.45rem 0 0; color:var(--text-3); font-size:.63rem; line-height:1.45; }
   .holding-note b { color:var(--text-2); }
   .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:.6rem; }.grid input { width:100%; box-sizing:border-box; }
-  .size-control { display:flex; flex-direction:column; gap:.4rem; }
-  .field-label { color:var(--text-3); font-size:.68rem; }
-  .size-tabs { align-self:flex-start; display:flex; padding:2px; border:1px solid var(--border-md);
-               border-radius:var(--radius-sm); background:var(--surface); }
-  .size-tabs button { border:0; border-radius:calc(var(--radius-sm) - 2px); padding:.3rem .55rem;
-                      background:transparent; color:var(--text-3); font:inherit; font-size:.66rem; cursor:pointer; }
+  .size-control { display:flex; flex-direction:column; gap:.65rem; padding:.75rem;
+                  border:1px solid var(--border-md); border-radius:var(--radius-sm); background:var(--surface); }
+  .field-label { color:var(--text-2); font-size:.75rem; font-weight:600; }
+  .size-tabs { display:flex; gap:.25rem; padding:.25rem; border:1px solid var(--border-md);
+               border-radius:var(--radius-sm); background:var(--surface-2); }
+  .size-tabs button { flex:1; display:flex; align-items:center; justify-content:center; gap:.4rem;
+                      border:1px solid transparent; border-radius:calc(var(--radius-sm) - 2px); min-height:44px; padding:.45rem;
+                      background:transparent; color:var(--text-2); font:inherit; font-size:.75rem; cursor:pointer; }
   .size-tabs button:hover { color:var(--text); background:var(--surface-3); }
-  .size-tabs button.active { color:var(--text); background:var(--surface-3); box-shadow:0 0 0 1px var(--border-md); }
+  .size-tabs button.active { color:var(--text); background:var(--side-tint); border-color:var(--side-color); font-weight:600; }
   .size-tabs button:focus-visible { outline:2px solid var(--primary); outline-offset:2px; }
+  .size-control label { color:var(--text-2); font-size:.75rem; min-width:0; }
+  .size-control .grid { align-items:start; }
+  .input-with-unit { display:flex; align-items:center; background:var(--surface-2); border:1px solid var(--border-md);
+                     border-radius:var(--radius-sm); min-width:0; }
+  .input-with-unit input { min-width:0; flex:1; width:0; border:0; background:transparent; }
+  .input-with-unit > span { flex:none; padding-right:.6rem; font-size:.68rem; color:var(--text-2); white-space:nowrap; }
+  .input-with-unit:focus-within { outline:2px solid var(--primary); outline-offset:2px; }
+  .input-with-unit input:focus-visible { outline:none; }
+  .size-result { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:.4rem;
+                 font-size:.75rem; color:var(--text-2); }
+  .size-result b { color:var(--text); }
   .sizing-note { margin:.7rem 0 0; padding:.5rem .6rem; border-left:2px solid var(--primary);
                  background:color-mix(in srgb,var(--primary) 7%,transparent); color:var(--text-2);
                  font-size:.7rem; line-height:1.45; }
@@ -1496,6 +1575,7 @@
   .start-from-live:focus-visible { outline:2px solid var(--primary); outline-offset:2px; }
   .form-card .warning { margin:.65rem 0 0; }.error { color:var(--danger); background:color-mix(in srgb,var(--danger) 8%,transparent); }
   .footer { display:flex; justify-content:flex-end; gap:.5rem; padding:.8rem 1rem; border-top:1px solid var(--border); }
+  .dialog > .footer { position:sticky; bottom:0; z-index:2; background:var(--surface); }
   .outcome { margin:1rem; padding:1rem; display:flex; gap:.7rem; border:1px solid color-mix(in srgb,var(--danger) 35%,transparent);
              background:color-mix(in srgb,var(--danger) 7%,transparent); color:var(--danger); border-radius:var(--radius-sm); }
   .outcome.ok { color:var(--success); border-color:color-mix(in srgb,var(--success) 35%,transparent); background:color-mix(in srgb,var(--success) 7%,transparent); }
@@ -1505,5 +1585,8 @@
     .choice-grid,.grid,.holding-stats { grid-template-columns:1fr; }
     .holding-head { align-items:flex-start; }
     .holding-refresh { padding:.35rem; }
+    .size-tabs { flex-direction:column; }
+    .title span { max-width:10rem; }
+    .side-badge { font-size:.6rem; padding:.25rem; }
   }
 </style>

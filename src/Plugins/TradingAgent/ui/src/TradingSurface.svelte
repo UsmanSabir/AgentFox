@@ -98,6 +98,10 @@
   // Separate state prevents the toolbar action from silently moving focus or replacing a panel draft.
   let newOrderDialogOpen = false;
   let selectedOrderAction: 'BUY' | 'SELL' | null = null;
+  let quickOrder = false;
+  let quickMenuOpen = false;
+  let quickMenu: HTMLDetailsElement;
+  let quickMenuToggle: HTMLElement;
   let ticketDraftOpen = false;
   let ticket: OrderComposer;
   let orderDialogReturnFocus: HTMLElement | null = null;
@@ -362,8 +366,28 @@
 
   function openNewOrderDialog() {
     if (!newOrderDialogOpen) orderDialogReturnFocus = document.activeElement as HTMLElement;
+    quickMenuOpen = false;
+    quickOrder = false;
     selectedOrderAction = null;
     newOrderDialogOpen = true;
+  }
+  function openQuickOrder(action: 'BUY' | 'SELL') {
+    if (!selectedSymbol?.trim() || newOrderDialogOpen) return;
+    quickMenuOpen = false;
+    orderDialogReturnFocus = quickMenuToggle;
+    quickOrder = true;
+    selectedOrderAction = action;
+    newOrderDialogOpen = true;
+  }
+  function closeQuickMenu(event: MouseEvent) {
+    if (quickMenuOpen && event.target instanceof Node && !quickMenu?.contains(event.target)) quickMenuOpen = false;
+  }
+  function quickMenuKey(event: KeyboardEvent) {
+    if (event.key !== 'Escape' || !quickMenuOpen) return;
+    event.preventDefault();
+    event.stopPropagation();
+    quickMenuOpen = false;
+    quickMenuToggle?.focus();
   }
   function closeNewOrderDialog() {
     newOrderDialogOpen = false;
@@ -387,6 +411,7 @@
   }
   export function beginOrder(symbol:string, action: 'BUY' | 'SELL' | null = null) {
     if (!newOrderDialogOpen) {
+      quickOrder = false;
       selectedSymbol = symbol;
       selectedOrderAction = action;
       orderDialogReturnFocus = document.activeElement as HTMLElement;
@@ -410,6 +435,8 @@
   });
 </script>
 
+<svelte:window on:click={closeQuickMenu} on:keydown={quickMenuKey} />
+
 <WorkspacePanel {workspace} id="core-dialogs">
 {#if armContext}
   <ArmOrderDialog
@@ -423,6 +450,7 @@
   <NewOrderDialog
     {selectedSymbol}
     selectedAction={selectedOrderAction}
+    quick={quickOrder}
     on:changed={() => { load(); armedPanel?.load(); persistentPanel?.load(); }}
     on:close={closeNewOrderDialog}
   >
@@ -468,9 +496,18 @@
   <div class="page-header-row" id="trading-overview">
     <div><h1 class="page-title">Trading Manager</h1><p class="page-sub">Monitor PSX signals, prepare conditional orders, and review execution history</p></div>
     <div class="header-actions">
-      <button class="btn btn-primary new-order-btn" on:click={openNewOrderDialog}>
-        <ShoppingCart size={14} /> New Order
-      </button>
+      <div class="new-order-split">
+        <button class="btn btn-primary new-order-btn" on:click={openNewOrderDialog}>
+          <ShoppingCart size={14} /> New Order
+        </button>
+        <details class="quick-order-menu" bind:open={quickMenuOpen} bind:this={quickMenu}>
+          <summary class="btn btn-primary" bind:this={quickMenuToggle} aria-label="Quick order actions" aria-expanded={quickMenuOpen}><ChevronDown size={14} aria-hidden="true" /></summary>
+          <div class="quick-order-options" role="group" aria-label="Quick limit orders">
+            <button type="button" class="quick-buy" on:click={() => openQuickOrder('BUY')} disabled={!selectedSymbol?.trim()} title={selectedSymbol ? undefined : 'Select a stock first'}>Quick Buy <span>{selectedSymbol ?? 'Select a stock'}</span></button>
+            <button type="button" class="quick-sell" on:click={() => openQuickOrder('SELL')} disabled={!selectedSymbol?.trim()} title={selectedSymbol ? undefined : 'Select a stock first'}>Quick Sell <span>{selectedSymbol ?? 'Select a stock'}</span></button>
+          </div>
+        </details>
+      </div>
       {#if status}
         <button
           class="btn kill-switch-btn"
@@ -875,6 +912,21 @@
   .page-header-row { display:flex; justify-content:space-between; align-items:flex-start; gap:1rem; margin-bottom:1.25rem; }
   .header-actions { display:flex; gap:.6rem; align-items:center; }
   .new-order-btn { display:flex; align-items:center; gap:.4rem; white-space:nowrap; font-weight:700; }
+  .new-order-split { position:relative; display:flex; align-items:stretch; }
+  .new-order-split .new-order-btn { border-radius:var(--radius-sm) 0 0 var(--radius-sm); }
+  .quick-order-menu { position:static; }
+  .quick-order-menu > summary { display:flex; align-items:center; justify-content:center; list-style:none;
+                                height:100%; min-width:2rem; padding:.4rem .5rem; border-left:1px solid var(--bg); border-radius:0 var(--radius-sm) var(--radius-sm) 0; }
+  .quick-order-menu > summary::-webkit-details-marker { display:none; }
+  .quick-order-options { position:absolute; top:calc(100% + .4rem); left:0; z-index:20; min-width:210px; padding:.35rem;
+                         border:1px solid var(--border-md); border-radius:var(--radius-sm); background:var(--surface); box-shadow:0 10px 30px #0005; }
+  .quick-order-options button { display:flex; align-items:center; justify-content:space-between; gap:1rem; width:100%; min-height:44px;
+                               padding:.6rem; border:0; border-radius:var(--radius-sm); background:transparent; font:inherit; font-size:.8rem; font-weight:600; text-align:left; cursor:pointer; }
+  .quick-order-options button:hover:not(:disabled) { background:var(--surface-2); }
+  .quick-order-options button:disabled { opacity:.5; cursor:default; }
+  .quick-buy { color:var(--success); }.quick-sell { color:var(--danger); }
+  .quick-order-options button span { color:var(--text-2); font-size:.7rem; font-weight:400; }
+  .new-order-split button:focus-visible,.quick-order-menu > summary:focus-visible { outline:2px solid var(--primary); outline-offset:2px; }
   .kill-switch-btn { display:flex; align-items:center; gap:.4rem; border:1px solid rgba(52,211,153,.35); background:rgba(52,211,153,.08); color:var(--success); border-radius:var(--radius); padding:.55rem .9rem; font-size:.78rem; font-weight:600; cursor:pointer; }
   .kill-switch-btn.active { border-color:rgba(248,113,113,.45); background:rgba(248,113,113,.15); color:var(--danger); }
   .kill-switch-btn:disabled { opacity:.6; cursor:wait; }
