@@ -10,7 +10,7 @@
     type ChannelInfo,
     type ChannelsStatus,
     type ChannelOutboxEntry
-  } from '$lib/api';
+  } from '#lib/api.ts';
 
   let status: ChannelsStatus | null = null;
   let loading = true;

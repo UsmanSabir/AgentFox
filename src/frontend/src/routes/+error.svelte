@@ -1,11 +1,11 @@
 <script lang="ts">
-  import { page } from '$app/stores';
+  import { page } from '$app/state';
 </script>
 
 <div class="error-page">
   <div class="error-content">
-    <div class="error-code">{$page.status}</div>
-    <h1 class="error-title">{$page.error?.message ?? 'Something went wrong'}</h1>
+    <div class="error-code">{page.status}</div>
+    <h1 class="error-title">{page.error?.message ?? 'Something went wrong'}</h1>
     <a href="/" class="btn btn-ghost">Back to Dashboard</a>
   </div>
 </div>

@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { page } from '$app/stores';
-  import { sidebarCollapsed } from '$lib/stores';
-  import { serializeSidebarCollapsed, SIDEBAR_COLLAPSED_KEY } from '$lib/sidebarPreference';
-  import { api } from '$lib/api';
+  import { page } from '$app/state';
+  import { afterNavigate } from '$app/navigation';
+  import { sidebarCollapsed } from '#lib/stores.ts';
+  import { serializeSidebarCollapsed, SIDEBAR_COLLAPSED_KEY } from '#lib/sidebarPreference.ts';
+  import { api } from '#lib/api.ts';
   import {
     LayoutDashboard,
     MessageSquare,
@@ -60,7 +61,8 @@
   let pluginItems: { href: string; label: string; icon: typeof IconType }[] = [];
 
   $: collapsed = $sidebarCollapsed;
-  $: current  = $page.url.pathname;
+  let current = page.url.pathname;
+  afterNavigate(() => { current = page.url.pathname; });
 
   // Live build version from the backend; falls back to the label below if unreachable.
   let version = 'v1.0.0';
@@ -74,8 +76,8 @@
 
     try {
       const pages = await api.pluginUi.list();
-      pluginItems = pages.map(p => ({
-        href:  `/ext/${p.slug}`,
+      pluginItems = pages.map((p) => ({
+        href: `/ext/${p.slug}`,
         label: p.title,
         icon:  pluginIcons[p.icon] ?? Puzzle
       }));
@@ -90,7 +92,7 @@
   }
 
   function toggleCollapsed() {
-    sidebarCollapsed.update(value => {
+    sidebarCollapsed.update((value) => {
       const next = !value;
       try { localStorage.setItem(SIDEBAR_COLLAPSED_KEY,serializeSidebarCollapsed(next)); }
       catch { /* Keep the session toggle working when browser storage is unavailable. */ }

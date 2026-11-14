@@ -1,10 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { page } from '$app/stores';
-  import { sidebarCollapsed, uiTheme, type UiTheme } from '$lib/stores';
+  import { page } from '$app/state';
+  import { afterNavigate } from '$app/navigation';
+  import { sidebarCollapsed, uiTheme, type UiTheme } from '#lib/stores.ts';
   import { get } from 'svelte/store';
-  import { pluginSidebarRequest } from '$lib/pluginLayout';
-  import { api, getManagementApiKey, type PluginUiPageInfo } from '$lib/api';
+  import { pluginSidebarRequest } from '#lib/pluginLayout.ts';
+  import { api, getManagementApiKey, type PluginUiPageInfo } from '#lib/api.ts';
 
   // Generic host for a plugin-supplied UI. This file is the ONLY thing the host app knows about
   // plugin pages: it looks the slug up in the manifest and frames the assets the backend serves at
@@ -24,8 +25,9 @@
     previousSidebar = null;
   }
 
-  $: slug    = $page.params.slug;
-  $: current = pages?.find(p => p.slug === slug) ?? null;
+  let slug = page.params.slug;
+  afterNavigate(() => { slug = page.params.slug; });
+  $: current = pages?.find((p) => p.slug === slug) ?? null;
   // Svelte may reuse this route component for another plugin slug.
   $: { slug; restoreSidebar(); }
 
