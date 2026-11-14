@@ -157,8 +157,12 @@ const offscreen = writable<Record<string, OffscreenCount>>({});
 /**
  * Per owner: how many drawn levels/zones are above or below the visible price range, so the owner's
  * own panel can show a "2 below view" chip. Written by the chart (not by hosts), refreshed after each
- * draw and when the visible range moves; it does NOT follow a manual drag of the price axis. An owner
- * with nothing drawn has no entry.
+ * draw and when the visible range moves; it does NOT follow a manual drag of the price axis, and it
+ * also goes stale when a live tick rescales the price axis until the next draw or range change. An
+ * owner with nothing drawn has no entry.
+ *
+ * ONE chart writes these. Counts are keyed by owner only, so two mounted ChartPanes showing the same
+ * owner's symbol would overwrite each other's numbers; the dashboard mounts a single chart at a time.
  */
 export const annotationOffscreen: Readable<Record<string, OffscreenCount>> = { subscribe: offscreen.subscribe };
 

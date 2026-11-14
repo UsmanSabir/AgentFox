@@ -1026,8 +1026,9 @@ export interface ArmOrderDialogContext {
   attachTakeProfit?: boolean;
   takeProfitPrice?: number | null;
 
-  // Further pre-fill, all editable in the dialog. `priceBound` applies only to a trailing LIMIT kept
-  // working until filled (the dialog shows and sends it only while that holds).
+  // Further pre-fill, all editable in the dialog. `priceBound` is DROPPED unless the order is a
+  // percent-trigger trailing LIMIT (`trailing: true`, `triggerPercent` set, `orderType: 'LIMIT'`) with
+  // `persistentUntilFilled: true`; the dialog neither shows nor sends it otherwise.
   priceBound?: number | null;
   persistentUntilFilled?: boolean;
   expiresInDays?: number;

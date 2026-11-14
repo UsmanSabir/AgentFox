@@ -165,6 +165,8 @@ public sealed class PsxSeriesCacheTests
 
         Assert.AreEqual(0, (await client.GetEodClosesAsync("REFUSED", 5)).Count);
         Assert.AreEqual(0, (await client.GetEodClosesAsync("KSE100", 0)).Count);
+        Assert.AreEqual(0, (await client.GetEodClosesAsync("../KSE100", 5)).Count, "an invalid symbol is empty, not a throw");
+        Assert.AreEqual(0, (await client.GetEodClosesAsync("", 5)).Count);
         Assert.AreEqual(0, portal.HitsOn("/timeseries/eod/KSE100"));
     }
 }

@@ -207,9 +207,10 @@ public sealed partial class PsxDataClient
         CancellationToken ct = default)
     {
         if (sessions <= 0) return [];
-        symbol = NormalizePortalSymbol(symbol, "symbol");
         try
         {
+            // Inside the try: an invalid symbol is "unavailable" (empty), as documented, not an exception.
+            symbol = NormalizePortalSymbol(symbol, "symbol");
             var eod = await CachedSeriesAsync($"timeseries/eod/{symbol}", EodSeriesTtl, ct);
             static DateOnly PktDay(long ts) => DateOnly.FromDateTime(
                 DateTimeOffset.FromUnixTimeSeconds(ts).ToOffset(TimeSpan.FromHours(5)).DateTime);

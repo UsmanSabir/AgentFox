@@ -455,11 +455,15 @@
 
 <WorkspacePanel {workspace} id="core-dialogs">
 {#if armContext}
-  <ArmOrderDialog
-    {...armContext}
-    on:armed={() => armedPanel?.load()}
-    on:close={() => armContext = null}
-  />
+  <!-- Keyed on the context: a second request arriving while the dialog is open remounts it, so the
+       new pre-fill is read from scratch rather than leaving the dialog's own state behind. -->
+  {#key armContext}
+    <ArmOrderDialog
+      {...armContext}
+      on:armed={() => armedPanel?.load()}
+      on:close={() => armContext = null}
+    />
+  {/key}
 {/if}
 
 {#if newOrderDialogOpen}

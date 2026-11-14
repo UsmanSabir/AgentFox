@@ -26,8 +26,10 @@
  *  - `chartAnnotations.ts` — `setChartAnnotations(owner, symbol, { levels?, zones?, markers? } | null)`.
  *    Draws horizontal levels, translucent price zones and arrow/circle markers on the chart showing
  *    `symbol`, redrawn instantly with no refetch. Always drawn (the Levels toggle does not hide
- *    it), outside autoscale, cleared by `null` or by a symbol change, and coloured only by the same
- *    semantic `kind` tokens server overlays use. `annotationOffscreen` publishes, per owner, how many
+ *    it), outside autoscale, and coloured only by the same semantic `kind` tokens server overlays use.
+ *    An owner's set is bound to the symbol it was written for: a symbol change does NOT clear it, it
+ *    is only not drawn on another symbol's chart, so owners must clear (`null`) what they stop caring
+ *    about. `annotationOffscreen` publishes, per owner, how many
  *    levels/zones sit above/below the visible price range, for a "2 below view" chip.
  *  - `orderRequests.ts` — `requestArmOrder(prefill)` and `requestPriceAlert(symbol, target, direction)`.
  *    Ask the dashboard to OPEN its existing conditional-order dialog or price-alert dialog,
