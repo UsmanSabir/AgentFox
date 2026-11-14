@@ -14,7 +14,7 @@
 
 <TradingSurface {symbolExtension} {portfolioExtraBalance} {portfolioHeaderAction} {showSideNavigation} {navigationItems}
   bind:archiveAvailable bind:selectedSymbol>
-  <svelte:fragment slot="order-detail" let:symbol let:action let:orderType let:quantity let:price let:value let:conditional let:triggerLevel>
-    <slot name="order-detail" {symbol} {action} {orderType} {quantity} {price} {value} {conditional} {triggerLevel}/>
+  <svelte:fragment slot="order-detail" let:symbol let:action let:orderType let:quantity let:price let:value let:conditional let:triggerLevel let:trailing let:triggerPercent>
+    <slot name="order-detail" {symbol} {action} {orderType} {quantity} {price} {value} {conditional} {triggerLevel} {trailing} {triggerPercent}/>
   </svelte:fragment>
 </TradingSurface>
