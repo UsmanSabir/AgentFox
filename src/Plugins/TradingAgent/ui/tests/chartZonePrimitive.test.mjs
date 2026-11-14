@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { zoneRows, zoneSegments } from '../src/chartZonePrimitive.ts';
+import { zoneLabelAnchor, zoneRows, zoneSegments } from '../src/chartZonePrimitive.ts';
 
 test('a zone with no split is one strong band across the plot', () => {
   assert.deepEqual(zoneSegments(400, null), [{ x0: 0, x1: 400, strong: true }]);
@@ -47,4 +47,10 @@ test('a split time that is not on a bar resolves to the first bar at or after it
   assert.equal(zoneStartColumn(500, 400, 4, indexAtOrAfter, column), 40, 'past the last bar: the slot after the data');
   assert.equal(zoneStartColumn(250, null, 0, indexAtOrAfter, column), null, 'no data: unresolvable');
   assert.equal(zoneStartColumn(250, 400, 4, () => null, column), null);
+});
+
+test('a zone label sits at the right edge by default and inside the left edge on request', () => {
+  assert.deepEqual(zoneLabelAnchor(undefined, 800), { x: 794, textAlign: 'right' });
+  assert.deepEqual(zoneLabelAnchor('right', 800), { x: 794, textAlign: 'right' });
+  assert.deepEqual(zoneLabelAnchor('left', 800), { x: 6, textAlign: 'left' });
 });

@@ -25,7 +25,13 @@
  *
  *  - `chartAnnotations.ts` — `setChartAnnotations(owner, symbol, { levels?, zones?, markers? } | null)`.
  *    Draws horizontal levels, translucent price zones and arrow/circle markers on the chart showing
- *    `symbol`, redrawn instantly with no refetch. Always drawn (the Levels toggle does not hide
+ *    `symbol`. A marker is `above`/`below` its bar by default, or `atPrice` with a `price` to sit AT
+ *    that price (a down arrow's tip touches it from above, an up arrow's from below); without a
+ *    usable `price` it falls back to `above`. An `atPrice` marker draws no text on the chart: its label
+ *    moves to the hover card (its `detail`, when it has one, wins). A zone label is drawn at the zone's right edge by default, or its left with `labelAlign: 'left'`,
+ *    clear of the axis titles. Levels whose axis chips would collide share one chip
+ *    whose text carries each name with its own price ("Target 685.33 · Safe 681.70"). The chart is
+ *    redrawn instantly with no refetch. Always drawn (the Levels toggle does not hide
  *    it), outside autoscale, and coloured only by the same semantic `kind` tokens server overlays use.
  *    An owner's set is bound to the symbol it was written for: a symbol change does NOT clear it, it
  *    is only not drawn on another symbol's chart, so owners must clear (`null`) what they stop caring
@@ -33,8 +39,8 @@
  *    levels/zones sit above/below the visible price range, for a "2 below view" chip.
  *  - `orderRequests.ts` — `requestArmOrder(prefill)` and `requestPriceAlert(symbol, target, direction)`.
  *    Ask the dashboard to OPEN its existing conditional-order dialog or price-alert dialog,
- *    pre-filled. The dialog shows every field for the user to confirm and sends only on its own
- *    button; there is no request that submits. An unconsumed request expires after 15 seconds.
+ *    pre-filled (including an optional `quantity` of whole shares as the starting size). The dialog
+ *    shows every field for the user to confirm and sends only on its own button; there is no request that submits. An unconsumed request expires after 15 seconds.
  *  - the `order-detail` slot on the order dialog and docked ticket carries ten props: `symbol`,
  *    `action`, `orderType`, `quantity`, `price`, `value`, `conditional`, `triggerLevel`, `trailing`
  *    and `triggerPercent`. Every forwarder (OrderComposer, NewOrderDialog, TradingSurface, and

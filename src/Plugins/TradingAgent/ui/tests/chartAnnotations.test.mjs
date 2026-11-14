@@ -138,7 +138,7 @@ test('labels of levels closer than a chip are merged onto the lowest line', () =
     { price: 100.5, label: 'Break-even' },
     { price: 90, label: 'Target' }
   ], y);
-  assert.deepEqual(plans[0], { title: 'Break-even · Sold', axisLabelVisible: true });
+  assert.deepEqual(plans[0], { title: 'Break-even 100.50 · Sold 100.00', axisLabelVisible: true });
   assert.deepEqual(plans[1], { title: '', axisLabelVisible: false });
   assert.deepEqual(plans[2], { title: 'Target', axisLabelVisible: true });
 });
@@ -157,7 +157,26 @@ test('a chain of close levels merges into one chip', () => {
   const plans = planLevelLabels([
     { price: 100, label: 'A' }, { price: 99, label: 'B' }, { price: 98, label: 'C' }
   ], y);
-  assert.equal(plans[2].title, 'A · B · C');
+  assert.equal(plans[2].title, 'A 100.00 · B 99.00 · C 98.00');
   assert.equal(plans[0].axisLabelVisible, false);
   assert.equal(plans[1].axisLabelVisible, false);
+});
+
+test('a merged label names every level with its own price, the case seen on MARI', () => {
+  const y = price => 1000 - price * 10;
+  const plans = planLevelLabels([
+    { price: 681.7, label: 'Safe' }, { price: 685.33, label: 'Target' }
+  ], y, 40);
+  assert.equal(plans[0].title, 'Target 685.33 · Safe 681.70');
+  assert.equal(plans[0].axisLabelVisible, true);
+  assert.equal(plans[1].axisLabelVisible, false);
+});
+
+test('an unmerged level keeps its plain label, and an empty label adds no stray price', () => {
+  const y = price => 1000 - price * 10;
+  const plans = planLevelLabels([
+    { price: 100, label: '' }, { price: 100.2, label: 'B' }, { price: 50, label: 'Solo' }
+  ], y);
+  assert.equal(plans[0].title, 'B 100.20');
+  assert.equal(plans[2].title, 'Solo');
 });
