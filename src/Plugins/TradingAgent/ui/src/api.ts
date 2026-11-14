@@ -1025,6 +1025,14 @@ export interface ArmOrderDialogContext {
   stopRecurring?: boolean;
   attachTakeProfit?: boolean;
   takeProfitPrice?: number | null;
+
+  // Further pre-fill, all editable in the dialog. `priceBound` is DROPPED unless the order is a
+  // percent-trigger trailing LIMIT (`trailing: true`, `triggerPercent` set, `orderType: 'LIMIT'`) with
+  // `persistentUntilFilled: true`; the dialog neither shows nor sends it otherwise.
+  priceBound?: number | null;
+  persistentUntilFilled?: boolean;
+  expiresInDays?: number;
+  note?: string;
 }
 
 /** One thing the trading agent did, as recorded by TradingActivityLog. */

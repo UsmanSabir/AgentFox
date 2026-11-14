@@ -19,6 +19,29 @@
  */
 
 /**
+ * SIBLING CONTRACTS — for a host component that lives beside the chart and the order dialogs. Plain
+ * TypeScript stores, not component slots, and a community build never calls any of them, so nothing
+ * here changes what that build shows or does.
+ *
+ *  - `chartAnnotations.ts` — `setChartAnnotations(owner, symbol, { levels?, zones?, markers? } | null)`.
+ *    Draws horizontal levels, translucent price zones and arrow/circle markers on the chart showing
+ *    `symbol`, redrawn instantly with no refetch. Always drawn (the Levels toggle does not hide
+ *    it), outside autoscale, and coloured only by the same semantic `kind` tokens server overlays use.
+ *    An owner's set is bound to the symbol it was written for: a symbol change does NOT clear it, it
+ *    is only not drawn on another symbol's chart, so owners must clear (`null`) what they stop caring
+ *    about. `annotationOffscreen` publishes, per owner, how many
+ *    levels/zones sit above/below the visible price range, for a "2 below view" chip.
+ *  - `orderRequests.ts` — `requestArmOrder(prefill)` and `requestPriceAlert(symbol, target, direction)`.
+ *    Ask the dashboard to OPEN its existing conditional-order dialog or price-alert dialog,
+ *    pre-filled. The dialog shows every field for the user to confirm and sends only on its own
+ *    button; there is no request that submits. An unconsumed request expires after 15 seconds.
+ *  - the `order-detail` slot on the order dialog and docked ticket carries ten props: `symbol`,
+ *    `action`, `orderType`, `quantity`, `price`, `value`, `conditional`, `triggerLevel`, `trailing`
+ *    and `triggerPercent`. Every forwarder (OrderComposer, NewOrderDialog, TradingSurface, and
+ *    TradingDashboard) passes all ten; add a prop to all of them or to none.
+ */
+
+/**
  * A Svelte component constructor.
  *
  * Deliberately loose. Pinning this to one Svelte component-type API would couple the extension

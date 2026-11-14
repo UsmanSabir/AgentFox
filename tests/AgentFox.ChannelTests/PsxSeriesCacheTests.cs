@@ -135,4 +135,38 @@ public sealed class PsxSeriesCacheTests
         StringAssert.Contains(second.Error, "asked again after");
         Assert.AreEqual(1, portal.HitsOn("/timeseries/eod/REFUSED"));
     }
+
+    [TestMethod]
+    public async Task Eod_closes_are_oldest_first_one_per_date_and_share_the_existing_cache()
+    {
+        using var portal = new FakePortal();
+        var client = Client(portal);
+
+        var closes = await client.GetEodClosesAsync("kse100", 10);
+        Assert.AreEqual(2, closes.Count);
+        Assert.AreEqual(165966.08m, closes[0].Close);
+        Assert.AreEqual(165363.11m, closes[1].Close);
+        Assert.IsTrue(closes[0].Date < closes[1].Date);
+
+        var newest = await client.GetEodClosesAsync("KSE100", 1);
+        Assert.AreEqual(1, newest.Count);
+        Assert.AreEqual(165363.11m, newest[0].Close);
+
+        // The quote summary reads the same cached series: the portal was asked once for all three.
+        await client.GetQuoteSummaryAsync("KSE100", CancellationToken.None, includeIntraday: false);
+        Assert.AreEqual(1, portal.HitsOn("/timeseries/eod/KSE100"));
+    }
+
+    [TestMethod]
+    public async Task Eod_closes_that_cannot_be_read_are_empty_never_zero()
+    {
+        using var portal = new FakePortal();
+        var client = Client(portal);
+
+        Assert.AreEqual(0, (await client.GetEodClosesAsync("REFUSED", 5)).Count);
+        Assert.AreEqual(0, (await client.GetEodClosesAsync("KSE100", 0)).Count);
+        Assert.AreEqual(0, (await client.GetEodClosesAsync("../KSE100", 5)).Count, "an invalid symbol is empty, not a throw");
+        Assert.AreEqual(0, (await client.GetEodClosesAsync("", 5)).Count);
+        Assert.AreEqual(0, portal.HitsOn("/timeseries/eod/KSE100"));
+    }
 }
