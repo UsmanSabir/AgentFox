@@ -33,8 +33,9 @@
   import type { SymbolExtensionComponent } from './symbolExtensions';
   import {
     annotationsForSymbol, chartAnnotationOwners, countOffscreen, levelLineWidth, planLevelLabels,
-    reportAnnotationOffscreen, type AnnotationLevel, type AnnotationMarker
+    reportAnnotationOffscreen, type AnnotationLevel, type AnnotationMarker, type AnnotationZone
   } from './chartAnnotations';
+  import { ZonePrimitive, type DrawnZone } from './chartZonePrimitive';
 
   export let symbol: string | null = null;
   export let companyName: string | null = null;
@@ -295,6 +296,8 @@
   // overlays and level lines so each can be replaced without disturbing the others.
   let annotationLines: { line: IPriceLine; level: AnnotationLevel; title: string; axisLabelVisible: boolean }[] = [];
   let annotationMarkers: ISeriesMarkersPluginApi<Time> | null = null;
+  // One primitive paints every annotation zone; it lives on the candle series and is replaced with it.
+  let annotationZones: ZonePrimitive | null = null;
   let annotationMarkerDetails = new Map<number, MarkerDetailLine[]>();
   let annotationFrame = 0;
   // Owners we have published an off-screen count for, so one that disappears is retracted.
@@ -509,6 +512,7 @@
   function forgetAnnotationArtifacts() {
     annotationLines = [];
     annotationMarkers = null;
+    annotationZones = null;
     annotationMarkerDetails = new Map();
   }
 
@@ -517,6 +521,7 @@
     try {
       for (const entry of annotationLines) candleSeries?.removePriceLine(entry.line);
       annotationMarkers?.setMarkers([]);
+      annotationZones?.setZones([]);
     } catch {
       // handles from a disposed chart; nothing to clean up
     }
@@ -548,8 +553,28 @@
       annotationLines.push({ line, level, title: plan.title, axisLabelVisible: plan.axisLabelVisible });
     });
 
+    drawAnnotationZones(sets.flatMap(s => s.annotations.zones ?? []));
     drawAnnotationMarkers(sets.flatMap(s => s.annotations.markers ?? []), data);
     scheduleAnnotationRefresh();
+  }
+
+  function drawAnnotationZones(zones: AnnotationZone[]) {
+    if (zones.length === 0) return;
+    if (!annotationZones) {
+      annotationZones = new ZonePrimitive();
+      candleSeries!.attachPrimitive(annotationZones);
+    }
+    // The fill is the kind's theme colour at low alpha, a touch stronger on a light background where
+    // the same alpha reads fainter. Theme changes rebuild the chart, which redraws this.
+    const light = typeof document !== 'undefined'
+      && document.documentElement.getAttribute('data-theme') === 'light';
+    const drawn: DrawnZone[] = zones.map(z => ({
+      priceFrom: z.priceFrom, priceTo: z.priceTo, label: z.label,
+      color: overlayColor(z.kind), fromTime: z.fromTime
+    }));
+    annotationZones.setZones(drawn, light
+      ? { strongAlpha: 0.2, faintAlpha: 0.08 }
+      : { strongAlpha: 0.15, faintAlpha: 0.06 });
   }
 
   function drawAnnotationMarkers(markers: AnnotationMarker[], d: ChartData) {
