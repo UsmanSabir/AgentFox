@@ -50,9 +50,16 @@
   let quantity: number | null = null;
   let sizeMode: 'shares' | 'value' = 'shares';
   let orderValue: number | null = null;
-  let expiresInDays = 30;
-  let persistentUntilFilled = false;
-  let note = '';
+  // Pre-fillable like the rest (see ArmOrderDialogContext): all stay editable below, none is sent unless
+  // the user presses the dialog's own button.
+  export let expiresInDays = 30;
+  export let persistentUntilFilled = false;
+  export let note = '';
+  /**
+   * Trailing LIMIT only: a BUY's maximum or a SELL's minimum price. The server requires trailing and
+   * persistentUntilFilled with it, so it is shown and sent only while those hold.
+   */
+  export let priceBound: number | null = null;
   let busy = false;
   let error: string | null = null;
   let holdingBusy = false;
@@ -97,6 +104,7 @@
   $: isStop = orderType === 'STOPLOSS';
   $: persistable = orderType !== 'MARKET';
   $: if (!persistable) persistentUntilFilled = false;
+  $: boundedTrail = isPercent && trailing && orderType === 'LIMIT' && persistentUntilFilled;
   $: fallsToTrigger = triggerKind === 'PriceBelow' || triggerKind === 'PercentDrop';
 
   // A protective SELL normally means "cover what I can sell". Read both custody and the working
@@ -310,6 +318,9 @@
     } else if (!isEvent && !(triggerPrice && triggerPrice > 0)) {
       error = 'Enter a trigger price.'; return;
     }
+    if (boundedTrail && priceBound != null && (!Number.isFinite(priceBound) || priceBound <= 0)) {
+      error = 'The price limit must be a positive price, or empty for none.'; return;
+    }
     if (stopError) { error = stopError; return; }
     if (takeProfitError) { error = takeProfitError; return; }
 
@@ -322,6 +333,7 @@
       referencePrice: isPercent ? referencePrice : null,
       trailing: isPercent && trailing,
       persistentUntilFilled,
+      priceBound: boundedTrail && priceBound != null && priceBound > 0 ? priceBound : null,
       orderType,
       price: orderType === 'MARKET' ? null : price ?? level,
       limitPrice: isStop ? limitPrice : null,
@@ -681,6 +693,13 @@
           trigger trails upward, so a large move could leave it too far away to fill. Market is the
           safer pairing with a trailing trigger.
         </p>
+      {/if}
+
+      {#if boundedTrail}
+        <label class="full">
+          <span>{action === 'BUY' ? 'Maximum buy price' : 'Minimum sell price'} (PKR / share, optional)</span>
+          <input type="number" min="0.01" step="0.01" bind:value={priceBound} placeholder="No limit" />
+        </label>
       {/if}
 
       {#if canAttachStop}

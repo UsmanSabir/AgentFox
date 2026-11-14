@@ -30,6 +30,7 @@
   }
   import ArmedOrdersPanel from './ArmedOrdersPanel.svelte';
   import ArmOrderDialog from './ArmOrderDialog.svelte';
+  import { orderRequests, takeOrderRequest } from './orderRequests';
   import ActivityPanel from './ActivityPanel.svelte';
   import MoversPanel from './MoversPanel.svelte';
   import NewOrderDialog from './NewOrderDialog.svelte';
@@ -421,8 +422,22 @@
   }
   function refreshWatchlist() { if (workspace) void workspaceWatchlist?.refresh(); else void marketWorkspace?.refresh(); }
 
+  /**
+   * A sibling component asked (orderRequests.ts) for one of this surface's own dialogs, pre-filled.
+   * It opens the SAME dialog a chart click opens — nothing is sent until the user presses that dialog's
+   * button. In a community build nothing writes the store, so this never runs.
+   */
+  function handleOrderRequest(pendingRequest: unknown) {
+    if (!pendingRequest) return;
+    const request = takeOrderRequest();
+    if (!request) return;
+    if (request.kind === 'arm') armContext = request.prefill;
+    else void openPriceAlert(request.symbol, request.target, request.direction);
+  }
+
   onMount(() => {
     load(); startMarketClock();
+    const stopOrderRequests = orderRequests.subscribe(handleOrderRequest);
     const unregister = [
       workspace?.registerCommand({ id:'order.new', label:'New Order — open dialog', run:openNewOrderDialog }),
       workspace?.registerCommand({ id:'watchlist.search', label:'Search watched symbols', run:() => {
@@ -432,7 +447,7 @@
       workspace?.registerCommand({ id:'trading.refresh', label:'Refresh trading state', run:load }),
       workspace?.registerCommand({ id:'broker.check', label:'Check broker now', run:reconcileNow })
     ];
-    return () => unregister.forEach(dispose => dispose?.());
+    return () => { stopOrderRequests(); unregister.forEach(dispose => dispose?.()); };
   });
 </script>
 
