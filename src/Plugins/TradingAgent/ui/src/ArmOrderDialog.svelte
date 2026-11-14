@@ -9,7 +9,7 @@
   import { Crosshair, X, AlertTriangle, Zap } from 'lucide-svelte';
   import { livePriceLabel, useLivePrices } from './livePrices';
   import { validArmQuantity } from './orderRequests';
-  import { armOrderSummary } from './armSummary';
+  import { armOrderSummary, armLevelLine } from './armSummary';
 
   /**
    * Pre-filled context from wherever the user clicked — a chart level or an alert. Everything stays
@@ -279,11 +279,13 @@
    * is a number in a box; this says what those numbers will actually do, in the order it happens —
    * and it is the thing to read back before committing size to a level.
    */
-  $: summary = armOrderSummary({
+  $: summaryInput = {
     action, quantity: effectiveQuantity, symbol, orderType, price, isEvent, triggerAlertKind,
     isPercent, fallsToTrigger, level, triggerPercent, referencePrice, trailing,
     priceBound: boundedTrail ? priceBound : null
-  });
+  };
+  $: summary = armOrderSummary(summaryInput);
+  $: levelLine = armLevelLine(summaryInput);
 
   async function submit() {
     if (busy) return;
@@ -504,9 +506,9 @@
           </label>
         {/if}
 
-        {#if level != null}
+        {#if levelLine}
           <p class="level-line">
-            Fires at <b>{money(level)}</b>
+            {#if levelLine.kind === 'fires'}Fires at <b>{money(levelLine.level)}</b>{:else}{levelLine.text}{/if}
             {#if displayedCurrentPrice != null && displayedCurrentPrice > 0}
               · {symbol} is {money(displayedCurrentPrice)} now
               <small title={livePriceLabel(livePriceView)}>({livePriceView.freshness})</small>

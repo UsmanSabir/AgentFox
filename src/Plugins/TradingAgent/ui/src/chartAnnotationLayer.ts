@@ -157,11 +157,20 @@ export class AnnotationLayer {
         // The arrow's tip touches the price: a down arrow sits above it, an up arrow below it.
         const position = shape === 'arrowDown' ? 'atPriceTop'
           : shape === 'arrowUp' ? 'atPriceBottom' : 'atPriceMiddle';
-        return { ...base, position, price: m.price } as LayerMarker;
+        // NO text on the chart for an atPrice marker. lightweight-charts centres marker text on the
+        // marker with no offset, and a fill sits at a price inside its own candle, so the label was
+        // drawn over (or behind) that very bar. The arrow marks the price; the words move to the
+        // hover card below, which already carries `detail`.
+        return { ...base, text: '', position, price: m.price } as LayerMarker;
       }
       return { ...base, position: m.position === 'below' ? 'belowBar' : 'aboveBar' } as LayerMarker;
     });
-    this.markerDetails = markerDetailsByTime(drawable);
+    // An atPrice marker's label is not drawn on the chart (above), so it is the hover card's line
+    // when the marker gave no `detail` of its own.
+    this.markerDetails = markerDetailsByTime(drawable.map(m => {
+      const atPrice = m.position === 'atPrice' && typeof m.price === 'number' && Number.isFinite(m.price) && m.price > 0;
+      return atPrice && !m.detail?.trim() && m.label ? { ...m, detail: m.label } : m;
+    }));
     if (this.markers) this.markers.setMarkers(list);
     else if (list.length > 0) this.markers = this.host.createMarkers(series, list);
   }

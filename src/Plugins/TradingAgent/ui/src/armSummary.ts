@@ -68,3 +68,27 @@ export function armOrderSummary(i: ArmSummaryInput): string | null {
   }
   return `${head} — that is ${money(i.level)} to begin with.`;
 }
+
+/**
+ * The short line ABOVE the summary: where the order fires. For a fixed trigger it is one level
+ * ("fires"). For a TRAILING trigger there is no fixed level once the trigger follows the price, so
+ * the line describes the reference honestly ("trails") instead of quoting a number that contradicts
+ * a price bound — "Fires at 746.64" next to a 671.68 maximum on a BUY.
+ */
+export type ArmLevelLine =
+  | { kind: 'fires'; level: number }
+  | { kind: 'trails'; text: string };
+
+export function armLevelLine(i: ArmSummaryInput): ArmLevelLine | null {
+  if (i.isEvent || i.level == null) return null;
+  if (!i.isPercent || !i.trailing) return { kind: 'fires', level: i.level };
+  const from = i.referencePrice != null ? money(i.referencePrice) : '—';
+  const extreme = i.fallsToTrigger ? 'highest' : 'lowest';
+  const extremeNoun = i.fallsToTrigger ? 'high' : 'low';
+  const move = i.fallsToTrigger ? 'fall' : 'rise';
+  const head = `Trails the ${extreme} price from ${from} · fires on a ${i.triggerPercent}% ${move} from that ${extremeNoun}`;
+  if (i.priceBound != null && i.priceBound > 0) {
+    return { kind: 'trails', text: `${head}, at no ${i.fallsToTrigger ? 'less' : 'more'} than ${money(i.priceBound)}` };
+  }
+  return { kind: 'trails', text: `${head} · starts at ${money(i.level)}` };
+}

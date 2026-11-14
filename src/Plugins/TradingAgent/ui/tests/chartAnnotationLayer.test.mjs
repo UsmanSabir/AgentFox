@@ -124,3 +124,16 @@ test('a zone label alignment reaches the zone primitive', () => {
   layer.draw(input(series, { zones: [{ priceFrom: 90, priceTo: 110, kind: 'support', label: 'Z', labelAlign: 'left' }] }));
   assert.equal(lastZones(state)[0].labelAlign, 'left');
 });
+
+test('an atPrice marker draws no text on the chart; its label becomes the hover line unless a detail exists', () => {
+  const { state, series, layer } = rig();
+  layer.draw(input(series, { markers: [
+    { time: 10, position: 'atPrice', price: 712.55, shape: 'arrowDown', kind: 'sold', label: 'Sold 5 @ 712.55' },
+    { time: 20, position: 'atPrice', price: 650, shape: 'arrowUp', kind: 'buy', label: 'Bought', detail: 'Bought 3 at 650' },
+    { time: 30, position: 'above', shape: 'arrowUp', kind: 'buy', label: 'Plain' }] }));
+  const m = lastMarkers(state);
+  assert.deepEqual(m.map(x => x.text), ['', '', 'Plain']);
+  assert.equal(layer.markerDetails.get(10)[0].text, 'Sold 5 @ 712.55');
+  assert.equal(layer.markerDetails.get(20)[0].text, 'Bought 3 at 650');
+  assert.equal(layer.markerDetails.get(30), undefined);
+});
