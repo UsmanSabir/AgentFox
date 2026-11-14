@@ -9,6 +9,7 @@
   import { Crosshair, X, AlertTriangle, Zap } from 'lucide-svelte';
   import { livePriceLabel, useLivePrices } from './livePrices';
   import { validArmQuantity } from './orderRequests';
+  import { armOrderSummary } from './armSummary';
 
   /**
    * Pre-filled context from wherever the user clicked — a chart level or an alert. Everything stays
@@ -278,29 +279,11 @@
    * is a number in a box; this says what those numbers will actually do, in the order it happens —
    * and it is the thing to read back before committing size to a level.
    */
-  $: summary = (() => {
-    if (!effectiveQuantity || effectiveQuantity <= 0) return null;
-    const fill = orderType === 'MARKET'
-      ? 'at the best price available'
-      : price != null ? `at ${money(price)}` : 'with no price set';
-    const verb = action === 'SELL' ? 'Sells' : 'Buys';
-
-    if (isEvent) {
-      return triggerAlertKind
-        ? `${verb} ${effectiveQuantity} ${symbol} ${fill} when ${symbol} raises `
-          + `"${triggerAlertKind.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase()}".`
-        : null;
-    }
-
-    if (level == null) return null;
-    const move = fallsToTrigger ? 'falls' : 'rises';
-
-    if (!isPercent) return `${verb} ${effectiveQuantity} ${symbol} ${fill} if it ${move} to ${money(level)}.`;
-
-    const from = referencePrice != null ? money(referencePrice) : '—';
-    return `${verb} ${effectiveQuantity} ${symbol} ${fill} if it ${move} ${triggerPercent}% `
-         + `from ${from} — that is ${money(level)}.`;
-  })();
+  $: summary = armOrderSummary({
+    action, quantity: effectiveQuantity, symbol, orderType, price, isEvent, triggerAlertKind,
+    isPercent, fallsToTrigger, level, triggerPercent, referencePrice, trailing,
+    priceBound: boundedTrail ? priceBound : null
+  });
 
   async function submit() {
     if (busy) return;

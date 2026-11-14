@@ -35,7 +35,9 @@ export interface ZonesHandle { setZones(zones: LayerZone[], style?: LayerZoneSty
 
 export interface LayerMarker {
   time: number;
-  position: 'aboveBar' | 'belowBar';
+  position: 'aboveBar' | 'belowBar' | 'atPriceTop' | 'atPriceBottom' | 'atPriceMiddle';
+  /** Present exactly when `position` is one of the atPrice* values. */
+  price?: number;
   color: string;
   shape: 'arrowUp' | 'arrowDown' | 'circle';
   text: string;
@@ -143,13 +145,22 @@ export class AnnotationLayer {
     // A time outside the loaded bars has no bar to sit on: not drawn, rather than snapped to an edge.
     const drawable = input.markers.filter(m => m.time >= firstTime && m.time <= lastTime)
       .sort((a, b) => a.time - b.time);
-    const list: LayerMarker[] = drawable.map(m => ({
-      time: m.time,
-      position: m.position === 'below' ? 'belowBar' : 'aboveBar',
-      color: this.host.colorOf(m.kind),
-      shape: m.shape === 'arrowUp' || m.shape === 'arrowDown' ? m.shape : 'circle',
-      text: m.label ?? ''
-    }));
+    const list: LayerMarker[] = drawable.map(m => {
+      const shape = m.shape === 'arrowUp' || m.shape === 'arrowDown' ? m.shape : 'circle';
+      const base = {
+        time: m.time,
+        color: this.host.colorOf(m.kind),
+        shape,
+        text: m.label ?? ''
+      };
+      if (m.position === 'atPrice' && typeof m.price === 'number' && Number.isFinite(m.price) && m.price > 0) {
+        // The arrow's tip touches the price: a down arrow sits above it, an up arrow below it.
+        const position = shape === 'arrowDown' ? 'atPriceTop'
+          : shape === 'arrowUp' ? 'atPriceBottom' : 'atPriceMiddle';
+        return { ...base, position, price: m.price } as LayerMarker;
+      }
+      return { ...base, position: m.position === 'below' ? 'belowBar' : 'aboveBar' } as LayerMarker;
+    });
     this.markerDetails = markerDetailsByTime(drawable);
     if (this.markers) this.markers.setMarkers(list);
     else if (list.length > 0) this.markers = this.host.createMarkers(series, list);

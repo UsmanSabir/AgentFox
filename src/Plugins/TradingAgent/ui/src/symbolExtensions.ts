@@ -25,7 +25,11 @@
  *
  *  - `chartAnnotations.ts` — `setChartAnnotations(owner, symbol, { levels?, zones?, markers? } | null)`.
  *    Draws horizontal levels, translucent price zones and arrow/circle markers on the chart showing
- *    `symbol`, redrawn instantly with no refetch. Always drawn (the Levels toggle does not hide
+ *    `symbol`. A marker is `above`/`below` its bar by default, or `atPrice` with a `price` to sit AT
+ *    that price (a down arrow's tip touches it from above, an up arrow's from below); without a
+ *    usable `price` it falls back to `above`. Levels whose axis chips would collide share one chip
+ *    whose text carries each name with its own price ("Target 685.33 · Safe 681.70"). The chart is
+ *    redrawn instantly with no refetch. Always drawn (the Levels toggle does not hide
  *    it), outside autoscale, and coloured only by the same semantic `kind` tokens server overlays use.
  *    An owner's set is bound to the symbol it was written for: a symbol change does NOT clear it, it
  *    is only not drawn on another symbol's chart, so owners must clear (`null`) what they stop caring
