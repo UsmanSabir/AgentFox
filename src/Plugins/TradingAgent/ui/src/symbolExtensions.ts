@@ -27,7 +27,8 @@
  *    Draws horizontal levels, translucent price zones and arrow/circle markers on the chart showing
  *    `symbol`. A marker is `above`/`below` its bar by default, or `atPrice` with a `price` to sit AT
  *    that price (a down arrow's tip touches it from above, an up arrow's from below); without a
- *    usable `price` it falls back to `above`. A zone label is drawn at the zone's right edge by default, or its left with `labelAlign: 'left'`,
+ *    usable `price` it falls back to `above`. An `atPrice` marker draws no text on the chart: its label
+ *    moves to the hover card (its `detail`, when it has one, wins). A zone label is drawn at the zone's right edge by default, or its left with `labelAlign: 'left'`,
  *    clear of the axis titles. Levels whose axis chips would collide share one chip
  *    whose text carries each name with its own price ("Target 685.33 · Safe 681.70"). The chart is
  *    redrawn instantly with no refetch. Always drawn (the Levels toggle does not hide

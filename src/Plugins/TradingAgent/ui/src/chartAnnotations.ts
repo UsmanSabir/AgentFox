@@ -69,7 +69,9 @@ export interface AnnotationMarker {
    * 'above' / 'below' sit against the bar's high / low (the default). 'atPrice' puts the marker AT
    * `price` on the price scale, which is what a fill at a known price wants: an arrow above the bar's
    * high says nothing about where the trade happened. An 'atPrice' marker without a usable `price`
-   * (missing, not finite, not above zero) falls back to 'above'.
+   * (missing, not finite, not above zero) falls back to 'above'. An 'atPrice' marker draws NO text on
+   * the chart (a label centred on a price inside the bar's own candle covers that candle); its `label`
+   * becomes its hover-card line instead, unless it carries a `detail` of its own.
    */
   position: 'above' | 'below' | 'atPrice';
   /** The price an 'atPrice' marker sits at; ignored for the other positions. */
