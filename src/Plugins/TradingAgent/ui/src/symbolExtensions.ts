@@ -33,8 +33,8 @@
  *    levels/zones sit above/below the visible price range, for a "2 below view" chip.
  *  - `orderRequests.ts` — `requestArmOrder(prefill)` and `requestPriceAlert(symbol, target, direction)`.
  *    Ask the dashboard to OPEN its existing conditional-order dialog or price-alert dialog,
- *    pre-filled. The dialog shows every field for the user to confirm and sends only on its own
- *    button; there is no request that submits. An unconsumed request expires after 15 seconds.
+ *    pre-filled (including an optional `quantity` of whole shares as the starting size). The dialog
+ *    shows every field for the user to confirm and sends only on its own button; there is no request that submits. An unconsumed request expires after 15 seconds.
  *  - the `order-detail` slot on the order dialog and docked ticket carries ten props: `symbol`,
  *    `action`, `orderType`, `quantity`, `price`, `value`, `conditional`, `triggerLevel`, `trailing`
  *    and `triggerPercent`. Every forwarder (OrderComposer, NewOrderDialog, TradingSurface, and

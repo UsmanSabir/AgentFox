@@ -8,6 +8,7 @@
   } from './api';
   import { Crosshair, X, AlertTriangle, Zap } from 'lucide-svelte';
   import { livePriceLabel, useLivePrices } from './livePrices';
+  import { validArmQuantity } from './orderRequests';
 
   /**
    * Pre-filled context from wherever the user clicked — a chart level or an alert. Everything stays
@@ -47,7 +48,14 @@
 
   const dispatch = createEventDispatcher<{ armed: void; close: void }>();
 
-  let quantity: number | null = null;
+  /**
+   * Optional starting share count from the caller (ArmOrderDialogContext.quantity). Whole shares above
+   * zero only; anything else is ignored and the dialog keeps its own default. Still editable, and
+   * nothing is sent until the dialog's own button.
+   */
+  export let quantity: number | null = null;
+  const initialQuantity = validArmQuantity(quantity);
+  quantity = initialQuantity;
   let sizeMode: 'shares' | 'value' = 'shares';
   let orderValue: number | null = null;
   // Pre-fillable like the rest (see ArmOrderDialogContext): all stay editable below, none is sent unless
@@ -116,8 +124,9 @@
     autoSizeKey = requestedAutoSizeKey;
     if (requestedAutoSizeKey) {
       sizeMode = 'shares';
-      quantity = null;
-      quantityWasEdited = false;
+      // A caller-supplied size outranks the custody default, which would otherwise overwrite it.
+      quantity = initialQuantity;
+      quantityWasEdited = initialQuantity != null;
       void loadAvailableShares(requestedAutoSizeKey);
     } else {
       availableShares = null;
