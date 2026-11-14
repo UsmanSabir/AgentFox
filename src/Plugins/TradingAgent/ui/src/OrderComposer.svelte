@@ -1301,7 +1301,8 @@
             can show one here without this component learning about it. Renders nothing when unfilled.
 
             `conditional` says nothing is sent to the broker now: the order waits for a trigger (or a
-            date), and `triggerLevel` is that trigger's level when it has one. Without them a host can
+            date), and `triggerLevel` is that trigger's level when it has one. `trailing` says the trigger follows the price, and
+            `triggerPercent` is the move's size when the trigger is a percentage (null for an exact price or a date). Without these a host can
             only judge `price` as if the order were placed now — which told a waiting trailing sell it
             "should fill now" at its trigger.
           -->
@@ -1313,7 +1314,9 @@
                 price={estimatedPrice}
                 value={estimatedValue}
                 conditional={choice.submission === 'conditional' || scheduled}
-                triggerLevel={conditionalLevel} />
+                triggerLevel={conditionalLevel}
+                trailing={choice?.trailing === true}
+                triggerPercent={choice?.submission === 'conditional' && !exactPriceTrigger && !dateOnlySchedule ? triggerPercent : null} />
         </div>
       {/if}
 

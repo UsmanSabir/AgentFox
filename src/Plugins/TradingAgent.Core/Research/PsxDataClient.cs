@@ -9,6 +9,9 @@ using TradingAgent.Config;
 
 namespace TradingAgent.Research;
 
+/// <summary>One end-of-day close: the PKT trading date and the closing price (index points for an index).</summary>
+public sealed record PsxEodClose(DateOnly Date, decimal Close);
+
 /// <summary>
 /// Price/volume summary for one symbol computed from the PSX data portal's EOD and intraday
 /// time series. All fields are nullable: a null means "the feed did not provide it", and the
@@ -185,6 +188,45 @@ public sealed partial class PsxDataClient
         {
             _logger.LogWarning(ex, "[PsxData] Previous-session close unavailable for {Symbol}.", symbol);
             return null;
+        }
+    }
+
+    /// <summary>
+    /// The last <paramref name="sessions"/> end-of-day closes of a symbol or index, oldest first, one per PKT
+    /// date. Reads the SAME expiring end-of-day cache (<see cref="EodSeriesTtl"/>) the quote summary uses: no
+    /// second cache and no extra portal request when that series is already warm. A caller computing a moving
+    /// average over an index needs the closes, which the summary deliberately does not carry.
+    ///
+    /// <para>
+    /// The newest row may be today's, still forming, while the market is open; the caller decides whether that
+    /// belongs in its figure. Unavailable (portal refusing, nothing returned) answers an EMPTY list after a
+    /// warning — never zeros — and a caller must treat empty as unknown.
+    /// </para>
+    /// </summary>
+    public async Task<IReadOnlyList<PsxEodClose>> GetEodClosesAsync(string symbol, int sessions,
+        CancellationToken ct = default)
+    {
+        if (sessions <= 0) return [];
+        try
+        {
+            // Inside the try: an invalid symbol is "unavailable" (empty), as documented, not an exception.
+            symbol = NormalizePortalSymbol(symbol, "symbol");
+            var eod = await CachedSeriesAsync($"timeseries/eod/{symbol}", EodSeriesTtl, ct);
+            static DateOnly PktDay(long ts) => DateOnly.FromDateTime(
+                DateTimeOffset.FromUnixTimeSeconds(ts).ToOffset(TimeSpan.FromHours(5)).DateTime);
+            return eod.Where(p => p.Price > 0)
+                .GroupBy(p => PktDay(p.Ts))
+                .Select(g => new PsxEodClose(g.Key, g.OrderByDescending(p => p.Ts).First().Price))
+                .OrderByDescending(c => c.Date)
+                .Take(sessions)
+                .OrderBy(c => c.Date)
+                .ToList();
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[PsxData] End-of-day closes unavailable for {Symbol}.", symbol);
+            return [];
         }
     }
 

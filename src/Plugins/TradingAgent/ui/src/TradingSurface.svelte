@@ -30,6 +30,7 @@
   }
   import ArmedOrdersPanel from './ArmedOrdersPanel.svelte';
   import ArmOrderDialog from './ArmOrderDialog.svelte';
+  import { orderRequests, takeOrderRequest } from './orderRequests';
   import ActivityPanel from './ActivityPanel.svelte';
   import MoversPanel from './MoversPanel.svelte';
   import NewOrderDialog from './NewOrderDialog.svelte';
@@ -421,8 +422,22 @@
   }
   function refreshWatchlist() { if (workspace) void workspaceWatchlist?.refresh(); else void marketWorkspace?.refresh(); }
 
+  /**
+   * A sibling component asked (orderRequests.ts) for one of this surface's own dialogs, pre-filled.
+   * It opens the SAME dialog a chart click opens — nothing is sent until the user presses that dialog's
+   * button. In a community build nothing writes the store, so this never runs.
+   */
+  function handleOrderRequest(pendingRequest: unknown) {
+    if (!pendingRequest) return;
+    const request = takeOrderRequest();
+    if (!request) return;
+    if (request.kind === 'arm') armContext = request.prefill;
+    else void openPriceAlert(request.symbol, request.target, request.direction);
+  }
+
   onMount(() => {
     load(); startMarketClock();
+    const stopOrderRequests = orderRequests.subscribe(handleOrderRequest);
     const unregister = [
       workspace?.registerCommand({ id:'order.new', label:'New Order — open dialog', run:openNewOrderDialog }),
       workspace?.registerCommand({ id:'watchlist.search', label:'Search watched symbols', run:() => {
@@ -432,7 +447,7 @@
       workspace?.registerCommand({ id:'trading.refresh', label:'Refresh trading state', run:load }),
       workspace?.registerCommand({ id:'broker.check', label:'Check broker now', run:reconcileNow })
     ];
-    return () => unregister.forEach(dispose => dispose?.());
+    return () => { stopOrderRequests(); unregister.forEach(dispose => dispose?.()); };
   });
 </script>
 
@@ -440,11 +455,15 @@
 
 <WorkspacePanel {workspace} id="core-dialogs">
 {#if armContext}
-  <ArmOrderDialog
-    {...armContext}
-    on:armed={() => armedPanel?.load()}
-    on:close={() => armContext = null}
-  />
+  <!-- Keyed on the context: a second request arriving while the dialog is open remounts it, so the
+       new pre-fill is read from scratch rather than leaving the dialog's own state behind. -->
+  {#key armContext}
+    <ArmOrderDialog
+      {...armContext}
+      on:armed={() => armedPanel?.load()}
+      on:close={() => armContext = null}
+    />
+  {/key}
 {/if}
 
 {#if newOrderDialogOpen}
@@ -458,8 +477,8 @@
     <!-- Every prop the composer offers, not the three that happened to be needed first. A
          half-forwarded slot is indistinguishable from a host that does not want the rest, so the
          next detail to need the symbol would look like a slot that cannot supply one. -->
-    <svelte:fragment slot="order-detail" let:symbol let:action let:orderType let:quantity let:price let:value let:conditional let:triggerLevel>
-      <slot name="order-detail" {symbol} {action} {orderType} {quantity} {price} {value} {conditional} {triggerLevel}/>
+    <svelte:fragment slot="order-detail" let:symbol let:action let:orderType let:quantity let:price let:value let:conditional let:triggerLevel let:trailing let:triggerPercent>
+      <slot name="order-detail" {symbol} {action} {orderType} {quantity} {price} {value} {conditional} {triggerLevel} {trailing} {triggerPercent}/>
     </svelte:fragment>
   </NewOrderDialog>
 {/if}
@@ -471,8 +490,8 @@
       <OrderComposer docked bind:this={ticket} {selectedSymbol}
         on:changed={() => { load(); armedPanel?.load(); persistentPanel?.load(); }}
         on:attention={() => workspace?.focusPanel('ticket')} on:close={closeOrderTicket}>
-        <svelte:fragment slot="order-detail" let:symbol let:action let:orderType let:quantity let:price let:value let:conditional let:triggerLevel>
-          <slot name="order-detail" {symbol} {action} {orderType} {quantity} {price} {value} {conditional} {triggerLevel}/>
+        <svelte:fragment slot="order-detail" let:symbol let:action let:orderType let:quantity let:price let:value let:conditional let:triggerLevel let:trailing let:triggerPercent>
+          <slot name="order-detail" {symbol} {action} {orderType} {quantity} {price} {value} {conditional} {triggerLevel} {trailing} {triggerPercent}/>
         </svelte:fragment>
       </OrderComposer>
     {:else}

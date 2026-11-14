@@ -31,6 +31,12 @@
   import { chartTimeFormatters } from './chartTime';
   import { livePriceLabel, useLivePrices, type LivePrice } from './livePrices';
   import type { SymbolExtensionComponent } from './symbolExtensions';
+  import {
+    annotationsForSymbol, chartAnnotationOwners, countOffscreen, planLevelLabels,
+    reportAnnotationOffscreen
+  } from './chartAnnotations';
+  import { ZonePrimitive } from './chartZonePrimitive';
+  import { AnnotationLayer, type LayerMarker, type LayerSeries } from './chartAnnotationLayer';
 
   export let symbol: string | null = null;
   export let companyName: string | null = null;
@@ -287,6 +293,28 @@
   // be hovered themselves, so the card follows the crosshair's BAR rather than the marker's pixels.
   let markerDetails = new Map<number, MarkerDetailLine[]>();
   let detailCard: { left: number; top: number; lines: MarkerDetailLine[] } | null = null;
+  // Client-side annotations (see chartAnnotations.ts): a third artefact group, owned apart from server
+  // overlays and level lines so each can be replaced without disturbing the others.
+  // The layer owns every handle (price lines, the zone primitive, the markers plugin). It is idempotent
+  // on redraw; only a real chart teardown calls annotationLayer.forget() (see chartAnnotationLayer.ts).
+  const annotationLayer = new AnnotationLayer({
+    attachZones: () => {
+      const zones = new ZonePrimitive();
+      candleSeries!.attachPrimitive(zones);
+      return zones;
+    },
+    // autoScale off: the annotation markers must not widen the price range the server markers' own
+    // autoscale margins already shaped.
+    createMarkers: (_series, markers) => {
+      const asSeries = (list: LayerMarker[]) => list as unknown as SeriesMarker<Time>[];
+      const plugin = createSeriesMarkers(candleSeries!, asSeries(markers), { autoScale: false });
+      return { setMarkers: list => plugin.setMarkers(asSeries(list)) };
+    },
+    colorOf: kind => overlayColor(kind)
+  });
+  let annotationFrame = 0;
+  // Owners we have published an off-screen count for, so one that disappears is retracted.
+  let reportedOwners = new Set<string>();
   let resizeObserver: ResizeObserver | null = null;
   // A docked tab can receive data before it has any width. Apply its range only after layout;
   // otherwise the chart clamps bar spacing to half a pixel and keeps that spacing when revealed.
@@ -336,6 +364,7 @@
     });
     // Released with the chart: remove() drops every subscription, so no teardown site needs it.
     chart.subscribeCrosshairMove(showMarkerDetail);
+    chart.timeScale().subscribeVisibleLogicalRangeChange(scheduleAnnotationRefresh);
 
     candleSeries = chart.addSeries(CandlestickSeries, {
       upColor: token('--success', '#34d399'),
@@ -442,6 +471,7 @@
 
     drawLevels(d);
     const projectedBars = drawOverlays(d);
+    redrawAnnotations();
     // Logical range ignores weekends and archive gaps, so the latest candles use the available width
     // instead of being compressed into the right half of the plot by calendar time.
     if (d.candles.length > 0) {
@@ -483,6 +513,89 @@
   }
 
   $: applyLiveQuote(livePriceView.quote);
+
+  // ── Client-side annotations ─────────────────────────────────────────────
+  // What a sibling component wrote to chartAnnotations.ts for THIS symbol. Always drawn (the Levels
+  // toggle does not hide it), never part of autoscale, redrawn here on every store change without
+  // touching the candles. Presentation only: nothing drawn from it is an execution input.
+  $: annotationSets = annotationsForSymbol($chartAnnotationOwners, symbol);
+  $: annotationSets, redrawAnnotations();
+
+  /**
+   * Redraws every annotation: idempotent, so it removes what the last call attached before attaching
+   * anew. It never forgets handles; that is for real teardown (rebuild, a chart-identity change in
+   * load, destroy), where the chart the handles belong to is gone.
+   */
+  function redrawAnnotations() {
+    const sets = annotationSets;
+    if (!chart || !candleSeries || !data || sets.length === 0) {
+      annotationLayer.clear();
+      retractAnnotationCounts(new Set());
+      return;
+    }
+    const first = data.candles.length ? data.candles[0].time : null;
+    const last = data.candles.length ? data.candles[data.candles.length - 1].time : null;
+    annotationLayer.draw({
+      series: candleSeries as unknown as LayerSeries,
+      levels: sets.flatMap(s => s.annotations.levels ?? []),
+      zones: sets.flatMap(s => s.annotations.zones ?? []),
+      markers: sets.flatMap(s => s.annotations.markers ?? []),
+      firstTime: first,
+      lastTime: last,
+      light: typeof document !== 'undefined'
+        && document.documentElement.getAttribute('data-theme') === 'light'
+    });
+    scheduleAnnotationRefresh();
+  }
+
+  /**
+   * Re-plans label merging and the off-screen counts a frame later, once the price scale has laid
+   * itself out for the new data or visible range. Cheap: it only re-applies options on existing lines.
+   * A manual drag of the price axis fires no event, so counts and merges catch up on the next change.
+   */
+  function scheduleAnnotationRefresh() {
+    // A community build has no annotations and has reported nothing: pan and zoom cost it nothing.
+    if (annotationSets.length === 0 && annotationLayer.lines.length === 0 && reportedOwners.size === 0) return;
+    if (annotationFrame || typeof requestAnimationFrame === 'undefined') return;
+    annotationFrame = requestAnimationFrame(() => {
+      annotationFrame = 0;
+      refreshAnnotationLayout();
+    });
+  }
+
+  function refreshAnnotationLayout() {
+    if (!chart || !candleSeries) return;
+    const yOf = (price: number) => candleSeries!.priceToCoordinate(price);
+    const plans = planLevelLabels(annotationLayer.lines.map(e => e.level), yOf);
+    annotationLayer.lines.forEach((entry, i) => {
+      const plan = plans[i];
+      if (plan.title === entry.title && plan.axisLabelVisible === entry.axisLabelVisible) return;
+      (entry.line as IPriceLine).applyOptions({ title: plan.title, axisLabelVisible: plan.axisLabelVisible });
+      entry.title = plan.title;
+      entry.axisLabelVisible = plan.axisLabelVisible;
+    });
+
+    // The visible price range: the price at the top and bottom rows of the main pane.
+    const height = chart.panes()[0]?.getHeight() ?? 0;
+    const a = height > 0 ? candleSeries.coordinateToPrice(0) : null;
+    const b = height > 0 ? candleSeries.coordinateToPrice(height) : null;
+    const low = a != null && b != null ? Math.min(a, b) : null;
+    const high = a != null && b != null ? Math.max(a, b) : null;
+    const seen = new Set<string>();
+    for (const set of annotationSets) {
+      seen.add(set.owner);
+      reportAnnotationOffscreen(set.owner,
+        countOffscreen(set.annotations.levels ?? [], set.annotations.zones ?? [], low, high));
+    }
+    retractAnnotationCounts(seen);
+    reportedOwners = seen;
+  }
+
+  /** Withdraws the off-screen count of every owner we reported before and that is not in `keep`. */
+  function retractAnnotationCounts(keep: Set<string>) {
+    for (const owner of reportedOwners) if (!keep.has(owner)) reportAnnotationOffscreen(owner, null);
+    reportedOwners = new Set([...reportedOwners].filter(o => keep.has(o)));
+  }
 
   /**
    * Drops the overlay handles without touching the chart. Called wherever the chart itself is
@@ -531,8 +644,11 @@
 
   /** The crosshair is on a bar: show that bar's marker detail, or nothing when it has none. */
   function showMarkerDetail(param: MouseEventParams<Time>) {
-    const lines = param.time != null ? markerDetails.get(param.time as number) : undefined;
-    if (!lines || !param.point || !container) {
+    const at = param.time as number | undefined;
+    const lines = at != null
+      ? [...(markerDetails.get(at) ?? []), ...(annotationLayer.markerDetails.get(at) ?? [])]
+      : [];
+    if (lines.length === 0 || !param.point || !container) {
       detailCard = null;
       return;
     }
@@ -746,6 +862,7 @@
     candleSeries = volumeSeries = sma20Series = sma50Series = rsiSeries = null;
     priceLines = [];
     forgetOverlayArtifacts();
+    annotationLayer.forget();
     if (data) render(data);
   }
 
@@ -805,6 +922,7 @@
       candleSeries = volumeSeries = sma20Series = sma50Series = rsiSeries = null;
       priceLines = [];
       forgetOverlayArtifacts();
+      annotationLayer.forget();
       data = null;
     }
     try {
@@ -890,8 +1008,12 @@
 
   onDestroy(() => {
     resizeObserver?.disconnect();
+    if (annotationFrame && typeof cancelAnimationFrame !== 'undefined') cancelAnimationFrame(annotationFrame);
+    for (const owner of reportedOwners) reportAnnotationOffscreen(owner, null);
+    reportedOwners = new Set();
     chart?.remove();
     chart = null;
+    annotationLayer.forget();
   });
 
   const pct = (value: number | null | undefined) =>
