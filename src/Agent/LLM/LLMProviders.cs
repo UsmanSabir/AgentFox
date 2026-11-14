@@ -6,6 +6,7 @@ using Microsoft.Extensions.Configuration;
 using OllamaSharp;
 using OpenAI;
 using System.ClientModel;
+using System.ClientModel.Primitives;
 using Azure.AI.OpenAI;
 
 namespace AgentFox.LLM;
@@ -46,7 +47,7 @@ public class LLMFactory
                     var model = configuration["LLM:Model"];
 
                     var keyCredential = new ApiKeyCredential(apiKey);
-                    var openAiClient = new OpenAIClient(keyCredential, new OpenAIClientOptions() { Endpoint = new Uri(baseUrl), NetworkTimeout = timeout });
+                    var openAiClient = new OpenAIClient(keyCredential, OpenAiOptions(baseUrl, timeout, customHeaders));
                     var chatClient = openAiClient.GetChatClient(model);
 
                     provider = chatClient.AsIChatClient();
@@ -60,7 +61,7 @@ public class LLMFactory
                     var model = configuration["LLM:Model"];
 
                     var keyCredential = new ApiKeyCredential(apiKey);
-                    var openAiClient = new OpenAIClient(keyCredential, new OpenAIClientOptions() { Endpoint = new Uri(baseUrl), NetworkTimeout = timeout });
+                    var openAiClient = new OpenAIClient(keyCredential, OpenAiOptions(baseUrl, timeout, customHeaders));
                     var chatClient = openAiClient.GetChatClient(model);
 
                     provider = chatClient.AsIChatClient();
@@ -172,10 +173,38 @@ public class LLMFactory
             Model = modelNameOrKey,
             BaseUrl = configuration["LLM:BaseUrl"] ?? "http://localhost:11434",
             ApiKey = configuration["LLM:ApiKey"],
+            Headers = configuration.GetSection("LLM:Headers").Get<Dictionary<string, string>>() ?? new(),
             TimeoutSeconds = int.TryParse(configuration["LLM:TimeoutSeconds"], out var t) ? t : 3600
         };
 
         return CreateChatClient(fallback);
+    }
+
+    private static OpenAIClientOptions OpenAiOptions(string baseUrl, TimeSpan? timeout,
+        IReadOnlyDictionary<string, string> headers)
+    {
+        var options = new OpenAIClientOptions { Endpoint = new Uri(baseUrl), NetworkTimeout = timeout };
+        if (headers.Count > 0)
+        {
+            var handler = new CustomHeaderHandler(headers) { InnerHandler = new HttpClientHandler() };
+            options.Transport = new HttpClientPipelineTransport(new HttpClient(handler));
+        }
+        return options;
+    }
+
+    private sealed class CustomHeaderHandler(IReadOnlyDictionary<string, string> headers) : DelegatingHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            foreach (var (name, value) in headers)
+            {
+                if (name.Equals("Authorization", StringComparison.OrdinalIgnoreCase) ||
+                    name.Equals("Host", StringComparison.OrdinalIgnoreCase) ||
+                    !request.Headers.TryAddWithoutValidation(name, value))
+                    throw new InvalidOperationException($"Unsupported LLM header: {name}");
+            }
+            return base.SendAsync(request, cancellationToken);
+        }
     }
 
     public static IChatClient? CreateChatClient(ModelConfig modelConfig)
@@ -199,7 +228,7 @@ public class LLMFactory
                     var model = modelConfig.Model;
 
                     var keyCredential = new ApiKeyCredential(apiKey);
-                    var openAiClient = new OpenAIClient(keyCredential, new OpenAIClientOptions() { Endpoint = new Uri(baseUrl), NetworkTimeout = timeout });
+                    var openAiClient = new OpenAIClient(keyCredential, OpenAiOptions(baseUrl, timeout, modelConfig.Headers));
                     var chatClient = openAiClient.GetChatClient(model);
                     provider = chatClient.AsIChatClient();
 
@@ -215,7 +244,7 @@ public class LLMFactory
                     var model = modelConfig.Model;
 
                     var keyCredential = new ApiKeyCredential(apiKey);
-                    var openAiClient = new OpenAIClient(keyCredential, new OpenAIClientOptions() { Endpoint = new Uri(baseUrl), NetworkTimeout = timeout });
+                    var openAiClient = new OpenAIClient(keyCredential, OpenAiOptions(baseUrl, timeout, modelConfig.Headers));
                     var chatClient = openAiClient.GetChatClient(model);
                     provider = chatClient.AsIChatClient();
 

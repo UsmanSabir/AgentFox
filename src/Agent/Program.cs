@@ -115,6 +115,7 @@ class Program
         builder.Configuration
             .AddJsonFile(AppSettingsHelper.ResolveDefaultsPath(), optional: false, reloadOnChange: false)
             .AddJsonFile(appCfgPath, optional: true, reloadOnChange: true)
+            .AddHostedLlmSecrets()
             .AddEnvironmentVariables()
             .AddCommandLine(args);
 

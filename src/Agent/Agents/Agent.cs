@@ -33,6 +33,7 @@ public class ModelConfig
     public string Model { get; set; } = string.Empty;
     public string BaseUrl { get; set; } = "http://localhost:11434";
     public string? ApiKey { get; set; }
+    public Dictionary<string, string> Headers { get; set; } = new();
     public int TimeoutSeconds { get; set; } = 3600;
 }
 
