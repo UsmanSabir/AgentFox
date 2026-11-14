@@ -26,7 +26,7 @@ export interface LayerSeries {
 }
 
 export interface LayerZone {
-  priceFrom: number; priceTo: number; label?: string; color: string; fromTime?: number;
+  priceFrom: number; priceTo: number; label?: string; labelAlign?: 'left' | 'right'; color: string; fromTime?: number;
 }
 export interface LayerZoneStyle { strongAlpha: number; faintAlpha: number; }
 
@@ -35,7 +35,9 @@ export interface ZonesHandle { setZones(zones: LayerZone[], style?: LayerZoneSty
 
 export interface LayerMarker {
   time: number;
-  position: 'aboveBar' | 'belowBar';
+  position: 'aboveBar' | 'belowBar' | 'atPriceTop' | 'atPriceBottom' | 'atPriceMiddle';
+  /** Present exactly when `position` is one of the atPrice* values. */
+  price?: number;
   color: string;
   shape: 'arrowUp' | 'arrowDown' | 'circle';
   text: string;
@@ -128,7 +130,7 @@ export class AnnotationLayer {
     if (input.zones.length === 0) return;
     if (!this.zones) this.zones = this.host.attachZones(series);
     const drawn: LayerZone[] = input.zones.map(z => ({
-      priceFrom: z.priceFrom, priceTo: z.priceTo, label: z.label,
+      priceFrom: z.priceFrom, priceTo: z.priceTo, label: z.label, labelAlign: z.labelAlign,
       color: this.host.colorOf(z.kind), fromTime: z.fromTime
     }));
     // A touch stronger on a light background, where the same alpha reads fainter.
@@ -143,14 +145,32 @@ export class AnnotationLayer {
     // A time outside the loaded bars has no bar to sit on: not drawn, rather than snapped to an edge.
     const drawable = input.markers.filter(m => m.time >= firstTime && m.time <= lastTime)
       .sort((a, b) => a.time - b.time);
-    const list: LayerMarker[] = drawable.map(m => ({
-      time: m.time,
-      position: m.position === 'below' ? 'belowBar' : 'aboveBar',
-      color: this.host.colorOf(m.kind),
-      shape: m.shape === 'arrowUp' || m.shape === 'arrowDown' ? m.shape : 'circle',
-      text: m.label ?? ''
+    const list: LayerMarker[] = drawable.map(m => {
+      const shape = m.shape === 'arrowUp' || m.shape === 'arrowDown' ? m.shape : 'circle';
+      const base = {
+        time: m.time,
+        color: this.host.colorOf(m.kind),
+        shape,
+        text: m.label ?? ''
+      };
+      if (m.position === 'atPrice' && typeof m.price === 'number' && Number.isFinite(m.price) && m.price > 0) {
+        // The arrow's tip touches the price: a down arrow sits above it, an up arrow below it.
+        const position = shape === 'arrowDown' ? 'atPriceTop'
+          : shape === 'arrowUp' ? 'atPriceBottom' : 'atPriceMiddle';
+        // NO text on the chart for an atPrice marker. lightweight-charts centres marker text on the
+        // marker with no offset, and a fill sits at a price inside its own candle, so the label was
+        // drawn over (or behind) that very bar. The arrow marks the price; the words move to the
+        // hover card below, which already carries `detail`.
+        return { ...base, text: '', position, price: m.price } as LayerMarker;
+      }
+      return { ...base, position: m.position === 'below' ? 'belowBar' : 'aboveBar' } as LayerMarker;
+    });
+    // An atPrice marker's label is not drawn on the chart (above), so it is the hover card's line
+    // when the marker gave no `detail` of its own.
+    this.markerDetails = markerDetailsByTime(drawable.map(m => {
+      const atPrice = m.position === 'atPrice' && typeof m.price === 'number' && Number.isFinite(m.price) && m.price > 0;
+      return atPrice && !m.detail?.trim() && m.label ? { ...m, detail: m.label } : m;
     }));
-    this.markerDetails = markerDetailsByTime(drawable);
     if (this.markers) this.markers.setMarkers(list);
     else if (list.length > 0) this.markers = this.host.createMarkers(series, list);
   }
