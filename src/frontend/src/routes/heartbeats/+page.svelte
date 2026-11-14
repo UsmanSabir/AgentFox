@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { Heart, Plus, Trash2, Pause, Play, RefreshCw, Pencil, X, Check } from 'lucide-svelte';
-  import { api, type HeartbeatInfo, type HeartbeatRequest } from '$lib/api';
+  import { api, type HeartbeatInfo, type HeartbeatRequest } from '#lib/api.ts';
 
   let beats: HeartbeatInfo[] = [];
   let loading = true;

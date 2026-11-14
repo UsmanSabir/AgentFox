@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { api } from '$lib/api';
-  import { tools } from '$lib/stores';
+  import { api } from '#lib/api.ts';
+  import { tools } from '#lib/stores.ts';
   import { Wrench, RefreshCw, Search, Terminal, Globe, FolderOpen, Brain, Calculator, Clock, Hash, Info } from 'lucide-svelte';
 
   let loading = true;

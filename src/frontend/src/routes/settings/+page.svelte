@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { api, getManagementApiKey, setManagementApiKey } from '$lib/api';
+  import { api, getManagementApiKey, setManagementApiKey } from '#lib/api.ts';
   import { onMount } from 'svelte';
-  import { agentStatus } from '$lib/stores';
+  import { agentStatus } from '#lib/stores.ts';
   import {
     Settings, Server, Cpu, Key, Globe, Database,
     RefreshCw, CheckCircle, XCircle, Zap

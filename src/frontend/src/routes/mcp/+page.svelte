@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { api } from '$lib/api';
-  import type { McpStatus, McpServerInfo } from '$lib/api';
+  import { api } from '#lib/api.ts';
+  import type { McpStatus, McpServerInfo } from '#lib/api.ts';
   import {
     Server, RefreshCw, CheckCircle, XCircle, Wrench,
     ChevronDown, ChevronRight, Plug, AlertTriangle, Info

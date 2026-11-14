@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { CalendarClock, Plus, Trash2, RefreshCw, Pencil } from 'lucide-svelte';
-  import { api, type CronJobInfo } from '$lib/api';
+  import { api, type CronJobInfo } from '#lib/api.ts';
 
   let jobs: CronJobInfo[] = [];
   let loading = true;

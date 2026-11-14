@@ -1,16 +1,16 @@
 <script lang="ts">
   import '../app.css';
-  import Sidebar from '$lib/components/Sidebar.svelte';
+  import Sidebar from '#lib/components/Sidebar.svelte';
   import {
     sidebarCollapsed, agentStatus, resetChat, uiMode, uiTheme,
     type UiMode, type UiTheme
-  } from '$lib/stores';
-  import { api } from '$lib/api';
+  } from '#lib/stores.ts';
+  import { api } from '#lib/api.ts';
   import { onMount } from 'svelte';
-  import { page } from '$app/stores';
+  import { page } from '$app/state';
   import { MessageSquare, Zap, Sun, Moon } from 'lucide-svelte';
-  import { goto } from '$app/navigation';
-  import { parseSidebarCollapsed, SIDEBAR_COLLAPSED_KEY } from '$lib/sidebarPreference';
+  import { afterNavigate, goto } from '$app/navigation';
+  import { parseSidebarCollapsed, SIDEBAR_COLLAPSED_KEY } from '#lib/sidebarPreference.ts';
 
   function startNewChat(event: MouseEvent) {
     event.preventDefault();
@@ -24,7 +24,7 @@
   function selectMode(mode: UiMode) {
     uiMode.set(mode);
     localStorage.setItem(UI_MODE_KEY, mode);
-    if (mode === 'simple' && $page.url.pathname !== '/chat') goto('/chat');
+    if (mode === 'simple' && page.url.pathname !== '/chat') goto('/chat');
   }
 
   function applyTheme(theme: UiTheme, persist = true) {
@@ -56,7 +56,7 @@
     const savedMode = localStorage.getItem(UI_MODE_KEY);
     if (savedMode === 'simple' || savedMode === 'advanced') {
       uiMode.set(savedMode);
-      if (savedMode === 'simple' && $page.url.pathname !== '/chat') goto('/chat');
+      if (savedMode === 'simple' && page.url.pathname !== '/chat') goto('/chat');
     }
 
     async function poll() {
@@ -86,13 +86,18 @@
     '/settings':'Settings',
   };
 
+  let pathname = page.url.pathname;
+  afterNavigate(() => { pathname = page.url.pathname; });
   $: title = (() => {
-    const p = $page.url.pathname;
+    const p = pathname;
     // Plugin-supplied pages (/ext/{slug}) are not in the static map — title them from the slug so a
     // plugin page doesn't have to register anything host-side just to name its own header.
     if (p.startsWith('/ext/')) {
-      const slug = p.slice('/ext/'.length).split('/')[0];
-      return slug ? slug.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : 'Plugin';
+      const slug = p.slice(('/ext/').length).split('/')[0];
+
+      return slug
+        ? slug.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+        : 'Plugin';
     }
     for (const [k, v] of Object.entries(pageTitles)) {
       if (p === '/' ? p === k : p.startsWith(k) && k !== '/') return v;
@@ -101,7 +106,11 @@
   })();
 </script>
 
-<div class="app-shell" class:simple-mode={simpleMode} style="--offset: {collapsed ? '64px' : 'var(--sidebar-w)'}">
+<div
+  class="app-shell"
+  class:simple-mode={simpleMode}
+  style="--offset: {collapsed ? '64px' : 'var(--sidebar-w)'}"
+>
   {#if !simpleMode}
     <Sidebar />
   {/if}
@@ -161,9 +170,7 @@
     </header>
 
     <!-- Page content -->
-    <main class="content">
-      <slot />
-    </main>
+    <main class="content"><slot></slot></main>
   </div>
 </div>
 
@@ -197,8 +204,18 @@
     gap: 1rem;
   }
 
-  .header-left { display: flex; align-items: center; gap: 0.75rem; }
-  .header-right { display: flex; align-items: center; gap: 0.75rem; margin-left: auto; }
+  .header-left {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-left: auto;
+  }
 
   .header-title {
     font-size: 0.9375rem;
@@ -294,9 +311,15 @@
     flex-shrink: 0;
     transition: background 0.3s;
   }
-  .status-dot.ready { background: var(--success); box-shadow: 0 0 5px var(--success); }
 
-  .status-text { color: var(--text-3); }
+  .status-dot.ready {
+    background: var(--success);
+    box-shadow: 0 0 5px var(--success);
+  }
+
+  .status-text {
+    color: var(--text-3);
+  }
 
   /* Content */
   .content {

@@ -1,13 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { api } from '$lib/api';
-  import { agentStatus, tools, skills, agents } from '$lib/stores';
-  import StatusBadge from '$lib/components/StatusBadge.svelte';
+  import { api } from '#lib/api.ts';
+  import { agentStatus, tools, skills, agents } from '#lib/stores.ts';
+  import StatusBadge from '#lib/components/StatusBadge.svelte';
   import {
     Bot, Wrench, Puzzle, Database, MessageSquare,
     Activity, Clock, ArrowRight, Zap
   } from 'lucide-svelte';
-  import type { MemoryEntry, SessionInfo } from '$lib/api';
+  import type { MemoryEntry, SessionInfo } from '#lib/api.ts';
 
   let recentMemory: MemoryEntry[] = [];
   let sessions: SessionInfo[] = [];
