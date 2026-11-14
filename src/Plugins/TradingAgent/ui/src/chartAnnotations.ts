@@ -54,6 +54,8 @@ export interface AnnotationZone {
   priceFrom: number;
   priceTo: number;
   label?: string;
+  /** Which edge the label is drawn at: 'right' (default, where price-line titles sit) or 'left'. */
+  labelAlign?: 'left' | 'right';
   kind: AnnotationKind;
   fromTime?: number;
 }

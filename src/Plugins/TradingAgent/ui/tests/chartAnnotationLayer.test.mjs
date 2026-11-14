@@ -118,3 +118,9 @@ test('an atPrice marker without a usable price falls back to above the bar, and 
   assert.deepEqual(m.map(x => x.position), ['aboveBar', 'aboveBar', 'aboveBar', 'belowBar', 'aboveBar']);
   assert.ok(m.every(x => !('price' in x)));
 });
+
+test('a zone label alignment reaches the zone primitive', () => {
+  const { state, series, layer } = rig();
+  layer.draw(input(series, { zones: [{ priceFrom: 90, priceTo: 110, kind: 'support', label: 'Z', labelAlign: 'left' }] }));
+  assert.equal(lastZones(state)[0].labelAlign, 'left');
+});

@@ -26,7 +26,7 @@ export interface LayerSeries {
 }
 
 export interface LayerZone {
-  priceFrom: number; priceTo: number; label?: string; color: string; fromTime?: number;
+  priceFrom: number; priceTo: number; label?: string; labelAlign?: 'left' | 'right'; color: string; fromTime?: number;
 }
 export interface LayerZoneStyle { strongAlpha: number; faintAlpha: number; }
 
@@ -130,7 +130,7 @@ export class AnnotationLayer {
     if (input.zones.length === 0) return;
     if (!this.zones) this.zones = this.host.attachZones(series);
     const drawn: LayerZone[] = input.zones.map(z => ({
-      priceFrom: z.priceFrom, priceTo: z.priceTo, label: z.label,
+      priceFrom: z.priceFrom, priceTo: z.priceTo, label: z.label, labelAlign: z.labelAlign,
       color: this.host.colorOf(z.kind), fromTime: z.fromTime
     }));
     // A touch stronger on a light background, where the same alpha reads fainter.
