@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { api } from '$lib/api';
+  import { api } from '#lib/api.ts';
   import { Database, RefreshCw, Search, Filter, Brain, Power, Trash2 } from 'lucide-svelte';
-  import type { MemoryEntry, MemorySettings, SpecialistMemoryMode } from '$lib/api';
+  import type { MemoryEntry, MemorySettings, SpecialistMemoryMode } from '#lib/api.ts';
 
   let entries: MemoryEntry[] = [];
   let filtered: MemoryEntry[] = [];

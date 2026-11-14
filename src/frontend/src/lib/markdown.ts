@@ -1,6 +1,6 @@
 import { Marked } from 'marked';
 import DOMPurify from 'dompurify';
-import { browser } from '$app/environment';
+import { browser } from '$app/env';
 
 // GFM (tables, strikethrough, autolinks) with single-newline line breaks,
 // which matches how chat/LLM output is typically written.

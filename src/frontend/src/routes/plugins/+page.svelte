@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { api, type PluginSessionSummary, type PluginSessionStats, type PluginConfigResponse } from '$lib/api';
+  import { api, type PluginSessionSummary, type PluginSessionStats, type PluginConfigResponse } from '#lib/api.ts';
   import { RefreshCw, Activity, Settings, Clock, CheckCircle, AlertCircle, Zap } from 'lucide-svelte';
 
   let loading = true;

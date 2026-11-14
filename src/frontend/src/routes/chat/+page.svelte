@@ -3,8 +3,8 @@
 import { streamChat, streamConversationEvents, api, type SessionInfo,
   type SpecialistAgentInfo, type TodoSnapshot, type ConversationStreamEvent,
   type ToolActivity, type ToolActivityDetails, type ChatAttachment,
-  type AttachmentCapabilities } from '$lib/api';
-  import { renderMarkdown } from '$lib/markdown';
+  type AttachmentCapabilities } from '#lib/api.ts';
+  import { renderMarkdown } from '#lib/markdown.ts';
   import {
     chatMessages, addUserMessage, addAssistantMessage, addBackgroundResultMessage,
     appendToken, appendReasoning, setMessageStatus, upsertToolActivity, finalizeMessage,
@@ -12,7 +12,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
     activeConversationId, activeAgentId, agentReady, resetChat,
     upsertPendingApproval, clearPendingApproval, setBackgroundResult, uiMode,
     type ChatMessage, type ChatAttachmentView
-  } from '$lib/stores';
+  } from '#lib/stores.ts';
   import {
     Send, RotateCcw, StopCircle, Bot, User, Copy, Check, Zap, History, Plus, X,
     Download, Upload, Trash2, Pencil, Brain, GitFork, ChevronDown, Paperclip, FileText

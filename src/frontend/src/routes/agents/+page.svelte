@@ -1,11 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { api } from '$lib/api';
-  import { agents, resetChat } from '$lib/stores';
-  import StatusBadge from '$lib/components/StatusBadge.svelte';
+  import { api } from '#lib/api.ts';
+  import { agents, resetChat } from '#lib/stores.ts';
+  import StatusBadge from '#lib/components/StatusBadge.svelte';
   import { Bot, RefreshCw, Users, Cpu, Activity, MessageSquare } from 'lucide-svelte';
   import { goto } from '$app/navigation';
-  import type { AgentInfo, SpecialistAgentInfo, CommandQueueStatus } from '$lib/api';
+  import type { AgentInfo, SpecialistAgentInfo, CommandQueueStatus } from '#lib/api.ts';
 
   let loading = true;
   let error: string | null = null;
