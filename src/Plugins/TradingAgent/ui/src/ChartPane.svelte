@@ -32,10 +32,11 @@
   import { livePriceLabel, useLivePrices, type LivePrice } from './livePrices';
   import type { SymbolExtensionComponent } from './symbolExtensions';
   import {
-    annotationsForSymbol, chartAnnotationOwners, countOffscreen, levelLineWidth, planLevelLabels,
-    reportAnnotationOffscreen, type AnnotationLevel, type AnnotationMarker, type AnnotationZone
+    annotationsForSymbol, chartAnnotationOwners, countOffscreen, planLevelLabels,
+    reportAnnotationOffscreen
   } from './chartAnnotations';
-  import { ZonePrimitive, type DrawnZone } from './chartZonePrimitive';
+  import { ZonePrimitive } from './chartZonePrimitive';
+  import { AnnotationLayer, type LayerMarker, type LayerSeries } from './chartAnnotationLayer';
 
   export let symbol: string | null = null;
   export let companyName: string | null = null;
@@ -294,11 +295,23 @@
   let detailCard: { left: number; top: number; lines: MarkerDetailLine[] } | null = null;
   // Client-side annotations (see chartAnnotations.ts): a third artefact group, owned apart from server
   // overlays and level lines so each can be replaced without disturbing the others.
-  let annotationLines: { line: IPriceLine; level: AnnotationLevel; title: string; axisLabelVisible: boolean }[] = [];
-  let annotationMarkers: ISeriesMarkersPluginApi<Time> | null = null;
-  // One primitive paints every annotation zone; it lives on the candle series and is replaced with it.
-  let annotationZones: ZonePrimitive | null = null;
-  let annotationMarkerDetails = new Map<number, MarkerDetailLine[]>();
+  // The layer owns every handle (price lines, the zone primitive, the markers plugin). It is idempotent
+  // on redraw; only a real chart teardown calls annotationLayer.forget() (see chartAnnotationLayer.ts).
+  const annotationLayer = new AnnotationLayer({
+    attachZones: () => {
+      const zones = new ZonePrimitive();
+      candleSeries!.attachPrimitive(zones);
+      return zones;
+    },
+    // autoScale off: the annotation markers must not widen the price range the server markers' own
+    // autoscale margins already shaped.
+    createMarkers: (_series, markers) => {
+      const asSeries = (list: LayerMarker[]) => list as unknown as SeriesMarker<Time>[];
+      const plugin = createSeriesMarkers(candleSeries!, asSeries(markers), { autoScale: false });
+      return { setMarkers: list => plugin.setMarkers(asSeries(list)) };
+    },
+    colorOf: kind => overlayColor(kind)
+  });
   let annotationFrame = 0;
   // Owners we have published an off-screen count for, so one that disappears is retracted.
   let reportedOwners = new Set<string>();
@@ -508,91 +521,31 @@
   $: annotationSets = annotationsForSymbol($chartAnnotationOwners, symbol);
   $: annotationSets, redrawAnnotations();
 
-  /** Drops annotation handles without touching the chart (the chart is being, or was, destroyed). */
-  function forgetAnnotationArtifacts() {
-    annotationLines = [];
-    annotationMarkers = null;
-    annotationZones = null;
-    annotationMarkerDetails = new Map();
-  }
-
-  function clearAnnotationArtifacts() {
-    // Guarded like drawOverlays: the handles may belong to a chart that was rebuilt in between.
-    try {
-      for (const entry of annotationLines) candleSeries?.removePriceLine(entry.line);
-      annotationMarkers?.setMarkers([]);
-      annotationZones?.setZones([]);
-    } catch {
-      // handles from a disposed chart; nothing to clean up
-    }
-    annotationLines = [];
-    annotationMarkerDetails = new Map();
-  }
-
+  /**
+   * Redraws every annotation: idempotent, so it removes what the last call attached before attaching
+   * anew. It never forgets handles; that is for real teardown (rebuild, a chart-identity change in
+   * load, destroy), where the chart the handles belong to is gone.
+   */
   function redrawAnnotations() {
-    clearAnnotationArtifacts();
     const sets = annotationSets;
     if (!chart || !candleSeries || !data || sets.length === 0) {
+      annotationLayer.clear();
       retractAnnotationCounts(new Set());
       return;
     }
-
-    const levels: AnnotationLevel[] = sets.flatMap(s => s.annotations.levels ?? []);
-    const yOf = (price: number) => candleSeries!.priceToCoordinate(price);
-    const plans = planLevelLabels(levels, yOf);
-    levels.forEach((level, i) => {
-      const plan = plans[i];
-      const line = candleSeries!.createPriceLine({
-        price: level.price,
-        color: overlayColor(level.kind),
-        lineWidth: levelLineWidth(level.weight),
-        lineStyle: level.dashed ? 2 : 0,
-        axisLabelVisible: plan.axisLabelVisible,
-        title: plan.title
-      });
-      annotationLines.push({ line, level, title: plan.title, axisLabelVisible: plan.axisLabelVisible });
+    const first = data.candles.length ? data.candles[0].time : null;
+    const last = data.candles.length ? data.candles[data.candles.length - 1].time : null;
+    annotationLayer.draw({
+      series: candleSeries as unknown as LayerSeries,
+      levels: sets.flatMap(s => s.annotations.levels ?? []),
+      zones: sets.flatMap(s => s.annotations.zones ?? []),
+      markers: sets.flatMap(s => s.annotations.markers ?? []),
+      firstTime: first,
+      lastTime: last,
+      light: typeof document !== 'undefined'
+        && document.documentElement.getAttribute('data-theme') === 'light'
     });
-
-    drawAnnotationZones(sets.flatMap(s => s.annotations.zones ?? []));
-    drawAnnotationMarkers(sets.flatMap(s => s.annotations.markers ?? []), data);
     scheduleAnnotationRefresh();
-  }
-
-  function drawAnnotationZones(zones: AnnotationZone[]) {
-    if (zones.length === 0) return;
-    if (!annotationZones) {
-      annotationZones = new ZonePrimitive();
-      candleSeries!.attachPrimitive(annotationZones);
-    }
-    // The fill is the kind's theme colour at low alpha, a touch stronger on a light background where
-    // the same alpha reads fainter. Theme changes rebuild the chart, which redraws this.
-    const light = typeof document !== 'undefined'
-      && document.documentElement.getAttribute('data-theme') === 'light';
-    const drawn: DrawnZone[] = zones.map(z => ({
-      priceFrom: z.priceFrom, priceTo: z.priceTo, label: z.label,
-      color: overlayColor(z.kind), fromTime: z.fromTime
-    }));
-    annotationZones.setZones(drawn, light
-      ? { strongAlpha: 0.2, faintAlpha: 0.08 }
-      : { strongAlpha: 0.15, faintAlpha: 0.06 });
-  }
-
-  function drawAnnotationMarkers(markers: AnnotationMarker[], d: ChartData) {
-    if (d.candles.length === 0) return;
-    const first = d.candles[0].time, last = d.candles[d.candles.length - 1].time;
-    // A time outside the loaded bars has no bar to sit on: not drawn, rather than snapped to an edge.
-    const drawable = markers.filter(m => m.time >= first && m.time <= last)
-      .sort((a, b) => a.time - b.time);
-    const list: SeriesMarker<Time>[] = drawable.map(m => ({
-      time: m.time as UTCTimestamp,
-      position: m.position === 'below' ? 'belowBar' : 'aboveBar',
-      color: overlayColor(m.kind),
-      shape: m.shape === 'arrowUp' || m.shape === 'arrowDown' ? m.shape : 'circle',
-      text: m.label ?? ''
-    }));
-    annotationMarkerDetails = markerDetailsByTime(drawable);
-    if (annotationMarkers) annotationMarkers.setMarkers(list);
-    else if (list.length > 0) annotationMarkers = createSeriesMarkers(candleSeries!, list);
   }
 
   /**
@@ -601,6 +554,8 @@
    * A manual drag of the price axis fires no event, so counts and merges catch up on the next change.
    */
   function scheduleAnnotationRefresh() {
+    // A community build has no annotations and has reported nothing: pan and zoom cost it nothing.
+    if (annotationSets.length === 0 && annotationLayer.lines.length === 0 && reportedOwners.size === 0) return;
     if (annotationFrame || typeof requestAnimationFrame === 'undefined') return;
     annotationFrame = requestAnimationFrame(() => {
       annotationFrame = 0;
@@ -611,11 +566,11 @@
   function refreshAnnotationLayout() {
     if (!chart || !candleSeries) return;
     const yOf = (price: number) => candleSeries!.priceToCoordinate(price);
-    const plans = planLevelLabels(annotationLines.map(e => e.level), yOf);
-    annotationLines.forEach((entry, i) => {
+    const plans = planLevelLabels(annotationLayer.lines.map(e => e.level), yOf);
+    annotationLayer.lines.forEach((entry, i) => {
       const plan = plans[i];
       if (plan.title === entry.title && plan.axisLabelVisible === entry.axisLabelVisible) return;
-      entry.line.applyOptions({ title: plan.title, axisLabelVisible: plan.axisLabelVisible });
+      (entry.line as IPriceLine).applyOptions({ title: plan.title, axisLabelVisible: plan.axisLabelVisible });
       entry.title = plan.title;
       entry.axisLabelVisible = plan.axisLabelVisible;
     });
@@ -654,7 +609,6 @@
     eventStrip = null;
     markerDetails = new Map();
     detailCard = null;
-    forgetAnnotationArtifacts();
   }
 
   /** How much of the price pane, from the bottom, the event strip takes; volume sits above it. */
@@ -692,7 +646,7 @@
   function showMarkerDetail(param: MouseEventParams<Time>) {
     const at = param.time as number | undefined;
     const lines = at != null
-      ? [...(markerDetails.get(at) ?? []), ...(annotationMarkerDetails.get(at) ?? [])]
+      ? [...(markerDetails.get(at) ?? []), ...(annotationLayer.markerDetails.get(at) ?? [])]
       : [];
     if (lines.length === 0 || !param.point || !container) {
       detailCard = null;
@@ -908,6 +862,7 @@
     candleSeries = volumeSeries = sma20Series = sma50Series = rsiSeries = null;
     priceLines = [];
     forgetOverlayArtifacts();
+    annotationLayer.forget();
     if (data) render(data);
   }
 
@@ -967,6 +922,7 @@
       candleSeries = volumeSeries = sma20Series = sma50Series = rsiSeries = null;
       priceLines = [];
       forgetOverlayArtifacts();
+      annotationLayer.forget();
       data = null;
     }
     try {
@@ -1057,6 +1013,7 @@
     reportedOwners = new Set();
     chart?.remove();
     chart = null;
+    annotationLayer.forget();
   });
 
   const pct = (value: number | null | undefined) =>

@@ -35,3 +35,16 @@ test('a price the scale cannot place gives no rows', () => {
   assert.equal(zoneRows(100, 120, () => null), null);
   assert.equal(zoneRows(100, 120, p => (p === 100 ? NaN : 10)), null);
 });
+
+test('a split time that is not on a bar resolves to the first bar at or after it', async () => {
+  const { zoneStartColumn } = await import('../src/chartZonePrimitive.ts');
+  const times = [100, 200, 300, 400];
+  const indexAtOrAfter = t => { const i = times.findIndex(x => x >= t); return i < 0 ? null : i; };
+  const column = i => i * 10;
+  assert.equal(zoneStartColumn(250, 400, 4, indexAtOrAfter, column), 20, 'between bars: the next one');
+  assert.equal(zoneStartColumn(300, 400, 4, indexAtOrAfter, column), 20, 'on a bar: that bar');
+  assert.equal(zoneStartColumn(50, 400, 4, indexAtOrAfter, column), 0, 'before the first bar');
+  assert.equal(zoneStartColumn(500, 400, 4, indexAtOrAfter, column), 40, 'past the last bar: the slot after the data');
+  assert.equal(zoneStartColumn(250, null, 0, indexAtOrAfter, column), null, 'no data: unresolvable');
+  assert.equal(zoneStartColumn(250, 400, 4, () => null, column), null);
+});

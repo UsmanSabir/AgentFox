@@ -54,6 +54,25 @@ export function zoneRows(
   return { top: Math.min(a, b), bottom: Math.max(a, b) };
 }
 
+/**
+ * Pure: the pixel column where a zone turns strong. A `fromTime` past the last bar (a forecast) turns
+ * strong at the first slot after the data; otherwise at the first bar at or after it (`timeToIndex`
+ * with findNearest), so a time that sits between bars still splits. Null when it cannot be placed,
+ * which paints the zone strong throughout.
+ */
+export function zoneStartColumn(
+  fromTime: number,
+  lastBarTime: number | null,
+  barCount: number,
+  indexAtOrAfter: (time: number) => number | null,
+  columnOfIndex: (index: number) => number | null
+): number | null {
+  if (lastBarTime == null || barCount <= 0) return null;
+  if (fromTime > lastBarTime) return columnOfIndex(barCount);
+  const index = indexAtOrAfter(fromTime);
+  return index == null ? null : columnOfIndex(index);
+}
+
 type Draw = IPrimitivePaneRenderer['draw'];
 
 class ZoneRenderer implements IPrimitivePaneRenderer {
@@ -74,14 +93,15 @@ class ZoneRenderer implements IPrimitivePaneRenderer {
         const top = Math.max(0, rows.top), bottom = Math.min(mediaSize.height, rows.bottom);
         if (bottom <= top) continue;
 
-        let xFrom = zone.fromTime != null ? timeScale.timeToCoordinate(zone.fromTime as Time) : null;
-        if (xFrom == null && zone.fromTime != null) {
-          // No bar at that time. After the last bar (a forecast) the zone turns strong at the first bar
-          // past the data; before the first bar, or unresolvable, it is strong throughout (xFrom null).
-          const data = series.data();
-          const last = data.length > 0 ? (data[data.length - 1].time as number) : null;
-          if (last != null && zone.fromTime > last) xFrom = timeScale.logicalToCoordinate(data.length as Logical);
-        }
+        // timeToCoordinate is exact-match only in v5, so a time that is not on a bar (a weekend, mid-bar,
+        // a daily time on intraday bars) would lose the split. Resolve through the bar index instead.
+        const data = series.data();
+        const xFrom = zone.fromTime == null ? null : zoneStartColumn(
+          zone.fromTime,
+          data.length > 0 ? (data[data.length - 1].time as number) : null,
+          data.length,
+          t => timeScale.timeToIndex(t as Time, true),
+          i => timeScale.logicalToCoordinate(i as Logical));
         ctx.save();
         ctx.fillStyle = zone.color;
         for (const seg of zoneSegments(mediaSize.width, xFrom)) {
