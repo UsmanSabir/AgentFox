@@ -54,6 +54,8 @@ export interface AnnotationZone {
   priceFrom: number;
   priceTo: number;
   label?: string;
+  /** Which edge the label is drawn at: 'right' (default, where price-line titles sit) or 'left'. */
+  labelAlign?: 'left' | 'right';
   kind: AnnotationKind;
   fromTime?: number;
 }
@@ -63,7 +65,17 @@ export type AnnotationMarkerShape = 'arrowUp' | 'arrowDown' | 'circle';
 export interface AnnotationMarker {
   /** The bar's UTC seconds. A time with no bar draws nothing. */
   time: number;
-  position: 'above' | 'below';
+  /**
+   * 'above' / 'below' sit against the bar's high / low (the default). 'atPrice' puts the marker AT
+   * `price` on the price scale, which is what a fill at a known price wants: an arrow above the bar's
+   * high says nothing about where the trade happened. An 'atPrice' marker without a usable `price`
+   * (missing, not finite, not above zero) falls back to 'above'. An 'atPrice' marker draws NO text on
+   * the chart (a label centred on a price inside the bar's own candle covers that candle); its `label`
+   * becomes its hover-card line instead, unless it carries a `detail` of its own.
+   */
+  position: 'above' | 'below' | 'atPrice';
+  /** The price an 'atPrice' marker sits at; ignored for the other positions. */
+  price?: number;
   shape: AnnotationMarkerShape;
   label?: string;
   /** One line shown in the chart's hover card while the pointer is on that bar. */
@@ -220,6 +232,10 @@ export interface LevelLabelPlan {
  * row (null when unknown); levels closer than `minGapPx` rows form a group, and the group's lowest
  * level (largest y) carries every label joined with " · " while the others draw their line with no
  * chip. The lines themselves are always all drawn. Result is index-aligned with the input.
+ *
+ * A merged label keeps every level's NAME beside its OWN price ("Target 685.33 · Safe 681.70"), because
+ * the one chip left on the axis can show only the carrier's price and the others would otherwise be
+ * unreadable. A level that is not merged keeps its plain label: its own chip already shows the price.
  */
 export function planLevelLabels(
   levels: readonly { price: number; label: string }[],
@@ -235,7 +251,9 @@ export function planLevelLabels(
   const flush = () => {
     if (group.length > 1) {
       const carrier = group[group.length - 1];
-      const joined = group.map(g => levels[g.index].label).filter(Boolean).join(' · ');
+      const joined = group
+        .map(g => levels[g.index].label ? `${levels[g.index].label} ${g.price.toFixed(2)}` : '')
+        .filter(Boolean).join(' · ');
       for (const g of group) plans[g.index] = { title: '', axisLabelVisible: false };
       plans[carrier.index] = { title: joined, axisLabelVisible: true };
     }

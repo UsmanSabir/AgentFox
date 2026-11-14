@@ -94,3 +94,46 @@ test('markers outside the loaded bars are not drawn, and marker detail follows t
   assert.equal(lastMarkers(state)[0].position, 'belowBar');
   assert.deepEqual([...layer.markerDetails.keys()], [50]);
 });
+
+test('an atPrice marker sits at its price: a down arrow above it, an up arrow below it, a circle on it', () => {
+  const { state, series, layer } = rig();
+  layer.draw(input(series, { markers: [
+    { time: 10, position: 'atPrice', price: 712.55, shape: 'arrowDown', kind: 'sold' },
+    { time: 20, position: 'atPrice', price: 650, shape: 'arrowUp', kind: 'buy' },
+    { time: 30, position: 'atPrice', price: 700, shape: 'circle', kind: 'buy' }] }));
+  const m = lastMarkers(state);
+  assert.deepEqual(m.map(x => [x.position, x.price]),
+    [['atPriceTop', 712.55], ['atPriceBottom', 650], ['atPriceMiddle', 700]]);
+});
+
+test('an atPrice marker without a usable price falls back to above the bar, and others are unchanged', () => {
+  const { state, series, layer } = rig();
+  layer.draw(input(series, { markers: [
+    { time: 10, position: 'atPrice', shape: 'arrowDown', kind: 'sold' },
+    { time: 20, position: 'atPrice', price: NaN, shape: 'arrowDown', kind: 'sold' },
+    { time: 30, position: 'atPrice', price: -1, shape: 'arrowDown', kind: 'sold' },
+    { time: 40, position: 'below', price: 5, shape: 'arrowUp', kind: 'buy' },
+    { time: 50, position: 'above', shape: 'arrowUp', kind: 'buy' }] }));
+  const m = lastMarkers(state);
+  assert.deepEqual(m.map(x => x.position), ['aboveBar', 'aboveBar', 'aboveBar', 'belowBar', 'aboveBar']);
+  assert.ok(m.every(x => !('price' in x)));
+});
+
+test('a zone label alignment reaches the zone primitive', () => {
+  const { state, series, layer } = rig();
+  layer.draw(input(series, { zones: [{ priceFrom: 90, priceTo: 110, kind: 'support', label: 'Z', labelAlign: 'left' }] }));
+  assert.equal(lastZones(state)[0].labelAlign, 'left');
+});
+
+test('an atPrice marker draws no text on the chart; its label becomes the hover line unless a detail exists', () => {
+  const { state, series, layer } = rig();
+  layer.draw(input(series, { markers: [
+    { time: 10, position: 'atPrice', price: 712.55, shape: 'arrowDown', kind: 'sold', label: 'Sold 5 @ 712.55' },
+    { time: 20, position: 'atPrice', price: 650, shape: 'arrowUp', kind: 'buy', label: 'Bought', detail: 'Bought 3 at 650' },
+    { time: 30, position: 'above', shape: 'arrowUp', kind: 'buy', label: 'Plain' }] }));
+  const m = lastMarkers(state);
+  assert.deepEqual(m.map(x => x.text), ['', '', 'Plain']);
+  assert.equal(layer.markerDetails.get(10)[0].text, 'Sold 5 @ 712.55');
+  assert.equal(layer.markerDetails.get(20)[0].text, 'Bought 3 at 650');
+  assert.equal(layer.markerDetails.get(30), undefined);
+});

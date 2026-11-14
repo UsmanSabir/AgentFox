@@ -18,6 +18,8 @@ export interface DrawnZone {
   priceFrom: number;
   priceTo: number;
   label?: string;
+  /** Where the label sits along the zone: the right edge (default) or the left edge. */
+  labelAlign?: 'left' | 'right';
   /** A resolved CSS colour. Alpha is applied by the primitive. */
   color: string;
   /** UTC seconds; bars before it are painted fainter. Omitted: one strength throughout. */
@@ -29,6 +31,15 @@ export interface ZoneStyle {
   strongAlpha: number;
   /** Fill alpha over bars before a zone's `fromTime`. */
   faintAlpha: number;
+}
+
+/**
+ * Pure: where a zone's label is drawn. The right edge (default) is where price-line titles sit, so a
+ * caller whose zone label would collide with them asks for the left edge, which is inside the zone and
+ * clear of the axis chips.
+ */
+export function zoneLabelAnchor(align: 'left' | 'right' | undefined, width: number): { x: number; textAlign: 'left' | 'right' } {
+  return align === 'left' ? { x: 6, textAlign: 'left' } : { x: width - 6, textAlign: 'right' };
 }
 
 export interface ZoneSegment { x0: number; x1: number; strong: boolean; }
@@ -121,9 +132,10 @@ class ZoneRenderer implements IPrimitivePaneRenderer {
           ctx.globalAlpha = 0.9;
           ctx.fillStyle = zone.color;
           ctx.font = '11px system-ui, sans-serif';
-          ctx.textAlign = 'right';
+          const anchor = zoneLabelAnchor(zone.labelAlign, mediaSize.width);
+          ctx.textAlign = anchor.textAlign;
           ctx.textBaseline = 'top';
-          ctx.fillText(zone.label, mediaSize.width - 6, top + 3);
+          ctx.fillText(zone.label, anchor.x, top + 3);
         }
         ctx.restore();
       }

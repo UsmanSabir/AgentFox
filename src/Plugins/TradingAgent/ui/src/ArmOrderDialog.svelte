@@ -8,6 +8,8 @@
   } from './api';
   import { Crosshair, X, AlertTriangle, Zap } from 'lucide-svelte';
   import { livePriceLabel, useLivePrices } from './livePrices';
+  import { validArmQuantity } from './orderRequests';
+  import { armOrderSummary, armLevelLine } from './armSummary';
 
   /**
    * Pre-filled context from wherever the user clicked — a chart level or an alert. Everything stays
@@ -47,7 +49,14 @@
 
   const dispatch = createEventDispatcher<{ armed: void; close: void }>();
 
-  let quantity: number | null = null;
+  /**
+   * Optional starting share count from the caller (ArmOrderDialogContext.quantity). Whole shares above
+   * zero only; anything else is ignored and the dialog keeps its own default. Still editable, and
+   * nothing is sent until the dialog's own button.
+   */
+  export let quantity: number | null = null;
+  const initialQuantity = validArmQuantity(quantity);
+  quantity = initialQuantity;
   let sizeMode: 'shares' | 'value' = 'shares';
   let orderValue: number | null = null;
   // Pre-fillable like the rest (see ArmOrderDialogContext): all stay editable below, none is sent unless
@@ -116,8 +125,9 @@
     autoSizeKey = requestedAutoSizeKey;
     if (requestedAutoSizeKey) {
       sizeMode = 'shares';
-      quantity = null;
-      quantityWasEdited = false;
+      // A caller-supplied size outranks the custody default, which would otherwise overwrite it.
+      quantity = initialQuantity;
+      quantityWasEdited = initialQuantity != null;
       void loadAvailableShares(requestedAutoSizeKey);
     } else {
       availableShares = null;
@@ -269,29 +279,13 @@
    * is a number in a box; this says what those numbers will actually do, in the order it happens —
    * and it is the thing to read back before committing size to a level.
    */
-  $: summary = (() => {
-    if (!effectiveQuantity || effectiveQuantity <= 0) return null;
-    const fill = orderType === 'MARKET'
-      ? 'at the best price available'
-      : price != null ? `at ${money(price)}` : 'with no price set';
-    const verb = action === 'SELL' ? 'Sells' : 'Buys';
-
-    if (isEvent) {
-      return triggerAlertKind
-        ? `${verb} ${effectiveQuantity} ${symbol} ${fill} when ${symbol} raises `
-          + `"${triggerAlertKind.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase()}".`
-        : null;
-    }
-
-    if (level == null) return null;
-    const move = fallsToTrigger ? 'falls' : 'rises';
-
-    if (!isPercent) return `${verb} ${effectiveQuantity} ${symbol} ${fill} if it ${move} to ${money(level)}.`;
-
-    const from = referencePrice != null ? money(referencePrice) : '—';
-    return `${verb} ${effectiveQuantity} ${symbol} ${fill} if it ${move} ${triggerPercent}% `
-         + `from ${from} — that is ${money(level)}.`;
-  })();
+  $: summaryInput = {
+    action, quantity: effectiveQuantity, symbol, orderType, price, isEvent, triggerAlertKind,
+    isPercent, fallsToTrigger, level, triggerPercent, referencePrice, trailing,
+    priceBound: boundedTrail ? priceBound : null
+  };
+  $: summary = armOrderSummary(summaryInput);
+  $: levelLine = armLevelLine(summaryInput);
 
   async function submit() {
     if (busy) return;
@@ -512,9 +506,9 @@
           </label>
         {/if}
 
-        {#if level != null}
+        {#if levelLine}
           <p class="level-line">
-            Fires at <b>{money(level)}</b>
+            {#if levelLine.kind === 'fires'}Fires at <b>{money(levelLine.level)}</b>{:else}{levelLine.text}{/if}
             {#if displayedCurrentPrice != null && displayedCurrentPrice > 0}
               · {symbol} is {money(displayedCurrentPrice)} now
               <small title={livePriceLabel(livePriceView)}>({livePriceView.freshness})</small>

@@ -987,9 +987,10 @@ export interface AttachTakeProfitRequest {
 }
 
 /**
- * Editable values used to pre-fill the arm-order dialog from a chart level or an alert. Quantity is
- * intentionally absent: SELL stop-loss orders derive a safe default from current custody, while all
- * other orders still ask the operator to choose a size in the dialog.
+ * Editable values used to pre-fill the arm-order dialog from a chart level or an alert. `quantity` is
+ * optional: absent, SELL stop-loss orders derive a safe default from current custody and all other
+ * orders ask the operator to choose a size; given (whole shares, above zero — anything else is
+ * ignored), it is the starting size, still editable.
  */
 export interface ArmOrderDialogContext {
   symbol: string;
@@ -1003,6 +1004,8 @@ export interface ArmOrderDialogContext {
   limitPrice?: number | null;
   sourceAlertId?: string | null;
   context?: string | null;
+  /** Starting share count; whole shares above zero, otherwise ignored. Editable in the dialog. */
+  quantity?: number;
 
   // Percent-trigger pre-fill. `referencePrice` is what the caller had on screen, so the level the
   // dialog quotes is the one that gets armed rather than one re-derived a moment later.

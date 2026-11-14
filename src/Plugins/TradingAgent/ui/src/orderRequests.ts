@@ -72,6 +72,11 @@ export function requestPriceAlert(
   return true;
 }
 
+/** Pure: a caller-supplied starting size is whole shares above zero, otherwise null (ignored). */
+export function validArmQuantity(quantity: unknown): number | null {
+  return typeof quantity === 'number' && Number.isInteger(quantity) && quantity > 0 ? quantity : null;
+}
+
 /** Pure: whether a pending request is still within its lifetime. */
 export function isFresh(p: PendingOrderRequest, nowMs: number): boolean {
   return nowMs - p.atMs >= 0 && nowMs - p.atMs <= REQUEST_TTL_MS;
