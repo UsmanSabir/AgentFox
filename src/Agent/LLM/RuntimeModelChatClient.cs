@@ -1,6 +1,7 @@
 using AgentFox.Agents;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace AgentFox.LLM;
 
@@ -8,6 +9,7 @@ namespace AgentFox.LLM;
 public sealed class RuntimeModelChatClient : IChatClient
 {
     private readonly IConfiguration _configuration;
+    private readonly IServiceProvider? _services;
     private readonly object _gate = new();
     private ClientState _current;
     private bool _disposed;
@@ -20,9 +22,10 @@ public sealed class RuntimeModelChatClient : IChatClient
         public bool Retired;
     }
 
-    public RuntimeModelChatClient(IConfiguration configuration)
+    public RuntimeModelChatClient(IConfiguration configuration, IServiceProvider? services = null)
     {
         _configuration = configuration;
+        _services = services;
         _current = new ClientState(LLMFactory.CreateFromConfiguration(configuration),
             configuration["LLM:Model"] ?? string.Empty);
     }
@@ -38,23 +41,56 @@ public sealed class RuntimeModelChatClient : IChatClient
 
     public bool TrySetModel(string? requested, out string? error)
     {
-        error = null;
+        var result = TrySetModelAsync(requested).GetAwaiter().GetResult();
+        error = result.Error;
+        return result.Success;
+    }
+
+    public async Task<(bool Success, string? Error)> TrySetModelAsync(string? requested,
+        CancellationToken cancellationToken = default)
+    {
         if (!CanSwitch)
-        {
-            error = "Configure an API key before changing the model at runtime.";
-            return false;
-        }
+            return (false, "Configure an API key before changing the model at runtime.");
 
         var model = requested?.Trim();
         if (string.IsNullOrEmpty(model) || model.Length > 200 || requested!.Any(char.IsControl))
+            return (false, "Enter a model ID of 1 to 200 characters without control characters.");
+
+        var selection = await GetSelectionAsync(cancellationToken);
+        if (selection.AllowedModels is { } allowed && !allowed.Contains(model, StringComparer.Ordinal))
+            return (false, selection.Reason ?? "This model is not allowed for this account.");
+
+        return SetModelCore(model);
+    }
+
+    /// <summary>Refreshes policy and restores the configured model if the active selection is no longer allowed.</summary>
+    public async Task<ModelSwitchSelection> GetSelectionAsync(CancellationToken cancellationToken = default)
+    {
+        // Nothing to enforce when the model cannot leave the configured one (no API key). Consulting the policy anyway would cost
+        // a hub read a minute, on every model call, for an agent that can never switch.
+        if (!CanSwitch) return new ModelSwitchSelection(null);
+        ModelSwitchSelection selection;
+        try
         {
-            error = "Enter a model ID of 1 to 200 characters without control characters.";
-            return false;
+            // Resolved on use so a premium policy never creates a constructor cycle through the hub client.
+            selection = await (_services?.GetService<IModelSwitchPolicy>() ?? new AllowAnyModelSwitchPolicy())
+                .ReadAsync(cancellationToken);
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch { selection = new ModelSwitchSelection([], "Model access could not be checked. Only the configured model is available."); }
+        if (selection.AllowedModels is null) return selection;
+        var allowed = selection.AllowedModels.Append(ConfiguredModel).Where(x => !string.IsNullOrWhiteSpace(x))
+            .Distinct(StringComparer.Ordinal).ToArray();
+        if (!allowed.Contains(Model, StringComparer.Ordinal)) SetModelCore(ConfiguredModel);
+        return selection with { AllowedModels = allowed };
+    }
+
+    private (bool Success, string? Error) SetModelCore(string model)
+    {
 
         lock (_gate)
         {
-            if (model == _current.Model) return true;
+            if (model == _current.Model) return (true, null);
         }
 
         IChatClient next;
@@ -66,8 +102,7 @@ public sealed class RuntimeModelChatClient : IChatClient
         }
         catch (Exception)
         {
-            error = "The model client could not be created. Check the model ID and provider settings.";
-            return false;
+            return (false, "The model client could not be created. Check the model ID and provider settings.");
         }
 
         IChatClient? retired = null;
@@ -80,7 +115,7 @@ public sealed class RuntimeModelChatClient : IChatClient
             if (old.ActiveCalls == 0) retired = old.Client;
         }
         retired?.Dispose();
-        return true;
+        return (true, null);
     }
 
     private static bool HasConfiguredApiKey(IConfiguration config)
@@ -100,8 +135,9 @@ public sealed class RuntimeModelChatClient : IChatClient
             || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(env)));
     }
 
-    private ClientState Acquire()
+    private async Task<ClientState> AcquireAsync(CancellationToken cancellationToken)
     {
+        await GetSelectionAsync(cancellationToken);
         lock (_gate)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
@@ -124,7 +160,7 @@ public sealed class RuntimeModelChatClient : IChatClient
     public async Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages,
         ChatOptions? options = null, CancellationToken cancellationToken = default)
     {
-        var state = Acquire();
+        var state = await AcquireAsync(cancellationToken);
         try { return await state.Client.GetResponseAsync(messages, options, cancellationToken); }
         finally { Release(state); }
     }
@@ -133,7 +169,7 @@ public sealed class RuntimeModelChatClient : IChatClient
         IEnumerable<ChatMessage> messages, ChatOptions? options = null,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        var state = Acquire();
+        var state = await AcquireAsync(cancellationToken);
         try
         {
             await foreach (var update in state.Client.GetStreamingResponseAsync(messages, options, cancellationToken))

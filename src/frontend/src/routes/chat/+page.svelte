@@ -884,8 +884,16 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
       <form class="model-picker" on:submit|preventDefault={applyModel} title="Model for future agent calls until restart">
         <label for="runtime-model">Model</label>
         {#if runtimeModel.canSwitch}
-          <input id="runtime-model" aria-label="Model ID" bind:value={modelInput}
-            maxlength="200" spellcheck="false" disabled={modelSaving || isStreaming} />
+          {#if runtimeModel.allowedModels}
+            <select id="runtime-model" aria-label="Model ID" bind:value={modelInput} disabled={modelSaving || isStreaming}>
+              {#each runtimeModel.allowedModels as allowedModel}
+                <option value={allowedModel}>{allowedModel}</option>
+              {/each}
+            </select>
+          {:else}
+            <input id="runtime-model" aria-label="Model ID" bind:value={modelInput}
+              maxlength="200" spellcheck="false" disabled={modelSaving || isStreaming} />
+          {/if}
           <button class="toolbar-btn" type="submit"
             disabled={modelSaving || isStreaming || !modelInput.trim() || modelInput.trim() === runtimeModel.model}>
             {modelSaving ? 'Applying…' : 'Apply'}
@@ -1423,7 +1431,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
     font-size: 0.75rem;
   }
   .model-picker { display: flex; align-items: center; gap: 0.4rem; min-width: 0; }
-  .model-picker input {
+  .model-picker input, .model-picker select {
     width: clamp(9rem, 19vw, 17rem);
     min-width: 0;
     padding: 0.3rem 0.45rem;
@@ -1542,7 +1550,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
     .conv-label, .conv-id { display: none; }
     .agent-picker > span { display: none; }
     .model-picker > label { display: none; }
-    .model-picker input { width: 7rem; }
+    .model-picker input, .model-picker select { width: 7rem; }
   }
 
   /* Intro / empty state */

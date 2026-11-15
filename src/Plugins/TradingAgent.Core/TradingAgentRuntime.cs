@@ -563,6 +563,8 @@ public sealed class TradingAgentRuntime
             MaxIterations = 8,
             MaxConcurrentTurns = 1,
             TimeoutSeconds = agentOptions.Value.SpecialistTimeoutSeconds,
+            ToolGates = BindToolGates(composition, services),
+            PromptFragment = composition.SpecialistPromptAppendixProvider,
             SystemPrompt = $"""
                 You are the isolated PSX Trading Agent for AgentFox.
 
@@ -654,6 +656,20 @@ public sealed class TradingAgentRuntime
             agentOptions.Value.AutoExecute,
             agentOptions.Value.MinConfidence,
             agentOptions.Value.DuplicateWindowMinutes);
+    }
+
+    /// <summary>
+    /// Binds the edition's per-tool availability predicates to this host's service provider. Null when there are none, so the
+    /// host sees no gates at all and the community edition's specialist is exactly what it was.
+    /// </summary>
+    internal static IReadOnlyDictionary<string, Func<CancellationToken, ValueTask<bool>>>? BindToolGates(
+        TradingCompositionOptions composition, IServiceProvider services)
+    {
+        if (composition.SpecialistToolAvailability.Count == 0) return null;
+        var bound = new Dictionary<string, Func<CancellationToken, ValueTask<bool>>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (name, available) in composition.SpecialistToolAvailability)
+            bound[name] = ct => available(services, ct);
+        return bound;
     }
 
     /// <summary>

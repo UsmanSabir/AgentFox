@@ -104,18 +104,23 @@ public class WebModule : IAppModule
         });
 
         // The model ID is runtime-only. The configured provider, credential and endpoint stay fixed.
-        endpoints.MapGet("/model", (RuntimeModelChatClient modelClient, HttpContext httpContext) => Results.Ok(new
+        endpoints.MapGet("/model", async (RuntimeModelChatClient modelClient, HttpContext httpContext, CancellationToken ct) =>
         {
-            provider = modelClient.Provider,
-            model = modelClient.Model,
-            configuredModel = modelClient.ConfiguredModel,
-            canSwitch = modelClient.CanSwitch && httpContext.User.IsInRole(ManagementRoles.Administrator)
-        }));
-        endpoints.MapPut("/model", (RuntimeModelChatClient modelClient, RuntimeModelRequest req) =>
-            modelClient.TrySetModel(req.Model, out var error)
-                ? Results.Ok(new { provider = modelClient.Provider, model = modelClient.Model,
-                    configuredModel = modelClient.ConfiguredModel, canSwitch = modelClient.CanSwitch })
-                : Results.BadRequest(new { error }))
+            var selection = await modelClient.GetSelectionAsync(ct);
+            return Results.Ok(new { provider = modelClient.Provider, model = modelClient.Model,
+                configuredModel = modelClient.ConfiguredModel,
+                canSwitch = modelClient.CanSwitch && httpContext.User.IsInRole(ManagementRoles.Administrator),
+                allowedModels = selection.AllowedModels });
+        });
+        endpoints.MapPut("/model", async (RuntimeModelChatClient modelClient, RuntimeModelRequest req, CancellationToken ct) =>
+        {
+            var result = await modelClient.TrySetModelAsync(req.Model, ct);
+            if (!result.Success) return Results.BadRequest(new { error = result.Error });
+            var selection = await modelClient.GetSelectionAsync(ct);
+            return Results.Ok(new { provider = modelClient.Provider, model = modelClient.Model,
+                configuredModel = modelClient.ConfiguredModel, canSwitch = modelClient.CanSwitch,
+                allowedModels = selection.AllowedModels });
+        })
             .RequireAuthorization("ManagementAdministrator");
 
         // ── Chat (request/response) ───────────────────────────────────────────

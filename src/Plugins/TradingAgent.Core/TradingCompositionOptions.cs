@@ -69,4 +69,27 @@ public sealed record TradingCompositionOptions
     /// presented as actionable; replacing it would silently drop both.
     /// </summary>
     public string? SpecialistPromptAppendix { get; init; }
+
+    /// <summary>
+    /// Per-tool availability for the specialist, keyed by tool name (case-insensitive). An entry is asked before every model
+    /// call, with the host's service provider: when it answers false the tool is left out of what the model is offered, and a
+    /// call to it anyway is refused by the host. Tools with no entry are always offered, so the empty default changes
+    /// nothing. A predicate that throws counts as false for that tool only (unknown is never availability), and nothing is
+    /// cached here, so an entry that does real work must be cheap or keep its own short cache.
+    ///
+    /// <para>
+    /// This hides a tool; it does not make a tool safe to leave unguarded. The tool itself should still refuse when the
+    /// thing the predicate checks is false, since a tool can also be reached by a path that never consults this.
+    /// </para>
+    /// </summary>
+    public IReadOnlyDictionary<string, Func<IServiceProvider, CancellationToken, ValueTask<bool>>> SpecialistToolAvailability { get; init; }
+        = new Dictionary<string, Func<IServiceProvider, CancellationToken, ValueTask<bool>>>();
+
+    /// <summary>
+    /// Prompt text appended after <see cref="SpecialistPromptAppendix"/> before every model call, given the names of the
+    /// tools that call is actually offered once <see cref="SpecialistToolAvailability"/> has been applied. Prose that names
+    /// a tool belongs here so it appears only while that tool does, and the same set drives both, so the text and the tool
+    /// list cannot disagree. Return null or whitespace for nothing; a throw omits the text for that call.
+    /// </summary>
+    public Func<IReadOnlySet<string>, string?>? SpecialistPromptAppendixProvider { get; init; }
 }
