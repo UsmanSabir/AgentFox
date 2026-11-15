@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { get } from 'svelte/store';
 import {
-  REQUEST_TTL_MS, isFresh, validArmQuantity, orderRequests, requestArmOrder, requestPriceAlert, takeOrderRequest
+  REQUEST_TTL_MS, isFresh, validArmQuantity, orderRequests, requestArmOrder, requestNewOrder, requestPriceAlert, takeOrderRequest
 } from '../src/orderRequests.ts';
 
 const drain = () => takeOrderRequest(Date.now());
@@ -76,4 +76,57 @@ test('two identical requests are two events', () => {
 test('a starting quantity is whole shares above zero, else ignored', () => {
   assert.equal(validArmQuantity(25), 25);
   for (const bad of [0, -3, 2.5, NaN, Infinity, '10', null, undefined]) assert.equal(validArmQuantity(bad), null);
+});
+
+test('a new-order request is held once, cleaned, and consumed exactly once', () => {
+  drain();
+  assert.equal(requestNewOrder({
+    symbol: ' luck ', action: 'BUY', kind: 'priceTrigger', quantity: 20, triggerDirection: 'below', triggerPrice: 95, price: 96
+  }, 1000), true);
+  assert.equal(get(orderRequests).request.kind, 'newOrder');
+  const taken = takeOrderRequest(1500);
+  assert.deepEqual(taken, { kind: 'newOrder', prefill: {
+    symbol: 'LUCK', action: 'BUY', kind: 'priceTrigger', quantity: 20, triggerDirection: 'below', triggerPrice: 95, price: 96
+  } });
+  assert.equal(takeOrderRequest(1600), null);
+});
+
+test('a new-order request that cannot be placed is a no-op that leaves nothing pending', () => {
+  drain();
+  assert.equal(requestNewOrder({ symbol: '', action: 'BUY', kind: 'limit' }), false);
+  assert.equal(requestNewOrder({ symbol: 'LUCK', action: 'HOLD', kind: 'limit' }), false);
+  assert.equal(requestNewOrder({ symbol: 'LUCK', action: 'buy', kind: 'limit' }), false);
+  assert.equal(requestNewOrder({ symbol: 'LUCK', action: 'BUY', kind: 'market' }), false);
+  assert.equal(requestNewOrder({ symbol: 'LUCK', action: 'BUY', kind: 'priceTrigger', triggerPrice: 90 }), false);
+  assert.equal(requestNewOrder({ symbol: 'LUCK', action: 'BUY', kind: 'priceTrigger', triggerDirection: 'sideways' }), false);
+  assert.equal(requestNewOrder(null), false);
+  assert.equal(get(orderRequests), null);
+});
+
+test('a stale new-order request is cleared and ignored', () => {
+  drain();
+  requestNewOrder({ symbol: 'LUCK', action: 'SELL', kind: 'limit', price: 100 }, 0);
+  assert.equal(takeOrderRequest(REQUEST_TTL_MS + 1), null);
+  assert.equal(get(orderRequests), null);
+});
+
+test('the three request kinds share one slot: the latest wins', () => {
+  drain();
+  requestArmOrder({ symbol: 'LUCK' }, 0);
+  requestNewOrder({ symbol: 'ENGRO', action: 'SELL', kind: 'limit', price: 300 }, 0);
+  assert.equal(takeOrderRequest(1).kind, 'newOrder');
+  requestNewOrder({ symbol: 'ENGRO', action: 'SELL', kind: 'limit', price: 300 }, 0);
+  requestPriceAlert('LUCK', 10, 'above', 0);
+  assert.equal(takeOrderRequest(1).kind, 'priceAlert');
+  requestPriceAlert('LUCK', 10, 'above', 0);
+  requestNewOrder({ symbol: 'ENGRO', action: 'BUY', kind: 'trailing' }, 0);
+  assert.equal(takeOrderRequest(1).prefill.symbol, 'ENGRO');
+  assert.equal(takeOrderRequest(1), null);
+});
+
+test('a refused new-order request does not displace the pending one', () => {
+  drain();
+  requestArmOrder({ symbol: 'LUCK' }, 0);
+  assert.equal(requestNewOrder({ symbol: '', action: 'BUY', kind: 'limit' }), false);
+  assert.equal(takeOrderRequest(1).kind, 'arm');
 });
