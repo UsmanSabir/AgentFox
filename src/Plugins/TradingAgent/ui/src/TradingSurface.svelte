@@ -921,8 +921,10 @@
   .compact-toolbar { gap:.2rem .5rem; padding:.15rem .45rem; }
   .compact-toolbar .runtime-cluster { gap:.45rem; }
   .compact-toolbar .workspace-status-line { flex-wrap:nowrap; gap:.4rem; white-space:nowrap; }
-  .compact-toolbar .safety-banner { padding:.2rem .4rem; }
-  .compact-toolbar .safety-banner div { flex-wrap:nowrap; white-space:nowrap; }
+  .compact-toolbar .safety-banner { padding:.2rem .4rem; max-width:100%; box-sizing:border-box; }
+  .compact-toolbar .safety-banner div { min-width:0; flex-wrap:nowrap; }
+  .compact-toolbar .safety-banner b { flex:none; }
+  .compact-toolbar .safety-banner span { flex:1 1 18rem; min-width:0; overflow-wrap:anywhere; }
   .runtime-cluster { display:contents; }
   .workspace-status-line { display:flex; flex-wrap:wrap; gap:1rem; margin-top:.3rem; font-size:.65rem; color:var(--text-2); }
 
