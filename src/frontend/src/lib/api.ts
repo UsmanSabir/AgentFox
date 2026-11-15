@@ -44,7 +44,8 @@ export interface RuntimeModel {
   provider: string;
   model: string;
   configuredModel: string;
-  canSwitch: boolean;
+    canSwitch: boolean;
+    allowedModels: string[] | null;
 }
 
 export interface ReferenceItem {

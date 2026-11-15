@@ -5,6 +5,7 @@ using System.Text.Json;
 using AgentFox.LLM;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using TradingAgent.Research;
 
@@ -13,6 +14,34 @@ namespace AgentFox.ChannelTests;
 [TestClass]
 public sealed class RuntimeModelChatClientTests
 {
+    private sealed class MutablePolicy : IModelSwitchPolicy
+    {
+        public ModelSwitchSelection Selection = new(null);
+        public Task<ModelSwitchSelection> ReadAsync(CancellationToken cancellationToken = default) => Task.FromResult(Selection);
+    }
+
+    [TestMethod]
+    public async Task Restricted_policy_refuses_other_models_and_reverts_a_selection_when_narrowed()
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["LLM:Provider"] = "OpenRouter", ["LLM:ApiKey"] = "synthetic-secret", ["LLM:Model"] = "base"
+        }).Build();
+        var policy = new MutablePolicy { Selection = new ModelSwitchSelection(["approved"]) };
+        using var services = new ServiceCollection().AddSingleton<IModelSwitchPolicy>(policy).BuildServiceProvider();
+        using var client = new RuntimeModelChatClient(config, services);
+        Assert.IsFalse((await client.TrySetModelAsync("unapproved")).Success);
+        Assert.IsTrue((await client.TrySetModelAsync("approved")).Success);
+        Assert.AreEqual("approved", client.Model);
+        policy.Selection = new ModelSwitchSelection([], "Policy unreadable; only the configured model is available.");
+        var selection = await client.GetSelectionAsync();
+        CollectionAssert.AreEqual(new[] { "base" }, selection.AllowedModels!.ToArray());
+        Assert.AreEqual("base", client.Model);
+        var denied = await client.TrySetModelAsync("approved");
+        Assert.IsFalse(denied.Success);
+        StringAssert.Contains(denied.Error, "unreadable");
+    }
+
     [TestMethod]
     public async Task Switching_model_changes_the_next_request_and_attachment_capabilities()
     {
