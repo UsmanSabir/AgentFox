@@ -34,6 +34,20 @@ public sealed class SpecialistAgentDescriptor
     /// external fetches across several tool-call iterations) should raise this explicitly.
     /// </summary>
     public int TimeoutSeconds { get; init; } = 300;
+    /// <summary>
+    /// Optional per-turn availability of individual tools, keyed by tool name (case-insensitive). A tool with an entry is
+    /// asked before EVERY model call: when the answer is false it is left out of the tool list the model is offered and
+    /// a call to it anyway is refused by the host. A tool with no entry is always offered, so null (the default) changes
+    /// nothing. A predicate that throws counts as false for that tool: unknown is never availability. The host never
+    /// caches an answer, so a predicate that does real work must be cheap or cache for itself.
+    /// </summary>
+    public IReadOnlyDictionary<string, Func<CancellationToken, ValueTask<bool>>>? ToolGates { get; init; }
+    /// <summary>
+    /// Optional prompt text appended after <see cref="SystemPrompt"/> before every model call, given the names of the tools
+    /// that call is actually offered (after <see cref="ToolGates"/>). It lets prose that names a tool appear only while that
+    /// tool does. Return null or whitespace for nothing; a throw omits the text for that call.
+    /// </summary>
+    public Func<IReadOnlySet<string>, string?>? PromptFragment { get; init; }
 }
 
 /// <summary>

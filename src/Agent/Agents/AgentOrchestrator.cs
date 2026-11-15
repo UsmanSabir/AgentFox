@@ -671,6 +671,7 @@ public sealed class AgentOrchestrator : IHostedService
                 .WithWorkspaceManager(_workspaceManager)
                 .WithSessionManager(_sessionManager)
                 .WithExperienceLearning(_experienceLearning)
+                .WithToolGates(descriptor.ToolGates, descriptor.PromptFragment)
                 .WithCompactionFromConfig(_configuration)
                 .WithTodoPlannerFromConfig(_configuration)
                 // Same source name as the main agent; the span's agent name is what separates
