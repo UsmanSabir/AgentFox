@@ -55,7 +55,8 @@ public sealed class AttachmentDocumentReader
         _modelReadsPdf = modelReadsPdf;
     }
 
-    public static AttachmentDocumentReader FromConfig(IConfiguration config, McpManager? mcp, string baseDirectory)
+    public static AttachmentDocumentReader FromConfig(IConfiguration config, McpManager? mcp, string baseDirectory,
+        RuntimeModelChatClient? runtimeModel = null)
     {
         var section = config.GetSection("LLM:Attachments:DocumentReader");
         var server = section["Server"] is { Length: > 0 } s ? s : "anymd";
@@ -67,8 +68,8 @@ public sealed class AttachmentDocumentReader
             Path.GetFullPath(directory),
             days,
             () => mcp?.Servers.ContainsKey(server) == true,
-            // Read live: LLM:Model reloads, and a switch to a PDF-native model must take effect.
-            () => AttachmentSupport.Resolve(config).Documents);
+            // Read live: a runtime switch to a PDF-native model must take effect here too.
+            () => AttachmentSupport.Resolve(config, runtimeModel: runtimeModel?.Model).Documents);
     }
 
     /// <summary>True when <paramref name="mediaType"/> is a document this reader takes. A PDF goes

@@ -173,6 +173,14 @@ agentfox config validate
 agentfox config migrate
 ```
 
+### Changing the model while running
+
+When an API key is configured for the agent's LLM provider, an administrator can enter a model ID
+in the Chat toolbar and select **Apply**. New model calls use that ID immediately, including calls
+from non-web channels. The provider, endpoint, key, headers, and timeout stay configured as before.
+The selection lasts until the agent restarts; its configured model is then restored. The model ID
+must be supported by the configured provider.
+
 ### Uninstalling
 
 The installer writes an `uninstall` script into the install dir. It removes the system service (if
