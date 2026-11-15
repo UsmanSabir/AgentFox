@@ -4,6 +4,8 @@ export const WORKSPACE_RETENTION_MS = 180 * 24 * 60 * 60 * 1000;
 export const MAX_LAYOUT_LENGTH = 100_000;
 /** Where a workstation keeps the layout saved as "My view": beside its working layout, never in place of it. */
 export const myViewStorageKey = (storageKey: string) => `${storageKey}.my-view`;
+/** An explicitly saved preset, separate from the automatically remembered working layout. */
+export const presetViewStorageKey = (storageKey: string, preset: string) => `${storageKey}.preset.${preset}`;
 
 /** Aliases rename view metadata only; an unknown id or a retired target remains invalid. */
 export function resolveWorkspacePreset(

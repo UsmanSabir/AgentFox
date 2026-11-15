@@ -117,7 +117,7 @@
 
   <div class="main-area" class:simple={simpleMode}>
     <!-- Header -->
-    <header class="header">
+    <header class="header" class:trading-workspace={pathname.startsWith('/ext/trading')}>
       <div class="header-left">
         {#if simpleMode}
           <span class="simple-brand"><Zap size={16} /> AgentFox</span>
@@ -203,6 +203,7 @@
     flex-shrink: 0;
     gap: 1rem;
   }
+  .header.trading-workspace { height:44px; }
 
   .header-left {
     display: flex;
