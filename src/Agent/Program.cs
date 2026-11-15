@@ -332,7 +332,8 @@ class Program
         builder.Services.AddSingleton(skillRegistry!);
         builder.Services.AddSingleton(mcpManager!);
         // Chat attachments the model cannot read natively go to the document-reading MCP server.
-        builder.Services.AddSingleton(AttachmentDocumentReader.FromConfig(configuration, mcpManager, AppContext.BaseDirectory));
+        builder.Services.AddSingleton(sp => AttachmentDocumentReader.FromConfig(configuration, mcpManager,
+            AppContext.BaseDirectory, sp.GetRequiredService<RuntimeModelChatClient>()));
         builder.Services.AddSingleton(memory!);
         builder.Services.AddSingleton(agentMemory!);
         builder.Services.AddSingleton(memoryPolicy);
@@ -356,7 +357,9 @@ class Program
             AgentFox.Helpers.AppSettingsHelper.ResolveAppSettingsPath()));
 
         // LLM
-        builder.Services.AddSingleton(_ => LLMFactory.CreateFromConfiguration(configuration));
+        builder.Services.AddSingleton<RuntimeModelChatClient>();
+        builder.Services.AddSingleton<Microsoft.Extensions.AI.IChatClient>(sp =>
+            sp.GetRequiredService<RuntimeModelChatClient>());
 
         // Session management
         builder.Services.AddSingleton(sp =>

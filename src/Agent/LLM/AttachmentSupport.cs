@@ -183,10 +183,11 @@ public static class AttachmentSupport
     /// from the configured model name otherwise. Office and EPUB documents are accepted only
     /// while <paramref name="documentReader"/> reports its MCP server connected.
     /// </summary>
-    public static AttachmentCapabilities Resolve(IConfiguration config, AttachmentDocumentReader? documentReader = null)
+    public static AttachmentCapabilities Resolve(IConfiguration config, AttachmentDocumentReader? documentReader = null,
+        string? runtimeModel = null)
     {
         var provider = config["LLM:Provider"] ?? string.Empty;
-        var model    = config["LLM:Model"] ?? string.Empty;
+        var model    = runtimeModel ?? config["LLM:Model"] ?? string.Empty;
 
         var section  = config.GetSection("LLM:Attachments");
         var enabled  = ReadBool(section["Enabled"]) ?? true;
