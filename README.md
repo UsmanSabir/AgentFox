@@ -180,6 +180,8 @@ in the Chat toolbar and select **Apply**. New model calls use that ID immediatel
 from non-web channels. The provider, endpoint, key, headers, and timeout stay configured as before.
 The selection lasts until the agent restarts; its configured model is then restored. The model ID
 must be supported by the configured provider.
+An optional model-switch policy can limit hosted or managed installations to an approved list; the
+configured model remains available. When the list is limited, Chat shows a picker of those models.
 
 ### Uninstalling
 

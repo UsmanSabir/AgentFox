@@ -357,6 +357,7 @@ class Program
             AgentFox.Helpers.AppSettingsHelper.ResolveAppSettingsPath()));
 
         // LLM
+        builder.Services.AddSingleton<IModelSwitchPolicy, AllowAnyModelSwitchPolicy>();
         builder.Services.AddSingleton<RuntimeModelChatClient>();
         builder.Services.AddSingleton<Microsoft.Extensions.AI.IChatClient>(sp =>
             sp.GetRequiredService<RuntimeModelChatClient>());
