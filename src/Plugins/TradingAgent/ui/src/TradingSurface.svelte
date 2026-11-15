@@ -32,6 +32,7 @@
   import ArmedOrdersPanel from './ArmedOrdersPanel.svelte';
   import ArmOrderDialog from './ArmOrderDialog.svelte';
   import { orderRequests, takeOrderRequest } from './orderRequests';
+  import type { CleanNewOrderPrefill } from './newOrderPrefill';
   import ActivityPanel from './ActivityPanel.svelte';
   import MoversPanel from './MoversPanel.svelte';
   import NewOrderDialog from './NewOrderDialog.svelte';
@@ -102,6 +103,8 @@
   let newOrderDialogOpen = false;
   let selectedOrderAction: 'BUY' | 'SELL' | null = null;
   let quickOrder = false;
+  /** Set by a `requestNewOrder`; the dialog is keyed on it, so a second request remounts it fresh. */
+  let newOrderPrefill: CleanNewOrderPrefill | null = null;
   let quickMenuOpen = false;
   let quickMenu: HTMLDetailsElement;
   let quickMenuToggle: HTMLElement;
@@ -394,6 +397,7 @@
   }
   function closeNewOrderDialog() {
     newOrderDialogOpen = false;
+    newOrderPrefill = null;
     requestAnimationFrame(() => {
       if (orderDialogReturnFocus?.isConnected && orderDialogReturnFocus.getClientRects().length) orderDialogReturnFocus.focus();
       else workspace?.focusPanel('watchlist');
@@ -424,6 +428,20 @@
   function refreshWatchlist() { if (workspace) void workspaceWatchlist?.refresh(); else void marketWorkspace?.refresh(); }
 
   /**
+   * Opens the New Order dialog filled from a request. Already open: it is remounted on the new prefill
+   * (the same as the conditional-order dialog), keeping the focus to return to; nothing is submitted.
+   */
+  function openNewOrderWithPrefill(prefill: CleanNewOrderPrefill) {
+    if (!newOrderDialogOpen) orderDialogReturnFocus = document.activeElement as HTMLElement;
+    quickMenuOpen = false;
+    quickOrder = false;
+    selectedSymbol = prefill.symbol;
+    selectedOrderAction = prefill.action;
+    newOrderPrefill = prefill;
+    newOrderDialogOpen = true;
+  }
+
+  /**
    * A sibling component asked (orderRequests.ts) for one of this surface's own dialogs, pre-filled.
    * It opens the SAME dialog a chart click opens — nothing is sent until the user presses that dialog's
    * button. In a community build nothing writes the store, so this never runs.
@@ -433,6 +451,7 @@
     const request = takeOrderRequest();
     if (!request) return;
     if (request.kind === 'arm') armContext = request.prefill;
+    else if (request.kind === 'newOrder') openNewOrderWithPrefill(request.prefill);
     else void openPriceAlert(request.symbol, request.target, request.direction);
   }
 
@@ -468,10 +487,12 @@
 {/if}
 
 {#if newOrderDialogOpen}
+  {#key newOrderPrefill}
   <NewOrderDialog
     {selectedSymbol}
     selectedAction={selectedOrderAction}
     quick={quickOrder}
+    prefill={newOrderPrefill}
     on:changed={() => { load(); armedPanel?.load(); persistentPanel?.load(); }}
     on:close={closeNewOrderDialog}
   >
@@ -482,6 +503,7 @@
       <slot name="order-detail" {symbol} {action} {orderType} {quantity} {price} {value} {conditional} {triggerLevel} {trailing} {triggerPercent}/>
     </svelte:fragment>
   </NewOrderDialog>
+  {/key}
 {/if}
 </WorkspacePanel>
 

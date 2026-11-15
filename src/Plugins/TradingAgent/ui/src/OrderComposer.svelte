@@ -17,6 +17,7 @@
   import { livePriceLabel, useLivePrices } from './livePrices';
   import { announceAccountChanged } from './accountSignal';
   import { holdingValuation } from './holdingValuation';
+  import { composerStateFor, type CleanNewOrderPrefill } from './newOrderPrefill';
 
   export let selectedSymbol: string | null = null;
   /**
@@ -25,6 +26,12 @@
    * side; taking the first matching entry preserves its ordering as the source of truth.
    */
   export let selectedAction: 'BUY' | 'SELL' | null = null;
+  /**
+   * A starting form handed in by a sibling (see `newOrderPrefill.ts`): the order shape, size and prices
+   * a person would otherwise choose and type by hand. It fills the form and nothing more — the person
+   * still reviews the summary and presses the button. Read once, when the composer opens.
+   */
+  export let prefill: CleanNewOrderPrefill | null = null;
   export let docked = false;
   /** Compact, shares-only limit ticket. Validation, confirmation and submission stay shared. */
   export let quick = false;
@@ -234,7 +241,8 @@
       ]);
       if (intentResult.status === 'rejected') throw intentResult.reason;
       registry = intentResult.value;
-      if (selectedAction) {
+      if (prefill) applyPrefill(prefill, registry.intents);
+      else if (selectedAction) {
         side = selectedAction;
         const initialIntent = registry.intents.find(item => item.action === selectedAction
           && (!quick || (item.submission === 'immediate' && item.orderType === 'LIMIT' && item.priceField === 'limit')));
@@ -257,6 +265,25 @@
       if (docked && mounted) { await tick(); focusComposer(); }
     }
   });
+
+  /**
+   * Sets the form as a person would by hand: the side, then the order shape, then the numbers. A field
+   * the request left out keeps the composer's own suggestion; a shape this server does not offer leaves
+   * the side chosen and the shape grid for the person to pick from.
+   */
+  function applyPrefill(request: CleanNewOrderPrefill, intents: OrderIntentDefinition[]) {
+    const state = composerStateFor(request, intents);
+    side = state.side;
+    if (!state.intent) return;
+    choose(state.intent);
+    if (state.quantity != null) { sizeMode = 'shares'; quantity = state.quantity; quantityWasEdited = true; }
+    if (state.price != null) price = state.price;
+    if (state.triggerPrice != null) triggerPrice = state.triggerPrice;
+    if (state.triggerPercent != null) triggerPercent = state.triggerPercent;
+    if (state.priceBound != null) priceBound = state.priceBound;
+    if (state.persistentUntilFilled && persistable) persistentUntilFilled = true;
+    if (state.expiresInDays != null) expiresInDays = state.expiresInDays;
+  }
 
   async function refreshQuote() {
     if (!symbol.trim() || quoteBusy) return;

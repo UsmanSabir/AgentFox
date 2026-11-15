@@ -4,8 +4,8 @@
  *
  * WHY THIS EXISTS. A host panel that works out a price level (an exit, a re-entry, an alert) wants to
  * hand it to the user as a ready-to-confirm order, not as numbers to retype. The dashboard already
- * has the right dialogs — the conditional-order dialog (`ArmOrderDialog`) and the price-alert dialog
- * — and the chart already opens them from a clicked level. This store is the same door for a caller
+ * has the right dialogs — the conditional-order dialog (`ArmOrderDialog`), the New Order dialog and the
+ * price-alert dialog — and the chart already opens the first and last from a clicked level. This store is the same door for a caller
  * that is not the chart.
  *
  * WHAT IT DOES NOT DO. It submits nothing and decides nothing. The dialog opens with the prefill, shows
@@ -15,15 +15,20 @@
  *
  * MECHANISM. One pending request, memory only. `TradingSurface` consumes it as soon as it sees it. A
  * request nobody consumes within `REQUEST_TTL_MS` is dropped, so a call made while no dashboard is
- * mounted cannot open a dialog minutes later, over something unrelated.
+ * mounted cannot open a dialog minutes later, over something unrelated. The three request kinds share
+ * the one slot, so the latest request wins and a consumer never acts on two.
  */
 import { get, writable, type Readable } from 'svelte/store';
 import type { ArmOrderDialogContext } from './api';
+import { cleanNewOrderPrefill, type CleanNewOrderPrefill, type NewOrderPrefill } from './newOrderPrefill.ts';
+
+export type { NewOrderPrefill, NewOrderKind, NewOrderSide, NewOrderTriggerDirection } from './newOrderPrefill.ts';
 
 export type PriceAlertDirection = 'above' | 'below';
 
 export type OrderRequest =
   | { kind: 'arm'; prefill: ArmOrderDialogContext }
+  | { kind: 'newOrder'; prefill: CleanNewOrderPrefill }
   | { kind: 'priceAlert'; symbol: string; target: number; direction: PriceAlertDirection };
 
 export interface PendingOrderRequest {
@@ -53,6 +58,21 @@ export function requestArmOrder(prefill: ArmOrderDialogContext, nowMs = Date.now
   const symbol = cleanSymbol(prefill.symbol);
   if (!symbol) return false;
   pending.set({ seq: ++seq, atMs: nowMs, request: { kind: 'arm', prefill: { ...prefill, symbol } } });
+  return true;
+}
+
+/**
+ * Asks the dashboard to open the New Order dialog (`OrderComposer`) pre-filled as `prefill` describes —
+ * an immediate limit, a wait-for-a-price limit, or a trailing limit (see `NewOrderPrefill`). It only
+ * fills the form the way a person would by hand; the person still reviews it and presses the dialog's
+ * own button. Returns false, doing nothing, for a blank symbol, a side other than BUY/SELL, an unknown
+ * kind, or a price trigger with no `below`/`above` direction. An unusable number is dropped, so the
+ * dialog shows its own suggestion for that field rather than a guess.
+ */
+export function requestNewOrder(prefill: NewOrderPrefill, nowMs = Date.now()): boolean {
+  const clean = cleanNewOrderPrefill(prefill);
+  if (!clean) return false;
+  pending.set({ seq: ++seq, atMs: nowMs, request: { kind: 'newOrder', prefill: clean } });
   return true;
 }
 
