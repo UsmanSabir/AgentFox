@@ -66,6 +66,9 @@ public sealed class RuntimeModelChatClient : IChatClient
     /// <summary>Refreshes policy and restores the configured model if the active selection is no longer allowed.</summary>
     public async Task<ModelSwitchSelection> GetSelectionAsync(CancellationToken cancellationToken = default)
     {
+        // Nothing to enforce when the model cannot leave the configured one (no API key). Consulting the policy anyway would cost
+        // a hub read a minute, on every model call, for an agent that can never switch.
+        if (!CanSwitch) return new ModelSwitchSelection(null);
         ModelSwitchSelection selection;
         try
         {

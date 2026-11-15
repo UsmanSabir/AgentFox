@@ -42,6 +42,34 @@ public sealed class RuntimeModelChatClientTests
         StringAssert.Contains(denied.Error, "unreadable");
     }
 
+    private sealed class CountingPolicy : IModelSwitchPolicy
+    {
+        public int Calls;
+        public Task<ModelSwitchSelection> ReadAsync(CancellationToken cancellationToken = default)
+        {
+            Calls++;
+            return Task.FromResult(new ModelSwitchSelection([], "Policy unreadable."));
+        }
+    }
+
+    [TestMethod]
+    public async Task An_agent_that_cannot_switch_never_consults_the_policy()
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["LLM:Provider"] = "Ollama", ["LLM:Model"] = "initial"
+        }).Build();
+        var policy = new CountingPolicy();
+        using var services = new ServiceCollection().AddSingleton<IModelSwitchPolicy>(policy).BuildServiceProvider();
+        using var client = new RuntimeModelChatClient(config, services);
+        Assert.IsFalse(client.CanSwitch);
+        var selection = await client.GetSelectionAsync();
+        Assert.IsNull(selection.AllowedModels);
+        Assert.IsFalse((await client.TrySetModelAsync("other")).Success);
+        Assert.AreEqual(0, policy.Calls);
+        Assert.AreEqual("initial", client.Model);
+    }
+
     [TestMethod]
     public async Task Switching_model_changes_the_next_request_and_attachment_capabilities()
     {
