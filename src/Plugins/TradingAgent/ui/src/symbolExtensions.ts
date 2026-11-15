@@ -37,10 +37,16 @@
  *    is only not drawn on another symbol's chart, so owners must clear (`null`) what they stop caring
  *    about. `annotationOffscreen` publishes, per owner, how many
  *    levels/zones sit above/below the visible price range, for a "2 below view" chip.
- *  - `orderRequests.ts` — `requestArmOrder(prefill)` and `requestPriceAlert(symbol, target, direction)`.
- *    Ask the dashboard to OPEN its existing conditional-order dialog or price-alert dialog,
- *    pre-filled (including an optional `quantity` of whole shares as the starting size). The dialog
- *    shows every field for the user to confirm and sends only on its own button; there is no request that submits. An unconsumed request expires after 15 seconds.
+ *  - `orderRequests.ts` — `requestArmOrder(prefill)`, `requestNewOrder(prefill)` and
+ *    `requestPriceAlert(symbol, target, direction)`.
+ *    Ask the dashboard to OPEN its existing conditional-order dialog, New Order dialog or price-alert
+ *    dialog, pre-filled (including an optional `quantity` of whole shares as the starting size). The
+ *    dialog shows every field for the user to confirm and sends only on its own button; there is no request that submits. An unconsumed request expires after 15 seconds.
+ *    `requestNewOrder` carries only what the order composer already models (`NewOrderPrefill`,
+ *    `newOrderPrefill.ts`): `symbol`, `action`, optional `quantity`, and a `kind` — `limit` (an
+ *    immediate limit at `price`), `priceTrigger` (wait until the price is at or `below`/`above`
+ *    `triggerPrice`, then a limit at `price`) or `trailing` (a `triggerPercent` trail, optional
+ *    `priceBound`) — plus optional `keepWorking` and `expiresInDays`. A bad number is dropped, not guessed.
  *  - the `order-detail` slot on the order dialog and docked ticket carries ten props: `symbol`,
  *    `action`, `orderType`, `quantity`, `price`, `value`, `conditional`, `triggerLevel`, `trailing`
  *    and `triggerPercent`. Every forwarder (OrderComposer, NewOrderDialog, TradingSurface, and
