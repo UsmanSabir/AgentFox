@@ -1,6 +1,10 @@
 using System.Security.Cryptography;
+using System.Net;
+using System.Net.Sockets;
 using System.Text;
+using System.Text.Json;
 using AgentFox.LLM;
+using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
 
 namespace AgentFox.ChannelTests;
@@ -83,5 +87,72 @@ public class HostedLlmSecretsTests
             new Dictionary<string, string> { ["X-Title"] = "Stockji" });
         Assert.IsNull(options.Transport);   // the SDK's own transport, so NetworkTimeout is not capped at 100 s
         Assert.AreEqual(TimeSpan.FromMinutes(10), options.NetworkTimeout);
+    }
+
+    [TestMethod]
+    public async Task OpenRouter_requests_include_the_hosted_account_slug_in_the_body()
+    {
+        using var portReservation = new TcpListener(IPAddress.Loopback, 0);
+        portReservation.Start();
+        var port = ((IPEndPoint)portReservation.LocalEndpoint).Port;
+        portReservation.Stop();
+        using var listener = new HttpListener();
+        listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+        listener.Start();
+
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["LLM:Provider"] = "OpenRouter",
+            ["LLM:Model"] = "example/model",
+            ["LLM:ApiKey"] = "synthetic-secret",
+            ["LLM:BaseUrl"] = $"http://127.0.0.1:{port}/v1",
+            ["LLM:User"] = "magma",
+            ["Models:LM:Provider"] = "OpenRouter",
+            ["Models:LM:Model"] = "example/other-model",
+            ["Models:LM:ApiKey"] = "synthetic-secret",
+            ["Models:LM:BaseUrl"] = $"http://127.0.0.1:{port}/v1"
+        }).Build();
+
+        async Task<string> CaptureRequestAsync(bool streaming)
+        {
+            var context = await listener.GetContextAsync().WaitAsync(TimeSpan.FromSeconds(10));
+            using var reader = new StreamReader(context.Request.InputStream);
+            var body = await reader.ReadToEndAsync();
+            var response = Encoding.UTF8.GetBytes(streaming
+                ? """data: {"id":"test","object":"chat.completion.chunk","created":0,"model":"example/model","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}""" + "\n\ndata: [DONE]\n\n"
+                : """{"id":"test","object":"chat.completion","created":0,"model":"example/model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}""");
+            context.Response.ContentType = streaming ? "text/event-stream" : "application/json";
+            context.Response.ContentLength64 = response.Length;
+            await context.Response.OutputStream.WriteAsync(response);
+            context.Response.Close();
+            return body;
+        }
+
+        var previousUser = Environment.GetEnvironmentVariable("LLM__User");
+        try
+        {
+            Environment.SetEnvironmentVariable("LLM__User", "magma");
+            foreach (var client in new[] {
+                LLMFactory.CreateFromConfiguration(configuration),
+                LLMFactory.CreateWithModelOverride(configuration, "LM")!,
+                LLMFactory.CreateChatClient(new AgentFox.Agents.ModelConfig {
+                    Provider = "OpenRouter", Model = "example/model", ApiKey = "synthetic-secret",
+                    BaseUrl = $"http://127.0.0.1:{port}/v1" })! })
+            {
+                using (client)
+                {
+                    var capture = CaptureRequestAsync(false);
+                    await client.GetResponseAsync([new ChatMessage(ChatRole.User, "hello")]);
+                    using var body = JsonDocument.Parse(await capture);
+                    Assert.AreEqual("magma", body.RootElement.GetProperty("user").GetString());
+
+                    capture = CaptureRequestAsync(true);
+                    await foreach (var _ in client.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "hello")])) { }
+                    using var streamedBody = JsonDocument.Parse(await capture);
+                    Assert.AreEqual("magma", streamedBody.RootElement.GetProperty("user").GetString());
+                }
+            }
+        }
+        finally { Environment.SetEnvironmentVariable("LLM__User", previousUser); }
     }
 }
