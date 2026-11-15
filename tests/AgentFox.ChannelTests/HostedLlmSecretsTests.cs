@@ -38,11 +38,22 @@ public class HostedLlmSecretsTests
             Assert.AreEqual("synthetic-secret", config["LLM:ApiKey"]);
             Assert.AreEqual("Stockji", config["LLM:Headers:X-Title"]);
 
+            // Tampered, or encrypted under a key the account no longer has: the agent starts without the layer.
             var tampered = File.ReadAllBytes(blobPath);
             tampered[^1] ^= 1;
             File.WriteAllBytes(blobPath, tampered);
-            Assert.ThrowsExactly<AuthenticationTagMismatchException>(() =>
-                new ConfigurationBuilder().AddHostedLlmSecrets());
+            var errors = new StringWriter();
+            var fallback = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?> { ["LLM:Provider"] = "Ollama" })
+                .AddHostedLlmSecrets(errors).Build();
+            Assert.AreEqual("Ollama", fallback["LLM:Provider"]);
+            StringAssert.Contains(errors.ToString(), "AuthenticationTagMismatchException");
+            Assert.IsFalse(errors.ToString().Contains("synthetic-secret"));
+
+            File.Delete(blobPath);
+            errors = new StringWriter();
+            new ConfigurationBuilder().AddHostedLlmSecrets(errors);
+            StringAssert.Contains(errors.ToString(), "could not be loaded");
         }
         finally
         {
@@ -50,5 +61,27 @@ public class HostedLlmSecretsTests
             Environment.SetEnvironmentVariable("AGENTFOX_LLM_SECRET_KEY_FILE", previousKey);
             Directory.Delete(folder, recursive: true);
         }
+    }
+
+    [TestMethod]
+    public void Custom_headers_are_set_on_each_request_and_reserved_names_are_refused()
+    {
+        var policy = new LLMFactory.CustomHeaderPolicy(new Dictionary<string, string> { ["X-Title"] = "Stockji" });
+        var pipeline = System.ClientModel.Primitives.ClientPipeline.Create();
+        using var message = pipeline.CreateMessage();
+        policy.Apply(message);
+        policy.Apply(message);   // a retry re-applies: Set replaces, never a second value
+        Assert.IsTrue(message.Request.Headers.TryGetValue("X-Title", out var value));
+        Assert.AreEqual("Stockji", value);
+
+        Assert.ThrowsExactly<InvalidOperationException>(() =>
+            new LLMFactory.CustomHeaderPolicy(new Dictionary<string, string> { ["Authorization"] = "Bearer x" }));
+        Assert.ThrowsExactly<InvalidOperationException>(() =>
+            new LLMFactory.CustomHeaderPolicy(new Dictionary<string, string> { ["X-Title"] = "a\r\nInjected: 1" }));
+
+        var options = LLMFactory.OpenAiOptions("https://example.test/v1", TimeSpan.FromMinutes(10),
+            new Dictionary<string, string> { ["X-Title"] = "Stockji" });
+        Assert.IsNull(options.Transport);   // the SDK's own transport, so NetworkTimeout is not capped at 100 s
+        Assert.AreEqual(TimeSpan.FromMinutes(10), options.NetworkTimeout);
     }
 }

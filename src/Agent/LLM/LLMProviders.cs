@@ -180,30 +180,51 @@ public class LLMFactory
         return CreateChatClient(fallback);
     }
 
-    private static OpenAIClientOptions OpenAiOptions(string baseUrl, TimeSpan? timeout,
+    // Headers ride on a pipeline policy, not a replacement transport: a caller-built HttpClient brings its own
+    // 100-second Timeout, which would silently cap NetworkTimeout, and the SDK's shared transport is kept.
+    internal static OpenAIClientOptions OpenAiOptions(string baseUrl, TimeSpan? timeout,
         IReadOnlyDictionary<string, string> headers)
     {
         var options = new OpenAIClientOptions { Endpoint = new Uri(baseUrl), NetworkTimeout = timeout };
         if (headers.Count > 0)
-        {
-            var handler = new CustomHeaderHandler(headers) { InnerHandler = new HttpClientHandler() };
-            options.Transport = new HttpClientPipelineTransport(new HttpClient(handler));
-        }
+            options.AddPolicy(new CustomHeaderPolicy(headers), PipelinePosition.PerCall);
         return options;
     }
 
-    private sealed class CustomHeaderHandler(IReadOnlyDictionary<string, string> headers) : DelegatingHandler
+    internal sealed class CustomHeaderPolicy : PipelinePolicy
     {
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        private readonly KeyValuePair<string, string>[] _headers;
+
+        public CustomHeaderPolicy(IReadOnlyDictionary<string, string> headers)
         {
-            foreach (var (name, value) in headers)
+            // Checked once, when the client is built: a bad name fails configuration, not every request.
+            foreach (var name in headers.Keys)
             {
                 if (name.Equals("Authorization", StringComparison.OrdinalIgnoreCase) ||
                     name.Equals("Host", StringComparison.OrdinalIgnoreCase) ||
-                    !request.Headers.TryAddWithoutValidation(name, value))
+                    name.Length == 0 || name.Any(c => c <= ' ' || c >= 0x7f || c == ':'))
                     throw new InvalidOperationException($"Unsupported LLM header: {name}");
             }
-            return base.SendAsync(request, cancellationToken);
+            if (headers.Values.Any(v => v.Contains('\r') || v.Contains('\n')))
+                throw new InvalidOperationException("LLM header values must be a single line.");
+            _headers = headers.ToArray();
+        }
+
+        public override void Process(PipelineMessage message, IReadOnlyList<PipelinePolicy> pipeline, int currentIndex)
+        {
+            Apply(message);
+            ProcessNext(message, pipeline, currentIndex);
+        }
+
+        public override ValueTask ProcessAsync(PipelineMessage message, IReadOnlyList<PipelinePolicy> pipeline, int currentIndex)
+        {
+            Apply(message);
+            return ProcessNextAsync(message, pipeline, currentIndex);
+        }
+
+        internal void Apply(PipelineMessage message)
+        {
+            foreach (var (name, value) in _headers) message.Request.Headers.Set(name, value);
         }
     }
 
