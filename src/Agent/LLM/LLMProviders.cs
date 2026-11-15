@@ -6,6 +6,7 @@ using Microsoft.Extensions.Configuration;
 using OllamaSharp;
 using OpenAI;
 using System.ClientModel;
+using System.ClientModel.Primitives;
 using Azure.AI.OpenAI;
 
 namespace AgentFox.LLM;
@@ -46,7 +47,7 @@ public class LLMFactory
                     var model = configuration["LLM:Model"];
 
                     var keyCredential = new ApiKeyCredential(apiKey);
-                    var openAiClient = new OpenAIClient(keyCredential, new OpenAIClientOptions() { Endpoint = new Uri(baseUrl), NetworkTimeout = timeout });
+                    var openAiClient = new OpenAIClient(keyCredential, OpenAiOptions(baseUrl, timeout, customHeaders));
                     var chatClient = openAiClient.GetChatClient(model);
 
                     provider = chatClient.AsIChatClient();
@@ -60,7 +61,7 @@ public class LLMFactory
                     var model = configuration["LLM:Model"];
 
                     var keyCredential = new ApiKeyCredential(apiKey);
-                    var openAiClient = new OpenAIClient(keyCredential, new OpenAIClientOptions() { Endpoint = new Uri(baseUrl), NetworkTimeout = timeout });
+                    var openAiClient = new OpenAIClient(keyCredential, OpenAiOptions(baseUrl, timeout, customHeaders));
                     var chatClient = openAiClient.GetChatClient(model);
 
                     provider = chatClient.AsIChatClient();
@@ -172,10 +173,59 @@ public class LLMFactory
             Model = modelNameOrKey,
             BaseUrl = configuration["LLM:BaseUrl"] ?? "http://localhost:11434",
             ApiKey = configuration["LLM:ApiKey"],
+            Headers = configuration.GetSection("LLM:Headers").Get<Dictionary<string, string>>() ?? new(),
             TimeoutSeconds = int.TryParse(configuration["LLM:TimeoutSeconds"], out var t) ? t : 3600
         };
 
         return CreateChatClient(fallback);
+    }
+
+    // Headers ride on a pipeline policy, not a replacement transport: a caller-built HttpClient brings its own
+    // 100-second Timeout, which would silently cap NetworkTimeout, and the SDK's shared transport is kept.
+    internal static OpenAIClientOptions OpenAiOptions(string baseUrl, TimeSpan? timeout,
+        IReadOnlyDictionary<string, string> headers)
+    {
+        var options = new OpenAIClientOptions { Endpoint = new Uri(baseUrl), NetworkTimeout = timeout };
+        if (headers.Count > 0)
+            options.AddPolicy(new CustomHeaderPolicy(headers), PipelinePosition.PerCall);
+        return options;
+    }
+
+    internal sealed class CustomHeaderPolicy : PipelinePolicy
+    {
+        private readonly KeyValuePair<string, string>[] _headers;
+
+        public CustomHeaderPolicy(IReadOnlyDictionary<string, string> headers)
+        {
+            // Checked once, when the client is built: a bad name fails configuration, not every request.
+            foreach (var name in headers.Keys)
+            {
+                if (name.Equals("Authorization", StringComparison.OrdinalIgnoreCase) ||
+                    name.Equals("Host", StringComparison.OrdinalIgnoreCase) ||
+                    name.Length == 0 || name.Any(c => c <= ' ' || c >= 0x7f || c == ':'))
+                    throw new InvalidOperationException($"Unsupported LLM header: {name}");
+            }
+            if (headers.Values.Any(v => v.Contains('\r') || v.Contains('\n')))
+                throw new InvalidOperationException("LLM header values must be a single line.");
+            _headers = headers.ToArray();
+        }
+
+        public override void Process(PipelineMessage message, IReadOnlyList<PipelinePolicy> pipeline, int currentIndex)
+        {
+            Apply(message);
+            ProcessNext(message, pipeline, currentIndex);
+        }
+
+        public override ValueTask ProcessAsync(PipelineMessage message, IReadOnlyList<PipelinePolicy> pipeline, int currentIndex)
+        {
+            Apply(message);
+            return ProcessNextAsync(message, pipeline, currentIndex);
+        }
+
+        internal void Apply(PipelineMessage message)
+        {
+            foreach (var (name, value) in _headers) message.Request.Headers.Set(name, value);
+        }
     }
 
     public static IChatClient? CreateChatClient(ModelConfig modelConfig)
@@ -199,7 +249,7 @@ public class LLMFactory
                     var model = modelConfig.Model;
 
                     var keyCredential = new ApiKeyCredential(apiKey);
-                    var openAiClient = new OpenAIClient(keyCredential, new OpenAIClientOptions() { Endpoint = new Uri(baseUrl), NetworkTimeout = timeout });
+                    var openAiClient = new OpenAIClient(keyCredential, OpenAiOptions(baseUrl, timeout, modelConfig.Headers));
                     var chatClient = openAiClient.GetChatClient(model);
                     provider = chatClient.AsIChatClient();
 
@@ -215,7 +265,7 @@ public class LLMFactory
                     var model = modelConfig.Model;
 
                     var keyCredential = new ApiKeyCredential(apiKey);
-                    var openAiClient = new OpenAIClient(keyCredential, new OpenAIClientOptions() { Endpoint = new Uri(baseUrl), NetworkTimeout = timeout });
+                    var openAiClient = new OpenAIClient(keyCredential, OpenAiOptions(baseUrl, timeout, modelConfig.Headers));
                     var chatClient = openAiClient.GetChatClient(model);
                     provider = chatClient.AsIChatClient();
 
