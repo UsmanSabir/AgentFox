@@ -16,6 +16,7 @@
   import WatchlistPanel from './WatchlistPanel.svelte';
   import ChartPane from './ChartPane.svelte';
   export let workspace: WorkspaceComposition | null = null;
+  export let compactToolbar = false;
   let selectedCompany: string | null = null;
   let workspaceWatchlist: WatchlistPanel | null = null;
   import AlertsPanel from './AlertsPanel.svelte';
@@ -512,7 +513,7 @@
 
 <div class="page-wrap fade-in">
   <WorkspacePanel {workspace} id="core-toolbar">
-  <div class:hosted-toolbar={workspace !== null}>
+  <div class:hosted-toolbar={workspace !== null} class:compact-toolbar={compactToolbar && workspace !== null}>
   <div class="page-header-row" id="trading-overview">
     <div><h1 class="page-title">Trading Manager</h1><p class="page-sub">Monitor PSX signals, prepare conditional orders, and review execution history</p></div>
     <div class="header-actions">
@@ -917,6 +918,11 @@
   .hosted-toolbar .kill-switch-btn { padding:.3rem .5rem; font-size:.65rem; }
   .hosted-toolbar .workspace-status-line { flex:0 1 auto; flex-wrap:wrap; gap:.6rem; margin:0; }
   .hosted-toolbar .safety-banner { flex:0 1 auto; min-width:0; }
+  .compact-toolbar { gap:.2rem .5rem; padding:.15rem .45rem; }
+  .compact-toolbar .runtime-cluster { gap:.45rem; }
+  .compact-toolbar .workspace-status-line { flex-wrap:nowrap; gap:.4rem; white-space:nowrap; }
+  .compact-toolbar .safety-banner { padding:.2rem .4rem; }
+  .compact-toolbar .safety-banner div { flex-wrap:nowrap; white-space:nowrap; }
   .runtime-cluster { display:contents; }
   .workspace-status-line { display:flex; flex-wrap:wrap; gap:1rem; margin-top:.3rem; font-size:.65rem; color:var(--text-2); }
 
@@ -1001,6 +1007,14 @@
     .hosted-toolbar { grid-template-columns:max-content minmax(0,1fr); }
     .hosted-toolbar .header-actions { grid-column:2; }
     .hosted-toolbar .runtime-cluster { grid-column:1 / -1; grid-row:2; }
+  }
+  @media (max-width: 900px) {
+    .hosted-toolbar { display:flex; flex-wrap:wrap; }
+    .hosted-toolbar .page-header-row { display:flex; flex:1 1 100%; align-items:center; }
+    .hosted-toolbar .runtime-cluster { display:flex; flex:1 1 100%; flex-wrap:wrap; }
+    .compact-toolbar .workspace-status-line,
+    .compact-toolbar .safety-banner div { flex-wrap:wrap; white-space:normal; }
+    .hosted-toolbar .header-actions { flex-wrap:wrap; }
   }
   .archive-head { display:flex; justify-content:space-between; align-items:stretch; gap:.5rem; }
   .archive-toggle { flex:1 1 auto; width:auto; }
