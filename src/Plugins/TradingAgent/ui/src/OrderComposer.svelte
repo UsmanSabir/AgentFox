@@ -281,7 +281,9 @@
     if (state.triggerPrice != null) triggerPrice = state.triggerPrice;
     if (state.triggerPercent != null) triggerPercent = state.triggerPercent;
     if (state.priceBound != null) priceBound = state.priceBound;
-    if (state.persistentUntilFilled && persistable) persistentUntilFilled = true;
+    // Decided by the mapping from the intent itself: `persistable` is a reactive and still reads the
+    // pre-`choose` value here.
+    if (state.persistentUntilFilled) persistentUntilFilled = true;
     if (state.expiresInDays != null) expiresInDays = state.expiresInDays;
   }
 

@@ -117,6 +117,14 @@ export function intentFor(
     && item.triggerKind === trigger) ?? null;
 }
 
+/**
+ * Whether the composer offers "keep the unfilled remainder working" for this order: any non-market
+ * order. Decided from the intent itself, because the composer's own reactive flag has not been
+ * recomputed yet in the same synchronous call that chooses the intent.
+ */
+export const canKeepWorking = (intent: OrderIntentDefinition | null): boolean =>
+  intent != null && intent.orderType !== 'MARKET';
+
 /** What to put in the composer's own state, field for field. Null means "leave the composer's default". */
 export interface ComposerPrefillState {
   side: NewOrderSide;
@@ -153,7 +161,7 @@ export function composerStateFor(
     triggerPrice: trigger,
     triggerPercent: prefill.kind === 'trailing' ? prefill.triggerPercent ?? null : null,
     priceBound: prefill.kind === 'trailing' ? prefill.priceBound ?? null : null,
-    persistentUntilFilled: prefill.kind === 'trailing' || prefill.keepWorking === true,
+    persistentUntilFilled: canKeepWorking(intent) && (prefill.kind === 'trailing' || prefill.keepWorking === true),
     expiresInDays: prefill.expiresInDays ?? null
   };
 }

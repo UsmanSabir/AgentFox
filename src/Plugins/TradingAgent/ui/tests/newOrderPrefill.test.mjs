@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cleanNewOrderPrefill, composerStateFor, intentFor } from '../src/newOrderPrefill.ts';
+import { canKeepWorking, cleanNewOrderPrefill, composerStateFor, intentFor } from '../src/newOrderPrefill.ts';
 
 // The shapes the server's registry reports (OrderIntentRegistry.cs), reduced to what matching reads.
 const intent = (id, action, o) => ({
@@ -119,4 +119,17 @@ test('mapping never selects a scheduled, percent-window or target intent for the
     assert.ok(found && !found.requiresActivationDate && found.defaultWindowMinutes == null && found.priceField !== 'target');
   }
   assert.equal(intentFor(cleanNewOrderPrefill({ symbol: 'X', action: 'SELL', kind: 'limit' }), registry).id, 'limit-sell');
+});
+
+test('mapping: keep-working is decided from the intent, and never set for a market order or no intent', () => {
+  const wait = composerStateFor(cleanNewOrderPrefill({
+    symbol: 'X', action: 'BUY', kind: 'priceTrigger', triggerDirection: 'below', keepWorking: true
+  }), registry);
+  assert.equal(wait.persistentUntilFilled, true);
+  const limit = composerStateFor(cleanNewOrderPrefill({ symbol: 'X', action: 'BUY', kind: 'limit', keepWorking: true }), registry);
+  assert.equal(limit.persistentUntilFilled, true);
+  assert.equal(canKeepWorking(registry.find(i => i.id === 'market-buy')), false);
+  assert.equal(canKeepWorking(null), false);
+  const none = composerStateFor(cleanNewOrderPrefill({ symbol: 'X', action: 'BUY', kind: 'trailing', keepWorking: true }), []);
+  assert.equal(none.persistentUntilFilled, false);
 });
