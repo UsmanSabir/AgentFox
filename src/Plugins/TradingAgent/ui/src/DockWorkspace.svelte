@@ -7,7 +7,7 @@
   import { searchWorkspaceCommands } from './workspaceSearch';
   import { presetPlacedPanels, workspacePresetPanels, type WorkspaceCommand, type WorkspaceComposition, type WorkspacePanel, type WorkspaceRegion, type WorkspacePreset } from './workspaceComposition';
   import {
-    readWorkspaceLayout, saveWorkspaceLayout, myViewStorageKey, resolveWorkspacePreset,
+    readWorkspaceLayout, saveWorkspaceLayout, myViewStorageKey, presetViewStorageKey, resolveWorkspacePreset,
     type AutoHideEdge, type AutoHideTrays, type WorkspaceLayout
   } from './workspaceLayout';
 
@@ -25,6 +25,9 @@
    * asks for a particular view. The choice is then saved like any other. Unset (the default) changes nothing.
    */
   export let initialPreset: string | null = null;
+  /** Optional host-specific chrome; the index sparkline keeps its native 32px height. */
+  export let compactChrome = false;
+  export let hiddenPresetIds: string[] = [];
 
   let root: HTMLElement;
   let dockRoot: HTMLDivElement;
@@ -91,6 +94,7 @@
   // Browser storage only, one record replaced whole on Save; it lapses after the same 180 days as the working
   // layout, counted from its last use (each restore renews it), and Forget removes it.
   let myView: WorkspaceLayout | null = null;
+  let savedPresets: Record<string, WorkspaceLayout> = {};
   let onMyView = false;
   let query = '';
   let panelsOnly = false;
@@ -451,6 +455,81 @@
   function readLayout(raw: string | null) {
     return readWorkspaceLayout(raw, edition, panels.map(p => p.id), presets.map(p => p.id), Date.now(), presetAliases);
   }
+  function readPresetViews() {
+    const next: Record<string, WorkspaceLayout> = {};
+    for (const item of presets) {
+      const key = presetViewStorageKey(storageKey, item.id);
+      let raw: string | null = null;
+      try { raw = localStorage.getItem(key); } catch { /* Optional browser storage. */ }
+      const record = readLayout(raw);
+      if (record?.preset === item.id) next[item.id] = record;
+      else if (raw) { try { localStorage.removeItem(key); } catch { /* Optional browser storage. */ } }
+    }
+    savedPresets = next;
+  }
+  function discardPresetView(id: string) {
+    try { localStorage.removeItem(presetViewStorageKey(storageKey, id)); } catch { /* Optional browser storage. */ }
+    const next = { ...savedPresets }; delete next[id]; savedPresets = next;
+  }
+  function savePresetView(id: string) {
+    if (!api || preset !== id) return;
+    if (openEdge) { notice = `Close the ${openEdge} panel peek before saving ${selectedPreset.label}.`; return; }
+    const record = saveWorkspaceLayout(edition, id, api.toJSON(), Date.now(), autoHide,
+      api.hasMaximizedGroup() ? api.activePanel?.id : undefined, panels.map(p => p.id), panelWidths);
+    try {
+      localStorage.setItem(presetViewStorageKey(storageKey, id), JSON.stringify(record));
+      savedPresets = { ...savedPresets, [id]: record };
+      notice = `${selectedPreset.label} view saved.`;
+    } catch { storageWarning = `${selectedPreset.label} view could not be saved in this browser.`; }
+  }
+  function applyPresetView(id: string, record: WorkspaceLayout): boolean {
+    if (!api) return false;
+    try {
+      parkTrays();
+      api.exitMaximizedGroup();
+      previousPanelWidths.clear();
+      panelWidths = { ...record.panelWidths };
+      api.fromJSON(record.layout);
+      preset = id;
+      autoHide = record.autoHide ?? {};
+      const allowed = new Set(offeredPanels().map(panel => panel.id));
+      if (Object.keys(record.layout.panels).some(panelId => !allowed.has(panelId))
+        || edges.some(edge => autoHide[edge]?.ids.some(panelId => !allowed.has(panelId)))) throw new Error('panels changed');
+      adoptNewPanels(Object.keys(record.layout.panels), record.known);
+      restorePanelWidths();
+      if (record.maximized) api.getPanel(record.maximized)?.api.maximize();
+      maximized = api.hasMaximizedGroup();
+      activeId = api.activePanel?.id ?? activeId;
+      return true;
+    } catch { buildDefault(id); return false; }
+  }
+  function restorePresetView(id: string) {
+    const record = savedPresets[id];
+    if (!record || !api) return;
+    clearTimeout(saveTimer);
+    suppressSave = true;
+    if (openEdge) closeTray();
+    const restored = applyPresetView(id, record);
+    if (!restored) discardPresetView(id);
+    suppressSave = false;
+    onMyView = false;
+    scheduleSave();
+    onPresetChange(id);
+    notice = restored ? `${selectedPreset.label} saved view restored.` : `${selectedPreset.label} saved view no longer matches the available panels; default restored.`;
+  }
+  function resetPresetView(id: string) {
+    discardPresetView(id);
+    if (!api) return;
+    clearTimeout(saveTimer);
+    suppressSave = true;
+    panelWidths = {};
+    buildDefault(id);
+    suppressSave = false;
+    onMyView = false;
+    scheduleSave();
+    onPresetChange(id);
+    notice = `${selectedPreset.label} default view restored. Trading state and open forms are unchanged.`;
+  }
   function writeMyView(record: WorkspaceLayout) {
     try { localStorage.setItem(myViewStorageKey(storageKey), JSON.stringify(record)); return true; }
     catch { storageWarning = 'My view could not be saved in this browser; your layout is unchanged.'; return false; }
@@ -505,11 +584,14 @@
     notice = 'My view forgotten.';
   }
   function selectPreset(id: string) {
+    root?.querySelectorAll<HTMLDetailsElement>('.preset-menu').forEach(menu => menu.open = false);
     onMyView = false;
     if (!api) { preset = id; mobilePresetChanged = true; updateMobilePanels(); onPresetChange(preset); return; }
     clearTimeout(saveTimer);
     suppressSave = true;
-    buildDefault(id);
+    if (savedPresets[id]) {
+      if (!applyPresetView(id, savedPresets[id])) discardPresetView(id);
+    } else buildDefault(id);
     suppressSave = false;
     scheduleSave();
     onPresetChange(preset);
@@ -882,6 +964,7 @@
       activeId = api.activePanel?.id ?? activeId;
       maximized = api.hasMaximizedGroup();
       readMyView();
+      readPresetViews();
       subscriptions.push(api.onDidLayoutChange(() => { scheduleSave(); refreshPanelVisibility(); }));
       subscriptions.push(api.onDidMaximizedGroupChange(() => { maximized = api?.hasMaximizedGroup() ?? false; scheduleSave(); refreshPanelVisibility(); }));
       subscriptions.push(api.onDidActivePanelChange(() => { activeId = api?.activePanel?.id ?? activeId; refreshPanelVisibility(); }));
@@ -917,22 +1000,41 @@
   });
 </script>
 
-<section class="workstation" class:mobile={!desktop} aria-label={selectedPreset.title ?? title} tabindex="-1" bind:this={root}>
+<section class="workstation" class:mobile={!desktop} class:compact={compactChrome} aria-label={selectedPreset.title ?? title} tabindex="-1" bind:this={root}>
   <header class="workstation-bar" class:has-toolbar={!!$$slots.toolbar}>
     <nav class="workspace-views" aria-label="Workspace layout">
-      {#each presets as item}
-        <button data-workspace-preset={item.id} class:chosen={preset === item.id && !onMyView} aria-pressed={preset === item.id && !onMyView} on:click={() => selectPreset(item.id)}>{item.label}</button>
+      {#each presets.filter(item => !hiddenPresetIds.includes(item.id)) as item}
+        <div class="preset-choice">
+          <button data-workspace-preset={item.id} class:chosen={preset === item.id && !onMyView} aria-pressed={preset === item.id && !onMyView} on:click={() => selectPreset(item.id)}>{item.label}</button>
+          <details class="preset-menu">
+            <summary aria-label={`${item.label} view options`} title={`${item.label} view options`}><ChevronDown size={12}/></summary>
+            <div class="preset-actions" role="group" aria-label={`${item.label} view options`}>
+              <button disabled={!desktop || preset !== item.id} title={preset !== item.id ? `Open ${item.label} before saving its layout` : undefined} on:click={(event) => { event.currentTarget.closest('details')!.open = false; savePresetView(item.id); }}>{savedPresets[item.id] ? 'Update saved view' : 'Save current layout as view'}</button>
+              {#if savedPresets[item.id]}<button disabled={!desktop} on:click={(event) => { event.currentTarget.closest('details')!.open = false; restorePresetView(item.id); }}>Restore saved view</button>{/if}
+              <button disabled={!desktop} on:click={(event) => { event.currentTarget.closest('details')!.open = false; resetPresetView(item.id); }}>Reset to default</button>
+            </div>
+          </details>
+        </div>
       {/each}
       <button class:chosen={onMyView} aria-pressed={onMyView} on:click={restoreMyView} disabled={!desktop || !myView}
         title={myView ? 'Restore the layout you saved as My view' : 'Save an arrangement using Layout → Save as My view'}>My view</button>
     </nav>
     <slot name="toolbar"/>
     <div class="workspace-tools">
+      {#if compactChrome}<span class="focus-indicator" aria-live="polite">Focus: {panels.find(p => p.id === activeId)?.title ?? 'Workspace'}</span>{/if}
       <button class="panel-finder" on:click={() => openPalette(true)} aria-haspopup="dialog"
         aria-keyshortcuts="Control+Shift+K Meta+Shift+K" title="Find and open a panel (Ctrl+Shift+K)"><Search size={14}/> Find panel <kbd>Ctrl ⇧ K</kbd></button>
       <details class="layout-menu" bind:this={layoutMenu}>
         <summary bind:this={layoutSummary}><Settings2 size={14}/> Layout <ChevronDown size={12}/></summary>
         <div class="layout-actions" role="group" aria-label="Layout actions">
+      {#each presets.filter(item => hiddenPresetIds.includes(item.id)) as item}
+        <button on:click={() => runLayout(() => selectPreset(item.id))}>Switch to {item.label}</button>
+      {/each}
+      {#if hiddenPresetIds.includes(preset)}
+        <button on:click={() => runLayout(() => savePresetView(preset))} disabled={!desktop}>{savedPresets[preset] ? 'Update saved view' : 'Save current layout as view'}</button>
+        {#if savedPresets[preset]}<button on:click={() => runLayout(() => restorePresetView(preset))} disabled={!desktop}>Restore saved view</button>{/if}
+        <button on:click={() => runLayout(() => resetPresetView(preset))} disabled={!desktop}>Reset {selectedPreset.label} to default</button>
+      {/if}
       <button on:click={() => runLayout(saveMyView)} disabled={!desktop}
         title={myView ? 'Replace your saved My view with the current arrangement' : 'Save the current arrangement as My view'}><Save size={14}/> Save as My view</button>
       {#if myView}<button on:click={() => runLayout(forgetMyView)}>Forget My view</button>{/if}
@@ -1008,7 +1110,7 @@
     </nav>
   {/if}
   <div class="workspace-stack" class:hidden={desktop} bind:this={stack}></div>
-  <footer><span>Focus: {panels.find(p => p.id === activeId)?.title ?? 'Workspace'}</span><button class="workspace-help" on:click={() => shortcutsSheet.open()} aria-label="Workspace keyboard shortcuts" title="Keyboard shortcuts">?</button></footer>
+  {#if !compactChrome}<footer><span>Focus: {panels.find(p => p.id === activeId)?.title ?? 'Workspace'}</span><button class="workspace-help" on:click={() => shortcutsSheet.open()} aria-label="Workspace keyboard shortcuts" title="Keyboard shortcuts">?</button></footer>{/if}
   <p class="sr-only" role="status">{notice}</p>
   <div hidden bind:this={depot}><slot {workspace}/></div>
 </section>
@@ -1036,6 +1138,19 @@
 <style>
   .workstation { height:100dvh; min-width:0; min-height:0; display:flex; flex-direction:column; overflow:hidden; background:var(--bg); color:var(--text); }
   .workstation-bar { display:flex; align-items:center; justify-content:space-between; gap:.5rem; padding:.55rem .75rem; flex:none; min-width:0; border-bottom:1px solid var(--border-md); background:var(--surface-2); }
+  .compact .workstation-bar { padding:.25rem .55rem; min-height:40px; box-sizing:border-box; }
+  .compact .workspace-views { overflow:visible; }
+  .preset-choice { display:flex; flex:none; min-width:0; }
+  .preset-choice > button { border-radius:4px 0 0 4px; }
+  .preset-menu { position:relative; }
+  .preset-menu > summary { min-width:22px; height:100%; min-height:30px; justify-content:center; padding:.25rem; border-radius:0 4px 4px 0; border-left:0; }
+  .preset-actions { position:absolute; top:calc(100% + .3rem); left:0; z-index:25; display:flex; flex-direction:column; gap:.2rem; min-width:190px; padding:.4rem; border:1px solid var(--border-high); border-radius:6px; background:var(--surface); box-shadow:0 8px 28px #0005; }
+  .preset-actions button { width:100%; text-align:left; border-color:transparent; }
+  .focus-indicator { white-space:nowrap; color:var(--text-2); font-size:.65rem; }
+  @media (max-width:1350px) {
+    .compact .workstation-bar { flex-wrap:wrap; }
+    .compact .workspace-views { flex:1 1 auto; }
+  }
   nav, button, .workspace-tools, summary { display:flex; align-items:center; gap:.4rem; }
   .workspace-views { flex:1; min-width:0; flex-wrap:nowrap; overflow-x:auto; }
   .has-toolbar .workspace-views { flex:0 1 auto; }
