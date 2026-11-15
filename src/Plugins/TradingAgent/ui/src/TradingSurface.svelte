@@ -553,7 +553,15 @@
     </div>{/if}
     <div class:blocked={!status.liveExecutionReady} class="safety-banner">
       <ShieldAlert size={19} />
-      <div><b>{status.liveExecutionReady ? 'Live safety gates ready' : 'Live execution blocked'}</b><span>{status.liveExecutionReady ? 'All reported live prerequisites are healthy.' : liveBlockReason(status)}</span></div>
+      <div><b>{status.liveExecutionReady ? 'Live safety gates ready' : 'Live execution blocked'}</b>
+        {#if compactToolbar && workspace}
+          <button type="button" class="safety-reason-scroll"
+            title={status.liveExecutionReady ? 'All reported live prerequisites are healthy.' : liveBlockReason(status)}
+            on:click={(event) => { const element = event.currentTarget; element.scrollLeft = element.scrollLeft + element.clientWidth >= element.scrollWidth - 2 ? 0 : element.scrollLeft + element.clientWidth * .8; }}
+            on:keydown={(event) => { if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return; event.preventDefault(); event.currentTarget.scrollLeft += event.key === 'ArrowRight' ? 80 : -80; }}
+          >{status.liveExecutionReady ? 'All reported live prerequisites are healthy.' : liveBlockReason(status)}</button>
+        {:else}<span>{status.liveExecutionReady ? 'All reported live prerequisites are healthy.' : liveBlockReason(status)}</span>{/if}
+      </div>
     </div>
     </div>
   {/if}
@@ -924,7 +932,8 @@
   .compact-toolbar .safety-banner { padding:.2rem .4rem; max-width:100%; box-sizing:border-box; }
   .compact-toolbar .safety-banner div { min-width:0; flex-wrap:nowrap; }
   .compact-toolbar .safety-banner b { flex:none; }
-  .compact-toolbar .safety-banner span { flex:1 1 18rem; min-width:0; overflow-wrap:anywhere; }
+  .compact-toolbar .safety-reason-scroll { flex:1 1 18rem; min-width:0; padding:0; border:0; background:none; color:var(--text-2); font:inherit; font-size:.75rem; text-align:left; overflow-x:auto; overflow-y:hidden; white-space:nowrap; scrollbar-width:thin; cursor:e-resize; }
+  .compact-toolbar .safety-reason-scroll:focus-visible { outline:2px solid var(--primary); outline-offset:-2px; }
   .runtime-cluster { display:contents; }
   .workspace-status-line { display:flex; flex-wrap:wrap; gap:1rem; margin-top:.3rem; font-size:.65rem; color:var(--text-2); }
 
