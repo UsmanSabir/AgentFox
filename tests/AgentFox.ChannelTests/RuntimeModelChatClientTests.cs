@@ -5,6 +5,8 @@ using System.Text.Json;
 using AgentFox.LLM;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging.Abstractions;
+using TradingAgent.Research;
 
 namespace AgentFox.ChannelTests;
 
@@ -56,6 +58,8 @@ public sealed class RuntimeModelChatClientTests
 
         Assert.IsTrue(client.TrySetModel("openai/gpt-4o", out var error), error);
         Assert.AreEqual("example/text-model", client.ConfiguredModel);
+        Assert.AreEqual("openai/gpt-4o",
+            (client.GetService(typeof(ChatClientMetadata)) as ChatClientMetadata)?.DefaultModelId);
         Assert.IsTrue(AttachmentSupport.Resolve(config, runtimeModel: client.Model).Images);
         Assert.IsFalse(documentReader.Handles("application/pdf"));
         var second = CaptureAsync();
@@ -64,6 +68,60 @@ public sealed class RuntimeModelChatClientTests
         Assert.AreEqual("openai/gpt-4o", captured.Model);
         Assert.AreEqual("AgentFox", captured.Header);
         Assert.AreEqual("test-account", captured.User);
+    }
+
+    [TestMethod]
+    public async Task Trading_assessment_cache_is_separate_for_each_runtime_model()
+    {
+        using var reservation = new TcpListener(IPAddress.Loopback, 0);
+        reservation.Start();
+        var port = ((IPEndPoint)reservation.LocalEndpoint).Port;
+        reservation.Stop();
+        using var listener = new HttpListener();
+        listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+        listener.Start();
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["LLM:Provider"] = "OpenRouter", ["LLM:ApiKey"] = "synthetic-secret",
+            ["LLM:Model"] = "example/first", ["LLM:BaseUrl"] = $"http://127.0.0.1:{port}/v1"
+        }).Build();
+        using var client = new RuntimeModelChatClient(config);
+        var assessments = new StockAssessmentService(client, NullLogger<StockAssessmentService>.Instance);
+        var request = new StockAssessmentRequest
+        {
+            Symbol = "OGDC", Evidence = new { symbol = "OGDC" },
+            CacheKey = StockAssessmentService.CacheKeyFor("OGDC", 309m, "1D")
+        };
+
+        async Task<string> AnswerAsync()
+        {
+            var context = await listener.GetContextAsync().WaitAsync(TimeSpan.FromSeconds(10));
+            using var reader = new StreamReader(context.Request.InputStream);
+            using var body = JsonDocument.Parse(await reader.ReadToEndAsync());
+            var model = body.RootElement.GetProperty("model").GetString()!;
+            var content = """{"confidence":"HIGH","confidence_score":80,"recommendation":"PROCEED","rationale":"ok","supporting_factors":[],"risk_factors":[],"invalidation_level":null}""";
+            var response = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
+            {
+                id = "test", @object = "chat.completion", created = 0, model,
+                choices = new[] { new { index = 0, message = new { role = "assistant", content }, finish_reason = "stop" } }
+            }));
+            context.Response.ContentType = "application/json";
+            context.Response.ContentLength64 = response.Length;
+            await context.Response.OutputStream.WriteAsync(response);
+            context.Response.Close();
+            return model;
+        }
+
+        var firstCall = AnswerAsync();
+        Assert.IsFalse((await assessments.AssessAsync(request)).FromCache);
+        Assert.AreEqual("example/first", await firstCall);
+        Assert.IsTrue((await assessments.AssessAsync(request)).FromCache);
+
+        Assert.IsTrue(client.TrySetModel("example/second", out var error), error);
+        var secondCall = AnswerAsync();
+        Assert.IsFalse((await assessments.AssessAsync(request)).FromCache);
+        Assert.AreEqual("example/second", await secondCall);
+        Assert.IsTrue((await assessments.AssessAsync(request)).FromCache);
     }
 
     [TestMethod]

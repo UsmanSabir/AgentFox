@@ -76,7 +76,7 @@ public sealed partial class TradingCoreEndpoints
                 var symbol = PsxDataClient.NormalizeStockSymbol(body.Symbol);
                 var interval = body.Interval?.Trim() ?? "1D";
                 var key = $"symbol|{symbol}|{interval}|{body.Context?.Trim()}";
-                var submitted = jobs.Submit(key, async jobCt =>
+                var submitted = jobs.Submit(assessments.ModelScopedKey(key), async jobCt =>
                     (object)await AssessSymbolAsync(
                         symbol, interval, body.Context, null,
                         assessments, analysis, dataClient, universe, jobCt));
@@ -124,7 +124,7 @@ public sealed partial class TradingCoreEndpoints
 
             try
             {
-                var submitted = jobs.Submit($"alert|{alertId}", async jobCt =>
+                var submitted = jobs.Submit(assessments.ModelScopedKey($"alert|{alertId}"), async jobCt =>
                 {
                     var key = StockAssessmentService.CacheKeyFor(
                         alert.Symbol, alert.LevelPrice, alert.Interval);
