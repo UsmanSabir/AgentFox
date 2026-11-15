@@ -1083,6 +1083,10 @@ public class AgentBuilder
     /// </summary>
     private Func<string, Dictionary<string, object?>, CancellationToken, Task<bool>>? _toolApprovalGate;
 
+    /// <summary>Per-tool availability and the prompt text that depends on it. Set via <see cref="WithToolGates"/>; null means none.</summary>
+    private IReadOnlyDictionary<string, Func<CancellationToken, ValueTask<bool>>>? _toolGates;
+    private Func<IReadOnlySet<string>, string?>? _gatedPromptFragment;
+
     /// <summary>
     /// Ceiling on a single tool invocation. <see cref="Timeout.InfiniteTimeSpan"/> disables it.
     /// </summary>
@@ -1215,6 +1219,20 @@ public class AgentBuilder
         Func<string, Dictionary<string, object?>, CancellationToken, Task<bool>> gate)
     {
         _toolApprovalGate = gate;
+        return this;
+    }
+
+    /// <summary>
+    /// Makes individual tools available per model call. A gated tool that is unavailable is left out of the list the
+    /// model is offered and is refused if called anyway; <paramref name="promptFragment"/> is appended to the instructions of
+    /// every call with the names of the tools that call is offered. Both default to nothing, which leaves the agent exactly as it was.
+    /// </summary>
+    public AgentBuilder WithToolGates(
+        IReadOnlyDictionary<string, Func<CancellationToken, ValueTask<bool>>>? gates,
+        Func<IReadOnlySet<string>, string?>? promptFragment = null)
+    {
+        _toolGates = gates is { Count: > 0 } ? gates : null;
+        _gatedPromptFragment = promptFragment;
         return this;
     }
 
@@ -1607,6 +1625,11 @@ public class AgentBuilder
             return missing;
         }
 
+        // A gated tool the model was not offered (or whose gate has since closed) is refused here, the one path every
+        // model-invoked call takes, so a hallucinated or replayed call cannot reach it.
+        if (!await ToolGates.IsAvailableAsync(_toolGates, toolName, ct, _logger))
+            return ToolResult.Fail($"Tool '{toolName}' is not available right now.");
+
         // One span per model-invoked tool call. This is the only path every such call takes, so
         // instrumenting here rather than per tool means a new tool is traced the day it is written.
         // Arguments and results are deliberately NOT recorded: they carry whatever the tool read,
@@ -1990,6 +2013,8 @@ public class AgentBuilder
         var promptRegistry = _promptContributorRegistry;
         var mcpManager = _mcpManager;
         var middlewareLogger = _logger;
+        var toolGates = _toolGates;
+        var gatedPromptFragment = _gatedPromptFragment;
         agentBuilder.Use(inner => new DynamicAgentMiddleware(
             inner,
             toolRegistry,
@@ -1997,7 +2022,9 @@ public class AgentBuilder
             baselineToolNames,
             def => CreateAgentTool(def),
             mcpManager,
-            middlewareLogger));
+            middlewareLogger,
+            toolGates,
+            gatedPromptFragment));
 
         // Model-call spans and token metrics. Registered AFTER the dynamic middleware and
         // therefore INSIDE it: ChatClientBuilder applies factories in reverse, so the first Use

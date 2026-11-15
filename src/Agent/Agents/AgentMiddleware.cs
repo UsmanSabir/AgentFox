@@ -163,6 +163,8 @@ internal sealed class DynamicAgentMiddleware : DelegatingChatClient
     private readonly Func<ToolDefinition, AITool> _toolFactory;
     private readonly McpManager? _mcpManager;
     private readonly ILogger? _logger;
+    private readonly IReadOnlyDictionary<string, Func<CancellationToken, ValueTask<bool>>>? _toolGates;
+    private readonly Func<IReadOnlySet<string>, string?>? _gatedPromptFragment;
 
     // Tool injection cache — rebuilt only when ToolRegistry.Version changes
     private int _cachedToolVersion;
@@ -183,7 +185,9 @@ internal sealed class DynamicAgentMiddleware : DelegatingChatClient
         IEnumerable<string> baselineToolNames,
         Func<ToolDefinition, AITool> toolFactory,
         McpManager? mcpManager = null,
-        ILogger? logger = null) : base(inner)
+        ILogger? logger = null,
+        IReadOnlyDictionary<string, Func<CancellationToken, ValueTask<bool>>>? toolGates = null,
+        Func<IReadOnlySet<string>, string?>? gatedPromptFragment = null) : base(inner)
     {
         _toolRegistry = toolRegistry;
         _promptRegistry = promptRegistry;
@@ -191,20 +195,21 @@ internal sealed class DynamicAgentMiddleware : DelegatingChatClient
         _toolFactory = toolFactory;
         _mcpManager = mcpManager;
         _logger = logger;
+        _toolGates = toolGates is { Count: > 0 } ? toolGates : null;
+        _gatedPromptFragment = gatedPromptFragment;
         // Snapshot the version at construction so first-call change detection is accurate
         _cachedToolVersion = toolRegistry.Version;
     }
 
-    public override Task<ChatResponse> GetResponseAsync(
+    public override async Task<ChatResponse> GetResponseAsync(
         IEnumerable<ChatMessage> messages,
         ChatOptions? options = null,
         CancellationToken cancellationToken = default)
     {
         var messageList = StripEmptyMessages(messages as IReadOnlyList<ChatMessage> ?? messages.ToList());
-        return base.GetResponseAsync(
-            messageList,
-            PrepareOptions(options, ShouldForceDelegation(messageList)),
-            cancellationToken);
+        var prepared = await ApplyToolGatesAsync(
+            PrepareOptions(options, ShouldForceDelegation(messageList)), cancellationToken);
+        return await base.GetResponseAsync(messageList, prepared, cancellationToken);
     }
 
     public override async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
@@ -213,7 +218,8 @@ internal sealed class DynamicAgentMiddleware : DelegatingChatClient
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         var messageList = StripEmptyMessages(messages as IReadOnlyList<ChatMessage> ?? messages.ToList());
-        var prepared = PrepareOptions(options, ShouldForceDelegation(messageList));
+        var prepared = await ApplyToolGatesAsync(
+            PrepareOptions(options, ShouldForceDelegation(messageList)), cancellationToken);
         await foreach (var update in base.GetStreamingResponseAsync(messageList, prepared, cancellationToken))
             yield return update;
     }
@@ -352,6 +358,43 @@ internal sealed class DynamicAgentMiddleware : DelegatingChatClient
         if (options is null)
             InjectDynamicTools(opts);
         InjectPromptAddons(opts);
+        return opts;
+    }
+
+    /// <summary>
+    /// Per-call availability for gated tools (<see cref="ToolGates"/>), applied to the CLONE going to the model so the shared
+    /// options the outer function-invoker owns are never touched: a tool the model is not offered but calls anyway still
+    /// reaches the host's own refusal. A no-op, and no allocation, when the agent has no gates and no gated prompt text.
+    /// </summary>
+    private async ValueTask<ChatOptions> ApplyToolGatesAsync(ChatOptions opts, CancellationToken ct)
+    {
+        if (_toolGates is null && _gatedPromptFragment is null) return opts;
+
+        if (_toolGates is not null && opts.Tools is { Count: > 0 } tools)
+        {
+            HashSet<string>? hidden = null;
+            foreach (var name in _toolGates.Keys)
+            {
+                if (!tools.Any(t => t.Name.Equals(name, StringComparison.OrdinalIgnoreCase))) continue;
+                if (!await ToolGates.IsAvailableAsync(_toolGates, name, ct, _logger))
+                    (hidden ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase)).Add(name);
+            }
+            if (hidden is not null)
+                opts.Tools = tools.Where(t => !hidden.Contains(t.Name)).ToList();
+        }
+
+        if (_gatedPromptFragment is not null)
+        {
+            var offered = (opts.Tools ?? []).Select(t => t.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            string? fragment = null;
+            try { fragment = _gatedPromptFragment(offered); }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(ex, "The tool-dependent prompt section threw and was omitted from this call.");
+            }
+            if (!string.IsNullOrWhiteSpace(fragment))
+                opts.Instructions = (opts.Instructions ?? string.Empty) + "\n\n" + fragment.Trim();
+        }
         return opts;
     }
 
