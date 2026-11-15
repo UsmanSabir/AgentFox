@@ -5,6 +5,7 @@ using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
 using OllamaSharp;
 using OpenAI;
+using ChatCompletionOptions = OpenAI.Chat.ChatCompletionOptions;
 using System.ClientModel;
 using System.ClientModel.Primitives;
 using Azure.AI.OpenAI;
@@ -64,7 +65,7 @@ public class LLMFactory
                     var openAiClient = new OpenAIClient(keyCredential, OpenAiOptions(baseUrl, timeout, customHeaders));
                     var chatClient = openAiClient.GetChatClient(model);
 
-                    provider = chatClient.AsIChatClient();
+                    provider = WithOpenRouterUser(chatClient.AsIChatClient(), configuration["LLM:User"]);
                     //provider = CreateOpenAI(apiKey, baseUrl, timeout, customHeaders);
                     break;
                 }
@@ -164,7 +165,10 @@ public class LLMFactory
         // 1. Named model config lookup
         var modelConfig = configuration.GetSection($"Models:{modelNameOrKey}").Get<ModelConfig>();
         if (modelConfig != null && !string.IsNullOrEmpty(modelConfig.Model))
+        {
+            modelConfig.User ??= configuration["LLM:User"];
             return CreateChatClient(modelConfig);
+        }
 
         // 2. Fallback: reuse default provider settings, swap model name
         var fallback = new ModelConfig
@@ -173,6 +177,7 @@ public class LLMFactory
             Model = modelNameOrKey,
             BaseUrl = configuration["LLM:BaseUrl"] ?? "http://localhost:11434",
             ApiKey = configuration["LLM:ApiKey"],
+            User = configuration["LLM:User"],
             Headers = configuration.GetSection("LLM:Headers").Get<Dictionary<string, string>>() ?? new(),
             TimeoutSeconds = int.TryParse(configuration["LLM:TimeoutSeconds"], out var t) ? t : 3600
         };
@@ -228,6 +233,42 @@ public class LLMFactory
         }
     }
 
+    private static IChatClient WithOpenRouterUser(IChatClient client, string? user)
+    {
+        // Some callers build a ModelConfig directly (for example, summarization), bypassing the LLM section.
+        user ??= Environment.GetEnvironmentVariable("LLM__User");
+        return string.IsNullOrWhiteSpace(user) ? client : new OpenRouterUserChatClient(client, user);
+    }
+
+    private sealed class OpenRouterUserChatClient(IChatClient inner, string user) : IChatClient
+    {
+        private ChatOptions AddUser(ChatOptions? options)
+        {
+            var copy = options?.Clone() ?? new ChatOptions();
+            var originalFactory = copy.RawRepresentationFactory;
+            copy.RawRepresentationFactory = client =>
+            {
+                var native = originalFactory?.Invoke(client) as ChatCompletionOptions ?? new ChatCompletionOptions();
+                native.EndUserId = user; // Serialized as request-body "user" by the OpenAI-compatible chat API.
+                return native;
+            };
+            return copy;
+        }
+
+        public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages,
+            ChatOptions? options = null, CancellationToken cancellationToken = default)
+            => inner.GetResponseAsync(messages, AddUser(options), cancellationToken);
+
+        public IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> messages,
+            ChatOptions? options = null, CancellationToken cancellationToken = default)
+            => inner.GetStreamingResponseAsync(messages, AddUser(options), cancellationToken);
+
+        public object? GetService(Type serviceType, object? serviceKey = null)
+            => inner.GetService(serviceType, serviceKey);
+
+        public void Dispose() => inner.Dispose();
+    }
+
     public static IChatClient? CreateChatClient(ModelConfig modelConfig)
     {
         var providerType = modelConfig.Provider?.ToLowerInvariant();
@@ -267,7 +308,7 @@ public class LLMFactory
                     var keyCredential = new ApiKeyCredential(apiKey);
                     var openAiClient = new OpenAIClient(keyCredential, OpenAiOptions(baseUrl, timeout, modelConfig.Headers));
                     var chatClient = openAiClient.GetChatClient(model);
-                    provider = chatClient.AsIChatClient();
+                    provider = WithOpenRouterUser(chatClient.AsIChatClient(), modelConfig.User);
 
                     break;
                 }
