@@ -60,18 +60,9 @@ public sealed class RuntimeModelChatClient : IChatClient
         IChatClient next;
         try
         {
-            // A literal model ID only. Named Models entries may carry a different provider or key.
-            next = LLMFactory.CreateChatClient(new ModelConfig
-            {
-                Provider = Provider,
-                Model = model,
-                BaseUrl = _configuration["LLM:BaseUrl"] ?? (Provider.Equals("OpenRouter", StringComparison.OrdinalIgnoreCase)
-                    ? "https://openrouter.ai/api/v1" : "https://api.openai.com/v1"),
-                ApiKey = _configuration["LLM:ApiKey"],
-                User = _configuration["LLM:User"],
-                Headers = _configuration.GetSection("LLM:Headers").Get<Dictionary<string, string>>() ?? new(),
-                TimeoutSeconds = int.TryParse(_configuration["LLM:TimeoutSeconds"], out var timeout) ? timeout : 0
-            }) ?? throw new InvalidOperationException("The model client could not be created.");
+            // Same construction as the startup client (provider defaults, headers, timeout, OpenRouter user, Azure client);
+            // only the model ID differs. A literal model ID only: named Models entries may carry another provider or key.
+            next = LLMFactory.CreateFromConfiguration(_configuration, model);
         }
         catch (Exception)
         {
@@ -153,6 +144,8 @@ public sealed class RuntimeModelChatClient : IChatClient
 
     public object? GetService(Type serviceType, object? serviceKey = null)
     {
+        // Hand out the wrapper itself, never an inner client that switching would retire and dispose.
+        if (serviceKey is null && serviceType.IsInstanceOfType(this)) return this;
         lock (_gate) return _current.Client.GetService(serviceType, serviceKey);
     }
 

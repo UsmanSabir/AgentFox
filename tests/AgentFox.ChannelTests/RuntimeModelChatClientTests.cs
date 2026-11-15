@@ -146,4 +146,55 @@ public sealed class RuntimeModelChatClientTests
         Assert.IsFalse(ollama.CanSwitch);
         Assert.IsFalse(ollama.TrySetModel("other", out _));
     }
+
+    [TestMethod]
+    public void Anthropic_agent_without_a_base_url_keeps_its_own_endpoint_after_a_switch()
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["LLM:Provider"] = "Anthropic", ["LLM:ApiKey"] = "synthetic-secret", ["LLM:Model"] = "claude-first"
+        }).Build();
+        using var client = new RuntimeModelChatClient(config);
+        var startup = (ChatClientMetadata)client.GetService(typeof(ChatClientMetadata))!;
+        Assert.IsNotNull(startup.ProviderUri);
+        Assert.AreEqual("api.anthropic.com", startup.ProviderUri!.Host);
+
+        Assert.IsTrue(client.TrySetModel("claude-second", out var error), error);
+        var switched = (ChatClientMetadata)client.GetService(typeof(ChatClientMetadata))!;
+        Assert.AreEqual("claude-second", switched.DefaultModelId);
+        Assert.AreEqual(startup.ProviderUri, switched.ProviderUri);
+    }
+
+    [TestMethod]
+    public void Azure_switch_is_built_like_the_startup_client()
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["LLM:Provider"] = "AzureOpenAI", ["LLM:ApiKey"] = "synthetic-secret", ["LLM:Model"] = "deployment-one",
+            ["LLM:BaseUrl"] = "https://example.openai.azure.com/"
+        }).Build();
+        using var client = new RuntimeModelChatClient(config);
+        var startupType = client.GetService(typeof(OpenAI.Chat.ChatClient))!.GetType();
+        Assert.IsTrue(client.TrySetModel("deployment-two", out var error), error);
+        var switched = client.GetService(typeof(OpenAI.Chat.ChatClient))!;
+        Assert.AreEqual(startupType, switched.GetType());
+        Assert.AreEqual(typeof(Azure.AI.OpenAI.AzureOpenAIClient).Assembly, switched.GetType().Assembly);
+        Assert.AreEqual("deployment-two",
+            ((ChatClientMetadata)client.GetService(typeof(ChatClientMetadata))!).DefaultModelId);
+    }
+
+    [TestMethod]
+    public void GetService_for_the_chat_client_returns_the_wrapper_not_an_inner_client()
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["LLM:Provider"] = "OpenRouter", ["LLM:ApiKey"] = "synthetic-secret", ["LLM:Model"] = "initial"
+        }).Build();
+        using var client = new RuntimeModelChatClient(config);
+        Assert.AreSame(client, client.GetService(typeof(IChatClient)));
+        Assert.AreSame(client, client.GetService(typeof(RuntimeModelChatClient)));
+        Assert.IsTrue(client.TrySetModel("other", out var error), error);
+        Assert.AreSame(client, client.GetService(typeof(IChatClient)));
+        Assert.IsNotNull(client.GetService(typeof(ChatClientMetadata)));
+    }
 }
