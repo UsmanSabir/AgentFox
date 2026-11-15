@@ -120,17 +120,19 @@ public sealed class StockAssessmentService
         if (request.IsDelisted)
             return Delisted(request.Symbol);
 
-        if (request.CacheKey is { } key && _cache.TryGetValue(key, out var cached) && !cached.IsExpired)
+        var scopedKey = request.CacheKey is { } key ? ModelScopedKey(key) : null;
+        if (scopedKey is not null && _cache.TryGetValue(scopedKey, out var cached) && !cached.IsExpired)
             return cached.Assessment with { FromCache = true };
 
         var assessment = await CallModelAsync(request, ct);
 
-        if (request.CacheKey is { } cacheKey && assessment.Recommendation != "INSUFFICIENT_DATA")
+        if (scopedKey is not null && assessment.Recommendation != "INSUFFICIENT_DATA"
+            && scopedKey == ModelScopedKey(request.CacheKey!))
         {
             // A failed assessment is never cached: the next click should retry rather than be told
             // "insufficient data" for the rest of the session because one model call timed out.
             PruneIfFull();
-            _cache[cacheKey] = new CacheEntry(assessment, EndOfSessionUtc());
+            _cache[scopedKey] = new CacheEntry(assessment, EndOfSessionUtc());
         }
 
         return assessment;
@@ -143,7 +145,7 @@ public sealed class StockAssessmentService
     /// </summary>
     public bool TryGetCached(string cacheKey, out StockAssessment assessment)
     {
-        if (_cache.TryGetValue(cacheKey, out var entry) && !entry.IsExpired)
+        if (_cache.TryGetValue(ModelScopedKey(cacheKey), out var entry) && !entry.IsExpired)
         {
             assessment = entry.Assessment with { FromCache = true };
             return true;
@@ -166,6 +168,13 @@ public sealed class StockAssessmentService
     public static string CacheKeyFor(string symbol, decimal? level, string interval) =>
         string.Create(CultureInfo.InvariantCulture,
             $"{symbol.ToUpperInvariant()}|{interval}|{level ?? 0m:F2}|{PsxTime.Today():yyyy-MM-dd}");
+
+    /// <summary>Separate cached verdicts and retained jobs by the model currently serving requests.</summary>
+    public string ModelScopedKey(string key)
+    {
+        var model = ModelName() ?? string.Empty;
+        return $"{model.Length}:{model}|{key}";
+    }
 
     private async Task<StockAssessment> CallModelAsync(
         StockAssessmentRequest request, CancellationToken ct)
@@ -203,7 +212,7 @@ public sealed class StockAssessmentService
                     SupportingFactors = parsed.SupportingFactors,
                     RiskFactors       = parsed.RiskFactors,
                     InvalidationLevel = parsed.InvalidationLevel,
-                    Model             = ModelName(),
+                    Model             = response.ModelId ?? ModelName(),
                     AssessedUtc       = DateTime.UtcNow
                 };
             }

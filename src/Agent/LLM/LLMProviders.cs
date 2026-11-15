@@ -17,8 +17,11 @@ namespace AgentFox.LLM;
 /// </summary>
 public class LLMFactory
 {
-    public static IChatClient CreateFromConfiguration(IConfiguration configuration)
+    /// <summary>Builds the configured chat client. <paramref name="modelOverride"/> swaps only the model ID, so a runtime
+    /// switch is built by exactly the code the startup client uses and the two cannot diverge.</summary>
+    public static IChatClient CreateFromConfiguration(IConfiguration configuration, string? modelOverride = null)
     {
+        var configuredModel = modelOverride ?? configuration["LLM:Model"];
         var providerType = configuration["LLM:Provider"]?.ToLowerInvariant();
 
         TimeSpan? timeout = null;
@@ -45,7 +48,7 @@ public class LLMFactory
                 {
                     var apiKey = configuration["LLM:ApiKey"] ?? Environment.GetEnvironmentVariable("OPENAI_API_KEY");
                     var baseUrl = configuration["LLM:BaseUrl"] ?? "https://api.openai.com/v1";
-                    var model = configuration["LLM:Model"];
+                    var model = configuredModel;
 
                     var keyCredential = new ApiKeyCredential(apiKey);
                     var openAiClient = new OpenAIClient(keyCredential, OpenAiOptions(baseUrl, timeout, customHeaders));
@@ -59,7 +62,7 @@ public class LLMFactory
                 {
                     var apiKey = configuration["LLM:ApiKey"] ?? Environment.GetEnvironmentVariable("OPENROUTER_API_KEY");
                     var baseUrl = configuration["LLM:BaseUrl"] ?? "https://openrouter.ai/api/v1";
-                    var model = configuration["LLM:Model"];
+                    var model = configuredModel;
 
                     var keyCredential = new ApiKeyCredential(apiKey);
                     var openAiClient = new OpenAIClient(keyCredential, OpenAiOptions(baseUrl, timeout, customHeaders));
@@ -73,7 +76,7 @@ public class LLMFactory
                 {
                     var apiKey = configuration["LLM:ApiKey"] ?? Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY");
                     var baseUrl = configuration["LLM:BaseUrl"];
-                    var model = configuration["LLM:Model"];
+                    var model = configuredModel;
                     if (string.IsNullOrEmpty(apiKey))
                         throw new InvalidOperationException("Anthropic Provider requires an API key in configuration or ANTHROPIC_API_KEY environment variable.");
 
@@ -90,7 +93,7 @@ public class LLMFactory
                 {
                     var apiKey = configuration["LLM:ApiKey"] ?? Environment.GetEnvironmentVariable("AZURE_OPENAI_API_KEY");
                     var baseUrl = configuration["LLM:BaseUrl"] ?? throw new InvalidOperationException("Azure OpenAI Provider requires BaseUrl in configuration.");
-                    var model = configuration["LLM:Model"] ?? throw new InvalidOperationException("Azure OpenAI Provider requires Model name in configuration.");
+                    var model = configuredModel ?? throw new InvalidOperationException("Azure OpenAI Provider requires Model name in configuration.");
 
                     //var keyCredential = new ApiKeyCredential(apiKey);
                     //var openAiClient = new OpenAIClient(keyCredential, new OpenAIClientOptions() { Endpoint = new Uri(baseUrl), NetworkTimeout = timeout });
@@ -109,7 +112,7 @@ public class LLMFactory
                 {
                     var apiKey = configuration["LLM:ApiKey"] ?? Environment.GetEnvironmentVariable("GOOGLE_VERTEX_AI_API_KEY");
                     var baseUrl = configuration["LLM:BaseUrl"] ?? throw new InvalidOperationException("Google Vertex AI Provider requires BaseUrl in configuration.");
-                    var model = configuration["LLM:Model"] ?? throw new InvalidOperationException("Google Vertex AI Provider requires Model name in configuration.");
+                    var model = configuredModel ?? throw new InvalidOperationException("Google Vertex AI Provider requires Model name in configuration.");
 
                     var client = new Client(vertexAI: true, apiKey: apiKey);
 
@@ -120,7 +123,7 @@ public class LLMFactory
                 {
                     var apiKey = configuration["LLM:ApiKey"] ?? Environment.GetEnvironmentVariable("GOOGLE_GENAI_API_KEY");
                     var baseUrl = configuration["LLM:BaseUrl"] ?? throw new InvalidOperationException("Google GenAI Provider requires BaseUrl in configuration.");
-                    var model = configuration["LLM:Model"] ?? throw new InvalidOperationException("Google GenAI Provider requires Model name in configuration.");
+                    var model = configuredModel ?? throw new InvalidOperationException("Google GenAI Provider requires Model name in configuration.");
 
                     var client = new Client(vertexAI: false, apiKey: apiKey);
 
@@ -134,7 +137,7 @@ public class LLMFactory
                     if (string.IsNullOrEmpty(baseUrl))
                         baseUrl = "http://localhost:11434"; // Ollama default only
 
-                    var model = configuration["LLM:Model"] ?? "qwen3.5:4b";
+                    var model = configuredModel ?? "qwen3.5:4b";
                     //var apiKey = configuration["LLM:ApiKey"] ?? Environment.GetEnvironmentVariable("OLLAMA_API_KEY");
 
                     if (string.IsNullOrEmpty(model))

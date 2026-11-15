@@ -40,6 +40,13 @@ export interface Capabilities {
   attachments: AttachmentCapabilities;
 }
 
+export interface RuntimeModel {
+  provider: string;
+  model: string;
+  configuredModel: string;
+  canSwitch: boolean;
+}
+
 export interface ReferenceItem {
   url: string;
   title?: string;
@@ -502,6 +509,8 @@ export const api = {
   version:  () => get<VersionInfo>('/version'),
   status:   () => get<AgentStatus>('/status'),
   capabilities: () => get<Capabilities>('/capabilities'),
+  runtimeModel: () => get<RuntimeModel>('/model'),
+  setRuntimeModel: (model: string) => put<RuntimeModel>('/model', { model }),
   agents:   () => get<AgentInfo[]>('/agents'),
   specialistAgents: () => get<SpecialistAgentInfo[]>('/specialist-agents'),
   specialistChat: (agentId: string, message: string, conversationId?: string) =>

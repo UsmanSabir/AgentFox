@@ -80,9 +80,9 @@ public class WebModule : IAppModule
         // ── Capabilities ──────────────────────────────────────────────────────
         // What the configured model accepts as chat input. The web UI reads this to decide
         // whether to offer the attachment button at all, and which file types to accept.
-        endpoints.MapGet("/capabilities", (IConfiguration config, HttpContext httpContext) =>
+        endpoints.MapGet("/capabilities", (IConfiguration config, RuntimeModelChatClient modelClient, HttpContext httpContext) =>
         {
-            var caps = AttachmentSupport.Resolve(config, DocumentReader(httpContext));
+            var caps = AttachmentSupport.Resolve(config, DocumentReader(httpContext), modelClient.Model);
             return Results.Ok(new
             {
                 attachments = new
@@ -103,6 +103,21 @@ public class WebModule : IAppModule
             });
         });
 
+        // The model ID is runtime-only. The configured provider, credential and endpoint stay fixed.
+        endpoints.MapGet("/model", (RuntimeModelChatClient modelClient, HttpContext httpContext) => Results.Ok(new
+        {
+            provider = modelClient.Provider,
+            model = modelClient.Model,
+            configuredModel = modelClient.ConfiguredModel,
+            canSwitch = modelClient.CanSwitch && httpContext.User.IsInRole(ManagementRoles.Administrator)
+        }));
+        endpoints.MapPut("/model", (RuntimeModelChatClient modelClient, RuntimeModelRequest req) =>
+            modelClient.TrySetModel(req.Model, out var error)
+                ? Results.Ok(new { provider = modelClient.Provider, model = modelClient.Model,
+                    configuredModel = modelClient.ConfiguredModel, canSwitch = modelClient.CanSwitch })
+                : Results.BadRequest(new { error }))
+            .RequireAuthorization("ManagementAdministrator");
+
         // ── Chat (request/response) ───────────────────────────────────────────
 
         endpoints.MapPost("/chat", async (
@@ -110,6 +125,7 @@ public class WebModule : IAppModule
             SessionManager sessionManager,
             MarkdownSessionStore sessionStore,
             IConfiguration config,
+            RuntimeModelChatClient modelClient,
             ChatRequest req,
             HttpContext httpContext,
             CancellationToken ct) =>
@@ -125,7 +141,7 @@ public class WebModule : IAppModule
             // Reject the whole turn on an unusable attachment rather than dropping it: a user
             // who attached a screenshot to a text-only model must be told, not left believing
             // the model looked at it.
-            if (!AttachmentSupport.TryResolve(req.Attachments, AttachmentSupport.Resolve(config, documentReader), out _, out var attachmentError))
+            if (!AttachmentSupport.TryResolve(req.Attachments, AttachmentSupport.Resolve(config, documentReader, modelClient.Model), out _, out var attachmentError))
                 return Results.BadRequest(new ChatResponse { Success = false, Error = attachmentError });
 
             try
@@ -166,6 +182,7 @@ public class WebModule : IAppModule
     SessionManager sessionManager,
     MarkdownSessionStore sessionStore,
     IConfiguration config,
+    RuntimeModelChatClient modelClient,
     WebChatTurnCoordinator turnCoordinator,
     PendingNotificationStore pendingNotifications,
     HttpContext httpContext,
@@ -179,7 +196,7 @@ public class WebModule : IAppModule
             }
 
             // Same all-or-nothing rule as /chat — see the comment there.
-            if (!AttachmentSupport.TryResolve(req.Attachments, AttachmentSupport.Resolve(config, DocumentReader(httpContext)), out _, out var attachmentError))
+            if (!AttachmentSupport.TryResolve(req.Attachments, AttachmentSupport.Resolve(config, DocumentReader(httpContext), modelClient.Model), out _, out var attachmentError))
             {
                 httpContext.Response.StatusCode = 400;
                 await httpContext.Response.WriteAsJsonAsync(new { error = attachmentError }, ct);
@@ -1631,6 +1648,8 @@ public record HitlDecisionRequest(string? Message);
 /// comma-separated filter spec used in appsettings; null or blank means the catch-all.
 /// </summary>
 public record ChannelSubscriptionRequest(string? Subscribe);
+
+public record RuntimeModelRequest(string? Model);
 
 public record HeartbeatRequest(
     string Name,

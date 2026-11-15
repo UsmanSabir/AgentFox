@@ -4,6 +4,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
   type SpecialistAgentInfo, type TodoSnapshot, type ConversationStreamEvent,
   type ToolActivity, type ToolActivityDetails, type ChatAttachment,
   type AttachmentCapabilities } from '#lib/api.ts';
+  import type { RuntimeModel } from '#lib/api.ts';
   import { renderMarkdown } from '#lib/markdown.ts';
   import {
     chatMessages, addUserMessage, addAssistantMessage, addBackgroundResultMessage,
@@ -28,6 +29,38 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
   let forkingMessageId: string | null = null;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let sessions: SessionInfo[] = [];
+  let runtimeModel: RuntimeModel | null = null;
+  let modelInput = '';
+  let modelSaving = false;
+  let modelError = '';
+  let modelNotice = '';
+
+  async function loadRuntimeModel() {
+    try {
+      runtimeModel = await api.runtimeModel();
+      modelInput = runtimeModel.model;
+    } catch {
+      runtimeModel = null;
+    }
+  }
+
+  async function applyModel() {
+    if (!runtimeModel?.canSwitch || modelSaving || isStreaming) return;
+    modelError = '';
+    modelNotice = '';
+    modelSaving = true;
+    try {
+      runtimeModel = await api.setRuntimeModel(modelInput.trim());
+      modelInput = runtimeModel.model;
+      modelNotice = `Using ${runtimeModel.model} for new calls until the agent restarts.`;
+      clearAttachments();
+      await loadCapabilities();
+    } catch (err) {
+      modelError = err instanceof Error ? err.message : String(err);
+    } finally {
+      modelSaving = false;
+    }
+  }
 
   // ── Live background sub-agent turns ─────────────────────────────────────
   // A turn kicked off by a finishing background sub-agent has no chat request of its own,
@@ -246,7 +279,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
 
   onMount(async () => {
     inputEl?.focus();
-    await Promise.all([loadSessions(), loadSpecialists(), loadMemorySettings(), loadCapabilities()]);
+    await Promise.all([loadSessions(), loadSpecialists(), loadMemorySettings(), loadCapabilities(), loadRuntimeModel()]);
   });
 
   onDestroy(() => {
@@ -847,6 +880,23 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
         {/each}
       </select>
     </label>
+    {#if selectedAgentId === 'main' && runtimeModel}
+      <form class="model-picker" on:submit|preventDefault={applyModel} title="Model for future agent calls until restart">
+        <label for="runtime-model">Model</label>
+        {#if runtimeModel.canSwitch}
+          <input id="runtime-model" aria-label="Model ID" bind:value={modelInput}
+            maxlength="200" spellcheck="false" disabled={modelSaving || isStreaming} />
+          <button class="toolbar-btn" type="submit"
+            disabled={modelSaving || isStreaming || !modelInput.trim() || modelInput.trim() === runtimeModel.model}>
+            {modelSaving ? 'Applying…' : 'Apply'}
+          </button>
+        {:else}
+          <span class="model-current">{runtimeModel.model || 'Default'}</span>
+        {/if}
+      </form>
+      {#if modelError}<span class="model-error" role="alert">{modelError}</span>{/if}
+      {#if modelNotice}<span class="sr-only" role="status">{modelNotice}</span>{/if}
+    {/if}
     {#if convId}
       <span class="conv-label">Session:</span>
       <code class="conv-id">{convId}</code>
@@ -1346,6 +1396,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
     border-bottom: 1px solid var(--border);
     font-size: 0.75rem;
     color: var(--text-3);
+    overflow-x: auto;
   }
   .toolbar-btn {
     display: inline-flex;
@@ -1371,6 +1422,19 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
     padding: 0.25rem 1.8rem 0.25rem 0.45rem;
     font-size: 0.75rem;
   }
+  .model-picker { display: flex; align-items: center; gap: 0.4rem; min-width: 0; }
+  .model-picker input {
+    width: clamp(9rem, 19vw, 17rem);
+    min-width: 0;
+    padding: 0.3rem 0.45rem;
+    border: 1px solid var(--border-md);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    color: var(--text);
+    font: inherit;
+  }
+  .model-current { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 17rem; }
+  .model-error { color: var(--danger, #c43b3b); max-width: 20rem; }
   .conv-label { color: var(--text-3); }
   .conv-id {
     font-family: monospace;
@@ -1477,6 +1541,8 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
     .session-panel { position: absolute; z-index: 20; inset: 42px auto 0 0; box-shadow: 12px 0 30px rgba(0,0,0,0.35); }
     .conv-label, .conv-id { display: none; }
     .agent-picker > span { display: none; }
+    .model-picker > label { display: none; }
+    .model-picker input { width: 7rem; }
   }
 
   /* Intro / empty state */
