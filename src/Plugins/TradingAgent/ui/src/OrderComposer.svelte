@@ -414,6 +414,18 @@
     }
   }
 
+  async function scrollToOrderBottom() {
+    // Let the chosen size and its summary render before measuring the dialog.
+    await tick();
+    if (!mounted || !dialogElement?.isConnected) return;
+    const remaining = dialogElement.scrollHeight - dialogElement.clientHeight - dialogElement.scrollTop;
+    if (remaining <= 1) return;
+    dialogElement.scrollTo({
+      top: dialogElement.scrollHeight,
+      behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth'
+    });
+  }
+
   function sellFraction(fraction: number) {
     if (availableSellQuantity == null || availableSellQuantity <= 0) return;
     const shares = fraction >= 1
@@ -423,6 +435,7 @@
     sizeMode = 'shares';
     quantity = shares;
     quantityWasEdited = true;
+    void scrollToOrderBottom();
   }
 
   function defaultStopLossQuantity(snapshot: BrokerAccountSnapshot | null, ticker: string) {
@@ -450,6 +463,7 @@
     // would have to guess a price the order may not use.
     sizeMode = 'value';
     orderValue = value;
+    void scrollToOrderBottom();
   }
 
   // A date can be the whole trigger, or it can postpone when a price trigger starts being watched.
@@ -1450,7 +1464,7 @@
   .dialog { width:min(920px, 96vw); max-height:92vh; overflow:auto; background:var(--surface);
             border:1px solid var(--border-md); border-radius:var(--radius); box-shadow:0 20px 70px rgba(0,0,0,.5); }
   header { position:sticky; top:0; z-index:2; display:flex; justify-content:space-between; align-items:center;
-           padding:.9rem 1rem; background:var(--surface); border-bottom:1px solid var(--border); }
+           padding:.6rem 1rem; background:var(--surface); border-bottom:1px solid var(--border); }
   .title { display:flex; align-items:center; gap:.55rem; color:var(--primary); }
   .title div { display:flex; flex-direction:column; gap:.12rem; }.title b { color:var(--text); font-size:.96rem; }
   .title span { color:var(--text-3); font-size:.68rem; }
@@ -1462,7 +1476,7 @@
   .icon:focus-visible,.choice:focus-visible,input:focus-visible,.persist-check:focus-within,
   .attach-check:focus-within { outline:2px solid var(--primary); outline-offset:2px; }
   .loading { padding:2rem; color:var(--text-3); text-align:center; }
-  .symbol-row { display:flex; align-items:end; gap:1rem; padding:1rem; border-bottom:1px solid var(--border); flex-wrap:wrap; }
+  .symbol-row { display:flex; align-items:end; gap:1rem; padding:.65rem 1rem; border-bottom:1px solid var(--border); flex-wrap:wrap; }
   label { display:flex; flex-direction:column; gap:.3rem; color:var(--text-3); font-size:.68rem; }
   .persist-check { margin-top:.8rem; flex-direction:row; align-items:flex-start; gap:.55rem;
                    padding:.7rem; border:1px solid var(--border); border-radius:var(--radius-sm);
@@ -1493,26 +1507,26 @@
   .dialog header { border-top:3px solid var(--side-color); }
   .dialog .btn-primary,.review-dialog .btn-primary { background:var(--side-color); color:var(--bg); }
   .dialog .footer > .btn-primary { justify-content:center; font-weight:700; }
-  .choices { padding:.7rem 1rem .8rem; }
-  .side-control { display:flex; flex-direction:column; gap:.5rem; padding:1rem 1rem 0; }
+  .choices { padding:.5rem 1rem .6rem; }
+  .side-control { display:flex; flex-direction:column; gap:.3rem; padding:.65rem 1rem 0; }
   .embedded .side-control { padding:.7rem .7rem 0; }
   .side-picker { display:flex; width:100%; gap:.3rem; padding:.25rem;
                  background:var(--surface-2); border:1px solid var(--border-md); border-radius:var(--radius); }
   .side-picker button { flex:1; display:flex; align-items:center; justify-content:center; gap:.5rem;
-                        min-height:48px; padding:.55rem; border:1px solid transparent;
+                        min-height:32px; padding:.3rem .55rem; border:1px solid transparent;
                         background:transparent; color:var(--text-2); border-radius:var(--radius-sm); cursor:pointer; font:inherit; font-weight:700; }
   .side-picker .active { border-color:var(--side-color); background:var(--side-color); color:var(--bg); }
   .selection-mark { display:inline-flex; align-items:center; justify-content:center; width:18px; height:18px; flex:none; }
   h3 { margin:0 0 .4rem; color:var(--text-2); font-size:.7rem; }
   .choice-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:.45rem; }
-  .choice { min-height:44px; text-align:left; border:1px solid var(--border-md); font-size:.78rem; font-weight:600;
-            background:var(--surface-2); color:var(--text); border-radius:var(--radius-sm); padding:.55rem; cursor:pointer; }
+  .choice { min-height:32px; text-align:left; border:1px solid var(--border-md); font-size:.78rem; font-weight:600;
+            background:var(--surface-2); color:var(--text); border-radius:var(--radius-sm); padding:.3rem .55rem; cursor:pointer; }
   .choice:hover { background:var(--surface-3); }
   .choice.selected { border-color:var(--side-color); background:var(--side-tint); }
   .side-picker button:focus-visible, .more-types summary:focus-visible, .intent-help summary:focus-visible {
     outline:2px solid var(--primary); outline-offset:2px;
   }
-  .more-types summary { width:fit-content; padding:.6rem 0; color:var(--primary); cursor:pointer; font-size:.78rem; }
+  .more-types summary { width:fit-content; padding:.4rem 0; color:var(--primary); cursor:pointer; font-size:.78rem; }
   .intent-variant { margin:.6rem 0; }
   .intent-help { position:relative; }
   .intent-help summary { cursor:pointer; list-style:none; text-align:center; width:1.4rem; color:var(--text); border:1px solid var(--border-md); border-radius:50%; }
@@ -1563,7 +1577,7 @@
   .size-tabs { display:flex; gap:.25rem; padding:.25rem; border:1px solid var(--border-md);
                border-radius:var(--radius-sm); background:var(--surface-2); }
   .size-tabs button { flex:1; display:flex; align-items:center; justify-content:center; gap:.4rem;
-                      border:1px solid transparent; border-radius:calc(var(--radius-sm) - 2px); min-height:44px; padding:.45rem;
+                      border:1px solid transparent; border-radius:calc(var(--radius-sm) - 2px); min-height:32px; padding:.25rem .45rem;
                       background:transparent; color:var(--text-2); font:inherit; font-size:.75rem; cursor:pointer; }
   .size-tabs button:hover { color:var(--text); background:var(--surface-3); }
   .size-tabs button.active { color:var(--text); background:var(--side-tint); border-color:var(--side-color); font-weight:600; }
