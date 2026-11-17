@@ -25,16 +25,20 @@ public sealed class ChannelConfigStore
     private static readonly JsonSerializerOptions JsonWriteOpts = new() { WriteIndented = true };
 
     private readonly string _configFilePath;
-    private readonly IConfiguration? _fallbackConfiguration;
+    // The release-owned defaults FILE, and nothing else. Never the host's effective IConfiguration:
+    // that also carries environment variables, command-line switches and hosted secrets, and the
+    // first write copies the initial list into the user file, so a token supplied only through the
+    // environment would land on disk in plain text.
+    private readonly string? _defaultsFilePath;
     private readonly object _gate = new();
 
     // Shared by the HTTP and agent-tool surfaces, including across awaits to a transport.
     internal SemaphoreSlim ManagementGate { get; } = new(1, 1);
 
-    public ChannelConfigStore(string configFilePath, IConfiguration? fallbackConfiguration = null)
+    public ChannelConfigStore(string configFilePath, string? defaultsFilePath = null)
     {
         _configFilePath = configFilePath;
-        _fallbackConfiguration = fallbackConfiguration;
+        _defaultsFilePath = defaultsFilePath;
     }
 
     public string ConfigFilePath => _configFilePath;
@@ -45,8 +49,7 @@ public sealed class ChannelConfigStore
         {
             var root = ReadRoot();
             if (root == null) throw new InvalidOperationException("Invalid channel configuration root.");
-            if (root["Channels"] == null)
-                return _fallbackConfiguration == null ? [] : ChannelConfiguration.ReadEntries(_fallbackConfiguration, includeDisabled: true);
+            if (root["Channels"] == null) return [];
             using var stream = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(root.ToJsonString()));
             var config = new ConfigurationBuilder().AddJsonStream(stream).Build();
             try { return ChannelConfiguration.ReadEntries(config, includeDisabled: true); }
@@ -216,14 +219,24 @@ public sealed class ChannelConfigStore
             ? JsonNode.Parse(File.ReadAllText(_configFilePath), documentOptions: new()
                 { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true }) as JsonObject
             : new JsonObject();
-        if (root != null && root["Channels"] == null && _fallbackConfiguration != null)
+        if (root != null && root["Channels"] == null)
         {
             // An explicit user Channels array is authoritative, including []. IConfiguration's
             // per-index merging otherwise resurrects deleted defaults after the next restart.
-            root["Channels"] = new JsonArray(ChannelConfiguration.ReadEntries(_fallbackConfiguration, includeDisabled: true)
-                .Select(e => (JsonNode?)JsonSerializer.SerializeToNode(e.Config)).ToArray());
+            var defaults = ReadDefaultEntries();
+            if (defaults != null)
+                root["Channels"] = new JsonArray(defaults
+                    .Select(e => (JsonNode?)JsonSerializer.SerializeToNode(e.Config)).ToArray());
         }
         return root;
+    }
+
+    private List<ChannelConfigurationEntry>? ReadDefaultEntries()
+    {
+        if (string.IsNullOrWhiteSpace(_defaultsFilePath) || !File.Exists(_defaultsFilePath)) return null;
+        var config = new ConfigurationBuilder().AddJsonFile(_defaultsFilePath, optional: true, reloadOnChange: false).Build();
+        try { return ChannelConfiguration.ReadEntries(config, includeDisabled: true); }
+        finally { (config as IDisposable)?.Dispose(); }
     }
 
     private void WriteRoot(JsonObject root)
