@@ -1,566 +1,813 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import {
-    Radio, RefreshCw, Pencil, Check, X, AlertTriangle,
-    MessageSquare, Send, Hash, Phone, Mail,
-    Smartphone, Wifi, Rss, Globe, Bot, Users
+    Radio,
+    RefreshCw,
+    Plus,
+    Power,
+    Trash2,
+    Pencil,
+    AlertTriangle,
+    Send,
+    Hash,
+    Phone,
+    Bot,
+    Users,
+    MessageSquare,
   } from 'lucide-svelte';
+  import ChannelHelp from '#lib/components/ChannelHelp.svelte';
   import {
     api,
     type ChannelInfo,
     type ChannelsStatus,
-    type ChannelOutboxEntry
+    type ChannelProviderInfo,
+    type ChannelManagementResult,
+    type ChannelOutboxEntry,
   } from '#lib/api.ts';
 
   let status: ChannelsStatus | null = null;
-  let loading = true;
-  let error = '';
-  let intervalId: ReturnType<typeof setInterval>;
-
-  // ── Subscription editing ─────────────────────────────────────────────────
-  let editingId: string | null = null;
-  let draft = '';
-  let saving = false;
-  let saveError = '';
-  /** Set when a save applied live but could not be written to appsettings.json. */
-  let saveWarning = '';
-
-  const CATCH_ALL = '>';
-
-  function beginEdit(ch: ChannelInfo) {
-    editingId = ch.id;
-    draft = ch.receivesAll ? CATCH_ALL : (ch.subscriptions ?? []).join(', ');
-    saveError = '';
-    saveWarning = '';
-  }
-
-  function cancelEdit() {
-    editingId = null;
+  let providers: ChannelProviderInfo[] = [];
+  let providersLoaded = false,
+    loading = true,
+    busy = false,
+    adding = false,
+    disposed = false;
+  let error = '',
+    loadError = '',
+    note = '',
+    warning = '',
+    channelType = '',
+    name = '',
+    subscribe = '>',
     draft = '';
-    saveError = '';
-  }
-
-  /** Toggles one filter in the draft, so the topic list doubles as a picker. */
-  function toggleFilter(filter: string) {
-    const parts = draft.split(',').map((p) => p.trim()).filter(Boolean);
-    const at = parts.indexOf(filter);
-    if (at >= 0) parts.splice(at, 1);
-    else parts.push(filter);
-    draft = parts.join(', ');
-  }
-
-  function draftHas(filter: string) {
-    return draft.split(',').map((p) => p.trim()).includes(filter);
-  }
-
-  async function save(ch: ChannelInfo) {
-    saving = true;
-    saveError = '';
-    saveWarning = '';
-    try {
-      const result = await api.setChannelSubscriptions(ch.id, draft.trim());
-
-      // The change is already live on the server; a failed write only means it reverts on
-      // restart. Saying so is the point — silently succeeding would leave the operator
-      // believing a setting is permanent when it is not.
-      if (!result.persisted)
-        saveWarning =
-          `Applied to the running channel, but not saved: ${result.persistError ?? 'unknown error'}. ` +
-          'It will revert when the agent restarts.';
-
-      editingId = null;
-      await load();
-    } catch (e: unknown) {
-      saveError = e instanceof Error ? e.message : String(e);
-    } finally {
-      saving = false;
-    }
-  }
-
-  function onKeydown(event: KeyboardEvent, ch: ChannelInfo) {
-    if (event.key === 'Enter') { event.preventDefault(); save(ch); }
-    else if (event.key === 'Escape') { event.preventDefault(); cancelEdit(); }
-  }
-
-  // ── Test-channel outbox ──────────────────────────────────────────────────
-  // Only 'dummy' channels record what they were asked to deliver. Reading it back is how you
-  // confirm a subscription filter actually matched, rather than inferring it from silence.
+  let config: Record<string, string> = {};
+  let nameInput: HTMLInputElement, addButton: HTMLButtonElement, topicInput: HTMLInputElement;
+  let editingId: string | null = null;
+  let removing: ChannelInfo | null = null;
   let outboxId: string | null = null;
   let outbox: ChannelOutboxEntry[] = [];
-  let outboxError = '';
+  let readVersion = 0;
+  let readController: AbortController | null = null;
+  const requests = new Set<AbortController>();
+  let interval: ReturnType<typeof setInterval>;
+  let draftExpiry: ReturnType<typeof setTimeout>;
+  $: provider = providers.find((p) => p.type === channelType);
+  $: enabledCount = status?.channels.filter((c) => c.enabled).length ?? 0;
 
-  async function toggleOutbox(ch: ChannelInfo) {
-    if (outboxId === ch.id) { outboxId = null; outbox = []; return; }
-    outboxId = ch.id;
-    await loadOutbox(ch.id);
-  }
-
-  async function loadOutbox(id: string) {
-    outboxError = '';
-    try { outbox = (await api.channelMessages(id)).messages; }
-    catch (e: unknown) { outboxError = e instanceof Error ? e.message : String(e); }
-  }
-
-  async function clearOutbox(id: string) {
+  async function request<T>(
+    action: (signal: AbortSignal) => Promise<T>,
+    timeout = 65000,
+  ): Promise<T> {
+    const controller = new AbortController();
+    requests.add(controller);
+    const timer = setTimeout(() => controller.abort(), timeout);
     try {
-      await api.clearChannelMessages(id);
-      outbox = [];
-      await load();
-    } catch (e: unknown) {
-      outboxError = e instanceof Error ? e.message : String(e);
+      return await action(controller.signal);
+    } finally {
+      clearTimeout(timer);
+      requests.delete(controller);
     }
   }
-
-  function shortTime(iso: string) {
-    const d = new Date(iso);
-    return isNaN(d.getTime()) ? iso : d.toLocaleTimeString();
+  function stopRead() {
+    readVersion++;
+    readController?.abort();
+    readController = null;
   }
-
-  // Icon map keyed by stable backend channel type id.
-  const typeIcons: Record<string, typeof Radio> = {
-    discord:    MessageSquare,
-    telegram:   Send,
-    slack:      Hash,
-    whatsapp:   Phone,
-    teams:      Users,
-    email:      Mail,
-    sms:        Smartphone,
-    websocket:  Wifi,
-    rss:        Rss,
-    webhook:    Globe,
-  };
-
-  const typeColors: Record<string, string> = {
-    discord:   '#5865f2',
-    telegram:  '#26a5e4',
-    slack:     '#e01e5a',
-    whatsapp:  '#25d366',
-    teams:     '#6264a7',
-    email:     '#ea4335',
-    sms:       '#fb923c',
-    websocket: '#0ea5e9',
-    rss:       '#f97316',
-    webhook:   '#8b5cf6',
-  };
-
-  function iconFor(type: string) {
-    return typeIcons[type] ?? Bot;
+  function errorText(e: unknown) {
+    return e instanceof Error ? e.message : String(e);
   }
-
-  function colorFor(type: string) {
-    return typeColors[type] ?? 'var(--primary)';
+  async function load(force = false) {
+    if (disposed || (!force && (busy || adding || editingId !== null || removing !== null))) return;
+    stopRead();
+    const version = readVersion;
+    const controller = new AbortController();
+    readController = controller;
+    const timer = setTimeout(() => controller.abort(), 15000);
+    try {
+      const [next, available] = await Promise.all([
+        api.channels(controller.signal),
+        providersLoaded ? Promise.resolve(null) : api.channelProviders(controller.signal),
+      ]);
+      if (disposed || version !== readVersion) return;
+      status = next;
+      if (available) {
+        providers = available.providers;
+        providersLoaded = true;
+      }
+      loadError = '';
+    } catch (e) {
+      if (!disposed && version === readVersion)
+        loadError = controller.signal.aborted
+          ? 'Channel status took too long to load. Retry Refresh.'
+          : errorText(e);
+    } finally {
+      clearTimeout(timer);
+      if (!disposed && version === readVersion) {
+        loading = false;
+        readController = null;
+      }
+    }
   }
-
-  function labelFor(type: string) {
-    if (type === 'whatsapp') return 'WhatsApp';
-    if (type === 'websocket') return 'WebSocket';
-    return type.charAt(0).toUpperCase() + type.slice(1);
-  }
-
-  async function load() {
-    // The 5s poll would overwrite a half-typed filter with the server's copy, so an open editor
-    // pauses it. Saving reloads explicitly.
-    if (editingId !== null) return;
-
+  async function run(action: (signal: AbortSignal) => Promise<ChannelManagementResult>) {
+    if (busy) return false;
+    stopRead();
+    busy = true;
     error = '';
-    try { status = await api.channels(); }
-    catch (e: unknown) { error = e instanceof Error ? e.message : String(e); }
-    finally { loading = false; }
+    note = '';
+    warning = '';
+    let failure = '';
+    try {
+      const result = await request(action);
+      if (disposed) return false;
+      note = result.message ?? 'Channel updated.';
+      warning = result.warning ?? '';
+      if (!result.persisted)
+        warning = `Applied now, but not saved. It will revert on restart. ${result.persistError ?? ''}`;
+      return true;
+    } catch (e) {
+      failure =
+        e instanceof Error && e.name === 'AbortError'
+          ? 'The request timed out. Refresh channel status before retrying.'
+          : errorText(e);
+      return false;
+    } finally {
+      if (!disposed) {
+        busy = false;
+        await load(true);
+        if (failure) error = failure;
+      }
+    }
   }
-
+  function clearAdd() {
+    clearTimeout(draftExpiry);
+    adding = false;
+    name = '';
+    config = {};
+    subscribe = '>';
+    channelType = '';
+  }
+  function expireDraft() {
+    clearTimeout(draftExpiry);
+    draftExpiry = setTimeout(() => {
+      clearAdd();
+      editingId = null;
+      draft = '';
+      note = 'Unsaved channel form expired.';
+    }, 600000);
+  }
+  async function openAdd() {
+    stopRead();
+    editingId = null;
+    removing = null;
+    outboxId = null;
+    outbox = [];
+    adding = true;
+    channelType = providers[0]?.type ?? '';
+    error = '';
+    note = '';
+    config = {};
+    expireDraft();
+    await tick();
+    nameInput?.focus();
+  }
+  async function cancelAdd() {
+    clearAdd();
+    await tick();
+    addButton?.focus();
+  }
+  async function add() {
+    const payload = {
+      type: channelType,
+      name: name.trim(),
+      config: { ...config },
+      subscribe: subscribe.trim(),
+    };
+    // Credentials exist only in the mounted form and one request. No browser storage.
+    const result = run((signal) => api.addChannel(payload, signal));
+    config = {};
+    if (await result) {
+      clearAdd();
+      await tick();
+      addButton?.focus();
+    }
+    for (const key of Object.keys(payload.config)) delete payload.config[key];
+  }
+  async function beginEdit(ch: ChannelInfo) {
+    stopRead();
+    clearAdd();
+    removing = null;
+    editingId = ch.id;
+    draft = ch.receivesAll ? '>' : ch.subscriptions.join(', ');
+    error = '';
+    note = '';
+    expireDraft();
+    await tick();
+    topicInput?.focus();
+  }
+  async function saveTopics(ch: ChannelInfo) {
+    if (await run((signal) => api.setChannelSubscriptions(ch.id, draft.trim(), signal))) {
+      editingId = null;
+      draft = '';
+    }
+  }
+  function pick(filter: string) {
+    if (filter === '>') {
+      draft = '>';
+      return;
+    }
+    const parts = draft
+      .split(',')
+      .map((p) => p.trim())
+      .filter((p) => p && p !== '>');
+    draft = (parts.includes(filter) ? parts.filter((p) => p !== filter) : [...parts, filter]).join(
+      ', ',
+    );
+  }
+  async function remove(ch: ChannelInfo) {
+    if (await run((signal) => api.removeChannel(ch.id, signal))) {
+      removing = null;
+      outboxId = null;
+      outbox = [];
+    }
+  }
+  async function toggleOutbox(ch: ChannelInfo) {
+    if (outboxId === ch.id) {
+      outboxId = null;
+      outbox = [];
+      return;
+    }
+    outboxId = ch.id;
+    outbox = [];
+    await loadOutbox(ch);
+  }
+  async function loadOutbox(ch: ChannelInfo) {
+    try {
+      const response = await request((signal) => api.channelMessages(ch.id, signal), 15000);
+      if (!disposed && outboxId === ch.id) outbox = response.messages;
+    } catch (e) {
+      if (!disposed) error = errorText(e);
+    }
+  }
+  async function clearOutbox(ch: ChannelInfo) {
+    try {
+      await request((signal) => api.clearChannelMessages(ch.id, signal), 15000);
+      if (!disposed && outboxId === ch.id) outbox = [];
+    } catch (e) {
+      if (!disposed) error = errorText(e);
+    }
+  }
+  const icons: Record<string, typeof Radio> = {
+    telegram: Send,
+    slack: Hash,
+    discord: MessageSquare,
+    whatsapp: Phone,
+    'stockji-whatsapp': Phone,
+    'whatsapp-bridge': Phone,
+    teams: Users,
+  };
+  const filterHelp =
+    'Comma-separated filters. > receives everything. * matches one segment. > matches trailing segments and must come last. Empty receives everything. Approval requests fall back to connected active channels when no filter matches.';
+  const namePattern = '[a-zA-Z0-9][a-zA-Z0-9._\\-]{0,63}';
   onMount(() => {
     load();
-    intervalId = setInterval(load, 5000); // auto-refresh every 5s
+    interval = setInterval(() => load(), 5000);
   });
-
-  onDestroy(() => clearInterval(intervalId));
+  onDestroy(() => {
+    disposed = true;
+    stopRead();
+    clearInterval(interval);
+    requests.forEach((c) => c.abort());
+    requests.clear();
+    clearAdd();
+    draft = '';
+    outbox = [];
+    status = null;
+  });
 </script>
 
 <svelte:head><title>Channels — AgentFox</title></svelte:head>
-
-<div class="page">
-  <!-- Header -->
-  <div class="page-header">
+<div class="page" aria-busy={busy}>
+  <header class="page-header">
     <div class="page-title">
       <Radio size={20} />
       <h1>Channels</h1>
+      <ChannelHelp
+        label="channels"
+        text="Activate to receive selected topics and accept channel messages. Deactivate keeps credentials and topics. Remove deletes the saved configuration. These controls do not change trading mode."
+      />
     </div>
-    <div class="page-actions">
-      <button class="btn" on:click={load}>
-        <RefreshCw size={14} />
-        Refresh
-      </button>
+    <div class="actions">
+      <button
+        class="btn btn-ghost"
+        on:click={() => load()}
+        disabled={busy || adding || editingId !== null || removing !== null}
+        ><RefreshCw size={14} />Refresh</button
+      >
+      <button
+        class="btn btn-primary"
+        bind:this={addButton}
+        on:click={openAdd}
+        disabled={busy || adding || !providersLoaded || !status?.ready}
+        ><Plus size={15} />Add channel</button
+      >
     </div>
-  </div>
-
-  {#if error}
-    <div class="error-banner">{error}</div>
-  {/if}
-
-  {#if saveWarning}
-    <div class="warn-banner">
-      <AlertTriangle size={14} />
-      <span>{saveWarning}</span>
-      <button class="icon-btn" title="Dismiss" on:click={() => (saveWarning = '')}>
-        <X size={13} />
-      </button>
-    </div>
-  {/if}
-
-  <!-- Summary pills -->
-  {#if status && status.ready}
-    <div class="summary-row">
-      <div class="pill">
-        <span class="pill-value">{status.total}</span>
-        <span class="pill-label">Configured</span>
-      </div>
-      <div class="pill pill-green">
-        <span class="pill-value">{status.connected}</span>
-        <span class="pill-label">Connected</span>
-      </div>
-      {#if status.total - status.connected > 0}
-        <div class="pill pill-red">
-          <span class="pill-value">{status.total - status.connected}</span>
-          <span class="pill-label">Offline</span>
+  </header>
+  {#if error}<p class="error-banner" role="alert">{error}</p>{/if}
+  {#if loadError}<p class="error-banner" role="alert">{loadError}</p>{/if}
+  {#if warning}<p class="warn-banner" role="status"><AlertTriangle size={16} />{warning}</p>{/if}
+  {#if note}<p class="result" role="status">{note}</p>{/if}
+  {#if adding}
+    <form class="card add-form" on:submit|preventDefault={add}>
+      <h2>Add channel</h2>
+      <fieldset disabled={busy}>
+        <div class="form-grid">
+          <label
+            >Channel type<select bind:value={channelType} on:change={() => (config = {})}
+              >{#each providers as p}<option value={p.type}>{p.name}</option>{/each}</select
+            ></label
+          >
+          <label
+            >Name<input
+              bind:this={nameInput}
+              bind:value={name}
+              required
+              maxlength="64"
+              pattern={namePattern}
+              autocomplete="off"
+              placeholder="my-alerts"
+            /></label
+          >
         </div>
-      {/if}
-    </div>
+        {#key channelType}<div class="form-grid provider-fields">
+            {#each provider?.fields ?? [] as field}<label
+                ><span class="field-label"
+                  >{field.key}{field.required ? ' *' : ''}<ChannelHelp
+                    label={field.key}
+                    text={field.description}
+                  /></span
+                >
+                <input
+                  type={field.secret ? 'password' : 'text'}
+                  aria-label={field.key}
+                  bind:value={config[field.key]}
+                  required={field.required}
+                  maxlength="8192"
+                  autocomplete="off"
+                  spellcheck="false"
+                  autocapitalize="none"
+                /></label
+              >{/each}
+          </div>{/key}
+        {#if channelType === 'stockji-whatsapp'}<p class="delivery-note">
+            Uses this agent's linked Stockji WhatsApp number. The phone link is checked when
+            sending.
+          </p>{/if}
+        <label
+          ><span class="field-label"
+            >Topics <ChannelHelp label="topic filters" text={filterHelp} /></span
+          ><input
+            aria-label="Topics"
+            bind:value={subscribe}
+            maxlength="4096"
+            autocomplete="off"
+          /></label
+        >
+        <div class="actions form-actions">
+          <button class="btn btn-primary" type="submit"
+            >{busy ? 'Adding…' : 'Add & activate'}</button
+          ><button class="btn btn-ghost" type="button" on:click={cancelAdd}>Cancel</button>
+        </div>
+      </fieldset>
+    </form>
   {/if}
-
-  <!-- Channel cards -->
-  {#if loading}
-    <div class="loading">Loading channels…</div>
-  {:else if !status?.ready}
-    <div class="empty">
-      <Radio size={36} class="empty-icon" />
-      <p>Channel manager not ready yet.</p>
-      <p class="empty-sub">The agent is still initializing — try again in a moment.</p>
-    </div>
-  {:else if status.channels.length === 0}
-    <div class="empty">
-      <Radio size={36} class="empty-icon" />
-      <p>No channels configured.</p>
-      <p class="empty-sub">
-        Add channels in <code>appsettings.json</code> under the <code>Channels</code> array.<br />
-        Supported via providers. Built-in providers: telegram, discord, slack, whatsapp, teams.
-      </p>
-    </div>
-  {:else}
+  {#if loading}<p class="empty">Loading channels…</p>{:else if !status?.ready}<p class="empty">
+      Channel manager is not ready yet.
+    </p>{:else}
+    <p class="summary">
+      {status.total} configured · {enabledCount} active · {status.total - enabledCount} disabled
+    </p>
+    {#if !status.channels.length}<div class="card empty">
+        <Radio size={28} />
+        <p>No channels configured.</p>
+      </div>{/if}
     <div class="grid">
       {#each status.channels as ch (ch.id)}
-        <div class="channel-card card" class:offline={!ch.isConnected}>
-          <!-- Left accent bar -->
-          <div class="accent-bar" style="background: {colorFor(ch.type)}"></div>
-
-          <div class="card-body">
-            <!-- Icon + name row -->
-            <div class="card-header">
-              <div class="type-icon" style="background: {colorFor(ch.type)}22; color: {colorFor(ch.type)}">
-                <svelte:component this={iconFor(ch.type)} size={18} />
+        <article class="card channel-card" aria-label={ch.id}>
+          <div class="card-header">
+            <div class="identity">
+              <span class="type-icon"
+                ><svelte:component this={icons[ch.type] ?? Bot} size={19} /></span
+              >
+              <div>
+                <h2>{ch.name}</h2>
+                <p class="channel-id">{ch.id}</p>
               </div>
-              <div class="card-titles">
-                <div class="ch-name">{ch.name}</div>
-                <div class="ch-type">{labelFor(ch.type)}</div>
-              </div>
-              <span
-                class="status-dot"
-                class:dot-green={ch.isConnected}
-                class:dot-red={!ch.isConnected}
-                title={ch.status}
-              ></span>
             </div>
-
-            <!-- Details -->
-            <div class="card-details">
-              <div class="detail-row">
-                <span class="detail-label">Channel ID</span>
-                <span class="detail-value mono">{ch.id || '—'}</span>
-              </div>
-              <div class="detail-row">
-                <span class="detail-label">Status</span>
-                <span class="badge" class:badge-green={ch.isConnected} class:badge-red={!ch.isConnected}>
-                  {ch.status}
-                </span>
-              </div>
-              <div class="detail-row detail-row-wrap">
-                <span class="detail-label">Receives</span>
-                {#if editingId === ch.id}
-                  <span class="edit-spacer"></span>
-                {:else}
-                  <span class="filters">
-                    {#if ch.receivesAll}
-                      <code class="filter filter-all" title="Catch-all — every topic">everything</code>
-                    {:else}
-                      {#each ch.subscriptions ?? [] as filter}
-                        <code class="filter">{filter}</code>
-                      {/each}
-                    {/if}
-                    <button
-                      class="icon-btn"
-                      title="Edit subscriptions"
-                      aria-label="Edit subscriptions for {ch.name}"
-                      on:click={() => beginEdit(ch)}
-                    >
-                      <Pencil size={12} />
-                    </button>
-                  </span>
-                {/if}
-              </div>
-
-              <!-- Inline subscription editor -->
-              {#if editingId === ch.id}
-                <div class="editor">
-                  <div class="editor-row">
-                    <!-- svelte-ignore a11y-autofocus -->
-                    <input
-                      class="editor-input mono"
-                      bind:value={draft}
-                      placeholder={CATCH_ALL}
-                      autofocus
-                      disabled={saving}
-                      aria-label="Topic filters, comma separated"
-                      on:keydown={(e) => onKeydown(e, ch)}
-                    />
-                    <button class="icon-btn icon-btn-ok" title="Save (Enter)" disabled={saving} on:click={() => save(ch)}>
-                      <Check size={14} />
-                    </button>
-                    <button class="icon-btn" title="Cancel (Esc)" disabled={saving} on:click={cancelEdit}>
-                      <X size={14} />
-                    </button>
-                  </div>
-
-                  <p class="editor-hint">
-                    Comma-separated. <code>*</code> = one segment, <code>&gt;</code> = one or more
-                    trailing segments (last only). Empty or <code>&gt;</code> receives everything.
-                  </p>
-
-                  {#if (status?.topics ?? []).length > 0}
-                    <div class="picker">
-                      <button
-                        class="pick"
-                        class:pick-on={draftHas(CATCH_ALL)}
-                        on:click={() => toggleFilter(CATCH_ALL)}
-                      >everything</button>
-                      {#each status?.topics ?? [] as topic (topic.name)}
-                        <button
-                          class="pick"
-                          class:pick-on={draftHas(topic.name)}
-                          title={topic.description}
-                          on:click={() => toggleFilter(topic.name)}
-                        >{topic.name}</button>
-                      {/each}
-                    </div>
-                  {/if}
-
-                  {#if saveError}
-                    <p class="editor-error">{saveError}</p>
-                  {/if}
-                </div>
-              {/if}
-
-              <!-- Test-channel outbox -->
-              {#if ch.recordsMessages}
-                <div class="outbox">
-                  <div class="outbox-head">
-                    <button class="link-btn" on:click={() => toggleOutbox(ch)}>
-                      {outboxId === ch.id ? 'Hide' : 'Show'} received ({ch.receivedCount})
-                    </button>
-                    {#if outboxId === ch.id}
-                      <button class="link-btn" on:click={() => loadOutbox(ch.id)}>Refresh</button>
-                      <button class="link-btn" on:click={() => clearOutbox(ch.id)}>Clear</button>
-                    {/if}
-                  </div>
-
-                  {#if outboxId === ch.id}
-                    {#if outboxError}
-                      <p class="editor-error">{outboxError}</p>
-                    {:else if outbox.length === 0}
-                      <p class="editor-hint">
-                        Nothing recorded. If you expected something, the filters above did not match
-                        the topic it was published on.
-                      </p>
-                    {:else}
-                      <ul class="msg-list">
-                        {#each outbox as msg (msg.sequence)}
-                          <li class="msg">
-                            <span class="msg-time mono">{shortTime(msg.at)}</span>
-                            <span class="msg-body">
-                              {msg.content}
-                              {#if msg.actions.length > 0}
-                                <span class="msg-actions">[{msg.actions.join('] [')}]</span>
-                              {/if}
-                            </span>
-                          </li>
-                        {/each}
-                      </ul>
-                    {/if}
-                  {/if}
-                </div>
-              {/if}
-            </div>
+            <span
+              class="status"
+              class:connected={ch.enabled && ch.isConnected}
+              class:disconnected={ch.enabled && !ch.isConnected}
+              >{ch.enabled
+                ? ch.isConnected
+                  ? ch.deliveryStatus
+                    ? 'Active'
+                    : 'Connected'
+                  : 'Disconnected'
+                : 'Disabled'}</span
+            >
           </div>
-        </div>
+          {#if !ch.providerAvailable}<p class="delivery-note">
+              Channel provider is unavailable.
+            </p>{/if}
+          {#if ch.enabled && ch.deliveryStatus}<p class="delivery-note">{ch.deliveryStatus}</p>{/if}
+          <div class="topics">
+            <span>Receives</span>{#if ch.receivesAll}<code>Everything</code
+              >{:else}{#each ch.subscriptions as topic}<code>{topic}</code>{/each}{/if}
+          </div>
+          {#if editingId === ch.id}<form
+              class="topic-editor"
+              on:submit|preventDefault={() => saveTopics(ch)}
+            >
+              <label
+                ><span class="field-label"
+                  >Topics <ChannelHelp label="topic filters" text={filterHelp} /></span
+                ><input
+                  aria-label="Topics"
+                  bind:this={topicInput}
+                  bind:value={draft}
+                  disabled={busy}
+                  maxlength="4096"
+                  autocomplete="off"
+                /></label
+              >
+              <div class="picker">
+                <button class="pick" type="button" disabled={busy} on:click={() => pick('>')}
+                  >Everything</button
+                >{#each status.topics ?? [] as topic}<button
+                    class="pick"
+                    type="button"
+                    disabled={busy}
+                    aria-pressed={draft
+                      .split(',')
+                      .map((p) => p.trim())
+                      .includes(topic.name)}
+                    on:click={() => pick(topic.name)}>{topic.name}</button
+                  >{/each}
+              </div>
+              <div class="actions">
+                <button class="btn btn-primary" disabled={busy} type="submit">Save topics</button
+                ><button
+                  class="btn btn-ghost"
+                  disabled={busy}
+                  type="button"
+                  on:click={() => {
+                    editingId = null;
+                    draft = '';
+                  }}>Cancel</button
+                >
+              </div>
+            </form>{/if}
+          {#if removing?.id === ch.id}<div
+              class="remove-confirm"
+              role="group"
+              aria-label={`Confirm removal of ${ch.id}`}
+            >
+              <p>Remove <strong>{ch.id}</strong> and delete its saved configuration?</p>
+              <div class="actions">
+                <button class="btn btn-danger" disabled={busy} on:click={() => remove(ch)}
+                  >Remove channel</button
+                ><button class="btn btn-ghost" disabled={busy} on:click={() => (removing = null)}
+                  >Cancel</button
+                >
+              </div>
+            </div>
+          {:else}<div class="actions card-actions">
+              <button
+                class="btn btn-ghost"
+                disabled={busy || (!ch.providerAvailable && !ch.enabled)}
+                aria-label={`${ch.enabled && ch.isConnected ? 'Deactivate' : 'Activate'} ${ch.id}`}
+                on:click={() =>
+                  run((signal) =>
+                    api.setChannelEnabled(ch.id, !(ch.enabled && ch.isConnected), signal),
+                  )}
+                ><Power size={14} />{ch.enabled && ch.isConnected
+                  ? 'Deactivate'
+                  : 'Activate'}</button
+              >
+              {#if ch.enabled && !ch.isConnected}<button
+                  class="btn btn-ghost"
+                  disabled={busy}
+                  on:click={() => run((signal) => api.setChannelEnabled(ch.id, false, signal))}
+                  >Deactivate</button
+                >{/if}
+              <button class="btn btn-ghost" disabled={busy} on:click={() => beginEdit(ch)}
+                ><Pencil size={13} />Edit topics</button
+              >
+              <button
+                class="btn btn-danger remove"
+                disabled={busy}
+                aria-label={`Remove ${ch.id}`}
+                on:click={() => {
+                  stopRead();
+                  clearAdd();
+                  editingId = null;
+                  removing = ch;
+                }}><Trash2 size={14} />Remove</button
+              >
+            </div>{/if}
+          {#if ch.recordsMessages}<div class="outbox">
+              <div class="actions">
+                <button class="btn btn-ghost" disabled={busy} on:click={() => toggleOutbox(ch)}
+                  >{outboxId === ch.id ? 'Hide' : 'Show'} received ({ch.receivedCount})</button
+                >{#if outboxId === ch.id}<button
+                    class="btn btn-ghost"
+                    disabled={busy}
+                    on:click={() => loadOutbox(ch)}>Refresh</button
+                  ><button class="btn btn-ghost" disabled={busy} on:click={() => clearOutbox(ch)}
+                    >Clear</button
+                  >{/if}
+              </div>
+              {#if outboxId === ch.id}<ul>
+                  {#each outbox as msg (msg.sequence)}<li>
+                      <time>{new Date(msg.at).toLocaleTimeString()}</time>
+                      {msg.content}{#if msg.actions.length}
+                        [{msg.actions.join('] [')}]{/if}
+                    </li>{:else}<li>Nothing recorded.</li>{/each}
+                </ul>{/if}
+            </div>{/if}
+        </article>
       {/each}
     </div>
   {/if}
-
-  <!-- Published topics -->
-  {#if status?.ready && (status.topics ?? []).length > 0}
-    <div class="topics card">
-      <div class="topics-header">
-        <Radio size={15} />
-        <h2>Published topics</h2>
-      </div>
-      <p class="topics-intro">
-        Subjects the agent and its plugins publish on. A channel's <code>Subscribe</code> filters are
-        matched against these — <code>*</code> matches exactly one segment,
-        <code>&gt;</code> matches one or more trailing segments and must come last. So
-        <code>trading.*</code> matches <code>trading.order</code> but not
-        <code>trading.order.accepted</code>, while <code>trading.&gt;</code> matches both.
-        A filter matching no topic is silent, not an error.
-      </p>
-      <ul class="topic-list">
-        {#each status.topics as topic (topic.name)}
-          <li class="topic">
-            <code class="topic-name">{topic.name}</code>
-            <span class="topic-desc">{topic.description}</span>
-            {#if topic.mandatory}
-              <span class="badge badge-amber" title="Delivered to every channel if nothing subscribes to it">
-                always delivered
-              </span>
-            {/if}
-          </li>
-        {/each}
-      </ul>
-    </div>
-  {/if}
-
-  <!-- Config hint -->
-  <div class="hint card">
-    <p>
-      Channels are configured in <code>appsettings.json</code> → <code>Channels[]</code>.
-      Set <code>"Enabled": false</code> on any entry to disable it without removing it.
-      Add <code>"Name"</code> to pin a stable id (required if you run two channels of the same type),
-      and <code>"Subscribe": "trading.&gt;, hitl.&gt;"</code> to narrow what it receives — omit it and
-      the channel receives everything. Changes take effect on next restart.
-    </p>
-  </div>
 </div>
 
 <style>
-  .page { width: 100%; min-width: 0; padding: 1.5rem; display: flex; flex-direction: column; gap: 1.25rem; }
-
-  .page-header  { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.75rem; }
-  .page-title   { display: flex; align-items: center; gap: 0.5rem; }
-  .page-title h1 { font-size: 1.25rem; font-weight: 700; color: var(--text); margin: 0; }
-  .page-title :global(svg) { color: var(--primary); }
-  .page-actions { display: flex; gap: 0.5rem; }
-
-  .error-banner { background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.3); color: #fca5a5; padding: 0.625rem 0.875rem; border-radius: var(--radius-sm); font-size: 0.8125rem; }
-
-  /* Summary */
-  .summary-row { display: flex; gap: 0.75rem; flex-wrap: wrap; }
-  .pill { display: flex; flex-direction: column; align-items: center; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.625rem 1.25rem; min-width: 80px; }
-  .pill-green { border-color: rgba(52,211,153,0.3); background: rgba(52,211,153,0.06); }
-  .pill-red   { border-color: rgba(239,68,68,0.3);  background: rgba(239,68,68,0.06); }
-  .pill-value { font-size: 1.375rem; font-weight: 700; color: var(--text); line-height: 1.2; }
-  .pill-green .pill-value { color: #34d399; }
-  .pill-red   .pill-value { color: #f87171; }
-  .pill-label { font-size: 0.6875rem; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; margin-top: 2px; }
-
-  /* Grid */
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 0.875rem; }
-
-  .channel-card { display: flex; gap: 0; overflow: hidden; padding: 0; }
-  .channel-card.offline { opacity: 0.65; }
-
-  .accent-bar { width: 4px; flex-shrink: 0; }
-
-  .card-body  { flex: 1; padding: 1rem 1.125rem; display: flex; flex-direction: column; gap: 0.75rem; }
-
-  .card-header { display: flex; align-items: center; gap: 0.75rem; }
-  .type-icon   { width: 36px; height: 36px; border-radius: 10px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
-  .card-titles { flex: 1; min-width: 0; }
-  .ch-name     { font-size: 0.9375rem; font-weight: 700; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .ch-type     { font-size: 0.75rem; color: var(--text-3); margin-top: 1px; }
-
-  .status-dot  { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
-  .dot-green   { background: #34d399; box-shadow: 0 0 6px #34d39966; }
-  .dot-red     { background: #f87171; }
-
-  .card-details { display: flex; flex-direction: column; gap: 0.375rem; }
-  .detail-row   { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; font-size: 0.8125rem; }
-  .detail-label { color: var(--text-3); flex-shrink: 0; }
-  .detail-value { color: var(--text-2); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 160px; }
-  .mono         { font-family: var(--font-mono, monospace); font-size: 0.75rem; }
-
-  .badge        { display: inline-flex; padding: 0.15rem 0.5rem; border-radius: 99px; font-size: 0.6875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
-  .badge-green  { background: rgba(52,211,153,0.12); color: #34d399; }
-  .badge-red    { background: rgba(239,68,68,0.12);  color: #f87171; }
-  .badge-amber  { background: rgba(251,191,36,0.12); color: #fbbf24; }
-
-  /* Subscriptions */
-  .detail-row-wrap { align-items: flex-start; }
-  .filters      { display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem; justify-content: flex-end; }
-  .filter       { font-family: var(--font-mono, monospace); font-size: 0.6875rem; background: var(--surface-2); color: var(--text-2); padding: 0.1em 0.4em; border-radius: 4px; white-space: nowrap; }
-  .filter-all   { color: var(--text-3); font-style: italic; }
-  .edit-spacer  { flex: 1; }
-
-  .icon-btn     { display: inline-flex; align-items: center; justify-content: center; background: transparent; border: 1px solid transparent; color: var(--text-3); border-radius: 4px; padding: 0.15rem; cursor: pointer; line-height: 0; }
-  .icon-btn:hover:not(:disabled) { color: var(--text); background: var(--surface-2); border-color: var(--border); }
-  .icon-btn:disabled { opacity: 0.5; cursor: default; }
-  .icon-btn-ok:hover:not(:disabled) { color: #34d399; }
-
-  /* Inline editor */
-  .editor       { display: flex; flex-direction: column; gap: 0.5rem; padding-top: 0.5rem; border-top: 1px solid var(--border); }
-  .editor-row   { display: flex; align-items: center; gap: 0.375rem; }
-  .editor-input { flex: 1; min-width: 0; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm, 6px); color: var(--text); padding: 0.35rem 0.5rem; font-size: 0.75rem; }
-  .editor-input:focus { outline: none; border-color: var(--primary); }
-  .editor-hint  { margin: 0; font-size: 0.6875rem; color: var(--text-3); line-height: 1.5; }
-  .editor-hint code { font-family: var(--font-mono, monospace); background: var(--surface-2); padding: 0 0.25em; border-radius: 3px; color: var(--accent); }
-  .editor-error { margin: 0; font-size: 0.75rem; color: #f87171; line-height: 1.5; }
-
-  .picker       { display: flex; flex-wrap: wrap; gap: 0.25rem; }
-  .pick         { font-family: var(--font-mono, monospace); font-size: 0.6875rem; background: var(--surface-2); border: 1px solid var(--border); color: var(--text-3); padding: 0.1em 0.4em; border-radius: 4px; cursor: pointer; }
-  .pick:hover   { color: var(--text); }
-  .pick-on      { background: rgba(52,211,153,0.12); border-color: rgba(52,211,153,0.35); color: #34d399; }
-
-  /* Test-channel outbox */
-  .outbox       { display: flex; flex-direction: column; gap: 0.375rem; padding-top: 0.5rem; border-top: 1px solid var(--border); }
-  .outbox-head  { display: flex; gap: 0.75rem; }
-  .link-btn     { background: none; border: none; padding: 0; color: var(--text-3); font-size: 0.75rem; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
-  .link-btn:hover { color: var(--text); }
-  .msg-list     { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.25rem; max-height: 180px; overflow-y: auto; }
-  .msg          { display: flex; gap: 0.5rem; font-size: 0.75rem; line-height: 1.5; }
-  .msg-time     { color: var(--text-3); flex-shrink: 0; font-size: 0.6875rem; }
-  .msg-body     { color: var(--text-2); word-break: break-word; }
-  .msg-actions  { color: var(--text-3); }
-
-  .warn-banner  { display: flex; align-items: center; gap: 0.5rem; background: rgba(251,191,36,0.1); border: 1px solid rgba(251,191,36,0.3); color: #fbbf24; padding: 0.625rem 0.875rem; border-radius: var(--radius-sm); font-size: 0.8125rem; }
-  .warn-banner span { flex: 1; }
-
-  /* Topics */
-  .topics        { padding: 1rem 1.125rem; display: flex; flex-direction: column; gap: 0.625rem; }
-  .topics-header { display: flex; align-items: center; gap: 0.5rem; }
-  .topics-header h2 { font-size: 0.9375rem; font-weight: 700; color: var(--text); margin: 0; }
-  .topics-header :global(svg) { color: var(--primary); }
-  .topics-intro  { margin: 0; font-size: 0.8125rem; color: var(--text-3); line-height: 1.6; }
-  .topics code   { font-family: var(--font-mono, monospace); background: var(--surface-2); padding: 0.1em 0.35em; border-radius: 4px; color: var(--accent); }
-  .topic-list    { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.375rem; }
-  .topic         { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem; font-size: 0.8125rem; }
-  .topic-name    { flex-shrink: 0; }
-  .topic-desc    { color: var(--text-3); }
-
-  /* Loading / empty */
-  .loading { text-align: center; color: var(--text-3); padding: 3rem; font-size: 0.875rem; }
-  .empty   { text-align: center; padding: 3.5rem 1rem; color: var(--text-3); }
-  .empty p { margin: 0.25rem 0; line-height: 1.6; }
-  .empty-sub { font-size: 0.8125rem; }
-  .empty :global(.empty-icon) { opacity: 0.3; margin-bottom: 0.75rem; }
-  .empty code { font-family: var(--font-mono, monospace); background: var(--surface-2); padding: 0.1em 0.35em; border-radius: 4px; font-size: 0.8125rem; color: var(--accent); }
-
-  /* Hint */
-  .hint { padding: 0.75rem 1rem; }
-  .hint p { margin: 0; font-size: 0.8125rem; color: var(--text-3); line-height: 1.6; }
-  .hint code { font-family: var(--font-mono, monospace); background: var(--surface-2); padding: 0.1em 0.35em; border-radius: 4px; color: var(--accent); }
+  .page {
+    width: 100%;
+    min-width: 0;
+    padding: 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+  }
+  .page-header,
+  .page-title,
+  .actions,
+  .card-header,
+  .identity,
+  .field-label {
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+  }
+  .page-header,
+  .card-header {
+    justify-content: space-between;
+    flex-wrap: wrap;
+  }
+  .page-title h1 {
+    font-size: 1.25rem;
+    margin: 0;
+    color: var(--text);
+  }
+  .page-title :global(svg) {
+    color: var(--primary);
+  }
+  .actions {
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+  h2 {
+    margin: 0;
+    font-size: 0.9375rem;
+    font-weight: 600;
+    color: var(--text);
+  }
+  p {
+    margin: 0;
+  }
+  .summary {
+    color: var(--text-2);
+    font-size: 0.8125rem;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 350px), 1fr));
+    gap: 1rem;
+    align-items: start;
+  }
+  .channel-card {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+  .identity,
+  .identity > div {
+    min-width: 0;
+  }
+  .channel-id {
+    color: var(--text-2);
+    font-size: 0.75rem;
+    overflow-wrap: anywhere;
+  }
+  .type-icon {
+    display: flex;
+    padding: 10px;
+    color: var(--primary);
+    background: var(--primary-dim);
+    border-radius: 9px;
+  }
+  .status {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.75rem;
+    color: var(--text-2);
+  }
+  .status::before {
+    content: '';
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+  .status.connected,
+  .result {
+    color: var(--success);
+  }
+  .status.disconnected {
+    color: var(--warning);
+  }
+  .topics {
+    display: flex;
+    gap: 0.375rem;
+    align-items: center;
+    flex-wrap: wrap;
+    color: var(--text-2);
+    font-size: 0.8125rem;
+  }
+  .topics code {
+    padding: 2px 7px;
+    background: var(--surface-2);
+    color: var(--text);
+    border-radius: 4px;
+    font-size: 0.75rem;
+    overflow-wrap: anywhere;
+  }
+  .remove {
+    margin-inline-start: auto;
+  }
+  .empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+    color: var(--text-2);
+    padding: 2.5rem 1rem;
+  }
+  .add-form {
+    max-width: 720px;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+  fieldset {
+    border: 0;
+    padding: 0;
+    margin: 0;
+    min-width: 0;
+  }
+  .form-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem;
+  }
+  .provider-fields {
+    margin: 1rem 0;
+  }
+  label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+    font-size: 0.8125rem;
+    color: var(--text-2);
+  }
+  .field-label {
+    justify-content: space-between;
+  }
+  input,
+  select {
+    width: 100%;
+    min-width: 0;
+    font: inherit;
+    color: var(--text);
+    background: var(--surface-2);
+    border: 1px solid var(--border-md);
+    border-radius: 6px;
+    padding: 10px 12px;
+  }
+  .form-actions {
+    margin-top: 1rem;
+  }
+  .topic-editor,
+  .remove-confirm,
+  .outbox {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+  }
+  .remove-confirm {
+    font-size: 0.8125rem;
+    overflow-wrap: anywhere;
+  }
+  .picker {
+    display: flex;
+    gap: 0.375rem;
+    flex-wrap: wrap;
+  }
+  .pick {
+    font-family: monospace;
+    font-size: 0.75rem;
+    color: var(--text-2);
+    border: 1px solid var(--border-md);
+    padding: 4px 7px;
+    border-radius: 4px;
+    background: var(--surface-2);
+    cursor: pointer;
+    overflow-wrap: anywhere;
+  }
+  .pick[aria-pressed='true'] {
+    color: var(--primary);
+    border-color: var(--primary);
+  }
+  .delivery-note {
+    font-size: 0.8125rem;
+    color: var(--text-2);
+    margin-bottom: 0.25rem;
+  }
+  .error-banner,
+  .warn-banner {
+    padding: 0.75rem 1rem;
+    border-radius: 6px;
+    background: var(--surface-2);
+    font-size: 0.8125rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    overflow-wrap: anywhere;
+  }
+  .error-banner {
+    color: var(--danger);
+    border: 1px solid var(--danger);
+  }
+  .warn-banner {
+    color: var(--warning);
+    border: 1px solid var(--warning);
+  }
+  .result {
+    font-size: 0.8125rem;
+  }
+  .outbox ul {
+    margin: 0;
+    padding-inline-start: 1rem;
+    font-size: 0.8125rem;
+    overflow-wrap: anywhere;
+  }
+  .outbox time {
+    color: var(--text-2);
+    font-size: 0.75rem;
+  }
+  button:disabled {
+    opacity: 0.55;
+    cursor: default;
+  }
+  :is(button, input, select):focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 3px;
+  }
+  @media (max-width: 600px) {
+    .page {
+      padding: 1rem;
+    }
+    .form-grid {
+      grid-template-columns: 1fr;
+    }
+    .remove {
+      margin-inline-start: 0;
+    }
+  }
+  @media (pointer: coarse) {
+    button,
+    input,
+    select {
+      min-height: 44px;
+    }
+    input,
+    select {
+      font-size: 16px;
+    }
+  }
 </style>

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using AgentFox.Plugins.Channels;
+using Microsoft.Extensions.Configuration;
 
 namespace AgentFox.Channels;
 
@@ -24,11 +25,61 @@ public sealed class ChannelConfigStore
     private static readonly JsonSerializerOptions JsonWriteOpts = new() { WriteIndented = true };
 
     private readonly string _configFilePath;
+    private readonly IConfiguration? _fallbackConfiguration;
     private readonly object _gate = new();
 
-    public ChannelConfigStore(string configFilePath) => _configFilePath = configFilePath;
+    // Shared by the HTTP and agent-tool surfaces, including across awaits to a transport.
+    internal SemaphoreSlim ManagementGate { get; } = new(1, 1);
+
+    public ChannelConfigStore(string configFilePath, IConfiguration? fallbackConfiguration = null)
+    {
+        _configFilePath = configFilePath;
+        _fallbackConfiguration = fallbackConfiguration;
+    }
 
     public string ConfigFilePath => _configFilePath;
+
+    public IReadOnlyList<ChannelConfigurationEntry> Read()
+    {
+        lock (_gate)
+        {
+            var root = ReadRoot();
+            if (root == null) throw new InvalidOperationException("Invalid channel configuration root.");
+            if (root["Channels"] == null)
+                return _fallbackConfiguration == null ? [] : ChannelConfiguration.ReadEntries(_fallbackConfiguration, includeDisabled: true);
+            using var stream = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(root.ToJsonString()));
+            var config = new ConfigurationBuilder().AddJsonStream(stream).Build();
+            try { return ChannelConfiguration.ReadEntries(config, includeDisabled: true); }
+            finally { (config as IDisposable)?.Dispose(); }
+        }
+    }
+
+    public string? SetEnabled(string id, bool enabled) => Update(id, entry => entry["Enabled"] = enabled);
+    public string? SetSubscription(string id, TopicSubscription subscription) =>
+        Update(id, entry => entry[ChannelConfigurationEntry.SubscribeKey] = subscription.ToString());
+
+    public string? Remove(string id) => Update(id, entry => entry.Parent!.AsArray().Remove(entry));
+
+    private string? Update(string id, Action<JsonObject> update)
+    {
+        lock (_gate)
+        {
+            try
+            {
+                var root = ReadRoot();
+                if (root == null) return "Cannot read channel configuration.";
+                var entries = ChannelConfiguration.GetOrNormalizeCanonicalArray(root);
+                var matches = entries.OfType<JsonObject>()
+                    .Where(e => string.Equals(e["Name"]?.GetValue<string>()?.Trim(), id, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                if (matches.Count != 1) return "No unique saved channel matches this id.";
+                update(matches[0]);
+                WriteRoot(root);
+                return null;
+            }
+            catch { return "Could not save channel configuration. Check the agent's configuration file permissions."; }
+        }
+    }
 
     /// <summary>Appends an entry for a newly added channel.</summary>
     public string? Add(string channelType, Dictionary<string, string> config)
@@ -42,6 +93,9 @@ public sealed class ChannelConfigStore
                     return "Cannot read appsettings.json";
 
                 var channels = ChannelConfiguration.GetOrNormalizeCanonicalArray(root);
+                if (config.TryGetValue("Name", out var id) && channels.OfType<JsonObject>().Any(e =>
+                    string.Equals(e["Name"]?.GetValue<string>(), id, StringComparison.OrdinalIgnoreCase)))
+                    return "A saved channel already uses this name.";
                 var entry = new JsonObject
                 {
                     ["Type"] = channelType,
@@ -128,7 +182,7 @@ public sealed class ChannelConfigStore
     /// </summary>
     private static JsonNode? FindEntry(JsonArray channels, Channel channel)
     {
-        JsonNode? byType = null;
+        var unnamedByType = new List<JsonNode>();
 
         foreach (var node in channels)
         {
@@ -143,19 +197,43 @@ public sealed class ChannelConfigStore
             }
 
             var type = entry["Type"]?.GetValue<string>();
-            if (byType == null && type != null &&
+            if ((string.IsNullOrWhiteSpace(name) || name.StartsWith("channel-", StringComparison.Ordinal)) && type != null &&
                 type.Equals(channel.Type, StringComparison.OrdinalIgnoreCase))
             {
-                byType = node;
+                unnamedByType.Add(node);
             }
         }
 
-        return byType;
+        // Compatibility for callers that still address one old, unnamed entry by its type.
+        // Never let a stale named id edit another bot of the same type.
+        return channel.ChannelId.Equals(channel.Type, StringComparison.OrdinalIgnoreCase)
+            && unnamedByType.Count == 1 ? unnamedByType[0] : null;
     }
 
-    private JsonObject? ReadRoot() =>
-        JsonNode.Parse(File.ReadAllText(_configFilePath)) as JsonObject;
+    private JsonObject? ReadRoot()
+    {
+        var root = File.Exists(_configFilePath)
+            ? JsonNode.Parse(File.ReadAllText(_configFilePath), documentOptions: new()
+                { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true }) as JsonObject
+            : new JsonObject();
+        if (root != null && root["Channels"] == null && _fallbackConfiguration != null)
+        {
+            // An explicit user Channels array is authoritative, including []. IConfiguration's
+            // per-index merging otherwise resurrects deleted defaults after the next restart.
+            root["Channels"] = new JsonArray(ChannelConfiguration.ReadEntries(_fallbackConfiguration, includeDisabled: true)
+                .Select(e => (JsonNode?)JsonSerializer.SerializeToNode(e.Config)).ToArray());
+        }
+        return root;
+    }
 
-    private void WriteRoot(JsonObject root) =>
-        File.WriteAllText(_configFilePath, root.ToJsonString(JsonWriteOpts));
+    private void WriteRoot(JsonObject root)
+    {
+        var staging = _configFilePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            File.WriteAllText(staging, root.ToJsonString(JsonWriteOpts));
+            File.Move(staging, _configFilePath, overwrite: true);
+        }
+        finally { if (File.Exists(staging)) File.Delete(staging); }
+    }
 }

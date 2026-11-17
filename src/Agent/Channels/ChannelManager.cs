@@ -15,7 +15,8 @@ namespace AgentFox.Channels;
 /// </summary>
 public class ChannelManager
 {
-    private readonly Dictionary<string, Channel> _channels = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Channel> _channels =
+        new(StringComparer.OrdinalIgnoreCase);
     private readonly Func<FoxAgent?> _agentFactory;
     private ChannelMessageGateway? _gateway;
     private readonly SessionManager? _sessionManager;
@@ -116,6 +117,7 @@ public class ChannelManager
         var connected = await channel.ConnectAsync();
         if (!connected)
         {
+            await channel.DisconnectAsync();
             _logger?.LogWarning("AddAndConnectAsync: could not connect channel '{Name}'", channel.Name);
             return false;
         }
@@ -129,14 +131,15 @@ public class ChannelManager
     {
         if (_channels.TryGetValue(channelId, out var channel))
         {
-            await channel.DisconnectAsync();
-            _channels.Remove(channelId);
+            channel.IsEnabled = false;
+            try { await channel.DisconnectAsync(); }
+            finally { _channels.TryRemove(channelId, out _); }
         }
     }
 
     public async Task ConnectAllAsync()
     {
-        foreach (var channel in _channels.Values)
+        foreach (var channel in _channels.Values.Where(c => c.IsEnabled))
             await channel.ConnectAsync();
     }
 
@@ -164,7 +167,7 @@ public class ChannelManager
     /// </summary>
     public IReadOnlyList<Channel> ResolveRecipients(string? topic)
     {
-        var connected = _channels.Values.Where(c => c.IsConnected).ToList();
+        var connected = _channels.Values.Where(c => c.IsEnabled && c.IsConnected).ToList();
 
         if (string.IsNullOrWhiteSpace(topic) || connected.Count == 0)
             return connected;
@@ -250,6 +253,8 @@ public class ChannelManager
 
     private async Task HandleMessage(Channel channel, ChannelMessage message)
     {
+        if (!channel.IsEnabled || !_channels.TryGetValue(channel.ChannelId, out var current)
+            || !ReferenceEquals(channel, current)) return;
         var agent = _agentFactory();
         if (agent == null)
         {

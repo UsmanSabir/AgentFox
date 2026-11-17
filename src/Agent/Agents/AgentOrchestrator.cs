@@ -1103,7 +1103,7 @@ public sealed class AgentOrchestrator : IHostedService
     {
         var typeCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var entry in ChannelConfiguration.ReadEntries(_configuration, _logger))
+        foreach (var entry in _channelConfigStore.Read().Where(e => e.Enabled))
         {
             // Each child is one array element — read all its key/value pairs.
             var config = entry.GetChildren()
@@ -1136,8 +1136,7 @@ public sealed class AgentOrchestrator : IHostedService
             var (ch, error) = _channelProviderCatalog.Create(type, config);
             if (ch != null)
             {
-                // An explicit Name pins the id, which is what subscriptions are stored against.
-                // Without it the provider's own id stands, and AddChannel de-duplicates.
+                // The reader assigns a non-secret stable id to unnamed saved entries too.
                 if (!string.IsNullOrWhiteSpace(entry.Name))
                     ch.ChannelId = entry.Name!;
 

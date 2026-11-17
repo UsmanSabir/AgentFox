@@ -19,10 +19,12 @@ public sealed class ChannelConfigurationEntry
     public required string Type { get; init; }
     public required Dictionary<string, string> Config { get; init; }
 
+    public bool Enabled => !Config.TryGetValue("Enabled", out var raw)
+        || !bool.TryParse(raw, out var enabled) || enabled;
+
     /// <summary>
-    /// The operator-assigned id, if any. Without it a channel's id is whatever its provider minted
-    /// — <c>"telegram"</c> for every Telegram bot, a token prefix for Slack — which is fine until
-    /// subscriptions have to be stored against it.
+    /// The stable id. Explicit names and legacy keys are preserved; the reader supplies a
+    /// non-secret name for an unnamed array entry before filtering disabled channels.
     /// </summary>
     public string? Name =>
         Config.TryGetValue(NameKey, out var name) && !string.IsNullOrWhiteSpace(name)
@@ -46,7 +48,8 @@ public sealed record ChannelConfigurationValue(string Key, string? Value);
 
 public static class ChannelConfiguration
 {
-    public static List<ChannelConfigurationEntry> ReadEntries(IConfiguration configuration, ILogger? logger = null)
+    public static List<ChannelConfigurationEntry> ReadEntries(IConfiguration configuration, ILogger? logger = null,
+        bool includeDisabled = false)
     {
         var section = configuration.GetSection("Channels");
         if (!section.Exists())
@@ -57,16 +60,29 @@ public static class ChannelConfiguration
             return [];
 
         var arrayChildren = children.Where(c => int.TryParse(c.Key, out _)).OrderBy(c => int.Parse(c.Key)).ToList();
-        if (arrayChildren.Count > 0)
-            return arrayChildren.Select(c => ParseArrayEntry(c, logger)).Where(c => c != null).Cast<ChannelConfigurationEntry>().ToList();
-
-        return children.Select(c => ParseLegacyEntry(c, logger)).Where(c => c != null).Cast<ChannelConfigurationEntry>().ToList();
+        var entries = (arrayChildren.Count > 0
+            ? arrayChildren.Select(c => ParseArrayEntry(c, logger))
+            : children.Select(c => ParseLegacyEntry(c, logger)))
+            .OfType<ChannelConfigurationEntry>().ToList();
+        // Allocate before filtering disabled entries. The same identities are pinned on the next
+        // write, before an array deletion can shift any indices. Never derive an id from a secret.
+        var names = entries.Select(e => e.Name).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in entries.Where(e => e.Name == null))
+        {
+            var id = $"channel-{entry.Key}";
+            while (!names.Add(id)) id += "-unnamed";
+            entry.Config[ChannelConfigurationEntry.NameKey] = id;
+        }
+        return includeDisabled ? entries : entries.Where(e => e.Enabled).ToList();
     }
 
     public static JsonArray GetOrNormalizeCanonicalArray(JsonObject root)
     {
         if (root["Channels"] is JsonArray existingArray)
+        {
+            PinNames(existingArray);
             return existingArray;
+        }
 
         var canonical = new JsonArray();
         if (root["Channels"] is JsonObject legacyObject)
@@ -100,7 +116,22 @@ public static class ChannelConfiguration
         }
 
         root["Channels"] = canonical;
+        PinNames(canonical);
         return canonical;
+    }
+
+    private static void PinNames(JsonArray entries)
+    {
+        var names = entries.OfType<JsonObject>().Select(e => e["Name"]?.GetValue<string>()?.Trim())
+            .OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase);
+        for (var i = 0; i < entries.Count; i++)
+        {
+            if (entries[i] is not JsonObject entry || !string.IsNullOrWhiteSpace(entry["Name"]?.GetValue<string>()))
+                continue;
+            var id = $"channel-{i}";
+            while (!names.Add(id)) id += "-unnamed";
+            entry["Name"] = id;
+        }
     }
 
     /// <summary>
@@ -154,13 +185,6 @@ public static class ChannelConfiguration
             return null;
         }
 
-        if (config.TryGetValue("Enabled", out var enabledStr)
-            && bool.TryParse(enabledStr, out var enabled)
-            && !enabled)
-        {
-            return null;
-        }
-
         return new ChannelConfigurationEntry
         {
             Key = entry.Key,
@@ -176,13 +200,6 @@ public static class ChannelConfiguration
             .ToDictionary(c => c.Key, c => c.Value!, StringComparer.OrdinalIgnoreCase);
 
         NormalizeSubscriptions(entry, config);
-
-        if (config.TryGetValue("Enabled", out var enabledStr)
-            && bool.TryParse(enabledStr, out var enabled)
-            && !enabled)
-        {
-            return null;
-        }
 
         // The legacy shape keys entries by name ("telegram_main"), which is exactly the stable id
         // the canonical array form has to spell out — carry it over rather than losing it.
