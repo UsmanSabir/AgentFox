@@ -5,9 +5,9 @@
   import { Command, Search, RotateCcw, Maximize, Minimize, Keyboard, Pin, PinOff, X, Fullscreen, Shrink, Save, Settings2, ChevronDown } from 'lucide-svelte';
   import WorkspaceShortcuts from './WorkspaceShortcuts.svelte';
   import { searchWorkspaceCommands } from './workspaceSearch';
-  import { presetPlacedPanels, workspacePresetPanels, type WorkspaceCommand, type WorkspaceComposition, type WorkspacePanel, type WorkspaceRegion, type WorkspacePreset } from './workspaceComposition';
+  import { adoptablePanelIds, knownPanelIds, presetPlacedPanels, presetWithoutHidden, visiblePanels, workspacePresetPanels, type WorkspaceCommand, type WorkspaceComposition, type WorkspacePanel, type WorkspaceRegion, type WorkspacePreset } from './workspaceComposition';
   import {
-    readWorkspaceLayout, saveWorkspaceLayout, myViewStorageKey, presetViewStorageKey, resolveWorkspacePreset,
+    readWorkspaceLayout, saveWorkspaceLayout, myViewStorageKey, presetViewStorageKey, resolveWorkspacePreset, layoutFitsPanels, dropPanelsFromTrays,
     type AutoHideEdge, type AutoHideTrays, type WorkspaceLayout
   } from './workspaceLayout';
 
@@ -30,6 +30,14 @@
   /** Optional host-specific chrome; the index sparkline keeps its native 32px height. */
   export let compactChrome = false;
   export let hiddenPresetIds: string[] = [];
+  /**
+   * Panels to hide for now WITHOUT removing them from `panels`; it may change after mount. A hidden panel stays a valid id, so a saved
+   * layout, preset view or My view that holds it is never reset because of it. It is not offered (Find panel, commands, focus requests),
+   * not placed by a default build, not adopted, and not written into a layout's `known` list; one that is open, docked or in an
+   * auto-hide tray, is closed without touching the rest of the layout. When it stops being hidden it is adopted like any panel the
+   * catalogue has gained.
+   */
+  export let hiddenPanelIds: string[] = [];
 
   let root: HTMLElement;
   let dockRoot: HTMLDivElement;
@@ -79,8 +87,12 @@
   // `initialPreset` — so the saved layout is skipped once and the choice is saved instead.
   let mobilePresetChanged = requestedPreset !== null;
   $: selectedPreset = presets.find(item => item.id === preset) ?? presets[0];
-  $: availablePanels = workspacePresetPanels(panels, selectedPreset);
-  function offeredPanels() { return workspacePresetPanels(panels, presets.find(item => item.id === preset)); }
+  $: hiddenSet = new Set(hiddenPanelIds);
+  $: availablePanels = visiblePanels(workspacePresetPanels(panels, selectedPreset), hiddenSet);
+  /** What the current view offers and places: its panels, minus the hidden ones. */
+  function offeredPanels() { return visiblePanels(workspacePresetPanels(panels, presets.find(item => item.id === preset)), hiddenSet); }
+  /** What the current view may hold, hidden panels included: a layout naming one is still valid. */
+  function allowedPanelIds() { return new Set(workspacePresetPanels(panels, presets.find(item => item.id === preset)).map(panel => panel.id)); }
   function panelRegion(id: string) {
     const columns = presets.find(item => item.id === preset)?.columns;
     const index = columns?.findIndex(column => column.panels.includes(id)) ?? -1;
@@ -298,17 +310,46 @@
     if (!api) return false;
     const hidden = edges.flatMap(edge => autoHide[edge]?.ids ?? []);
     const seen = new Set(known ?? [...placed, ...hidden]);
-    let adopted = false;
-    for (const spec of offeredPanels()) {
-      if (seen.has(spec.id) || api.getPanel(spec.id) || trayForPanel(spec.id)) continue;
-      const peer = offeredPanels().find(p => panelRegion(p.id) === panelRegion(spec.id) && api?.getPanel(p.id));
-      addPanel(spec.id, peer?.id);
-      adopted = true;
+    return adoptPanels(adoptablePanelIds(offeredPanels().map(p => p.id), seen, hiddenSet, id => !!api?.getPanel(id) || !!trayForPanel(id)));
+  }
+  /** Docks each panel beside a peer of its region, as a panel the catalogue has gained is. */
+  function adoptPanels(ids: readonly string[]) {
+    if (!api) return false;
+    for (const id of ids) {
+      const peer = offeredPanels().find(p => panelRegion(p.id) === panelRegion(id) && api?.getPanel(p.id));
+      addPanel(id, peer?.id);
     }
-    return adopted;
+    return ids.length > 0;
+  }
+
+  /** Takes every hidden panel out of the live view, docked or in a tray, and leaves the rest of the layout as it is. */
+  function dropHiddenFromView() {
+    if (!api || !hiddenSet.size) return;
+    for (const id of hiddenSet) api.getPanel(id)?.api.close();
+    const dropped = dropPanelsFromTrays(autoHide, hiddenSet, openEdge);
+    if (dropped.changed) {
+      if (dropped.closesOpenEdge) closeTray(false);
+      autoHide = dropped.trays;
+    }
+    if (hiddenSet.has(activeId)) activeId = api.activePanel?.id ?? offeredPanels()[0]?.id ?? activeId;
+    maximized = api.hasMaximizedGroup();
+  }
+  let appliedHidden = new Set<string>();
+  $: applyHiddenPanels(hiddenSet);
+  function applyHiddenPanels(next: Set<string>) {
+    const unhidden = [...appliedHidden].filter(id => !next.has(id));
+    appliedHidden = new Set(next);
+    if (!api) { if (!desktop) updateMobilePanels(); return; }
+    const before = suppressSave;
+    suppressSave = true;
+    dropHiddenFromView();
+    adoptPanels(adoptablePanelIds(offeredPanels().map(p => p.id).filter(id => unhidden.includes(id)), new Set(), next, id => !!api?.getPanel(id) || !!trayForPanel(id)));
+    suppressSave = before;
+    scheduleSave();
   }
 
   function addPanel(id: string, reference?: string, direction: 'left' | 'right' | 'above' | 'below' | 'within' = 'within') {
+    if (hiddenSet.has(id)) return undefined;
     const spec = panels.find(p => p.id === id)!;
     return api?.addPanel({
       id, component: id, title: spec.title, renderer: 'always',
@@ -353,8 +394,9 @@
     autoHide = {};
     api.exitMaximizedGroup();
     api.clear();
-    const selected = presets.find(p => p.id === next) ?? presets[0];
+    const selected = presetWithoutHidden(presets.find(p => p.id === next) ?? presets[0], hiddenSet);
     preset = selected.id;
+    const catalogue = visiblePanels(panels, hiddenSet);
     if (selected.columns?.length) {
       let previous: string | undefined;
       const totalWeight = selected.columns.reduce((total, column) => total + (column.weight ?? 1), 0);
@@ -372,7 +414,7 @@
       // Edges the preset starts auto-hidden: never added to the grid, opened from the edge strip, exactly as Unpin
       // leaves them.
       const trays = Object.entries(selected.autoHide ?? {}).flatMap(([edge, tray]) => {
-        const ids = (tray?.panels ?? []).filter(id => panels.some(p => p.id === id) && !api!.getPanel(id));
+        const ids = (tray?.panels ?? []).filter(id => catalogue.some(p => p.id === id) && !api!.getPanel(id));
         return ids.length ? [[edge, { ids, active: ids.includes(tray!.active) ? tray!.active : ids[0],
           size: Math.min(900, Math.max(edge === 'bottom' ? 260 : 240, tray!.size ?? 260)) }]] : [];
       });
@@ -382,18 +424,18 @@
       restorePanelWidths();
       return;
     }
-    const primary = panels.find(p => p.region === 'center')!;
+    const primary = catalogue.find(p => p.region === 'center') ?? catalogue[0];
     addPanel(primary.id);
     const regions = ['left', 'right', 'bottom'] as const;
     const leaders: Partial<Record<WorkspaceRegion, string>> = { center: primary.id };
     for (const region of regions) {
-      const first = panels.find(p => p.region === region);
+      const first = catalogue.find(p => p.region === region);
       if (!first) continue;
       leaders[region] = first.id;
       if (region === 'right' && dockRoot.clientWidth < 1200) addPanel(first.id, primary.id);
       else addPanel(first.id, region === 'bottom' ? undefined : primary.id, region === 'bottom' ? 'below' : region);
     }
-    for (const spec of panels) {
+    for (const spec of catalogue) {
       if (!api.getPanel(spec.id)) addPanel(spec.id, leaders[spec.region] ?? primary.id);
     }
     api.getPanel(leaders.left ?? '')?.api.setSize({ width: Math.max(250, Math.min(280, dockRoot.clientWidth * .2)) });
@@ -422,7 +464,7 @@
       }
     }
     try {
-      localStorage.setItem(storageKey, JSON.stringify(saveWorkspaceLayout(edition, preset, api.toJSON(), Date.now(), autoHide, api.hasMaximizedGroup() ? api.activePanel?.id : undefined, panels.map(p => p.id), panelWidths)));
+      localStorage.setItem(storageKey, JSON.stringify(saveWorkspaceLayout(edition, preset, api.toJSON(), Date.now(), autoHide, api.hasMaximizedGroup() ? api.activePanel?.id : undefined, knownPanelIds(panels, hiddenSet), panelWidths)));
       dirty = false;
       storageWarning = '';
     } catch { storageWarning = 'Layout could not be saved in this browser; trading is unaffected.'; }
@@ -487,7 +529,7 @@
     if (!api || preset !== id) return;
     if (openEdge) { notice = `Close the ${openEdge} panel peek before saving ${selectedPreset.label}.`; return; }
     const record = saveWorkspaceLayout(edition, id, api.toJSON(), Date.now(), autoHide,
-      api.hasMaximizedGroup() ? api.activePanel?.id : undefined, panels.map(p => p.id), panelWidths);
+      api.hasMaximizedGroup() ? api.activePanel?.id : undefined, knownPanelIds(panels, hiddenSet), panelWidths);
     try {
       localStorage.setItem(presetViewStorageKey(storageKey, id), JSON.stringify(record));
       savedPresets = { ...savedPresets, [id]: record };
@@ -505,9 +547,8 @@
       syncPanelTitles();
       preset = id;
       autoHide = record.autoHide ?? {};
-      const allowed = new Set(offeredPanels().map(panel => panel.id));
-      if (Object.keys(record.layout.panels).some(panelId => !allowed.has(panelId))
-        || edges.some(edge => autoHide[edge]?.ids.some(panelId => !allowed.has(panelId)))) throw new Error('panels changed');
+      if (!layoutFitsPanels(record.layout.panels, autoHide, allowedPanelIds())) throw new Error('panels changed');
+      dropHiddenFromView();
       adoptNewPanels(Object.keys(record.layout.panels), record.known);
       restorePanelWidths();
       if (record.maximized) api.getPanel(record.maximized)?.api.maximize();
@@ -551,7 +592,7 @@
     if (!api) { notice = 'My view is saved from the full-width workstation.'; return; }
     if (openEdge) { notice = `Pin the ${openEdge} panels before saving My view.`; return; }
     const record = saveWorkspaceLayout(edition, preset, api.toJSON(), Date.now(), autoHide,
-      api.hasMaximizedGroup() ? api.activePanel?.id : undefined, panels.map(p => p.id), panelWidths);
+      api.hasMaximizedGroup() ? api.activePanel?.id : undefined, knownPanelIds(panels, hiddenSet), panelWidths);
     if (!writeMyView(record)) return;
     myView = record;
     onMyView = true;
@@ -572,9 +613,8 @@
       syncPanelTitles();
       preset = view.preset;
       autoHide = view.autoHide ?? {};
-      const allowed = new Set(offeredPanels().map(panel => panel.id));
-      if (Object.keys(view.layout.panels).some(id => !allowed.has(id))
-        || edges.some(edge => autoHide[edge]?.ids.some(id => !allowed.has(id)))) throw new Error('panels changed');
+      if (!layoutFitsPanels(view.layout.panels, autoHide, allowedPanelIds())) throw new Error('panels changed');
+      dropHiddenFromView();
       if (view.maximized) api.getPanel(view.maximized)?.api.maximize();
       maximized = api.hasMaximizedGroup();
       activeId = api.activePanel?.id ?? activeId;
@@ -863,8 +903,8 @@
     for (const p of panels) depot.appendChild(container(p.id));
     const selected = presets.find(item => item.id === preset);
     const placed = presetPlacedPanels(selected);
-    const ids = selected?.columns && !selected.offersUnplaced
-      ? placed : [...new Set([...placed, ...offeredPanels().map(panel => panel.id)])];
+    const ids = (selected?.columns && !selected.offersUnplaced
+      ? placed : [...new Set([...placed, ...offeredPanels().map(panel => panel.id)])]).filter(id => !hiddenSet.has(id));
     for (const id of ids) { stack.appendChild(container(id)); place(id); }
   }
 
@@ -956,12 +996,10 @@
       if (saved) {
         try {
           api.fromJSON(saved.layout); syncPanelTitles(); preset = saved.preset; autoHide = saved.autoHide ?? {};
-          const allowed = new Set(offeredPanels().map(panel => panel.id));
-          if (Object.keys(saved.layout.panels).some(id => !allowed.has(id))
-            || edges.some(edge => autoHide[edge]?.ids.some(id => !allowed.has(id)))) {
+          if (!layoutFitsPanels(saved.layout.panels, autoHide, allowedPanelIds())) {
             buildDefault(preset);
             adopted = true;
-          }
+          } else dropHiddenFromView();
           adopted = adoptNewPanels(Object.keys(saved.layout.panels), saved.known) || adopted;
           restorePanelWidths();
           if(saved.maximized) api.getPanel(saved.maximized)?.api.maximize();
