@@ -10,6 +10,10 @@ public abstract class Channel
     public string ChannelId { get; set; } = string.Empty;
     public bool IsConnected { get; protected set; }
 
+    /// <summary>Operator's live switch, independent of transport health. Disabled channels neither
+    /// receive notifications nor dispatch inbound commands, even if a transport disconnect fails.</summary>
+    public bool IsEnabled { get; set; } = true;
+
     /// <summary>
     /// The topics this channel receives notifications for. Defaults to the catch-all, so a channel
     /// nobody configured behaves exactly as it did before subscriptions existed.

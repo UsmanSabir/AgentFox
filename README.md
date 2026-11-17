@@ -142,6 +142,9 @@ irm https://raw.githubusercontent.com/UsmanSabir/AgentFox/main/install.ps1 -OutF
 | `-SkipService` | `--skip-service` / `AGENTFOX_SKIP_SERVICE=1` | off | Don't install the service and suppress the service hint. |
 | `-SkipOnboarding` | `--skip-onboarding` / `AGENTFOX_SKIP_ONBOARDING=1` | wizard runs | Don't launch the interactive setup wizard after install. |
 
+Manage notification destinations from **Channels**: add, remove, activate/deactivate, and edit their
+topics without restarting. See [channel management](docs/channel-management.md) for the API and persistence rules.
+
 ### Updating
 
 The installer writes an `update` script into the install dir that re-downloads the latest release

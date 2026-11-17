@@ -18,6 +18,7 @@ public sealed class ChannelConfigField
 {
     public required string Description { get; init; }
     public bool Required { get; init; }
+    public bool Secret { get; init; }
 }
 
 public sealed class ChannelCreationContext

@@ -68,7 +68,7 @@ public class NotifyUserTool : BaseTool
         get
         {
             var connected = _channelManager.Channels.Values
-                .Where(c => c.IsConnected)
+                .Where(c => c.IsEnabled && c.IsConnected)
                 .Select(c => c.Type)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
@@ -175,7 +175,7 @@ public class NotifyUserTool : BaseTool
             return ToolResult.Fail(
                 $"{topicError} Omit 'topic' to use the default '{NotificationTopics.AgentNotify}'.");
 
-        if (_channelManager.Channels.Values.All(c => !c.IsConnected))
+        if (_channelManager.Channels.Values.All(c => !c.IsEnabled || !c.IsConnected))
             return ToolResult.Fail("No channels are connected. Use manage_channel to add a channel.");
 
         var channels = _channelManager.ResolveRecipients(topic);

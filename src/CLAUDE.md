@@ -97,9 +97,26 @@ Publishers use constants from `NotificationTopics` (host) and `TradingTopics` (t
 
 `DummyChannel` (type `dummy`) is the way to verify any of this. It needs no credentials, connects instantly, and records what it was asked to deliver instead of sending it, exposed through `IInspectableChannel` → `GET/DELETE /channels/{id}/messages` and a "show received" view on the channels page. A wrong filter produces no error anywhere — the only symptom is that nothing arrives — so the check is: add a dummy with the filter, cause the event, read its outbox.
 
-Subscriptions are editable at runtime from three surfaces: `manage_channel action=subscribe` (agent chat), `PUT /channels/{id}/subscriptions` (the channels page's inline editor), and appsettings on restart. All writes funnel through `ChannelConfigStore`, the single locked writer for the `Channels` array — two surfaces each running their own read-modify-write on that file is how an entry gets clobbered. Both paths update the live channel first and persist second, then report `persisted: false` rather than swallowing a failed write: "it worked but reverts on restart" is the one outcome an operator has to act on. The page's 5s poll pauses while its editor is open, or it would overwrite a half-typed filter.
+Channel management is shared by the Channels page and `manage_channel`: add, remove, activate,
+deactivate and subscribe use `ChannelManagement`. `ChannelEndpoints.Map` supplies the authenticated
+HTTP routes; configuration writes require ManagementAdministrator. `ChannelConfigStore.ManagementGate`
+serializes lifecycle actions across both surfaces, and its locked writer atomically replaces the
+existing user configuration. Live enable/disable and topic changes report `persisted: false` on a
+failed save. A failed connection after add leaves a visible, saved, disconnected channel for retry;
+removal requires saving the deletion first. See [channel management](../docs/channel-management.md).
 
-Channel identity is the prerequisite that makes any of it storable. Providers mint their own ids and several are not unique per instance (Telegram hardcodes `"telegram"`), so a second bot used to overwrite the first in the manager's dictionary. Config entries take an optional `Name` that pins the id; `AddChannel` suffixes (`telegram#2`) and warns when one collides anyway. `Subscribe` accepts a comma-separated string or a JSON array — the array form needs explicit handling in `ChannelConfiguration.NormalizeSubscriptions` because `IConfiguration` flattens it into a null-valued parent section that the config-dictionary pass drops on the floor.
+Disabled is independent of disconnected: `Channel.IsEnabled` gates routed notifications, explicit
+sends, webhooks and inbound dispatch even if a transport's disconnect fails. The page lists disabled
+saved entries and permits topic edits. Stockji WhatsApp reports a local active adapter separately from
+phone delivery, since the hub checks the link and STOP state at send time. The page's poll pauses
+while a form or confirmation is open; credentials are transient and cleared after submission.
+
+Channel identity is stable before any mutation. Explicit `Name` values and legacy object keys remain
+ids. The configuration reader names previously unnamed array entries before filtering disabled ones;
+the writer pins these names before a deletion shifts indices. HTTP writes use exact ids, and agent
+type aliases must be unambiguous. Startup reads the store's authoritative user Channels list, including
+[], so per-index configuration merging cannot resurrect deleted defaults. `Subscribe` accepts a
+comma-separated string or a JSON array; `NormalizeSubscriptions` folds both into the same filters.
 
 ### LLM Providers (`LLM/`)
 

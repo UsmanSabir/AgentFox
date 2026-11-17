@@ -8,7 +8,7 @@ namespace AgentFox.Tools;
 /// Tool that lets the agent proactively push a message to any registered channel.
 ///
 /// Parameters and Description are computed from the live ChannelManager on every access,
-/// so the agent always sees up-to-date channel information — even after channels are
+/// so the agent always sees up-to-date channel information â€” even after channels are
 /// added or removed at runtime via ManageChannelTool.
 ///
 /// Registration (Program.cs, before agent build):
@@ -97,6 +97,9 @@ public class SendToChannelTool : BaseTool
                 $"Channel '{channelName}' is not registered. " +
                 $"Registered: {(registered.Length > 0 ? registered : "none")}");
         }
+
+        if (!channel.IsEnabled)
+            return ToolResult.Fail($"Channel '{channelName}' is deactivated.");
 
         if (!channel.IsConnected)
             return ToolResult.Fail($"Channel '{channelName}' is registered but not connected.");
