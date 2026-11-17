@@ -25,7 +25,12 @@
   /** Dense workstation presentation; classic retains its existing cards and controls. */
   export let dense = false;
   let managementOpen = false;
-  const dispatch = createEventDispatcher<{ newOrder:{symbol:string}; priceAlert:{symbol:string}; compactChange:boolean }>();
+  const dispatch = createEventDispatcher<{ select:string; newOrder:{symbol:string}; priceAlert:{symbol:string}; compactChange:boolean }>();
+  // Explicit picks also fire when reselecting the current stock. List refreshes only update binding.
+  function selectSymbol(symbol: string) {
+    selected = symbol;
+    dispatch('select', symbol);
+  }
   let panelElement: HTMLElement;
   /** Shared dashboard clock; used to refresh live session moves without adding another timer. */
   export let refreshTick = 0;
@@ -796,7 +801,7 @@
     {:else if dense}
       <WatchlistTable entries={filteredEntries} {selected} {archive} {rowStatus} {busy} {dragOverSymbol} {compact}
         canReorder={!search.trim() && !alertsOnly && autoTradeFilter === 'all'}
-        onSelect={symbol => selected = symbol} onAction={tableAction} onSearch={focusSearch}
+        onSelect={selectSymbol} onAction={tableAction} onSearch={focusSearch}
         onDragStart={startDrag} onDragOver={dragOver} onDrop={dropOn}
         onDragEnd={() => { draggedSymbol = null; dragOverSymbol = null; }}/>
     {:else}
@@ -821,7 +826,7 @@
           <button
             class="pick"
             title={entry.companyName ? `${entry.symbol} — ${entry.companyName}` : entry.symbol}
-            on:click={() => selected = entry.symbol}
+            on:click={() => selectSymbol(entry.symbol)}
           >
             <span class="identity">
               <span class="symbol-line">

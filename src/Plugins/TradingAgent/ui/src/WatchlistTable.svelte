@@ -101,7 +101,7 @@
     if ((event.key === 'F10' && event.shiftKey) || event.key === 'ContextMenu' || event.key === 'F2') {
       event.preventDefault(); if (!event.repeat) void openActions(focused); return;
     }
-    // The native Actions button handles Enter itself. Other cells select without moving focus.
+    // The native Actions button handles Enter itself. Other cells select the stock; the workspace may reveal its chart.
     if ((event.key === 'Enter' || event.key === ' ') && column !== 2 && !event.ctrlKey && !event.metaKey) {
       event.preventDefault(); if (!event.repeat) onSelect(focused); return;
     }
