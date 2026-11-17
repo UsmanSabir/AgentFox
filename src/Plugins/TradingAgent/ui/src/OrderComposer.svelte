@@ -830,7 +830,7 @@
         result = {
           ok: true,
           title: scheduled ? 'Scheduled order saved' : 'Waiting order saved',
-          detail: `${scheduled ? `Active from ${activeFromDate} (PKT), expiring ${expiresInDays} day(s) later. Manage or cancel it in Waiting orders. ` : ''}${armed.note} ${armed.willFireUnattended ? 'It can fire unattended.' : 'It still needs approval before sending.'}`
+          detail: `${scheduled ? `Active from ${activeFromDate} (PKT), expiring ${expiresInDays} day(s) later. Manage or cancel it in Persistent orders. ` : ''}${armed.note} ${armed.willFireUnattended ? 'It can fire unattended.' : 'It still needs approval before sending.'}`
             + (armed.attachedStop
               ? ` A ${armed.attachedStop.recurring ? 'recurring' : 'one-session'} protective stop at ${money(armed.attachedStop.stopTrigger)} `
                 + `(limit ${money(armed.attachedStop.stopLimit)}) is attached and will cover the shares that actually fill.`
@@ -843,7 +843,7 @@
 
       if (docked && uncertainOrderFailure(e instanceof ApiError ? e.status : null, e instanceof ApiError ? e.code : null)) {
         result = {ok:false, title:'Outcome unknown — do not retry yet',
-          detail:`${error} Check ${immediate ? 'Decisions & ledger and the broker order book' : 'Waiting orders'} before creating another order. This ticket will not retry automatically.`};
+          detail:`${error} Check ${immediate ? 'Decisions & ledger and the broker order book' : 'Persistent orders'} before creating another order. This ticket will not retry automatically.`};
         dispatch('changed');
       }
 
@@ -892,7 +892,7 @@
       `${summary}\n\n`
       + `Already live and placing on its own:\n${live.entries.map(entry => entry.describe).join('\n')}\n\n`
       + `Place this one as well? If both go through the account ends up holding up to ${extra} `
-      + `more share(s) than this order asks for. Cancel the keep-working order in Waiting orders `
+      + `more share(s) than this order asks for. Cancel the repeating order in Persistent orders `
       + `instead if this is meant to replace it.`, 'Place both'
     )) return;
 

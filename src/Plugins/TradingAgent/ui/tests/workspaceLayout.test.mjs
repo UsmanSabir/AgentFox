@@ -146,3 +146,49 @@ test('preset aliases cannot revive unregistered views or weaken saved-layout val
   const invalid = {...saved(),preset:'old',edition:'other'};
   assert.equal(readWorkspaceLayout(JSON.stringify(invalid),'premium',['chart'],['trading'],now,{old:'trading'}),null);
 });
+
+test('retired panel ids migrate in place: the first spot keeps the merged panel, later ones are dropped', async () => {
+  const { migrateWorkspacePanels } = await import('../src/workspaceLayout.ts');
+  const aliases = { armed:'auto-orders', persistent:'auto-orders' };
+  const leaf = (views, size, activeView = views[0]) => ({ type:'leaf', data:{ id:'g'+size, views, activeView }, size });
+  const value = {
+    version:1, edition:'premium', savedAt:now, preset:'trading',
+    layout:{
+      grid:{ root:{ type:'branch', size:800, data:[
+        leaf(['chart','armed'], 600, 'armed'),
+        leaf(['persistent'], 200)
+      ] }, width:1200, height:800, orientation:'HORIZONTAL' },
+      panels:{
+        chart:{ id:'chart', contentComponent:'chart', title:'Price chart' },
+        armed:{ id:'armed', contentComponent:'armed', title:'Waiting orders' },
+        persistent:{ id:'persistent', contentComponent:'persistent', title:'Persistent orders' }
+      }
+    },
+    known:['chart','armed','persistent'],
+    panelWidths:{ persistent:300 }
+  };
+  migrateWorkspacePanels(value, aliases);
+  const [first, ...rest] = value.layout.grid.root.data;
+  assert.deepEqual(first.data.views, ['chart','auto-orders']);
+  assert.equal(first.data.activeView, 'auto-orders');
+  assert.equal(first.size, 800, 'the emptied group gives its space to its neighbour');
+  assert.equal(rest.length, 0, 'the second retired spot is removed, not duplicated');
+  assert.deepEqual(Object.keys(value.layout.panels).sort(), ['auto-orders','chart']);
+  assert.equal(value.layout.panels['auto-orders'].contentComponent, 'auto-orders');
+  assert.deepEqual(value.known, ['chart','auto-orders']);
+  assert.deepEqual(value.panelWidths, { 'auto-orders':300 });
+
+  const restored = readWorkspaceLayout(JSON.stringify({ ...value, layout:{ ...value.layout,
+    panels:{ ...value.layout.panels } } }), 'premium', ['chart','auto-orders'], ['trading'], now);
+  assert.ok(restored, 'a migrated record passes validation');
+});
+
+test('readWorkspaceLayout migrates retired ids, including auto-hide trays, instead of discarding the layout', () => {
+  const aliases = { armed:'auto-orders', persistent:'auto-orders' };
+  const value = { ...saved(), autoHide:{ bottom:{ ids:['armed','persistent','watchlist'], active:'persistent', size:282 } } };
+  const read = readWorkspaceLayout(JSON.stringify(value), 'premium', ['chart','watchlist','auto-orders'], ['trading'], now, {}, aliases);
+  assert.ok(read, 'the saved layout survives');
+  assert.deepEqual(read.autoHide.bottom, { ids:['auto-orders','watchlist'], active:'auto-orders', size:282 });
+  assert.equal(readWorkspaceLayout(JSON.stringify(value), 'premium', ['chart','watchlist','auto-orders'], ['trading'], now),
+    null, 'without aliases an unknown id is still refused');
+});

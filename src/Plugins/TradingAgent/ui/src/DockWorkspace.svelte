@@ -18,6 +18,8 @@
   export let presets: WorkspacePreset[];
   /** Producer-owned names for retired views; applies to deep links, working layouts and My view. */
   export let presetAliases: Readonly<Record<string, string>> = {};
+  /** Producer-owned names for retired PANELS; a saved layout naming one is migrated, not discarded. */
+  export let panelAliases: Readonly<Record<string, string>> = {};
   export let onPresetChange: (id: string) => void = () => {};
   export let onExit: () => void;
   /**
@@ -453,7 +455,17 @@
     if (!myView && raw) { try { localStorage.removeItem(myViewStorageKey(storageKey)); } catch { /* optional */ } }
   }
   function readLayout(raw: string | null) {
-    return readWorkspaceLayout(raw, edition, panels.map(p => p.id), presets.map(p => p.id), Date.now(), presetAliases);
+    return readWorkspaceLayout(raw, edition, panels.map(p => p.id), presets.map(p => p.id), Date.now(), presetAliases, panelAliases);
+  }
+  /**
+   * A restored layout carries the titles it was saved with, so a renamed panel would keep its old tab
+   * label for as long as the layout lived. The catalogue is the authority for names.
+   */
+  function syncPanelTitles() {
+    for (const panel of api?.panels ?? []) {
+      const title = panels.find(spec => spec.id === panel.id)?.title;
+      if (title && panel.title !== title) panel.api.setTitle(title);
+    }
   }
   function readPresetViews() {
     const next: Record<string, WorkspaceLayout> = {};
@@ -490,6 +502,7 @@
       previousPanelWidths.clear();
       panelWidths = { ...record.panelWidths };
       api.fromJSON(record.layout);
+      syncPanelTitles();
       preset = id;
       autoHide = record.autoHide ?? {};
       const allowed = new Set(offeredPanels().map(panel => panel.id));
@@ -556,6 +569,7 @@
       previousPanelWidths.clear();
       panelWidths = { ...view.panelWidths };
       api.fromJSON(view.layout);
+      syncPanelTitles();
       preset = view.preset;
       autoHide = view.autoHide ?? {};
       const allowed = new Set(offeredPanels().map(panel => panel.id));
@@ -835,7 +849,7 @@
     }
     if (event.key === 'Escape' && api?.hasMaximizedGroup()) { event.preventDefault(); event.stopPropagation(); maximize(); return; }
     if ((event.ctrlKey || event.metaKey) && event.shiftKey && !event.altKey && event.code === 'Space') { event.preventDefault(); event.stopPropagation(); maximize(); return; }
-    const direct: Record<string,string> = { Digit1:'watchlist', Digit2:'chart', Digit3:'plan', Digit4:'ticket', Digit5:'order-logs', Digit6:'portfolio', Digit7:'persistent', Digit8:'armed' };
+    const direct: Record<string,string> = { Digit1:'watchlist', Digit2:'chart', Digit3:'plan', Digit4:'ticket', Digit5:'order-logs', Digit6:'portfolio', Digit7:'persistent' };
     if ((event.ctrlKey || event.metaKey) && event.shiftKey && !event.altKey && direct[event.code]) focusPanel(direct[event.code]);
     else if ((event.ctrlKey || event.metaKey) && event.shiftKey && !event.altKey && event.code === 'Digit0') resetView();
     else if (event.ctrlKey && !event.shiftKey && event.code === 'BracketRight') cycleTab(1);
@@ -941,7 +955,7 @@
       let adopted = false;
       if (saved) {
         try {
-          api.fromJSON(saved.layout); preset = saved.preset; autoHide = saved.autoHide ?? {};
+          api.fromJSON(saved.layout); syncPanelTitles(); preset = saved.preset; autoHide = saved.autoHide ?? {};
           const allowed = new Set(offeredPanels().map(panel => panel.id));
           if (Object.keys(saved.layout.panels).some(id => !allowed.has(id))
             || edges.some(edge => autoHide[edge]?.ids.some(id => !allowed.has(id)))) {

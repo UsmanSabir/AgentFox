@@ -4,15 +4,30 @@
   import { onAccountChanged } from './accountSignal';
   import { trading, type ArmedOrdersResponse, type ArmedOrder, type ProtectiveStop } from './api';
   import {
-    Crosshair, Trash2, RefreshCw, Zap, ShieldAlert, Clock, Shield, ShieldOff, ListChecks
+    Crosshair, Trash2, RefreshCw, Zap, ShieldAlert, Shield, ShieldOff, ListChecks
   } from 'lucide-svelte';
   import LivePriceInline from './LivePriceInline.svelte';
   import OrderActionReview from './OrderActionReview.svelte';
+  import ApprovalStrip from './ApprovalStrip.svelte';
   import { orderListNavigation, focusOrderControls } from './orderListNavigation';
 
   export let refreshTick = 0;
   export let keyboardMode = false;
-  let query = '';
+  /**
+   * Inside Persistent orders (AutoOrdersPanel): the host owns the header, approval strip, search box, history toggle and the
+   * empty state, and `show` picks which of this panel's two lists the selected chip asks for.
+   */
+  export let embedded = false;
+  export let show: 'all' | 'triggers' | 'stops' | 'repeat' = 'all';
+  export let query = '';
+  export let showHistory = false;
+  /** Fired triggers already shown as their keep-working order, so one order is one row. */
+  export let hideArmedIds: ReadonlySet<string> = new Set();
+  // Read back by the host (bind:) for its strip, chip counts and single empty state.
+  export let approval: ArmedOrdersResponse['approval'] | null = null;
+  export let triggerCount = 0;
+  export let stopCount = 0;
+  export let loaded = false;
   let review: OrderActionReview;
   let reviewing = false;
   let feedback: HTMLParagraphElement;
@@ -27,12 +42,13 @@
   let busy = false;
   let error: string | null = null;
   let notice: string | null = null;
-  let showHistory = false;
   let selectedOrderIds = new Set<string>();
 
   export async function load() {
     try {
       data = await trading.armed.list(showHistory);
+      approval = data.approval;
+      loaded = true;
       const waiting = new Set(data.orders.filter(o => o.state === 'armed' && !o.protectiveStopId).map(o => o.armedId));
       selectedOrderIds = new Set([...selectedOrderIds].filter(id => waiting.has(id)));
       error = null;
@@ -106,39 +122,6 @@
     } finally {
       busy = false;
       feedback?.focus();
-    }
-  }
-
-  async function openWindow() {
-    if (busy) return;
-    busy = true;
-    notice = null;
-    try {
-      const result = await trading.approval.openWindow();
-      // inForce, not just "granted" — a window opened while the market is closed does nothing, and
-      // saying otherwise would imply protection that is not active.
-      notice = result.inForce
-        ? `Confirmation suspended until ${new Date(result.armedUntilUtc!).toLocaleTimeString()}.`
-        : result.note;
-      await load();
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
-    } finally {
-      busy = false;
-    }
-  }
-
-  async function closeWindow() {
-    if (busy) return;
-    busy = true;
-    try {
-      await trading.approval.closeWindow();
-      notice = 'Confirmation is required again.';
-      await load();
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
-    } finally {
-      busy = false;
     }
   }
 
@@ -238,10 +221,16 @@
    * longer `armed`, so the default view filters it out — nesting would hide precisely the stops that
    * matter, the live ones.
    */
-  $: stops = data?.protectiveStops ?? [];
+  // Embedded, the host's one search box covers stops too; standalone, protection is always shown.
+  $: stops = (data?.protectiveStops ?? []).filter(s => !embedded || !keyboardMode
+    || `${s.symbol} stop ${s.state} ${s.stopId}`.toLowerCase().includes(query.trim().toLowerCase()));
 
   /** The local backstops are shown as part of their stop, not as loose triggers in the main list. */
-  $: entries = (data?.orders ?? []).filter(o => !o.protectiveStopId);
+  $: entries = (data?.orders ?? []).filter(o => !o.protectiveStopId && !hideArmedIds.has(o.armedId));
+  $: triggerCount = entries.length;
+  $: stopCount = stops.length;
+  $: showTriggers = show === 'all' || show === 'triggers';
+  $: showStops = show === 'all' || show === 'stops';
   $: visibleEntries = entries.filter(o => !keyboardMode || `${o.symbol} ${o.action} ${o.state} ${o.armedId}`.toLowerCase().includes(query.trim().toLowerCase()));
   $: selectableEntries = entries.filter(order => order.state === 'armed');
   $: selectedCount = selectableEntries.filter(order => selectedOrderIds.has(order.armedId)).length;
@@ -293,7 +282,8 @@
   onMount(() => { load(); return onAccountChanged(load); });
 </script>
 
-<section class="armed" use:orderListNavigation={keyboardMode}>
+<section class="armed" class:embedded use:orderListNavigation={keyboardMode}>
+  {#if !embedded}
   <header>
     <div class="head-copy">
       <Crosshair size={15} />
@@ -313,38 +303,17 @@
   {#if data}
     <!-- Approval state sits with the triggers because an armed order that cannot be approved will not
          fire, and that pairing is the first thing to check when one does not. -->
-    <div class="approval" class:live={data.approval.armedUntilUtc}>
-      <ShieldAlert size={13} />
-      <div>
-        <b>Approval: {data.approval.mode}</b>
-        <span>
-          {#if data.approval.armedUntilUtc}
-            Window open until {new Date(data.approval.armedUntilUtc).toLocaleTimeString()}
-            {#if data.approval.armedBy}(by {data.approval.armedBy}){/if}
-          {:else if data.approval.mode === 'Auto'}
-            Auto-approved this session: {data.approval.autoApprovedThisSession} / {data.approval.maxOrdersPerSession}
-          {:else}
-            No confirmation-free window is open.
-          {/if}
-        </span>
-      </div>
-      {#if data.approval.armedUntilUtc}
-        <button class="btn btn-danger" on:click={closeWindow} disabled={busy}>Close window</button>
-      {:else}
-        <button class="btn btn-ghost" on:click={openWindow} disabled={busy}>
-          <Clock size={13} /> Open window
-        </button>
-      {/if}
-    </div>
+    <ApprovalStrip approval={data.approval} on:changed={load}/>
+  {/if}
   {/if}
 
   <p class="line" class:danger={!!error} role="status" tabindex="-1" bind:this={feedback}>{error ?? notice ?? ''}</p>
-  {#if keyboardMode}
+  {#if keyboardMode && !embedded}
     <label class="order-filter">Find trigger <input type="search" bind:value={query} aria-label="Find waiting order" placeholder="Symbol, state or trigger ID"/></label>
     <p class="line">↑ ↓ / Home / End navigate rows · Enter focuses row controls · Tab reaches actions. Selection can include filtered-out rows; review lists every target.</p>
   {/if}
 
-  {#if !loading && selectableEntries.length}
+  {#if showTriggers && !loading && selectableEntries.length}
     <div class="bulk-actions">
       <label>
         <input type="checkbox" checked={allSelected} on:change={toggleSelectAll} />
@@ -358,13 +327,16 @@
   {/if}
 
   {#if loading}
-    <p class="line">Loading…</p>
+    {#if !embedded}<p class="line">Loading…</p>{/if}
   {:else if !entries.length && !stops.length}
+    {#if !embedded}
     <p class="empty">
       No waiting orders. Use New Order to schedule a buy or sell for a date.
       For a price condition, choose a chart level or "sell if it drops"; alerts can create event conditions.
     </p>
-  {:else}
+    {/if}
+  {:else if showTriggers && entries.length}
+    {#if embedded && show === 'all'}<h3 class="group"><Crosshair size={13}/> On a trigger</h3>{/if}
     <ul class="list">
       {#each visibleEntries as order (order.armedId)}
         <li class="row {order.state}" data-order-row>
@@ -438,9 +410,13 @@
     {#if entries.length && !visibleEntries.length}<p class="line">No triggers match this filter. Protection below is always shown.</p>{/if}
   {/if}
 
-  {#if stops.length}
+  <!-- Persistent orders puts its "Repeat until filled" list here, between the triggers that feed it and the
+       stop-loss that protects what it buys. -->
+  <slot name="between"/>
+
+  {#if showStops && stops.length}
     <div class="stops">
-      <h3><Shield size={13} /> Protection</h3>
+      {#if !embedded || show === 'all'}<h3><Shield size={13} /> {embedded ? 'Stop-loss' : 'Protection'}</h3>{/if}
       <ul class="list">
         {#each stops as stop (stop.stopId)}
           {@const cover = describeCover(stop)}
@@ -486,7 +462,7 @@
     </div>
   {/if}
 
-  {#if data}<p class="caveat"><Zap size={12} /> {data.caveat}</p>{/if}
+  {#if data && showTriggers && (!embedded || entries.length)}<p class="caveat"><Zap size={12} /> {data.caveat}</p>{/if}
 </section>
 {#if keyboardMode}<OrderActionReview bind:this={review}/>{/if}
 
@@ -499,6 +475,11 @@
     background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
     padding: 1rem; display: flex; flex-direction: column; gap: .7rem; margin-bottom: 1.25rem;
   }
+  .armed.embedded { background:none; border:0; border-radius:0; padding:0; margin:0; }
+  .group { margin:0; display:flex; align-items:center; gap:.35rem; font-size:.74rem; font-weight:600; color:var(--text-2); }
+  .armed.embedded .line:empty { display:none; }
+  /* The host panel scrolls; a second scroll box inside it hid rows in the merged view. */
+  .armed.embedded .list { max-height:none; overflow:visible; }
   header { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; flex-wrap: wrap; }
   .head-copy { display: flex; gap: .55rem; align-items: flex-start; color: var(--primary); }
   .head-copy div { display: flex; flex-direction: column; gap: .2rem; }
@@ -510,15 +491,6 @@
   .head-actions .btn { display: flex; align-items: center; gap: .35rem; }
   .toggle { display: flex; align-items: center; gap: .3rem; color: var(--text-3); font-size: .7rem; cursor: pointer; }
 
-  .approval {
-    display: flex; align-items: center; gap: .6rem; background: var(--surface-2);
-    border-radius: var(--radius-sm); padding: .5rem .65rem; color: var(--text-3);
-  }
-  .approval.live { color: var(--warning); background: color-mix(in srgb, var(--warning) 10%, transparent); }
-  .approval div { display: flex; flex-direction: column; gap: .15rem; flex: 1; }
-  .approval b { color: var(--text); font-size: .78rem; }
-  .approval span { font-size: .7rem; }
-  .approval .btn { white-space: nowrap; display: flex; align-items: center; gap: .3rem; }
 
   .line { margin: 0; color: var(--text-3); font-size: .73rem; }
   .line.danger { color: var(--danger); }

@@ -15,7 +15,19 @@
     type PersistentActionId
   } from './persistentOrderUi';
   export let keyboardMode = false;
-  let query = '';
+  /**
+   * Inside the merged Persistent orders panel (AutoOrdersPanel): the host owns the header, search box, history toggle and empty state. `hidden`
+   * keeps it mounted (so its counts stay current) while another chip is selected.
+   */
+  export let embedded = false;
+  export let hidden = false;
+  export let query = '';
+  export let showHistory = false;
+  // Read back by the host (bind:): the chip count, its empty state, and which fired triggers became
+  // one of these orders so they are not listed twice.
+  export let orderCount = 0;
+  export let loaded = false;
+  export let sourceArmedIds: ReadonlySet<string> = new Set();
   $: visibleOrders = orders.filter(o => !keyboardMode || `${o.symbol} ${o.action} ${o.state} ${o.intentId}`.toLowerCase().includes(query.trim().toLowerCase()));
 
   export let refreshTick = 0;
@@ -30,7 +42,6 @@
   let review: OrderActionReview;
   let actionSheet: OrderRowActions;
   let resolutionSheet: PersistentOrderResolutionDialog;
-  let showHistory = false;
   let lastTick = 0;
   /**
    * The broker's own resting orders, per intent, once someone asks for them.
@@ -110,6 +121,9 @@
   export async function load() {
     try {
       orders = (await trading.persistentOrders.list(showHistory)).orders;
+      orderCount = orders.length;
+      sourceArmedIds = new Set(orders.flatMap(o => o.sourceArmedId ? [o.sourceArmedId] : []));
+      loaded = true;
       error = null;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -267,8 +281,9 @@
   onMount(load);
 </script>
 
-<section class="persistent" aria-label="Persistent order management"
+<section class="persistent" class:embedded {hidden} aria-label="Repeat until filled orders"
          use:orderListNavigation={keyboardMode} use:persistentActionKeys>
+  {#if !embedded}
   <header>
     <div class="title">
       <Repeat2 size={15} />
@@ -279,16 +294,17 @@
       <button on:click={load} disabled={busy != null || reviewing}><RefreshCw size={12} /> Refresh</button>
     </div>
   </header>
-  {#if keyboardMode}<label class="order-filter">Find persistent order <input type="search" bind:value={query} aria-label="Find persistent order" placeholder="Symbol, state or intent ID"/></label><p class="notice">↑ ↓ / Home / End navigate rows · Enter focuses controls · Shift+F10 or the context-menu key opens row actions.</p>{/if}
+  {/if}
+  {#if keyboardMode && !embedded}<label class="order-filter">Find persistent order <input type="search" bind:value={query} aria-label="Find persistent order" placeholder="Symbol, state or intent ID"/></label><p class="notice">↑ ↓ / Home / End navigate rows · Enter focuses controls · Shift+F10 or the context-menu key opens row actions.</p>{/if}
 
-  <p class:bad={!!error} class="notice feedback" role="status" tabindex="-1" bind:this={feedback}>
+  <p class:bad={!!error} class:quiet={!error && !notice} class="notice feedback" role="status" tabindex="-1" bind:this={feedback}>
     {#if error}<AlertTriangle size={12} />{/if}{error ?? notice ?? ''}
   </p>
 
   {#if loading}
-    <p class="empty">Loading…</p>
+    {#if !embedded}<p class="empty">Loading…</p>{/if}
   {:else if !orders.length}
-    <p class="empty">No keep-working orders. Enable “Keep the unfilled remainder working” when placing or arming a LIMIT or STOPLOSS.</p>
+    {#if !embedded}<p class="empty">No keep-working orders. Enable “Keep the unfilled remainder working” when placing or arming a LIMIT or STOPLOSS.</p>{/if}
   {:else if !visibleOrders.length}
     <p class="empty">No persistent orders match this filter.</p>
   {:else}
@@ -418,6 +434,10 @@
   .order-filter input { min-width:0; padding:.35rem; border:1px solid var(--border-md); background:var(--surface-2); color:var(--text); border-radius:4px; }
   .persistent { margin:1rem 0; border:1px solid var(--border); border-radius:var(--radius);
                 background:var(--surface); overflow:hidden; }
+  .persistent.embedded { margin:0; border:0; border-radius:0; background:none; overflow:visible; }
+  .persistent[hidden] { display:none; }
+  .persistent.embedded .grid { padding:0; }
+  .persistent.embedded .notice.quiet { display:none; }
   header { display:flex; justify-content:space-between; align-items:center; gap:1rem; padding:.75rem .9rem;
            border-bottom:1px solid var(--border); }
   .title { display:flex; align-items:center; gap:.5rem; color:var(--primary); }

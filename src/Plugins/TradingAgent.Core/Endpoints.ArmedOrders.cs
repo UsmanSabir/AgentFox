@@ -72,6 +72,7 @@ public sealed partial class TradingCoreEndpoints
             var orders = await repository.GetArmedOrdersAsync(armedOnly: !(all ?? false), ct);
             var stops  = await repository.GetProtectiveStopsAsync(openOnly: !(all ?? false), ct);
             var window = approvals.ArmedWindow;
+            var policy = approvals.DescribeUnattendedPolicy();
             var pktNow = calendar.GetStatus().PktNow;
             return Results.Ok(new
             {
@@ -165,7 +166,12 @@ public sealed partial class TradingCoreEndpoints
                     armedUntilUtc = window?.UntilUtc,
                     armedBy = window?.By,
                     autoApprovedThisSession = approvals.AutoApprovedThisSession,
-                    maxOrdersPerSession = options.Value.Approval.Auto.MaxOrdersPerSession
+                    maxOrdersPerSession = options.Value.Approval.Auto.MaxOrdersPerSession,
+                    // Asked of the gate, never inferred in the page: whether an opened window would do
+                    // anything, and whether a triggered order goes out without a confirmation.
+                    windowApplies = approvals.WindowCanTakeEffect(),
+                    willFireUnattended = policy.WillFireUnattended,
+                    explanation = policy.Explanation
                 },
                 monitorRequired = true,
                 caveat = "An armed order is evaluated by the monitor, so it only fires while AgentFox is "
@@ -801,9 +807,11 @@ public sealed partial class TradingCoreEndpoints
                     : !marketOpen && options.Value.Approval.Window.DisarmAtMarketClose
                         ? "Granted, but NOT in force: the market is closed and arming does not survive "
                         + "the close. It will need re-arming during a session."
-                        : !mode.Equals("Armed", StringComparison.OrdinalIgnoreCase)
-                            ? $"Granted, but approval mode is '{mode}' — only 'Armed' mode consults the "
-                            + "window. Set Approval.Mode to Armed for this to have any effect."
+                        // "Window" is the mode ApprovalGate consults. This said "Armed", a mode that
+                        // does not exist, so following its advice changed nothing.
+                        : !mode.Equals("Window", StringComparison.OrdinalIgnoreCase)
+                            ? $"Granted, but approval mode is '{mode}' — only 'Window' mode consults the "
+                            + "window. Set Approval.Mode to Window for this to have any effect."
                             : "Granted, but not currently in force."
             });
         }).RequireAuthorization("TradingRiskManager");
