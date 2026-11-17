@@ -354,7 +354,8 @@ class Program
         // One writer for the Channels array: manage_channel and the web UI's subscription editor
         // both mutate it, and two independent read-modify-write cycles lose entries.
         builder.Services.AddSingleton(_ => new AgentFox.Channels.ChannelConfigStore(
-            AgentFox.Helpers.AppSettingsHelper.ResolveAppSettingsPath(), builder.Configuration));
+            AgentFox.Helpers.AppSettingsHelper.ResolveAppSettingsPath(),
+            AgentFox.Helpers.AppSettingsHelper.ResolveDefaultsPath()));
 
         // LLM
         builder.Services.AddSingleton<IModelSwitchPolicy, AllowAnyModelSwitchPolicy>();

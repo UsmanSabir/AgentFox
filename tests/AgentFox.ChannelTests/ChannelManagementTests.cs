@@ -194,13 +194,37 @@ public sealed class ChannelManagementTests
     {
         var path = Path.Combine(_directory, "user.json");
         File.WriteAllText(path, "{ /* user settings */ }");
-        var defaults = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
-            { ["Channels:0:Type"] = "dummy", ["Channels:0:Name"] = "from-defaults" }).Build();
+        var defaults = Path.Combine(_directory, "defaults.json");
+        File.WriteAllText(defaults, """{ "Channels": [ { "Type": "dummy", "Name": "from-defaults" } ] }""");
         var store = new ChannelConfigStore(path, defaults);
         Assert.AreEqual("from-defaults", store.Read().Single().Name);
         Assert.IsNull(store.Remove("from-defaults"));
         Assert.AreEqual(0, new ChannelConfigStore(path, defaults).Read().Count);
         Assert.AreEqual(0, Directory.GetFiles(_directory, "*.tmp").Length);
+    }
+
+    [TestMethod]
+    public void FirstSave_CopiesOnlyTheDefaultsFile_NeverEnvironmentSecrets()
+    {
+        // A token supplied only through the environment must never be written to the user file
+        // when the first edit materialises the initial channel list there.
+        const string variable = "Channels__0__BotToken";
+        var previous = Environment.GetEnvironmentVariable(variable);
+        Environment.SetEnvironmentVariable(variable, "env-only-secret");
+        try
+        {
+            var path = Path.Combine(_directory, "user-env.json");
+            File.WriteAllText(path, "{}");
+            var defaults = Path.Combine(_directory, "defaults-env.json");
+            File.WriteAllText(defaults, """{ "Channels": [ { "Type": "dummy", "Name": "from-defaults" } ] }""");
+            var store = new ChannelConfigStore(path, defaults);
+            Assert.IsNull(store.SetEnabled("from-defaults", false));
+            var written = File.ReadAllText(path);
+            StringAssert.Contains(written, "from-defaults");
+            Assert.IsFalse(written.Contains("env-only-secret"), "An environment-only secret was persisted.");
+            Assert.IsFalse(written.Contains("BotToken"), "An environment-only key was persisted.");
+        }
+        finally { Environment.SetEnvironmentVariable(variable, previous); }
     }
 
     [TestMethod]

@@ -46,7 +46,11 @@ is removed in `finally`. No new history, credential store or database is created
 
 An explicit user `Channels` array is authoritative, including an empty array. Startup reads that same
 list, avoiding configuration providers' per-index merging that could resurrect deleted default entries.
-If the user has not saved a Channels list, the host's effective configuration supplies the initial list.
+If the user has not saved a Channels list, the release defaults file (`appsettings.defaults.json`)
+supplies the initial list, and the first change copies it into the user file. Only that file is read:
+never environment variables, command-line switches or hosted secrets, so a credential supplied only
+through the environment is never written to disk. Channels are therefore configured in the files
+(or from the Channels page), not through `Channels__N__…` environment variables.
 Legacy object keys remain channel names. Unnamed array entries receive non-secret names (`channel-0`,
 etc.) before disabled entries are filtered, and every write pins those names before indices can shift.
 
