@@ -118,6 +118,20 @@ public sealed class ApprovalGate
     }
 
     /// <summary>
+    /// Whether opening a window would change anything right now: only <c>ApprovalRequired</c> execution
+    /// with <c>Approval.Mode = Window</c> consults it, and the kill switch or AutoExecute off sends
+    /// nothing either way. The UI offers "Open window" only when this is true. Before it asked, the
+    /// button was shown on every install (Mode defaults to <c>Always</c>) and did nothing.
+    /// </summary>
+    public bool WindowCanTakeEffect()
+    {
+        var policy = _policy.Current();
+        return !policy.KillSwitch && policy.AutoExecute
+            && policy.ExecutionMode.Trim().Equals("ApprovalRequired", StringComparison.OrdinalIgnoreCase)
+            && (_options.Value.Approval.Mode ?? "Always").Trim().Equals("Window", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
     /// Describes whether orders can currently fire unattended, without evaluating a specific order.
     ///
     /// <para>

@@ -29,7 +29,7 @@
     await tick();
     await priceAlerts?.open(symbol, target, undefined, direction);
   }
-  import ArmedOrdersPanel from './ArmedOrdersPanel.svelte';
+  import AutoOrdersPanel from './AutoOrdersPanel.svelte';
   import ArmOrderDialog from './ArmOrderDialog.svelte';
   import { orderRequests, takeOrderRequest } from './orderRequests';
   import type { CleanNewOrderPrefill } from './newOrderPrefill';
@@ -38,7 +38,6 @@
   import NewOrderDialog from './NewOrderDialog.svelte';
   import OrderComposer from './OrderComposer.svelte';
   import PortfolioPanel from './PortfolioPanel.svelte';
-  import PersistentOrdersPanel from './PersistentOrdersPanel.svelte';
   import SideNavigation from './SideNavigation.svelte';
   import type { SectionNavigationItem } from './sectionNavigation';
   import type { SymbolExtension } from './symbolExtensions';
@@ -94,8 +93,7 @@
    * same event with pre-filled context, so there is one dialog rather than one per origin.
    */
   let armContext: ArmOrderDialogContext | null = null;
-  let armedPanel: ArmedOrdersPanel | null = null;
-  let persistentPanel: PersistentOrdersPanel | null = null;
+  let autoOrdersPanel: AutoOrdersPanel | null = null;
   let marketWorkspace: MarketWorkspace | null = null;
   // The workstation deliberately keeps both community-owned presentations. "New Order" is the
   // quick modal flow; the Order ticket panel remains available for traders who prefer a docked draft.
@@ -480,7 +478,7 @@
   {#key armContext}
     <ArmOrderDialog
       {...armContext}
-      on:armed={() => armedPanel?.load()}
+      on:armed={() => autoOrdersPanel?.load()}
       on:close={() => armContext = null}
     />
   {/key}
@@ -493,7 +491,7 @@
     selectedAction={selectedOrderAction}
     quick={quickOrder}
     prefill={newOrderPrefill}
-    on:changed={() => { load(); armedPanel?.load(); persistentPanel?.load(); }}
+    on:changed={() => { load(); autoOrdersPanel?.load(); }}
     on:close={closeNewOrderDialog}
   >
     <!-- Every prop the composer offers, not the three that happened to be needed first. A
@@ -511,7 +509,7 @@
   <WorkspacePanel {workspace} id="ticket">
     {#if ticketDraftOpen}
       <OrderComposer docked bind:this={ticket} {selectedSymbol}
-        on:changed={() => { load(); armedPanel?.load(); persistentPanel?.load(); }}
+        on:changed={() => { load(); autoOrdersPanel?.load(); }}
         on:attention={() => workspace?.focusPanel('ticket')} on:close={closeOrderTicket}>
         <svelte:fragment slot="order-detail" let:symbol let:action let:orderType let:quantity let:price let:value let:conditional let:triggerLevel let:trailing let:triggerPercent>
           <slot name="order-detail" {symbol} {action} {orderType} {quantity} {price} {value} {conditional} {triggerLevel} {trailing} {triggerPercent}/>
@@ -658,6 +656,7 @@
       <WorkspacePanel {workspace} id="watchlist">
         <WatchlistPanel bind:this={workspaceWatchlist} bind:selected={selectedSymbol} bind:selectedCompany
           allowCompact={!!workspace.setPanelWidth} dense refreshTick={marketTick} marketOpen={status.market.isOpen}
+          on:select={() => workspace?.focusPanel('chart')}
           on:compactChange={event => workspace?.setPanelWidth?.('watchlist', event.detail ? 180 : null)}
           on:newOrder={event => {selectedSymbol = event.detail.symbol; openNewOrderDialog();}}
           on:priceAlert={event => openPriceAlert(event.detail.symbol)}
@@ -706,13 +705,11 @@
     </div>
 
     {/if}
-    <WorkspacePanel {workspace} id="persistent">
-    <PersistentOrdersPanel bind:this={persistentPanel} refreshTick={marketTick} keyboardMode={!!workspace}/>
-    </WorkspacePanel>
-
     <div class="alerts-row">
-      <WorkspacePanel {workspace} id="armed">
-      <ArmedOrdersPanel bind:this={armedPanel} refreshTick={marketTick} keyboardMode={!!workspace}/>
+      <!-- One panel for every order the app places on the person's behalf: triggers, repeat-until-filled
+           and stop-loss. It replaced the separate Waiting orders and Persistent orders panels. -->
+      <WorkspacePanel {workspace} id="persistent">
+      <AutoOrdersPanel bind:this={autoOrdersPanel} refreshTick={marketTick} keyboardMode={!!workspace}/>
       </WorkspacePanel>
       <WorkspacePanel {workspace} id="alerts">
       <div class="price-alert-tabs">

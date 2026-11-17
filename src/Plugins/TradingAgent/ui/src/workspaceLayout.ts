@@ -16,6 +16,116 @@ export function resolveWorkspacePreset(
   const renamed = Object.hasOwn(aliases, id) ? aliases[id] : undefined;
   return renamed && presets.includes(renamed) ? renamed : null;
 }
+type GridNode = { type?: unknown; data?: unknown; size?: unknown };
+
+/**
+ * Rewrites retired panel ids in a saved record, before it is validated, so a layout the operator
+ * arranged survives a panel being renamed or merged. Without this, readWorkspaceLayout refuses any
+ * record naming an id that has left the catalogue and the whole arrangement falls back to the preset.
+ *
+ * Several retired ids may map to ONE panel (and a retired id may map onto a panel already placed): the first
+ * place met keeps it, grid before trays, and every later one is dropped. A group emptied by that loses
+ * its space to a neighbour so the rest of the grid keeps its proportions. Only view metadata is touched.
+ */
+export function migrateWorkspacePanels(value: unknown, aliases: Readonly<Record<string, string>>): void {
+  if (!value || typeof value !== 'object' || !Object.keys(aliases).length) return;
+  const record = value as { layout?: { grid?: { root?: GridNode }; panels?: Record<string, Record<string, unknown>> };
+    autoHide?: Record<string, { ids?: unknown; active?: unknown } | undefined>;
+    bottomTray?: { ids?: unknown; active?: unknown }; maximized?: unknown;
+    known?: unknown; panelWidths?: Record<string, unknown> };
+  const retired = (id: unknown): id is string => typeof id === 'string' && Object.hasOwn(aliases, id);
+  const target = (id: string) => retired(id) ? aliases[id] : id;
+  const layout = record.layout;
+  const root = layout?.grid?.root;
+  if (!layout?.panels || typeof layout.panels !== 'object' || !root) return;
+
+  const leaves: { views: unknown[] }[] = [];
+  const collect = (node: GridNode) => {
+    if (node?.type === 'leaf' && node.data && Array.isArray((node.data as { views?: unknown }).views)) leaves.push(node.data as { views: unknown[] });
+    else if (node?.type === 'branch' && Array.isArray(node.data)) (node.data as GridNode[]).forEach(collect);
+  };
+  collect(root);
+  const placed = new Set<string>(leaves.flatMap(leaf => leaf.views.filter((v): v is string => typeof v === 'string' && !retired(v))));
+  const source = new Map<string, string>();
+
+  // Returns whether the node still holds a panel.
+  const walk = (node: GridNode): boolean => {
+    if (node?.type === 'leaf') {
+      const data = node.data as { views?: unknown[]; activeView?: unknown };
+      if (!Array.isArray(data?.views)) return true;
+      data.views = data.views.flatMap(view => {
+        if (!retired(view)) return [view];
+        const to = target(view);
+        if (placed.has(to)) return [];
+        placed.add(to); source.set(to, view);
+        return [to];
+      });
+      if (retired(data.activeView)) data.activeView = target(data.activeView);
+      if (data.activeView !== undefined && !data.views.includes(data.activeView)) data.activeView = data.views[0];
+      return data.views.length > 0;
+    }
+    if (node?.type !== 'branch' || !Array.isArray(node.data)) return true;
+    const children = node.data as GridNode[];
+    const kept: GridNode[] = [];
+    let freed = 0;
+    for (const child of children) {
+      if (walk(child)) {
+        if (freed && typeof child.size === 'number') { child.size += freed; freed = 0; }
+        kept.push(child);
+      } else if (typeof child.size === 'number') {
+        const previous = kept[kept.length - 1];
+        if (previous && typeof previous.size === 'number') previous.size += child.size; else freed += child.size;
+      }
+    }
+    node.data = kept;
+    return kept.length > 0;
+  };
+  walk(root);
+
+  const panels: Record<string, Record<string, unknown>> = {};
+  for (const [id, state] of Object.entries(layout.panels)) {
+    if (!retired(id)) { panels[id] = state; continue; }
+    const to = target(id);
+    if (source.get(to) !== id) continue;
+    panels[to] = { ...state, id: to, contentComponent: to, ...(state?.tabComponent === id ? { tabComponent: to } : {}) };
+  }
+  layout.panels = panels;
+
+  const parked = new Set<string>();
+  const migrateTray = (tray: { ids?: unknown; active?: unknown } | undefined) => {
+    if (!tray || !Array.isArray(tray.ids)) return true;
+    tray.ids = tray.ids.flatMap(id => {
+      const to = typeof id === 'string' ? target(id) : id;
+      if (typeof to !== 'string') return [to];
+      if ((retired(id) && placed.has(to)) || parked.has(to)) return [];
+      parked.add(to);
+      return [to];
+    });
+    if (retired(tray.active)) tray.active = target(tray.active);
+    if (!(tray.ids as unknown[]).includes(tray.active)) tray.active = (tray.ids as unknown[])[0];
+    return (tray.ids as unknown[]).length > 0;
+  };
+  if (record.autoHide && typeof record.autoHide === 'object') {
+    for (const edge of Object.keys(record.autoHide)) if (!migrateTray(record.autoHide[edge])) delete record.autoHide[edge];
+    if (!Object.keys(record.autoHide).length) delete record.autoHide;
+  }
+  if (record.bottomTray && !migrateTray(record.bottomTray)) delete record.bottomTray;
+
+  if (retired(record.maximized)) {
+    const to = target(record.maximized);
+    if (Object.hasOwn(panels, to)) record.maximized = to; else delete record.maximized;
+  }
+  if (Array.isArray(record.known)) record.known = [...new Set(record.known.map(id => typeof id === 'string' ? target(id) : id))];
+  if (record.panelWidths && typeof record.panelWidths === 'object') {
+    for (const id of Object.keys(record.panelWidths)) {
+      if (!retired(id)) continue;
+      const width = record.panelWidths[id];
+      delete record.panelWidths[id];
+      if (!Object.hasOwn(record.panelWidths, target(id))) record.panelWidths[target(id)] = width;
+    }
+  }
+}
+
 export type AutoHideEdge = 'left' | 'right' | 'bottom';
 export interface AutoHideTray { ids: string[]; active: string; size: number }
 export type AutoHideTrays = Partial<Record<AutoHideEdge, AutoHideTray>>;
@@ -48,11 +158,13 @@ export interface WorkspaceLayout {
 /** Validate before handing browser preferences to Dockview; never accept components/params as code. */
 export function readWorkspaceLayout(
   raw: string | null, edition: string, allowedIds: readonly string[], presets: readonly string[],
-  now = Date.now(), presetAliases: Readonly<Record<string, string>> = {}
+  now = Date.now(), presetAliases: Readonly<Record<string, string>> = {},
+  panelAliases: Readonly<Record<string, string>> = {}
 ): WorkspaceLayout | null {
   if (!raw || raw.length > MAX_LAYOUT_LENGTH) return null;
   try {
     const value = JSON.parse(raw) as WorkspaceLayout;
+    migrateWorkspacePanels(value, panelAliases);
     const preset = resolveWorkspacePreset(value.preset, presets, presetAliases);
     if (value.version !== 1 || value.edition !== edition || !preset
       || !Number.isFinite(value.savedAt) || value.savedAt > now

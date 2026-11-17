@@ -909,6 +909,12 @@ export interface ArmedOrdersResponse {
     armedBy: string | null;
     autoApprovedThisSession: number;
     maxOrdersPerSession: number;
+    /** Whether opening a window would change anything. Absent from an older server: treat as true. */
+    windowApplies?: boolean;
+    /** Whether a triggered order is sent without asking. Absent from an older server. */
+    willFireUnattended?: boolean;
+    /** The gate's own sentence for why. */
+    explanation?: string;
   };
   caveat: string;
 }
