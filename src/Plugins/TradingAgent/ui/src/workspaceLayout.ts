@@ -249,3 +249,34 @@ export function saveWorkspaceLayout(
     ...(maximized && Object.hasOwn(copy.panels,maximized) ? {maximized} : {}),
     ...(Object.keys(savedTrays).length ? { autoHide:savedTrays } : {}) };
 }
+
+/**
+ * Whether a layout names only panels the workspace may place: its docked panels and every auto-hide tray entry must be in `allowed`.
+ * A panel the producer has hidden is still in `allowed` (it stays in the catalogue), so a record that holds one is valid and is
+ * never reset because of it.
+ */
+export function layoutFitsPanels(layoutPanels: Readonly<Record<string, unknown>>, trays: AutoHideTrays, allowed: ReadonlySet<string>): boolean {
+  return !Object.keys(layoutPanels).some(id => !allowed.has(id))
+    && !(['left', 'right', 'bottom'] as const).some(edge => trays[edge]?.ids.some(id => !allowed.has(id)));
+}
+
+/**
+ * The trays without the panels in `drop`. A tray left empty is removed, and one whose active panel went takes its first remaining one.
+ * `closesOpenEdge` is true when the tray currently peeking (`openEdge`) shows a panel that went, so the caller closes the peek first.
+ */
+export function dropPanelsFromTrays(trays: AutoHideTrays, drop: ReadonlySet<string>, openEdge: AutoHideEdge | null = null):
+  { trays: AutoHideTrays; changed: boolean; closesOpenEdge: boolean } {
+  const next: AutoHideTrays = {};
+  let changed = false;
+  let closesOpenEdge = false;
+  for (const edge of ['left', 'right', 'bottom'] as const) {
+    const tray = trays[edge];
+    if (!tray) continue;
+    const ids = tray.ids.filter(id => !drop.has(id));
+    if (ids.length === tray.ids.length) { next[edge] = tray; continue; }
+    changed = true;
+    if (openEdge === edge && drop.has(tray.active)) closesOpenEdge = true;
+    if (ids.length) next[edge] = { ...tray, ids, active: ids.includes(tray.active) ? tray.active : ids[0] };
+  }
+  return { trays: next, changed, closesOpenEdge };
+}
