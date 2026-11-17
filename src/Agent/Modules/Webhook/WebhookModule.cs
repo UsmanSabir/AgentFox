@@ -65,6 +65,9 @@ public class WebhookModule : IAppModule
                 return Results.NotFound(new { error = $"Channel '{channelName}' is not registered." });
             }
 
+            if (!channel.IsEnabled)
+                return Results.Conflict(new { error = "This channel is deactivated." });
+
             // Read the raw body
             string body;
             try

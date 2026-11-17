@@ -329,8 +329,11 @@ export interface ChannelInfo {
   id: string;
   name: string;
   type: string;
+  enabled: boolean;
   isConnected: boolean;
-  status: 'connected' | 'disconnected';
+  status: 'connected' | 'disconnected' | 'disabled';
+  providerAvailable: boolean;
+  deliveryStatus: string | null;
   /** Topic filters this channel receives. `['>']` is the catch-all. */
   subscriptions: string[];
   /** True when `subscriptions` is the plain catch-all and nothing is filtered out. */
@@ -375,6 +378,31 @@ export interface ChannelSubscriptionResult {
   /** False when the change is live but could not be written to appsettings.json. */
   persisted: boolean;
   persistError: string | null;
+}
+
+export interface ChannelProviderInfo {
+  type: string;
+  name: string;
+  fields: { key: string; description: string; required: boolean; secret: boolean }[];
+}
+
+export interface ChannelManagementResult {
+  ok: boolean;
+  id: string | null;
+  persisted: boolean;
+  persistError: string | null;
+  message: string | null;
+  warning: string | null;
+}
+
+/** Channel writes need the server's validation error, abort on unmount, and never log credentials. */
+async function channelRequest<T>(path: string, method: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+  const response = await fetch(`${BASE}${path}`, {
+    method, signal, headers: requestHeaders(body !== undefined),
+    body: body === undefined ? undefined : JSON.stringify(body)
+  });
+  if (!response.ok) throw await errorFrom(response);
+  return response.json() as Promise<T>;
 }
 
 /**
@@ -570,15 +598,23 @@ export const api = {
     URL.revokeObjectURL(url);
   },
   mcp:      () => get<McpStatus>('/mcp'),
-  channels: () => get<ChannelsStatus>('/channels'),
-  setChannelSubscriptions: (id: string, subscribe: string) =>
-    put<ChannelSubscriptionResult>(
-      `/channels/${encodeURIComponent(id)}/subscriptions`, { subscribe }),
-  channelMessages: (id: string) =>
-    get<{ id: string; messages: ChannelOutboxEntry[] }>(
-      `/channels/${encodeURIComponent(id)}/messages`),
-  clearChannelMessages: (id: string) =>
-    del<{ id: string; cleared: boolean }>(`/channels/${encodeURIComponent(id)}/messages`),
+  channels: (signal?: AbortSignal) => channelRequest<ChannelsStatus>('/channels', 'GET', undefined, signal),
+  channelProviders: (signal?: AbortSignal) =>
+    channelRequest<{ providers: ChannelProviderInfo[] }>('/channels/providers', 'GET', undefined, signal),
+  addChannel: (body: { type: string; name: string; config: Record<string, string>; subscribe: string }, signal?: AbortSignal) =>
+    channelRequest<ChannelManagementResult>('/channels', 'POST', body, signal),
+  setChannelEnabled: (id: string, enabled: boolean, signal?: AbortSignal) =>
+    channelRequest<ChannelManagementResult>(`/channels/${encodeURIComponent(id)}/enabled`, 'PUT', { enabled }, signal),
+  removeChannel: (id: string, signal?: AbortSignal) =>
+    channelRequest<ChannelManagementResult>(`/channels/${encodeURIComponent(id)}`, 'DELETE', undefined, signal),
+  setChannelSubscriptions: (id: string, subscribe: string, signal?: AbortSignal) =>
+    channelRequest<ChannelManagementResult>(
+      `/channels/${encodeURIComponent(id)}/subscriptions`, 'PUT', { subscribe }, signal),
+  channelMessages: (id: string, signal?: AbortSignal) =>
+    channelRequest<{ id: string; messages: ChannelOutboxEntry[] }>(
+      `/channels/${encodeURIComponent(id)}/messages`, 'GET', undefined, signal),
+  clearChannelMessages: (id: string, signal?: AbortSignal) =>
+    channelRequest<{ id: string; cleared: boolean }>(`/channels/${encodeURIComponent(id)}/messages`, 'DELETE', undefined, signal),
   pendingNotifications: (conversationId: string) =>
     get<PendingNotificationsResponse>(`/chat/pending/${encodeURIComponent(conversationId)}`),
   todos: (conversationId: string) =>

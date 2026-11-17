@@ -26,7 +26,16 @@ jobs:
         with:
           node-version: '24'
           cache: npm
-          cache-dependency-path: src/Plugins/TradingAgent/ui/package-lock.json
+          cache-dependency-path: |
+            src/frontend/package-lock.json
+            src/Plugins/TradingAgent/ui/package-lock.json
+      - name: Host UI
+        working-directory: src/frontend
+        run: |
+          npm ci
+          npm run check
+          npm run build
+          node --test "tests/*.test.mjs"
       - name: Trading UI
         working-directory: src/Plugins/TradingAgent/ui
         run: |
