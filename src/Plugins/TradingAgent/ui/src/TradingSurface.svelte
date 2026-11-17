@@ -656,6 +656,7 @@
       <WorkspacePanel {workspace} id="watchlist">
         <WatchlistPanel bind:this={workspaceWatchlist} bind:selected={selectedSymbol} bind:selectedCompany
           allowCompact={!!workspace.setPanelWidth} dense refreshTick={marketTick} marketOpen={status.market.isOpen}
+          on:select={() => workspace?.focusPanel('chart')}
           on:compactChange={event => workspace?.setPanelWidth?.('watchlist', event.detail ? 180 : null)}
           on:newOrder={event => {selectedSymbol = event.detail.symbol; openNewOrderDialog();}}
           on:priceAlert={event => openPriceAlert(event.detail.symbol)}
