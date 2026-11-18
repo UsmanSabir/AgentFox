@@ -65,6 +65,9 @@
     cell?.focus({preventScroll:true});
     cell?.scrollIntoView({block:'nearest',inline:'nearest'});
   }
+  export function focusSymbol(symbol:string) {
+    return focusCell(symbol, 0);
+  }
   async function openActions(symbol:string, fromColumn = column) {
     menuSymbol = symbol; returnColumn = fromColumn; actionError = '';
     await tick();

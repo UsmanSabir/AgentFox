@@ -16,13 +16,14 @@
     ['Ctrl+] / Ctrl+[','Next / previous tab in the focused group'],
     ['Ctrl+Shift+Space','Maximize / restore the active group'],
     ['Ctrl+Shift+F','Enter / exit page full screen; browser F11 remains browser-owned'],
-    ['Ctrl+Shift+1 / 2 / 3','Watchlist / Price chart / Trade plan'],
+    ['Ctrl+Shift+1','Open the Watchlist and focus stock search (also from inputs)'],
+    ['Ctrl+Shift+2 / 3','Price chart / Trade plan'],
     ['Ctrl+Shift+4 / 5','Order ticket / Order logs'],
     ['Ctrl+Shift+6 / 7','Portfolio / Persistent orders'],
     ['Ctrl+Shift+0','Reset view (does not discard in-session drafts)'],
     ['Escape','Close a dialog or bottom peek; otherwise restore a maximized group'],
     ['Tab / Shift+Tab','Move between controls; Enter / Space activates the focused control'],
-    ['Watchlist: ↑ ↓ / Enter','Move between symbols / select the focused symbol'],
+    ['Watchlist: ↑ ↓ / Enter','Move from search into the matching rows or between rows. Enter opens the focused stock or the first search match.'],
     ['Watchlist: F2 / Shift+F10','Open actions for the focused symbol; / focuses search'],
     ['Order lists: ↑ ↓ / Home / End','Move between visible rows; Tab reaches filters and controls'],
     ['Persistent orders, repeat until filled: Shift+F10','Open safe row actions; selecting one opens its review or evidence form'],
@@ -34,7 +35,7 @@
 </script>
 <dialog bind:this={dialog} aria-label="Keyboard shortcuts" on:cancel={event => {event.preventDefault();close();}}>
   <header><h2>Keyboard shortcuts</h2><button bind:this={back} on:click={close}>Close shortcuts</button></header>
-  <p>Layout shortcuts do not place orders. Number, tab-cycle and maximize shortcuts are ignored while typing. Panel search, Commands and F6 remain available from inputs. On Mac, Cmd also works for panel search, Ctrl+K, number and maximize shortcuts.</p>
+  <p>Layout shortcuts do not place orders. Watchlist search, panel search, Commands and F6 work from inputs. On Mac, Cmd also works for watchlist search, panel search, Ctrl+K, number and maximize shortcuts.</p>
   <table><caption>Workstation keyboard reference</caption><tbody>{#each shortcuts as [keys,description]}<tr><th scope="row"><kbd>{keys}</kbd></th><td>{description}</td></tr>{/each}</tbody></table>
   <p>Use <b>Commands</b> for pin/unpin, resizing and moving panels. The workstation follows the AgentFox theme. Browser/OS shortcuts may take priority; every action also has an on-screen control. Native order controls retain explicit confirmation.</p>
 </dialog>

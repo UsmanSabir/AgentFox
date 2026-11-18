@@ -60,6 +60,7 @@
   /** Narrows the rows below by symbol — separate from `input`, which is for adding a new ticker. */
   let search = '';
   let searchInput: HTMLInputElement;
+  let watchlistTable: WatchlistTable;
   let managementButton: HTMLButtonElement;
   /** When active, show only symbols that currently have one or more unacknowledged alerts. */
   let alertsOnly = false;
@@ -473,8 +474,26 @@
   }
 
   export function focusSearch() {
-    if (searchInput?.isConnected) searchInput.focus();
-    else managementButton?.focus();
+    if (searchInput?.isConnected) {
+      searchInput.focus();
+      searchInput.select();
+    } else managementButton?.focus();
+  }
+
+  function searchKey(event: KeyboardEvent) {
+    if (!dense || event.defaultPrevented || event.isComposing || event.altKey ||
+      event.ctrlKey || event.metaKey || event.shiftKey) return;
+
+    if (event.key === 'Enter' && search.trim()) {
+      event.preventDefault();
+      const first = filteredEntries[0];
+      if (first && !event.repeat) selectSymbol(first.symbol);
+    } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      const entry = event.key === 'ArrowDown' ? filteredEntries[0] : filteredEntries.at(-1);
+      if (!entry) return;
+      event.preventDefault();
+      void watchlistTable?.focusSymbol(entry.symbol);
+    }
   }
 
   async function tableAction(action:WatchlistAction, symbol:string) {
@@ -708,22 +727,7 @@
     </div>
   {/if}
 
-  {#if loading}
-    <!-- Rows rather than a line of text. The panel is stretched to the chart card's height by the
-         grid, so a single centred note can land below the fold and read as "the list is empty" —
-         which is the exact wrong answer while it is still loading. -->
-    <ul class="rows skeleton" aria-hidden="true">
-      {#each Array(7) as _}
-        <li><span class="bar wide"></span><span class="bar narrow"></span></li>
-      {/each}
-    </ul>
-    <p class="note" role="status" aria-live="polite">Loading watchlist…</p>
-  {:else if !data?.entries.length}
-    <p class="note">
-      No symbols are being watched. Add a ticker above, or Reset to seed from the configured
-      allowed-symbols list.
-    </p>
-  {:else}
+  {#if dense || (!loading && data?.entries.length)}
     <div class="filter-row">
       <div class="search-row">
         <Search size={13} aria-hidden="true" />
@@ -734,6 +738,9 @@
           bind:value={search}
           spellcheck="false"
           aria-label="Search watched symbols"
+          aria-keyshortcuts={dense ? 'Control+Shift+1 Meta+Shift+1' : undefined}
+          title={dense ? 'Focus watchlist search (Ctrl+Shift+1)' : undefined}
+          on:keydown={searchKey}
         />
         {#if search}
           <button
@@ -745,6 +752,7 @@
           ><X size={13} /></button>
         {/if}
       </div>
+      {#if !loading && data?.entries.length}
       <label class="automation-filter" title="Filter by effective auto-trading status">
         <Bot size={13} aria-hidden="true" />
         <select bind:value={autoTradeFilter} aria-label="Filter by auto-trading status">
@@ -763,7 +771,25 @@
       >
         <Bell size={13} /> Alerts only
       </button>
+      {/if}
     </div>
+  {/if}
+  {#if loading}
+    <!-- Rows rather than a line of text. The panel is stretched to the chart card's height by the
+         grid, so a single centred note can land below the fold and read as "the list is empty" —
+         which is the exact wrong answer while it is still loading. -->
+    <ul class="rows skeleton" aria-hidden="true">
+      {#each Array(7) as _}
+        <li><span class="bar wide"></span><span class="bar narrow"></span></li>
+      {/each}
+    </ul>
+    <p class="note" role="status" aria-live="polite">Loading watchlist…</p>
+  {:else if !data?.entries.length}
+    <p class="note">
+      No symbols are being watched. Add a ticker above, or Reset to seed from the configured
+      allowed-symbols list.
+    </p>
+  {:else}
     {#if dense && compact && (autoTradeFilter !== 'all' || alertsOnly)}
       <button class="compact-filters" on:click={() => { autoTradeFilter = 'all'; alertsOnly = false; }}>Clear active filters</button>
     {/if}
@@ -799,7 +825,7 @@
         {/if}
       </p>
     {:else if dense}
-      <WatchlistTable entries={filteredEntries} {selected} {archive} {rowStatus} {busy} {dragOverSymbol} {compact}
+      <WatchlistTable bind:this={watchlistTable} entries={filteredEntries} {selected} {archive} {rowStatus} {busy} {dragOverSymbol} {compact}
         canReorder={!search.trim() && !alertsOnly && autoTradeFilter === 'all'}
         onSelect={selectSymbol} onAction={tableAction} onSearch={focusSearch}
         onDragStart={startDrag} onDragOver={dragOver} onDrop={dropOn}

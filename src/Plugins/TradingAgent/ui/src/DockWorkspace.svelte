@@ -850,7 +850,7 @@
     if (!command) return;
     const reason = command.disabled?.();
     if (reason) { notice = reason; return; }
-    closePalette();
+    if (palette.open) closePalette();
     await tick();
     try { await command.run(); }
     catch (e) { notice = e instanceof Error ? e.message : String(e); }
@@ -882,6 +882,12 @@
     }
     if (event.key === 'F6' && !event.ctrlKey && !event.metaKey && !event.altKey) {
       event.preventDefault(); event.stopPropagation(); cycleGroup(event.shiftKey ? -1 : 1); return;
+    }
+    if ((event.ctrlKey || event.metaKey) && event.shiftKey && !event.altKey && event.code === 'Digit1') {
+      const command = commands.find(item => item.id === 'watchlist.search');
+      if (command) {
+        event.preventDefault(); event.stopPropagation(); void execute(command); return;
+      }
     }
     if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
     if ((event.ctrlKey || event.metaKey) && event.shiftKey && !event.altKey && event.code === 'KeyF') {
