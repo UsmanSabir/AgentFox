@@ -1,0 +1,283 @@
+<script lang="ts">
+  import { onMount, tick } from 'svelte';
+  import { Check, Filter, Plus, Trash2, X } from 'lucide-svelte';
+  import type { WatchlistEntry } from './api';
+  import {
+    addWatchlistList, changeWatchlistMembership, listNameLimit, readWatchlistLists, watchlistListsKey,
+    watchlistSectors, writeWatchlistLists, type WatchlistFilter, type WatchlistList
+  } from './watchlistLists';
+
+  export let entries: WatchlistEntry[];
+  export let loadingSectors: boolean;
+  export let activeFilter: WatchlistFilter | null = null;
+  export let restoreRowFocus: (symbol: string) => void;
+
+  let lists: WatchlistList[] = [];
+  let selection: Pick<WatchlistFilter, 'kind' | 'name'> | null = null;
+  let trigger: HTMLButtonElement;
+  let menu: HTMLDialogElement;
+  let editor: HTMLDialogElement;
+  let nameInput: HTMLInputElement;
+  let menuOpen = false;
+  let menuError = '';
+  let editorError = '';
+  let editSymbol: string | null = null;
+  let before: string[] = [];
+  let checked: string[] = [];
+  let newName = '';
+  let showName = false;
+  let saving = false;
+
+  $: sectors = watchlistSectors(entries);
+  $: watched = new Set(entries.map(entry => entry.symbol));
+  $: customGroups = lists.map(({ name, symbols }): WatchlistFilter => ({
+    kind: 'list', name, symbols: new Set(symbols.filter(symbol => watched.has(symbol)))
+  }));
+  $: activeFilter = selection
+    ? [...sectors, ...customGroups].find(group => group.kind === selection?.kind && group.name === selection.name)
+      ?? (selection.kind === 'sector' ? { ...selection, symbols: new Set<string>() } : null)
+    : null;
+
+  function loadLists() {
+    try {
+      lists = readWatchlistLists(localStorage);
+      if (selection?.kind === 'list' && !lists.some(list => list.name === selection?.name)) selection = null;
+    } catch {
+      menuError = 'Saved lists could not be read in this browser.';
+    }
+  }
+
+  onMount(() => {
+    loadLists();
+    function sync(event: StorageEvent) {
+      if (event.key === watchlistListsKey || event.key === null) loadLists();
+    }
+    window.addEventListener('storage', sync);
+    document.addEventListener('visibilitychange', loadLists);
+    return () => {
+      window.removeEventListener('storage', sync);
+      document.removeEventListener('visibilitychange', loadLists);
+    };
+  });
+
+  async function saveLists(update: (latest: WatchlistList[]) => WatchlistList[]) {
+    const save = () => {
+      const next = update(readWatchlistLists(localStorage));
+      writeWatchlistLists(localStorage, next);
+      lists = next;
+    };
+    // Serialise read/modify/write among other tabs of the same workspace where Web Locks is available.
+    if (navigator.locks) await navigator.locks.request(watchlistListsKey, save);
+    else save();
+  }
+
+  export function clear() {
+    selection = null;
+    trigger.focus();
+  }
+
+  function openMenu() {
+    menuError = '';
+    loadLists();
+    const { left, bottom } = trigger.getBoundingClientRect();
+    menu.style.setProperty('--filter-left', Math.max(8, Math.min(left, window.innerWidth - 248)) + 'px');
+    menu.style.setProperty('--filter-top', Math.max(8, Math.min(bottom + 6, window.innerHeight - 164)) + 'px');
+    menu.showModal();
+    menuOpen = true;
+    menu.querySelector<HTMLButtonElement>('.choice[aria-pressed="true"]')?.focus();
+  }
+
+  function choose(filter: WatchlistFilter | null) {
+    selection = filter && { kind: filter.kind, name: filter.name };
+    menu.close();
+  }
+
+  async function openEditor(symbol: string | null) {
+    loadLists();
+    editSymbol = symbol;
+    before = symbol ? lists.filter(list => list.symbols.includes(symbol)).map(list => list.name) : [];
+    checked = [...before];
+    editorError = '';
+    newName = '';
+    showName = symbol === null || !lists.length;
+    if (menu.open) menu.close();
+    await tick();
+    editor.showModal();
+    if (showName) nameInput?.focus();
+  }
+
+  export function editLists(symbol: string) {
+    return openEditor(symbol);
+  }
+
+  async function closeEditor() {
+    const symbol = editSymbol;
+    await tick();
+    if (symbol) restoreRowFocus(symbol);
+    else trigger.focus();
+  }
+
+  async function showNewName() {
+    showName = true;
+    await tick();
+    nameInput?.focus();
+  }
+
+  function errorMessage(error: unknown) {
+    return error instanceof DOMException ? 'Lists could not be saved in this browser.'
+      : error instanceof Error ? error.message : 'Lists could not be saved.';
+  }
+
+  async function submit() {
+    if (saving) return;
+    const name = newName.trim();
+    const symbol = editSymbol;
+    const additions = name ? [...checked, name] : checked;
+    if (!symbol && !name) { editorError = 'Enter a list name.'; return; }
+    if (symbol && !entries.some(entry => entry.symbol === symbol)) {
+      editorError = `${symbol} is no longer on the Watchlist.`;
+      return;
+    }
+    saving = true;
+    editorError = '';
+    try {
+      await saveLists(latest => {
+        const next = name ? addWatchlistList(latest, name) : latest;
+        return symbol ? changeWatchlistMembership(next, symbol, before, additions) : next;
+      });
+      if (!symbol) selection = { kind: 'list', name };
+      editor.close();
+    } catch (error) { editorError = errorMessage(error); }
+    finally { saving = false; }
+  }
+
+  async function deleteList(name: string) {
+    if (saving || !confirm(`Delete “${name}”? Its stocks will stay on your Watchlist.`)) return;
+    saving = true;
+    menuError = '';
+    try {
+      await saveLists(latest => latest.filter(list => list.name !== name));
+      if (selection?.kind === 'list' && selection.name === name) selection = null;
+      await tick();
+      menu.querySelector<HTMLButtonElement>('.choice[aria-pressed="true"]')?.focus();
+    } catch (error) { menuError = errorMessage(error); }
+    finally { saving = false; }
+  }
+</script>
+
+<button class="trigger" class:active={activeFilter !== null} type="button" bind:this={trigger}
+  aria-haspopup="dialog" aria-expanded={menuOpen} aria-label="Filter watched stocks" on:click={openMenu}>
+  <Filter size={13} aria-hidden="true"/> Filter
+</button>
+
+<dialog class="filter-menu" bind:this={menu} aria-label="Filter watched stocks"
+  on:close={() => menuOpen = false} on:click={event => { if (event.target === menu) menu.close(); }}>
+  <div class="menu-content">
+    <button type="button" class="choice" aria-pressed={!activeFilter} on:click={() => choose(null)}>
+      <span>All stocks</span><small>{entries.length}</small>
+      {#if !activeFilter}<Check size={14} aria-hidden="true"/>{/if}
+    </button>
+    <h3>Sectors</h3>
+    {#each sectors as sector (sector.name)}
+      <button type="button" class="choice" aria-pressed={activeFilter?.kind === 'sector' && activeFilter.name === sector.name}
+        on:click={() => choose(sector)}>
+        <span>{sector.name}</span><small>{sector.symbols.size}</small>
+        {#if activeFilter?.kind === 'sector' && activeFilter.name === sector.name}<Check size={14} aria-hidden="true"/>{/if}
+      </button>
+    {:else}
+      <p class="hint">{loadingSectors ? 'Loading sectors…' : 'No sector details available.'}</p>
+    {/each}
+    <h3>Your lists</h3>
+    {#each customGroups as group (group.name)}
+      <div class="list-choice">
+        <button type="button" class="choice" aria-pressed={activeFilter?.kind === 'list' && activeFilter.name === group.name}
+          on:click={() => choose(group)}>
+          <span>{group.name}</span><small>{group.symbols.size}</small>
+          {#if activeFilter?.kind === 'list' && activeFilter.name === group.name}<Check size={14} aria-hidden="true"/>{/if}
+        </button>
+        <button type="button" class="delete" disabled={saving} aria-label={`Delete list ${group.name}`}
+          on:click={() => deleteList(group.name)}><Trash2 size={13} aria-hidden="true"/></button>
+      </div>
+    {/each}
+    <button type="button" class="new-list" on:click={() => openEditor(null)}><Plus size={14} aria-hidden="true"/> New list</button>
+    {#if menuError}<p class="error" role="alert">{menuError}</p>{/if}
+  </div>
+</dialog>
+
+<dialog class="list-editor" bind:this={editor} aria-label={editSymbol ? `Lists for ${editSymbol}` : 'New list'}
+  on:close={closeEditor} on:cancel={event => { if (saving) event.preventDefault(); }}>
+  <form on:submit|preventDefault={submit}>
+    <header><strong>{editSymbol ? `Lists for ${editSymbol}` : 'New list'}</strong>
+      <button type="button" class="delete" aria-label="Close list editor" disabled={saving} on:click={() => editor.close()}>
+        <X size={15} aria-hidden="true"/>
+      </button>
+    </header>
+    {#if editSymbol}
+      <div class="list-checks">
+        {#each lists as list (list.name)}
+          <label class="check"><input type="checkbox" value={list.name} bind:group={checked} disabled={saving}/> {list.name}</label>
+        {/each}
+      </div>
+      {#if !showName}
+        <button type="button" class="new-list" on:click={showNewName}><Plus size={14} aria-hidden="true"/> New list</button>
+      {/if}
+    {/if}
+    {#if showName}
+      <label class="name">List name
+        <input type="text" bind:this={nameInput} bind:value={newName} maxlength={listNameLimit} required={!editSymbol}
+          placeholder="e.g. Keep an eye on" disabled={saving}/>
+      </label>
+    {/if}
+    {#if editorError}<p class="error" role="alert">{editorError}</p>{/if}
+    <footer>
+      <button type="button" class="cancel" disabled={saving} on:click={() => editor.close()}>Cancel</button>
+      <button type="submit" class="done" disabled={saving}>{editSymbol ? 'Done' : 'Create list'}</button>
+    </footer>
+  </form>
+</dialog>
+
+<style>
+  button { font:inherit; cursor:pointer; color:inherit; }
+  button:focus-visible, input:focus-visible { outline:2px solid var(--primary); outline-offset:1px; }
+  .trigger { display:flex; align-items:center; gap:.23rem; min-height:25px; padding:0 .3rem;
+    border:1px solid var(--border-md); border-radius:5px; background:var(--surface-2); color:var(--text-2);
+    font-size:.69rem; white-space:nowrap; }
+  .trigger:hover, .trigger.active, .trigger[aria-expanded="true"] { color:var(--primary); background:var(--primary-dim); }
+  dialog { box-sizing:border-box; color:var(--text); background:var(--surface-1, var(--surface));
+    border:1px solid var(--border-high); border-radius:8px; box-shadow:0 8px 28px #0006;
+    font-size:.82rem; }
+  .filter-menu { position:fixed; inset:var(--filter-top) auto auto var(--filter-left); margin:0; padding:0;
+    width:min(240px, calc(100dvw - 16px)); max-height:min(28rem, calc(100dvh - var(--filter-top) - 8px));
+    overscroll-behavior:contain; }
+  .filter-menu::backdrop { background:transparent; }
+  .menu-content { padding:.45rem; }
+  h3 { padding:.55rem .4rem .25rem; margin:.3rem 0 0; border-top:1px solid var(--border);
+    color:var(--text-2); font-size:.72rem; }
+  .choice, .new-list, .delete { display:flex; align-items:center; gap:.35rem; min-height:29px; padding:.25rem .4rem;
+    border:0; border-radius:4px; background:transparent; text-align:left; }
+  .choice { width:100%; min-width:0; }
+  .choice span { flex:1; overflow-wrap:anywhere; }
+  .choice small, .hint { color:var(--text-2); }
+  .choice:hover, .delete:hover, .new-list:hover { background:var(--surface-2); }
+  .choice[aria-pressed="true"] { color:var(--primary); background:var(--primary-dim); }
+  .list-choice { display:flex; gap:.1rem; }
+  .delete { min-width:27px; justify-content:center; color:var(--text-2); }
+  .new-list { color:var(--primary); }
+  .hint, .error { margin:.3rem .4rem; overflow-wrap:anywhere; }
+  .error { color:var(--danger); }
+  .list-editor { width:min(330px,calc(100dvw - 1rem)); max-height:85dvh; padding:.85rem; }
+  .list-editor::backdrop { background:#0007; }
+  form { display:grid; gap:.65rem; }
+  header, footer { display:flex; align-items:center; justify-content:space-between; gap:.5rem; }
+  footer { justify-content:flex-end; }
+  .list-checks { display:grid; gap:.15rem; }
+  .list-checks:empty { display:none; }
+  .check, .name { padding:.2rem; overflow-wrap:anywhere; }
+  .check { display:flex; align-items:flex-start; gap:.35rem; }
+  .name { display:grid; gap:.25rem; }
+  .name input { min-width:0; padding:.4rem; border:1px solid var(--border-md); border-radius:4px;
+    background:var(--surface-2); color:var(--text); font:inherit; }
+  .cancel, .done { min-height:30px; padding:.25rem .6rem; border-radius:4px; border:1px solid var(--border-md);
+    background:var(--surface-2); }
+  .done { color:var(--primary); background:var(--primary-dim); border-color:var(--primary); }
+</style>

@@ -47,6 +47,7 @@
   $: menuIndex = entries.findIndex(e => e.symbol === menuSymbol);
   $: actions = menuEntry ? [
     { id:'order' as const, label:'New Order…', reason:'' },
+    { id:'lists' as const, label:'Add to lists…', reason:'' },
     { id:'pin' as const, label:menuEntry.pinned ? 'Unpin from top' : 'Pin to top', reason:'' },
     { id:'priceAlert' as const, label:'Set price alert', reason:'' },
     { id:'alerts' as const, label:menuEntry.alertsEnabled ? 'Mute alerts' : 'Enable alerts', reason:'' },
@@ -84,8 +85,8 @@
     if (busy || actionBusy || !menuEntry || actions.find(a => a.id === action)?.reason) return;
     // Capture identity, never a row index that a quote/list refresh could retarget.
     const symbol = menuEntry.symbol;
-    if (action === 'order') {
-      // Let the existing order dialog acquire focus after this modal has returned it to the row.
+    if (action === 'order' || action === 'lists') {
+      // Return focus to the row before the next dialog opens.
       closeActions();
       await tick();
       await onAction(action, symbol);
