@@ -111,8 +111,13 @@
   let orderDialogReturnFocus: HTMLElement | null = null;
   let ticketReturnFocus: HTMLElement | null = null;
 
-  /** Symbol the watchlist has selected; drives the chart pane. */
+  /** Selected stock; drives the chart pane. */
   export let selectedSymbol: string | null = null;
+
+  function selectChartSymbol(event: CustomEvent<string>) {
+    selectedSymbol = event.detail;
+    workspace?.focusPanel('chart');
+  }
 
   /** Proposal inbox: open-only by default, since a decision queue should read as empty when it is. */
   let showResolvedProposals = false;
@@ -656,7 +661,7 @@
       <WorkspacePanel {workspace} id="watchlist">
         <WatchlistPanel bind:this={workspaceWatchlist} bind:selected={selectedSymbol} bind:selectedCompany
           allowCompact={!!workspace.setPanelWidth} dense refreshTick={marketTick} marketOpen={status.market.isOpen}
-          on:select={() => workspace?.focusPanel('chart')}
+          on:select={selectChartSymbol}
           on:compactChange={event => workspace?.setPanelWidth?.('watchlist', event.detail ? 180 : null)}
           on:newOrder={event => {selectedSymbol = event.detail.symbol; openNewOrderDialog();}}
           on:priceAlert={event => openPriceAlert(event.detail.symbol)}
@@ -720,8 +725,7 @@
         <PriceAlertsPanel bind:this={priceAlerts}/>
       {:else}
       <AlertsPanel
-
-        on:select={(e) => selectedSymbol = e.detail}
+        on:select={selectChartSymbol}
         on:arm={(e) => armContext = e.detail}
         on:alertsChanged={refreshWatchlist}
       />

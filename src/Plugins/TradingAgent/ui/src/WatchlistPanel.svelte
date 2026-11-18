@@ -12,6 +12,8 @@
   import type { SymbolExtensionComponent } from './symbolExtensions';
   import LivePriceInline from './LivePriceInline.svelte';
   import WatchlistTable from './WatchlistTable.svelte';
+  import WatchlistFilters from './WatchlistFilters.svelte';
+  import type { WatchlistFilter } from './watchlistLists';
   import { moveWatchlistRow, type WatchlistAction } from './watchlistNavigation';
 
   /** Selected symbol, so the chart pane (Phase 2) can follow the list. */
@@ -60,6 +62,9 @@
   /** Narrows the rows below by symbol — separate from `input`, which is for adding a new ticker. */
   let search = '';
   let searchInput: HTMLInputElement;
+  let watchlistTable: WatchlistTable;
+  let filters: WatchlistFilters;
+  let activeFilter: WatchlistFilter | null = null;
   let managementButton: HTMLButtonElement;
   /** When active, show only symbols that currently have one or more unacknowledged alerts. */
   let alertsOnly = false;
@@ -111,7 +116,7 @@
   }
 
   function startDrag(event: DragEvent, entry: WatchlistEntry) {
-    if (search.trim() || alertsOnly || autoTradeFilter !== 'all') {
+    if (!canReorder) {
       event.preventDefault();
       return;
     }
@@ -136,7 +141,7 @@
     const sourceSymbol = draggedSymbol;
     draggedSymbol = null;
     dragOverSymbol = null;
-    if (!data || !sourceSymbol || sourceSymbol === target.symbol) return;
+    if (!data || !canReorder || !sourceSymbol || sourceSymbol === target.symbol) return;
 
     const source = data.entries.find(item => item.symbol === sourceSymbol);
     if (!source || source.pinned !== target.pinned) return;
@@ -160,7 +165,11 @@
 
   /** Adopts a response without losing the selection when the list it was made against changed. */
   function apply(next: WatchlistResponse) {
-    data = next;
+    // The fast read and a portal outage both omit sector data. Keep known sectors for this panel.
+    const priorSectors = new Map(data?.entries.map(entry => [entry.symbol, entry.sectorName]));
+    data = { ...next, entries: next.entries.map(entry => ({
+      ...entry, sectorName: entry.sectorName ?? priorSectors.get(entry.symbol)
+    })) };
     if (selected && !next.entries.some(entry => entry.symbol === selected)) selected = null;
     if (!selected && next.entries.length) selected = next.entries[0].symbol;
   }
@@ -473,8 +482,31 @@
   }
 
   export function focusSearch() {
-    if (searchInput?.isConnected) searchInput.focus();
-    else managementButton?.focus();
+    if (searchInput?.isConnected) {
+      searchInput.focus();
+      searchInput.select();
+    } else managementButton?.focus();
+  }
+
+  function restoreRowFocus(symbol: string) {
+    if (filteredEntries.some(entry => entry.symbol === symbol)) void watchlistTable?.focusSymbol(symbol);
+    else focusSearch();
+  }
+
+  function searchKey(event: KeyboardEvent) {
+    if (!dense || event.defaultPrevented || event.isComposing || event.altKey ||
+      event.ctrlKey || event.metaKey || event.shiftKey) return;
+
+    if (event.key === 'Enter' && search.trim()) {
+      event.preventDefault();
+      const first = filteredEntries[0];
+      if (first && !event.repeat) selectSymbol(first.symbol);
+    } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      const entry = event.key === 'ArrowDown' ? filteredEntries[0] : filteredEntries.at(-1);
+      if (!entry) return;
+      event.preventDefault();
+      void watchlistTable?.focusSymbol(entry.symbol);
+    }
   }
 
   async function tableAction(action:WatchlistAction, symbol:string) {
@@ -484,6 +516,7 @@
     switch (action) {
       case 'order': dispatch('newOrder',{symbol}); return;
       case 'priceAlert': dispatch('priceAlert',{symbol}); return;
+      case 'lists': await filters?.editLists(symbol); return;
       case 'pin': await togglePin(entry); return;
       case 'alerts': await toggleAlerts(entry); return;
       case 'automation': if (entry.tradable) await toggleAutoTrade(entry); return;
@@ -492,7 +525,7 @@
         return;
       case 'remove': await remove(entry); return;
       case 'up': case 'down': {
-        if (!data || search.trim() || alertsOnly || autoTradeFilter !== 'all') return;
+        if (!data || !canReorder) return;
         const before = data.entries;
         const reordered = moveWatchlistRow(before,symbol,action === 'up' ? -1 : 1);
         if (!reordered) return;
@@ -544,7 +577,9 @@
   $: manualOnlyCount = (data?.entries ?? []).filter(e => e.tradable && e.manualOnly).length;
   $: watchlistControlsExecution = data?.executionUniverseSource === 'Watchlist';
   $: selectedCompany = data?.entries.find(entry => entry.symbol === selected)?.companyName ?? null;
+  $: canReorder = !search.trim() && !activeFilter && !alertsOnly && autoTradeFilter === 'all';
   $: filteredEntries = (data?.entries ?? []).filter(entry =>
+    (!activeFilter || activeFilter.symbols.has(entry.symbol)) &&
     (!alertsOnly || entry.openAlerts > 0) &&
     (autoTradeFilter === 'all' ||
       (autoTradeFilter === 'enabled' && !entry.manualOnly) ||
@@ -573,6 +608,10 @@
       </span>
     </div>
     <div class="header-actions">
+      {#if dense}
+        <WatchlistFilters bind:this={filters} entries={data?.entries ?? []} loadingSectors={loading || enriching}
+          bind:activeFilter {restoreRowFocus}/>
+      {/if}
       {#if allowCompact}
         <button
           class="icon density"
@@ -708,22 +747,7 @@
     </div>
   {/if}
 
-  {#if loading}
-    <!-- Rows rather than a line of text. The panel is stretched to the chart card's height by the
-         grid, so a single centred note can land below the fold and read as "the list is empty" —
-         which is the exact wrong answer while it is still loading. -->
-    <ul class="rows skeleton" aria-hidden="true">
-      {#each Array(7) as _}
-        <li><span class="bar wide"></span><span class="bar narrow"></span></li>
-      {/each}
-    </ul>
-    <p class="note" role="status" aria-live="polite">Loading watchlist…</p>
-  {:else if !data?.entries.length}
-    <p class="note">
-      No symbols are being watched. Add a ticker above, or Reset to seed from the configured
-      allowed-symbols list.
-    </p>
-  {:else}
+  {#if dense || (!loading && data?.entries.length)}
     <div class="filter-row">
       <div class="search-row">
         <Search size={13} aria-hidden="true" />
@@ -734,6 +758,9 @@
           bind:value={search}
           spellcheck="false"
           aria-label="Search watched symbols"
+          aria-keyshortcuts={dense ? 'Control+Shift+1 Meta+Shift+1' : undefined}
+          title={dense ? 'Focus watchlist search (Ctrl+Shift+1)' : undefined}
+          on:keydown={searchKey}
         />
         {#if search}
           <button
@@ -745,6 +772,7 @@
           ><X size={13} /></button>
         {/if}
       </div>
+      {#if !loading && data?.entries.length}
       <label class="automation-filter" title="Filter by effective auto-trading status">
         <Bot size={13} aria-hidden="true" />
         <select bind:value={autoTradeFilter} aria-label="Filter by auto-trading status">
@@ -763,7 +791,32 @@
       >
         <Bell size={13} /> Alerts only
       </button>
+      {/if}
     </div>
+  {/if}
+  {#if activeFilter}
+    <div class="active-group">
+      <button type="button" aria-label={`Clear ${activeFilter.name} filter`} title={`Clear ${activeFilter.name} filter`}
+        on:click={() => filters?.clear()}><span>{activeFilter.name}</span><X size={12} aria-hidden="true"/></button>
+      <span role="status">{filteredEntries.length} of {data?.entries.length ?? 0}</span>
+    </div>
+  {/if}
+  {#if loading}
+    <!-- Rows rather than a line of text. The panel is stretched to the chart card's height by the
+         grid, so a single centred note can land below the fold and read as "the list is empty" —
+         which is the exact wrong answer while it is still loading. -->
+    <ul class="rows skeleton" aria-hidden="true">
+      {#each Array(7) as _}
+        <li><span class="bar wide"></span><span class="bar narrow"></span></li>
+      {/each}
+    </ul>
+    <p class="note" role="status" aria-live="polite">Loading watchlist…</p>
+  {:else if !data?.entries.length}
+    <p class="note">
+      No symbols are being watched. Add a ticker above, or Reset to seed from the configured
+      allowed-symbols list.
+    </p>
+  {:else}
     {#if dense && compact && (autoTradeFilter !== 'all' || alertsOnly)}
       <button class="compact-filters" on:click={() => { autoTradeFilter = 'all'; alertsOnly = false; }}>Clear active filters</button>
     {/if}
@@ -786,7 +839,11 @@
     {/if}
     {#if !filteredEntries.length}
       <p class="note" role="status" aria-live="polite">
-        {#if autoTradeFilter === 'enabled' && !alertsOnly && !search.trim()}
+        {#if activeFilter?.kind === 'list' && activeFilter.symbols.size === 0}
+          This list is empty. Clear the filter, then open a stock’s ⋯ menu and choose Add to lists.
+        {:else if activeFilter}
+          No stocks in {activeFilter.name} match the current filters.
+        {:else if autoTradeFilter === 'enabled' && !alertsOnly && !search.trim()}
           No watched symbols have auto trading enabled.
         {:else if autoTradeFilter === 'disabled' && !alertsOnly && !search.trim()}
           No watched symbols are manual-only.
@@ -799,8 +856,8 @@
         {/if}
       </p>
     {:else if dense}
-      <WatchlistTable entries={filteredEntries} {selected} {archive} {rowStatus} {busy} {dragOverSymbol} {compact}
-        canReorder={!search.trim() && !alertsOnly && autoTradeFilter === 'all'}
+      <WatchlistTable bind:this={watchlistTable} entries={filteredEntries} {selected} {archive} {rowStatus} {busy} {dragOverSymbol} {compact}
+        {canReorder}
         onSelect={selectSymbol} onAction={tableAction} onSearch={focusSearch}
         onDragStart={startDrag} onDragOver={dragOver} onDrop={dropOn}
         onDragEnd={() => { draggedSymbol = null; dragOverSymbol = null; }}/>
@@ -993,6 +1050,14 @@
   }
   header { display:flex; justify-content:space-between; align-items:flex-start; gap:1rem; }
   .header-actions { display:flex; align-items:center; gap:.35rem; }
+  .active-group { display:flex; align-items:center; gap:.4rem; flex:none; color:var(--text-2); font-size:.72rem; }
+  .active-group > span { flex:none; }
+  .active-group button { display:flex; align-items:center; gap:.28rem; min-width:0; min-height:24px; padding:.16rem .36rem;
+    border:1px solid var(--border-high); border-radius:5px; background:var(--primary-dim); color:var(--primary);
+    font:inherit; cursor:pointer; }
+  .active-group button > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .active-group button :global(svg) { flex:none; }
+  .active-group button:focus-visible { outline:2px solid var(--primary); outline-offset:1px; }
   .head-copy { display:flex; flex-direction:column; gap:.2rem; }
   .head-copy b { color:var(--text); font-size:.9rem; }
   .head-copy span { color:var(--text-3); font-size:.72rem; }
