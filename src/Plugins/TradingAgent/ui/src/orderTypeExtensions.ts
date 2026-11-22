@@ -12,7 +12,9 @@
  *  - receives `symbol`, `action` ('BUY' | 'SELL'), `quantity` (number | null), `price` (number | null),
  *    `docked` (boolean) and `armedOrder` (the `ArmedOrder` being edited, or null for a new one);
  *  - dispatches `back` to return to the composer with those values intact (or, when editing, to close),
- *    `done` with `{ title, detail }` once it has armed something, and `changed` when lists should re-read.
+ *    `done` with `{ title, detail }` once it has armed something, `changed` when lists should re-read, and
+ *    `side` ('BUY' | 'SELL') when the person changes side in the editor, so the dialog's header and colours follow
+ *    it (the composer's own side choice resets, exactly as switching side there does).
  * It submits through the ordinary `/trading/armed-orders` route, so every server check still applies.
  *
  * `triggerKind` names the armed-order kind this extension owns. The armed-orders panel renders
