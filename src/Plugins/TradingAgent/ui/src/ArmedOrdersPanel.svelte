@@ -4,8 +4,10 @@
   import { onAccountChanged } from './accountSignal';
   import { trading, type ArmedOrdersResponse, type ArmedOrder, type ProtectiveStop } from './api';
   import {
-    Crosshair, Trash2, RefreshCw, Zap, ShieldAlert, Shield, ShieldOff, ListChecks
+    Crosshair, Trash2, RefreshCw, Zap, ShieldAlert, Shield, ShieldOff, ListChecks, Pencil
   } from 'lucide-svelte';
+  import { orderTypeExtensions, extensionForTriggerKind } from './orderTypeExtensions';
+  import NewOrderDialog from './NewOrderDialog.svelte';
   import LivePriceInline from './LivePriceInline.svelte';
   import OrderActionReview from './OrderActionReview.svelte';
   import ApprovalStrip from './ApprovalStrip.svelte';
@@ -187,8 +189,17 @@
     o.trailing && o.orderType === 'LIMIT'
     && (o.triggerKind === 'PercentDrop' || o.triggerKind === 'PercentRise');
 
+  /**
+   * An order whose kind an edition owns (orderTypeExtensions.ts): it can be edited there, and the edition
+   * may add a status line under it. Null for every ordinary order and in a community build.
+   */
+  $: extensionFor = (o: ArmedOrder) => extensionForTriggerKind($orderTypeExtensions, o.triggerKind);
+  /** The armed order being edited, in the composer opened straight into its edition's editor. */
+  let editing: ArmedOrder | null = null;
+
   const describeFill = (o: ArmedOrder) =>
     o.orderType === 'MARKET' ? 'at market'
+      : o.triggerKind === 'Rule' && o.price == null ? 'limit set from the price when the rule is met'
       : pricedAtTrigger(o) && o.state === 'armed' ? 'limit at the trigger price'
       : o.price != null ? `@ ${num(o.price)}`
       : 'no price set';
@@ -282,6 +293,12 @@
   onMount(() => { load(); return onAccountChanged(load); });
 </script>
 
+{#if editing}
+  {#key editing.armedId}
+    <NewOrderDialog editArmedOrder={editing} on:close={() => editing = null} on:changed={load} />
+  {/key}
+{/if}
+
 <section class="armed" class:embedded use:orderListNavigation={keyboardMode}>
   {#if !embedded}
   <header>
@@ -367,7 +384,9 @@
               {#if order.state !== 'armed'}<span class="chip">{order.state}</span>{/if}
             </div>
             <div class="row-2">
-              {#if order.triggerKind === 'Scheduled'}
+              {#if order.triggerKind === 'Rule'}
+                fires when {order.conditionSummary ?? 'its rule is met'}
+              {:else if order.triggerKind === 'Scheduled'}
                 eligible from {describeTrigger(order)}, at the first market-open check before expiry
               {:else}
                 fires when {order.triggerKind === 'Event' ? 'event' : 'price'} {describeTrigger(order)}
@@ -397,8 +416,16 @@
               {#if order.executionId} · execution {order.executionId}{/if}
             </div>
             {#if order.note}<p class="note">{order.note}</p>{/if}
+            {#if order.state === 'armed' && extensionFor(order)?.armedRowDetail}
+              <svelte:component this={extensionFor(order)?.armedRowDetail} {order} />
+            {/if}
             {#if order.stateReason}<p class="reason">{order.stateReason}</p>{/if}
           </div>
+          {#if order.state === 'armed' && extensionFor(order)}
+            <button class="icon" title="Edit this order" aria-label={`Edit ${order.symbol} waiting order ${order.armedId}`} on:click={() => editing = order} disabled={busy || reviewing}>
+              <Pencil size={13} />
+            </button>
+          {/if}
           {#if order.state === 'armed'}
             <button class="icon danger" title="Cancel waiting order" aria-label={`Cancel ${order.symbol} waiting order ${order.armedId}`} on:click={() => disarm(order)} disabled={busy || reviewing}>
               <Trash2 size={13} />
