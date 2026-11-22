@@ -1007,7 +1007,8 @@
       <svelte:component this={activeExtension.editor}
         symbol={(symbol ?? '').trim().toUpperCase()} action={side} {quantity} {price} {docked}
         armedOrder={editArmedOrder}
-        on:back={leaveExtension} on:done={extensionDone} on:changed={() => dispatch('changed')} />
+        on:back={leaveExtension} on:done={extensionDone} on:changed={() => dispatch('changed')}
+        on:side={(event: CustomEvent<'BUY' | 'SELL'>) => chooseSide(event.detail)} />
     {:else if editArmedOrder}
       {#if error}<p class="error" role="alert">{error}</p>{/if}
       <div class="footer"><button class="btn btn-primary" on:click={() => dispatch('close')}>Close</button></div>
