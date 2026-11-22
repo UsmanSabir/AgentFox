@@ -151,7 +151,17 @@ public sealed record ArmOrderRequest(
     /// Trailing LIMIT only: the worst price it may trade at — a BUY's maximum, a SELL's minimum. Both a
     /// submission condition and a fill bound; see <c>ArmedOrder.PriceBound</c>.
     /// </summary>
-    decimal? PriceBound = null);
+    decimal? PriceBound = null,
+    /// <summary>
+    /// Rule orders only: the condition document the installed edition validates and evaluates. Opaque to
+    /// core. See <c>ArmedTriggerKind.Rule</c>.
+    /// </summary>
+    string? ConditionSpec = null,
+    /// <summary>
+    /// Rule orders only: edit an armed rule order. That order is disarmed (only if it is still waiting) and
+    /// this one armed in its place; a rule that has fired, expired or been cancelled is never edited.
+    /// </summary>
+    string? ReplacesArmedId = null);
 
 /// <summary>An immediate order submitted from a registry choice in the trading dashboard.</summary>
 public sealed record DashboardOrderRequest(

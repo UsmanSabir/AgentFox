@@ -129,7 +129,7 @@ public sealed partial class TradingCoreEndpoints
 
         // The dashboard speaks in outcomes ("book profit", "sell if it drops") rather than leaking
         // broker vocabulary into every button. This registry is the single contract for those choices.
-        trading.MapGet("/order-intents", (IRuntimePluginOptions<AhkConfig> brokerConfig) =>
+        trading.MapGet("/order-intents", (IRuntimePluginOptions<AhkConfig> brokerConfig, HttpContext http) =>
             Results.Ok(new
             {
                 intents = OrderIntentRegistry.All,
@@ -137,7 +137,11 @@ public sealed partial class TradingCoreEndpoints
                 {
                     marketOrdersEnabled = brokerConfig.Current.AllowMarketOrders,
                     brokerOrderTypes = new[] { "LIMIT", "MARKET", "STOPLOSS" },
+                    // Rule is listed only where something can evaluate one; elsewhere it is refused at arm.
                     conditionalTriggerTypes = Enum.GetNames<ArmedTriggerKind>()
+                        .Where(kind => kind != nameof(ArmedTriggerKind.Rule)
+                                       || http.RequestServices.GetService<IArmedOrderConditionEvaluator>() is not null)
+                        .ToArray()
                 }
             }));
 

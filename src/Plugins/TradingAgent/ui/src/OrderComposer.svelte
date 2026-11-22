@@ -9,8 +9,9 @@
     trading, percentTriggerLevel, ApiError,
     type OrderIntentDefinition, type OrderIntentRegistryResponse, type WatchlistEntry,
     type TriggerKind, type ArmOrderRequest, type BrokerAccountSnapshot,
-    type LiveEntryConflict
+    type LiveEntryConflict, type ArmedOrder
   } from './api';
+  import { orderTypeExtensions, extensionForTriggerKind, type OrderTypeExtension } from './orderTypeExtensions';
   import {
     ShoppingCart, X, AlertTriangle, RefreshCw, Check, CheckCircle2, BriefcaseBusiness, Wallet
   } from 'lucide-svelte';
@@ -35,6 +36,11 @@
   export let docked = false;
   /** Compact, shares-only limit ticket. Validation, confirmation and submission stay shared. */
   export let quick = false;
+  /**
+   * Opens straight into the edition editor that owns this armed order's kind (orderTypeExtensions.ts),
+   * to edit it. Back then closes rather than returning to a composer the person never opened.
+   */
+  export let editArmedOrder: ArmedOrder | null = null;
 
   const dispatch = createEventDispatcher<{ close: void; changed: void; attention: void }>();
   let dialogElement: HTMLDivElement;
@@ -72,9 +78,29 @@
     resolve?.(accepted);
     void tick().then(() => { if (reviewReturnFocus?.isConnected) reviewReturnFocus.focus(); });
   }
+  /**
+   * An edition's order type (orderTypeExtensions.ts) has the composer's body while it is open: one dialog,
+   * one set of controls. The composer's own fields keep their values underneath for Back.
+   */
+  let activeExtension: OrderTypeExtension | null = null;
+  function openExtension(extension: OrderTypeExtension) {
+    if (busy || releasing || reviewing) return;
+    error = null; blockedSell = null; duplicateEntry = null;
+    activeExtension = extension;
+  }
+  function leaveExtension() {
+    if (editArmedOrder) { dispatch('close'); return; }
+    activeExtension = null;
+    void tick().then(() => { if (mounted) focusComposer(); });
+  }
+  function extensionDone(event: CustomEvent<{ title?: string; detail?: string }>) {
+    result = { ok: true, title: event.detail?.title ?? 'Saved', detail: event.detail?.detail ?? '' };
+    activeExtension = null;
+    dispatch('changed');
+  }
   async function closeComposer() {
     if (busy || releasing || reviewing) return;
-    if (docked && !result && (choice || quantity != null || orderValue != null)
+    if (docked && !result && (choice || quantity != null || orderValue != null || activeExtension)
       && !await confirmAction('Discard order draft?', 'Discard this in-memory draft? No order will be submitted or cancelled.', 'Discard draft')) return;
     dispatch('close');
   }
@@ -230,6 +256,12 @@
 
   onMount(async () => {
     dialogElement.focus();
+    if (editArmedOrder) {
+      activeExtension = extensionForTriggerKind($orderTypeExtensions, editArmedOrder.triggerKind);
+      symbol = editArmedOrder.symbol;
+      if (editArmedOrder.action === 'BUY' || editArmedOrder.action === 'SELL') side = editArmedOrder.action;
+      if (!activeExtension) error = 'This order cannot be edited here: the editor for its kind is not installed.';
+    }
     try {
       // Independent failure domains: the watchlist is a symbol-picker convenience, while the
       // order-intent registry is what actually renders the "choose what you want to happen" grid.
@@ -955,7 +987,7 @@
   <div class="dialog" class:sell={side === 'SELL'} class:quick bind:this={dialogElement} role={docked ? 'region' : 'dialog'} aria-modal={docked ? undefined : true} aria-label={quick ? `Quick ${side.toLowerCase()}` : docked ? 'Order ticket draft' : 'New order'}
        tabindex="-1" on:keydown={composerKey}>
     <header>
-      <div class="title"><ShoppingCart size={17} /><div><b>{quick ? `Quick ${side === 'BUY' ? 'Buy' : 'Sell'}` : docked ? `Order ticket · ${symbol || 'new'}` : 'New Order'}</b>{#if !quick}<span>{docked ? 'Ctrl Enter reviews · never submits directly' : 'Choose what you want to happen'}</span>{/if}</div></div>
+      <div class="title"><ShoppingCart size={17} /><div><b>{quick ? `Quick ${side === 'BUY' ? 'Buy' : 'Sell'}` : activeExtension && editArmedOrder ? `Edit ${activeExtension.label.toLowerCase()} order` : docked ? `Order ticket · ${symbol || 'new'}` : 'New Order'}</b>{#if !quick}<span>{activeExtension ? `${activeExtension.label} · checked by the server when saved` : docked ? 'Ctrl Enter reviews · never submits directly' : 'Choose what you want to happen'}</span>{/if}</div></div>
       <div class="header-actions">
         {#if !quick}<span class="side-badge">{side} ORDER</span>{/if}
         <button class="icon" on:click={closeComposer} aria-label={docked ? 'Close order draft' : 'Close'} disabled={busy || releasing || reviewing}><X size={15} /></button>
@@ -970,6 +1002,15 @@
         <div><b>{result.title}</b><p>{result.detail}</p>{#if result.executionId}<small>Execution {result.executionId}</small>{/if}</div>
       </div>
       <div class="footer"><button class="btn btn-primary" on:click={() => dispatch('close')}>Done</button></div>
+    {:else if activeExtension}
+      <!-- An edition's order type: its editor has the body; Back returns here with the fields above intact. -->
+      <svelte:component this={activeExtension.editor}
+        symbol={(symbol ?? '').trim().toUpperCase()} action={side} {quantity} {price} {docked}
+        armedOrder={editArmedOrder}
+        on:back={leaveExtension} on:done={extensionDone} on:changed={() => dispatch('changed')} />
+    {:else if editArmedOrder}
+      {#if error}<p class="error" role="alert">{error}</p>{/if}
+      <div class="footer"><button class="btn btn-primary" on:click={() => dispatch('close')}>Close</button></div>
     {:else}
       {#if docked}<p class="draft-note">Draft for <b>{symbol || 'a new symbol'}</b>. Chart selection does not change this ticket. Hiding it preserves the draft; reload does not.</p>{/if}
       <fieldset class="draft-fields" disabled={busy || releasing || reviewing} on:input={() => { blockedSell = null; duplicateEntry = null; }}>
@@ -1014,6 +1055,10 @@
           {#each commonGroups.filter(group => groupKeys.includes(group)) as group}
             <button type="button" class="choice" class:selected={selectedGroup === group}
               aria-pressed={selectedGroup === group} on:click={() => chooseGroup(group)}>{groupLabels[group]}</button>
+          {/each}
+          {#each $orderTypeExtensions as extension (extension.id)}
+            <button type="button" class="choice extension" aria-label={`${extension.label}: opens its own editor`}
+              on:click={() => openExtension(extension)}>{extension.label} <span aria-hidden="true">↗</span></button>
           {/each}
         </div>
         {#if groupKeys.some(group => !commonGroups.includes(group))}

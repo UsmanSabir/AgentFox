@@ -51,6 +51,11 @@
  *    `action`, `orderType`, `quantity`, `price`, `value`, `conditional`, `triggerLevel`, `trailing`
  *    and `triggerPercent`. Every forwarder (OrderComposer, NewOrderDialog, TradingSurface, and
  *    TradingDashboard) passes all ten; add a prop to all of them or to none.
+ *  - `orderTypeExtensions.ts` — `registerOrderTypeExtension({ id, label, triggerKind, editor, armedRowDetail })`.
+ *    Adds an order-type tile to the composer whose editor takes over the composer's body (one dialog at a
+ *    time; Back returns with the composer's values intact), and an Edit button plus an optional status
+ *    line on each armed order of that `triggerKind`. The editor arms through `/trading/armed-orders`, so
+ *    every server check applies. See that file for the editor's props and events.
  */
 
 /**

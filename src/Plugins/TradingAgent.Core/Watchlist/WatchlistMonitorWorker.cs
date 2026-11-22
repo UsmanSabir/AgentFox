@@ -61,6 +61,8 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
     private readonly IProtectiveStopReleaser? _stopReleaser;
     private readonly SellAvailabilityConfirmer _sellAvailability;
     private readonly RecentPriceWindow _recentPrices;
+    private readonly IArmedOrderConditionEvaluator? _conditions;
+    private readonly MonitorTechnicalReadings? _technicals;
 
     /// <summary>
     /// When a triggered order that was refused may be tried again, and how many times in a row it has
@@ -109,9 +111,13 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
         ILogger<WatchlistMonitorWorker> logger,
         TradingActivityLog? activity = null,
         IProtectiveStopReleaser? stopReleaser = null,
-        RecentPriceWindow? recentPrices = null)
+        RecentPriceWindow? recentPrices = null,
+        IArmedOrderConditionEvaluator? conditions = null,
+        MonitorTechnicalReadings? technicals = null)
     {
         _recentPrices = recentPrices ?? new RecentPriceWindow();
+        _conditions = conditions;
+        _technicals = technicals;
         _activity = activity;
         _stopReleaser = stopReleaser;
         _universe = universe;
@@ -285,6 +291,48 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
     public async Task RunAtMarketOpenAsync(MarketSessionOpenContext context, CancellationToken ct) =>
         await RunPassAsync("market-open", ct);
 
+    /// <summary>
+    /// Evaluates ONLY the armed <see cref="ArmedTriggerKind.Rule"/> orders, against one fresh read of the
+    /// live quotes — no candle load, no analysis, no alerts. For an edition whose condition evaluator has
+    /// just seen its condition met on a live tick: a full pass re-analyses every monitored symbol before
+    /// it reaches the armed orders, which costs seconds the price may not wait for.
+    ///
+    /// <para>
+    /// The fire path is the same one a full pass takes, behind the same run gate, so a rule order is
+    /// claimed, approved, sized and submitted exactly as before. While the market is shut it does nothing.
+    /// Returns whether it ran.
+    /// </para>
+    /// </summary>
+    public async Task<bool> RunRuleOrdersPassAsync(string trigger, CancellationToken ct = default)
+    {
+        if (_conditions is null || !_calendar.GetStatus().IsOpen) return false;
+        await _runGate.WaitAsync(ct);
+        try
+        {
+            var snapshot = await _quotes.GetQuotesAsync(ct);
+            _logger.LogDebug("[ArmedOrders] Rule-order pass ({Trigger}).", trigger);
+            await EvaluateArmedOrdersAsync(snapshot.Quotes, [], ct, rulesOnly: true);
+            return true;
+        }
+        finally { _runGate.Release(); }
+    }
+
+    /// <summary>
+    /// The edition's decision for a rule order, or null when there is no evaluator or it failed. A failure
+    /// is a WAIT: an order whose condition could not be read must not fire.
+    /// </summary>
+    private ArmedConditionDecision? DecideCondition(ArmedOrder order, decimal? price, DateTime nowUtc)
+    {
+        if (order.TriggerKind != ArmedTriggerKind.Rule || _conditions is null) return null;
+        try { return _conditions.Evaluate(order, price, nowUtc); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[ArmedOrders] {ArmedId} ({Symbol}): the rule condition could not be evaluated.",
+                order.ArmedId, order.Symbol);
+            return ArmedConditionDecision.Wait($"The rule condition could not be evaluated: {ex.Message}");
+        }
+    }
+
     private async Task<MonitorStatus> RunPassCoreAsync(string trigger, CancellationToken ct)
     {
         var started = DateTime.UtcNow;
@@ -344,6 +392,9 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
             analyzed++;
             var lookback = candles.TakeLast(_options.Value.Scan.LookbackDays).ToList();
             var snapshot = TechnicalAnalyzer.Analyze(symbol, lookback, technicalOptions);
+            // Kept for a rule condition that reads SMA or RSI between passes; the same reading the alerts
+            // below are judged on, so the two cannot disagree. See MonitorTechnicalReadings.
+            _technicals?.Record(snapshot, DateTime.UtcNow);
             var multi = MultiTimeframeAnalyzer.Analyze(
                 symbol, candles, technicalOptions, _options.Value.Scan.ConfluenceTolerancePercent);
 
@@ -472,12 +523,14 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
     private async Task EvaluateArmedOrdersAsync(
         IReadOnlyDictionary<string, PsxLiveQuote> live,
         IReadOnlyList<AlertRecord> raisedThisPass,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool rulesOnly = false)
     {
         IReadOnlyList<ArmedOrder> armed;
         try
         {
             armed = await _repository.GetArmedOrdersAsync(armedOnly: true, ct);
+            if (rulesOnly) armed = armed.Where(o => o.TriggerKind == ArmedTriggerKind.Rule).ToList();
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -507,7 +560,9 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
         // the next opening auction.
         var marketIsOpen = _calendar.GetStatus().IsOpen;
 
-        RecordWindowedPrices(armed, live, now, marketIsOpen);
+        // Not on a rule-only pass: the window's sampling cadence is the full pass's, and an extra sample
+        // between two of them would change what "the last N minutes" measured for every windowed order.
+        if (!rulesOnly) RecordWindowedPrices(armed, live, now, marketIsOpen);
 
         foreach (var order in armed)
         {
@@ -532,8 +587,20 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                     PercentTrigger.WindowUsesHigh(order.TriggerKind))
                 : null;
 
+            var condition = DecideCondition(order, price, now);
             var outcome = ArmedOrderEvaluator.Evaluate(
-                order, price, alerts, now, out var why, marketIsOpen, windowReference);
+                order, price, alerts, now, out var why, marketIsOpen, windowReference, condition);
+
+            // A rule priced off the price that met it has no stored limit, so a "fire" without one is
+            // not an order anybody asked for. Held BEFORE the claim, so it costs no state write.
+            if (outcome == ArmedOrderOutcome.Fire && order.TriggerKind == ArmedTriggerKind.Rule
+                && !order.OrderType.Equals("MARKET", StringComparison.OrdinalIgnoreCase)
+                && (condition?.LimitPrice ?? order.Price) is not > 0)
+            {
+                _logger.LogWarning("[ArmedOrders] {ArmedId} ({Symbol}) met its rule but has no limit price to send.",
+                    order.ArmedId, order.Symbol);
+                continue;
+            }
 
             if (outcome == ArmedOrderOutcome.SkipMove)
             {
@@ -591,7 +658,9 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
             // A windowed LIMIT is priced at the level it just fired at, and a trailing LIMIT at the
             // price that met its trigger, inside its bound — see ArmedOrder.PriceAtFire. Frozen from
             // here: the persistent order below re-places this same price every session.
-            var firePrice = order.PriceAtFire(windowReference, price);
+            var firePrice = order.TriggerKind == ArmedTriggerKind.Rule
+                ? condition?.LimitPrice ?? order.Price
+                : order.PriceAtFire(windowReference, price);
 
             try
             {

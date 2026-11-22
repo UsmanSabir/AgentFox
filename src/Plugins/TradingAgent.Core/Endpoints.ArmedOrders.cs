@@ -123,7 +123,11 @@ public sealed partial class TradingCoreEndpoints
                     // A bounded trail: the worst price it may trade at, and — when a move triggered
                     // outside it — the low or high it now needs a strictly new one beyond.
                     o.PriceBound,
-                    o.SkippedReference
+                    o.SkippedReference,
+                    // A rule order: the edition's condition document, handed back opaque for its editor,
+                    // and the one-line summary it wrote, for a panel that cannot read the document.
+                    o.ConditionSpec,
+                    o.ConditionSummary
                     };
                 }),
                 // Sent with the orders because a stop and the entry it protects are one thing to
@@ -190,6 +194,7 @@ public sealed partial class TradingCoreEndpoints
             IMarketCalendar calendar,
             IOptions<TradingAgentOptions> options,
             ILogger<TradingCoreEndpoints> logger,
+            HttpContext http,
             CancellationToken ct) =>
         {
             string symbol;
@@ -219,8 +224,78 @@ public sealed partial class TradingCoreEndpoints
             var trailing = false;
             int? windowMinutes = null;
             var triggerLevel = body.TriggerPrice;
+            string? conditionSpec = null;
+            string? conditionSummary = null;
 
-            if (kind == ArmedTriggerKind.Event)
+            if (kind == ArmedTriggerKind.Rule)
+            {
+                // The condition is the edition's document, so the edition validates it; core checks only
+                // what it owns: that nothing a rule does not read is set, and the order type.
+                var conditions = http.RequestServices.GetService<IArmedOrderConditionEvaluator>();
+                if (conditions is null)
+                    return Results.BadRequest(new
+                    {
+                        error = "rule_orders_unavailable",
+                        message = "Rule orders need an edition that can evaluate them, and none is installed."
+                    });
+
+                if (string.IsNullOrWhiteSpace(body.ConditionSpec))
+                    return Results.BadRequest(new
+                    {
+                        error = "invalid_condition",
+                        message = "A rule order needs its rule (conditionSpec)."
+                    });
+
+                if (body.TriggerPrice is not null || body.TriggerPercent is not null || body.TriggerAlertKind is not null
+                    || body.Trailing || body.TriggerWindowMinutes is not null || body.ActiveFromDate is not null
+                    || body.PriceBound is not null)
+                    return Results.BadRequest(new
+                    {
+                        error = "invalid_trigger",
+                        message = "A rule order carries its whole condition in the rule, prices, dates and "
+                                + "times included, so no other trigger field may be set."
+                    });
+
+                var ruleOrderType = (body.OrderType ?? "LIMIT").Trim().ToUpperInvariant();
+                if (ruleOrderType is not ("LIMIT" or "MARKET"))
+                    return Results.BadRequest(new
+                    {
+                        error = "invalid_order_type",
+                        message = "A rule order places a LIMIT or a MARKET order."
+                    });
+
+                // Refused rather than validated against a price that may not be the entry: a rule priced
+                // off the price that met it does not know its entry until it fires.
+                if (body.AttachStop is not null || body.AttachTakeProfit is not null)
+                    return Results.BadRequest(new
+                    {
+                        error = "invalid_attached_stop",
+                        message = "A protective stop or target cannot be attached to a rule order. Add a "
+                                + "stop after it fills."
+                    });
+
+                var validation = conditions.Validate(new ArmedConditionRequest(
+                    symbol, action, ruleOrderType, body.Price, body.ConditionSpec));
+                if (!validation.Ok)
+                    return Results.BadRequest(new
+                    {
+                        error = validation.ErrorCode ?? "invalid_condition",
+                        message = validation.Message ?? "The rule could not be read."
+                    });
+
+                conditionSpec = validation.NormalizedSpec;
+                conditionSummary = validation.Summary;
+                triggerLevel = null;
+            }
+            else if (!string.IsNullOrWhiteSpace(body.ConditionSpec))
+            {
+                return Results.BadRequest(new
+                {
+                    error = "invalid_condition",
+                    message = "A condition document applies only to a Rule order."
+                });
+            }
+            else if (kind == ArmedTriggerKind.Event)
             {
                 if (!Enum.TryParse<AlertKind>(body.TriggerAlertKind, ignoreCase: true, out var parsed))
                     return Results.BadRequest(new
@@ -465,7 +540,9 @@ public sealed partial class TradingCoreEndpoints
                 ExpiresUtc       = window.ExpiresUtc,
                 ActiveFromUtc    = window.ActiveFromUtc,
                 Note             = body.Note,
-                SourceAlertId    = body.SourceAlertId
+                SourceAlertId    = body.SourceAlertId,
+                ConditionSpec    = conditionSpec,
+                ConditionSummary = conditionSummary
             };
 
             // Validated by AttachedStopRule, which the immediate-order path uses too so the two cannot
@@ -535,7 +612,50 @@ public sealed partial class TradingCoreEndpoints
                 });
             }
 
-            var id = await repository.SaveArmedOrderAsync(order, ct);
+            // An EDIT of a rule order is a replacement: the old one is disarmed with a compare-and-set
+            // and the new one saved, so an order that fired a moment ago is never edited after the fact.
+            // Every check above has already passed, so a refused edit changes nothing at all.
+            string? replacedArmedId = null;
+            if (!string.IsNullOrWhiteSpace(body.ReplacesArmedId))
+            {
+                if (kind != ArmedTriggerKind.Rule)
+                    return Results.BadRequest(new
+                    {
+                        error = "invalid_replace",
+                        message = "Only a rule order can be edited; disarm this one and arm a new order."
+                    });
+
+                var current = (await repository.GetArmedOrdersAsync(armedOnly: true, ct))
+                    .FirstOrDefault(o => o.ArmedId == body.ReplacesArmedId);
+                if (current is null || current.TriggerKind != ArmedTriggerKind.Rule
+                    || !await repository.TrySetArmedOrderStateAsync(
+                        current.ArmedId, "armed", "cancelled", $"Replaced by an edit (now {order.ArmedId}).", ct: ct))
+                    return Results.Conflict(new
+                    {
+                        error = "not_armed",
+                        message = "That rule order is no longer waiting. It may have fired, expired or been "
+                                + "cancelled. Nothing was changed."
+                    });
+
+                replacedArmedId = current.ArmedId;
+            }
+
+            string id;
+            try
+            {
+                id = await repository.SaveArmedOrderAsync(order, ct);
+            }
+            catch when (replacedArmedId is not null)
+            {
+                // Put the original back rather than leave the operator with neither.
+                await repository.TrySetArmedOrderStateAsync(
+                    replacedArmedId, "cancelled", "armed", "The edit could not be saved; restored.",
+                    ct: CancellationToken.None);
+                throw;
+            }
+
+            if (replacedArmedId is not null)
+                logger.LogWarning("[ArmedOrders] {Old} replaced by {New} (edited rule).", replacedArmedId, id);
 
             // The price the operator armed against is the window's first observation, so a fall
             // before the monitor's next pass is still measured from it. Only while the market is open:
@@ -599,8 +719,10 @@ public sealed partial class TradingCoreEndpoints
                     order.State,
                     order.ArmedUtc,
                     order.ExpiresUtc,
-                    order.Note
+                    order.Note,
+                    order.ConditionSummary
                 },
+                replacedArmedId,
                 // Said plainly at arm time, not discovered at fire time — and asked of the gate rather
                 // than re-derived here, since the execution mode matters as much as the approval mode.
                 willFireUnattended = unattended.WillFireUnattended,
