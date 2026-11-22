@@ -2,10 +2,11 @@
  * Pre-filling the New Order dialog: what a caller may ask for, and how each ask lands on the order
  * composer's own fields. Pure — no Svelte, no I/O — so every rule is testable on its own.
  *
- * The prefill carries ONLY what the composer already models: a side, a size, and one of three order
- * shapes the composer already offers ("At my price", "Wait for a price", "Trailing"). It adds no order
- * capability and no submission path. The composer still shows every field, and the person still reads
- * the summary and presses its own button; nothing here sends anything.
+ * The prefill carries ONLY what the composer already models: a side, a size, and one of the order
+ * shapes the composer already offers ("At my price", "Wait for a price", "Trailing", or an edition's
+ * order type from `orderTypeExtensions.ts`). It adds no order capability and no submission path. The
+ * composer still shows every field, and the person still reads the summary and presses its own button;
+ * nothing here sends anything.
  *
  * Bad values are DROPPED, not guessed: a number that is not usable is left out so the composer shows its
  * own suggestion for that field, and only a request that cannot be placed at all (no symbol, no side,
@@ -14,8 +15,11 @@
 import type { OrderIntentDefinition } from './api';
 
 export type NewOrderSide = 'BUY' | 'SELL';
-/** `limit`: an immediate limit order. `priceTrigger`: wait for a price, then a limit. `trailing`: a trailing limit. */
-export type NewOrderKind = 'limit' | 'priceTrigger' | 'trailing';
+/**
+ * `limit`: an immediate limit order. `priceTrigger`: wait for a price, then a limit. `trailing`: a trailing limit.
+ * `extension`: an edition's order type (`orderTypeExtensions.ts`), opened in its own editor with `conditionSpec`.
+ */
+export type NewOrderKind = 'limit' | 'priceTrigger' | 'trailing' | 'extension';
 export type NewOrderTriggerDirection = 'below' | 'above';
 
 export interface NewOrderPrefill {
@@ -24,7 +28,10 @@ export interface NewOrderPrefill {
   kind: NewOrderKind;
   /** Whole shares. */
   quantity?: number;
-  /** The limit price (`limit`, `priceTrigger`). A `priceTrigger` without one limits at its trigger price. */
+  /**
+   * The limit price (`limit`, `priceTrigger`, and `extension`, whose editor decides whether it uses one). A
+   * `priceTrigger` without one limits at its trigger price.
+   */
   price?: number;
   /** `priceTrigger`: the price level to wait for. */
   triggerPrice?: number;
@@ -38,7 +45,17 @@ export interface NewOrderPrefill {
   keepWorking?: boolean;
   /** Days before a waiting or keep-working order expires, 1 to 365 whole days. */
   expiresInDays?: number;
+  /** `extension`: the armed-order kind whose editor opens (`OrderTypeExtension.triggerKind`, e.g. `Rule`). Required there. */
+  triggerKind?: string;
+  /**
+   * `extension`: the condition document that editor starts from — opaque here, as it is to core, and checked by the
+   * edition's server when it is armed. Required there, at most `MAX_CONDITION_SPEC` characters.
+   */
+  conditionSpec?: string;
 }
+
+/** The longest condition document a prefill carries; the rule document's own limit (docs/rule-orders.md in the edition). */
+export const MAX_CONDITION_SPEC = 4096;
 
 /** A request after validation: only usable values remain; the symbol is trimmed and upper-cased. */
 export type CleanNewOrderPrefill = NewOrderPrefill;
@@ -67,9 +84,17 @@ export function cleanNewOrderPrefill(input: NewOrderPrefill | null | undefined):
   if (!symbol) return null;
   if (input.action !== 'BUY' && input.action !== 'SELL') return null;
   const kind = input.kind;
-  if (kind !== 'limit' && kind !== 'priceTrigger' && kind !== 'trailing') return null;
+  if (kind !== 'limit' && kind !== 'priceTrigger' && kind !== 'trailing' && kind !== 'extension') return null;
 
   const out: CleanNewOrderPrefill = { symbol, action: input.action, kind };
+  if (kind === 'extension') {
+    // Both are what makes it this kind; without either there is nothing to open, so the request is refused whole.
+    const triggerKind = typeof input.triggerKind === 'string' ? input.triggerKind.trim() : '';
+    const spec = typeof input.conditionSpec === 'string' ? input.conditionSpec.trim() : '';
+    if (!/^[A-Za-z][A-Za-z0-9]{0,39}$/.test(triggerKind) || !spec || spec.length > MAX_CONDITION_SPEC) return null;
+    out.triggerKind = triggerKind;
+    out.conditionSpec = spec;
+  }
   const quantity = wholeShares(input.quantity);
   if (quantity != null) out.quantity = quantity;
 
@@ -79,7 +104,7 @@ export function cleanNewOrderPrefill(input: NewOrderPrefill | null | undefined):
     const triggerPrice = positive(input.triggerPrice);
     if (triggerPrice != null) out.triggerPrice = triggerPrice;
   }
-  if (kind === 'limit' || kind === 'priceTrigger') {
+  if (kind === 'limit' || kind === 'priceTrigger' || kind === 'extension') {
     const price = positive(input.price);
     if (price != null) out.price = price;
   }
@@ -107,6 +132,8 @@ export function cleanNewOrderPrefill(input: NewOrderPrefill | null | undefined):
 export function intentFor(
   prefill: CleanNewOrderPrefill, intents: readonly OrderIntentDefinition[]
 ): OrderIntentDefinition | null {
+  // An edition's order type is not one of the server's intents: its own editor opens instead.
+  if (prefill.kind === 'extension') return null;
   const side = intents.filter(item => item.action === prefill.action && !item.requiresActivationDate);
   if (prefill.kind === 'limit')
     return side.find(item => item.submission === 'immediate' && item.orderType === 'LIMIT' && item.priceField === 'limit') ?? null;

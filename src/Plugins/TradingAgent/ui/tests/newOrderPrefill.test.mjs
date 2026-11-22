@@ -133,3 +133,33 @@ test('mapping: keep-working is decided from the intent, and never set for a mark
   const none = composerStateFor(cleanNewOrderPrefill({ symbol: 'X', action: 'BUY', kind: 'trailing', keepWorking: true }), []);
   assert.equal(none.persistentUntilFilled, false);
 });
+
+test('an extension prefill keeps its kind, document, size, limit and expiry', () => {
+  const spec = JSON.stringify({ v: 1, join: 'all', items: [{ left: 'last', op: 'le', right: { number: 671.68 } }] });
+  const clean = cleanNewOrderPrefill({
+    symbol: ' mari ', action: 'BUY', kind: 'extension', triggerKind: 'Rule', conditionSpec: spec,
+    quantity: 31, price: 671.68, expiresInDays: 30, keepWorking: true, triggerPercent: 3
+  });
+  assert.deepEqual(clean, {
+    symbol: 'MARI', action: 'BUY', kind: 'extension', triggerKind: 'Rule', conditionSpec: spec,
+    quantity: 31, price: 671.68, keepWorking: true, expiresInDays: 30
+  });
+  // Not one of the server's intents: the composer opens the extension's editor instead.
+  assert.equal(intentFor(clean, registry), null);
+});
+
+test('an extension prefill without a usable kind or document is refused whole', () => {
+  const base = { symbol: 'MARI', action: 'BUY', kind: 'extension', triggerKind: 'Rule', conditionSpec: '{"v":1}' };
+  assert.notEqual(cleanNewOrderPrefill(base), null);
+  assert.equal(cleanNewOrderPrefill({ ...base, triggerKind: '' }), null);
+  assert.equal(cleanNewOrderPrefill({ ...base, triggerKind: 'Rule; drop' }), null);
+  assert.equal(cleanNewOrderPrefill({ ...base, conditionSpec: '   ' }), null);
+  assert.equal(cleanNewOrderPrefill({ ...base, conditionSpec: 'x'.repeat(4097) }), null);
+  assert.equal(cleanNewOrderPrefill({ ...base, conditionSpec: undefined }), null);
+});
+
+test('only an extension prefill carries a condition document', () => {
+  const clean = cleanNewOrderPrefill({ symbol: 'MARI', action: 'BUY', kind: 'limit', price: 700, triggerKind: 'Rule', conditionSpec: '{}' });
+  assert.equal(clean.triggerKind, undefined);
+  assert.equal(clean.conditionSpec, undefined);
+});

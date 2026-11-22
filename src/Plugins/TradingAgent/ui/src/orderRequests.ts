@@ -63,10 +63,11 @@ export function requestArmOrder(prefill: ArmOrderDialogContext, nowMs = Date.now
 
 /**
  * Asks the dashboard to open the New Order dialog (`OrderComposer`) pre-filled as `prefill` describes —
- * an immediate limit, a wait-for-a-price limit, or a trailing limit (see `NewOrderPrefill`). It only
+ * an immediate limit, a wait-for-a-price limit, a trailing limit, or an edition's order type opened in its
+ * own editor with a condition document (see `NewOrderPrefill`). It only
  * fills the form the way a person would by hand; the person still reviews it and presses the dialog's
  * own button. Returns false, doing nothing, for a blank symbol, a side other than BUY/SELL, an unknown
- * kind, or a price trigger with no `below`/`above` direction. An unusable number is dropped, so the
+ * kind, a price trigger with no `below`/`above` direction, or an extension with no kind or document. An unusable number is dropped, so the
  * dialog shows its own suggestion for that field rather than a guess.
  */
 export function requestNewOrder(prefill: NewOrderPrefill, nowMs = Date.now()): boolean {
