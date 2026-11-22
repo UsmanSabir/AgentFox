@@ -68,7 +68,29 @@ public enum ArmedTriggerKind
     /// order instead. The activation date is orthogonal to every trigger kind.
     /// </para>
     /// </summary>
-    Scheduled
+    Scheduled,
+
+    /// <summary>
+    /// Fire when an EDITION's condition evaluator says so. The condition itself is
+    /// <see cref="ArmedOrder.ConditionSpec"/>, an opaque document this repo never interprets — core
+    /// stores it, shows its <see cref="ArmedOrder.ConditionSummary"/>, and asks the registered
+    /// <see cref="IArmedOrderConditionEvaluator"/> at each pass whether it is met.
+    ///
+    /// <para>
+    /// <b>Everything after "fire" is core's,</b> which is the point of the seam: the claim, the approval
+    /// gate, the refusal backoff, the SELL outlook, the stop release and the keep-working hand-over are
+    /// the same path every other kind takes. An edition supplies a yes or no and, optionally, the limit
+    /// price; it never submits.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>With no evaluator registered such an order never fires</b> — it waits and says why. Firing an
+    /// order whose condition nothing here can read is the one outcome worse than not firing it. It also
+    /// never fires while the market is shut, whatever the evaluator answers: a rule may hold on a date or
+    /// a time alone, and PSX queues an order placed while the board is shut for the next open.
+    /// </para>
+    /// </summary>
+    Rule
 }
 
 /// <summary>
@@ -372,6 +394,19 @@ public sealed record ArmedOrder
     public bool OperatorOriginated { get; init; }
 
     /// <summary>
+    /// For a <see cref="ArmedTriggerKind.Rule"/> order: the condition, as the edition that validated it
+    /// wrote it. Opaque here — core stores, returns and hands it back, and never parses it. Null for every
+    /// other kind. Retention is the table's own.
+    /// </summary>
+    public string? ConditionSpec { get; init; }
+
+    /// <summary>
+    /// For a <see cref="ArmedTriggerKind.Rule"/> order: one plain-language line describing the condition,
+    /// written by the evaluator at arm time, so a panel with no evaluator can still say what it waits for.
+    /// </summary>
+    public string? ConditionSummary { get; init; }
+
+    /// <summary>
     /// The level this order fires at as of right now: recomputed for a percent trigger, the stored
     /// level for a fixed one, null for an event or a scheduled order — neither has one.
     /// </summary>
@@ -392,7 +427,8 @@ public sealed record ArmedOrder
         PercentTrigger.IsPercent(TriggerKind)
             ? PercentTrigger.Level(TriggerKind,
                 IsWindowed ? windowReference ?? ReferencePrice : ReferencePrice, TriggerPercent)
-            : TriggerKind is ArmedTriggerKind.Event or ArmedTriggerKind.Scheduled ? null : TriggerPrice;
+            : TriggerKind is ArmedTriggerKind.Event or ArmedTriggerKind.Scheduled or ArmedTriggerKind.Rule
+                ? null : TriggerPrice;
 
     /// <summary>
     /// The limit to send when this order fires. For a windowed LIMIT order that is the level it fired
@@ -519,8 +555,10 @@ public static class ArmedOrderEvaluator
         DateTime nowUtc,
         out string reason,
         bool marketIsOpen = false,
-        decimal? windowReference = null) =>
-        Evaluate(order, lastPrice, alertsFiredForSymbol, nowUtc, out reason, marketIsOpen, windowReference)
+        decimal? windowReference = null,
+        ArmedConditionDecision? condition = null) =>
+        Evaluate(order, lastPrice, alertsFiredForSymbol, nowUtc, out reason, marketIsOpen, windowReference,
+                condition)
             == ArmedOrderOutcome.Fire;
 
     /// <summary>
@@ -547,6 +585,11 @@ public static class ArmedOrderEvaluator
     /// order then declines rather than falling back to its arm-time reference. Ignored by every other
     /// order.
     /// </param>
+    /// <param name="condition">
+    /// For a <see cref="ArmedTriggerKind.Rule"/> order, what the edition's evaluator decided this pass.
+    /// Null means nothing could decide — no evaluator is registered, or it failed — and the order then
+    /// waits. Ignored by every other kind.
+    /// </param>
     public static ArmedOrderOutcome Evaluate(
         ArmedOrder order,
         decimal? lastPrice,
@@ -554,7 +597,8 @@ public static class ArmedOrderEvaluator
         DateTime nowUtc,
         out string reason,
         bool marketIsOpen = false,
-        decimal? windowReference = null)
+        decimal? windowReference = null,
+        ArmedConditionDecision? condition = null)
     {
         if (order.State != "armed")
         {
@@ -685,6 +729,25 @@ public static class ArmedOrderEvaluator
 
                 reason = $"Scheduled for {scheduledFor:u}; that date has arrived and the market is open.";
                 return ArmedOrderOutcome.Fire;
+
+            case ArmedTriggerKind.Rule:
+                // Checked HERE rather than left to the evaluator: a rule can hold on a date or a time of
+                // day alone, so — like a scheduled order — nothing else stops it firing into a shut
+                // venue, which queues it for the next open on information from today.
+                if (!marketIsOpen)
+                {
+                    reason = "Rule order: the market is closed; a rule fires only while it is open.";
+                    return ArmedOrderOutcome.Wait;
+                }
+
+                if (condition is null)
+                {
+                    reason = "Rule order: nothing in this edition can evaluate its condition, so it waits.";
+                    return ArmedOrderOutcome.Wait;
+                }
+
+                reason = condition.Reason;
+                return condition.Fire ? ArmedOrderOutcome.Fire : ArmedOrderOutcome.Wait;
 
             default:
                 reason = $"Unknown trigger kind {order.TriggerKind}.";

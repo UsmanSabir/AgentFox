@@ -248,6 +248,8 @@ public sealed class TradingAgentRuntime
         // Registered as a singleton AND as the hosted service, so the API can read its live status and
         // trigger a pass on the same instance the timer drives.
         services.AddSingleton<RecentPriceWindow>();
+        // The monitor pass's latest SMA/RSI per symbol, for an edition's rule condition (memory only).
+        services.AddSingleton<MonitorTechnicalReadings>();
         services.AddSingleton<WatchlistMonitorWorker>();
         services.AddSingleton<IMarketSessionOpenParticipant>(
             sp => sp.GetRequiredService<WatchlistMonitorWorker>());

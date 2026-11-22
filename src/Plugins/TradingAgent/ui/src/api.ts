@@ -780,7 +780,13 @@ export const TRIGGER_KINDS = [
  * adding a price condition — "when should this happen" and "what has to be true" are different
  * questions, and only the second belongs in a list of triggers. New Order owns date scheduling.
  */
-export type TriggerKind = (typeof TRIGGER_KINDS)[number] | 'Scheduled';
+export type TriggerKind = (typeof TRIGGER_KINDS)[number] | 'Scheduled' | 'Rule';
+
+/**
+ * `Rule` is armed and evaluated by an EDITION (see `orderTypeExtensions.ts`): the condition is its own
+ * document, which this build stores and shows the summary of but never reads. Not in the trigger picker.
+ */
+export const isRuleTrigger = (kind: TriggerKind | string) => kind === 'Rule';
 
 /** A scheduled order's date IS its condition, so it carries no level and no alert kind. */
 export const isScheduledTrigger = (kind: TriggerKind | string) => kind === 'Scheduled';
@@ -865,6 +871,9 @@ export interface ArmedOrder {
    * move. The order waits for a strictly new one before it can submit.
    */
   skippedReference?: number | null;
+  /** Rule orders: the edition's condition document (opaque here) and its one-line summary. */
+  conditionSpec?: string | null;
+  conditionSummary?: string | null;
 }
 
 /**
@@ -971,6 +980,11 @@ export interface ArmOrderRequest {
    * browser's local midnight would arm the order on the wrong day for anyone outside Pakistan.
    */
   activeFromDate?: string | null;
+
+  /** Rule orders only: the condition document the installed edition validates. Opaque to this build. */
+  conditionSpec?: string | null;
+  /** Rule orders only: edit this armed rule order — it is disarmed (if still waiting) and this one armed. */
+  replacesArmedId?: string | null;
 }
 
 /** A protective stop to attach to a BUY entry. Sized at fill time, not here. */
@@ -1490,6 +1504,8 @@ export const trading = {
         order: ArmedOrder;
         willFireUnattended: boolean;
         note: string;
+        /** Set when this arm replaced (edited) an armed rule order. */
+        replacedArmedId?: string | null;
         attachedStop: {
           stopId: string;
           stopTrigger: number;
