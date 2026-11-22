@@ -11,7 +11,7 @@
     type TriggerKind, type ArmOrderRequest, type BrokerAccountSnapshot,
     type LiveEntryConflict, type ArmedOrder
   } from './api';
-  import { orderTypeExtensions, extensionForTriggerKind, type OrderTypeExtension } from './orderTypeExtensions';
+  import { orderTypeExtensions, extensionForTriggerKind, type OrderTypeExtension, type ExtensionPrefill } from './orderTypeExtensions';
   import {
     ShoppingCart, X, AlertTriangle, RefreshCw, Check, CheckCircle2, BriefcaseBusiness, Wallet
   } from 'lucide-svelte';
@@ -83,9 +83,12 @@
    * one set of controls. The composer's own fields keep their values underneath for Back.
    */
   let activeExtension: OrderTypeExtension | null = null;
+  /** What a prefill handed the extension's editor (its condition document); pressing the tile yourself starts blank. */
+  let extensionPrefill: ExtensionPrefill | null = null;
   function openExtension(extension: OrderTypeExtension) {
     if (busy || releasing || reviewing) return;
     error = null; blockedSell = null; duplicateEntry = null;
+    extensionPrefill = null;
     activeExtension = extension;
   }
   function leaveExtension() {
@@ -304,6 +307,24 @@
    * the side chosen and the shape grid for the person to pick from.
    */
   function applyPrefill(request: CleanNewOrderPrefill, intents: OrderIntentDefinition[]) {
+    if (request.kind === 'extension') {
+      // An edition's order type: its editor takes the body, as pressing its tile would, starting from the given document.
+      side = request.action;
+      const extension = extensionForTriggerKind($orderTypeExtensions, request.triggerKind);
+      if (!extension) {
+        error = 'This order needs an order type that is not available here, so it opened as an ordinary New Order.';
+        return;
+      }
+      if (request.quantity != null) { quantity = request.quantity; quantityWasEdited = true; }
+      if (request.price != null) price = request.price;
+      extensionPrefill = {
+        conditionSpec: request.conditionSpec ?? '',
+        expiresInDays: request.expiresInDays ?? null,
+        keepWorking: request.keepWorking === true
+      };
+      activeExtension = extension;
+      return;
+    }
     const state = composerStateFor(request, intents);
     side = state.side;
     if (!state.intent) return;
@@ -1006,7 +1027,7 @@
       <!-- An edition's order type: its editor has the body; Back returns here with the fields above intact. -->
       <svelte:component this={activeExtension.editor}
         symbol={(symbol ?? '').trim().toUpperCase()} action={side} {quantity} {price} {docked}
-        armedOrder={editArmedOrder}
+        armedOrder={editArmedOrder} prefill={extensionPrefill}
         on:back={leaveExtension} on:done={extensionDone} on:changed={() => dispatch('changed')}
         on:side={(event: CustomEvent<'BUY' | 'SELL'>) => chooseSide(event.detail)} />
     {:else if editArmedOrder}

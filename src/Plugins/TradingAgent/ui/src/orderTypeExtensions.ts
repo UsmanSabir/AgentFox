@@ -10,7 +10,9 @@
  * the composer's body over to `editor` — one dialog at a time, never a second modal on top — carrying
  * what was already chosen. The editor:
  *  - receives `symbol`, `action` ('BUY' | 'SELL'), `quantity` (number | null), `price` (number | null),
- *    `docked` (boolean) and `armedOrder` (the `ArmedOrder` being edited, or null for a new one);
+ *    `docked` (boolean), `armedOrder` (the `ArmedOrder` being edited, or null for a new one) and `prefill`
+ *    (`ExtensionPrefill`: a condition document to start from, when a sibling opened New Order with
+ *    `requestNewOrder({ kind: 'extension', … })`; null when the person pressed the tile);
  *  - dispatches `back` to return to the composer with those values intact (or, when editing, to close),
  *    `done` with `{ title, detail }` once it has armed something, `changed` when lists should re-read, and
  *    `side` ('BUY' | 'SELL') when the person changes side in the editor, so the dialog's header and colours follow
@@ -35,6 +37,17 @@ export interface OrderTypeExtension {
   triggerKind: string;
   editor: SymbolExtensionComponent;
   armedRowDetail?: SymbolExtensionComponent | null;
+}
+
+/**
+ * A starting point handed to an editor by a prefill (`newOrderPrefill.ts`, kind `extension`). `conditionSpec` is the
+ * editor's own document, opaque here; the editor shows it for review and nothing is armed until the person presses
+ * its button. An editor that cannot read it starts blank and says so.
+ */
+export interface ExtensionPrefill {
+  conditionSpec: string;
+  expiresInDays: number | null;
+  keepWorking: boolean;
 }
 
 const registered = writable<OrderTypeExtension[]>([]);
