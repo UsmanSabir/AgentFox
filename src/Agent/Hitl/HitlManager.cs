@@ -18,7 +18,9 @@ public record HitlRequest(
     string? ChannelId,
     HitlTrigger Trigger,
     string Description,
-    string Details
+    string Details,
+    // The chat that started the run, when the asking run is nested in it (a delegated specialist, an inline sub-agent).
+    string? RootSessionKey = null
 );
 
 /// <summary>
@@ -300,10 +302,11 @@ public class HitlManager
     /// <summary>
     /// Returns the pending Mode 1 approval request for the given session, if any.
     /// Lets a client (e.g. the web chat UI) poll "is my turn currently blocked on approval?"
-    /// without holding the originating request open for the whole wait.
+    /// without holding the originating request open for the whole wait. A request a nested run filed (a specialist the
+    /// chat delegated to) is found under the chat's session too.
     /// </summary>
     public HitlRequest? GetPendingForSession(string sessionKey) =>
-        _pending.Values.FirstOrDefault(e => e.Request.SessionKey == sessionKey)?.Request;
+        _pending.Values.FirstOrDefault(e => e.Request.SessionKey == sessionKey || e.Request.RootSessionKey == sessionKey)?.Request;
 
     /// <summary>Non-positive settings mean "wait forever" — opt-in, and no longer the default.</summary>
     private static TimeSpan ToTimeout(int seconds) =>

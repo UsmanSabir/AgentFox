@@ -43,18 +43,25 @@ public static class ToolGate
 {
     /// <param name="phase">The session's plan phase. Only <see cref="PlanPhase.Execute"/> unlocks mutating tools.</param>
     /// <param name="bypassed">The result of <c>HitlBypassPolicy.IsBypassed</c> for this session and role.</param>
+    /// <param name="requiresHuman">The tool is an <c>IHumanApprovedTool</c>: it is asked about whatever the watched list and the
+    /// bypass rules say, because its effect is only legitimate when a person agreed to it.</param>
     public static ToolGateOutcome Decide(
         string toolName,
         IReadOnlyCollection<string> mutatingTools,
         IReadOnlyCollection<string> watchedTools,
         PlanPhase phase,
-        bool bypassed)
+        bool bypassed,
+        bool requiresHuman = false)
     {
         // 1) Plan enforcement. Before bypass, deliberately — see the class remarks.
         if (Contains(mutatingTools, toolName) && phase != PlanPhase.Execute)
             return ToolGateOutcome.RefusedPendingPlan;
 
-        // 2) Per-tool human approval.
+        // 2) A tool that is only legitimate with a person's yes. No configuration and no bypass can waive it.
+        if (requiresHuman)
+            return ToolGateOutcome.RequiresHumanApproval;
+
+        // 3) Per-tool human approval.
         if (!Contains(watchedTools, toolName))
             return ToolGateOutcome.Allowed;
 

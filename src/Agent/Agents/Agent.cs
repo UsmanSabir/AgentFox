@@ -165,6 +165,14 @@ public class FoxAgent
     /// </summary>
     internal static readonly AsyncLocal<string?> CurrentSessionKey = new();
 
+    /// <summary>
+    /// The session of the OUTERMOST turn in this flow: a chat's own session, kept while that turn delegates to a specialist or a
+    /// sub-agent running inline (whose <see cref="CurrentSessionKey"/> is its own). An approval a nested run asks for is filed
+    /// under both, so the chat that started it can show it (<c>HitlManager.GetPendingForSession</c>). Set only when unset, by
+    /// <see cref="ProcessAsync"/>; an async method's change is undone when it returns, so each top-level turn starts afresh.
+    /// </summary>
+    internal static readonly AsyncLocal<string?> RootSessionKey = new();
+
     public string Id => _agent.Config.Id;
     public string Name => _agent.Config.Name;
     public IMemory Memory => _agent.Memory;
@@ -521,6 +529,7 @@ public class FoxAgent
     {
         conversationId ??= Guid.NewGuid().ToString("N");
         CurrentSessionKey.Value = conversationId;
+        RootSessionKey.Value ??= conversationId;
 
         // Every agent turn runs under a correlation id. Ensure() adopts one already in force
         // (a channel message, or the command that scheduled this turn) and mints one otherwise,
@@ -1078,10 +1087,9 @@ public class AgentBuilder
     private SkillRegistry? _pendingSkillsRegistry; // set by WithSkillsRegistry, consumed in Build()
 
     /// <summary>
-    /// Optional gate evaluated before every tool execution.
-    /// Return true to allow, false to block.  Set via <see cref="WithToolApprovalGate"/>.
+    /// Optional gate evaluated before every tool execution. Set via <see cref="WithToolApprovalGate(Func{ITool, Dictionary{string, object?}, CancellationToken, Task{ToolApprovalVerdict}})"/>.
     /// </summary>
-    private Func<string, Dictionary<string, object?>, CancellationToken, Task<bool>>? _toolApprovalGate;
+    private Func<ITool, Dictionary<string, object?>, CancellationToken, Task<ToolApprovalVerdict>>? _toolApprovalGate;
 
     /// <summary>Per-tool availability and the prompt text that depends on it. Set via <see cref="WithToolGates"/>; null means none.</summary>
     private IReadOnlyDictionary<string, Func<CancellationToken, ValueTask<bool>>>? _toolGates;
@@ -1218,7 +1226,21 @@ public class AgentBuilder
     public AgentBuilder WithToolApprovalGate(
         Func<string, Dictionary<string, object?>, CancellationToken, Task<bool>> gate)
     {
-        _toolApprovalGate = gate;
+        ArgumentNullException.ThrowIfNull(gate);
+        _toolApprovalGate = async (tool, args, ct) =>
+            await gate(tool.Name, args, ct) ? ToolApprovalVerdict.Allow() : ToolApprovalVerdict.Block();
+        return this;
+    }
+
+    /// <summary>
+    /// Installs a gate that sees the tool itself and can say WHO approved the call. An approval it returns is in scope
+    /// (<see cref="ToolApprovals.Current"/>) for exactly that one execution, which is how an <see cref="IHumanApprovedTool"/>
+    /// proves a person agreed before it acts.
+    /// </summary>
+    public AgentBuilder WithToolApprovalGate(
+        Func<ITool, Dictionary<string, object?>, CancellationToken, Task<ToolApprovalVerdict>> gate)
+    {
+        _toolApprovalGate = gate ?? throw new ArgumentNullException(nameof(gate));
         return this;
     }
 
@@ -1639,17 +1661,22 @@ public class AgentBuilder
         toolSpan?.SetTag("agentfox.tool.argument_count", arguments.Count);
 
         // ── HITL approval gate (Mode 1) ──────────────────────────────────────
+        HumanToolApproval? approval = null;
         if (_toolApprovalGate != null)
         {
-            var allowed = await _toolApprovalGate(toolName, arguments, ct);
-            if (!allowed)
+            var verdict = await _toolApprovalGate(tool, arguments, ct);
+            if (!verdict.Allowed)
             {
                 // A blocked tool is a refusal, not a success — see AgentTelemetry.SetOutcome.
                 AgentTelemetry.SetOutcome(toolSpan, succeeded: false, "blocked by approval gate");
-                return ToolResult.Fail(
-                    $"Tool '{toolName}' was blocked — not approved by user.");
+                return ToolResult.Fail(verdict.Message ?? $"Tool '{toolName}' was blocked — not approved by user.");
             }
+            approval = verdict.Approval;
         }
+
+        // The approval is in scope for THIS execution only, so a tool that must have one (IHumanApprovedTool) can check it,
+        // and it cannot leak into the next call.
+        using var approvalScope = approval is null ? null : ToolApprovals.Enter(approval);
 
         // Tool-execution lifecycle hooks. Plugins subscribe via IPluginContext
         // (OnToolPreExecute/OnToolPostExecute/OnToolError) which lands in this same

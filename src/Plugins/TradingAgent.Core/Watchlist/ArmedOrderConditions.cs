@@ -39,6 +39,29 @@ public interface IArmedOrderConditionEvaluator
     ArmedConditionDecision Evaluate(ArmedOrder order, decimal? passPrice, DateTime nowUtc);
 }
 
+/// <summary>
+/// A last word from the edition at the moment a RULE order is about to fire, before core claims it: null lets it
+/// fire, a sentence holds it. A held order stays armed and is tried again on the monitor's refusal backoff (1 → 30
+/// minutes), exactly as a refused fire is; nothing is sent and nothing is claimed.
+///
+/// <para>
+/// For a check that belongs to WHO armed the order rather than to the rule: premium re-checks an AI agent's caps
+/// (docs/rule-orders.md, "Rule orders on MCP") on a rule the agent armed, because the operator may have narrowed or
+/// switched off agent trading while it waited. Core's own policy still runs after it, unchanged.
+/// </para>
+///
+/// <para>
+/// Optional, and must be a LEAF for the same reason <see cref="IArmedOrderConditionEvaluator"/> must: the worker that
+/// calls it sits on the graph every broker adapter is wired into. It may read stores; it must not reach a broker.
+/// </para>
+/// </summary>
+public interface IArmedOrderFireCheck
+{
+    /// <param name="limitPrice">The limit the order would be sent at (the rule's live price, or its stored one), or null
+    /// for a MARKET order.</param>
+    ValueTask<string?> RefusalAsync(ArmedOrder order, decimal? limitPrice, CancellationToken ct);
+}
+
 /// <summary>What is being armed, as far as a condition's validity depends on it.</summary>
 public sealed record ArmedConditionRequest(
     string Symbol,

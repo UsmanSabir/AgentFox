@@ -407,6 +407,15 @@ public sealed record ArmedOrder
     public string? ConditionSummary { get; init; }
 
     /// <summary>
+    /// Who armed it, when not a person at the dashboard (null): <c>chat</c> for an order a person approved in chat, or
+    /// <c>mcp:&lt;agent&gt;</c> for one an AI agent asked for and the owner approved. Data, not prose, so a check that depends on
+    /// who armed the order (an <see cref="IArmedOrderFireCheck"/>) never reads it out of <see cref="Note"/>. Set only by an
+    /// in-process caller of <c>TradingCoreEndpoints.ArmOrderAsync</c>; the HTTP route never takes it from a request body.
+    /// An EDIT made in the dashboard replaces the order with one a person armed, so it is null again.
+    /// </summary>
+    public string? ArmedBy { get; init; }
+
+    /// <summary>
     /// The level this order fires at as of right now: recomputed for a percent trigger, the stored
     /// level for a fixed one, null for an event or a scheduled order — neither has one.
     /// </summary>

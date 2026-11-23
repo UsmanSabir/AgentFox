@@ -534,10 +534,13 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
 
     // Reserve the first web conversation id synchronously so two rapid submissions
     // before the first SSE session event still land in the same server queue.
-    const turnConversationId = selectedAgentId === 'main'
-      ? (convId ?? `web_${crypto.randomUUID().replaceAll('-', '')}`)
-      : convId;
-    if (selectedAgentId === 'main' && !convId)
+    // A specialist's conversation is reserved the same way, in the shape its route accepts
+    // ("specialist/{id}/web_…"), so an approval it asks for during its FIRST turn can be polled and
+    // shown here: its reply only arrives once the turn ends, which an unanswered approval holds open.
+    const turnConversationId = convId ?? (selectedAgentId === 'main'
+      ? `web_${crypto.randomUUID().replaceAll('-', '')}`
+      : `specialist/${selectedAgentId.replace(/[<>:"/\\|?*\s\u0000-\u001f]/g, '_')}/web_${crypto.randomUUID().replaceAll('-', '')}`);
+    if (!convId)
       activeConversationId.set(turnConversationId);
 
     void runMessage(text, assistantId, attached.map(a => a.payload), turnConversationId);
@@ -606,7 +609,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
           finalizeMessage(assistantId, 'The response ended before completion.');
         }
       } else {
-        const response = await api.specialistChat(selectedAgentId, text, convId);
+        const response = await api.specialistChat(selectedAgentId, text, conversationId ?? convId);
         if (response.conversationId) activeConversationId.set(response.conversationId);
         if (response.success) {
           appendToken(assistantId, response.response);
