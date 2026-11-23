@@ -62,6 +62,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
     private readonly SellAvailabilityConfirmer _sellAvailability;
     private readonly RecentPriceWindow _recentPrices;
     private readonly IArmedOrderConditionEvaluator? _conditions;
+    private readonly IArmedOrderFireCheck? _fireCheck;
     private readonly MonitorTechnicalReadings? _technicals;
 
     /// <summary>
@@ -113,10 +114,12 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
         IProtectiveStopReleaser? stopReleaser = null,
         RecentPriceWindow? recentPrices = null,
         IArmedOrderConditionEvaluator? conditions = null,
-        MonitorTechnicalReadings? technicals = null)
+        MonitorTechnicalReadings? technicals = null,
+        IArmedOrderFireCheck? fireCheck = null)
     {
         _recentPrices = recentPrices ?? new RecentPriceWindow();
         _conditions = conditions;
+        _fireCheck = fireCheck;
         _technicals = technicals;
         _activity = activity;
         _stopReleaser = stopReleaser;
@@ -645,6 +648,27 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
             // execution boundary.
             if (_refusedFires.TryGetValue(order.ArmedId, out var held) && now < held.NextUtc)
                 continue;
+
+            // The edition's last word on a rule order (IArmedOrderFireCheck): held before the claim, on the same
+            // backoff as a refused fire, so a held rule costs no state write and stays armed. A check that cannot
+            // run holds too: it exists because who armed the order matters, and not knowing is not a yes.
+            if (order.TriggerKind == ArmedTriggerKind.Rule && _fireCheck is not null)
+            {
+                string? holdReason;
+                try { holdReason = await _fireCheck.RefusalAsync(order, condition?.LimitPrice ?? order.Price, ct); }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    holdReason = "Its fire check could not run, so it waits: " + ex.Message;
+                }
+                if (holdReason is not null)
+                {
+                    var retry = NoteRefusal(order);
+                    _logger.LogWarning("[ArmedOrders] {ArmedId} ({Symbol}) met its rule but was held: {Reason} {Retry}",
+                        order.ArmedId, order.Symbol, holdReason, retry);
+                    _activity?.Warn("Armed", $"{order.Symbol}: rule order met but held", $"{holdReason} {retry}");
+                    continue;
+                }
+            }
 
             // Claim it before the broker sees anything.
             if (!await _repository.TrySetArmedOrderStateAsync(
