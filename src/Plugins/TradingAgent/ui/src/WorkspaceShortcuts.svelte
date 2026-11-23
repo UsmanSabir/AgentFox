@@ -21,7 +21,7 @@
     ['Ctrl+Shift+4 / 5','Order ticket / Order logs'],
     ['Ctrl+Shift+6 / 7','Portfolio / Persistent orders'],
     ['Ctrl+Shift+0','Reset view (does not discard in-session drafts)'],
-    ['Escape','Close a dialog or bottom peek; otherwise restore a maximized group'],
+    ['Escape','Clear the watchlist search when focused there, close a dialog or bottom peek, or restore a maximized group.'],
     ['Tab / Shift+Tab','Move between controls; Enter / Space activates the focused control'],
     ['Watchlist: ↑ ↓ / Enter','Move from search into the matching rows or between rows. Enter opens the focused stock or the first search match.'],
     ['Watchlist: F2 / Shift+F10','Open actions for the focused symbol; / focuses search'],

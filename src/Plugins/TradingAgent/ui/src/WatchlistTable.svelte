@@ -18,6 +18,7 @@
   export let onSelect: (symbol:string) => void;
   export let onAction: (action:WatchlistAction, symbol:string) => Promise<void>;
   export let onSearch: () => void;
+  export let onSearchEscape: (event:KeyboardEvent) => void;
   export let onDragStart: (event:DragEvent, entry:WatchlistEntry) => void;
   export let onDragOver: (event:DragEvent, entry:WatchlistEntry) => void;
   export let onDrop: (event:DragEvent, entry:WatchlistEntry) => void;
@@ -101,6 +102,10 @@
     if (event.defaultPrevented || event.isComposing || event.altKey || !focused) return;
     const target = event.target as HTMLElement;
     if (target.closest('input,textarea,select,[contenteditable="true"]')) return;
+    if (event.key === 'Escape' && !target.closest('dialog,[role="dialog"],[role="alertdialog"]')) {
+      onSearchEscape(event);
+      return;
+    }
     if (event.key === '/' && !event.ctrlKey && !event.metaKey) { event.preventDefault(); onSearch(); return; }
     if ((event.key === 'F10' && event.shiftKey) || event.key === 'ContextMenu' || event.key === 'F2') {
       event.preventDefault(); if (!event.repeat) void openActions(focused); return;

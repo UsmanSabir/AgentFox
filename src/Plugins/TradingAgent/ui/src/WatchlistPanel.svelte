@@ -31,6 +31,7 @@
   // Explicit picks also fire when reselecting the current stock. List refreshes only update binding.
   function selectSymbol(symbol: string) {
     selected = symbol;
+    if (dense) search = '';
     dispatch('select', symbol);
   }
   let panelElement: HTMLElement;
@@ -442,6 +443,12 @@
     searchInput?.focus();
   }
 
+  function clearSearchOnEscape(event: KeyboardEvent) {
+    if (event.key !== 'Escape' || !search || event.defaultPrevented || event.isComposing || event.repeat) return;
+    event.preventDefault();
+    clearSearch();
+  }
+
   async function reset() {
     if (busy) return;
     const userAdded = data?.entries.filter(e => e.source === 'user').length ?? 0;
@@ -494,6 +501,10 @@
   }
 
   function searchKey(event: KeyboardEvent) {
+    if (event.key === 'Escape') {
+      clearSearchOnEscape(event);
+      return;
+    }
     if (!dense || event.defaultPrevented || event.isComposing || event.altKey ||
       event.ctrlKey || event.metaKey || event.shiftKey) return;
 
@@ -767,6 +778,7 @@
             class="search-clear"
             type="button"
             on:click={clearSearch}
+            on:keydown={clearSearchOnEscape}
             aria-label="Clear watchlist search"
             title="Clear search"
           ><X size={13} /></button>
@@ -858,7 +870,7 @@
     {:else if dense}
       <WatchlistTable bind:this={watchlistTable} entries={filteredEntries} {selected} {archive} {rowStatus} {busy} {dragOverSymbol} {compact}
         {canReorder}
-        onSelect={selectSymbol} onAction={tableAction} onSearch={focusSearch}
+        onSelect={selectSymbol} onAction={tableAction} onSearch={focusSearch} onSearchEscape={clearSearchOnEscape}
         onDragStart={startDrag} onDragOver={dragOver} onDrop={dropOn}
         onDragEnd={() => { draggedSymbol = null; dragOverSymbol = null; }}/>
     {:else}
