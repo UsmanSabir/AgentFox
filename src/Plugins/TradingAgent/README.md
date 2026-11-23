@@ -599,6 +599,10 @@ The HITL gate is handled by AgentFox's built-in tool approval system — no extr
 }
 ```
 
+The list applies to the main agent AND to every specialist, the trading agent included (until 2026-11-23 a specialist had no
+approval gate, so `place_order` there ran with nobody asked). A tool that implements `IHumanApprovedTool` is always asked about,
+whatever this list and the bypass rules say. A specialist run the chat delegated to shows its approval in that chat too.
+
 **Approval prompt example (sent to the channel):**
 
 ```

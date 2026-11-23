@@ -183,571 +183,8 @@ public sealed partial class TradingCoreEndpoints
             });
         });
 
-        trading.MapPost("/armed-orders", async (
-            ArmOrderRequest body,
-            ITradingRepository repository,
-            MonitoredUniverse universe,
-            ApprovalGate approvals,
-            ProtectiveStopWorker protectiveStops,
-            CompositeLiveQuoteSource quotes,
-            RecentPriceWindow recentPrices,
-            IMarketCalendar calendar,
-            IOptions<TradingAgentOptions> options,
-            ILogger<TradingCoreEndpoints> logger,
-            HttpContext http,
-            CancellationToken ct) =>
-        {
-            string symbol;
-            try { symbol = PsxDataClient.NormalizeStockSymbol(body.Symbol ?? ""); }
-            catch (ArgumentException ex)
-            {
-                return Results.BadRequest(new { error = "invalid_symbol", message = ex.Message });
-            }
-
-            var action = (body.Action ?? "").Trim().ToUpperInvariant();
-            if (action is not ("BUY" or "SELL"))
-                return Results.BadRequest(new { error = "invalid_action", message = "Action must be BUY or SELL." });
-
-            if (body.Quantity is not > 0)
-                return Results.BadRequest(new { error = "invalid_quantity", message = "Quantity must be positive." });
-
-            if (!Enum.TryParse<ArmedTriggerKind>(body.TriggerKind, ignoreCase: true, out var kind))
-                return Results.BadRequest(new
-                {
-                    error = "invalid_trigger",
-                    message = $"Trigger kind must be one of {string.Join(", ", Enum.GetNames<ArmedTriggerKind>())}."
-                });
-
-            AlertKind? alertKind = null;
-            decimal? triggerPercent = null;
-            decimal? referencePrice = null;
-            var trailing = false;
-            int? windowMinutes = null;
-            var triggerLevel = body.TriggerPrice;
-            string? conditionSpec = null;
-            string? conditionSummary = null;
-
-            if (kind == ArmedTriggerKind.Rule)
-            {
-                // The condition is the edition's document, so the edition validates it; core checks only
-                // what it owns: that nothing a rule does not read is set, and the order type.
-                var conditions = http.RequestServices.GetService<IArmedOrderConditionEvaluator>();
-                if (conditions is null)
-                    return Results.BadRequest(new
-                    {
-                        error = "rule_orders_unavailable",
-                        message = "Rule orders need an edition that can evaluate them, and none is installed."
-                    });
-
-                if (string.IsNullOrWhiteSpace(body.ConditionSpec))
-                    return Results.BadRequest(new
-                    {
-                        error = "invalid_condition",
-                        message = "A rule order needs its rule (conditionSpec)."
-                    });
-
-                if (body.TriggerPrice is not null || body.TriggerPercent is not null || body.TriggerAlertKind is not null
-                    || body.Trailing || body.TriggerWindowMinutes is not null || body.ActiveFromDate is not null
-                    || body.PriceBound is not null)
-                    return Results.BadRequest(new
-                    {
-                        error = "invalid_trigger",
-                        message = "A rule order carries its whole condition in the rule, prices, dates and "
-                                + "times included, so no other trigger field may be set."
-                    });
-
-                var ruleOrderType = (body.OrderType ?? "LIMIT").Trim().ToUpperInvariant();
-                if (ruleOrderType is not ("LIMIT" or "MARKET"))
-                    return Results.BadRequest(new
-                    {
-                        error = "invalid_order_type",
-                        message = "A rule order places a LIMIT or a MARKET order."
-                    });
-
-                // Refused rather than validated against a price that may not be the entry: a rule priced
-                // off the price that met it does not know its entry until it fires.
-                if (body.AttachStop is not null || body.AttachTakeProfit is not null)
-                    return Results.BadRequest(new
-                    {
-                        error = "invalid_attached_stop",
-                        message = "A protective stop or target cannot be attached to a rule order. Add a "
-                                + "stop after it fills."
-                    });
-
-                var validation = conditions.Validate(new ArmedConditionRequest(
-                    symbol, action, ruleOrderType, body.Price, body.ConditionSpec));
-                if (!validation.Ok)
-                    return Results.BadRequest(new
-                    {
-                        error = validation.ErrorCode ?? "invalid_condition",
-                        message = validation.Message ?? "The rule could not be read."
-                    });
-
-                conditionSpec = validation.NormalizedSpec;
-                conditionSummary = validation.Summary;
-                triggerLevel = null;
-            }
-            else if (!string.IsNullOrWhiteSpace(body.ConditionSpec))
-            {
-                return Results.BadRequest(new
-                {
-                    error = "invalid_condition",
-                    message = "A condition document applies only to a Rule order."
-                });
-            }
-            else if (kind == ArmedTriggerKind.Event)
-            {
-                if (!Enum.TryParse<AlertKind>(body.TriggerAlertKind, ignoreCase: true, out var parsed))
-                    return Results.BadRequest(new
-                    {
-                        error = "invalid_alert_kind",
-                        message = $"Event triggers need an alert kind: {string.Join(", ", Enum.GetNames<AlertKind>())}."
-                    });
-                alertKind = parsed;
-                triggerLevel = null;
-            }
-            else if (kind == ArmedTriggerKind.Scheduled)
-            {
-                // The date is the entire condition, so there is nothing else to validate here — and
-                // nothing else may be stored. The rules are in ScheduledOrderRule so they can be
-                // tabled rather than reached only through a broker, a universe and a database.
-                if (ScheduledOrderRule.ValidateScheduledRequest(
-                        body.ActiveFromDate, body.TriggerPrice, body.TriggerPercent,
-                        body.TriggerAlertKind) is { } problem)
-                    return Results.BadRequest(new { error = problem.Code, message = problem.Message });
-
-                triggerLevel = null;
-            }
-            else if (PercentTrigger.IsPercent(kind))
-            {
-                // A percent trigger is "if it drops 3%", which needs a size of move and a price to
-                // measure it from. The level is DERIVED from those two and stored alongside them, so a
-                // reader that only knows about levels still sees a real number — see ArmedOrder.
-                if (body.TriggerPercent is not > 0 || body.TriggerPercent > PercentTrigger.MaxPercent)
-                    return Results.BadRequest(new
-                    {
-                        error = "invalid_trigger_percent",
-                        message = $"A percent trigger needs a move between 0 and {PercentTrigger.MaxPercent}%."
-                    });
-
-                triggerPercent = Math.Round(body.TriggerPercent.Value, 2, MidpointRounding.AwayFromZero);
-
-                // The caller normally sends the price it was showing the operator, so the level armed
-                // is exactly the level they were quoted. Capturing it here is the fallback for a
-                // scripted caller with no screen — one snapshot, and only on that path.
-                referencePrice = body.ReferencePrice is > 0 ? body.ReferencePrice : null;
-                if (referencePrice is null)
-                {
-                    try
-                    {
-                        var snapshot = await quotes.GetQuotesAsync(ct);
-                        if (snapshot.Quotes.TryGetValue(symbol, out var quote) && quote.Current is > 0)
-                            referencePrice = quote.Current;
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        logger.LogWarning(ex,
-                            "[ArmedOrders] Could not capture a reference price for {Symbol}.", symbol);
-                    }
-                }
-
-                if (referencePrice is not > 0)
-                    return Results.BadRequest(new
-                    {
-                        error = "no_reference_price",
-                        message = $"A percent trigger measures the move from a price, and no live price "
-                                + $"for '{symbol}' is available right now. Send referencePrice, or arm a "
-                                + "PriceBelow/PriceAbove trigger at an exact level instead."
-                    });
-
-                triggerLevel = PercentTrigger.Level(kind, referencePrice, triggerPercent);
-                if (triggerLevel is not > 0)
-                    return Results.BadRequest(new
-                    {
-                        error = "invalid_trigger_percent",
-                        message = $"{triggerPercent}% from {referencePrice} does not produce a usable "
-                                + "price level."
-                    });
-
-                // A move too small for the price rounds onto the price it is measured from: 0.04% under
-                // 12.04 is 12.04. Such a trigger is met the moment it is armed, which is an immediate
-                // order wearing a waiting order's label.
-                if (PercentTriggerRule.LevelIsAtReference(kind, referencePrice.Value, triggerLevel.Value))
-                    return Results.BadRequest(new
-                    {
-                        error = "invalid_trigger_percent",
-                        message = $"{triggerPercent}% of {referencePrice} is less than one paisa, so this "
-                                + "would trigger at once. Use a larger move."
-                    });
-
-                trailing = body.Trailing;
-
-                if (body.TriggerWindowMinutes is { } minutes)
-                {
-                    if (minutes < 1 || minutes > RecentPriceWindow.MaxWindowMinutes)
-                        return Results.BadRequest(new
-                        {
-                            error = "invalid_trigger_window",
-                            message = $"A price window must be between 1 and "
-                                    + $"{RecentPriceWindow.MaxWindowMinutes} trading minutes."
-                        });
-
-                    // A trail only ratchets; a window's high ages out and can fall. One order cannot
-                    // be both, and silently picking one would arm something other than what was asked.
-                    if (trailing)
-                        return Results.BadRequest(new
-                        {
-                            error = "invalid_trigger_window",
-                            message = "Choose a trailing reference or a recent-price window, not both."
-                        });
-
-                    windowMinutes = minutes;
-                }
-            }
-            else if (body.TriggerWindowMinutes is not null)
-            {
-                return Results.BadRequest(new
-                {
-                    error = "invalid_trigger_window",
-                    message = "A price window applies only to a percent trigger."
-                });
-            }
-            else if (body.TriggerPrice is not > 0)
-            {
-                return Results.BadRequest(new
-                {
-                    error = "invalid_trigger_price",
-                    message = "A price trigger needs a positive level."
-                });
-            }
-
-            // ── When this order becomes active, and when it gives up ──────────────────────────
-            //
-            // Both bounds come from ScheduledOrderRule, which owns the PKT conversion, the default
-            // expiry's anchor and the ordering check as pure, tabled rules.
-            //
-            // Note what is deliberately NOT checked: whether the date is a TRADING day.
-            // IMarketCalendar.IsTradingDay reads a configured holiday list that ships EMPTY, so such a
-            // refusal would catch weekends and nothing else — arm-time protection that looks real and
-            // mostly is not. The order goes to the broker and the venue decides, which is how every
-            // other order in this system already behaves; a date the exchange is shut on simply waits
-            // for the open that follows it.
-            var window = ScheduledOrderRule.Resolve(
-                body.ActiveFromDate, body.ExpiresUtc, body.ExpiresInDays,
-                PsxTime.Today(), DateTime.UtcNow);
-
-            if (!window.Ok)
-                return Results.BadRequest(new { error = window.ErrorCode, message = window.Message });
-
-            // Refuse up front rather than at fire time. An armed order for a non-tradable symbol would
-            // sit there looking like protection and be rejected by the risk engine the moment it
-            // mattered — which is the failure mode worth designing out.
-            if (!await universe.IsTradableAsync(symbol, ct))
-                return Results.BadRequest(new
-                {
-                    error = "not_tradable",
-                    message = $"'{symbol}' is not in the selected execution universe, so an order for it would be refused "
-                            + "by the risk engine. Arming one would be protection in name only."
-                });
-
-            // A manual-only symbol is deliberately NOT refused here. Manual means "I manage this
-            // name myself, no strategy or plan does" — and arming an order by hand is the operator
-            // managing it. The order below claims OperatorOriginated, which carries that fact to the
-            // execution boundary so it fires like any other. What manual-only still refuses is a
-            // strategy originating an order on its own; see TradingManager.
-
-            // Same reasoning as the tradability check above, applied to the stop's own geometry: an
-            // armed stop whose limit sits on the wrong side of its trigger is refused by the risk
-            // engine at fire time, which is the one moment it was supposed to work. Checking it here
-            // means the order is either armed and fillable, or never armed at all.
-            //
-            // The direction comes from the TRIGGER, not the side — a BUY armed to fire on a falling
-            // price wants its limit BELOW the trigger, and judging it by the side alone is what
-            // refused a legitimate FFC dip-buy live on 2026-08-18. See StopLimitRule.
-            var stopProblem = StopLimitRule.Validate(
-                action,
-                (body.OrderType ?? "LIMIT").Trim().ToUpperInvariant(),
-                PercentTrigger.FiresOnRisingPrice(kind),
-                body.Price,
-                body.LimitPrice);
-
-            if (stopProblem is not null)
-                return Results.BadRequest(new
-                {
-                    error = "invalid_stop_limit",
-                    message = $"This order would be refused when it fired: {stopProblem}"
-                });
-
-            // A price bound belongs to a trailing LIMIT and to nothing else. It is the fill bound AND the
-            // submission condition, so it is refused anywhere it could only be half of that: a MARKET
-            // order has no limit to clamp, and a fixed or windowed trigger has no trail to skip a move of.
-            // It rides the keep-working lifecycle because that is the path whose limit is frozen at the
-            // bounded price and carried across sessions.
-            decimal? priceBound = null;
-            if (body.PriceBound is { } bound)
-            {
-                var orderType = (body.OrderType ?? "LIMIT").Trim().ToUpperInvariant();
-                string? boundProblem =
-                    bound <= 0 ? "A price bound must be a positive price."
-                    : !PercentTrigger.IsPercent(kind) || !trailing
-                        ? "A maximum buy or minimum sell price applies only to a trailing order."
-                    : orderType != "LIMIT" ? "A maximum buy or minimum sell price needs a LIMIT order."
-                    : !body.PersistentUntilFilled
-                        ? "A trailing order with a price bound keeps its unfilled remainder working; "
-                          + "set persistentUntilFilled."
-                    : null;
-
-                if (boundProblem is not null)
-                    return Results.BadRequest(new { error = "invalid_price_bound", message = boundProblem });
-
-                priceBound = Math.Round(bound, 2, MidpointRounding.AwayFromZero);
-            }
-
-            if (body.PersistentUntilFilled
-                && PersistentOrderDecisions.ValidateEligibility(body.OrderType) is { } persistenceProblem)
-            {
-                return Results.BadRequest(new
-                {
-                    error = "order_not_persistable",
-                    message = persistenceProblem
-                });
-            }
-
-            var order = new ArmedOrder
-            {
-                ArmedId          = Guid.NewGuid().ToString("N"),
-                Symbol           = symbol,
-                TriggerKind      = kind,
-                TriggerPrice     = triggerLevel,
-                TriggerAlertKind = alertKind,
-                TriggerPercent   = triggerPercent,
-                ReferencePrice   = referencePrice,
-                Trailing         = trailing,
-                TriggerWindowMinutes = windowMinutes,
-                Action           = action,
-                Quantity         = body.Quantity!.Value,
-                OrderType        = (body.OrderType ?? "LIMIT").Trim().ToUpperInvariant(),
-                Price            = body.Price,
-                LimitPrice       = body.LimitPrice,
-                PersistentUntilFilled = body.PersistentUntilFilled,
-                PriceBound       = priceBound,
-                // Someone is standing at the dashboard arming this. That is what lets it fire on a
-                // manual-only symbol — see ArmedOrder.OperatorOriginated.
-                OperatorOriginated = true,
-                // Default an expiry: an entry trigger left open indefinitely can fire months later
-                // against a thesis nobody remembers forming. Resolved above, because a scheduled
-                // order's default is measured from its activation date rather than from now.
-                ExpiresUtc       = window.ExpiresUtc,
-                ActiveFromUtc    = window.ActiveFromUtc,
-                Note             = body.Note,
-                SourceAlertId    = body.SourceAlertId,
-                ConditionSpec    = conditionSpec,
-                ConditionSummary = conditionSummary
-            };
-
-            // Validated by AttachedStopRule, which the immediate-order path uses too so the two cannot
-            // drift on what an attachable stop is. It owns the BUY-only rule and both level checks.
-            // A trailing order's entry price is unknown until it triggers, and by then the trail has moved
-            // away from the level known now — for a trailing buy, usually well below it. Both attachment
-            // rules check against that level, so an attached stop could rest above the real fill and sell
-            // the moment it was placed. Refused rather than checked against a number that is not the entry.
-            if (trailing && (body.AttachStop is not null || body.AttachTakeProfit is not null))
-                return Results.BadRequest(new
-                {
-                    error = "invalid_attached_stop",
-                    message = "A protective stop or target cannot be attached to a trailing order: its "
-                            + "entry price is not known until it triggers. Add a stop after it fills."
-                });
-
-            ProtectiveStop? attached = null;
-            if (body.AttachStop is { } attach)
-            {
-                var plan = AttachedStopRule.Validate(
-                    action, attach.StopTrigger, attach.StopLimit, order.Price ?? order.TriggerPrice);
-                if (!plan.Ok)
-                    return Results.BadRequest(new { error = plan.ErrorCode, message = plan.Message });
-
-                decimal? takeProfitPrice = null;
-                if (body.AttachTakeProfit is { } target)
-                {
-                    var targetPlan = AttachedTakeProfitRule.Validate(
-                        action, target.Price, order.Price ?? order.TriggerPrice, hasAttachedStop: true);
-                    if (targetPlan.ErrorCode is not null)
-                        return Results.BadRequest(new
-                        {
-                            error = targetPlan.ErrorCode,
-                            message = targetPlan.Message
-                        });
-                    takeProfitPrice = targetPlan.Price;
-                }
-
-                attached = new ProtectiveStop
-                {
-                    StopId        = Guid.NewGuid().ToString("N"),
-                    Symbol        = symbol,
-                    ParentArmedId = order.ArmedId,
-                    StopTrigger   = plan.StopTrigger,
-                    StopLimit     = plan.StopLimit,
-                    // Sized at fill time, never here: what matters is what the entry actually buys.
-                    DesiredQuantity = 0,
-                    Recurring     = attach.Recurring,
-                    State         = "pending_fill",
-                    TakeProfitPrice = takeProfitPrice,
-                    Note          = attach.Quantity is { } wanted
-                                        ? $"Requested cover: {wanted} share(s)."
-                                        : null,
-                    // Attached by hand to an entry armed by hand; it inherits the entry's origination.
-                    OperatorOriginated = true,
-                    SellAtMarketIfMissed = attach.SellAtMarketIfMissed
-                };
-            }
-            else if (body.AttachTakeProfit is { } target)
-            {
-                var targetPlan = AttachedTakeProfitRule.Validate(
-                    action, target.Price, order.Price ?? order.TriggerPrice, hasAttachedStop: false);
-                return Results.BadRequest(new
-                {
-                    error = targetPlan.ErrorCode,
-                    message = targetPlan.Message
-                });
-            }
-
-            // An EDIT of a rule order is a replacement: the old one is disarmed with a compare-and-set
-            // and the new one saved, so an order that fired a moment ago is never edited after the fact.
-            // Every check above has already passed, so a refused edit changes nothing at all.
-            string? replacedArmedId = null;
-            if (!string.IsNullOrWhiteSpace(body.ReplacesArmedId))
-            {
-                if (kind != ArmedTriggerKind.Rule)
-                    return Results.BadRequest(new
-                    {
-                        error = "invalid_replace",
-                        message = "Only a rule order can be edited; disarm this one and arm a new order."
-                    });
-
-                var current = (await repository.GetArmedOrdersAsync(armedOnly: true, ct))
-                    .FirstOrDefault(o => o.ArmedId == body.ReplacesArmedId);
-                if (current is null || current.TriggerKind != ArmedTriggerKind.Rule
-                    || !await repository.TrySetArmedOrderStateAsync(
-                        current.ArmedId, "armed", "cancelled", $"Replaced by an edit (now {order.ArmedId}).", ct: ct))
-                    return Results.Conflict(new
-                    {
-                        error = "not_armed",
-                        message = "That rule order is no longer waiting. It may have fired, expired or been "
-                                + "cancelled. Nothing was changed."
-                    });
-
-                replacedArmedId = current.ArmedId;
-            }
-
-            string id;
-            try
-            {
-                id = await repository.SaveArmedOrderAsync(order, ct);
-            }
-            catch when (replacedArmedId is not null)
-            {
-                // Put the original back rather than leave the operator with neither.
-                await repository.TrySetArmedOrderStateAsync(
-                    replacedArmedId, "cancelled", "armed", "The edit could not be saved; restored.",
-                    ct: CancellationToken.None);
-                throw;
-            }
-
-            if (replacedArmedId is not null)
-                logger.LogWarning("[ArmedOrders] {Old} replaced by {New} (edited rule).", replacedArmedId, id);
-
-            // The price the operator armed against is the window's first observation, so a fall
-            // before the monitor's next pass is still measured from it. Only while the market is open:
-            // a price recorded while it is shut would be counted as trading time.
-            if (order.IsWindowed && referencePrice is { } seed && calendar.GetStatus().IsOpen)
-                recentPrices.Record(symbol, seed, DateTime.UtcNow,
-                    RecentPriceWindow.MaxGapFor(options.Value.Monitor.IntervalSeconds));
-            if (attached is not null)
-            {
-                await repository.SaveProtectiveStopAsync(attached, ct);
-
-                // Not awaited, on purpose. A fill is proved by holdings RISING, which needs the
-                // holding from before the entry went in — and an entry armed at a level the price is
-                // already touching can trigger before the periodic pass ever takes that reading.
-                // Kicking it here shrinks the window from minutes to seconds without making the
-                // operator wait on a page scrape.
-                protectiveStops.CaptureBaselineSoon(attached.StopId);
-
-                logger.LogWarning(
-                    "[ProtectiveStops] {StopId} attached to entry {ArmedId}: SELL stop {Trigger}/{Limit} "
-                    + "on {Symbol}, recurring={Recurring}.",
-                    attached.StopId, id, attached.StopTrigger, attached.StopLimit, symbol,
-                    attached.Recurring);
-            }
-
-            var unattended = approvals.DescribeUnattendedPolicy();
-            logger.LogWarning(
-                "[ArmedOrders] Armed {ArmedId}: {Action} {Qty} {Symbol} on {Kind} {Level}{Basis}. "
-                + "Approval mode {Mode}.",
-                id, action, order.Quantity, symbol, kind,
-                order.TriggerPrice?.ToString() ?? alertKind?.ToString() ?? "",
-                triggerPercent is null
-                    ? ""
-                    : $" ({triggerPercent}% from {referencePrice}"
-                      + (trailing ? ", trailing" : "")
-                      + (priceBound is { } b ? $", {(action == "BUY" ? "max" : "min")} {b}" : "")
-                      + (windowMinutes is { } w ? $", from the {w}-minute extreme" : "") + ")",
-                options.Value.Approval.Mode);
-
-            return Results.Ok(new
-            {
-                armedId = id,
-                order = new
-                {
-                    order.ArmedId,
-                    order.Symbol,
-                    triggerKind = order.TriggerKind.ToString(),
-                    order.TriggerPrice,
-                    triggerAlertKind = order.TriggerAlertKind?.ToString(),
-                    order.TriggerPercent,
-                    order.ReferencePrice,
-                    order.Trailing,
-                    order.TriggerWindowMinutes,
-                    order.PersistentUntilFilled,
-                    order.PriceBound,
-                    order.Action,
-                    order.Quantity,
-                    order.OrderType,
-                    order.Price,
-                    order.LimitPrice,
-                    order.State,
-                    order.ArmedUtc,
-                    order.ExpiresUtc,
-                    order.Note,
-                    order.ConditionSummary
-                },
-                replacedArmedId,
-                // Said plainly at arm time, not discovered at fire time — and asked of the gate rather
-                // than re-derived here, since the execution mode matters as much as the approval mode.
-                willFireUnattended = unattended.WillFireUnattended,
-                note = unattended.Explanation,
-                attachedStop = attached is null ? null : new
-                {
-                    attached.StopId,
-                    attached.StopTrigger,
-                    attached.StopLimit,
-                    attached.Recurring,
-                    attached.State,
-                    attached.TakeProfitPrice,
-                    attached.TakeProfitArmedId,
-                    // The honest version of "and then it's protected". Each clause is a real gap the
-                    // operator would otherwise find out about from a position that was not covered.
-                    note = "The stop is dormant until the entry is confirmed filled by an increase in "
-                         + "your holdings, which is checked every few minutes while the market is open. "
-                         + (attached.Recurring
-                                ? "It is then re-placed at the broker each session, because outstanding "
-                                + "orders are cleared at the close."
-                                : "It is placed once and NOT re-placed after that session, so the "
-                                + "position stops being protected the next day.")
-                }
-            });
-        }).RequireAuthorization("TradingTrader");
+        trading.MapPost("/armed-orders", (ArmOrderRequest body, HttpContext http, CancellationToken ct) =>
+            ArmOrderAsync(body, http.RequestServices, ct)).RequireAuthorization("TradingTrader");
 
         trading.MapDelete("/armed-orders/{armedId}", async (
             string armedId,
@@ -945,6 +382,579 @@ public sealed partial class TradingCoreEndpoints
             approvals.Disarm(http.User.Identity?.Name ?? "operator");
             return Results.Ok(new { armed = false });
         }).RequireAuthorization("TradingAnalyst");
+    }
 
+    /// <summary>
+    /// Arms one order: everything <c>POST /trading/armed-orders</c> does, callable without an HTTP request. The route is a
+    /// one-line wrapper over it, and an edition's tool that arms on a person's approval (premium's <c>arm_rule_order</c>) calls it
+    /// too, so there is ONE arming path and every check above the save applies to both. Answers the same results the route
+    /// returns; a caller that is not the route reads them through <see cref="IStatusCodeHttpResult"/> and
+    /// <see cref="IValueHttpResult"/>. Resolve <paramref name="services"/> from a scope, as a request's are.
+    /// </summary>
+    public static async Task<IResult> ArmOrderAsync(ArmOrderRequest body, IServiceProvider services, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(body);
+        ArgumentNullException.ThrowIfNull(services);
+        var repository = services.GetRequiredService<ITradingRepository>();
+        var universe = services.GetRequiredService<MonitoredUniverse>();
+        var approvals = services.GetRequiredService<ApprovalGate>();
+        var protectiveStops = services.GetRequiredService<ProtectiveStopWorker>();
+        var quotes = services.GetRequiredService<CompositeLiveQuoteSource>();
+        var recentPrices = services.GetRequiredService<RecentPriceWindow>();
+        var calendar = services.GetRequiredService<IMarketCalendar>();
+        var options = services.GetRequiredService<IOptions<TradingAgentOptions>>();
+        var logger = services.GetRequiredService<ILogger<TradingCoreEndpoints>>();
+
+        string symbol;
+        try { symbol = PsxDataClient.NormalizeStockSymbol(body.Symbol ?? ""); }
+        catch (ArgumentException ex)
+        {
+            return Results.BadRequest(new { error = "invalid_symbol", message = ex.Message });
+        }
+
+        var action = (body.Action ?? "").Trim().ToUpperInvariant();
+        if (action is not ("BUY" or "SELL"))
+            return Results.BadRequest(new { error = "invalid_action", message = "Action must be BUY or SELL." });
+
+        if (body.Quantity is not > 0)
+            return Results.BadRequest(new { error = "invalid_quantity", message = "Quantity must be positive." });
+
+        if (!Enum.TryParse<ArmedTriggerKind>(body.TriggerKind, ignoreCase: true, out var kind))
+            return Results.BadRequest(new
+            {
+                error = "invalid_trigger",
+                message = $"Trigger kind must be one of {string.Join(", ", Enum.GetNames<ArmedTriggerKind>())}."
+            });
+
+        AlertKind? alertKind = null;
+        decimal? triggerPercent = null;
+        decimal? referencePrice = null;
+        var trailing = false;
+        int? windowMinutes = null;
+        var triggerLevel = body.TriggerPrice;
+        string? conditionSpec = null;
+        string? conditionSummary = null;
+
+        if (kind == ArmedTriggerKind.Rule)
+        {
+            // The condition is the edition's document, so the edition validates it; core checks only
+            // what it owns: that nothing a rule does not read is set, and the order type.
+            var conditions = services.GetService<IArmedOrderConditionEvaluator>();
+            if (conditions is null)
+                return Results.BadRequest(new
+                {
+                    error = "rule_orders_unavailable",
+                    message = "Rule orders need an edition that can evaluate them, and none is installed."
+                });
+
+            if (string.IsNullOrWhiteSpace(body.ConditionSpec))
+                return Results.BadRequest(new
+                {
+                    error = "invalid_condition",
+                    message = "A rule order needs its rule (conditionSpec)."
+                });
+
+            if (body.TriggerPrice is not null || body.TriggerPercent is not null || body.TriggerAlertKind is not null
+                || body.Trailing || body.TriggerWindowMinutes is not null || body.ActiveFromDate is not null
+                || body.PriceBound is not null)
+                return Results.BadRequest(new
+                {
+                    error = "invalid_trigger",
+                    message = "A rule order carries its whole condition in the rule, prices, dates and "
+                            + "times included, so no other trigger field may be set."
+                });
+
+            var ruleOrderType = (body.OrderType ?? "LIMIT").Trim().ToUpperInvariant();
+            if (ruleOrderType is not ("LIMIT" or "MARKET"))
+                return Results.BadRequest(new
+                {
+                    error = "invalid_order_type",
+                    message = "A rule order places a LIMIT or a MARKET order."
+                });
+
+            // Refused rather than validated against a price that may not be the entry: a rule priced
+            // off the price that met it does not know its entry until it fires.
+            if (body.AttachStop is not null || body.AttachTakeProfit is not null)
+                return Results.BadRequest(new
+                {
+                    error = "invalid_attached_stop",
+                    message = "A protective stop or target cannot be attached to a rule order. Add a "
+                            + "stop after it fills."
+                });
+
+            var validation = conditions.Validate(new ArmedConditionRequest(
+                symbol, action, ruleOrderType, body.Price, body.ConditionSpec));
+            if (!validation.Ok)
+                return Results.BadRequest(new
+                {
+                    error = validation.ErrorCode ?? "invalid_condition",
+                    message = validation.Message ?? "The rule could not be read."
+                });
+
+            conditionSpec = validation.NormalizedSpec;
+            conditionSummary = validation.Summary;
+            triggerLevel = null;
+        }
+        else if (!string.IsNullOrWhiteSpace(body.ConditionSpec))
+        {
+            return Results.BadRequest(new
+            {
+                error = "invalid_condition",
+                message = "A condition document applies only to a Rule order."
+            });
+        }
+        else if (kind == ArmedTriggerKind.Event)
+        {
+            if (!Enum.TryParse<AlertKind>(body.TriggerAlertKind, ignoreCase: true, out var parsed))
+                return Results.BadRequest(new
+                {
+                    error = "invalid_alert_kind",
+                    message = $"Event triggers need an alert kind: {string.Join(", ", Enum.GetNames<AlertKind>())}."
+                });
+            alertKind = parsed;
+            triggerLevel = null;
+        }
+        else if (kind == ArmedTriggerKind.Scheduled)
+        {
+            // The date is the entire condition, so there is nothing else to validate here — and
+            // nothing else may be stored. The rules are in ScheduledOrderRule so they can be
+            // tabled rather than reached only through a broker, a universe and a database.
+            if (ScheduledOrderRule.ValidateScheduledRequest(
+                    body.ActiveFromDate, body.TriggerPrice, body.TriggerPercent,
+                    body.TriggerAlertKind) is { } problem)
+                return Results.BadRequest(new { error = problem.Code, message = problem.Message });
+
+            triggerLevel = null;
+        }
+        else if (PercentTrigger.IsPercent(kind))
+        {
+            // A percent trigger is "if it drops 3%", which needs a size of move and a price to
+            // measure it from. The level is DERIVED from those two and stored alongside them, so a
+            // reader that only knows about levels still sees a real number — see ArmedOrder.
+            if (body.TriggerPercent is not > 0 || body.TriggerPercent > PercentTrigger.MaxPercent)
+                return Results.BadRequest(new
+                {
+                    error = "invalid_trigger_percent",
+                    message = $"A percent trigger needs a move between 0 and {PercentTrigger.MaxPercent}%."
+                });
+
+            triggerPercent = Math.Round(body.TriggerPercent.Value, 2, MidpointRounding.AwayFromZero);
+
+            // The caller normally sends the price it was showing the operator, so the level armed
+            // is exactly the level they were quoted. Capturing it here is the fallback for a
+            // scripted caller with no screen — one snapshot, and only on that path.
+            referencePrice = body.ReferencePrice is > 0 ? body.ReferencePrice : null;
+            if (referencePrice is null)
+            {
+                try
+                {
+                    var snapshot = await quotes.GetQuotesAsync(ct);
+                    if (snapshot.Quotes.TryGetValue(symbol, out var quote) && quote.Current is > 0)
+                        referencePrice = quote.Current;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    logger.LogWarning(ex,
+                        "[ArmedOrders] Could not capture a reference price for {Symbol}.", symbol);
+                }
+            }
+
+            if (referencePrice is not > 0)
+                return Results.BadRequest(new
+                {
+                    error = "no_reference_price",
+                    message = $"A percent trigger measures the move from a price, and no live price "
+                            + $"for '{symbol}' is available right now. Send referencePrice, or arm a "
+                            + "PriceBelow/PriceAbove trigger at an exact level instead."
+                });
+
+            triggerLevel = PercentTrigger.Level(kind, referencePrice, triggerPercent);
+            if (triggerLevel is not > 0)
+                return Results.BadRequest(new
+                {
+                    error = "invalid_trigger_percent",
+                    message = $"{triggerPercent}% from {referencePrice} does not produce a usable "
+                            + "price level."
+                });
+
+            // A move too small for the price rounds onto the price it is measured from: 0.04% under
+            // 12.04 is 12.04. Such a trigger is met the moment it is armed, which is an immediate
+            // order wearing a waiting order's label.
+            if (PercentTriggerRule.LevelIsAtReference(kind, referencePrice.Value, triggerLevel.Value))
+                return Results.BadRequest(new
+                {
+                    error = "invalid_trigger_percent",
+                    message = $"{triggerPercent}% of {referencePrice} is less than one paisa, so this "
+                            + "would trigger at once. Use a larger move."
+                });
+
+            trailing = body.Trailing;
+
+            if (body.TriggerWindowMinutes is { } minutes)
+            {
+                if (minutes < 1 || minutes > RecentPriceWindow.MaxWindowMinutes)
+                    return Results.BadRequest(new
+                    {
+                        error = "invalid_trigger_window",
+                        message = $"A price window must be between 1 and "
+                                + $"{RecentPriceWindow.MaxWindowMinutes} trading minutes."
+                    });
+
+                // A trail only ratchets; a window's high ages out and can fall. One order cannot
+                // be both, and silently picking one would arm something other than what was asked.
+                if (trailing)
+                    return Results.BadRequest(new
+                    {
+                        error = "invalid_trigger_window",
+                        message = "Choose a trailing reference or a recent-price window, not both."
+                    });
+
+                windowMinutes = minutes;
+            }
+        }
+        else if (body.TriggerWindowMinutes is not null)
+        {
+            return Results.BadRequest(new
+            {
+                error = "invalid_trigger_window",
+                message = "A price window applies only to a percent trigger."
+            });
+        }
+        else if (body.TriggerPrice is not > 0)
+        {
+            return Results.BadRequest(new
+            {
+                error = "invalid_trigger_price",
+                message = "A price trigger needs a positive level."
+            });
+        }
+
+        // ── When this order becomes active, and when it gives up ──────────────────────────
+        //
+        // Both bounds come from ScheduledOrderRule, which owns the PKT conversion, the default
+        // expiry's anchor and the ordering check as pure, tabled rules.
+        //
+        // Note what is deliberately NOT checked: whether the date is a TRADING day.
+        // IMarketCalendar.IsTradingDay reads a configured holiday list that ships EMPTY, so such a
+        // refusal would catch weekends and nothing else — arm-time protection that looks real and
+        // mostly is not. The order goes to the broker and the venue decides, which is how every
+        // other order in this system already behaves; a date the exchange is shut on simply waits
+        // for the open that follows it.
+        var window = ScheduledOrderRule.Resolve(
+            body.ActiveFromDate, body.ExpiresUtc, body.ExpiresInDays,
+            PsxTime.Today(), DateTime.UtcNow);
+
+        if (!window.Ok)
+            return Results.BadRequest(new { error = window.ErrorCode, message = window.Message });
+
+        // Refuse up front rather than at fire time. An armed order for a non-tradable symbol would
+        // sit there looking like protection and be rejected by the risk engine the moment it
+        // mattered — which is the failure mode worth designing out.
+        if (!await universe.IsTradableAsync(symbol, ct))
+            return Results.BadRequest(new
+            {
+                error = "not_tradable",
+                message = $"'{symbol}' is not in the selected execution universe, so an order for it would be refused "
+                        + "by the risk engine. Arming one would be protection in name only."
+            });
+
+        // A manual-only symbol is deliberately NOT refused here. Manual means "I manage this
+        // name myself, no strategy or plan does" — and arming an order by hand is the operator
+        // managing it. The order below claims OperatorOriginated, which carries that fact to the
+        // execution boundary so it fires like any other. What manual-only still refuses is a
+        // strategy originating an order on its own; see TradingManager.
+
+        // Same reasoning as the tradability check above, applied to the stop's own geometry: an
+        // armed stop whose limit sits on the wrong side of its trigger is refused by the risk
+        // engine at fire time, which is the one moment it was supposed to work. Checking it here
+        // means the order is either armed and fillable, or never armed at all.
+        //
+        // The direction comes from the TRIGGER, not the side — a BUY armed to fire on a falling
+        // price wants its limit BELOW the trigger, and judging it by the side alone is what
+        // refused a legitimate FFC dip-buy live on 2026-08-18. See StopLimitRule.
+        var stopProblem = StopLimitRule.Validate(
+            action,
+            (body.OrderType ?? "LIMIT").Trim().ToUpperInvariant(),
+            PercentTrigger.FiresOnRisingPrice(kind),
+            body.Price,
+            body.LimitPrice);
+
+        if (stopProblem is not null)
+            return Results.BadRequest(new
+            {
+                error = "invalid_stop_limit",
+                message = $"This order would be refused when it fired: {stopProblem}"
+            });
+
+        // A price bound belongs to a trailing LIMIT and to nothing else. It is the fill bound AND the
+        // submission condition, so it is refused anywhere it could only be half of that: a MARKET
+        // order has no limit to clamp, and a fixed or windowed trigger has no trail to skip a move of.
+        // It rides the keep-working lifecycle because that is the path whose limit is frozen at the
+        // bounded price and carried across sessions.
+        decimal? priceBound = null;
+        if (body.PriceBound is { } bound)
+        {
+            var orderType = (body.OrderType ?? "LIMIT").Trim().ToUpperInvariant();
+            string? boundProblem =
+                bound <= 0 ? "A price bound must be a positive price."
+                : !PercentTrigger.IsPercent(kind) || !trailing
+                    ? "A maximum buy or minimum sell price applies only to a trailing order."
+                : orderType != "LIMIT" ? "A maximum buy or minimum sell price needs a LIMIT order."
+                : !body.PersistentUntilFilled
+                    ? "A trailing order with a price bound keeps its unfilled remainder working; "
+                      + "set persistentUntilFilled."
+                : null;
+
+            if (boundProblem is not null)
+                return Results.BadRequest(new { error = "invalid_price_bound", message = boundProblem });
+
+            priceBound = Math.Round(bound, 2, MidpointRounding.AwayFromZero);
+        }
+
+        if (body.PersistentUntilFilled
+            && PersistentOrderDecisions.ValidateEligibility(body.OrderType) is { } persistenceProblem)
+        {
+            return Results.BadRequest(new
+            {
+                error = "order_not_persistable",
+                message = persistenceProblem
+            });
+        }
+
+        var order = new ArmedOrder
+        {
+            ArmedId          = Guid.NewGuid().ToString("N"),
+            Symbol           = symbol,
+            TriggerKind      = kind,
+            TriggerPrice     = triggerLevel,
+            TriggerAlertKind = alertKind,
+            TriggerPercent   = triggerPercent,
+            ReferencePrice   = referencePrice,
+            Trailing         = trailing,
+            TriggerWindowMinutes = windowMinutes,
+            Action           = action,
+            Quantity         = body.Quantity!.Value,
+            OrderType        = (body.OrderType ?? "LIMIT").Trim().ToUpperInvariant(),
+            Price            = body.Price,
+            LimitPrice       = body.LimitPrice,
+            PersistentUntilFilled = body.PersistentUntilFilled,
+            PriceBound       = priceBound,
+            // Someone is standing at the dashboard arming this, or approved this exact order in chat (an
+            // edition's IHumanApprovedTool, which refuses without that approval). That is what lets it fire on
+            // a manual-only symbol — see ArmedOrder.OperatorOriginated. Never call this for automation.
+            OperatorOriginated = true,
+            // Default an expiry: an entry trigger left open indefinitely can fire months later
+            // against a thesis nobody remembers forming. Resolved above, because a scheduled
+            // order's default is measured from its activation date rather than from now.
+            ExpiresUtc       = window.ExpiresUtc,
+            ActiveFromUtc    = window.ActiveFromUtc,
+            Note             = body.Note,
+            SourceAlertId    = body.SourceAlertId,
+            ConditionSpec    = conditionSpec,
+            ConditionSummary = conditionSummary
+        };
+
+        // Validated by AttachedStopRule, which the immediate-order path uses too so the two cannot
+        // drift on what an attachable stop is. It owns the BUY-only rule and both level checks.
+        // A trailing order's entry price is unknown until it triggers, and by then the trail has moved
+        // away from the level known now — for a trailing buy, usually well below it. Both attachment
+        // rules check against that level, so an attached stop could rest above the real fill and sell
+        // the moment it was placed. Refused rather than checked against a number that is not the entry.
+        if (trailing && (body.AttachStop is not null || body.AttachTakeProfit is not null))
+            return Results.BadRequest(new
+            {
+                error = "invalid_attached_stop",
+                message = "A protective stop or target cannot be attached to a trailing order: its "
+                        + "entry price is not known until it triggers. Add a stop after it fills."
+            });
+
+        ProtectiveStop? attached = null;
+        if (body.AttachStop is { } attach)
+        {
+            var plan = AttachedStopRule.Validate(
+                action, attach.StopTrigger, attach.StopLimit, order.Price ?? order.TriggerPrice);
+            if (!plan.Ok)
+                return Results.BadRequest(new { error = plan.ErrorCode, message = plan.Message });
+
+            decimal? takeProfitPrice = null;
+            if (body.AttachTakeProfit is { } target)
+            {
+                var targetPlan = AttachedTakeProfitRule.Validate(
+                    action, target.Price, order.Price ?? order.TriggerPrice, hasAttachedStop: true);
+                if (targetPlan.ErrorCode is not null)
+                    return Results.BadRequest(new
+                    {
+                        error = targetPlan.ErrorCode,
+                        message = targetPlan.Message
+                    });
+                takeProfitPrice = targetPlan.Price;
+            }
+
+            attached = new ProtectiveStop
+            {
+                StopId        = Guid.NewGuid().ToString("N"),
+                Symbol        = symbol,
+                ParentArmedId = order.ArmedId,
+                StopTrigger   = plan.StopTrigger,
+                StopLimit     = plan.StopLimit,
+                // Sized at fill time, never here: what matters is what the entry actually buys.
+                DesiredQuantity = 0,
+                Recurring     = attach.Recurring,
+                State         = "pending_fill",
+                TakeProfitPrice = takeProfitPrice,
+                Note          = attach.Quantity is { } wanted
+                                    ? $"Requested cover: {wanted} share(s)."
+                                    : null,
+                // Attached by hand to an entry armed by hand; it inherits the entry's origination.
+                OperatorOriginated = true,
+                SellAtMarketIfMissed = attach.SellAtMarketIfMissed
+            };
+        }
+        else if (body.AttachTakeProfit is { } target)
+        {
+            var targetPlan = AttachedTakeProfitRule.Validate(
+                action, target.Price, order.Price ?? order.TriggerPrice, hasAttachedStop: false);
+            return Results.BadRequest(new
+            {
+                error = targetPlan.ErrorCode,
+                message = targetPlan.Message
+            });
+        }
+
+        // An EDIT of a rule order is a replacement: the old one is disarmed with a compare-and-set
+        // and the new one saved, so an order that fired a moment ago is never edited after the fact.
+        // Every check above has already passed, so a refused edit changes nothing at all.
+        string? replacedArmedId = null;
+        if (!string.IsNullOrWhiteSpace(body.ReplacesArmedId))
+        {
+            if (kind != ArmedTriggerKind.Rule)
+                return Results.BadRequest(new
+                {
+                    error = "invalid_replace",
+                    message = "Only a rule order can be edited; disarm this one and arm a new order."
+                });
+
+            var current = (await repository.GetArmedOrdersAsync(armedOnly: true, ct))
+                .FirstOrDefault(o => o.ArmedId == body.ReplacesArmedId);
+            if (current is null || current.TriggerKind != ArmedTriggerKind.Rule
+                || !await repository.TrySetArmedOrderStateAsync(
+                    current.ArmedId, "armed", "cancelled", $"Replaced by an edit (now {order.ArmedId}).", ct: ct))
+                return Results.Conflict(new
+                {
+                    error = "not_armed",
+                    message = "That rule order is no longer waiting. It may have fired, expired or been "
+                            + "cancelled. Nothing was changed."
+                });
+
+            replacedArmedId = current.ArmedId;
+        }
+
+        string id;
+        try
+        {
+            id = await repository.SaveArmedOrderAsync(order, ct);
+        }
+        catch when (replacedArmedId is not null)
+        {
+            // Put the original back rather than leave the operator with neither.
+            await repository.TrySetArmedOrderStateAsync(
+                replacedArmedId, "cancelled", "armed", "The edit could not be saved; restored.",
+                ct: CancellationToken.None);
+            throw;
+        }
+
+        if (replacedArmedId is not null)
+            logger.LogWarning("[ArmedOrders] {Old} replaced by {New} (edited rule).", replacedArmedId, id);
+
+        // The price the operator armed against is the window's first observation, so a fall
+        // before the monitor's next pass is still measured from it. Only while the market is open:
+        // a price recorded while it is shut would be counted as trading time.
+        if (order.IsWindowed && referencePrice is { } seed && calendar.GetStatus().IsOpen)
+            recentPrices.Record(symbol, seed, DateTime.UtcNow,
+                RecentPriceWindow.MaxGapFor(options.Value.Monitor.IntervalSeconds));
+        if (attached is not null)
+        {
+            await repository.SaveProtectiveStopAsync(attached, ct);
+
+            // Not awaited, on purpose. A fill is proved by holdings RISING, which needs the
+            // holding from before the entry went in — and an entry armed at a level the price is
+            // already touching can trigger before the periodic pass ever takes that reading.
+            // Kicking it here shrinks the window from minutes to seconds without making the
+            // operator wait on a page scrape.
+            protectiveStops.CaptureBaselineSoon(attached.StopId);
+
+            logger.LogWarning(
+                "[ProtectiveStops] {StopId} attached to entry {ArmedId}: SELL stop {Trigger}/{Limit} "
+                + "on {Symbol}, recurring={Recurring}.",
+                attached.StopId, id, attached.StopTrigger, attached.StopLimit, symbol,
+                attached.Recurring);
+        }
+
+        var unattended = approvals.DescribeUnattendedPolicy();
+        logger.LogWarning(
+            "[ArmedOrders] Armed {ArmedId}: {Action} {Qty} {Symbol} on {Kind} {Level}{Basis}. "
+            + "Approval mode {Mode}.",
+            id, action, order.Quantity, symbol, kind,
+            order.TriggerPrice?.ToString() ?? alertKind?.ToString() ?? "",
+            triggerPercent is null
+                ? ""
+                : $" ({triggerPercent}% from {referencePrice}"
+                  + (trailing ? ", trailing" : "")
+                  + (priceBound is { } b ? $", {(action == "BUY" ? "max" : "min")} {b}" : "")
+                  + (windowMinutes is { } w ? $", from the {w}-minute extreme" : "") + ")",
+            options.Value.Approval.Mode);
+
+        return Results.Ok(new
+        {
+            armedId = id,
+            order = new
+            {
+                order.ArmedId,
+                order.Symbol,
+                triggerKind = order.TriggerKind.ToString(),
+                order.TriggerPrice,
+                triggerAlertKind = order.TriggerAlertKind?.ToString(),
+                order.TriggerPercent,
+                order.ReferencePrice,
+                order.Trailing,
+                order.TriggerWindowMinutes,
+                order.PersistentUntilFilled,
+                order.PriceBound,
+                order.Action,
+                order.Quantity,
+                order.OrderType,
+                order.Price,
+                order.LimitPrice,
+                order.State,
+                order.ArmedUtc,
+                order.ExpiresUtc,
+                order.Note,
+                order.ConditionSummary
+            },
+            replacedArmedId,
+            // Said plainly at arm time, not discovered at fire time — and asked of the gate rather
+            // than re-derived here, since the execution mode matters as much as the approval mode.
+            willFireUnattended = unattended.WillFireUnattended,
+            note = unattended.Explanation,
+            attachedStop = attached is null ? null : new
+            {
+                attached.StopId,
+                attached.StopTrigger,
+                attached.StopLimit,
+                attached.Recurring,
+                attached.State,
+                attached.TakeProfitPrice,
+                attached.TakeProfitArmedId,
+                // The honest version of "and then it's protected". Each clause is a real gap the
+                // operator would otherwise find out about from a position that was not covered.
+                note = "The stop is dormant until the entry is confirmed filled by an increase in "
+                     + "your holdings, which is checked every few minutes while the market is open. "
+                     + (attached.Recurring
+                            ? "It is then re-placed at the broker each session, because outstanding "
+                            + "orders are cleared at the close."
+                            : "It is placed once and NOT re-placed after that session, so the "
+                            + "position stops being protected the next day.")
+            }
+        });
     }
 }

@@ -430,13 +430,15 @@ public sealed class AgentOrchestrator : IHostedService
             builder = builder.WithLogger(_loggerFactory.CreateLogger<FoxAgent>());
 
         // ── HITL Mode 1 + plan/execute gate ───────────────────────────────────
-        // One gate serves two concerns:
+        // One gate serves three concerns:
         //   • Plan enforcement — mutating tools are blocked until the session's plan is approved.
         //   • Per-tool approval — watched tools require an explicit human /approve.
-        // Trusted contexts (HitlBypassPolicy) skip the human step entirely.
+        //   • IHumanApprovedTool — always asks a person, whatever the two settings above say.
+        // Trusted contexts (HitlBypassPolicy) skip the human step for watched tools only.
+        // Installed unconditionally: an IHumanApprovedTool must be asked about even on a deployment with HITL off,
+        // and for every other tool the decision is a cheap pure function.
         var hitlConfig = _configuration.GetSection("Hitl").Get<HitlConfig>() ?? new HitlConfig();
         var planCfg    = _configuration.GetSection("Plan").Get<PlanConfig>() ?? new PlanConfig();
-        var bypass     = new HitlBypassPolicy(hitlConfig);
 
         var watchedTools = new HashSet<string>(
             hitlConfig.Enabled ? hitlConfig.RequireApprovalForTools : Enumerable.Empty<string>(),
@@ -445,93 +447,8 @@ public sealed class AgentOrchestrator : IHostedService
             planCfg.Enabled ? planCfg.MutatingTools : Enumerable.Empty<string>(),
             StringComparer.OrdinalIgnoreCase);
 
-        if (watchedTools.Count > 0 || mutatingTools.Count > 0)
-        {
-            builder = builder.WithToolApprovalGate(async (toolName, args, ct) =>
-            {
-                var sessionKey  = FoxAgent.CurrentSessionKey.Value;
-                var sessionInfo = sessionKey != null ? _sessionManager.GetSession(sessionKey) : null;
-
-                // The decision itself is a pure function (ToolGate.Decide) so it can be asserted
-                // on without a session manager, a channel or a human. Everything below this line
-                // is delivery, and only the RequiresHumanApproval branch reaches it.
-                var outcome = ToolGate.Decide(
-                    toolName,
-                    mutatingTools,
-                    watchedTools,
-                    _planStore.For(sessionKey ?? string.Empty).Phase,
-                    bypass.IsBypassed(sessionInfo, _agentHolder.Agent?.Role));
-
-                if (outcome != ToolGateOutcome.RequiresHumanApproval)
-                {
-                    // RefusedPendingPlan is surfaced to the model, which the plan-phase prompt
-                    // then steers towards submit_plan.
-                    if (outcome == ToolGateOutcome.RefusedPendingPlan)
-                        _logger?.LogDebug(
-                            "Tool '{ToolName}' refused: no approved plan for session {SessionKey}.",
-                            toolName, sessionKey);
-
-                    return ToolGate.IsAllowedWithoutHuman(outcome);
-                }
-
-                var channelId   = sessionInfo?.ChannelId;
-                var approvalId  = Guid.NewGuid().ToString("N")[..8].ToUpper();
-                var argsPreview = args.Count == 0
-                    ? string.Empty
-                    : string.Join(", ", args.Take(3).Select(kv => $"{kv.Key}={kv.Value}"));
-
-                var msg =
-                    $"🔐 **Approval Required** `[{approvalId}]`\n\n" +
-                    $"Agent wants to run: **{toolName}**" +
-                    (argsPreview.Length > 0 ? $"\nArguments: `{argsPreview}`" : string.Empty) +
-                    $"\n\n`/approve {approvalId}` — allow\n`/reject {approvalId} [reason]` — block";
-
-                var request = new HitlRequest(
-                    approvalId, sessionKey ?? string.Empty, channelId,
-                    HitlTrigger.Tool, toolName, argsPreview);
-
-                // Broadcast to every connected channel — not just the one this session
-                // originated from — plus the console, so any reachable surface (including
-                // the web UI polling HitlManager.GetPendingForSession) can resolve it.
-                // HitlManager.Respond is already id-based and channel-agnostic, so whichever
-                // surface answers first wins; the rest are harmless no-ops. Channels that
-                // support interactive UI (Discord buttons, Telegram inline keyboards) render
-                // these as one-click controls instead of requiring a typed command.
-                var actions = new List<ChannelAction>
-                {
-                    new("✅ Approve", $"/approve {approvalId}"),
-                    new("❌ Reject", $"/reject {approvalId}")
-                };
-                var deliveredTo = _channelManager != null
-                    ? await _channelManager.BroadcastActionableAsync(
-                        msg, actions, NotificationTopics.HitlApproval)
-                    : 0;
-
-                // Console fallback — always prints; it's one more parallel notification
-                // surface now, not gated on "no channel configured" (matters for a headless
-                // service deployment with channels but no interactive console, and vice versa).
-                // Through ConsoleGate because this gate fires on every lane: printed directly from
-                // a cron or sub-agent turn it lands in the middle of whatever the REPL was drawing.
-                ConsoleGate.Write(() =>
-                {
-                    AnsiConsole.WriteLine();
-                    AnsiConsole.MarkupLine($"[bold yellow]🔐 Approval Required[/] [[{Markup.Escape(approvalId)}]]");
-                    AnsiConsole.MarkupLine($"Tool: [bold]{Markup.Escape(toolName)}[/]");
-                    if (argsPreview.Length > 0)
-                        AnsiConsole.MarkupLine($"Args: [dim]{Markup.Escape(argsPreview)}[/]");
-                    AnsiConsole.MarkupLine($"[dim]Type [bold]/hitl approve {Markup.Escape(approvalId)}[/] or [bold]/hitl reject {Markup.Escape(approvalId)}[/][/]");
-                });
-
-                if (deliveredTo == 0 && Console.IsInputRedirected)
-                    _logger?.LogWarning(
-                        "HITL approval [{ApprovalId}] has no reachable notification surface — " +
-                        "no connected channels and no interactive console. It will remain pending until it times out or the process restarts.",
-                        approvalId);
-
-                var decision = await _hitlManager.RequestApprovalAsync(request, ct);
-                return decision.Approved;
-            });
-        }
+        builder = builder.WithToolApprovalGate(
+            CreateToolApprovalGate(watchedTools, mutatingTools, new HitlBypassPolicy(hitlConfig), planAware: true));
 
         // Steer the model per plan phase (research / awaiting / execute).
         if (planCfg.Enabled)
@@ -550,6 +467,142 @@ public sealed class AgentOrchestrator : IHostedService
 
         return builder.Build();
     }
+
+    /// <summary>
+    /// The tool-approval gate. The main agent passes its configured watched and mutating tools; a specialist passes none, so on a
+    /// specialist only an <see cref="IHumanApprovedTool"/> is ever put to a person (a specialist has no plan phase, and what it
+    /// does with its other tools is unchanged by this).
+    /// </summary>
+    private Func<ITool, Dictionary<string, object?>, CancellationToken, Task<ToolApprovalVerdict>> CreateToolApprovalGate(
+        IReadOnlySet<string> watchedTools,
+        IReadOnlySet<string> mutatingTools,
+        HitlBypassPolicy bypass,
+        bool planAware) => async (tool, args, ct) =>
+    {
+        var toolName    = tool.Name;
+        var humanTool   = tool as IHumanApprovedTool;
+        var sessionKey  = FoxAgent.CurrentSessionKey.Value;
+        var sessionInfo = sessionKey != null ? _sessionManager.GetSession(sessionKey) : null;
+
+        // The decision itself is a pure function (ToolGate.Decide) so it can be asserted
+        // on without a session manager, a channel or a human. Everything below this line
+        // is delivery, and only the RequiresHumanApproval branch reaches it.
+        var outcome = ToolGate.Decide(
+            toolName,
+            mutatingTools,
+            watchedTools,
+            planAware ? _planStore.For(sessionKey ?? string.Empty).Phase : PlanPhase.Execute,
+            bypass.IsBypassed(sessionInfo, _agentHolder.Agent?.Role),
+            requiresHuman: humanTool is not null);
+
+        if (outcome != ToolGateOutcome.RequiresHumanApproval)
+        {
+            // RefusedPendingPlan is surfaced to the model, which the plan-phase prompt
+            // then steers towards submit_plan.
+            if (outcome == ToolGateOutcome.RefusedPendingPlan)
+                _logger?.LogDebug(
+                    "Tool '{ToolName}' refused: no approved plan for session {SessionKey}.",
+                    toolName, sessionKey);
+
+            return ToolGate.IsAllowedWithoutHuman(outcome) ? ToolApprovalVerdict.Allow() : ToolApprovalVerdict.Block();
+        }
+
+        var origin      = sessionInfo?.Origin.ToString();
+        var channelType = sessionInfo?.ChannelType;
+        string details;
+        if (humanTool is not null)
+        {
+            // What the person approves is the tool's own account of what will happen, never the model's arguments; and a
+            // call the tool already knows it will refuse is not put to anyone.
+            ToolApprovalPrompt prompt;
+            try
+            {
+                prompt = await humanTool.DescribeForApprovalAsync(
+                    args, new ToolApprovalContext(sessionKey, origin, channelType), ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger?.LogWarning(ex, "Tool '{ToolName}' could not describe its call for approval.", toolName);
+                return ToolApprovalVerdict.Block(
+                    $"Tool '{toolName}' could not prepare its approval request, so nobody was asked and nothing was done.");
+            }
+
+            if (prompt.Refusal is { Length: > 0 } refusal)
+                return ToolApprovalVerdict.Block(refusal);
+            details = (prompt.Text ?? string.Empty).Trim();
+            if (details.Length > 4000) details = details[..4000] + "…";
+        }
+        else
+        {
+            details = args.Count == 0
+                ? string.Empty
+                : string.Join(", ", args.Take(3).Select(kv => $"{kv.Key}={kv.Value}"));
+        }
+
+        var channelId  = sessionInfo?.ChannelId;
+        var approvalId = Guid.NewGuid().ToString("N")[..8].ToUpper();
+
+        var msg =
+            $"🔐 **Approval Required** `[{approvalId}]`\n\n" +
+            $"Agent wants to run: **{toolName}**" +
+            (details.Length == 0 ? string.Empty
+                : humanTool is not null ? $"\n\n{details}" : $"\nArguments: `{details}`") +
+            $"\n\n`/approve {approvalId}` — allow\n`/reject {approvalId} [reason]` — block";
+
+        // Filed under the chat that started the run too, so a delegated specialist's request shows in that chat.
+        var rootSessionKey = FoxAgent.RootSessionKey.Value;
+        var request = new HitlRequest(
+            approvalId, sessionKey ?? string.Empty, channelId,
+            HitlTrigger.Tool, toolName, details,
+            rootSessionKey is not null && rootSessionKey != sessionKey ? rootSessionKey : null);
+
+        // Broadcast to every connected channel — not just the one this session
+        // originated from — plus the console, so any reachable surface (including
+        // the web UI polling HitlManager.GetPendingForSession) can resolve it.
+        // HitlManager.Respond is already id-based and channel-agnostic, so whichever
+        // surface answers first wins; the rest are harmless no-ops. Channels that
+        // support interactive UI (Discord buttons, Telegram inline keyboards) render
+        // these as one-click controls instead of requiring a typed command.
+        var actions = new List<ChannelAction>
+        {
+            new("✅ Approve", $"/approve {approvalId}"),
+            new("❌ Reject", $"/reject {approvalId}")
+        };
+        var deliveredTo = _channelManager != null
+            ? await _channelManager.BroadcastActionableAsync(
+                msg, actions, NotificationTopics.HitlApproval)
+            : 0;
+
+        // Console fallback — always prints; it's one more parallel notification
+        // surface now, not gated on "no channel configured" (matters for a headless
+        // service deployment with channels but no interactive console, and vice versa).
+        // Through ConsoleGate because this gate fires on every lane: printed directly from
+        // a cron or sub-agent turn it lands in the middle of whatever the REPL was drawing.
+        ConsoleGate.Write(() =>
+        {
+            AnsiConsole.WriteLine();
+            AnsiConsole.MarkupLine($"[bold yellow]🔐 Approval Required[/] [[{Markup.Escape(approvalId)}]]");
+            AnsiConsole.MarkupLine($"Tool: [bold]{Markup.Escape(toolName)}[/]");
+            if (details.Length > 0)
+                AnsiConsole.MarkupLine($"Args: [dim]{Markup.Escape(details)}[/]");
+            AnsiConsole.MarkupLine($"[dim]Type [bold]/hitl approve {Markup.Escape(approvalId)}[/] or [bold]/hitl reject {Markup.Escape(approvalId)}[/][/]");
+        });
+
+        if (deliveredTo == 0 && Console.IsInputRedirected)
+            _logger?.LogWarning(
+                "HITL approval [{ApprovalId}] has no reachable notification surface — " +
+                "no connected channels and no interactive console. It will remain pending until it times out or the process restarts.",
+                approvalId);
+
+        var decision = await _hitlManager.RequestApprovalAsync(request, ct);
+        if (!decision.Approved)
+            return ToolApprovalVerdict.Block(decision.Feedback is { Length: > 0 } feedback
+                ? $"Tool '{toolName}' was not approved: {feedback}"
+                : null);
+
+        return ToolApprovalVerdict.Allow(
+            new HumanToolApproval(toolName, approvalId, sessionKey, origin, channelType, DateTime.UtcNow));
+    };
 
     // ─────────────────────────────────────────────────────────────────────────
     // Plugin notification
@@ -592,6 +645,11 @@ public sealed class AgentOrchestrator : IHostedService
     private void ActivateSpecialistAgents()
     {
         var toolsConfig = _configuration.GetSection("Tools").Get<ToolsConfig>() ?? new ToolsConfig();
+        var specialistHitl = _configuration.GetSection("Hitl").Get<HitlConfig>() ?? new HitlConfig();
+        var specialistWatched = new HashSet<string>(
+            specialistHitl.Enabled ? specialistHitl.RequireApprovalForTools : Enumerable.Empty<string>(),
+            StringComparer.OrdinalIgnoreCase);
+        var specialistBypass = new HitlBypassPolicy(specialistHitl);
         foreach (var descriptor in _specialistAgents.GetDescriptors())
         {
             var isolatedTools = new ToolRegistry();
@@ -672,6 +730,11 @@ public sealed class AgentOrchestrator : IHostedService
                 .WithSessionManager(_sessionManager)
                 .WithExperienceLearning(_experienceLearning)
                 .WithToolGates(descriptor.ToolGates, descriptor.PromptFragment)
+                // The SAME watched tools and bypass rules as the main agent (Hitl.RequireApprovalForTools): until
+                // 2026-11-23 a specialist had no gate at all, so place_order there ran with nobody asked even with
+                // place_order on that list. No plan phase (a main-agent concept). An IHumanApprovedTool is always asked.
+                .WithToolApprovalGate(CreateToolApprovalGate(
+                    specialistWatched, new HashSet<string>(), specialistBypass, planAware: false))
                 .WithCompactionFromConfig(_configuration)
                 .WithTodoPlannerFromConfig(_configuration)
                 // Same source name as the main agent; the span's agent name is what separates
