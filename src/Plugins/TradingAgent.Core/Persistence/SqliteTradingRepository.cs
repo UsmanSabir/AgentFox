@@ -2057,7 +2057,9 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                     -- Rule orders only: the edition's condition document (opaque here) and its one-line
                     -- summary. See ArmedOrder.ConditionSpec. Retention is the table's own.
                     condition_spec TEXT NULL,
-                    condition_summary TEXT NULL
+                    condition_summary TEXT NULL,
+                    -- Who armed it when not a person at the dashboard (chat, mcp:<agent>). See ArmedOrder.ArmedBy.
+                    armed_by TEXT NULL
                 );
                 CREATE INDEX IF NOT EXISTS ix_armed_orders_state
                     ON armed_orders(state, symbol);
@@ -2324,6 +2326,9 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                 connection, "armed_orders", "condition_spec", "TEXT NULL", ct);
             await AddColumnIfMissingAsync(
                 connection, "armed_orders", "condition_summary", "TEXT NULL", ct);
+            // NULL for every existing row: each was armed by a person at the dashboard or by core's own workers.
+            await AddColumnIfMissingAsync(
+                connection, "armed_orders", "armed_by", "TEXT NULL", ct);
             await AddColumnIfMissingAsync(
                 connection, "protective_stops", "operator_originated", "INTEGER NOT NULL DEFAULT 0", ct);
             await AddColumnIfMissingAsync(
@@ -2974,11 +2979,11 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                  protective_stop_id, trigger_percent, reference_price, trailing,
                  persistent_until_filled, operator_originated, active_from_utc, trigger_window_minutes,
                  pullback_price, pullback_count, rearm_count, price_bound, skipped_reference,
-                 condition_spec, condition_summary)
+                 condition_spec, condition_summary, armed_by)
             VALUES ($id, $symbol, $kind, $tprice, $talert, $action, $qty,
                     $otype, $price, $limit, $state, $armed, $expires, $note, $alert, $stop,
                     $tpercent, $reference, $trailing, $persistent, $operator, $activeFrom, $window,
-                    $pullback, $pullbacks, $rearms, $bound, $skipped, $conditionSpec, $conditionSummary)
+                    $pullback, $pullbacks, $rearms, $bound, $skipped, $conditionSpec, $conditionSummary, $armedBy)
             """;
         command.Parameters.AddWithValue("$id", order.ArmedId);
         command.Parameters.AddWithValue("$symbol", order.Symbol);
@@ -3014,6 +3019,7 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         command.Parameters.AddWithValue("$skipped", Money(order.SkippedReference));
         command.Parameters.AddWithValue("$conditionSpec", order.ConditionSpec ?? (object)DBNull.Value);
         command.Parameters.AddWithValue("$conditionSummary", order.ConditionSummary ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$armedBy", order.ArmedBy ?? (object)DBNull.Value);
         await command.ExecuteNonQueryAsync(ct);
         return order.ArmedId;
     }
@@ -3031,7 +3037,7 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                    trigger_percent, reference_price, trailing, persistent_until_filled,
                    operator_originated, active_from_utc, trigger_window_minutes,
                    pullback_price, pullback_count, rearm_count, pullback_requested_utc,
-                   price_bound, skipped_reference, condition_spec, condition_summary
+                   price_bound, skipped_reference, condition_spec, condition_summary, armed_by
             FROM armed_orders
             {(armedOnly ? "WHERE state = 'armed'" : "")}
             ORDER BY armed_utc DESC
@@ -3151,7 +3157,7 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                    trigger_percent, reference_price, trailing, persistent_until_filled,
                    operator_originated, active_from_utc, trigger_window_minutes,
                    pullback_price, pullback_count, rearm_count, pullback_requested_utc,
-                   price_bound, skipped_reference, condition_spec, condition_summary
+                   price_bound, skipped_reference, condition_spec, condition_summary, armed_by
             FROM armed_orders
             WHERE state = 'fired' AND pullback_price IS NOT NULL
             ORDER BY armed_utc DESC
@@ -3301,7 +3307,8 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         PriceBound            = ParseDecimal(reader, 30),
         SkippedReference      = ParseDecimal(reader, 31),
         ConditionSpec         = reader.FieldCount > 32 && !reader.IsDBNull(32) ? reader.GetString(32) : null,
-        ConditionSummary      = reader.FieldCount > 33 && !reader.IsDBNull(33) ? reader.GetString(33) : null
+        ConditionSummary      = reader.FieldCount > 33 && !reader.IsDBNull(33) ? reader.GetString(33) : null,
+        ArmedBy               = reader.FieldCount > 34 && !reader.IsDBNull(34) ? reader.GetString(34) : null
     };
 
     // ── Protective stops ──────────────────────────────────────────────────────

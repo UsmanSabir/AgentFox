@@ -48,6 +48,25 @@ public sealed class ArmedOrderTrailPersistenceTests
     // ── Round trip ────────────────────────────────────────────────────────────
 
     [TestMethod]
+    public async Task WhoArmedAnOrder_RoundTrips_AndADashboardOrderHasNone()
+    {
+        var repository = NewRepository();
+        ArmedOrder Rule(string id, string? armedBy) => new()
+        {
+            ArmedId = id, Symbol = "MEBL", Action = "BUY", OrderType = "LIMIT", Quantity = 10, Price = 90m,
+            TriggerKind = ArmedTriggerKind.Rule, ConditionSpec = "{}", ConditionSummary = "Last price <= 90", ArmedBy = armedBy
+        };
+        await repository.SaveArmedOrderAsync(Rule("agent", "mcp:claude"));
+        await repository.SaveArmedOrderAsync(Rule("chat", "chat"));
+        await repository.SaveArmedOrderAsync(Rule("dashboard", null));
+
+        var stored = (await repository.GetArmedOrdersAsync()).ToDictionary(o => o.ArmedId);
+        Assert.AreEqual("mcp:claude", stored["agent"].ArmedBy);
+        Assert.AreEqual("chat", stored["chat"].ArmedBy);
+        Assert.IsNull(stored["dashboard"].ArmedBy);
+    }
+
+    [TestMethod]
     public async Task APercentTrigger_RoundTripsItsReferenceAndPercentage()
     {
         var repository = NewRepository();

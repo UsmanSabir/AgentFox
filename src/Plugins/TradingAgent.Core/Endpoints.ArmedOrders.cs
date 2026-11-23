@@ -127,7 +127,9 @@ public sealed partial class TradingCoreEndpoints
                     // A rule order: the edition's condition document, handed back opaque for its editor,
                     // and the one-line summary it wrote, for a panel that cannot read the document.
                     o.ConditionSpec,
-                    o.ConditionSummary
+                    o.ConditionSummary,
+                    // Who armed it when not a person at the dashboard: "chat" or "mcp:<agent>". See ArmedOrder.ArmedBy.
+                    o.ArmedBy
                     };
                 }),
                 // Sent with the orders because a stop and the entry it protects are one thing to
@@ -391,7 +393,10 @@ public sealed partial class TradingCoreEndpoints
     /// returns; a caller that is not the route reads them through <see cref="IStatusCodeHttpResult"/> and
     /// <see cref="IValueHttpResult"/>. Resolve <paramref name="services"/> from a scope, as a request's are.
     /// </summary>
-    public static async Task<IResult> ArmOrderAsync(ArmOrderRequest body, IServiceProvider services, CancellationToken ct)
+    /// <param name="armedBy">Who armed it, recorded as <see cref="ArmedOrder.ArmedBy"/>: <c>chat</c> or <c>mcp:&lt;agent&gt;</c>.
+    /// Null — the route's value, never taken from the request body — is a person at the dashboard.</param>
+    public static async Task<IResult> ArmOrderAsync(ArmOrderRequest body, IServiceProvider services, CancellationToken ct,
+        string? armedBy = null)
     {
         ArgumentNullException.ThrowIfNull(body);
         ArgumentNullException.ThrowIfNull(services);
@@ -751,7 +756,8 @@ public sealed partial class TradingCoreEndpoints
             Note             = body.Note,
             SourceAlertId    = body.SourceAlertId,
             ConditionSpec    = conditionSpec,
-            ConditionSummary = conditionSummary
+            ConditionSummary = conditionSummary,
+            ArmedBy          = string.IsNullOrWhiteSpace(armedBy) ? null : armedBy.Trim()
         };
 
         // Validated by AttachedStopRule, which the immediate-order path uses too so the two cannot
@@ -929,7 +935,8 @@ public sealed partial class TradingCoreEndpoints
                 order.ArmedUtc,
                 order.ExpiresUtc,
                 order.Note,
-                order.ConditionSummary
+                order.ConditionSummary,
+                order.ArmedBy
             },
             replacedArmedId,
             // Said plainly at arm time, not discovered at fire time — and asked of the gate rather
