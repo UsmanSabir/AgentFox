@@ -890,6 +890,8 @@ public sealed class ProtectiveStopWorker
                 BaselineQuantity  = stop.BaselineQuantity,
                 OperatorOriginated = stop.OperatorOriginated,
                 SellAtMarketIfMissed = stop.SellAtMarketIfMissed,
+                // Resizing is not a reason to stop trailing.
+                TrailAtrMultiple = stop.TrailAtrMultiple,
                 Note = $"Auto-shrunk from {stop.StopId}: holding is {heldForShrink:0.##}, less than "
                      + $"the {stop.PlacedQuantity} share(s) already resting under it."
             };
