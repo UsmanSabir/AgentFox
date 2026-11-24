@@ -392,6 +392,9 @@
                 fires when {order.triggerKind === 'Event' ? 'event' : 'price'} {describeTrigger(order)}
                 {#if order.activeFromUtc} · not before {describeActivation(order)}{/if}
               {/if}
+              {#if order.notOnWatchlist && order.state === 'armed'}
+                <span class="chip off-list" title="{order.symbol} is not on your watchlist, so this order is kept but will not fire. Add {order.symbol} to the watchlist to make it active again.">not on watchlist · won't fire</span>
+              {/if}
               {#if notYetActive(order) && order.state === 'armed'}
                 <span class="chip scheduled">waiting for {describeActivation(order)}</span>
               {/if}
@@ -554,6 +557,7 @@
   /* Dormant, not live. Deliberately cooler than .trail: a scheduled order is the one row on this
      panel that is doing nothing yet, and it should not compete with the ones that are. */
   .chip.scheduled { color: var(--text-2); border-style: dashed; }
+  .chip.off-list { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 45%, transparent); }
   .meta { color: var(--text-3); font-size: .65rem; }
   .note { margin: 0; color: var(--text-2); font-size: .71rem; }
   .reason { margin: 0; color: var(--warning); font-size: .69rem; line-height: 1.45; }

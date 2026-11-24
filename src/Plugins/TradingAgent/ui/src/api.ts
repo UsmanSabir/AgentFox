@@ -874,6 +874,11 @@ export interface ArmedOrder {
   /** Rule orders: the edition's condition document (opaque here) and its one-line summary. */
   conditionSpec?: string | null;
   conditionSummary?: string | null;
+  /**
+   * The stock is not on the watchlist (Watchlist mode), so this order is kept but does not fire until it
+   * is added back. Optional: an older server never sends it.
+   */
+  notOnWatchlist?: boolean;
 }
 
 /**

@@ -22,8 +22,9 @@ namespace TradingAgent.Watchlist;
 ///   <item><see cref="ForExecutionAsync"/> — the explicitly selected execution source: configured
 ///   AllowedSymbols (the default) or the editable watchlist. This authoritative snapshot is passed
 ///   into <see cref="Risk.TradingRiskEngine"/> at the execution boundary.</item>
-///   <item><see cref="ForMonitoringAsync"/> — watchlist ∪ AllowedSymbols. What is CHARTED, SCANNED,
-///   and ALERTED on. A superset is safe here: the output is information, not an order.</item>
+///   <item><see cref="ForMonitoringAsync"/> — watchlist ∪ AllowedSymbols. What is CHARTED, SCANNED
+///   and analysed. A superset is safe here: the output is information, not an order. In Watchlist mode
+///   ALERTS and ARMED ORDERS are narrowed to the watchlist itself — see <see cref="WatchlistScope"/>.</item>
 ///   <item><see cref="ForArchiveAsync"/> — which symbols get deep daily history. Same as monitoring by
 ///   default, because a monitored symbol with no history produces no weekly structure. Costs no extra
 ///   requests: a session fetch already returns every symbol in the market, so this only adds rows.</item>

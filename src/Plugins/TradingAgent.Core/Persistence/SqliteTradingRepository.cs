@@ -3678,10 +3678,13 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         {
             var insert = connection.CreateCommand();
             insert.Transaction = transaction;
+            // Seeded (first run) and reset stocks start MANUAL-ONLY, like an added stock or a preset (owner,
+            // 2026-11-24): a new user has no automation on any stock until they switch it on per stock.
+            // Explicit rather than the column's DEFAULT 1, which exists for rows migrated from before the column.
             insert.CommandText = """
                 INSERT OR IGNORE INTO watchlist
-                    (symbol, added_utc, source, sort_order, alerts_enabled)
-                VALUES ($symbol, $now, $source, $order, 1)
+                    (symbol, added_utc, source, sort_order, alerts_enabled, auto_trade_enabled)
+                VALUES ($symbol, $now, $source, $order, 1, 0)
                 """;
             insert.Parameters.AddWithValue("$symbol", symbol);
             insert.Parameters.AddWithValue("$now", now);
