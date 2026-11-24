@@ -119,6 +119,26 @@ public sealed class ArmedOrderTrailPersistenceTests
             "off unless asked for, so no existing stop changes behaviour");
     }
 
+    [TestMethod]
+    public async Task A_stops_ATR_trail_multiple_round_trips_and_an_ordinary_stop_has_none()
+    {
+        var repository = NewRepository();
+        await repository.SaveProtectiveStopAsync(new ProtectiveStop
+        {
+            StopId = "trail", Symbol = "PPL", StopTrigger = 162m, StopLimit = 160.38m,
+            DesiredQuantity = 60, State = "active", TrailAtrMultiple = 2.5m
+        });
+        await repository.SaveProtectiveStopAsync(new ProtectiveStop
+        {
+            StopId = "plain", Symbol = "PPL", StopTrigger = 150m, StopLimit = 148.5m, State = "active"
+        });
+
+        var stops = await repository.GetProtectiveStopsAsync();
+
+        Assert.AreEqual(2.5m, stops.Single(s => s.StopId == "trail").TrailAtrMultiple);
+        Assert.IsNull(stops.Single(s => s.StopId == "plain").TrailAtrMultiple);
+    }
+
     // ── Migration ─────────────────────────────────────────────────────────────
 
     [TestMethod]

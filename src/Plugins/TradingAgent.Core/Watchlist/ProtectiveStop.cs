@@ -213,6 +213,13 @@ public sealed record ProtectiveStop
     /// </para>
     /// </summary>
     public bool SellAtMarketIfMissed { get; init; }
+
+    /// <summary>
+    /// "Trail at N × ATR": an edition raises this stop after each close to <c>close − N × ATR14</c>, never lower, by writing a
+    /// successor through <see cref="SupersedesStopId"/> exactly as any other raise. Null (every stop but these) means a stop
+    /// that stays where it was set. Core never reads it except to CARRY it: a stop it resizes keeps trailing.
+    /// </summary>
+    public decimal? TrailAtrMultiple { get; init; }
 }
 
 /// <summary>One row read from the broker's outstanding (resting) order book.</summary>
