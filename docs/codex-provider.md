@@ -65,8 +65,9 @@ finishes by itself ("Successfully logged in") and the card refreshes. Works on W
 
 Opt-in: premium `deploy/hosted/build.ps1 -CodexVersion 0.172.0` adds the pinned binary (OpenAI's npm per-platform
 package, sha512-checked) at `/opt/codex/codex`; the default `none` leaves it out, because the binary is ~307 MB. The
-CLI's folders live on `/data/codex` (the workspace). `ISubscriptionAccessPolicy` takes the provider id, so a hosted
-operator can switch Codex off for one account and leave Claude Code on.
+CLI's folders live on `/data/codex` (the workspace). Hosted accounts need the operator's grant: CopyHub's `codex_enabled`
+(migration 0064, off for every account, switched on /admin) reaches the agent as `features.codex`, and premium's
+`ISubscriptionAccessPolicy` reads it per provider, so Codex can be off for an account that has Claude Code on.
 
 ## Retention
 
@@ -81,6 +82,5 @@ operator can switch Codex off for one account and leave Claude Code on.
 
 ## Not done yet
 
-- A hosted per-account, per-provider switch (CopyHub flag) behind `ISubscriptionAccessPolicy`.
 - Exact Codex wordings for an expired sign-in and an exhausted plan are not yet measured; the classifier matches
   broadly and otherwise reports the (redacted) text.

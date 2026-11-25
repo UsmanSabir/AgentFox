@@ -69,9 +69,11 @@ environment. No API response carries it; the raw sign-in terminal output (which 
 
 ## Hosted access
 
-`ISubscriptionAccessPolicy` (default: allowed; it takes the provider id) lets an edition switch it off per account. An unreadable policy means
-"not allowed" — the configured provider keeps working. A per-account hub flag is planned, pending memory measurements
-on the hosting VM.
+`ISubscriptionAccessPolicy` (default: allowed; it takes the provider id) decides whether this agent may use a provider at
+all. Premium replaces it on hosted agents with the operator's per-account grants: CopyHub's `claude_code_enabled` and
+`codex_enabled` (migration 0064), OFF for every account and switched on /admin, reported as `features.claudeCode` and
+`features.codex`. A desktop install is always allowed. An unreadable policy means "not allowed" — the configured provider
+keeps working, and the Settings card says why.
 
 ## Retention
 
