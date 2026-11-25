@@ -39,6 +39,7 @@ public sealed class ClaudeCodeChatClient : IChatClient, ISubscriptionProvider
     public string Id => AiProviders.ClaudeCode;
     public string DisplayName => "Claude Code";
     public bool IsSignedIn => _store.Read().HasToken;
+    public bool IsInstalled => CliExecutable.IsInstalled(_options.ExecutablePath);
     public IChatClient Client => this;
 
     /// <summary>The model the next call uses: the owner's choice, else the configured default.</summary>

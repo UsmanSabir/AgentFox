@@ -84,13 +84,27 @@ keeps working, and the Settings card says why.
 | Sign-in attempt (link, terminal output) | memory, one attempt, ≤ `SignInTimeoutSeconds` (600) | its deadline, completion, failure or cancel |
 | Activity (last success/error/test, usage reading) | memory, a fixed handful of values | a restart |
 
+## Hosted image
+
+The hosted image carries the pinned CLI at `/opt/claude-code/claude` (premium `deploy/hosted/build.ps1
+-ClaudeCodeVersion`, default 2.1.258, from Anthropic's npm per-platform package, sha512-checked). A hosted agent's
+workspace is `/data`, so the CLI's folders and the token file live on the user's volume and survive a release.
+
+## Removing it
+
+- **One account (hosted):** turn its grant off on /admin. Every purpose goes back to the configured AI; nothing saved
+  is deleted.
+- **The owner's sign-in:** Settings → Claude Code → Remove sign-in deletes the encrypted token.
+- **The program:** a hosted release with `-ClaudeCodeVersion none`; on a desktop, uninstall the CLI. A token left
+  behind does no harm: the router sends a purpose to Claude Code only while the CLI is installed (`CliExecutable`,
+  checked at most once a minute), so the purpose falls back and the routing card says "not installed".
+- **Leftovers:** `{workspace}/claude-code` (1-day sweep for the CLI's files; the token until removed).
+
+The operator's runbook (enabling per account, upgrading the pin, removing) is premium's
+`docs/subscription-ai-clis.md`.
+
 ## Not done yet
 
 - Measure memory on the hosting VM. A hosted agent is capped at `--memory 512m` and settles at ~140–180 MB, so one
-  call (~235 MB) peaks near 415 MB: it fits, one at a time.
-
-The hosted image carries the pinned CLI at `/opt/claude-code/claude` (premium `deploy/hosted/build.ps1
--ClaudeCodeVersion`, from Anthropic's npm per-platform package, sha512-checked; `none` leaves it out). A hosted agent's
-workspace is `/data`, so the CLI's folders and the token file already live on the user's volume.
-- Hosted per-account switch (CopyHub flag) implementing `IClaudeCodeAccessPolicy`.
-- (done) Chat on Claude Code: /capabilities offers no attachment and /chat refuses one with a plain reason.
+  call (~235 MB) peaks near 415 MB: it fits, one at a time. Claude Code and Codex calls can overlap, which has not
+  been measured there.

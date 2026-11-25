@@ -251,6 +251,7 @@ public sealed class CodexTests
         public string Id => id;
         public string DisplayName => id;
         public bool IsSignedIn { get; set; } = signedIn;
+        public bool IsInstalled { get; set; } = true;
         public IChatClient Client => client;
     }
 
@@ -283,12 +284,40 @@ public sealed class CodexTests
         Assert.AreEqual(AiProviders.ClaudeCode, await router.ProviderInUseAsync(AiPurposes.StockAssessment, default));
         Assert.AreEqual("from claude", (await router.For(AiPurposes.StockAssessment).GetResponseAsync(Hello)).Text);
 
+        // A release built without the CLI leaves the sign-in on the volume: the purpose falls back, never fails.
+        codex.IsInstalled = false;
+        Assert.AreEqual(AiProviders.Configured, await router.ProviderInUseAsync(AiPurposes.Chat, default));
+        Assert.IsFalse(await router.UsesSubscriptionAsync(AiPurposes.Chat, default));
+        codex.IsInstalled = true;
+        Assert.AreEqual(AiProviders.Codex, await router.ProviderInUseAsync(AiPurposes.Chat, default));
+
         // A hosted operator switches one provider off: only that one stops being used.
         denied.Add(AiProviders.Codex);
         Assert.AreEqual(AiProviders.Configured, await router.ProviderInUseAsync(AiPurposes.Chat, default));
         Assert.AreEqual(AiProviders.ClaudeCode, await router.ProviderInUseAsync(AiPurposes.StockAssessment, default));
         Assert.IsTrue(await router.UsesSubscriptionAsync(AiPurposes.StockAssessment, default));
         Assert.IsFalse(await router.UsesSubscriptionAsync(AiPurposes.Chat, default));
+    }
+
+    [TestMethod]
+    public void A_cli_counts_as_installed_only_where_a_process_start_would_find_it()
+    {
+        using var h = new Harness();
+        var bin = Directory.CreateDirectory(Path.Combine(h.Dir, "bin")).FullName;
+        var exe = Path.Combine(bin, "codex");
+        File.WriteAllText(exe, "");
+        File.WriteAllText(Path.Combine(bin, "claude.cmd"), "");
+        File.WriteAllText(Path.Combine(bin, "tool.exe"), "");
+        var path = string.Join(Path.PathSeparator, Path.Combine(h.Dir, "missing"), bin);
+
+        Assert.AreEqual(exe, CliExecutable.Find(exe, null, windows: false));                 // a path: as given
+        Assert.IsNull(CliExecutable.Find(Path.Combine(bin, "gone"), path, windows: false));  // the image's path, CLI left out
+        Assert.AreEqual(exe, CliExecutable.Find("codex", path, windows: false));             // a bare name: on PATH
+        Assert.IsNull(CliExecutable.Find("codex", null, windows: false));
+        Assert.AreEqual(Path.Combine(bin, "tool.exe"), CliExecutable.Find("tool", path, windows: true)); // Windows adds .exe
+        Assert.IsNull(CliExecutable.Find("tool", path, windows: false));
+        Assert.IsNull(CliExecutable.Find("claude", path, windows: true));                    // a .cmd shim is never started
+        Assert.IsFalse(CliExecutable.IsInstalled(""));
     }
 
     private sealed class ChatClientStub(string text) : IChatClient

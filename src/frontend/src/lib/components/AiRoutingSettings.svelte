@@ -40,6 +40,7 @@
     if (provider === inUse) return '';
     const p = routing?.providers.find((x) => x.id === provider);
     if (p && !p.allowed) return `${p.label} is not available for this account; the configured AI answers.`;
+    if (p && p.installed === false) return `${p.label} is not installed where this agent runs; the configured AI answers.`;
     return `${label(provider)} is not signed in; the configured AI answers until it is.`;
   }
 

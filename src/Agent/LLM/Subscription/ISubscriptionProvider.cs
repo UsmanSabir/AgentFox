@@ -15,5 +15,9 @@ public interface ISubscriptionProvider
     /// sign-in still WORKS; a refused one is reported by the call that meets it.</summary>
     bool IsSignedIn { get; }
 
+    /// <summary>Whether the CLI's program is present where this agent runs (<see cref="CliExecutable"/>). A sign-in
+    /// lives on the agent's volume and outlives an image that no longer carries the CLI, so the router asks both.</summary>
+    bool IsInstalled { get; }
+
     IChatClient Client { get; }
 }

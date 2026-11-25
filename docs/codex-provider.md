@@ -63,11 +63,24 @@ finishes by itself ("Successfully logged in") and the card refreshes. Works on W
 
 ## Hosted image
 
-Opt-in: premium `deploy/hosted/build.ps1 -CodexVersion 0.172.0` adds the pinned binary (OpenAI's npm per-platform
-package, sha512-checked) at `/opt/codex/codex`; the default `none` leaves it out, because the binary is ~307 MB. The
-CLI's folders live on `/data/codex` (the workspace). Hosted accounts need the operator's grant: CopyHub's `codex_enabled`
+Included and pinned by default since 2026-11-25: premium `deploy/hosted/build.ps1 -CodexVersion` (default 0.172.0)
+adds the binary (OpenAI's npm per-platform package, sha512-checked) at `/opt/codex/codex`; `none` leaves it out. The
+binary is ~307 MB. The CLI's folders live on `/data/codex` (the workspace), so a sign-in survives a release. Hosted accounts need the operator's grant: CopyHub's `codex_enabled`
 (migration 0064, off for every account, switched on /admin) reaches the agent as `features.codex`, and premium's
 `ISubscriptionAccessPolicy` reads it per provider, so Codex can be off for an account that has Claude Code on.
+
+## Removing it
+
+- **One account (hosted):** turn its `codex_enabled` grant off on /admin. Every purpose goes back to the configured AI;
+  nothing saved is deleted.
+- **The owner's sign-in:** Settings → Codex → Sign out (`codex logout` deletes `auth.json`).
+- **The program:** a hosted release with `-CodexVersion none`; on a desktop, uninstall the CLI. A sign-in left behind
+  does no harm: the router sends a purpose to Codex only while the program is installed (`CliExecutable`, checked at
+  most once a minute), so the purpose falls back and the routing card says "not installed".
+- **Leftovers:** `{workspace}/codex` (logs and work files swept after a day; `auth.json` until signed out).
+
+The operator's runbook (enabling per account, upgrading the pin, removing) is premium's
+`docs/subscription-ai-clis.md`.
 
 ## Retention
 
@@ -84,3 +97,5 @@ CLI's folders live on `/data/codex` (the workspace). Hosted accounts need the op
 
 - Exact Codex wordings for an expired sign-in and an exhausted plan are not yet measured; the classifier matches
   broadly and otherwise reports the (redacted) text.
+- Not yet run on a hosted agent: memory inside the 512 MB container (177–244 MB per call measured in a Linux
+  container, on top of the agent's ~140–180 MB), and a Codex call overlapping a Claude Code one.

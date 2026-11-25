@@ -7,7 +7,7 @@ namespace AgentFox.LLM.Subscription;
 
 /// <summary>
 /// Sends each purpose to the provider the owner chose for it (<see cref="AiRoutingStore"/>) when that provider is
-/// signed in and this agent is allowed to use it; otherwise to the configured provider. Decided on every call, so the
+/// signed in, its CLI is installed here and this agent is allowed to use it; otherwise to the configured provider. Decided on every call, so the
 /// settings card takes effect at once, and a provider that stops being available simply stops being used.
 /// </summary>
 public sealed class AiClientRouter : IAiClientRouter
@@ -35,9 +35,13 @@ public sealed class AiClientRouter : IAiClientRouter
     public async Task<string> ProviderInUseAsync(string purpose, CancellationToken cancellationToken)
     {
         var chosen = _routing.ProviderFor(purpose);
-        if (!_providers.TryGetValue(chosen, out var provider) || !provider.IsSignedIn) return AiProviders.Configured;
+        if (!_providers.TryGetValue(chosen, out var provider) || !Usable(provider)) return AiProviders.Configured;
         return (await ReadAccessAsync(chosen, cancellationToken)).Allowed ? chosen : AiProviders.Configured;
     }
+
+    /// <summary>Signed in AND installed: a release can drop the CLI from the image while the owner's sign-in stays on
+    /// the volume, and sending a purpose there would fail every call instead of using the configured AI.</summary>
+    private static bool Usable(ISubscriptionProvider provider) => provider.IsSignedIn && provider.IsInstalled;
 
     /// <summary>Whether this purpose goes to a subscription provider (text only) right now.</summary>
     public async Task<bool> UsesSubscriptionAsync(string purpose, CancellationToken cancellationToken) =>
@@ -90,7 +94,7 @@ public sealed class AiClientRouter : IAiClientRouter
         {
             if (serviceKey is null && serviceType.IsInstanceOfType(this)) return this;
             if (serviceKey is null && serviceType == typeof(ChatClientMetadata)
-                && router._providers.TryGetValue(router._routing.ProviderFor(purpose), out var p) && p.IsSignedIn)
+                && router._providers.TryGetValue(router._routing.ProviderFor(purpose), out var p) && Usable(p))
                 return p.Client.GetService(serviceType);
             return router._configured.GetService(serviceType, serviceKey);
         }

@@ -45,9 +45,9 @@ public static class AiRoutingEndpoints
                 provider = routing.ProviderFor(purpose),
                 inUse = await router.ProviderInUseAsync(purpose, ct),
             });
-        var providers = new List<object> { new { id = AiProviders.Configured, label = "Configured AI", signedIn = true, allowed = true } };
+        var providers = new List<object> { new { id = AiProviders.Configured, label = "Configured AI", signedIn = true, installed = true, allowed = true } };
         foreach (var p in router.Providers)
-            providers.Add(new { id = p.Id, label = p.DisplayName, signedIn = p.IsSignedIn,
+            providers.Add(new { id = p.Id, label = p.DisplayName, signedIn = p.IsSignedIn, installed = p.IsInstalled,
                 allowed = (await router.ReadAccessAsync(p.Id, ct)).Allowed });
         return new { purposes, providers };
     }

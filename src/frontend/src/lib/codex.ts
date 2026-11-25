@@ -52,7 +52,7 @@ export const codex = {
 // ── AI routing — /api/ai/routing ──────────────────────────────────────────────────────────────
 
 export interface RoutingPurpose { id: string; label: string; provider: string; inUse: string }
-export interface RoutingProvider { id: string; label: string; signedIn: boolean; allowed: boolean }
+export interface RoutingProvider { id: string; label: string; signedIn: boolean; installed: boolean; allowed: boolean }
 export interface Routing { purposes: RoutingPurpose[]; providers: RoutingProvider[] }
 
 export const aiRouting = {

@@ -40,6 +40,7 @@ public sealed class CodexChatClient : IChatClient, ISubscriptionProvider
     public string Id => AiProviders.Codex;
     public string DisplayName => "Codex";
     public bool IsSignedIn => File.Exists(_paths.AuthFile);
+    public bool IsInstalled => CliExecutable.IsInstalled(_options.ExecutablePath);
     public IChatClient Client => this;
 
     /// <summary>The model the next call uses; null means the CLI's default for the account.</summary>
