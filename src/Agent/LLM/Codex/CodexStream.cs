@@ -42,7 +42,16 @@ public static class CodexStream
                         return Str(root, "type") == "item.completed" && Str(item, "text") is { Length: > 0 } text
                             ? new CodexAgentMessage(text) : null;
                     if (itemType == "error")
-                        return new CodexFailed(Str(item, "message") ?? "Codex reported an error.");
+                    {
+                        var message = Str(item, "message");
+                        // CLI 0.172.0 reports this on EVERY call where its optional code-mode helper is absent (measured
+                        // 2026-11-25; switching code_mode or code_mode_host off only rewords it). It is a notice, not a
+                        // failure, and the helper is deliberately not shipped: Code Mode would hand the model a code
+                        // runtime, a way to act that the disabled features exist to remove. Kept as a failure, it would
+                        // become the reason shown for an unrelated failure, such as a timeout.
+                        if (message?.StartsWith("Code Mode is unavailable", StringComparison.Ordinal) == true) return null;
+                        return new CodexFailed(message ?? "Codex reported an error.");
+                    }
                     return new CodexToolAttempt(itemType, Str(item, "status"));
                 case "turn.completed":
                     if (!root.TryGetProperty("usage", out var usage) || usage.ValueKind != JsonValueKind.Object)

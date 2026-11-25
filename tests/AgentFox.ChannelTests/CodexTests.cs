@@ -134,6 +134,15 @@ public sealed class CodexTests
         Assert.IsNull(CodexStream.Parse("not json"));
         Assert.IsNull(CodexStream.Parse("""{"type":"something.new"}"""));
         Assert.IsNull(CodexStream.Parse("""{"type":"item.completed","item":{"type":"reasoning","text":"secret"}}"""));
+        Assert.AreEqual("real", ((CodexFailed)CodexStream.Parse("""{"type":"item.completed","item":{"id":"item_0","type":"error","message":"real"}}""")!).Message);
+    }
+
+    [TestMethod]
+    public void The_code_mode_notice_on_every_call_is_not_a_failure()
+    {
+        // Both wordings measured 2026-11-25 on CLI 0.172.0 (helper absent; code_mode_host switched off).
+        Assert.IsNull(CodexStream.Parse("""{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Code Mode is unavailable because failed to spawn code-mode host /opt/codex/codex-code-mode-host: host executable was not found. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`."}}"""));
+        Assert.IsNull(CodexStream.Parse("""{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Code Mode is unavailable because code-mode host is disabled. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`."}}"""));
     }
 
     // ── The chat client ───────────────────────────────────────────────────────────────────────────
