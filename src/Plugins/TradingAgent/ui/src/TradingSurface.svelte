@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from 'svelte';
+  import { newOrderMenuItems } from './newOrderMenuExtensions';
   import {
     trading,
     type ArmOrderDialogContext, type TradingStatus, type TradeProposal, type TradingExecution,
@@ -551,6 +552,13 @@
           <div class="quick-order-options" role="group" aria-label="Quick limit orders">
             <button type="button" class="quick-buy" on:click={() => openQuickOrder('BUY')} disabled={!selectedSymbol?.trim()} title={selectedSymbol ? undefined : 'Select a stock first'}>Quick Buy <span>{selectedSymbol ?? 'Select a stock'}</span></button>
             <button type="button" class="quick-sell" on:click={() => openQuickOrder('SELL')} disabled={!selectedSymbol?.trim()} title={selectedSymbol ? undefined : 'Select a stock first'}>Quick Sell <span>{selectedSymbol ?? 'Select a stock'}</span></button>
+            <!-- An edition's own order windows (newOrderMenuExtensions.ts); none in a community build. -->
+            {#each $newOrderMenuItems as item (item.id)}
+              <button type="button" class="menu-extension" title={item.title ?? undefined}
+                on:click={() => { quickMenuOpen = false; item.run({ selectedSymbol: selectedSymbol?.trim() || null }); }}>
+                {item.label}{#if item.detail}<span>{item.detail}</span>{/if}
+              </button>
+            {/each}
           </div>
         </details>
       </div>
@@ -985,6 +993,7 @@
   .quick-order-options button:hover:not(:disabled) { background:var(--surface-2); }
   .quick-order-options button:disabled { opacity:.5; cursor:default; }
   .quick-buy { color:var(--success); }.quick-sell { color:var(--danger); }
+  .menu-extension { color:var(--text); border-top:1px solid var(--border) !important; }
   .quick-order-options button span { color:var(--text-2); font-size:.7rem; font-weight:400; }
   .new-order-split button:focus-visible,.quick-order-menu > summary:focus-visible { outline:2px solid var(--primary); outline-offset:2px; }
   .kill-switch-btn { display:flex; align-items:center; gap:.4rem; border:1px solid rgba(52,211,153,.35); background:rgba(52,211,153,.08); color:var(--success); border-radius:var(--radius); padding:.55rem .9rem; font-size:.78rem; font-weight:600; cursor:pointer; }
