@@ -261,8 +261,9 @@ public sealed partial class ClaudeCodeSignIn : IDisposable
             {
                 lock (_raw)
                 {
-                    var stripped = ClaudeCodeTerminalText.Strip(_raw.ToString());
-                    return ClaudeCodeTerminalText.IsAwaitingCode(stripped) ? ClaudeCodeTerminalText.FindSignInLink(stripped) : null;
+                    var raw = _raw.ToString();
+                    return ClaudeCodeTerminalText.IsAwaitingCode(ClaudeCodeTerminalText.Strip(raw))
+                        ? ClaudeCodeTerminalText.FindSignInLinkInRaw(raw) : null;
                 }
             }
         }

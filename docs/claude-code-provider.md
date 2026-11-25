@@ -55,7 +55,11 @@ Measured on CLI 2.1.258: a call peaks at **~210–235 MB** (startup dominates) a
 Facts the relay depends on (2026-11-25): `setup-token` prints nothing without a terminal (hence `script`; Windows would
 need ConPTY, so Windows offers paste only); the code and Enter must be **separate** writes; after an error the CLI's
 retry starts over with a new link, so the attempt ends and the owner starts again; the printed token is **wrapped**
-with terminal codes between the pieces (`ClaudeCodeTerminalText`). The token only grants `user:inference` and lasts
+with terminal codes between the pieces (`ClaudeCodeTerminalText`); words are placed with cursor moves rather than
+spaces, so a move must read as a space or "valid for 1 year" is never found; and with the agent's own config folder the
+CLI prints "Hold Shift while selecting…" between the link and the paste prompt, so the link is read from the CLI's own
+OSC 8 hyperlink rather than by joining lines (joining glued the hint onto `state`, and claude.ai answered "Sign-in did
+not complete"). The token only grants `user:inference` and lasts
 one year; expiry is shown as an estimate counted from when it was saved.
 
 The token is encrypted with the plugin-secrets key in `plugin-configs/claude-code.json` and goes nowhere but the CLI's
