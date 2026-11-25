@@ -312,9 +312,23 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
         await _runGate.WaitAsync(ct);
         try
         {
+            // An unreadable watchlist holds every rule rather than firing one the user may have dropped;
+            // the next full pass re-reads it. Rules carry no backstops, so nothing protective waits on this.
+            IReadOnlySet<string>? watched;
+            try
+            {
+                watched = WatchlistScope.Watched(
+                    _options.Value.ExecutionUniverseSource, await _repository.GetWatchlistAsync(ct));
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "[ArmedOrders] Rule-order pass: the watchlist could not be read; holding rules.");
+                return false;
+            }
+
             var snapshot = await _quotes.GetQuotesAsync(ct);
             _logger.LogDebug("[ArmedOrders] Rule-order pass ({Trigger}).", trigger);
-            await EvaluateArmedOrdersAsync(snapshot.Quotes, [], ct, rulesOnly: true);
+            await EvaluateArmedOrdersAsync(snapshot.Quotes, [], ct, rulesOnly: true, watched: watched);
             return true;
         }
         finally { _runGate.Release(); }
@@ -350,6 +364,9 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
             .Where(e => !e.AlertsEnabled)
             .Select(e => e.Symbol)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        // In Watchlist mode a stock off the watchlist raises nothing and fires no armed order; it is still
+        // analysed below, so a backstop on it keeps a price. See WatchlistScope.
+        var watched = WatchlistScope.Watched(_options.Value.ExecutionUniverseSource, watchlist);
 
         var symbols = await _universe.ForMonitoringAsync(ct);
         if (symbols.Count == 0)
@@ -406,7 +423,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                 previous, snapshot, multi, thresholds, DateTime.UtcNow);
             await _repository.SaveMonitorStateAsync(detection.NextState, ct);
 
-            if (muted.Contains(symbol)) continue;
+            if (muted.Contains(symbol) || !WatchlistScope.MayAlert(symbol, watched)) continue;
 
             foreach (var alert in detection.Fired)
             {
@@ -452,7 +469,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
         // Armed triggers are evaluated against the SAME snapshot the alerts came from, so an event
         // trigger sees exactly the alerts this pass raised — no second fetch, no drift between what
         // was detected and what fires on it.
-        await EvaluateArmedOrdersAsync(history.Live, raised, ct);
+        await EvaluateArmedOrdersAsync(history.Live, raised, ct, watched: watched);
 
         // Against the same prices, straight after: a take-profit fired ahead of its limit is pulled
         // back here once the market turns. See ArmedOrderPullback.
@@ -527,7 +544,8 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
         IReadOnlyDictionary<string, PsxLiveQuote> live,
         IReadOnlyList<AlertRecord> raisedThisPass,
         CancellationToken ct,
-        bool rulesOnly = false)
+        bool rulesOnly = false,
+        IReadOnlySet<string>? watched = null)
     {
         IReadOnlyList<ArmedOrder> armed;
         try
@@ -582,6 +600,10 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                     order.ArmedId, order.Symbol);
                 continue;
             }
+
+            // Off the watchlist: kept, but neither evaluated nor trailed, so it cannot fire and its
+            // reference does not drift while nobody is watching the stock. The panel says why.
+            if (!WatchlistScope.MayFire(order, watched)) continue;
 
             var price = live.TryGetValue(order.Symbol, out var quote) ? quote.Current : null;
             var alerts = alertsBySymbol.GetValueOrDefault(order.Symbol, Array.Empty<AlertKind>());

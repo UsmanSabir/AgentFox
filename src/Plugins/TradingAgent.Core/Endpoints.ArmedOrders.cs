@@ -74,6 +74,15 @@ public sealed partial class TradingCoreEndpoints
             var window = approvals.ArmedWindow;
             var policy = approvals.DescribeUnattendedPolicy();
             var pktNow = calendar.GetStatus().PktNow;
+            // Watchlist mode: an order on a stock off the watchlist is kept but does not fire. Unreadable
+            // watchlist → no warning rather than a wrong one; the monitor holds such orders regardless.
+            IReadOnlySet<string>? watched = null;
+            try
+            {
+                watched = WatchlistScope.Watched(
+                    options.Value.ExecutionUniverseSource, await repository.GetWatchlistAsync(ct));
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException) { }
             return Results.Ok(new
             {
                 // Projected rather than serialized straight from the record: an enum defaults to its
@@ -129,7 +138,9 @@ public sealed partial class TradingCoreEndpoints
                     o.ConditionSpec,
                     o.ConditionSummary,
                     // Who armed it when not a person at the dashboard: "chat" or "mcp:<agent>". See ArmedOrder.ArmedBy.
-                    o.ArmedBy
+                    o.ArmedBy,
+                    // Kept but will not fire until the stock is back on the watchlist. See WatchlistScope.
+                    notOnWatchlist = !WatchlistScope.MayFire(o, watched)
                     };
                 }),
                 // Sent with the orders because a stop and the entry it protects are one thing to

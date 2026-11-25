@@ -80,9 +80,14 @@ public class WebModule : IAppModule
         // ── Capabilities ──────────────────────────────────────────────────────
         // What the configured model accepts as chat input. The web UI reads this to decide
         // whether to offer the attachment button at all, and which file types to accept.
-        endpoints.MapGet("/capabilities", (IConfiguration config, RuntimeModelChatClient modelClient, HttpContext httpContext) =>
+        endpoints.MapGet("/capabilities", async (IConfiguration config, RuntimeModelChatClient modelClient, HttpContext httpContext, CancellationToken ct) =>
         {
             var caps = AttachmentSupport.Resolve(config, DocumentReader(httpContext), modelClient.Model);
+            // Chat on Claude Code reads no attachment, so the button is not offered while it is.
+            if (await ChatUsesClaudeCodeAsync(httpContext, ct))
+                return Results.Ok(new { attachments = new { enabled = false, images = false, documents = false, textFiles = false,
+                    convertedDocuments = false, maxFileSizeBytes = 0, maxFilesPerMessage = 0, maxTotalBytes = 0,
+                    acceptedMediaTypes = Array.Empty<string>(), provider = "subscription", model = caps.Model, source = "config" } });
             return Results.Ok(new
             {
                 attachments = new
@@ -123,6 +128,11 @@ public class WebModule : IAppModule
         })
             .RequireAuthorization("ManagementAdministrator");
 
+        // ── Subscription providers (the owner's own Claude / ChatGPT plan) ─────
+        AgentFox.LLM.ClaudeCode.ClaudeCodeEndpoints.Map(endpoints);
+        AgentFox.LLM.Codex.CodexEndpoints.Map(endpoints);
+        AgentFox.LLM.Subscription.AiRoutingEndpoints.Map(endpoints);
+
         // ── Chat (request/response) ───────────────────────────────────────────
 
         endpoints.MapPost("/chat", async (
@@ -146,6 +156,8 @@ public class WebModule : IAppModule
             // Reject the whole turn on an unusable attachment rather than dropping it: a user
             // who attached a screenshot to a text-only model must be told, not left believing
             // the model looked at it.
+            if (req.Attachments is { Count: > 0 } && await ChatUsesClaudeCodeAsync(httpContext, ct))
+                return Results.BadRequest(new ChatResponse { Success = false, Error = ClaudeCodeAttachmentRefusal });
             if (!AttachmentSupport.TryResolve(req.Attachments, AttachmentSupport.Resolve(config, documentReader, modelClient.Model), out _, out var attachmentError))
                 return Results.BadRequest(new ChatResponse { Success = false, Error = attachmentError });
 
@@ -197,6 +209,13 @@ public class WebModule : IAppModule
             {
                 httpContext.Response.StatusCode = 400;
                 await httpContext.Response.WriteAsJsonAsync(new { error = "Message must not be empty." }, ct);
+                return;
+            }
+
+            if (req.Attachments is { Count: > 0 } && await ChatUsesClaudeCodeAsync(httpContext, ct))
+            {
+                httpContext.Response.StatusCode = 400;
+                await httpContext.Response.WriteAsJsonAsync(new { error = ClaudeCodeAttachmentRefusal }, ct);
                 return;
             }
 
@@ -1344,6 +1363,15 @@ public class WebModule : IAppModule
 
     /// <summary>Optional: a host without a document reader registered (tests, embedded hosts)
     /// keeps its previous attachment behaviour rather than failing to bind the endpoint.</summary>
+    private const string ClaudeCodeAttachmentRefusal =
+        "Chat is answering through your Claude or ChatGPT subscription, which cannot read attachments. Send the message " +
+        "without the file, or switch chat back to the configured AI under Settings → AI routing.";
+
+    /// <summary>Whether the owner has sent chat to a subscription provider (text only). Absent router: no.</summary>
+    private static async Task<bool> ChatUsesClaudeCodeAsync(HttpContext httpContext, CancellationToken ct) =>
+        httpContext.RequestServices.GetService<AgentFox.LLM.Subscription.AiClientRouter>() is { } router
+        && await router.UsesSubscriptionAsync(AgentFox.LLM.AiPurposes.Chat, ct);
+
     private static AttachmentDocumentReader? DocumentReader(HttpContext httpContext) =>
         httpContext.RequestServices.GetService<AttachmentDocumentReader>();
 

@@ -45,13 +45,15 @@ public sealed class ManualOnlySymbolTests
         using var env = Env.Create(allowed: ["OGDC", "LUCK", "HBL"], manualOnly: ["OGDC"]);
         await env.Universe.SeedIfNeededAsync();
 
+        // Seeded stocks start manual-only (owner, 2026-11-24); the user opts two of them in.
+        Assert.AreEqual(3, await env.Repository.SetWatchlistAutoTradeEnabledAsync(true));
         Assert.IsTrue(await env.Repository.UpdateWatchlistSymbolAsync(
             "LUCK", alertsEnabled: null, notes: null, pinned: null, autoTradeEnabled: false));
         env.Universe.Invalidate();
 
         var deny = await env.Universe.ManualOnlyAsync();
         CollectionAssert.AreEquivalent(new[] { "OGDC", "LUCK" }, deny.ToArray());
-        Assert.IsFalse(deny.Contains("HBL"), "An untouched symbol must stay automatable.");
+        Assert.IsFalse(deny.Contains("HBL"), "A symbol switched on must stay automatable.");
         Assert.IsTrue(await env.Universe.IsManualOnlyAsync("ogdc"), "Matching is case-insensitive.");
     }
 
@@ -88,15 +90,15 @@ public sealed class ManualOnlySymbolTests
     }
 
     [TestMethod]
-    public async Task SeededSymbol_KeepsAutomationAllowed_ButAFreshAddStartsManualOnly()
+    public async Task SeededSymbol_AndAFreshAdd_BothStartManualOnly()
     {
         using var env = Env.Create(allowed: ["OGDC"], manualOnly: []);
         await env.Universe.SeedIfNeededAsync();
 
-        // A symbol seeded from the operator's own configured AllowedSymbols is a set they already
-        // reviewed before deployment; a migrated database must not silently disarm it. That behaviour
-        // is unchanged by the auto-trade-enabled column existing at all.
-        Assert.IsTrue((await env.Repository.GetWatchlistAsync()).Entries.Single().AutoTradeEnabled);
+        // A new user's seeded stocks start manual-only too (owner, 2026-11-24): the shipped list is a
+        // starting watchlist, not consent to automate. Rows migrated from before the column keep its
+        // DEFAULT 1, so an existing database is not disarmed.
+        Assert.IsFalse((await env.Repository.GetWatchlistAsync()).Entries.Single().AutoTradeEnabled);
 
         // A symbol added live — by hand or via an index preset — has no stop, no target and no plan
         // behind it yet, and the master automation switch was never consent for a stock that wasn't on
@@ -225,6 +227,10 @@ public sealed class ManualOnlySymbolTests
     public async Task TradingManager_LeavesUnrestrictedSymbolsAlone()
     {
         using var env = Env.Create(allowed: ["OGDC", "HBL"], manualOnly: ["OGDC"]);
+        await env.Universe.SeedIfNeededAsync();
+        await env.Repository.UpdateWatchlistSymbolAsync(
+            "HBL", alertsEnabled: null, notes: null, pinned: null, autoTradeEnabled: true);
+        env.Universe.Invalidate();
 
         // The gate is per symbol, not a mode: an unattended order for anything else still executes.
         var executed = await env.CreateManager().ExecuteGroupsAsync(Groups("HBL"), "worker:test");
