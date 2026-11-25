@@ -76,6 +76,12 @@ public sealed class ClaudeCodeTests
             var protector = new AesPluginSecretProtector(Path.Combine(Dir, ".key"), NullLogger<AesPluginSecretProtector>.Instance);
             Store = new ClaudeCodeStore(Path.Combine(Dir, "claude-code.json"), protector, NullLogger<ClaudeCodeStore>.Instance);
             if (signedIn) Store.SaveToken(Token, "paste");
+            // The router routes only while the CLI's program exists (CliExecutable). A stand-in file keeps these tests
+            // independent of whether the machine running them has Claude Code installed; the runner is faked anyway.
+            Directory.CreateDirectory(Dir);
+            var standIn = Path.Combine(Dir, "claude-stand-in");
+            File.WriteAllText(standIn, "");
+            Options.ExecutablePath = standIn;
         }
 
         public ClaudeCodeChatClient Client(ICliProcessRunner runner) =>
