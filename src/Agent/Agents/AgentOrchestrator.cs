@@ -36,6 +36,7 @@ namespace AgentFox.Agents;
 public sealed class AgentOrchestrator : IHostedService
 {
     private readonly IChatClient _chatClient;
+    private readonly IChatClient _mainChatClient;
     private readonly ToolRegistry _toolRegistry;
     private readonly SkillRegistry _skillRegistry;
     private readonly McpManager _mcpManager;
@@ -110,8 +111,12 @@ public sealed class AgentOrchestrator : IHostedService
         ConversationEventBus conversationEvents,
         HitlManager hitlManager,
         PlanStateStore planStore,
-        AgentFox.Plugins.PluginConfigManager pluginConfigManager)
+        AgentFox.Plugins.PluginConfigManager pluginConfigManager,
+        IAiClientRouter? aiRouter = null)
     {
+        // The MAIN agent's client only: the owner may send chat to Claude Code (text only, no tools). Sub-agents and
+        // specialists keep the configured client — they exist to call tools.
+        _mainChatClient       = aiRouter?.For(AiPurposes.Chat) ?? chatClient;
         _hitlManager          = hitlManager;
         _planStore            = planStore;
         _pluginConfigManager  = pluginConfigManager;
@@ -402,7 +407,7 @@ public sealed class AgentOrchestrator : IHostedService
     // ─────────────────────────────────────────────────────────────────────────
 
     private FoxAgent BuildAgent(string systemPrompt, bool withLogger = false) =>
-        BuildAgentWithClient(systemPrompt, _chatClient, withLogger);
+        BuildAgentWithClient(systemPrompt, _mainChatClient, withLogger);
 
     private FoxAgent BuildAgentWithClient(string systemPrompt, IChatClient client, bool withLogger = false)
     {

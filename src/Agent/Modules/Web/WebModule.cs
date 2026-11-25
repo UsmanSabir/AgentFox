@@ -123,6 +123,9 @@ public class WebModule : IAppModule
         })
             .RequireAuthorization("ManagementAdministrator");
 
+        // ── Claude Code (the owner's own subscription) ─────────────────────────
+        AgentFox.LLM.ClaudeCode.ClaudeCodeEndpoints.Map(endpoints);
+
         // ── Chat (request/response) ───────────────────────────────────────────
 
         endpoints.MapPost("/chat", async (

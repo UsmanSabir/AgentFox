@@ -102,9 +102,11 @@ public sealed class StockAssessmentService
     private readonly ILogger<StockAssessmentService> _logger;
     private readonly ConcurrentDictionary<string, CacheEntry> _cache = new();
 
-    public StockAssessmentService(IChatClient chatClient, ILogger<StockAssessmentService> logger)
+    public StockAssessmentService(IChatClient chatClient, ILogger<StockAssessmentService> logger,
+        AgentFox.LLM.IAiClientRouter? aiRouter = null)
     {
-        _chatClient = chatClient;
+        // The owner may send assessments to Claude Code (Settings → AI); the router decides per call.
+        _chatClient = aiRouter?.For(AgentFox.LLM.AiPurposes.StockAssessment) ?? chatClient;
         _logger = logger;
     }
 

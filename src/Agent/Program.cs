@@ -363,6 +363,35 @@ class Program
         builder.Services.AddSingleton<Microsoft.Extensions.AI.IChatClient>(sp =>
             sp.GetRequiredService<RuntimeModelChatClient>());
 
+        // One plugin-secrets protector for everything that encrypts with that key, so two instances never race to
+        // create the key file on a fresh install.
+        builder.Services.AddSingleton<AgentFox.Plugins.IPluginSecretProtector>(sp =>
+            new AgentFox.Plugins.AesPluginSecretProtector(
+                Path.Combine(sp.GetRequiredService<WorkspaceManager>().ResolvePath(""), "plugin-configs", ".plugin-secrets.key"),
+                sp.GetRequiredService<ILogger<AgentFox.Plugins.AesPluginSecretProtector>>()));
+
+        // Claude Code on the owner's own subscription: chosen per purpose in Settings → AI (docs/claude-code-provider.md).
+        var claudeCodeOptions = configuration.GetSection(AgentFox.LLM.ClaudeCode.ClaudeCodeOptions.SectionName)
+            .Get<AgentFox.LLM.ClaudeCode.ClaudeCodeOptions>() ?? new AgentFox.LLM.ClaudeCode.ClaudeCodeOptions();
+        builder.Services.AddSingleton(claudeCodeOptions);
+        builder.Services.AddSingleton(sp => new AgentFox.LLM.ClaudeCode.ClaudeCodePaths(
+            string.IsNullOrWhiteSpace(claudeCodeOptions.DataDirectory)
+                ? Path.Combine(sp.GetRequiredService<WorkspaceManager>().ResolvePath(""), "claude-code")
+                : claudeCodeOptions.DataDirectory));
+        builder.Services.AddSingleton(sp => new AgentFox.LLM.ClaudeCode.ClaudeCodeStore(
+            Path.Combine(sp.GetRequiredService<WorkspaceManager>().ResolvePath(""), "plugin-configs", "claude-code.json"),
+            sp.GetRequiredService<AgentFox.Plugins.IPluginSecretProtector>(),
+            sp.GetRequiredService<ILogger<AgentFox.LLM.ClaudeCode.ClaudeCodeStore>>()));
+        builder.Services.AddSingleton<AgentFox.LLM.ClaudeCode.IClaudeCodeProcessRunner, AgentFox.LLM.ClaudeCode.ClaudeCodeProcessRunner>();
+        builder.Services.AddSingleton<AgentFox.LLM.ClaudeCode.ClaudeCodeActivity>();
+        builder.Services.AddSingleton<AgentFox.LLM.ClaudeCode.ClaudeCodeChatClient>();
+        builder.Services.AddSingleton<AgentFox.LLM.ClaudeCode.ClaudeCodeSignIn>();
+        builder.Services.AddSingleton<AgentFox.LLM.ClaudeCode.ClaudeCodeStatusService>();
+        builder.Services.AddSingleton<AgentFox.LLM.ClaudeCode.AiClientRouter>();
+        builder.Services.AddSingleton<IAiClientRouter>(sp => sp.GetRequiredService<AgentFox.LLM.ClaudeCode.AiClientRouter>());
+        // A hosted edition replaces this with the operator's per-account switch.
+        builder.Services.AddSingleton<IClaudeCodeAccessPolicy, AllowClaudeCodeAccessPolicy>();
+
         // Session management
         builder.Services.AddSingleton(sp =>
         {
@@ -451,9 +480,7 @@ class Program
         {
             var workspaceDir = sp.GetRequiredService<WorkspaceManager>();
             var configDir = Path.Combine(workspaceDir.ResolvePath(""), "plugin-configs");
-            var secretProtector = new AgentFox.Plugins.AesPluginSecretProtector(
-                Path.Combine(configDir, ".plugin-secrets.key"),
-                sp.GetRequiredService<ILogger<AgentFox.Plugins.AesPluginSecretProtector>>());
+            var secretProtector = sp.GetRequiredService<AgentFox.Plugins.IPluginSecretProtector>();
             return new AgentFox.Plugins.PluginConfigManager(
                 configDir,
                 sp.GetRequiredService<ILogger<AgentFox.Plugins.PluginConfigManager>>(),

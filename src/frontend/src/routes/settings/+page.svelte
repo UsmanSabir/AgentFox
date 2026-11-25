@@ -2,6 +2,7 @@
   import { api, getManagementApiKey, setManagementApiKey } from '#lib/api.ts';
   import { onMount } from 'svelte';
   import { agentStatus } from '#lib/stores.ts';
+  import ClaudeCodeSettings from '#lib/components/ClaudeCodeSettings.svelte';
   import {
     Settings, Server, Cpu, Key, Globe, Database,
     RefreshCw, CheckCircle, XCircle, Zap
@@ -139,6 +140,8 @@
 
   <!-- Info sections -->
   <div class="sections">
+    <ClaudeCodeSettings />
+
     <section class="info-section">
       <h2 class="section-heading">
         <Key size={14} />
