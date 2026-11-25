@@ -83,9 +83,12 @@ on the hosting VM.
 
 ## Not done yet
 
-- Image: install the pinned CLI in the hosted Dockerfile (npm per-platform package, hash checked), and set
-  `ClaudeCode__DataDirectory=/data/claude-code` — the default `{workspace}/claude-code` is under `/app` there, which
-  the agent cannot write. (`plugin-configs/` is already linked to `/data`, so the token file is fine as it is.)
+- Measure memory on the hosting VM. A hosted agent is capped at `--memory 512m` and settles at ~140–180 MB, so one
+  call (~235 MB) peaks near 415 MB: it fits, one at a time.
+
+The hosted image carries the pinned CLI at `/opt/claude-code/claude` (premium `deploy/hosted/build.ps1
+-ClaudeCodeVersion`, from Anthropic's npm per-platform package, sha512-checked; `none` leaves it out). A hosted agent's
+workspace is `/data`, so the CLI's folders and the token file already live on the user's volume.
 - Hosted per-account switch (CopyHub flag) implementing `IClaudeCodeAccessPolicy`.
 - Chat on Claude Code still advertises attachments if the configured model accepts them; the attachment becomes a
   "cannot read attachments" note in the prompt rather than being refused up front.
