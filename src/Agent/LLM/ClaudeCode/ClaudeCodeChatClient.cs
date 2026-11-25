@@ -2,20 +2,9 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
+using AgentFox.LLM.Subscription;
 
 namespace AgentFox.LLM.ClaudeCode;
-
-public enum ClaudeCodeFailure
-{
-    NotSignedIn, NotInstalled, NotAllowed, ReauthenticationRequired, RateLimited, Busy, TimedOut, Failed,
-}
-
-/// <summary>A Claude Code call failed. The message is written for the owner and never holds a token.</summary>
-public sealed class ClaudeCodeException(ClaudeCodeFailure kind, string message)
-    : AiProviderException(message, retryable: kind is ClaudeCodeFailure.Busy)
-{
-    public ClaudeCodeFailure Kind { get; } = kind;
-}
 
 /// <summary>
 /// An <see cref="IChatClient"/> over the official Claude Code CLI, signed in with the owner's own subscription.
@@ -25,21 +14,18 @@ public sealed class ClaudeCodeException(ClaudeCodeFailure kind, string message)
 /// Each call starts one CLI process (stateless, no session saved), one at a time by default. Nothing here retries:
 /// a refused sign-in, an exhausted subscription or a call whose outcome is unknown is reported, never repeated.
 /// </summary>
-public sealed class ClaudeCodeChatClient : IChatClient
+public sealed class ClaudeCodeChatClient : IChatClient, ISubscriptionProvider
 {
-    internal const string JsonInstruction =
-        "Reply with one JSON object only: no prose before or after it and no code fences.";
-
     private readonly ClaudeCodeOptions _options;
     private readonly ClaudeCodePaths _paths;
     private readonly ClaudeCodeStore _store;
-    private readonly IClaudeCodeProcessRunner _runner;
+    private readonly ICliProcessRunner _runner;
     private readonly ClaudeCodeActivity _activity;
     private readonly ILogger<ClaudeCodeChatClient> _logger;
     private readonly SemaphoreSlim _gate;
 
     public ClaudeCodeChatClient(ClaudeCodeOptions options, ClaudeCodePaths paths, ClaudeCodeStore store,
-        IClaudeCodeProcessRunner runner, ClaudeCodeActivity activity, ILogger<ClaudeCodeChatClient> logger)
+        ICliProcessRunner runner, ClaudeCodeActivity activity, ILogger<ClaudeCodeChatClient> logger)
     {
         _options = options;
         _paths = paths;
@@ -49,6 +35,11 @@ public sealed class ClaudeCodeChatClient : IChatClient
         _logger = logger;
         _gate = new SemaphoreSlim(Math.Max(1, options.MaxConcurrentRequests));
     }
+
+    public string Id => AiProviders.ClaudeCode;
+    public string DisplayName => "Claude Code";
+    public bool IsSignedIn => _store.Read().HasToken;
+    public IChatClient Client => this;
 
     /// <summary>The model the next call uses: the owner's choice, else the configured default.</summary>
     public string CurrentModel => _store.Read().Model ?? _options.DefaultModel;
@@ -61,7 +52,7 @@ public sealed class ClaudeCodeChatClient : IChatClient
         ChatOptions? options = null, CancellationToken cancellationToken = default)
     {
         var token = _store.ReadToken()
-                    ?? throw Fail(ClaudeCodeFailure.NotSignedIn, "Claude Code is not signed in. Sign in under Settings → Claude Code.");
+                    ?? throw Fail(SubscriptionFailure.NotSignedIn, "Claude Code is not signed in. Sign in under Settings → Claude Code.");
         return StreamAsync(token, messages, options, cancellationToken);
     }
 
@@ -81,7 +72,7 @@ public sealed class ClaudeCodeChatClient : IChatClient
             _activity.RecordTest(passed);
             return (passed, passed ? "Claude Code answered." : "Claude Code answered with nothing.");
         }
-        catch (ClaudeCodeException ex)
+        catch (SubscriptionCliException ex)
         {
             _activity.RecordTest(false);
             return (false, ex.Message);
@@ -91,13 +82,13 @@ public sealed class ClaudeCodeChatClient : IChatClient
     private async IAsyncEnumerable<ChatResponseUpdate> StreamAsync(string token, IEnumerable<ChatMessage> messages,
         ChatOptions? options, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        var rendered = ClaudeCodePrompt.Render(messages);
+        var rendered = SubscriptionPrompt.Render(messages);
         // options.ModelId is ignored on purpose: the agent framework fills it with the CONFIGURED provider's model,
         // which means nothing to the CLI.
         var model = CurrentModel;
-        var (schema, wantsJson) = JsonRequest(options?.ResponseFormat);
+        var (schema, wantsJson) = SubscriptionPrompt.JsonRequest(options?.ResponseFormat);
         var systemPrompt = wantsJson && schema is null
-            ? rendered.SystemPrompt + "\n\n" + JsonInstruction
+            ? rendered.SystemPrompt + "\n\n" + SubscriptionPrompt.JsonInstruction
             : rendered.SystemPrompt;
 
         await AcquireAsync(cancellationToken);
@@ -105,17 +96,17 @@ public sealed class ClaudeCodeChatClient : IChatClient
         try
         {
             _paths.Ensure();
-            _activity.SweepIfDue(_paths);
+            _activity.SweepIfDue(_paths.SweptDirectories);
             await File.WriteAllTextAsync(promptFile, systemPrompt, new UTF8Encoding(false), cancellationToken);
 
-            var invocation = new ClaudeCodeInvocation(
+            var invocation = new CliInvocation(
                 _options.ExecutablePath,
                 ClaudeCodeCommand.Arguments(model, promptFile, schema),
                 ClaudeCodeCommand.Environment(Environment.GetEnvironmentVariables(), token, _paths),
                 _paths.Work, rendered.UserMessage, TimeSpan.FromSeconds(Math.Max(10, _options.RequestTimeoutSeconds)));
 
             ClaudeCodeResult? result = null;
-            ClaudeCodeProcessException? processFailure = null;
+            CliProcessException? processFailure = null;
             string? modelId = null;
             var sawDelta = false;
             var sawText = false;
@@ -131,7 +122,7 @@ public sealed class ClaudeCodeChatClient : IChatClient
                         if (!await lines.MoveNextAsync()) break;
                         line = lines.Current;
                     }
-                    catch (ClaudeCodeProcessException ex)
+                    catch (CliProcessException ex)
                     {
                         processFailure = ex;
                         break;
@@ -167,10 +158,10 @@ public sealed class ClaudeCodeChatClient : IChatClient
             {
                 var failure = processFailure switch
                 {
-                    { NotInstalled: true } => Fail(ClaudeCodeFailure.NotInstalled, processFailure.Message),
-                    { TimedOut: true } => Fail(ClaudeCodeFailure.TimedOut, processFailure.Message),
-                    not null => Fail(ClaudeCodeFailure.Failed, processFailure.Message),
-                    null => Fail(ClaudeCodeFailure.Failed, "Claude Code ended without an answer."),
+                    { NotInstalled: true } => Fail(SubscriptionFailure.NotInstalled, "The Claude Code CLI is not installed where this agent runs."),
+                    { TimedOut: true } => Fail(SubscriptionFailure.TimedOut, processFailure.Message),
+                    not null => Fail(SubscriptionFailure.Failed, processFailure.Message),
+                    null => Fail(SubscriptionFailure.Failed, "Claude Code ended without an answer."),
                 };
                 if (processFailure?.StderrTail is { } tail)
                     _logger.LogWarning("[ClaudeCode] CLI failed: {Stderr}", tail);
@@ -185,7 +176,7 @@ public sealed class ClaudeCodeChatClient : IChatClient
 
             if (wantsJson)
             {
-                var json = result.StructuredOutputJson ?? StripCodeFence(result.Text ?? "");
+                var json = result.StructuredOutputJson ?? SubscriptionPrompt.StripCodeFence(result.Text ?? "");
                 yield return Update(json, responseId, modelId);
             }
 
@@ -209,54 +200,37 @@ public sealed class ClaudeCodeChatClient : IChatClient
     {
         var wait = TimeSpan.FromSeconds(Math.Max(1, _options.QueueTimeoutSeconds));
         if (!await _gate.WaitAsync(wait, cancellationToken))
-            throw Fail(ClaudeCodeFailure.Busy, "Claude Code is busy with another request. Try again in a moment.");
+            throw Fail(SubscriptionFailure.Busy, "Claude Code is busy with another request. Try again in a moment.");
     }
 
-    private ClaudeCodeException FailFromResult(ClaudeCodeResult r)
+    private SubscriptionCliException FailFromResult(ClaudeCodeResult r)
     {
         var text = ClaudeCodeTerminalText.Redact(r.Text ?? "");
         if (text.Length > 300) text = text[..300];
         if (r.ApiErrorStatus is 401 or 403
             || text.Contains("Not logged in", StringComparison.OrdinalIgnoreCase)
             || text.Contains("OAuth", StringComparison.OrdinalIgnoreCase) && text.Contains("invalid", StringComparison.OrdinalIgnoreCase))
-            return Fail(ClaudeCodeFailure.ReauthenticationRequired,
+            return Fail(SubscriptionFailure.ReauthenticationRequired,
                 "Claude no longer accepts this sign-in. Sign in again under Settings → Claude Code.");
         if (r.ApiErrorStatus == 429 || text.Contains("usage limit", StringComparison.OrdinalIgnoreCase)
                                     || text.Contains("rate limit", StringComparison.OrdinalIgnoreCase))
         {
             var resets = _activity.Usage?.ResetsAt;
-            return Fail(ClaudeCodeFailure.RateLimited, resets is { } at
+            return Fail(SubscriptionFailure.RateLimited, resets is { } at
                 ? $"Your Claude subscription's usage limit is reached. It resets at {at:yyyy-MM-dd HH:mm} UTC."
                 : "Your Claude subscription's usage limit is reached. Try again later.");
         }
-        return Fail(ClaudeCodeFailure.Failed, text.Length > 0 ? $"Claude Code could not answer: {text}" : "Claude Code could not answer.");
+        return Fail(SubscriptionFailure.Failed, text.Length > 0 ? $"Claude Code could not answer: {text}" : "Claude Code could not answer.");
     }
 
-    private ClaudeCodeException Fail(ClaudeCodeFailure kind, string message)
+    private SubscriptionCliException Fail(SubscriptionFailure kind, string message)
     {
         _activity.RecordFailure(kind, message);
-        return new ClaudeCodeException(kind, message);
+        return new SubscriptionCliException(kind, message);
     }
 
     private static ChatResponseUpdate Update(string text, string responseId, string? modelId) =>
         new(ChatRole.Assistant, text) { ResponseId = responseId, ModelId = modelId };
-
-    /// <summary>A real schema goes to the CLI; plain "JSON please" is asked for in words (see the class remarks).</summary>
-    internal static (string? Schema, bool WantsJson) JsonRequest(ChatResponseFormat? format) => format switch
-    {
-        ChatResponseFormatJson { Schema: { } schema } => (schema.GetRawText(), true),
-        ChatResponseFormatJson => (null, true),
-        _ => (null, false),
-    };
-
-    internal static string StripCodeFence(string text)
-    {
-        var t = text.Trim();
-        if (!t.StartsWith("```", StringComparison.Ordinal)) return t;
-        var firstNewline = t.IndexOf('\n');
-        var end = t.LastIndexOf("```", StringComparison.Ordinal);
-        return firstNewline > 0 && end > firstNewline ? t[(firstNewline + 1)..end].Trim() : t;
-    }
 
     public object? GetService(Type serviceType, object? serviceKey = null) =>
         serviceKey is not null ? null

@@ -2,6 +2,8 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
+using AgentFox.LLM.Subscription;
+
 namespace AgentFox.LLM.ClaudeCode;
 
 public sealed record ClaudeCodeUsageView(
@@ -12,8 +14,7 @@ public sealed record ClaudeCodeUsageView(
 public sealed record ClaudeCodeStatus(
     string State, bool Installed, string? Version, bool Allowed, string? NotAllowedReason,
     bool SignedIn, string? TokenSource, DateTimeOffset? TokenSavedUtc, DateTimeOffset? TokenExpiresEstimateUtc,
-    bool ExpiringSoon, string Model, IReadOnlyList<string> Models,
-    bool UseForChat, bool UseForStockAssessment, bool UseForRebuyAdvice, bool SignInSupported,
+    bool ExpiringSoon, string Model, IReadOnlyList<string> Models, bool SignInSupported,
     DateTimeOffset? LastAuthCheckUtc, string? AuthMethod,
     DateTimeOffset? LastSuccessUtc, string? LastModel, DateTimeOffset? LastErrorUtc, string? LastError,
     DateTimeOffset? LastTestUtc, bool? LastTestPassed, ClaudeCodeUsageView? Usage, string? Problem);
@@ -32,12 +33,12 @@ public sealed partial class ClaudeCodeStatusService
     private readonly ClaudeCodeStore _store;
     private readonly ClaudeCodeActivity _activity;
     private readonly AiClientRouter _router;
-    private readonly IClaudeCodeProcessRunner _runner;
+    private readonly ICliProcessRunner _runner;
     private (bool Installed, string? Version, DateTimeOffset CheckedUtc)? _version;
     private (DateTimeOffset CheckedUtc, string? AuthMethod)? _auth;
 
     public ClaudeCodeStatusService(ClaudeCodeOptions options, ClaudeCodePaths paths, ClaudeCodeStore store,
-        ClaudeCodeActivity activity, AiClientRouter router, IClaudeCodeProcessRunner runner)
+        ClaudeCodeActivity activity, AiClientRouter router, ICliProcessRunner runner)
     {
         _options = options;
         _paths = paths;
@@ -52,17 +53,17 @@ public sealed partial class ClaudeCodeStatusService
         var (installed, version) = await VersionAsync(refresh, cancellationToken);
         var settings = _store.Read();
         if (refresh && installed && settings.HasToken) await CheckAuthAsync(cancellationToken);
-        var access = await _router.ReadAccessAsync(cancellationToken);
+        var access = await _router.ReadAccessAsync(AiProviders.ClaudeCode, cancellationToken);
 
         var expires = settings.TokenSavedUtc?.AddDays(_options.TokenLifetimeDays);
         var now = DateTimeOffset.UtcNow;
         var expiringSoon = expires is { } e && e > now && e - now <= TimeSpan.FromDays(_options.TokenExpiryWarningDays);
-        var rateLimited = _activity.LastErrorKind == ClaudeCodeFailure.RateLimited
+        var rateLimited = _activity.LastErrorKind == SubscriptionFailure.RateLimited
                           && _activity.LastErrorUtc > _activity.LastSuccessUtc.GetValueOrDefault();
         var state = !installed ? "not-installed"
             : !access.Allowed ? "not-allowed"
             : !settings.HasToken ? "not-signed-in"
-            : _activity.LastErrorKind == ClaudeCodeFailure.ReauthenticationRequired ? "reauthentication-required"
+            : _activity.LastErrorKind == SubscriptionFailure.ReauthenticationRequired ? "reauthentication-required"
             : expires is { } x && x <= now ? "expired"
             : rateLimited ? "rate-limited"
             : expiringSoon ? "expiring-soon"
@@ -75,7 +76,7 @@ public sealed partial class ClaudeCodeStatusService
         return new ClaudeCodeStatus(
             state, installed, version, access.Allowed, access.Reason,
             settings.HasToken, settings.TokenSource, settings.TokenSavedUtc, expires, expiringSoon, model, models,
-            settings.UseForChat, settings.UseForStockAssessment, settings.UseForRebuyAdvice, ClaudeCodeSignIn.IsSupported,
+            ClaudeCodeSignIn.IsSupported,
             _auth?.CheckedUtc, _auth?.AuthMethod,
             _activity.LastSuccessUtc, _activity.LastModel, _activity.LastErrorUtc, _activity.LastError,
             _activity.LastTestUtc, _activity.LastTestPassed, UsageView(), _store.LoadProblem);
@@ -117,11 +118,11 @@ public sealed partial class ClaudeCodeStatusService
         _auth = (DateTimeOffset.UtcNow, method);
     }
 
-    private async Task<(List<string> Lines, ClaudeCodeProcessException? Failure)> RunAsync(
+    private async Task<(List<string> Lines, CliProcessException? Failure)> RunAsync(
         string[] args, string? token, CancellationToken cancellationToken)
     {
         _paths.Ensure();
-        var invocation = new ClaudeCodeInvocation(_options.ExecutablePath, args,
+        var invocation = new CliInvocation(_options.ExecutablePath, args,
             ClaudeCodeCommand.Environment(Environment.GetEnvironmentVariables(), token, _paths),
             _paths.Work, StandardInput: null, Timeout: TimeSpan.FromSeconds(20));
         var lines = new List<string>();
@@ -131,7 +132,7 @@ public sealed partial class ClaudeCodeStatusService
                 if (lines.Count < 200) lines.Add(line);
             return (lines, null);
         }
-        catch (ClaudeCodeProcessException ex)
+        catch (CliProcessException ex)
         {
             return (lines, ex);
         }

@@ -370,27 +370,49 @@ class Program
                 Path.Combine(sp.GetRequiredService<WorkspaceManager>().ResolvePath(""), "plugin-configs", ".plugin-secrets.key"),
                 sp.GetRequiredService<ILogger<AgentFox.Plugins.AesPluginSecretProtector>>()));
 
-        // Claude Code on the owner's own subscription: chosen per purpose in Settings → AI (docs/claude-code-provider.md).
+        // Subscription providers: the owner's own Claude (Claude Code CLI) and ChatGPT (Codex CLI) plans, chosen per
+        // purpose under Settings (docs/claude-code-provider.md, docs/codex-provider.md). Each has its own config section,
+        // private folders and store; the runner, routing and access policy are shared.
+        string WorkspaceFile(IServiceProvider sp, params string[] parts) =>
+            Path.Combine([sp.GetRequiredService<WorkspaceManager>().ResolvePath(""), .. parts]);
+        builder.Services.AddSingleton<AgentFox.LLM.Subscription.ICliProcessRunner, AgentFox.LLM.Subscription.CliProcessRunner>();
+
         var claudeCodeOptions = configuration.GetSection(AgentFox.LLM.ClaudeCode.ClaudeCodeOptions.SectionName)
             .Get<AgentFox.LLM.ClaudeCode.ClaudeCodeOptions>() ?? new AgentFox.LLM.ClaudeCode.ClaudeCodeOptions();
         builder.Services.AddSingleton(claudeCodeOptions);
         builder.Services.AddSingleton(sp => new AgentFox.LLM.ClaudeCode.ClaudeCodePaths(
-            string.IsNullOrWhiteSpace(claudeCodeOptions.DataDirectory)
-                ? Path.Combine(sp.GetRequiredService<WorkspaceManager>().ResolvePath(""), "claude-code")
-                : claudeCodeOptions.DataDirectory));
+            string.IsNullOrWhiteSpace(claudeCodeOptions.DataDirectory) ? WorkspaceFile(sp, "claude-code") : claudeCodeOptions.DataDirectory));
         builder.Services.AddSingleton(sp => new AgentFox.LLM.ClaudeCode.ClaudeCodeStore(
-            Path.Combine(sp.GetRequiredService<WorkspaceManager>().ResolvePath(""), "plugin-configs", "claude-code.json"),
+            WorkspaceFile(sp, "plugin-configs", "claude-code.json"),
             sp.GetRequiredService<AgentFox.Plugins.IPluginSecretProtector>(),
             sp.GetRequiredService<ILogger<AgentFox.LLM.ClaudeCode.ClaudeCodeStore>>()));
-        builder.Services.AddSingleton<AgentFox.LLM.ClaudeCode.IClaudeCodeProcessRunner, AgentFox.LLM.ClaudeCode.ClaudeCodeProcessRunner>();
         builder.Services.AddSingleton<AgentFox.LLM.ClaudeCode.ClaudeCodeActivity>();
         builder.Services.AddSingleton<AgentFox.LLM.ClaudeCode.ClaudeCodeChatClient>();
         builder.Services.AddSingleton<AgentFox.LLM.ClaudeCode.ClaudeCodeSignIn>();
         builder.Services.AddSingleton<AgentFox.LLM.ClaudeCode.ClaudeCodeStatusService>();
-        builder.Services.AddSingleton<AgentFox.LLM.ClaudeCode.AiClientRouter>();
-        builder.Services.AddSingleton<IAiClientRouter>(sp => sp.GetRequiredService<AgentFox.LLM.ClaudeCode.AiClientRouter>());
-        // A hosted edition replaces this with the operator's per-account switch.
-        builder.Services.AddSingleton<IClaudeCodeAccessPolicy, AllowClaudeCodeAccessPolicy>();
+
+        var codexOptions = configuration.GetSection(AgentFox.LLM.Codex.CodexOptions.SectionName)
+            .Get<AgentFox.LLM.Codex.CodexOptions>() ?? new AgentFox.LLM.Codex.CodexOptions();
+        builder.Services.AddSingleton(codexOptions);
+        builder.Services.AddSingleton(sp => new AgentFox.LLM.Codex.CodexPaths(
+            string.IsNullOrWhiteSpace(codexOptions.DataDirectory) ? WorkspaceFile(sp, "codex") : codexOptions.DataDirectory));
+        builder.Services.AddSingleton(sp => new AgentFox.LLM.Codex.CodexStore(
+            WorkspaceFile(sp, "plugin-configs", "codex.json"), sp.GetRequiredService<ILogger<AgentFox.LLM.Codex.CodexStore>>()));
+        builder.Services.AddSingleton<AgentFox.LLM.Codex.CodexActivity>();
+        builder.Services.AddSingleton<AgentFox.LLM.Codex.CodexChatClient>();
+        builder.Services.AddSingleton<AgentFox.LLM.Codex.CodexSignIn>();
+        builder.Services.AddSingleton<AgentFox.LLM.Codex.CodexStatusService>();
+
+        builder.Services.AddSingleton<AgentFox.LLM.Subscription.ISubscriptionProvider>(sp => sp.GetRequiredService<AgentFox.LLM.ClaudeCode.ClaudeCodeChatClient>());
+        builder.Services.AddSingleton<AgentFox.LLM.Subscription.ISubscriptionProvider>(sp => sp.GetRequiredService<AgentFox.LLM.Codex.CodexChatClient>());
+        builder.Services.AddSingleton(sp => new AgentFox.LLM.Subscription.AiRoutingStore(
+            WorkspaceFile(sp, "plugin-configs", "ai-routing.json"),
+            purpose => sp.GetRequiredService<AgentFox.LLM.ClaudeCode.ClaudeCodeStore>().LegacyUseFor(purpose),
+            sp.GetRequiredService<ILogger<AgentFox.LLM.Subscription.AiRoutingStore>>()));
+        builder.Services.AddSingleton<AgentFox.LLM.Subscription.AiClientRouter>();
+        builder.Services.AddSingleton<IAiClientRouter>(sp => sp.GetRequiredService<AgentFox.LLM.Subscription.AiClientRouter>());
+        // A hosted edition replaces this with the operator's per-account, per-provider switch.
+        builder.Services.AddSingleton<ISubscriptionAccessPolicy, AllowSubscriptionAccessPolicy>();
 
         // Session management
         builder.Services.AddSingleton(sp =>

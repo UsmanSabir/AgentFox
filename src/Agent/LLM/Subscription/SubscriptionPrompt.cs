@@ -1,14 +1,14 @@
 using System.Text;
 using Microsoft.Extensions.AI;
 
-namespace AgentFox.LLM.ClaudeCode;
+namespace AgentFox.LLM.Subscription;
 
 /// <summary>
-/// Turns a chat request into what one CLI call takes: a system prompt and one user message on stdin. Each call is
+/// Turns a chat request into what one subscription CLI call (Claude Code, Codex) takes: a system prompt and one user message on stdin. Each call is
 /// stateless — the host owns the conversation (compaction, retries, model switches), so the whole history is sent
 /// every time rather than resumed from a Claude session that would drift from it.
 /// </summary>
-public static class ClaudeCodePrompt
+public static class SubscriptionPrompt
 {
     public const string DefaultSystemPrompt = "You are a helpful assistant.";
 
@@ -73,5 +73,26 @@ public static class ClaudeCodePrompt
             }
         }
         return sb.ToString().Trim();
+    }
+
+    public const string JsonInstruction =
+        "Reply with one JSON object only: no prose before or after it and no code fences.";
+
+    /// <summary>A real schema goes to the CLI; plain "JSON please" is asked for in words (each CLI's schema option is
+    /// only exercised with a real schema).</summary>
+    public static (string? Schema, bool WantsJson) JsonRequest(ChatResponseFormat? format) => format switch
+    {
+        ChatResponseFormatJson { Schema: { } schema } => (schema.GetRawText(), true),
+        ChatResponseFormatJson => (null, true),
+        _ => (null, false),
+    };
+
+    public static string StripCodeFence(string text)
+    {
+        var t = text.Trim();
+        if (!t.StartsWith("```", StringComparison.Ordinal)) return t;
+        var firstNewline = t.IndexOf('\n');
+        var end = t.LastIndexOf("```", StringComparison.Ordinal);
+        return firstNewline > 0 && end > firstNewline ? t[(firstNewline + 1)..end].Trim() : t;
     }
 }

@@ -29,9 +29,6 @@ export interface ClaudeCodeStatus {
   expiringSoon: boolean;
   model: string;
   models: string[];
-  useForChat: boolean;
-  useForStockAssessment: boolean;
-  useForRebuyAdvice: boolean;
   signInSupported: boolean;
   lastAuthCheckUtc: string | null;
   authMethod: string | null;
@@ -57,19 +54,17 @@ export interface SignInSnapshot {
 
 export interface ClaudeCodeChoices {
   model: string;
-  useForChat: boolean;
-  useForStockAssessment: boolean;
-  useForRebuyAdvice: boolean;
 }
 
 const BASE = '/api/ai/claude-code';
 
-async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
+/** One management call with the API's own `{ error }` text on failure. Shared by the AI provider cards. */
+export async function managementCall<T>(method: string, url: string, body?: unknown): Promise<T> {
   const headers: Record<string, string> = {};
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   const key = getManagementApiKey();
   if (key) headers['X-AgentFox-Api-Key'] = key;
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetch(url, {
     method,
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -85,6 +80,8 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
   }
   return res.json() as Promise<T>;
 }
+
+const call = <T,>(method: string, path: string, body?: unknown) => managementCall<T>(method, `${BASE}${path}`, body);
 
 export const claudeCode = {
   status: (refresh = false) => call<ClaudeCodeStatus>('GET', refresh ? '?refresh=true' : ''),

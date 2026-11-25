@@ -1,8 +1,10 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte';
+  import { createEventDispatcher, onDestroy, onMount } from 'svelte';
   import { Bot, RefreshCw, CheckCircle, XCircle, AlertTriangle, ExternalLink } from 'lucide-svelte';
   import ChannelHelp from './ChannelHelp.svelte';
   import { claudeCode, type ClaudeCodeStatus, type SignInSnapshot } from '#lib/claudeCode.ts';
+
+  const dispatch = createEventDispatcher<{ changed: void }>();
 
   let status: ClaudeCodeStatus | null = null;
   let loading = true;
@@ -18,11 +20,8 @@
   let showPaste = false;
   let token = '';
 
-  // Choices (edited locally, saved on change)
+  // The model (edited locally, saved on change). Which purposes use Claude Code is the AI routing card's.
   let model = '';
-  let useForChat = false;
-  let useForStockAssessment = true;
-  let useForRebuyAdvice = true;
 
   const STATE_TEXT: Record<string, string> = {
     'ready': 'Ready',
@@ -38,9 +37,6 @@
   function apply(s: ClaudeCodeStatus) {
     status = s;
     model = s.model;
-    useForChat = s.useForChat;
-    useForStockAssessment = s.useForStockAssessment;
-    useForRebuyAdvice = s.useForRebuyAdvice;
   }
 
   async function run(name: string, action: () => Promise<void>) {
@@ -64,7 +60,7 @@
 
   function saveChoices() {
     run('choices', async () => {
-      apply(await claudeCode.saveChoices({ model, useForChat, useForStockAssessment, useForRebuyAdvice }));
+      apply(await claudeCode.saveChoices({ model }));
       notice = 'Saved.';
     });
   }
@@ -85,6 +81,7 @@
       apply(await claudeCode.saveToken(value));
       showPaste = false;
       notice = 'Signed in.';
+      dispatch('changed');
     });
   }
 
@@ -93,6 +90,7 @@
     run('remove', async () => {
       apply(await claudeCode.removeToken());
       notice = 'Signed out.';
+      dispatch('changed');
     });
   }
 
@@ -113,6 +111,7 @@
         signIn = null;
         notice = 'Signed in.';
         await load(true);
+        dispatch('changed');
       } else if (signIn.error) {
         error = signIn.error;
       }
@@ -154,7 +153,7 @@
     <Bot size={14} />
     Claude Code (your subscription)
     <span class="heading-help">
-      <ChannelHelp label="Claude Code" text="Use your own Claude Pro or Max subscription for this agent's AI, through the official Claude Code program. Choose below which parts use it; everything else keeps the configured AI. Only you should sign in here: the subscription is yours alone and is not for sharing." />
+      <ChannelHelp label="Claude Code" text="Use your own Claude Pro or Max subscription for this agent's AI, through the official Claude Code program. Choose which parts use it under AI routing; everything else keeps the configured AI. Only you should sign in here: the subscription is yours alone and is not for sharing." />
     </span>
     <button class="btn btn-ghost icon-btn" on:click={() => load(true)} disabled={!!busy} title="Refresh status" aria-label="Refresh Claude Code status">
       <RefreshCw size={13} />
@@ -255,19 +254,6 @@
               {#each status.models as m}<option value={m}>{m}</option>{/each}
             </select>
             <ChannelHelp label="the model" text="Sonnet suits most work; Opus is stronger and uses more of your subscription; Haiku is fastest and lightest. Not every subscription offers every model: if one is refused, the last error says so." />
-          </label>
-          <label class="choice">
-            <input type="checkbox" bind:checked={useForStockAssessment} on:change={saveChoices} disabled={!!busy} />
-            <span>Stock assessments</span>
-          </label>
-          <label class="choice">
-            <input type="checkbox" bind:checked={useForRebuyAdvice} on:change={saveChoices} disabled={!!busy} />
-            <span>Rebuy “Ask AI”</span>
-          </label>
-          <label class="choice">
-            <input type="checkbox" bind:checked={useForChat} on:change={saveChoices} disabled={!!busy} />
-            <span>Chat (text only)</span>
-            <ChannelHelp label="chat on Claude Code" text="Chat then answers from Claude but cannot use any tool: it cannot read your account, look up prices or place orders. Switch it off to get those back." />
           </label>
         </div>
       {/if}

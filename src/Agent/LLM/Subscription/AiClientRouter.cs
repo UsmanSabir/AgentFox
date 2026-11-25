@@ -3,59 +3,68 @@ using System.Runtime.CompilerServices;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 
-namespace AgentFox.LLM.ClaudeCode;
+namespace AgentFox.LLM.Subscription;
 
 /// <summary>
-/// Sends each purpose to Claude Code when the owner has signed in, switched that purpose on, and this agent is
-/// allowed to use it; everything else stays on the configured provider. Decided on every call, so the settings card
-/// takes effect at once.
+/// Sends each purpose to the provider the owner chose for it (<see cref="AiRoutingStore"/>) when that provider is
+/// signed in and this agent is allowed to use it; otherwise to the configured provider. Decided on every call, so the
+/// settings card takes effect at once, and a provider that stops being available simply stops being used.
 /// </summary>
 public sealed class AiClientRouter : IAiClientRouter
 {
     private readonly RuntimeModelChatClient _configured;
-    private readonly ClaudeCodeChatClient _claude;
-    private readonly ClaudeCodeStore _store;
+    private readonly IReadOnlyDictionary<string, ISubscriptionProvider> _providers;
+    private readonly AiRoutingStore _routing;
     private readonly IServiceProvider _services;
     private readonly ConcurrentDictionary<string, IChatClient> _clients = new(StringComparer.Ordinal);
 
-    public AiClientRouter(RuntimeModelChatClient configured, ClaudeCodeChatClient claude, ClaudeCodeStore store,
-        IServiceProvider services)
+    public AiClientRouter(RuntimeModelChatClient configured, IEnumerable<ISubscriptionProvider> providers,
+        AiRoutingStore routing, IServiceProvider services)
     {
         _configured = configured;
-        _claude = claude;
-        _store = store;
+        _providers = providers.ToDictionary(p => p.Id, StringComparer.Ordinal);
+        _routing = routing;
         _services = services;
     }
 
     public IChatClient For(string purpose) => _clients.GetOrAdd(purpose, p => new PurposeChatClient(this, p));
 
-    /// <summary>Whether this purpose goes to Claude Code right now.</summary>
-    public async Task<bool> UsesClaudeCodeAsync(string purpose, CancellationToken cancellationToken)
+    public IReadOnlyCollection<ISubscriptionProvider> Providers => _providers.Values.ToList();
+
+    /// <summary>The provider this purpose actually uses right now (<see cref="AiProviders"/>).</summary>
+    public async Task<string> ProviderInUseAsync(string purpose, CancellationToken cancellationToken)
     {
-        var settings = _store.Read();
-        if (!settings.HasToken || !settings.IsUsedFor(purpose)) return false;
-        return (await ReadAccessAsync(cancellationToken)).Allowed;
+        var chosen = _routing.ProviderFor(purpose);
+        if (!_providers.TryGetValue(chosen, out var provider) || !provider.IsSignedIn) return AiProviders.Configured;
+        return (await ReadAccessAsync(chosen, cancellationToken)).Allowed ? chosen : AiProviders.Configured;
     }
 
+    /// <summary>Whether this purpose goes to a subscription provider (text only) right now.</summary>
+    public async Task<bool> UsesSubscriptionAsync(string purpose, CancellationToken cancellationToken) =>
+        await ProviderInUseAsync(purpose, cancellationToken) != AiProviders.Configured;
+
     /// <summary>Resolved on use: a hosted policy reads the hub, and a constructor edge to it can close a DI cycle.</summary>
-    public async Task<ClaudeCodeAccess> ReadAccessAsync(CancellationToken cancellationToken)
+    public async Task<SubscriptionAccess> ReadAccessAsync(string provider, CancellationToken cancellationToken)
     {
-        var policy = _services.GetService<IClaudeCodeAccessPolicy>() ?? new AllowClaudeCodeAccessPolicy();
+        var policy = _services.GetService<ISubscriptionAccessPolicy>() ?? new AllowSubscriptionAccessPolicy();
         try
         {
-            return await policy.ReadAsync(cancellationToken);
+            return await policy.ReadAsync(provider, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch
         {
             // Unreadable means not allowed: the configured provider keeps working, so this costs nothing but the
             // routing, where guessing "allowed" would spend a process on an account the operator switched off.
-            return new ClaudeCodeAccess(false, "Claude Code access could not be checked.");
+            return new SubscriptionAccess(false, "Access could not be checked.");
         }
     }
 
-    private async Task<IChatClient> ResolveAsync(string purpose, CancellationToken cancellationToken) =>
-        await UsesClaudeCodeAsync(purpose, cancellationToken) ? _claude : _configured;
+    private async Task<IChatClient> ResolveAsync(string purpose, CancellationToken cancellationToken)
+    {
+        var id = await ProviderInUseAsync(purpose, cancellationToken);
+        return _providers.TryGetValue(id, out var provider) ? provider.Client : _configured;
+    }
 
     private sealed class PurposeChatClient(AiClientRouter router, string purpose) : IChatClient
     {
@@ -81,8 +90,8 @@ public sealed class AiClientRouter : IAiClientRouter
         {
             if (serviceKey is null && serviceType.IsInstanceOfType(this)) return this;
             if (serviceKey is null && serviceType == typeof(ChatClientMetadata)
-                && router._store.Read() is { HasToken: true } s && s.IsUsedFor(purpose))
-                return router._claude.GetService(serviceType);
+                && router._providers.TryGetValue(router._routing.ProviderFor(purpose), out var p) && p.IsSignedIn)
+                return p.Client.GetService(serviceType);
             return router._configured.GetService(serviceType, serviceKey);
         }
 

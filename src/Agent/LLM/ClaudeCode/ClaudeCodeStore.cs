@@ -2,25 +2,14 @@ using System.Text.Json;
 using AgentFox.Plugins;
 using Microsoft.Extensions.Logging;
 
+using AgentFox.LLM.Subscription;
+
 namespace AgentFox.LLM.ClaudeCode;
 
-/// <summary>What the owner chose for Claude Code.</summary>
+/// <summary>What the owner chose for Claude Code. Which purposes use it lives in <see cref="AgentFox.LLM.Subscription.AiRoutingStore"/>.</summary>
 /// <param name="TokenSavedUtc">When the token was saved; the estimated expiry counts from here.</param>
 /// <param name="TokenSource"><c>signin</c> or <c>paste</c>.</param>
-public sealed record ClaudeCodeSettings(
-    bool HasToken, DateTimeOffset? TokenSavedUtc, string? TokenSource, string? Model,
-    bool UseForChat, bool UseForStockAssessment, bool UseForRebuyAdvice)
-{
-    public static readonly ClaudeCodeSettings Empty = new(false, null, null, null, false, true, true);
-
-    public bool IsUsedFor(string purpose) => purpose switch
-    {
-        AiPurposes.Chat => UseForChat,
-        AiPurposes.StockAssessment => UseForStockAssessment,
-        AiPurposes.RebuyAdvice => UseForRebuyAdvice,
-        _ => false,
-    };
-}
+public sealed record ClaudeCodeSettings(bool HasToken, DateTimeOffset? TokenSavedUtc, string? TokenSource, string? Model);
 
 /// <summary>
 /// The token and the owner's choices, in <c>plugin-configs/claude-code.json</c>. The token is encrypted with the
@@ -57,10 +46,7 @@ public sealed class ClaudeCodeStore
             var p = Load();
             return new ClaudeCodeSettings(
                 HasToken: !string.IsNullOrEmpty(p.Token) && TryToken(p) is not null,
-                p.TokenSavedUtc, p.TokenSource, p.Model,
-                p.UseForChat ?? ClaudeCodeSettings.Empty.UseForChat,
-                p.UseForStockAssessment ?? ClaudeCodeSettings.Empty.UseForStockAssessment,
-                p.UseForRebuyAdvice ?? ClaudeCodeSettings.Empty.UseForRebuyAdvice);
+                p.TokenSavedUtc, p.TokenSource, p.Model);
         }
     }
 
@@ -86,16 +72,26 @@ public sealed class ClaudeCodeStore
         lock (_gate) Write(Load() with { Token = null, TokenSavedUtc = null, TokenSource = null });
     }
 
-    public void SaveChoices(string? model, bool useForChat, bool useForStockAssessment, bool useForRebuyAdvice)
+    public void SaveModel(string? model)
+    {
+        lock (_gate) Write(Load() with { Model = string.IsNullOrWhiteSpace(model) ? null : model.Trim() });
+    }
+
+    /// <summary>A per-purpose switch saved before routing moved to <see cref="AgentFox.LLM.Subscription.AiRoutingStore"/>;
+    /// null when none was. Read once, as that store's starting point.</summary>
+    public bool? LegacyUseFor(string purpose)
     {
         lock (_gate)
-            Write(Load() with
+        {
+            var p = Load();
+            return purpose switch
             {
-                Model = string.IsNullOrWhiteSpace(model) ? null : model.Trim(),
-                UseForChat = useForChat,
-                UseForStockAssessment = useForStockAssessment,
-                UseForRebuyAdvice = useForRebuyAdvice,
-            });
+                AiPurposes.Chat => p.UseForChat,
+                AiPurposes.StockAssessment => p.UseForStockAssessment,
+                AiPurposes.RebuyAdvice => p.UseForRebuyAdvice,
+                _ => null,
+            };
+        }
     }
 
     private string? TryToken(Persisted p)

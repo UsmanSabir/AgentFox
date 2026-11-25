@@ -87,7 +87,7 @@ public class WebModule : IAppModule
             if (await ChatUsesClaudeCodeAsync(httpContext, ct))
                 return Results.Ok(new { attachments = new { enabled = false, images = false, documents = false, textFiles = false,
                     convertedDocuments = false, maxFileSizeBytes = 0, maxFilesPerMessage = 0, maxTotalBytes = 0,
-                    acceptedMediaTypes = Array.Empty<string>(), provider = "claude-code", model = caps.Model, source = "config" } });
+                    acceptedMediaTypes = Array.Empty<string>(), provider = "subscription", model = caps.Model, source = "config" } });
             return Results.Ok(new
             {
                 attachments = new
@@ -128,8 +128,10 @@ public class WebModule : IAppModule
         })
             .RequireAuthorization("ManagementAdministrator");
 
-        // ── Claude Code (the owner's own subscription) ─────────────────────────
+        // ── Subscription providers (the owner's own Claude / ChatGPT plan) ─────
         AgentFox.LLM.ClaudeCode.ClaudeCodeEndpoints.Map(endpoints);
+        AgentFox.LLM.Codex.CodexEndpoints.Map(endpoints);
+        AgentFox.LLM.Subscription.AiRoutingEndpoints.Map(endpoints);
 
         // ── Chat (request/response) ───────────────────────────────────────────
 
@@ -1362,13 +1364,13 @@ public class WebModule : IAppModule
     /// <summary>Optional: a host without a document reader registered (tests, embedded hosts)
     /// keeps its previous attachment behaviour rather than failing to bind the endpoint.</summary>
     private const string ClaudeCodeAttachmentRefusal =
-        "Chat is answering through Claude Code, which cannot read attachments. Send the message without the file, " +
-        "or switch chat back to the configured AI under Settings → Claude Code.";
+        "Chat is answering through your Claude or ChatGPT subscription, which cannot read attachments. Send the message " +
+        "without the file, or switch chat back to the configured AI under Settings → AI routing.";
 
-    /// <summary>Whether the owner has sent chat to Claude Code (text only). Absent router: no.</summary>
+    /// <summary>Whether the owner has sent chat to a subscription provider (text only). Absent router: no.</summary>
     private static async Task<bool> ChatUsesClaudeCodeAsync(HttpContext httpContext, CancellationToken ct) =>
-        httpContext.RequestServices.GetService<AgentFox.LLM.ClaudeCode.AiClientRouter>() is { } router
-        && await router.UsesClaudeCodeAsync(AgentFox.LLM.AiPurposes.Chat, ct);
+        httpContext.RequestServices.GetService<AgentFox.LLM.Subscription.AiClientRouter>() is { } router
+        && await router.UsesSubscriptionAsync(AgentFox.LLM.AiPurposes.Chat, ct);
 
     private static AttachmentDocumentReader? DocumentReader(HttpContext httpContext) =>
         httpContext.RequestServices.GetService<AttachmentDocumentReader>();

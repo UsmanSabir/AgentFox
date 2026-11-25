@@ -26,20 +26,29 @@ public interface IAiClientRouter
     IChatClient For(string purpose);
 }
 
-/// <summary>Whether this agent may use Claude Code at all (a hosted account can be switched off by its operator).</summary>
-public interface IClaudeCodeAccessPolicy
+/// <summary>The providers a purpose can be sent to. <see cref="Configured"/> is whatever the LLM section sets.</summary>
+public static class AiProviders
 {
-    Task<ClaudeCodeAccess> ReadAsync(CancellationToken cancellationToken = default);
+    public const string Configured = "configured";
+    public const string ClaudeCode = "claude-code";
+    public const string Codex = "codex";
+}
+
+/// <summary>Whether this agent may use a subscription provider (<see cref="AiProviders"/>) at all: a hosted account can
+/// be switched off by its operator, per provider.</summary>
+public interface ISubscriptionAccessPolicy
+{
+    Task<SubscriptionAccess> ReadAsync(string provider, CancellationToken cancellationToken = default);
 }
 
 /// <param name="Allowed">False keeps every purpose on the configured provider.</param>
 /// <param name="Reason">Shown in the settings card when not allowed.</param>
-public sealed record ClaudeCodeAccess(bool Allowed, string? Reason = null);
+public sealed record SubscriptionAccess(bool Allowed, string? Reason = null);
 
-public sealed class AllowClaudeCodeAccessPolicy : IClaudeCodeAccessPolicy
+public sealed class AllowSubscriptionAccessPolicy : ISubscriptionAccessPolicy
 {
-    public Task<ClaudeCodeAccess> ReadAsync(CancellationToken cancellationToken = default) =>
-        Task.FromResult(new ClaudeCodeAccess(true));
+    public Task<SubscriptionAccess> ReadAsync(string provider, CancellationToken cancellationToken = default) =>
+        Task.FromResult(new SubscriptionAccess(true));
 }
 
 /// <summary>

@@ -57,8 +57,8 @@ public static partial class ClaudeCodeTerminalText
 
     public static bool IsWellFormedToken(string token) => SetupToken().IsMatch(token);
 
-    /// <summary>Masks anything shaped like a token. For error text and logs.</summary>
-    public static string Redact(string text) => AnyToken().Replace(text, "sk-ant-****");
+    /// <summary>Masks anything shaped like a credential. For error text and logs.</summary>
+    public static string Redact(string text) => AgentFox.LLM.Subscription.SecretRedaction.Redact(text);
 
     private static string Unwrapped(string stripped)
     {
@@ -76,6 +76,5 @@ public static partial class ClaudeCodeTerminalText
     [GeneratedRegex(@"valid for 1 year\)\s*:?(.*?)Store", RegexOptions.Singleline)] private static partial Regex TokenBlock();
     [GeneratedRegex(@"\s+")] private static partial Regex Whitespace();
     [GeneratedRegex(@"^sk-ant-oat01-[A-Za-z0-9_-]{20,400}$")] private static partial Regex SetupToken();
-    [GeneratedRegex(@"sk-ant-[A-Za-z0-9_-]+")] private static partial Regex AnyToken();
     [GeneratedRegex(@"OAuth error:\s*([^\n]+)")] private static partial Regex OAuthError();
 }

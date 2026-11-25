@@ -2,16 +2,16 @@ using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text;
 
-namespace AgentFox.LLM.ClaudeCode;
+namespace AgentFox.LLM.Subscription;
 
-/// <param name="Environment">The child's WHOLE environment (<see cref="ClaudeCodeCommand.Environment"/>); nothing
+/// <param name="Environment">The child's WHOLE environment (built on <see cref="CliEnvironment.Base"/>); nothing
 /// else is inherited.</param>
-public sealed record ClaudeCodeInvocation(
+public sealed record CliInvocation(
     string Executable, IReadOnlyList<string> Arguments, IReadOnlyDictionary<string, string> Environment,
     string WorkingDirectory, string? StandardInput, TimeSpan Timeout);
 
 /// <summary>The CLI exited unsuccessfully, or could not be started.</summary>
-public sealed class ClaudeCodeProcessException(string message, int? exitCode = null, string? stderrTail = null)
+public sealed class CliProcessException(string message, int? exitCode = null, string? stderrTail = null)
     : Exception(message)
 {
     public int? ExitCode { get; } = exitCode;
@@ -22,20 +22,20 @@ public sealed class ClaudeCodeProcessException(string message, int? exitCode = n
 }
 
 /// <summary>Starts the CLI and yields its stdout lines. A seam, so the chat client is tested without a process.</summary>
-public interface IClaudeCodeProcessRunner
+public interface ICliProcessRunner
 {
-    /// <summary>Yields each stdout line; throws <see cref="ClaudeCodeProcessException"/> after the last line when the
+    /// <summary>Yields each stdout line; throws <see cref="CliProcessException"/> after the last line when the
     /// exit code is not zero.</summary>
-    IAsyncEnumerable<string> RunAsync(ClaudeCodeInvocation invocation, CancellationToken cancellationToken);
+    IAsyncEnumerable<string> RunAsync(CliInvocation invocation, CancellationToken cancellationToken);
 }
 
-public sealed class ClaudeCodeProcessRunner : IClaudeCodeProcessRunner
+public sealed class CliProcessRunner : ICliProcessRunner
 {
     /// <summary>Output beyond this ends the call: a reply is never this large, a runaway process might be.</summary>
     private const long MaxOutputChars = 16 * 1024 * 1024;
     private const int StderrTailChars = 4096;
 
-    public async IAsyncEnumerable<string> RunAsync(ClaudeCodeInvocation invocation,
+    public async IAsyncEnumerable<string> RunAsync(CliInvocation invocation,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         var psi = new ProcessStartInfo(invocation.Executable)
@@ -58,12 +58,12 @@ public sealed class ClaudeCodeProcessRunner : IClaudeCodeProcessRunner
         try
         {
             if (!process.Start())
-                throw new ClaudeCodeProcessException("The Claude Code CLI could not be started.") { NotInstalled = true };
+                throw new CliProcessException("The CLI could not be started.") { NotInstalled = true };
         }
         catch (System.ComponentModel.Win32Exception)
         {
-            throw new ClaudeCodeProcessException(
-                $"The Claude Code CLI was not found ({Path.GetFileName(invocation.Executable)}).") { NotInstalled = true };
+            throw new CliProcessException(
+                $"The CLI was not found ({Path.GetFileName(invocation.Executable)}).") { NotInstalled = true };
         }
 
         using var timeout = new CancellationTokenSource(invocation.Timeout);
@@ -82,7 +82,7 @@ public sealed class ClaudeCodeProcessRunner : IClaudeCodeProcessRunner
         {
             Kill(process);
             if (token.IsCancellationRequested) throw Cancelled(cancellationToken, timeout);
-            throw new ClaudeCodeProcessException("The Claude Code CLI stopped before reading the request.");
+            throw new CliProcessException("The CLI stopped before reading the request.");
         }
 
         long total = 0;
@@ -103,7 +103,7 @@ public sealed class ClaudeCodeProcessRunner : IClaudeCodeProcessRunner
             if (total > MaxOutputChars)
             {
                 Kill(process);
-                throw new ClaudeCodeProcessException("The Claude Code CLI produced more output than expected.");
+                throw new CliProcessException("The CLI produced more output than expected.");
             }
             yield return line;
         }
@@ -121,8 +121,8 @@ public sealed class ClaudeCodeProcessRunner : IClaudeCodeProcessRunner
         if (process.ExitCode != 0)
         {
             string tail;
-            lock (stderr) tail = ClaudeCodeTerminalText.Redact(stderr.ToString()).Trim();
-            throw new ClaudeCodeProcessException($"The Claude Code CLI exited with code {process.ExitCode}.",
+            lock (stderr) tail = SecretRedaction.Redact(stderr.ToString()).Trim();
+            throw new CliProcessException($"The CLI exited with code {process.ExitCode}.",
                 process.ExitCode, tail.Length == 0 ? null : tail);
         }
     }
@@ -131,7 +131,7 @@ public sealed class ClaudeCodeProcessRunner : IClaudeCodeProcessRunner
     {
         if (caller.IsCancellationRequested) return new OperationCanceledException(caller);
         if (timeout.IsCancellationRequested)
-            return new ClaudeCodeProcessException("The Claude Code call took too long and was stopped.") { TimedOut = true };
+            return new CliProcessException("The call took too long and was stopped.") { TimedOut = true };
         return new OperationCanceledException();
     }
 

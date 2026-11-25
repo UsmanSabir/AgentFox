@@ -3,6 +3,7 @@ using System.Runtime.CompilerServices;
 using System.Text.Json;
 using AgentFox.LLM;
 using AgentFox.LLM.ClaudeCode;
+using AgentFox.LLM.Subscription;
 using AgentFox.Plugins;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
@@ -42,17 +43,17 @@ public sealed class ClaudeCodeTests
 
     // ── Fakes ─────────────────────────────────────────────────────────────────────────────────────
 
-    private sealed class FakeRunner(Func<ClaudeCodeInvocation, CancellationToken, IAsyncEnumerable<string>> run) : IClaudeCodeProcessRunner
+    private sealed class FakeRunner(Func<CliInvocation, CancellationToken, IAsyncEnumerable<string>> run) : ICliProcessRunner
     {
-        public List<ClaudeCodeInvocation> Calls { get; } = [];
-        public IAsyncEnumerable<string> RunAsync(ClaudeCodeInvocation invocation, CancellationToken cancellationToken)
+        public List<CliInvocation> Calls { get; } = [];
+        public IAsyncEnumerable<string> RunAsync(CliInvocation invocation, CancellationToken cancellationToken)
         {
             lock (Calls) Calls.Add(invocation);
             return run(invocation, cancellationToken);
         }
 
         public static FakeRunner Lines(params string[] lines) => new((_, _) => Yield(lines, null));
-        public static FakeRunner LinesThenFail(ClaudeCodeProcessException ex, params string[] lines) => new((_, _) => Yield(lines, ex));
+        public static FakeRunner LinesThenFail(CliProcessException ex, params string[] lines) => new((_, _) => Yield(lines, ex));
 
         private static async IAsyncEnumerable<string> Yield(string[] lines, Exception? after)
         {
@@ -77,8 +78,15 @@ public sealed class ClaudeCodeTests
             if (signedIn) Store.SaveToken(Token, "paste");
         }
 
-        public ClaudeCodeChatClient Client(IClaudeCodeProcessRunner runner) =>
+        public ClaudeCodeChatClient Client(ICliProcessRunner runner) =>
             new(Options, Paths, Store, runner, Activity, NullLogger<ClaudeCodeChatClient>.Instance);
+
+        public AiRoutingStore Routing => _routing ??= new AiRoutingStore(Path.Combine(Dir, "ai-routing.json"),
+            Store.LegacyUseFor, NullLogger<AiRoutingStore>.Instance);
+        private AiRoutingStore? _routing;
+
+        public AiClientRouter Router(RuntimeModelChatClient configured, IServiceProvider services, params ISubscriptionProvider[] providers) =>
+            new(configured, providers, Routing, services);
 
         public void Dispose() { try { Directory.Delete(Dir, true); } catch { } }
     }
@@ -191,11 +199,11 @@ public sealed class ClaudeCodeTests
     [TestMethod]
     public void Renders_one_message_alone_and_a_conversation_as_a_transcript()
     {
-        var single = ClaudeCodePrompt.Render([new ChatMessage(ChatRole.User, "سلام، کیا حال ہے؟")]);
-        Assert.AreEqual(ClaudeCodePrompt.DefaultSystemPrompt, single.SystemPrompt);
+        var single = SubscriptionPrompt.Render([new ChatMessage(ChatRole.User, "سلام، کیا حال ہے؟")]);
+        Assert.AreEqual(SubscriptionPrompt.DefaultSystemPrompt, single.SystemPrompt);
         Assert.AreEqual("سلام، کیا حال ہے؟", single.UserMessage);
 
-        var many = ClaudeCodePrompt.Render([
+        var many = SubscriptionPrompt.Render([
             new ChatMessage(ChatRole.System, "A"), new ChatMessage(ChatRole.System, "B"),
             new ChatMessage(ChatRole.User, "first"), new ChatMessage(ChatRole.Assistant, "reply"),
             new ChatMessage(ChatRole.Tool, [new FunctionResultContent("c1", "tool output")]),
@@ -256,7 +264,7 @@ public sealed class ClaudeCodeTests
         });
         var reply = await h.Client(runner).GetResponseAsync(Hello, new ChatOptions { ResponseFormat = ChatResponseFormat.Json });
         Assert.AreEqual("{\"a\":1}", reply.Text);
-        StringAssert.EndsWith(systemPrompt, ClaudeCodeChatClient.JsonInstruction);
+        StringAssert.EndsWith(systemPrompt, SubscriptionPrompt.JsonInstruction);
         Assert.IsFalse(runner.Calls.Single().Arguments.Contains("--json-schema"));
     }
 
@@ -276,11 +284,11 @@ public sealed class ClaudeCodeTests
     public async Task A_refused_sign_in_asks_to_sign_in_again_and_the_exit_code_after_it_is_ignored()
     {
         using var h = new Harness();
-        var runner = FakeRunner.LinesThenFail(new ClaudeCodeProcessException("exit 1", 1),
+        var runner = FakeRunner.LinesThenFail(new CliProcessException("exit 1", 1),
             Init, Result("Failed to authenticate. API Error: 401 OAuth access token is invalid.", isError: true, apiError: 401));
-        var ex = await Assert.ThrowsExactlyAsync<ClaudeCodeException>(() => h.Client(runner).GetResponseAsync(Hello));
-        Assert.AreEqual(ClaudeCodeFailure.ReauthenticationRequired, ex.Kind);
-        Assert.AreEqual(ClaudeCodeFailure.ReauthenticationRequired, h.Activity.LastErrorKind);
+        var ex = await Assert.ThrowsExactlyAsync<SubscriptionCliException>(() => h.Client(runner).GetResponseAsync(Hello));
+        Assert.AreEqual(SubscriptionFailure.ReauthenticationRequired, ex.Kind);
+        Assert.AreEqual(SubscriptionFailure.ReauthenticationRequired, h.Activity.LastErrorKind);
     }
 
     [TestMethod]
@@ -288,8 +296,8 @@ public sealed class ClaudeCodeTests
     {
         using var h = new Harness();
         var runner = FakeRunner.Lines(Init, RateLimit, Result("Claude usage limit reached", isError: true, apiError: 429));
-        var ex = await Assert.ThrowsExactlyAsync<ClaudeCodeException>(() => h.Client(runner).GetResponseAsync(Hello));
-        Assert.AreEqual(ClaudeCodeFailure.RateLimited, ex.Kind);
+        var ex = await Assert.ThrowsExactlyAsync<SubscriptionCliException>(() => h.Client(runner).GetResponseAsync(Hello));
+        Assert.AreEqual(SubscriptionFailure.RateLimited, ex.Kind);
         StringAssert.Contains(ex.Message, "resets at");
         Assert.AreEqual(1, runner.Calls.Count);
     }
@@ -299,14 +307,14 @@ public sealed class ClaudeCodeTests
     {
         using (var h = new Harness(signedIn: false))
         {
-            var ex = await Assert.ThrowsExactlyAsync<ClaudeCodeException>(() => h.Client(FakeRunner.Lines()).GetResponseAsync(Hello));
-            Assert.AreEqual(ClaudeCodeFailure.NotSignedIn, ex.Kind);
+            var ex = await Assert.ThrowsExactlyAsync<SubscriptionCliException>(() => h.Client(FakeRunner.Lines()).GetResponseAsync(Hello));
+            Assert.AreEqual(SubscriptionFailure.NotSignedIn, ex.Kind);
         }
         using (var h = new Harness())
         {
-            var runner = FakeRunner.LinesThenFail(new ClaudeCodeProcessException("not found") { NotInstalled = true });
-            var ex = await Assert.ThrowsExactlyAsync<ClaudeCodeException>(() => h.Client(runner).GetResponseAsync(Hello));
-            Assert.AreEqual(ClaudeCodeFailure.NotInstalled, ex.Kind);
+            var runner = FakeRunner.LinesThenFail(new CliProcessException("not found") { NotInstalled = true });
+            var ex = await Assert.ThrowsExactlyAsync<SubscriptionCliException>(() => h.Client(runner).GetResponseAsync(Hello));
+            Assert.AreEqual(SubscriptionFailure.NotInstalled, ex.Kind);
         }
     }
 
@@ -314,9 +322,9 @@ public sealed class ClaudeCodeTests
     public async Task An_unexpected_end_without_a_result_is_a_failure_not_an_empty_answer()
     {
         using var h = new Harness();
-        var runner = FakeRunner.LinesThenFail(new ClaudeCodeProcessException("exit 137", 137, "Killed"), Init, Delta("par"));
-        var ex = await Assert.ThrowsExactlyAsync<ClaudeCodeException>(() => h.Client(runner).GetResponseAsync(Hello));
-        Assert.AreEqual(ClaudeCodeFailure.Failed, ex.Kind);
+        var runner = FakeRunner.LinesThenFail(new CliProcessException("exit 137", 137, "Killed"), Init, Delta("par"));
+        var ex = await Assert.ThrowsExactlyAsync<SubscriptionCliException>(() => h.Client(runner).GetResponseAsync(Hello));
+        Assert.AreEqual(SubscriptionFailure.Failed, ex.Kind);
     }
 
     [TestMethod]
@@ -340,8 +348,8 @@ public sealed class ClaudeCodeTests
         var client = h.Client(runner);
         var first = client.GetResponseAsync(Hello);
         await Task.Delay(100);
-        var ex = await Assert.ThrowsExactlyAsync<ClaudeCodeException>(() => client.GetResponseAsync(Hello));
-        Assert.AreEqual(ClaudeCodeFailure.Busy, ex.Kind);
+        var ex = await Assert.ThrowsExactlyAsync<SubscriptionCliException>(() => client.GetResponseAsync(Hello));
+        Assert.AreEqual(SubscriptionFailure.Busy, ex.Kind);
         release.Cancel();
         await Assert.ThrowsAsync<OperationCanceledException>(() => first);
     }
@@ -368,22 +376,45 @@ public sealed class ClaudeCodeTests
     }
 
     [TestMethod]
-    public void Defaults_route_trading_tasks_but_not_chat_and_choices_persist()
+    public void Routing_defaults_send_trading_tasks_to_claude_and_keep_chat_and_choices_persist()
     {
         using var h = new Harness();
-        var s = h.Store.Read();
-        Assert.IsFalse(s.IsUsedFor(AiPurposes.Chat));
-        Assert.IsTrue(s.IsUsedFor(AiPurposes.StockAssessment));
-        Assert.IsTrue(s.IsUsedFor(AiPurposes.RebuyAdvice));
-        Assert.IsFalse(s.IsUsedFor("something-else"));
+        Assert.AreEqual(AiProviders.Configured, h.Routing.ProviderFor(AiPurposes.Chat));
+        Assert.AreEqual(AiProviders.ClaudeCode, h.Routing.ProviderFor(AiPurposes.StockAssessment));
+        Assert.AreEqual(AiProviders.ClaudeCode, h.Routing.ProviderFor(AiPurposes.RebuyAdvice));
 
-        h.Store.SaveChoices("opus", useForChat: true, useForStockAssessment: false, useForRebuyAdvice: true);
+        h.Routing.Set(AiPurposes.Chat, AiProviders.Codex);
+        h.Routing.Set(AiPurposes.StockAssessment, AiProviders.Configured);
+        var reread = new AiRoutingStore(Path.Combine(h.Dir, "ai-routing.json"), _ => null, NullLogger<AiRoutingStore>.Instance);
+        Assert.AreEqual(AiProviders.Codex, reread.ProviderFor(AiPurposes.Chat));
+        Assert.AreEqual(AiProviders.Configured, reread.ProviderFor(AiPurposes.StockAssessment));
+        Assert.AreEqual(AiProviders.ClaudeCode, reread.ProviderFor(AiPurposes.RebuyAdvice));
+        Assert.ThrowsExactly<ArgumentException>(() => h.Routing.Set("something-else", AiProviders.Codex));
+        Assert.ThrowsExactly<ArgumentException>(() => h.Routing.Set(AiPurposes.Chat, "gemini"));
+
+        h.Store.SaveModel("opus");
         var protector = new AesPluginSecretProtector(Path.Combine(h.Dir, ".key"), NullLogger<AesPluginSecretProtector>.Instance);
-        var reread = new ClaudeCodeStore(Path.Combine(h.Dir, "claude-code.json"), protector, NullLogger<ClaudeCodeStore>.Instance).Read();
-        Assert.AreEqual("opus", reread.Model);
-        Assert.IsTrue(reread.UseForChat);
-        Assert.IsFalse(reread.UseForStockAssessment);
-        Assert.IsTrue(reread.HasToken);
+        var store = new ClaudeCodeStore(Path.Combine(h.Dir, "claude-code.json"), protector, NullLogger<ClaudeCodeStore>.Instance).Read();
+        Assert.AreEqual("opus", store.Model);
+        Assert.IsTrue(store.HasToken);
+    }
+
+    [TestMethod]
+    public void Switches_saved_before_routing_existed_carry_over()
+    {
+        using var h = new Harness();
+        // The Claude-only version kept per-purpose booleans in claude-code.json; write that shape directly.
+        var path = Path.Combine(h.Dir, "claude-code.json");
+        var json = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+        json["useForChat"] = true;
+        json["useForStockAssessment"] = false;
+        File.WriteAllText(path, json.ToJsonString());
+        var protector = new AesPluginSecretProtector(Path.Combine(h.Dir, ".key"), NullLogger<AesPluginSecretProtector>.Instance);
+        var old = new ClaudeCodeStore(path, protector, NullLogger<ClaudeCodeStore>.Instance);
+        var routing = new AiRoutingStore(Path.Combine(h.Dir, "routing2.json"), old.LegacyUseFor, NullLogger<AiRoutingStore>.Instance);
+        Assert.AreEqual(AiProviders.ClaudeCode, routing.ProviderFor(AiPurposes.Chat));
+        Assert.AreEqual(AiProviders.Configured, routing.ProviderFor(AiPurposes.StockAssessment));
+        Assert.AreEqual(AiProviders.ClaudeCode, routing.ProviderFor(AiPurposes.RebuyAdvice), "never saved: the default");
     }
 
     [TestMethod]
@@ -404,36 +435,36 @@ public sealed class ClaudeCodeTests
 
     // ── Routing ───────────────────────────────────────────────────────────────────────────────────
 
-    private sealed class Policy(Func<ClaudeCodeAccess> read) : IClaudeCodeAccessPolicy
+    private sealed class Policy(Func<SubscriptionAccess> read) : ISubscriptionAccessPolicy
     {
-        public Task<ClaudeCodeAccess> ReadAsync(CancellationToken cancellationToken = default) => Task.FromResult(read());
+        public Task<SubscriptionAccess> ReadAsync(string provider, CancellationToken cancellationToken = default) => Task.FromResult(read());
     }
 
     [TestMethod]
-    public async Task Each_purpose_goes_to_claude_only_when_signed_in_switched_on_and_allowed()
+    public async Task Each_purpose_goes_to_its_provider_only_when_signed_in_chosen_and_allowed()
     {
         using var h = new Harness();
         var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
             { ["LLM:Provider"] = "ollama", ["LLM:Model"] = "local" }).Build();
         using var configured = new RuntimeModelChatClient(config);
         var claude = h.Client(FakeRunner.Lines(Init, Result("ok")));
-        var access = new ClaudeCodeAccess(true);
-        Func<ClaudeCodeAccess> read = () => access;
-        using var services = new ServiceCollection().AddSingleton<IClaudeCodeAccessPolicy>(new Policy(() => read())).BuildServiceProvider();
-        var router = new AiClientRouter(configured, claude, h.Store, services);
+        var access = new SubscriptionAccess(true);
+        Func<SubscriptionAccess> read = () => access;
+        using var services = new ServiceCollection().AddSingleton<ISubscriptionAccessPolicy>(new Policy(() => read())).BuildServiceProvider();
+        var router = h.Router(configured, services, claude);
 
-        Assert.IsFalse(await router.UsesClaudeCodeAsync(AiPurposes.Chat, default), "chat is off by default");
-        Assert.IsTrue(await router.UsesClaudeCodeAsync(AiPurposes.RebuyAdvice, default));
+        Assert.IsFalse(await router.UsesSubscriptionAsync(AiPurposes.Chat, default), "chat is off by default");
+        Assert.IsTrue(await router.UsesSubscriptionAsync(AiPurposes.RebuyAdvice, default));
 
-        access = new ClaudeCodeAccess(false, "switched off");
-        Assert.IsFalse(await router.UsesClaudeCodeAsync(AiPurposes.RebuyAdvice, default));
+        access = new SubscriptionAccess(false, "switched off");
+        Assert.IsFalse(await router.UsesSubscriptionAsync(AiPurposes.RebuyAdvice, default));
 
         read = () => throw new InvalidOperationException("hub down");
-        Assert.IsFalse(await router.UsesClaudeCodeAsync(AiPurposes.RebuyAdvice, default), "unreadable policy keeps the configured provider");
+        Assert.IsFalse(await router.UsesSubscriptionAsync(AiPurposes.RebuyAdvice, default), "unreadable policy keeps the configured provider");
 
-        read = () => new ClaudeCodeAccess(true);
+        read = () => new SubscriptionAccess(true);
         h.Store.RemoveToken();
-        Assert.IsFalse(await router.UsesClaudeCodeAsync(AiPurposes.RebuyAdvice, default));
+        Assert.IsFalse(await router.UsesSubscriptionAsync(AiPurposes.RebuyAdvice, default));
 
         Assert.AreSame(router.For(AiPurposes.Chat), router.For(AiPurposes.Chat));
         Assert.AreSame(configured, router.For(AiPurposes.Chat).GetService(typeof(RuntimeModelChatClient)));
@@ -448,7 +479,7 @@ public sealed class ClaudeCodeTests
         using var configured = new RuntimeModelChatClient(config);
         var runner = FakeRunner.Lines(Init, Delta("from claude"), Result("from claude"));
         using var services = new ServiceCollection().BuildServiceProvider();
-        var router = new AiClientRouter(configured, h.Client(runner), h.Store, services);
+        var router = h.Router(configured, services, h.Client(runner));
         var reply = await router.For(AiPurposes.StockAssessment).GetResponseAsync(Hello);
         Assert.AreEqual("from claude", reply.Text);
         Assert.AreEqual(1, runner.Calls.Count);
@@ -462,11 +493,11 @@ public sealed class ClaudeCodeTests
         using var h = new Harness();
         var runner = new FakeRunner((inv, _) => inv.Arguments[0] == "--version"
             ? Lines("2.1.258 (Claude Code)")
-            : Fail(new ClaudeCodeProcessException("exit 1", 1), """{"loggedIn":true,""", """ "authMethod":"oauth_token"}"""));
+            : Fail(new CliProcessException("exit 1", 1), """{"loggedIn":true,""", """ "authMethod":"oauth_token"}"""));
         var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["LLM:Provider"] = "ollama" }).Build();
         using var configured = new RuntimeModelChatClient(config);
         using var services = new ServiceCollection().BuildServiceProvider();
-        var router = new AiClientRouter(configured, h.Client(runner), h.Store, services);
+        var router = h.Router(configured, services, h.Client(runner));
         var service = new ClaudeCodeStatusService(h.Options, h.Paths, h.Store, h.Activity, router, runner);
 
         var status = await service.GetAsync(refresh: true, default);
@@ -485,11 +516,11 @@ public sealed class ClaudeCodeTests
     public async Task Status_says_not_installed_when_the_cli_is_missing()
     {
         using var h = new Harness();
-        var runner = FakeRunner.LinesThenFail(new ClaudeCodeProcessException("not found") { NotInstalled = true });
+        var runner = FakeRunner.LinesThenFail(new CliProcessException("not found") { NotInstalled = true });
         var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["LLM:Provider"] = "ollama" }).Build();
         using var configured = new RuntimeModelChatClient(config);
         using var services = new ServiceCollection().BuildServiceProvider();
-        var router = new AiClientRouter(configured, h.Client(runner), h.Store, services);
+        var router = h.Router(configured, services, h.Client(runner));
         var status = await new ClaudeCodeStatusService(h.Options, h.Paths, h.Store, h.Activity, router, runner).GetAsync(true, default);
         Assert.AreEqual("not-installed", status.State);
         Assert.IsFalse(status.Installed);
@@ -508,7 +539,7 @@ public sealed class ClaudeCodeTests
         foreach (var f in new[] { oldBackup, newBackup, config, oldProject }) File.WriteAllText(f, "{}");
         foreach (var f in new[] { oldBackup, config, oldProject }) File.SetLastWriteTimeUtc(f, DateTime.UtcNow.AddDays(-3));
 
-        Assert.AreEqual(2, ClaudeCodeHousekeeping.Sweep(h.Paths, DateTimeOffset.UtcNow));
+        Assert.AreEqual(2, SubscriptionHousekeeping.Sweep(h.Paths.SweptDirectories, DateTimeOffset.UtcNow));
         Assert.IsFalse(File.Exists(oldBackup));
         Assert.IsFalse(File.Exists(oldProject));
         Assert.IsFalse(Directory.Exists(Path.Combine(h.Paths.Config, "projects", "-tmp-work")));
@@ -529,25 +560,25 @@ public sealed class ClaudeCodeTests
             var (exe, ok, fail) = OperatingSystem.IsWindows()
                 ? ("cmd.exe", new[] { "/c", "echo one& echo two" }, new[] { "/c", "echo partial& exit 3" })
                 : ("/bin/sh", new[] { "-c", "echo one; echo two" }, new[] { "-c", "echo partial; exit 3" });
-            var runner = new ClaudeCodeProcessRunner();
+            var runner = new CliProcessRunner();
 
             var lines = new List<string>();
-            await foreach (var l in runner.RunAsync(new ClaudeCodeInvocation(exe, ok, env, paths.Work, "", TimeSpan.FromSeconds(20)), default))
+            await foreach (var l in runner.RunAsync(new CliInvocation(exe, ok, env, paths.Work, "", TimeSpan.FromSeconds(20)), default))
                 lines.Add(l.Trim());
             CollectionAssert.AreEqual(new[] { "one", "two" }, lines);
 
             var seen = new List<string>();
-            var ex = await Assert.ThrowsExactlyAsync<ClaudeCodeProcessException>(async () =>
+            var ex = await Assert.ThrowsExactlyAsync<CliProcessException>(async () =>
             {
-                await foreach (var l in runner.RunAsync(new ClaudeCodeInvocation(exe, fail, env, paths.Work, "", TimeSpan.FromSeconds(20)), default))
+                await foreach (var l in runner.RunAsync(new CliInvocation(exe, fail, env, paths.Work, "", TimeSpan.FromSeconds(20)), default))
                     seen.Add(l.Trim());
             });
             Assert.AreEqual(3, ex.ExitCode);
             CollectionAssert.AreEqual(new[] { "partial" }, seen);
 
-            var missing = await Assert.ThrowsExactlyAsync<ClaudeCodeProcessException>(async () =>
+            var missing = await Assert.ThrowsExactlyAsync<CliProcessException>(async () =>
             {
-                await foreach (var _ in runner.RunAsync(new ClaudeCodeInvocation("definitely-not-claude-" + Guid.NewGuid().ToString("N"),
+                await foreach (var _ in runner.RunAsync(new CliInvocation("definitely-not-claude-" + Guid.NewGuid().ToString("N"),
                                    [], env, paths.Work, "", TimeSpan.FromSeconds(5)), default)) { }
             });
             Assert.IsTrue(missing.NotInstalled);
@@ -570,10 +601,10 @@ public sealed class ClaudeCodeTests
                 ? ("cmd.exe", new[] { "/c", "ping -n 30 127.0.0.1 >nul" })
                 : ("/bin/sh", new[] { "-c", "sleep 30" });
             var started = DateTime.UtcNow;
-            var ex = await Assert.ThrowsExactlyAsync<ClaudeCodeProcessException>(async () =>
+            var ex = await Assert.ThrowsExactlyAsync<CliProcessException>(async () =>
             {
-                await foreach (var _ in new ClaudeCodeProcessRunner().RunAsync(
-                                   new ClaudeCodeInvocation(exe, args, env, paths.Work, "", TimeSpan.FromSeconds(1)), default)) { }
+                await foreach (var _ in new CliProcessRunner().RunAsync(
+                                   new CliInvocation(exe, args, env, paths.Work, "", TimeSpan.FromSeconds(1)), default)) { }
             });
             Assert.IsTrue(ex.TimedOut, $"{ex.Message} exit={ex.ExitCode} stderr={ex.StderrTail}");
             Assert.IsTrue(DateTime.UtcNow - started < TimeSpan.FromSeconds(15));
@@ -593,8 +624,8 @@ public sealed class ClaudeCodeTests
         if (string.IsNullOrWhiteSpace(token)) { Assert.Inconclusive("Set CLAUDE_CODE_IT_TOKEN to run."); return; }
         using var h = new Harness(signedIn: false);
         h.Store.SaveToken(token.Trim(), "paste");
-        h.Store.SaveChoices("haiku", false, true, true);
-        var (passed, message) = await h.Client(new ClaudeCodeProcessRunner()).TestAsync(null, default);
+        h.Store.SaveModel("haiku");
+        var (passed, message) = await h.Client(new CliProcessRunner()).TestAsync(null, default);
         Assert.IsTrue(passed, message);
     }
 
@@ -605,11 +636,11 @@ public sealed class ClaudeCodeTests
     {
         if (Environment.GetEnvironmentVariable("CLAUDE_CODE_IT") != "1") { Assert.Inconclusive("Set CLAUDE_CODE_IT=1 to run."); return; }
         using var h = new Harness(signedIn: false);
-        var runner = new ClaudeCodeProcessRunner();
+        var runner = new CliProcessRunner();
         var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["LLM:Provider"] = "ollama" }).Build();
         using var configured = new RuntimeModelChatClient(config);
         using var services = new ServiceCollection().BuildServiceProvider();
-        var router = new AiClientRouter(configured, h.Client(runner), h.Store, services);
+        var router = h.Router(configured, services, h.Client(runner));
         var status = await new ClaudeCodeStatusService(h.Options, h.Paths, h.Store, h.Activity, router, runner).GetAsync(true, default);
         Console.WriteLine($"state={status.State} version={status.Version} signInSupported={status.SignInSupported}");
         Assert.IsTrue(status.Installed);

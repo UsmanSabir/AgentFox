@@ -1,7 +1,8 @@
 # Claude Code provider (the owner's own subscription)
 
 An agent's owner can let some of its AI work run on **their own Claude Pro or Max subscription**, through the
-official Claude Code CLI, instead of the configured provider. It is chosen per purpose under **Settings → Claude Code**.
+official Claude Code CLI, instead of the configured provider. Which purposes use it is chosen under **Settings → AI routing**,
+shared with the [Codex provider](codex-provider.md) (the owner's ChatGPT plan).
 
 It is for the owner of that one agent. It is not a shared backend: every agent signs in with its own owner's
 subscription, and no operator ever handles the token (Anthropic's terms forbid routing other people's requests through
@@ -10,7 +11,7 @@ agent's screen; nothing goes through the hub.
 
 ## What uses it
 
-| Purpose (`AiPurposes`) | Default once signed in | Notes |
+| Purpose (`AiPurposes`) | Default routing | Notes |
 | --- | --- | --- |
 | `stock-assessment` | on | `StockAssessmentService` |
 | `rebuy-advice` | on | the Rebuy panel's "Ask AI" card (premium) |
@@ -63,12 +64,12 @@ environment. No API response carries it; the raw sign-in terminal output (which 
 ## Endpoints (`/api/ai/claude-code`)
 
 `GET` status (viewer; `?refresh=true` re-reads the version and `auth status` — no model call). Administrator only:
-`PUT /settings`, `PUT /token`, `DELETE /token`, `POST /test` (one tiny model call), `GET|POST|DELETE /signin`,
+`PUT /settings` (the model), `PUT /token`, `DELETE /token`, `POST /test` (one tiny model call), `GET|POST|DELETE /signin`,
 `POST /signin/code`.
 
 ## Hosted access
 
-`IClaudeCodeAccessPolicy` (default: allowed) lets an edition switch it off per account. An unreadable policy means
+`ISubscriptionAccessPolicy` (default: allowed; it takes the provider id) lets an edition switch it off per account. An unreadable policy means
 "not allowed" — the configured provider keeps working. A per-account hub flag is planned, pending memory measurements
 on the hosting VM.
 
@@ -76,7 +77,7 @@ on the hosting VM.
 
 | Data | Kept | Removed by |
 | --- | --- | --- |
-| `plugin-configs/claude-code.json` (encrypted token, model, choices) | one file, replaced whole; no age limit (configuration) | Remove sign-in; the account's data deletion |
+| `plugin-configs/claude-code.json` (encrypted token, model; older files also hold the per-purpose switches `ai-routing.json` starts from) | one file, replaced whole; no age limit (configuration) | Remove sign-in; the account's data deletion |
 | `{workspace}/claude-code/config` — the CLI's own `.claude.json` backups, `projects/`, `sessions/`; `work/` prompt files | 1 day | `ClaudeCodeHousekeeping`, at most hourly from a call that is starting anyway |
 | Sign-in attempt (link, terminal output) | memory, one attempt, ≤ `SignInTimeoutSeconds` (600) | its deadline, completion, failure or cancel |
 | Activity (last success/error/test, usage reading) | memory, a fixed handful of values | a restart |

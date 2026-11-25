@@ -1,4 +1,5 @@
 using System.Collections;
+using AgentFox.LLM.Subscription;
 
 namespace AgentFox.LLM.ClaudeCode;
 
@@ -9,37 +10,16 @@ namespace AgentFox.LLM.ClaudeCode;
 /// </summary>
 public static class ClaudeCodeCommand
 {
-    /// <summary>
-    /// Variables a child may inherit. An allow-list, not a strip-list: auth precedence puts
-    /// <c>ANTHROPIC_AUTH_TOKEN</c>, <c>ANTHROPIC_API_KEY</c> and <c>apiKeyHelper</c> ABOVE the subscription token,
-    /// and in <c>-p</c> mode an API key is always used when present. A strip-list misses the next one invented.
-    /// </summary>
-    private static readonly string[] Inherited =
-    [
-        "PATH", "PATHEXT", "SystemRoot", "SystemDrive", "windir", "ComSpec", "OS", "PROCESSOR_ARCHITECTURE",
-        "NUMBER_OF_PROCESSORS", "TEMP", "TMP", "TMPDIR", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "TZ", "TERM",
-        "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy",
-        "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
-    ];
-
     /// <summary>The child's whole environment.</summary>
     /// <param name="parent">This process's environment.</param>
     /// <param name="token">The setup token; null for a sign-in, which has none yet.</param>
     public static Dictionary<string, string> Environment(IDictionary parent, string? token, ClaudeCodePaths paths)
     {
-        var env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var name in Inherited)
-            if (parent[name] is string value && value.Length > 0)
-                env[name] = value;
-
-        // A private home and config folder. With the owner's own ~/.claude the call loads their skills, plugins
-        // and auto-memory (measured 2026-11-25, even with --tools "" and --strict-mcp-config).
-        env["HOME"] = paths.Home;
-        env["USERPROFILE"] = paths.Home;
-        env["APPDATA"] = Path.Combine(paths.Home, "AppData", "Roaming");
-        env["LOCALAPPDATA"] = Path.Combine(paths.Home, "AppData", "Local");
-        env["XDG_CONFIG_HOME"] = Path.Combine(paths.Home, ".config");
-        env["XDG_CACHE_HOME"] = Path.Combine(paths.Home, ".cache");
+        // Allow-listed inheritance and a private home: with the owner's own ~/.claude a call loads their skills, plugins
+        // and auto-memory (measured 2026-11-25, even with --tools "" and --strict-mcp-config). Auth precedence puts
+        // ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY and apiKeyHelper ABOVE the subscription token, and in -p mode an API
+        // key is always used when present, so none of them may be inherited.
+        var env = CliEnvironment.Base(parent, paths.Home);
         env["CLAUDE_CONFIG_DIR"] = paths.Config;
 
         env["DISABLE_AUTOUPDATER"] = "1";            // the image pins the version; bare mode may become the default
@@ -49,7 +29,6 @@ public static class ClaudeCodeCommand
         env["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] = "1";
         env["CLAUDE_CODE_DISABLE_BUNDLED_SKILLS"] = "1";
         env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false";
-        env["BROWSER"] = "none";                     // a sign-in relays the link; nothing opens on the server
         if (token is not null)
             env["CLAUDE_CODE_OAUTH_TOKEN"] = token;
         return env;
@@ -87,6 +66,12 @@ public sealed record ClaudeCodePaths(string Root)
     public string Config => Path.Combine(Root, "config");
     /// <summary>An empty working folder, so no project CLAUDE.md or settings are found.</summary>
     public string Work => Path.Combine(Root, "work");
+
+    /// <summary>The CLI's leftovers, swept after a day (§0.1): even with session saving off it writes a backup of its
+    /// <c>.claude.json</c> on each run plus <c>projects/</c> and <c>sessions/</c> entries (measured 2026-11-25), and a
+    /// crashed call can leave its system-prompt file. The CLI's own small config files stay.</summary>
+    public IEnumerable<string> SweptDirectories =>
+        [Path.Combine(Config, "backups"), Path.Combine(Config, "projects"), Path.Combine(Config, "sessions"), Work];
 
     public void Ensure()
     {

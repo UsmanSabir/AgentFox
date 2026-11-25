@@ -1,11 +1,12 @@
 using System.Text.RegularExpressions;
+using AgentFox.LLM.Subscription;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 
 namespace AgentFox.LLM.ClaudeCode;
 
-public sealed record ClaudeCodeChoicesRequest(string? Model, bool UseForChat, bool UseForStockAssessment, bool UseForRebuyAdvice);
+public sealed record ClaudeCodeChoicesRequest(string? Model);
 public sealed record ClaudeCodeTokenRequest(string? Token);
 public sealed record ClaudeCodeCodeRequest(string? Code);
 
@@ -29,7 +30,7 @@ public static partial class ClaudeCodeEndpoints
         {
             if (req.Model is { } m && !string.IsNullOrWhiteSpace(m) && !ModelName().IsMatch(m.Trim()))
                 return Results.BadRequest(new { error = "Enter a model name such as sonnet, opus or haiku." });
-            store.SaveChoices(req.Model, req.UseForChat, req.UseForStockAssessment, req.UseForRebuyAdvice);
+            store.SaveModel(req.Model);
             return Results.Ok(await status.GetAsync(false, ct));
         }).RequireAuthorization(Admin);
 
@@ -40,7 +41,7 @@ public static partial class ClaudeCodeEndpoints
             var token = (req.Token ?? "").Trim();
             if (!ClaudeCodeTerminalText.IsWellFormedToken(token))
                 return Results.BadRequest(new { error = "That is not a Claude Code token. It starts with sk-ant-oat01-." });
-            if (!(await router.ReadAccessAsync(ct)).Allowed)
+            if (!(await router.ReadAccessAsync(AiProviders.ClaudeCode, ct)).Allowed)
                 return Results.BadRequest(new { error = "Claude Code is not available for this account." });
             var (passed, message) = await claude.TestAsync(token, ct);
             if (!passed)
@@ -62,7 +63,7 @@ public static partial class ClaudeCodeEndpoints
         group.MapPost("/test", async (ClaudeCodeChatClient claude, ClaudeCodeStatusService status, AiClientRouter router,
             CancellationToken ct) =>
         {
-            if (!(await router.ReadAccessAsync(ct)).Allowed)
+            if (!(await router.ReadAccessAsync(AiProviders.ClaudeCode, ct)).Allowed)
                 return Results.BadRequest(new { error = "Claude Code is not available for this account." });
             var (passed, message) = await claude.TestAsync(null, ct);
             return Results.Ok(new { passed, message, status = await status.GetAsync(false, ct) });
@@ -72,7 +73,7 @@ public static partial class ClaudeCodeEndpoints
 
         group.MapPost("/signin", async (ClaudeCodeSignIn signIn, AiClientRouter router, CancellationToken ct) =>
         {
-            if (!(await router.ReadAccessAsync(ct)).Allowed)
+            if (!(await router.ReadAccessAsync(AiProviders.ClaudeCode, ct)).Allowed)
                 return Results.BadRequest(new { error = "Claude Code is not available for this account." });
             return Results.Ok(await signIn.StartAsync(ct));
         }).RequireAuthorization(Admin);

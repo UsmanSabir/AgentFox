@@ -3,6 +3,10 @@
   import { onMount } from 'svelte';
   import { agentStatus } from '#lib/stores.ts';
   import ClaudeCodeSettings from '#lib/components/ClaudeCodeSettings.svelte';
+  import CodexSettings from '#lib/components/CodexSettings.svelte';
+  import AiRoutingSettings from '#lib/components/AiRoutingSettings.svelte';
+
+  let routingKey = 0;
   import {
     Settings, Server, Cpu, Key, Globe, Database,
     RefreshCw, CheckCircle, XCircle, Zap
@@ -140,7 +144,9 @@
 
   <!-- Info sections -->
   <div class="sections">
-    <ClaudeCodeSettings />
+    <AiRoutingSettings refreshKey={routingKey} />
+    <ClaudeCodeSettings on:changed={() => routingKey++} />
+    <CodexSettings on:changed={() => routingKey++} />
 
     <section class="info-section">
       <h2 class="section-heading">
