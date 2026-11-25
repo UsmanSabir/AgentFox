@@ -155,6 +155,34 @@ public sealed class ClaudeCodeTests
         Assert.AreEqual("key sk-ant-**** here", ClaudeCodeTerminalText.Redact("key " + Token + " here"));
     }
 
+    [TestMethod]
+    public void Reads_the_link_and_token_as_CLI_2_1_258_prints_them_with_the_agents_config()
+    {
+        // The shape captured on a hosted agent, 2026-11-25: words placed with cursor moves, the link carried as an OSC 8
+        // hyperlink AND printed, then the copy hint the CLI shows with the agent's own config folder.
+        const string state = "NWFd6h5Ybe5DWLQBJOap-Qn1RpFJlr80Qb3mg8bV5Lo";
+        var link = "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code" +
+                   "&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference" +
+                   "&code_challenge=1r6k64mULkmZkcjGZu8zOWme5RPHCViFb8gxOgaWHDE&code_challenge_method=S256&state=" + state;
+        var prompt =
+            "\x1b[2G\x1b[37mBrowser\x1b[10Gdidn't\x1b[17Gopen?\x1b[23GUse\x1b[27Gthe\x1b[31Gurl\x1b[35Gbelow\x1b[39m\r\r\n\r\r\n" +
+            "\x1b]8;id=1hwv8zt;" + link + "\x07\x1b[37m" + link + "\x1b[39m\x1b]8;;\x07\r\r\n\r\r\n" +
+            "\x1b[2G\x1b[37mHold\x1b[7GShift\x1b[13Gwhile\x1b[19Gselecting\x1b[29Gto\x1b[32Guse\x1b[36Gyour\x1b[41Gterminal's\x1b[52Gnative\x1b[59Gcopy\x1b[39m\r\r\n\r\r\n\r\r\n" +
+            "\x1b[2GPaste\x1b[8Gcode\x1b[13Ghere\x1b[18Gif\x1b[21Gprompted\x1b[30G>\r\r\n\x1b[>0q\x1b[c";
+
+        Assert.IsTrue(ClaudeCodeTerminalText.IsAwaitingCode(ClaudeCodeTerminalText.Strip(prompt)));
+        Assert.AreEqual(link, ClaudeCodeTerminalText.FindSignInLinkInRaw(prompt));
+        // Without the hyperlink the printed text still yields the link, not the hint glued onto its state.
+        var printedOnly = prompt.Replace("\x1b]8;id=1hwv8zt;" + link + "\x07", "");
+        Assert.AreEqual(link, ClaudeCodeTerminalText.FindSignInLinkInRaw(printedOnly));
+        Assert.IsNull(ClaudeCodeTerminalText.FindSignInLink(link + "Holdterminal'snativecopy"));
+
+        var done = prompt + "\x1b(B\x0f\r\x1b[31C\x1b[1A****8bV5Lo\r\r\n\r\x1b[1C\x1b[8A\x1b[K\r\x1b[1C\x1b[1B\x1b[32m✓ Long-lived authentication token created successfully!" +
+                   "\r\x1b[1B\x1b[39m\x1b[K\r\x1b[1C\x1b[1BYour\x1b[7GOAuth\x1b[13Gtoken\x1b[19G(valid\x1b[26Gfor\x1b[30G1\x1b[32Gyear):" +
+                   "\r\x1b[1C\x1b[1B\x1b[K\r\x1b[1C\x1b[1B\x1b[93m" + Token + "\r\x1b[1C\x1b[2B\x1b[37mStore this token securely. You won't be able to see it again.\x1b[39m\x1b[K\r\r\n";
+        Assert.AreEqual(Token, ClaudeCodeTerminalText.FindToken(ClaudeCodeTerminalText.Strip(done)));
+    }
+
     // ── How the CLI is started ────────────────────────────────────────────────────────────────────
 
     [TestMethod]
