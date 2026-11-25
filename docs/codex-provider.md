@@ -22,6 +22,11 @@ layer. Measured 2026-11-25 on CLI 0.172.0: asked to read a canary file with its 
 it (a sandbox that happened not to start in that container was the only thing in the way); with the tools off it
 attempted nothing.
 
+Every call also reports an `error` item, "Code Mode is unavailable … install `codex-code-mode-host`". The npm package
+carries that helper, and the image deliberately leaves it out: Code Mode gives the model a code runtime, a way to act.
+Switching `code_mode` or `code_mode_host` off only rewords the notice, so `CodexStream` drops it, instead of letting it
+become the reason shown for an unrelated failure such as a timeout.
+
 ```
 codex exec --json --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox read-only
            -c approval_policy="never" --disable shell_tool --disable unified_exec --disable plugins ... [-m <model>]
