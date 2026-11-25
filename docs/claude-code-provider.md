@@ -90,5 +90,4 @@ The hosted image carries the pinned CLI at `/opt/claude-code/claude` (premium `d
 -ClaudeCodeVersion`, from Anthropic's npm per-platform package, sha512-checked; `none` leaves it out). A hosted agent's
 workspace is `/data`, so the CLI's folders and the token file already live on the user's volume.
 - Hosted per-account switch (CopyHub flag) implementing `IClaudeCodeAccessPolicy`.
-- Chat on Claude Code still advertises attachments if the configured model accepts them; the attachment becomes a
-  "cannot read attachments" note in the prompt rather than being refused up front.
+- (done) Chat on Claude Code: /capabilities offers no attachment and /chat refuses one with a plain reason.
