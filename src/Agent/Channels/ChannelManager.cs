@@ -435,7 +435,7 @@ public class ChannelManager
             _logger?.LogError(ex, "Error handling channel message: {MessageId}", message.Id);
             try
             {
-                await channel.SendReplyAsync(message, $"Error processing request: {ex.Message}");
+                await channel.SendReplyAsync(message, $"Error processing request: {AgentFox.LLM.ModelFailureMessage.Describe(ex)}");
             }
             catch (Exception sendEx)
             {
