@@ -293,7 +293,7 @@
   let rsiLatest: number | null = null;
   // While the pointer is in the RSI pane the value moves beside the line at the hovered bar (the
   // library's crosshair marker is the dot on the line), and the corner readout steps aside for it.
-  let rsiTip: { left: number; top: number; value: number; zone: RsiZone } | null = null;
+  let rsiTip: { left: number; top: number; value: number; zone: RsiZone } | null = $state<{ left: number; top: number; value: number; zone: RsiZone } | null>(null);
   // Client-side annotations (see chartAnnotations.ts): a third artefact group, owned apart from server
   // overlays and level lines so each can be replaced without disturbing the others.
   // The layer owns every handle (price lines, the zone primitive, the markers plugin). It is idempotent
