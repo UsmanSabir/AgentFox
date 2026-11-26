@@ -16,32 +16,46 @@
   import { ApiError, trading, type WorkingOrderOwner } from './api';
   import { announceAccountChanged } from './accountSignal';
 
-  export let symbol: string;
-  export let orderNo: string;
-  export let side: string | null | undefined = null;
-  export let orderType: string | null | undefined = null;
-  export let remainingQuantity: number | null | undefined = null;
-  export let price: number | null | undefined = null;
-  export let showValues = false;
-  export let status: string | null | undefined = null;
-  export let currency: string | null | undefined = null;
+  interface Props {
+    symbol: string;
+    orderNo: string;
+    side?: string | null | undefined;
+    orderType?: string | null | undefined;
+    remainingQuantity?: number | null | undefined;
+    price?: number | null | undefined;
+    showValues?: boolean;
+    status?: string | null | undefined;
+    currency?: string | null | undefined;
+  }
+
+  let {
+    symbol,
+    orderNo,
+    side = null,
+    orderType = null,
+    remainingQuantity = null,
+    price = null,
+    showValues = false,
+    status = null,
+    currency = null
+  }: Props = $props();
 
   const dispatch = createEventDispatcher<{ changed: void }>();
 
   type Phase = 'idle' | 'confirming' | 'busy' | 'managed' | 'done';
-  let phase: Phase = 'idle';
-  let owners: WorkingOrderOwner[] = [];
-  let message = '';
-  let tone: 'good' | 'warn' | 'bad' = 'good';
+  let phase: Phase = $state('idle');
+  let owners: WorkingOrderOwner[] = $state([]);
+  let message = $state('');
+  let tone: 'good' | 'warn' | 'bad' = $state('good');
 
   // Quantity and price obey the panel's privacy toggle, like every other value in that table.
-  $: described = [
+  let described = $derived([
     side, orderType,
     showValues && remainingQuantity != null ? remainingQuantity : null,
     symbol,
     showValues && price != null ? `@ ${currency ?? 'Rs'} ${price}` : null,
     status ? `(${status})` : null
-  ].filter(v => v != null && v !== '').join(' ');
+  ].filter(v => v != null && v !== '').join(' '));
 
   async function cancel(acknowledgeManaged: boolean) {
     phase = 'busy';
@@ -74,12 +88,12 @@
 
 <div class="order-cancel">
   {#if phase === 'idle'}
-    <button class="cancel" on:click={() => phase = 'confirming'} aria-label={`Cancel order ${orderNo} on ${symbol}`}>Cancel</button>
+    <button class="cancel" onclick={() => phase = 'confirming'} aria-label={`Cancel order ${orderNo} on ${symbol}`}>Cancel</button>
   {:else if phase === 'confirming'}
     <span class="prompt">Cancel {described}?</span>
     <span class="row">
-      <button class="cancel strong" on:click={() => cancel(false)}>Yes, cancel</button>
-      <button class="keep" on:click={reset}>Keep</button>
+      <button class="cancel strong" onclick={() => cancel(false)}>Yes, cancel</button>
+      <button class="keep" onclick={reset}>Keep</button>
     </span>
   {:else if phase === 'busy'}
     <span class="prompt" aria-live="polite">Cancelling at the broker…</span>
@@ -92,12 +106,12 @@
       {/if}
     </div>
     <span class="row">
-      <button class="cancel strong" on:click={() => cancel(true)}>Cancel anyway</button>
-      <button class="keep" on:click={reset}>Keep</button>
+      <button class="cancel strong" onclick={() => cancel(true)}>Cancel anyway</button>
+      <button class="keep" onclick={reset}>Keep</button>
     </span>
   {:else}
     <p class="result {tone}" aria-live="polite">{message}</p>
-    <button class="keep" on:click={reset}>OK</button>
+    <button class="keep" onclick={reset}>OK</button>
   {/if}
 </div>
 

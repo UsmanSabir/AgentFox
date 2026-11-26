@@ -2,21 +2,30 @@
   import { ArrowDownRight, ArrowUpRight, Minus } from 'lucide-svelte';
   import { resolveDisplayQuote, useLivePrices } from './livePrices';
 
-  export let symbol: string;
-  export let fallbackChange: number | null = null;
-  export let fallbackPrice: number | null = null;
-  export let showPrice = true;
-  export let showUnavailable = false;
+  interface Props {
+    symbol: string;
+    fallbackChange?: number | null;
+    fallbackPrice?: number | null;
+    showPrice?: boolean;
+    showUnavailable?: boolean;
+  }
+
+  let {
+    symbol,
+    fallbackChange = null,
+    fallbackPrice = null,
+    showPrice = true,
+    showUnavailable = false
+  }: Props = $props();
 
   const livePrices = useLivePrices();
-  let priceStore = livePrices.quote(symbol);
-  $: priceStore = livePrices.quote(symbol);
-  $: view = $priceStore;
+  let priceStore = $derived(livePrices.quote(symbol));
+  let view = $derived($priceStore);
   // Every rule about which number wins and how it must be labelled lives in one pure function, so
   // the six cells that render prices cannot drift from each other. See `resolveDisplayQuote`.
-  $: display = resolveDisplayQuote(view, fallbackPrice, fallbackChange, showPrice);
-  $: ({ price, change, tag } = display);
-  $: sourceLabel = display.label;
+  let display = $derived(resolveDisplayQuote(view, fallbackPrice, fallbackChange, showPrice));
+  let { price, change, tag } = $derived(display);
+  let sourceLabel = $derived(display.label);
 
   const money = (value: number) => value.toLocaleString(undefined, { maximumFractionDigits: 2 });
   const percent = (value: number) => `${value > 0 ? '+' : ''}${value.toFixed(2)}%`;

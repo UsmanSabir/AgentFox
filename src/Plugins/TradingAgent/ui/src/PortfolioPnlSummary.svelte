@@ -1,20 +1,23 @@
 <script lang="ts">
-  import { derived, readable, type Readable } from 'svelte/store';
+  import { derived as derivedStore, type Readable } from 'svelte/store';
   import type { BrokerAccountHolding } from './api';
   import { useLivePrices, type LivePriceView } from './livePrices';
   import { summarizePortfolioPnl } from './portfolioPnl';
 
-  export let holdings: BrokerAccountHolding[] = [];
-  export let showValues = false;
+  interface Props {
+    holdings?: BrokerAccountHolding[];
+    showValues?: boolean;
+  }
+
+  let { holdings = [], showValues = false }: Props = $props();
 
   const hidden = '••••••';
   const livePrices = useLivePrices();
-  let quoteViews: Readable<LivePriceView[]> = readable([]);
-  $: quoteViews = derived(
+  let quoteViews: Readable<LivePriceView[]> = $derived(derivedStore(
     holdings.map(holding => livePrices.quote(holding.symbol ?? holding.instrumentId)),
     views => views
-  );
-  $: summary = summarizePortfolioPnl(holdings, $quoteViews);
+  ));
+  let summary = $derived(summarizePortfolioPnl(holdings, $quoteViews));
 
   const money = (value: number | null, currency: string | null, visible: boolean) => {
     if (!visible) return hidden;
@@ -34,7 +37,7 @@
   const percent = (value: number | null) => value == null
     ? null
     : `${value > 0 ? '+' : ''}${value.toFixed(2)}%`;
-  $: detail = !showValues
+  let detail = $derived(!showValues
     ? 'Choose Show values to view this total'
     : summary.mixedCurrencies
       ? 'Cannot combine holdings in different currencies'
@@ -42,14 +45,14 @@
         ? `${summary.unavailableCount} of ${holdings.length} holdings missing P/L`
         : summary.liveMarkCount > 0
           ? `Using live marks for ${summary.liveMarkCount} of ${holdings.length} holdings`
-          : 'Broker account snapshot';
-  $: resultLabel = summary.tone === 'gain'
+          : 'Broker account snapshot');
+  let resultLabel = $derived(summary.tone === 'gain'
     ? 'Gain'
     : summary.tone === 'loss'
       ? 'Loss'
       : summary.tone === 'flat'
         ? 'Flat'
-        : null;
+        : null);
 </script>
 
 <div

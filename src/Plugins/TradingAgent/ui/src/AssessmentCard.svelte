@@ -2,30 +2,37 @@
   import type { StockAssessment } from './api';
   import { Brain, ShieldCheck, ShieldAlert, ShieldX, HelpCircle } from 'lucide-svelte';
 
-  export let assessment: StockAssessment;
-  /** Compact form for the alert list; the chart pane uses the full one. */
-  export let compact = false;
+  
+  interface Props {
+    assessment: StockAssessment;
+    /** Compact form for the alert list; the chart pane uses the full one. */
+    compact?: boolean;
+  }
+
+  let { assessment, compact = false }: Props = $props();
 
   // The recommendation drives the colour, not the confidence: a HIGH-confidence AVOID is a warning,
   // and colouring it green because the model was sure would be exactly backwards.
-  $: tone =
-    assessment.recommendation === 'PROCEED' ? 'good'
+  let tone =
+    $derived(assessment.recommendation === 'PROCEED' ? 'good'
     : assessment.recommendation === 'CAUTION' ? 'warn'
     : assessment.recommendation === 'AVOID' ? 'bad'
-    : 'unknown';
+    : 'unknown');
 
-  $: icon =
-    tone === 'good' ? ShieldCheck
+  let icon =
+    $derived(tone === 'good' ? ShieldCheck
     : tone === 'warn' ? ShieldAlert
     : tone === 'bad' ? ShieldX
-    : HelpCircle;
+    : HelpCircle);
 
   const when = (iso: string) => new Date(iso).toLocaleString();
+
+  const SvelteComponent = $derived(icon);
 </script>
 
 <div class="assessment {tone}" class:compact>
   <div class="verdict">
-    <svelte:component this={icon} size={14} />
+    <SvelteComponent size={14} />
     <b>{assessment.recommendation.replace('_', ' ')}</b>
     <span class="conf">{assessment.confidence} · {assessment.confidenceScore}/100</span>
     {#if assessment.invalidationLevel != null}

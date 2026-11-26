@@ -1,20 +1,28 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { Navigation } from 'lucide-svelte';
   import type { SectionNavigationItem } from './sectionNavigation';
 
-  export let items: SectionNavigationItem[] = [];
-  export let label = 'Page sections';
+  interface Props {
+    items?: SectionNavigationItem[];
+    label?: string;
+  }
 
-  let activeId = items[0]?.id ?? '';
-  let syncVisibleSections = () => {};
+  let { items = [], label = 'Page sections' }: Props = $props();
+
+  // svelte-ignore state_referenced_locally -- a starting value; the section sync sets it from then on
+  let activeId = $state(items[0]?.id ?? '');
+  let syncVisibleSections = $state(() => {});
 
   // A composing edition can add contextual destinations (for example, a selected stock's plan)
   // after mount. Re-evaluate against the current item list instead of freezing the first render.
-  $: {
+  $effect.pre(() => {
+    // Re-runs when the items change or onMount installs the real sync, as the old `$:` did; the sync's own reads
+    // (the DOM, activeId) are untracked.
+    const sync = syncVisibleSections;
     void items;
-    syncVisibleSections();
-  }
+    untrack(() => sync());
+  });
 
   function activateVisibleSection(elements: HTMLElement[]) {
     const marker = Math.min(180, window.innerHeight * 0.28);
@@ -68,10 +76,10 @@
         class:active={activeId === item.id}
         aria-current={activeId === item.id ? 'location' : undefined}
         title={item.label}
-        on:click={(event) => navigate(event, item)}
+        onclick={(event) => navigate(event, item)}
       >
         <span class="icon" aria-hidden="true">
-          <svelte:component this={item.icon} size={17} strokeWidth={1.85} />
+          <item.icon size={17} strokeWidth={1.85} />
         </span>
         <span class="label">{item.label}</span>
       </a>
