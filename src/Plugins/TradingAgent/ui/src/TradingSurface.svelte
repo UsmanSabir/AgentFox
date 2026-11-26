@@ -141,6 +141,7 @@
   let proposalBusy: string | null = $state<string | null>(null);
   let reconciliationBusy = $state(false);
   let resolvingExecution: string | null = $state<string | null>(null);
+
   async function loadProposals() {
     try {
       proposals = await trading.proposals(!showResolvedProposals);

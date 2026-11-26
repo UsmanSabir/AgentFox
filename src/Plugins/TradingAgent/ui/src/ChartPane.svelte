@@ -65,6 +65,7 @@
   // Clean price action is the default: every horizontal line, an edition's own levels included, is
   // one click away and the levels are always listed below, but none covers the candles on first render.
   let levelMode: 'all' | 'key' | 'off' = $state<'all' | 'key' | 'off'>('off');
+
   interface Props {
     symbol?: string | null;
     companyName?: string | null;

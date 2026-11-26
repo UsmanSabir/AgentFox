@@ -3,7 +3,7 @@
   interface Props {
     workspace?: WorkspaceComposition | null;
     id: string;
-    children?: import('svelte').Snippet<[any]>;
+    children?: import('svelte').Snippet<[{ visible: boolean }]>;
   }
 
   let { workspace = null, id, children }: Props = $props();

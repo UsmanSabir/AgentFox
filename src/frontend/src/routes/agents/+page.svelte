@@ -11,6 +11,7 @@
   let error: string | null = $state<string | null>(null);
   let specialists: SpecialistAgentInfo[] = $state([]);
   let queues: CommandQueueStatus | null = $state<CommandQueueStatus | null>(null);
+
   async function load() {
     loading = true;
     error = null;

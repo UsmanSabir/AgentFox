@@ -6,6 +6,7 @@
   let loading = $state(true);
   let error: string | null = $state<string | null>(null);
   let activeTab: 'sessions' | 'config' = $state<'sessions' | 'config'>('sessions');
+
   let sessions: PluginSessionSummary[] = $state([]);
   let stats: Record<string, PluginSessionStats> = $state({});
   let configs: PluginConfigResponse[] = $state([]);

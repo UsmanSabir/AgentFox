@@ -13,6 +13,7 @@
   /** Verdicts fetched on demand, by alert id. Never fetched automatically — see api.assess. */
   let assessments: Record<string, StockAssessment> = $state({});
   let assessing: string | null = $state<string | null>(null);
+
   /**
    * Selecting an alert drives the chart pane to that symbol. `alertsChanged` fires whenever the open
    * count could have moved (ack/dismiss, a manual pass, or a new alert over the live stream) — the

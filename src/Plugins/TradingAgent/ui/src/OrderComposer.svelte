@@ -188,6 +188,7 @@
   let busy = $state(false);
   let error: string | null = $state<string | null>(null);
   let result: { ok: boolean; title: string; detail: string; executionId?: string } | null = $state<{ ok: boolean; title: string; detail: string; executionId?: string } | null>(null);
+
   /**
    * Set when a SELL was refused because this system's OWN protective stop is holding the shares.
    *

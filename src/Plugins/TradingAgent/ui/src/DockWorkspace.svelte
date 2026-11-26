@@ -45,7 +45,7 @@
    */
     hiddenPanelIds?: string[];
     toolbar?: import('svelte').Snippet;
-    children?: import('svelte').Snippet<[any]>;
+    children?: import('svelte').Snippet<[{ workspace: WorkspaceComposition }]>;
   }
 
   let {

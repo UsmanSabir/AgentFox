@@ -227,6 +227,7 @@
   let extensionFor = $derived((o: ArmedOrder) => extensionForTriggerKind($orderTypeExtensions, o.triggerKind));
   /** The armed order being edited, in the composer opened straight into its edition's editor. */
   let editing: ArmedOrder | null = $state<ArmedOrder | null>(null);
+
   const describeFill = (o: ArmedOrder) =>
     o.orderType === 'MARKET' ? 'at market'
       : o.triggerKind === 'Rule' && o.price == null ? 'limit set from the price when the rule is met'

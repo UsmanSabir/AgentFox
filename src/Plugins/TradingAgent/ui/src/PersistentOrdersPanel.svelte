@@ -79,6 +79,7 @@
    */
   let brokerView: Record<string, BrokerOrdersView> = $state({});
   let inspecting: string | null = $state<string | null>(null);
+
   async function confirmAction(message: string, label: string) {
     if (!keyboardMode) return confirm(message);
     reviewing = true;
