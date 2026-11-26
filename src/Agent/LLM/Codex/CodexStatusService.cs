@@ -6,7 +6,7 @@ namespace AgentFox.LLM.Codex;
 /// <summary>Everything the Codex card shows. Holds no credential.</summary>
 public sealed record CodexStatus(
     string State, bool Installed, string? Version, bool Allowed, string? NotAllowedReason,
-    bool SignedIn, string? SignedInWith, string Model, IReadOnlyList<string> Models, string? ReasoningEffort,
+    bool SignedIn, string? SignedInWith, string Model, IReadOnlyList<CodexModelInfo> Models, string? ReasoningEffort,
     DateTimeOffset? LastAuthCheckUtc,
     DateTimeOffset? LastSuccessUtc, string? LastModel, DateTimeOffset? LastErrorUtc, string? LastError,
     DateTimeOffset? LastTestUtc, bool? LastTestPassed);
@@ -28,6 +28,7 @@ public sealed partial class CodexStatusService
     private readonly ICliProcessRunner _runner;
     private (bool Installed, string? Version, DateTimeOffset At)? _version;
     private (string? With, DateTimeOffset At)? _auth;
+    private DateTimeOffset _catalogAskedAt;
 
     public CodexStatusService(CodexOptions options, CodexPaths paths, CodexStore store, CodexActivity activity,
         AiClientRouter router, ICliProcessRunner runner)
@@ -68,15 +69,32 @@ public sealed partial class CodexStatusService
             : rateLimited ? "rate-limited"
             : "ready";
 
-        var model = settings.Model ?? (string.IsNullOrWhiteSpace(_options.DefaultModel) ? DefaultModelLabel : _options.DefaultModel);
-        var models = new List<string> { DefaultModelLabel };
-        models.AddRange(_options.Models.Where(x => !string.IsNullOrWhiteSpace(x) && x != DefaultModelLabel));
-        if (!models.Contains(model, StringComparer.OrdinalIgnoreCase)) models.Add(model);
+        var catalog = signedIn && _version.Value.Installed ? await ReadCatalogAsync(refresh, cancellationToken) : [];
+        var model = settings.Model
+                    ?? (string.IsNullOrWhiteSpace(_options.DefaultModel) ? catalog.FirstOrDefault()?.Id ?? DefaultModelLabel : _options.DefaultModel);
+        var models = catalog.Count > 0 ? catalog.ToList()
+            : _options.Models.Where(x => !string.IsNullOrWhiteSpace(x) && x != DefaultModelLabel)
+                .Select(x => new CodexModelInfo(x, x, [], null)).ToList();
+        if (model != DefaultModelLabel && !models.Any(m => string.Equals(m.Id, model, StringComparison.OrdinalIgnoreCase)))
+            models.Add(new CodexModelInfo(model, model, [], null));
 
         return new CodexStatus(state, _version.Value.Installed, _version.Value.Version, access.Allowed, access.Reason,
             signedIn, _auth?.With, model, models, settings.ReasoningEffort, _auth?.At,
             _activity.LastSuccessUtc, _activity.LastModel, _activity.LastErrorUtc, _activity.LastError,
             _activity.LastTestUtc, _activity.LastTestPassed);
+    }
+
+    /// <summary>The plan's models: the CLI's own cache when it has one, else one <c>codex debug models</c> (no model call,
+    /// no plan usage), asked for at most every 10 minutes unless a refresh was requested.</summary>
+    private async Task<IReadOnlyList<CodexModelInfo>> ReadCatalogAsync(bool refresh, CancellationToken cancellationToken)
+    {
+        var cached = CodexModelCatalog.ReadCache(_paths);
+        if (cached.Count > 0 && !refresh) return cached;
+        if (!refresh && DateTimeOffset.UtcNow - _catalogAskedAt < CacheFor) return cached;
+        _catalogAskedAt = DateTimeOffset.UtcNow;
+        var (lines, _) = await RunAsync(["debug", "models"], cancellationToken);
+        var asked = CodexModelCatalog.Parse(string.Concat(lines));
+        return asked.Count > 0 ? asked : cached;
     }
 
     /// <summary><c>codex logout</c>: the CLI removes its own sign-in.</summary>
