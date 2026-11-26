@@ -182,7 +182,7 @@ public class WebModule : IAppModule
                 return Results.Ok(new ChatResponse
                 {
                     Success = false,
-                    Error = ex.Message
+                    Error = AgentFox.LLM.ModelFailureMessage.Describe(ex)
                 });
             }
         });
@@ -334,7 +334,7 @@ public class WebModule : IAppModule
             }
             catch (Exception ex)
             {
-                var errPayload = JsonSerializer.Serialize(new { error = ex.Message }, SseJsonOptions);
+                var errPayload = JsonSerializer.Serialize(new { error = AgentFox.LLM.ModelFailureMessage.Describe(ex) }, SseJsonOptions);
                 try
                 {
                     await httpContext.Response.WriteAsync($"event: error\ndata: {errPayload}\n\n", ct);
@@ -952,7 +952,7 @@ public class WebModule : IAppModule
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                return Results.Ok(new ChatResponse { Success = false, Error = ex.Message, ConversationId = conversationId });
+                return Results.Ok(new ChatResponse { Success = false, Error = AgentFox.LLM.ModelFailureMessage.Describe(ex), ConversationId = conversationId });
             }
         });
 
