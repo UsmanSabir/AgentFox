@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { createDockview, themeDark, themeLight, type DockviewApi, type DockviewGroupPanel, type IContentRenderer } from 'dockview';
   import 'dockview/dist/styles/dockview.css';
   import { Command, Search, RotateCcw, Maximize, Minimize, Keyboard, Pin, PinOff, X, Fullscreen, Shrink, Save, Settings2, ChevronDown } from 'lucide-svelte';
@@ -11,48 +11,75 @@
     type AutoHideEdge, type AutoHideTrays, type WorkspaceLayout
   } from './workspaceLayout';
 
-  export let panels: WorkspacePanel[];
-  export let title = 'Trading workstation';
-  export let edition: string;
-  export let storageKey: string;
-  export let presets: WorkspacePreset[];
-  /** Producer-owned names for retired views; applies to deep links, working layouts and My view. */
-  export let presetAliases: Readonly<Record<string, string>> = {};
-  /** Producer-owned names for retired PANELS; a saved layout naming one is migrated, not discarded. */
-  export let panelAliases: Readonly<Record<string, string>> = {};
-  export let onPresetChange: (id: string) => void = () => {};
-  export let onExit: () => void;
-  /**
+  
+  
+  
+  
+  
+  interface Props {
+    panels: WorkspacePanel[];
+    title?: string;
+    edition: string;
+    storageKey: string;
+    presets: WorkspacePreset[];
+    /** Producer-owned names for retired views; applies to deep links, working layouts and My view. */
+    presetAliases?: Readonly<Record<string, string>>;
+    /** Producer-owned names for retired PANELS; a saved layout naming one is migrated, not discarded. */
+    panelAliases?: Readonly<Record<string, string>>;
+    onPresetChange?: (id: string) => void;
+    onExit: () => void;
+    /**
    * Open on this preset instead of the saved layout's, when it names one of `presets` — for a link that
    * asks for a particular view. The choice is then saved like any other. Unset (the default) changes nothing.
    */
-  export let initialPreset: string | null = null;
-  /** Optional host-specific chrome; the index sparkline keeps its native 32px height. */
-  export let compactChrome = false;
-  export let hiddenPresetIds: string[] = [];
-  /**
+    initialPreset?: string | null;
+    /** Optional host-specific chrome; the index sparkline keeps its native 32px height. */
+    compactChrome?: boolean;
+    hiddenPresetIds?: string[];
+    /**
    * Panels to hide for now WITHOUT removing them from `panels`; it may change after mount. A hidden panel stays a valid id, so a saved
    * layout, preset view or My view that holds it is never reset because of it. It is not offered (Find panel, commands, focus requests),
    * not placed by a default build, not adopted, and not written into a layout's `known` list; one that is open, docked or in an
    * auto-hide tray, is closed without touching the rest of the layout. When it stops being hidden it is adopted like any panel the
    * catalogue has gained.
    */
-  export let hiddenPanelIds: string[] = [];
+    hiddenPanelIds?: string[];
+    toolbar?: import('svelte').Snippet;
+    children?: import('svelte').Snippet<[any]>;
+  }
 
-  let root: HTMLElement;
-  let dockRoot: HTMLDivElement;
-  let dockArea: HTMLDivElement;
-  let depot: HTMLDivElement;
-  let toolbar: HTMLDivElement;
-  let health: HTMLDivElement;
-  let overlays: HTMLDivElement;
-  let stack: HTMLDivElement;
-  let palette: HTMLDialogElement;
-  let search: HTMLInputElement;
-  let api: DockviewApi | null = null;
-  let shortcutsSheet: WorkspaceShortcuts;
-  let layoutMenu: HTMLDetailsElement;
-  let layoutSummary: HTMLElement;
+  let {
+    panels,
+    title = 'Trading workstation',
+    edition,
+    storageKey,
+    presets,
+    presetAliases = {},
+    panelAliases = {},
+    onPresetChange = () => {},
+    onExit,
+    initialPreset = null,
+    compactChrome = false,
+    hiddenPresetIds = [],
+    hiddenPanelIds = [],
+    toolbar,
+    children
+  }: Props = $props();
+
+  let root: HTMLElement = $state()!;
+  let dockRoot: HTMLDivElement = $state()!;
+  let dockArea: HTMLDivElement = $state()!;
+  let depot: HTMLDivElement = $state()!;
+  let coreToolbar: HTMLDivElement = $state()!;
+  let health: HTMLDivElement = $state()!;
+  let overlays: HTMLDivElement = $state()!;
+  let stack: HTMLDivElement = $state()!;
+  let palette: HTMLDialogElement = $state()!;
+  let search: HTMLInputElement = $state()!;
+  let api: DockviewApi | null = $state<DockviewApi | null>(null);
+  let shortcutsSheet: WorkspaceShortcuts = $state()!;
+  let layoutMenu: HTMLDetailsElement = $state()!;
+  let layoutSummary: HTMLElement = $state()!;
   async function runLayout(action: () => void | Promise<void>) {
     layoutMenu.open = false;
     layoutSummary.focus();
@@ -62,9 +89,9 @@
   function outsideLayoutMenu(event: PointerEvent) {
     if (layoutMenu.open && event.target instanceof Node && !layoutMenu.contains(event.target)) layoutMenu.open = false;
   }
-  let maximized = false;
-  let fullscreen = false;
-  let fullscreenSupported = false;
+  let maximized = $state(false);
+  let fullscreen = $state(false);
+  let fullscreenSupported = $state(false);
   async function toggleFullscreen() {
     if (!fullscreenSupported) {
       notice = 'Page full screen is unavailable here. Use the browser F11 command instead.';
@@ -80,15 +107,14 @@
   function syncFullscreen() {
     fullscreen = document.fullscreenElement === root;
   }
-  let desktop = true;
+  let desktop = $state(true);
+  // svelte-ignore state_referenced_locally -- the starting preset, chosen once from the props (as before)
   const requestedPreset = resolveWorkspacePreset(initialPreset, presets.map(item => item.id), presetAliases);
-  let preset = requestedPreset ?? presets[0].id;
+  // svelte-ignore state_referenced_locally -- the starting preset, chosen once from the props (as before)
+  let preset = $state(requestedPreset ?? presets[0].id);
   // Set when a preset was chosen before the layout was built — by a click on a phone, or by
   // `initialPreset` — so the saved layout is skipped once and the choice is saved instead.
   let mobilePresetChanged = requestedPreset !== null;
-  $: selectedPreset = presets.find(item => item.id === preset) ?? presets[0];
-  $: hiddenSet = new Set(hiddenPanelIds);
-  $: availablePanels = visiblePanels(workspacePresetPanels(panels, selectedPreset), hiddenSet);
   /** What the current view offers and places: its panels, minus the hidden ones. */
   function offeredPanels() { return visiblePanels(workspacePresetPanels(panels, presets.find(item => item.id === preset)), hiddenSet); }
   /** What the current view may hold, hidden panels included: a layout naming one is still valid. */
@@ -99,33 +125,33 @@
     if (index >= 0) return index === 0 ? 'left' : index === columns!.length - 1 ? 'right' : 'center';
     return panels.find(panel => panel.id === id)?.region;
   }
-  let commands: WorkspaceCommand[] = [];
-  let activeId = 'chart';
-  let notice = 'Workspace preview · existing trading controls retained';
-  let storageWarning = '';
+  let commands: WorkspaceCommand[] = $state([]);
+  let activeId = $state('chart');
+  let notice = $state('Workspace preview · existing trading controls retained');
+  let storageWarning = $state('');
   // "My view": one layout the operator saved on purpose, restored in one click. Kept apart from the layout that
   // follows every change (storageKey), so working in another mode or pressing Reset view never loses it.
   // Browser storage only, one record replaced whole on Save; it lapses after the same 180 days as the working
   // layout, counted from its last use (each restore renews it), and Forget removes it.
-  let myView: WorkspaceLayout | null = null;
-  let savedPresets: Record<string, WorkspaceLayout> = {};
-  let onMyView = false;
-  let query = '';
-  let panelsOnly = false;
-  let panelLocations: Record<string, string> = {};
-  let resultIndex = 0;
-  let previousFocus: HTMLElement | null = null;
-  let suppressSave = false;
+  let myView: WorkspaceLayout | null = $state<WorkspaceLayout | null>(null);
+  let savedPresets: Record<string, WorkspaceLayout> = $state({});
+  let onMyView = $state(false);
+  let query = $state('');
+  let panelsOnly = $state(false);
+  let panelLocations: Record<string, string> = $state({});
+  let resultIndex = $state(0);
+  let previousFocus: HTMLElement | null = $state<HTMLElement | null>(null);
+  let suppressSave = $state(false);
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
   let dirty = false;
   let disposed = false;
-  let autoHide: AutoHideTrays = {};
-  let openEdge: AutoHideEdge | null = null;
-  let trayHost: HTMLDivElement;
-  let trayShell: HTMLDivElement;
-  let leftTrayStrip: HTMLElement;
-  let rightTrayStrip: HTMLElement;
-  let bottomTrayStrip: HTMLElement;
+  let autoHide: AutoHideTrays = $state({});
+  let openEdge: AutoHideEdge | null = $state<AutoHideEdge | null>(null);
+  let trayHost: HTMLDivElement = $state()!;
+  let trayShell: HTMLDivElement = $state()!;
+  let leftTrayStrip: HTMLElement = $state()!;
+  let rightTrayStrip: HTMLElement = $state()!;
+  let bottomTrayStrip: HTMLElement = $state()!;
   let trayReturnFocus: HTMLElement | null = null;
   const nodes = new Map<string, HTMLElement>();
   // One listener per mounted producer, removed with attachPanel's existing cleanup.
@@ -179,7 +205,7 @@
   }
 
   function destination(id: string) {
-    if (id === 'core-toolbar') return toolbar;
+    if (id === 'core-toolbar') return coreToolbar;
     if (id === 'edition-health') return health;
     if (id === 'core-dialogs') return overlays;
     return container(id);
@@ -229,7 +255,6 @@
     }
   }
   function refreshPanelVisibility() { publishPanelVisibility(desktop, openEdge, autoHide, api, suppressSave); }
-  $: publishPanelVisibility(desktop, openEdge, autoHide, api, suppressSave);
 
   function setPanelWidth(id: string, width: number | null) {
     if (!desktop || !offeredPanels().some(panel => panel.id === id) || (width !== null && !Number.isFinite(width))) return;
@@ -335,7 +360,6 @@
     maximized = api.hasMaximizedGroup();
   }
   let appliedHidden = new Set<string>();
-  $: applyHiddenPanels(hiddenSet);
   function applyHiddenPanels(next: Set<string>) {
     const unhidden = [...appliedHidden].filter(id => !next.has(id));
     appliedHidden = new Set(next);
@@ -789,41 +813,6 @@
     closeTray(false);
   }
 
-  $: panelCommands = availablePanels.map(p => ({ id: 'panel.' + p.id, label: 'Show ' + p.title, keywords:p.description, run: () => focusPanel(p.id) }));
-  $: layoutCommands = [
-    { id:'workspace.shortcuts', label:'Show keyboard shortcuts', run:() => shortcutsSheet.open() },
-    { id:'workspace.fullscreen', label:fullscreen ? 'Exit page full screen' : 'Enter page full screen', run:toggleFullscreen,
-      disabled:() => fullscreenSupported ? null : 'Page full screen is unavailable in this browser or host frame.' },
-    ...edges.map(edge => ({ id:'layout.' + edge, label:autoHide[edge] ? `Pin ${edge} panels` : `Unpin ${edge} panels (auto-hide)`, run:() => autoHide[edge] ? pin(edge) : unpin(edge) })),
-    { id:'layout.reset', label:'Reset view to default', run:resetView },
-    { id:'layout.myview.save', label:myView ? 'Save this layout as My view (replaces the saved one)' : 'Save this layout as My view', run:saveMyView,
-      disabled:() => desktop ? null : 'My view is saved from the full-width workstation.' },
-    { id:'layout.myview.restore', label:'Restore My view', run:restoreMyView,
-      disabled:() => myView ? (desktop ? null : 'My view opens on the full-width workstation.') : 'No layout has been saved as My view yet.' },
-    { id:'layout.myview.forget', label:'Forget My view', run:forgetMyView,
-      disabled:() => myView ? null : 'No layout has been saved as My view yet.' },
-    { id:'layout.maximize', label:'Maximize / restore active group', run:maximize },
-    { id:'layout.hide', label:'Hide active panel (restore from Find panel)', run:hideActive },
-    { id:'layout.wider', label:'Make active panel wider', run:() => resize(80, 0) },
-    { id:'layout.narrower', label:'Make active panel narrower', run:() => resize(-80, 0) },
-    { id:'layout.taller', label:'Make active panel taller', run:() => resize(0, 80) },
-    { id:'layout.shorter', label:'Make active panel shorter', run:() => resize(0, -80) },
-    ...(['left', 'right', 'top', 'bottom'] as const).map(position => ({
-      id:'layout.move.' + position, label:'Move active panel to ' + position + ' edge', run:() => move(position)
-    })),
-    ...availablePanels.map(p => ({
-      id:'layout.tab.' + p.id, label:'Tab active panel with ' + p.title,
-      run:() => {
-        if (openEdge) { notice = `Pin the ${openEdge} panels before moving their docking tabs.`; return; }
-        const current = api?.getPanel(activeId);
-        const target = api?.getPanel(p.id);
-        if (current && target && current !== target) current.api.moveTo({ group:target.group });
-      }
-    }))
-  ];
-  $: allCommands = [...panelCommands, ...commands, ...layoutCommands];
-  $: results = searchWorkspaceCommands(panelsOnly ? panelCommands : allCommands, query);
-  $: if (resultIndex >= results.length) resultIndex = Math.max(0, results.length - 1);
 
   async function openPalette(onlyPanels = false) {
     panelLocations = Object.fromEntries(offeredPanels().map(panel => {
@@ -1056,73 +1045,122 @@
       window.removeEventListener('focusin', outsideTray);
     };
   });
+  let selectedPreset = $derived(presets.find(item => item.id === preset) ?? presets[0]);
+  let hiddenSet = $derived(new Set(hiddenPanelIds));
+  let availablePanels = $derived(visiblePanels(workspacePresetPanels(panels, selectedPreset), hiddenSet));
+  // Reads only what the old `$:` named; the calls are untracked so the layout state they touch cannot re-trigger them.
+  $effect.pre(() => {
+    const args = [desktop, openEdge, autoHide, api, suppressSave] as const;
+    untrack(() => publishPanelVisibility(...args));
+  });
+  $effect.pre(() => {
+    const hidden = hiddenSet;
+    untrack(() => applyHiddenPanels(hidden));
+  });
+  let panelCommands = $derived(availablePanels.map(p => ({ id: 'panel.' + p.id, label: 'Show ' + p.title, keywords:p.description, run: () => focusPanel(p.id) })));
+  let layoutCommands = $derived([
+    { id:'workspace.shortcuts', label:'Show keyboard shortcuts', run:() => shortcutsSheet.open() },
+    { id:'workspace.fullscreen', label:fullscreen ? 'Exit page full screen' : 'Enter page full screen', run:toggleFullscreen,
+      disabled:() => fullscreenSupported ? null : 'Page full screen is unavailable in this browser or host frame.' },
+    ...edges.map(edge => ({ id:'layout.' + edge, label:autoHide[edge] ? `Pin ${edge} panels` : `Unpin ${edge} panels (auto-hide)`, run:() => autoHide[edge] ? pin(edge) : unpin(edge) })),
+    { id:'layout.reset', label:'Reset view to default', run:resetView },
+    { id:'layout.myview.save', label:myView ? 'Save this layout as My view (replaces the saved one)' : 'Save this layout as My view', run:saveMyView,
+      disabled:() => desktop ? null : 'My view is saved from the full-width workstation.' },
+    { id:'layout.myview.restore', label:'Restore My view', run:restoreMyView,
+      disabled:() => myView ? (desktop ? null : 'My view opens on the full-width workstation.') : 'No layout has been saved as My view yet.' },
+    { id:'layout.myview.forget', label:'Forget My view', run:forgetMyView,
+      disabled:() => myView ? null : 'No layout has been saved as My view yet.' },
+    { id:'layout.maximize', label:'Maximize / restore active group', run:maximize },
+    { id:'layout.hide', label:'Hide active panel (restore from Find panel)', run:hideActive },
+    { id:'layout.wider', label:'Make active panel wider', run:() => resize(80, 0) },
+    { id:'layout.narrower', label:'Make active panel narrower', run:() => resize(-80, 0) },
+    { id:'layout.taller', label:'Make active panel taller', run:() => resize(0, 80) },
+    { id:'layout.shorter', label:'Make active panel shorter', run:() => resize(0, -80) },
+    ...(['left', 'right', 'top', 'bottom'] as const).map(position => ({
+      id:'layout.move.' + position, label:'Move active panel to ' + position + ' edge', run:() => move(position)
+    })),
+    ...availablePanels.map(p => ({
+      id:'layout.tab.' + p.id, label:'Tab active panel with ' + p.title,
+      run:() => {
+        if (openEdge) { notice = `Pin the ${openEdge} panels before moving their docking tabs.`; return; }
+        const current = api?.getPanel(activeId);
+        const target = api?.getPanel(p.id);
+        if (current && target && current !== target) current.api.moveTo({ group:target.group });
+      }
+    }))
+  ]);
+  let allCommands = $derived([...panelCommands, ...commands, ...layoutCommands]);
+  let results = $derived(searchWorkspaceCommands(panelsOnly ? panelCommands : allCommands, query));
+  $effect.pre(() => {
+    if (resultIndex >= results.length) resultIndex = Math.max(0, results.length - 1);
+  });
 </script>
 
 <section class="workstation" class:mobile={!desktop} class:compact={compactChrome} aria-label={selectedPreset.title ?? title} tabindex="-1" bind:this={root}>
-  <header class="workstation-bar" class:has-toolbar={!!$$slots.toolbar}>
+  <header class="workstation-bar" class:has-toolbar={!!toolbar}>
     <nav class="workspace-views" aria-label="Workspace layout">
       {#each presets.filter(item => !hiddenPresetIds.includes(item.id)) as item}
         <div class="preset-choice">
-          <button data-workspace-preset={item.id} class:chosen={preset === item.id && !onMyView} aria-pressed={preset === item.id && !onMyView} on:click={() => selectPreset(item.id)}>{item.label}</button>
+          <button data-workspace-preset={item.id} class:chosen={preset === item.id && !onMyView} aria-pressed={preset === item.id && !onMyView} onclick={() => selectPreset(item.id)}>{item.label}</button>
           <details class="preset-menu">
             <summary aria-label={`${item.label} view options`} title={`${item.label} view options`}><ChevronDown size={12}/></summary>
             <div class="preset-actions" role="group" aria-label={`${item.label} view options`}>
-              <button disabled={!desktop || preset !== item.id} title={preset !== item.id ? `Open ${item.label} before saving its layout` : undefined} on:click={(event) => { event.currentTarget.closest('details')!.open = false; savePresetView(item.id); }}>{savedPresets[item.id] ? 'Update saved view' : 'Save current layout as view'}</button>
-              {#if savedPresets[item.id]}<button disabled={!desktop} on:click={(event) => { event.currentTarget.closest('details')!.open = false; restorePresetView(item.id); }}>Restore saved view</button>{/if}
-              <button disabled={!desktop} on:click={(event) => { event.currentTarget.closest('details')!.open = false; resetPresetView(item.id); }}>Reset to default</button>
+              <button disabled={!desktop || preset !== item.id} title={preset !== item.id ? `Open ${item.label} before saving its layout` : undefined} onclick={(event) => { event.currentTarget.closest('details')!.open = false; savePresetView(item.id); }}>{savedPresets[item.id] ? 'Update saved view' : 'Save current layout as view'}</button>
+              {#if savedPresets[item.id]}<button disabled={!desktop} onclick={(event) => { event.currentTarget.closest('details')!.open = false; restorePresetView(item.id); }}>Restore saved view</button>{/if}
+              <button disabled={!desktop} onclick={(event) => { event.currentTarget.closest('details')!.open = false; resetPresetView(item.id); }}>Reset to default</button>
             </div>
           </details>
         </div>
       {/each}
-      <button class:chosen={onMyView} aria-pressed={onMyView} on:click={restoreMyView} disabled={!desktop || !myView}
+      <button class:chosen={onMyView} aria-pressed={onMyView} onclick={restoreMyView} disabled={!desktop || !myView}
         title={myView ? 'Restore the layout you saved as My view' : 'Save an arrangement using Layout → Save as My view'}>My view</button>
     </nav>
-    <slot name="toolbar"/>
+    {@render toolbar?.()}
     <div class="workspace-tools">
       {#if compactChrome}<span class="focus-indicator" aria-live="polite">Focus: {panels.find(p => p.id === activeId)?.title ?? 'Workspace'}</span>{/if}
-      <button class="panel-finder" on:click={() => openPalette(true)} aria-haspopup="dialog"
+      <button class="panel-finder" onclick={() => openPalette(true)} aria-haspopup="dialog"
         aria-keyshortcuts="Control+Shift+K Meta+Shift+K" title="Find and open a panel (Ctrl+Shift+K)"><Search size={14}/> Find panel <kbd>Ctrl ⇧ K</kbd></button>
       <details class="layout-menu" bind:this={layoutMenu}>
         <summary bind:this={layoutSummary}><Settings2 size={14}/> Layout <ChevronDown size={12}/></summary>
         <div class="layout-actions" role="group" aria-label="Layout actions">
       {#each presets.filter(item => hiddenPresetIds.includes(item.id)) as item}
-        <button on:click={() => runLayout(() => selectPreset(item.id))}>Switch to {item.label}</button>
+        <button onclick={() => runLayout(() => selectPreset(item.id))}>Switch to {item.label}</button>
       {/each}
       {#if hiddenPresetIds.includes(preset)}
-        <button on:click={() => runLayout(() => savePresetView(preset))} disabled={!desktop}>{savedPresets[preset] ? 'Update saved view' : 'Save current layout as view'}</button>
-        {#if savedPresets[preset]}<button on:click={() => runLayout(() => restorePresetView(preset))} disabled={!desktop}>Restore saved view</button>{/if}
-        <button on:click={() => runLayout(() => resetPresetView(preset))} disabled={!desktop}>Reset {selectedPreset.label} to default</button>
+        <button onclick={() => runLayout(() => savePresetView(preset))} disabled={!desktop}>{savedPresets[preset] ? 'Update saved view' : 'Save current layout as view'}</button>
+        {#if savedPresets[preset]}<button onclick={() => runLayout(() => restorePresetView(preset))} disabled={!desktop}>Restore saved view</button>{/if}
+        <button onclick={() => runLayout(() => resetPresetView(preset))} disabled={!desktop}>Reset {selectedPreset.label} to default</button>
       {/if}
-      <button on:click={() => runLayout(saveMyView)} disabled={!desktop}
+      <button onclick={() => runLayout(saveMyView)} disabled={!desktop}
         title={myView ? 'Replace your saved My view with the current arrangement' : 'Save the current arrangement as My view'}><Save size={14}/> Save as My view</button>
-      {#if myView}<button on:click={() => runLayout(forgetMyView)}>Forget My view</button>{/if}
-      <button on:click={() => runLayout(() => openPalette())} title="Search commands (Ctrl+K)"><Command size={14}/> Commands <kbd>Ctrl K</kbd></button>
-      <button on:click={() => runLayout(maximize)} disabled={!desktop} aria-pressed={maximized}
+      {#if myView}<button onclick={() => runLayout(forgetMyView)}>Forget My view</button>{/if}
+      <button onclick={() => runLayout(() => openPalette())} title="Search commands (Ctrl+K)"><Command size={14}/> Commands <kbd>Ctrl K</kbd></button>
+      <button onclick={() => runLayout(maximize)} disabled={!desktop} aria-pressed={maximized}
               aria-label={maximized ? 'Restore active group' : 'Maximize active group'}
               title={`${maximized ? 'Restore' : 'Maximize'} active group (Ctrl+Shift+Space)`}>
         {#if maximized}<Minimize size={16}/> Restore active group{:else}<Maximize size={16}/> Maximize active group{/if}
       </button>
-      <button on:click={() => runLayout(toggleFullscreen)} disabled={!desktop || !fullscreenSupported}
+      <button onclick={() => runLayout(toggleFullscreen)} disabled={!desktop || !fullscreenSupported}
               aria-pressed={fullscreen} aria-label={fullscreen ? 'Exit page full screen' : 'Page full screen'}
               title={fullscreen ? 'Exit page full screen (Escape)' : 'Page full screen (Ctrl+Shift+F; browser F11 is separate)'}>
         {#if fullscreen}<Shrink size={16}/> Exit full screen{:else}<Fullscreen size={16}/> Full screen{/if}
       </button>
-      <button on:click={() => runLayout(() => shortcutsSheet.open())} title="Keyboard shortcuts (Ctrl+/)"><Keyboard size={14}/> Shortcuts</button>
+      <button onclick={() => runLayout(() => shortcutsSheet.open())} title="Keyboard shortcuts (Ctrl+/)"><Keyboard size={14}/> Shortcuts</button>
       {#each edges as edge}
-        <button on:click={() => runLayout(() => autoHide[edge] ? pin(edge) : unpin(edge))} disabled={!desktop}
+        <button onclick={() => runLayout(() => autoHide[edge] ? pin(edge) : unpin(edge))} disabled={!desktop}
           title={`Auto-hide or pin the ${edge} panel group without closing its contents`}>
           {#if autoHide[edge]}<Pin size={14}/> Pin {edge}{:else}<PinOff size={14}/> Unpin {edge}{/if}
         </button>
       {/each}
-      <button on:click={() => runLayout(resetView)}><RotateCcw size={14}/> Reset view</button>
-      <button on:click={() => runLayout(onExit)}>Classic view</button>
+      <button onclick={() => runLayout(resetView)}><RotateCcw size={14}/> Reset view</button>
+      <button onclick={() => runLayout(onExit)}>Classic view</button>
         </div>
       </details>
     </div>
   </header>
   {#if storageWarning}<p class="storage-warning" role="status">{storageWarning}</p>{/if}
   <div class="workspace-operational-row">
-    <div class="core-toolbar" class:hidden={selectedPreset.showToolbar === false} bind:this={toolbar}></div>
+    <div class="core-toolbar" class:hidden={selectedPreset.showToolbar === false} bind:this={coreToolbar}></div>
     <div class="edition-health" bind:this={health}></div>
   </div>
   <div class="dock-area" class:hidden={!desktop} bind:this={dockArea}>
@@ -1130,7 +1168,7 @@
       <nav class="tray-strip side left" aria-label="Auto-hidden left panels" bind:this={leftTrayStrip}>
         {#each autoHide.left.ids as id}
           <button data-tray-id={id} aria-expanded={openEdge === 'left' && autoHide.left.active === id} class:chosen={openEdge === 'left' && autoHide.left.active === id}
-            on:click={() => openEdge === 'left' && autoHide.left?.active === id ? closeTray() : focusPanel(id)}>{panels.find(p => p.id === id)?.title}</button>
+            onclick={() => openEdge === 'left' && autoHide.left?.active === id ? closeTray() : focusPanel(id)}>{panels.find(p => p.id === id)?.title}</button>
         {/each}
       </nav>
     {/if}
@@ -1139,7 +1177,7 @@
       <nav class="tray-strip side right" aria-label="Auto-hidden right panels" bind:this={rightTrayStrip}>
         {#each autoHide.right.ids as id}
           <button data-tray-id={id} aria-expanded={openEdge === 'right' && autoHide.right.active === id} class:chosen={openEdge === 'right' && autoHide.right.active === id}
-            on:click={() => openEdge === 'right' && autoHide.right?.active === id ? closeTray() : focusPanel(id)}>{panels.find(p => p.id === id)?.title}</button>
+            onclick={() => openEdge === 'right' && autoHide.right?.active === id ? closeTray() : focusPanel(id)}>{panels.find(p => p.id === id)?.title}</button>
         {/each}
       </nav>
     {/if}
@@ -1149,11 +1187,11 @@
         style:height={openEdge === 'bottom' ? currentTray()?.size + 'px' : undefined}>
         <div class="tray-heading"><strong>{panels.find(p => p.id === currentTray()?.active)?.title}</strong><span>Auto-hidden · Esc to close</span>
           {#if openEdge === 'bottom'}
-            <button aria-label="Make bottom peek shorter" on:click={() => resize(0,-80)}>−</button><button aria-label="Make bottom peek taller" on:click={() => resize(0,80)}>+</button>
+            <button aria-label="Make bottom peek shorter" onclick={() => resize(0,-80)}>−</button><button aria-label="Make bottom peek taller" onclick={() => resize(0,80)}>+</button>
           {:else}
-            <button aria-label={`Make ${openEdge} peek narrower`} on:click={() => resize(-80,0)}>−</button><button aria-label={`Make ${openEdge} peek wider`} on:click={() => resize(80,0)}>+</button>
+            <button aria-label={`Make ${openEdge} peek narrower`} onclick={() => resize(-80,0)}>−</button><button aria-label={`Make ${openEdge} peek wider`} onclick={() => resize(80,0)}>+</button>
           {/if}
-          <button on:click={pinOpenTray}><Pin size={14}/> Pin {openEdge}</button><button aria-label={`Close ${openEdge} peek`} on:click={() => closeTray()}><X size={14}/></button>
+          <button onclick={pinOpenTray}><Pin size={14}/> Pin {openEdge}</button><button aria-label={`Close ${openEdge} peek`} onclick={() => closeTray()}><X size={14}/></button>
         </div>
         <div class="tray-content" bind:this={trayHost}></div>
       </div>
@@ -1163,29 +1201,29 @@
     <nav class="tray-strip bottom" aria-label="Auto-hidden bottom panels" bind:this={bottomTrayStrip}>
       {#each autoHide.bottom.ids as id}
         <button data-tray-id={id} aria-expanded={openEdge === 'bottom' && autoHide.bottom.active === id} class:chosen={openEdge === 'bottom' && autoHide.bottom.active === id}
-          on:click={() => openEdge === 'bottom' && autoHide.bottom?.active === id ? closeTray() : focusPanel(id)}>{panels.find(p => p.id === id)?.title}</button>
+          onclick={() => openEdge === 'bottom' && autoHide.bottom?.active === id ? closeTray() : focusPanel(id)}>{panels.find(p => p.id === id)?.title}</button>
       {/each}
     </nav>
   {/if}
   <div class="workspace-stack" class:hidden={desktop} bind:this={stack}></div>
-  {#if !compactChrome}<footer><span>Focus: {panels.find(p => p.id === activeId)?.title ?? 'Workspace'}</span><button class="workspace-help" on:click={() => shortcutsSheet.open()} aria-label="Workspace keyboard shortcuts" title="Keyboard shortcuts">?</button></footer>{/if}
+  {#if !compactChrome}<footer><span>Focus: {panels.find(p => p.id === activeId)?.title ?? 'Workspace'}</span><button class="workspace-help" onclick={() => shortcutsSheet.open()} aria-label="Workspace keyboard shortcuts" title="Keyboard shortcuts">?</button></footer>{/if}
   <p class="sr-only" role="status">{notice}</p>
-  <div hidden bind:this={depot}><slot {workspace}/></div>
+  <div hidden bind:this={depot}>{@render children?.({ workspace })}</div>
 </section>
 <div class="workstation-overlays" bind:this={overlays}></div>
 <WorkspaceShortcuts bind:this={shortcutsSheet}/>
 
-<dialog class="command-palette" bind:this={palette} on:cancel={() => previousFocus?.focus()} on:keydown={paletteKey} aria-label={panelsOnly ? 'Find panel' : 'Workspace commands'}>
+<dialog class="command-palette" bind:this={palette} oncancel={() => previousFocus?.focus()} onkeydown={paletteKey} aria-label={panelsOnly ? 'Find panel' : 'Workspace commands'}>
   <div class="palette-heading"><strong>{panelsOnly ? 'Find panel' : 'Workspace commands'}</strong>
     <details class="palette-help"><summary aria-label={panelsOnly ? 'Help finding panels' : 'Help searching commands'}>?</summary>
       <p>{panelsOnly ? 'Search by panel name or purpose. Selecting a result focuses its tab, reveals its drawer or opens the hidden panel.' : 'Search actions and panels. Layout actions do not change trading state.'} ↑ ↓ select · Enter open · Esc return.</p>
     </details>
-    <button on:click={closePalette} aria-label={panelsOnly ? 'Close panel search' : 'Close commands'}><X size={16}/></button></div>
-  <input bind:this={search} bind:value={query} on:input={() => resultIndex = 0} aria-label={panelsOnly ? 'Search panels' : 'Search commands'} placeholder={panelsOnly ? 'Panel name or purpose…' : 'Find an action or panel…'} role="combobox" aria-expanded="true" aria-controls="workspace-results" aria-activedescendant={results.length ? 'workspace-result-' + resultIndex : undefined} autocomplete="off"/>
+    <button onclick={closePalette} aria-label={panelsOnly ? 'Close panel search' : 'Close commands'}><X size={16}/></button></div>
+  <input bind:this={search} bind:value={query} oninput={() => resultIndex = 0} aria-label={panelsOnly ? 'Search panels' : 'Search commands'} placeholder={panelsOnly ? 'Panel name or purpose…' : 'Find an action or panel…'} role="combobox" aria-expanded="true" aria-controls="workspace-results" aria-activedescendant={results.length ? 'workspace-result-' + resultIndex : undefined} autocomplete="off"/>
   <span class="sr-only" role="status">{results.length} matching {panelsOnly ? (results.length === 1 ? 'panel' : 'panels') : (results.length === 1 ? 'command' : 'commands')}</span>
   <div class="command-results" id="workspace-results" role="listbox" aria-label={panelsOnly ? 'Matching panels' : 'Matching commands'}>
     {#each results as command, index (command.id)}
-      <button id={'workspace-result-' + index} role="option" aria-selected={index === resultIndex} tabindex="-1" class:highlighted={index === resultIndex} on:click={() => execute(command)}>
+      <button id={'workspace-result-' + index} role="option" aria-selected={index === resultIndex} tabindex="-1" class:highlighted={index === resultIndex} onclick={() => execute(command)}>
         <span>{command.label}</span>
         {#if panelsOnly}<small class="panel-location">{panelLocations[command.id.slice(6)]}</small>{/if}
       </button>
