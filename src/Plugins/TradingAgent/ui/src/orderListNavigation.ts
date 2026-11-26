@@ -4,6 +4,21 @@ export function focusOrderControls(event: Event) {
   target.closest('[data-order-row]')?.querySelector<HTMLElement>('button:not(:disabled):not([data-order-focus]),input:not(:disabled),summary')?.focus();
 }
 
+/**
+ * A row's symbol is both the keyboard entry to the row and a link to the stock. A pointer click
+ * (`detail` counts presses) selects the stock; Enter or Space reaches it as a click with `detail` 0 and
+ * keeps entering the row, so keyboard navigation is unchanged.
+ */
+export function isPointerClick(event: Pick<MouseEvent, 'detail'>): boolean {
+  return event.detail > 0;
+}
+
+/** The Buy / Sell view filter of Persistent orders. A stop-loss is a SELL. */
+export type OrderSideFilter = 'all' | 'BUY' | 'SELL';
+export function matchesSide(action: string | null | undefined, side: OrderSideFilter): boolean {
+  return side === 'all' || (action ?? '').toUpperCase() === side;
+}
+
 export function orderRowIndex(key: string, index: number, count: number): number | null {
   if (index < 0 || count < 1) return null;
   if (key === 'ArrowDown') return Math.min(count - 1, index + 1);

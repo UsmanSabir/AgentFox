@@ -19,6 +19,7 @@
   import { announceAccountChanged } from './accountSignal';
   import { holdingValuation } from './holdingValuation';
   import { composerStateFor, type CleanNewOrderPrefill } from './newOrderPrefill';
+  import { portal } from './portal';
 
   export let selectedSymbol: string | null = null;
   /**
@@ -1003,8 +1004,12 @@
 </script>
 
 <!-- Order intent must not disappear because of a stray backdrop click or Escape press. The visible
-     Close, Cancel and Done controls are the only dismissal paths. -->
-<div class="backdrop" class:embedded={docked} role="presentation">
+     Close, Cancel and Done controls are the only dismissal paths.
+     As a pop-up the backdrop is moved to <body> (portal.ts): opened from a docked panel (Edit on an armed
+     order), it would otherwise be clipped to that panel and lose its header and footer. The host stays the
+     component's root, because Svelte must never be handed a moved root node to remove. -->
+<div class="composer-host">
+<div class="backdrop" class:embedded={docked} role="presentation" use:portal={!docked}>
   <div class="dialog" class:sell={side === 'SELL'} class:quick bind:this={dialogElement} role={docked ? 'region' : 'dialog'} aria-modal={docked ? undefined : true} aria-label={quick ? `Quick ${side.toLowerCase()}` : docked ? 'Order ticket draft' : 'New order'}
        tabindex="-1" on:keydown={composerKey}>
     <header>
@@ -1489,8 +1494,10 @@
     <div class="footer"><button class="btn btn-ghost" on:click={() => finishReview(false)}>Back to ticket</button><button class="btn btn-primary" on:click={() => finishReview(true)}>{reviewAction}</button></div>
   </dialog>
 {/if}
+</div>
 
 <style>
+  .composer-host { display:contents; }
   .draft-fields { border:0; padding:0; margin:0; min-width:0; }
   .dialog.quick { width:min(460px,96vw); }
   .quick-fields { display:flex; flex-direction:column; gap:1rem; padding:1.1rem; }

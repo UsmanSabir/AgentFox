@@ -1,9 +1,9 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount, tick, createEventDispatcher } from 'svelte';
   import { RefreshCw, Repeat2, Trash2, AlertTriangle, CheckCircle2, RotateCcw, ShieldQuestion, MoreHorizontal } from 'lucide-svelte';
   import { trading, type PersistentOrder, type BrokerOrdersView } from './api';
   import LivePriceInline from './LivePriceInline.svelte';
-  import { orderListNavigation, focusOrderControls } from './orderListNavigation';
+  import { orderListNavigation, focusOrderControls, isPointerClick, matchesSide, type OrderSideFilter } from './orderListNavigation';
   import OrderActionReview from './OrderActionReview.svelte';
   import OrderRowActions from './OrderRowActions.svelte';
   import PersistentOrderResolutionDialog from './PersistentOrderResolutionDialog.svelte';
@@ -28,7 +28,17 @@
   export let orderCount = 0;
   export let loaded = false;
   export let sourceArmedIds: ReadonlySet<string> = new Set();
-  $: visibleOrders = orders.filter(o => !keyboardMode || `${o.symbol} ${o.action} ${o.state} ${o.intentId}`.toLowerCase().includes(query.trim().toLowerCase()));
+  /** Buy / Sell view filter (Persistent orders): changes what is shown and counted, as `query` does. */
+  export let side: OrderSideFilter = 'all';
+  /** `select` names a stock the person clicked, so the page can select it as the watchlist does. */
+  const dispatch = createEventDispatcher<{ select: string }>();
+  function symbolClick(event: MouseEvent, symbol: string) {
+    if (keyboardMode && !isPointerClick(event)) focusOrderControls(event);
+    else dispatch('select', symbol);
+  }
+  $: sideOrders = orders.filter(o => matchesSide(o.action, side));
+  $: orderCount = sideOrders.length;
+  $: visibleOrders = sideOrders.filter(o => !keyboardMode || `${o.symbol} ${o.action} ${o.state} ${o.intentId}`.toLowerCase().includes(query.trim().toLowerCase()));
 
   export let refreshTick = 0;
 
@@ -121,7 +131,6 @@
   export async function load() {
     try {
       orders = (await trading.persistentOrders.list(showHistory)).orders;
-      orderCount = orders.length;
       sourceArmedIds = new Set(orders.flatMap(o => o.sourceArmedId ? [o.sourceArmedId] : []));
       loaded = true;
       error = null;
@@ -303,7 +312,7 @@
 
   {#if loading}
     {#if !embedded}<p class="empty">Loading…</p>{/if}
-  {:else if !orders.length}
+  {:else if !sideOrders.length}
     {#if !embedded}<p class="empty">No keep-working orders. Enable “Keep the unfilled remainder working” when placing or arming a LIMIT or STOPLOSS.</p>{/if}
   {:else if !visibleOrders.length}
     <p class="empty">No persistent orders match this filter.</p>
@@ -312,7 +321,9 @@
       {#each visibleOrders as order (order.intentId)}
         <article class:danger={danger(order.state)} class:done={terminal(order.state)} data-order-row data-order-id={order.intentId}>
           <div class="top">
-            {#if keyboardMode}<button class="symbol" data-order-focus aria-label={`Controls for ${order.symbol} ${order.action} intent ${order.intentId}, ${order.state}`} on:click={focusOrderControls}>{order.symbol}</button>{:else}<span class="symbol">{order.symbol}</span>{/if}
+            <button class="symbol" data-order-focus={keyboardMode ? '' : undefined} title={`Show ${order.symbol} on the chart`}
+              aria-label={keyboardMode ? `Controls for ${order.symbol} ${order.action} intent ${order.intentId}, ${order.state}` : `Show ${order.symbol} on the chart`}
+              on:click={e => symbolClick(e, order.symbol)}>{order.symbol}</button>
             <LivePriceInline symbol={order.symbol} fallbackChange={null} />
             <span class="side {order.action.toLowerCase()}">{order.action}</span>
             <span class="state">{order.state}</span>
@@ -452,7 +463,8 @@
   article { border:1px solid var(--border); border-radius:var(--radius-sm); padding:.7rem; background:var(--surface-2); }
   article.danger { border-color:var(--warning); } article.done { opacity:.72; }
   .top { display:flex; align-items:center; gap:.4rem; }.symbol { font-weight:800; color:var(--text); }
-  button.symbol { border:0; background:transparent; padding:.2rem; }
+  button.symbol { border:0; background:transparent; padding:.2rem; font:inherit; font-weight:800; color:var(--text); cursor:pointer; }
+  button.symbol:hover { color:var(--primary); text-decoration:underline; }
   .row-menu { padding:.22rem; border-color:transparent; background:transparent; }
   .side,.state { padding:.12rem .34rem; border-radius:999px; font-size:.6rem; font-weight:700; }
   .side.buy { color:var(--success); background:color-mix(in srgb,var(--success) 12%,transparent); }
