@@ -18,6 +18,7 @@
   import {
     detailCardPosition, markerDetailsByTime, markerPlacement, markerShape, type MarkerDetailLine
   } from './chartOverlayMarkers';
+  import { rsiTipPosition, rsiZone, type RsiZone } from './chartRsiTip';
   import {
     trading, CHART_INTERVALS,
     type ArmOrderDialogContext, type CandleArchiveStatus, type ChartData, type ChartInterval,
@@ -298,6 +299,9 @@
   // hovered bar, and the latest value otherwise; null while the pane is hidden or has no RSI yet.
   let rsiReadout: { top: number; value: number | null } | null = null;
   let rsiLatest: number | null = null;
+  // While the pointer is in the RSI pane the value moves beside the line at the hovered bar (the
+  // library's crosshair marker is the dot on the line), and the corner readout steps aside for it.
+  let rsiTip: { left: number; top: number; value: number; zone: RsiZone } | null = null;
   // Client-side annotations (see chartAnnotations.ts): a third artefact group, owned apart from server
   // overlays and level lines so each can be replaced without disturbing the others.
   // The layer owns every handle (price lines, the zone primitive, the markers plugin). It is idempotent
@@ -676,6 +680,7 @@
    * bar with no RSI (the first 14 of a series) reads "—" rather than borrowing another bar's value.
    */
   function showRsiReadout(param?: MouseEventParams<Time>) {
+    rsiTip = null;
     if (!chart || !rsiSeries) { rsiReadout = null; return; }
     const pricePane = chart.panes()[0];
     if (!pricePane) { rsiReadout = null; return; }
@@ -686,7 +691,23 @@
       : rsiLatest;
     if (!hovered && value == null) { rsiReadout = null; return; }
     // The pane separator is 1px; the readout sits just inside the RSI pane's top-left corner.
-    rsiReadout = { top: pricePane.getHeight() + 1, value };
+    const paneTop = pricePane.getHeight() + 1;
+    rsiReadout = { top: paneTop, value };
+    if (hovered && param!.paneIndex === 1 && value != null) showRsiTip(param!, value, paneTop);
+  }
+
+  /** The tip beside the RSI line at the hovered bar; nothing when the bar or value has no coordinate. */
+  function showRsiTip(param: MouseEventParams<Time>, value: number, paneTop: number) {
+    const rsiPane = chart!.panes()[1];
+    const x = chart!.timeScale().timeToCoordinate(param.time!) ?? param.point?.x ?? null;
+    const y = rsiSeries!.priceToCoordinate(value);
+    if (!rsiPane || x == null || y == null) return;
+    rsiTip = {
+      ...rsiTipPosition({ x, y: paneTop + y },
+        { top: paneTop, height: rsiPane.getHeight(), width: chart!.timeScale().width() }),
+      value,
+      zone: rsiZone(value, rsiOversold, rsiOverbought)
+    };
   }
 
   /**
@@ -890,7 +911,7 @@
     resizeObserver = null;
     chart?.remove();
     chart = null;
-    candleSeries = volumeSeries = sma20Series = sma50Series = rsiSeries = null; rsiReadout = null;
+    candleSeries = volumeSeries = sma20Series = sma50Series = rsiSeries = null; rsiReadout = rsiTip = null;
     priceLines = [];
     forgetOverlayArtifacts();
     annotationLayer.forget();
@@ -950,7 +971,7 @@
       resizeObserver = null;
       chart?.remove();
       chart = null;
-      candleSeries = volumeSeries = sma20Series = sma50Series = rsiSeries = null; rsiReadout = null;
+      candleSeries = volumeSeries = sma20Series = sma50Series = rsiSeries = null; rsiReadout = rsiTip = null;
       priceLines = [];
       forgetOverlayArtifacts();
       annotationLayer.forget();
@@ -1244,9 +1265,15 @@
   {:else}
     <div class="plot-frame">
       <div class="plot" class:loading class:tall={expanded} bind:this={container}></div>
-      {#if rsiReadout}
+      {#if rsiReadout && !rsiTip}
         <div class="rsi-readout" style="top:{rsiReadout.top + 4}px" aria-live="off">
           RSI(14) <b>{rsiReadout.value != null ? rsiReadout.value.toFixed(2) : '—'}</b>
+        </div>
+      {/if}
+      {#if rsiTip}
+        <div class="rsi-tip" role="tooltip" style="left:{rsiTip.left}px; top:{rsiTip.top}px">
+          RSI(14) <b>{rsiTip.value.toFixed(2)}</b>{#if rsiTip.zone}<span class="rsi-tip-zone"
+            class:overbought={rsiTip.zone === 'overbought'}>{rsiTip.zone}</span>{/if}
         </div>
       {/if}
       {#if detailCard}
@@ -1461,6 +1488,14 @@
   .rsi-readout { position:absolute; left:8px; z-index:2; pointer-events:none; font-size:11px;
     color:var(--text-2); font-variant-numeric:tabular-nums; }
   .rsi-readout b { color:var(--info); font-weight:600; margin-left:4px; }
+  /* 24px tall to match rsiTipPosition's default; never in the pointer's way. */
+  .rsi-tip { position:absolute; z-index:3; height:24px; box-sizing:border-box; display:flex; align-items:center;
+    gap:6px; padding:0 8px; border-radius:6px; pointer-events:none; white-space:nowrap;
+    background:var(--surface-2); border:1px solid var(--border-high); box-shadow:0 4px 14px rgba(0,0,0,.25);
+    color:var(--text-2); font-size:11px; font-variant-numeric:tabular-nums; }
+  .rsi-tip b { color:var(--info); font-size:13px; font-weight:700; }
+  .rsi-tip-zone { font-size:10px; color:var(--info); }
+  .rsi-tip-zone.overbought { color:var(--warning, #f59e0b); }
   .marker-detail-line { display:flex; align-items:baseline; gap:6px; }
   .marker-detail-dot { width:7px; height:7px; border-radius:50%; flex-shrink:0; }
   /* A fixed height rather than a vh clamp: this renders inside an iframe whose viewport is shorter
