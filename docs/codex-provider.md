@@ -60,6 +60,19 @@ finishes by itself ("Successfully logged in") and the card refreshes. Works on W
 - From a terminal instead: `CODEX_HOME=<workspace>/codex/codex-home codex login --device-auth` (in a container:
   `docker exec -it -u <app user> <container> env CODEX_HOME=/data/codex/codex-home /opt/codex/codex login --device-auth`).
 
+## Choosing the model and reasoning level
+
+The Codex card offers **the models the signed-in plan offers**, as the CLI reports them: its own `models_cache.json`
+in `CODEX_HOME` (refreshed by every call), or one `codex debug models` when there is none (no model call, no plan
+usage). Only models marked `visibility: list` appear, in the plan's own order, and the reasoning levels shown are the
+chosen model's (`low`…`xhigh`, `max`; some add `ultra`). Not hardcoded: MEASURED 2026-11-26, a plan lost its "sol"
+models after the sign-in, the CLI's built-in default stayed one of them, and every call answered "The 'gpt-6.2-sol'
+model is not supported when using Codex with a ChatGPT account." (hosted `akd`; fixed there by choosing `gpt-6-luna`).
+
+With no model chosen, a call uses the **first model the plan lists**, not the CLI's default; with no catalog yet it
+falls back to the CLI's default. A model the owner typed or chose always wins. Reasoning "Default" is the model's own
+(medium for every model measured); higher levels are slower and use more of the plan per call.
+
 ## Endpoints
 
 `GET /api/ai/codex` (viewer; `?refresh=true` re-reads `--version` and `login status`, no model call). Administrator:

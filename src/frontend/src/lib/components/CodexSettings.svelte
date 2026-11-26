@@ -108,6 +108,13 @@
     });
   }
 
+  // Changing the model keeps the reasoning level only when the new model accepts it.
+  function onModelChange() {
+    const next = status?.models.find((m) => m.id === model);
+    if (effort && next && next.efforts.length > 0 && !next.efforts.includes(effort)) effort = '';
+    save();
+  }
+
   function save() {
     run('settings', async () => {
       apply(await codex.saveSettings(model, effort || null));
@@ -121,9 +128,14 @@
     }
   }
 
+  const effortLabel = (e: string) => (e === 'xhigh' ? 'Extra high' : e[0].toUpperCase() + e.slice(1));
+
   function when(utc: string | null): string {
     return utc ? new Date(utc).toLocaleString() : '—';
   }
+
+  $: selected = status?.models.find((m) => m.id === model) ?? null;
+  $: efforts = selected && selected.efforts.length > 0 ? selected.efforts : ['low', 'medium', 'high'];
 
   $: tone = !status ? 'muted' : status.state === 'ready' ? 'ok' : status.state === 'rate-limited' ? 'warn'
     : status.state === 'not-signed-in' ? 'muted' : 'bad';
@@ -200,15 +212,24 @@
         <div class="choices">
           <label class="choice">
             <span class="label">Model</span>
-            <input class="input" list="codex-models" bind:value={model} on:change={save} disabled={!!busy} aria-label="Codex model" />
-            <datalist id="codex-models">{#each status.models as m}<option value={m}></option>{/each}</datalist>
-            <ChannelHelp label="the Codex model" text="'default' lets Codex pick the model your plan offers. You can type any model name Codex accepts; if your plan does not offer it, the last error says so." />
+            {#if status.models.length > 0}
+              <select class="input select wide" bind:value={model} on:change={onModelChange} disabled={!!busy} aria-label="Codex model">
+                {#each status.models as m}<option value={m.id}>{m.name}{m.name === m.id ? '' : ` (${m.id})`}</option>{/each}
+              </select>
+            {:else}
+              <input class="input" bind:value={model} on:change={save} disabled={!!busy} aria-label="Codex model" />
+            {/if}
+            <ChannelHelp label="the Codex model" text={status.models.length > 0
+              ? 'These are the models your ChatGPT plan offers right now, as Codex reports them. If your plan changes, press Refresh to update the list.'
+              : 'Codex has not reported the models your plan offers yet. Press Test connection or Refresh to load them, or type a model name Codex accepts.'} />
           </label>
           <label class="choice">
             <span class="label">Reasoning</span>
             <select class="input select" bind:value={effort} on:change={save} disabled={!!busy} aria-label="Codex reasoning effort">
-              <option value="">Default</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option>
+              <option value="">{selected?.defaultEffort ? `Default (${selected.defaultEffort})` : 'Default'}</option>
+              {#each efforts as e}<option value={e}>{effortLabel(e)}</option>{/each}
             </select>
+            <ChannelHelp label="the reasoning level" text="Higher levels think longer: slower answers and more of your ChatGPT plan used per call. Default is what Codex uses for the model, which suits most purposes." />
           </label>
         </div>
       {/if}
@@ -237,6 +258,7 @@
   .input { flex: 0 1 220px; min-width: 140px; padding: 0.45rem 0.6rem; border-radius: var(--radius-sm); border: 1px solid var(--border);
     background: var(--surface-2); color: var(--text); }
   .select { flex: 0 1 160px; }
+  .select.wide { flex: 0 1 280px; }
   .signin { display: flex; flex-direction: column; gap: 0.4rem; margin-bottom: 0.75rem; align-items: flex-start; }
   .signin a { display: inline-flex; align-items: center; gap: 0.4rem; text-decoration: none; }
   .code { font-family: monospace; font-size: 1.1rem; font-weight: 700; letter-spacing: 0.08em; padding: 0.2rem 0.5rem;

@@ -5,6 +5,14 @@ import { managementCall } from './claudeCode.ts';
 
 export type CodexState = 'ready' | 'not-installed' | 'not-allowed' | 'not-signed-in' | 'reauthentication-required' | 'rate-limited';
 
+export interface CodexModel {
+  id: string;
+  name: string;
+  /** The reasoning levels this model accepts, as the CLI names them. Empty when the plan's catalog is not known. */
+  efforts: string[];
+  defaultEffort: string | null;
+}
+
 export interface CodexStatus {
   state: CodexState;
   installed: boolean;
@@ -14,7 +22,8 @@ export interface CodexStatus {
   signedIn: boolean;
   signedInWith: string | null;
   model: string;
-  models: string[];
+  /** The models the signed-in plan offers; empty until the CLI has reported them. */
+  models: CodexModel[];
   reasoningEffort: string | null;
   lastAuthCheckUtc: string | null;
   lastSuccessUtc: string | null;

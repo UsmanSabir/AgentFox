@@ -13,7 +13,7 @@ public sealed record CodexSettingsRequest(string? Model, string? ReasoningEffort
 public static partial class CodexEndpoints
 {
     private const string Admin = "ManagementAdministrator";
-    private static readonly string[] Efforts = ["low", "medium", "high"];
+    private static readonly string[] Efforts = ["low", "medium", "high", "xhigh", "max", "ultra"];
 
     public static void Map(IEndpointRouteBuilder endpoints)
     {
@@ -22,15 +22,15 @@ public static partial class CodexEndpoints
         group.MapGet("", async (CodexStatusService status, bool? refresh, CancellationToken ct) =>
             Results.Ok(await status.GetAsync(refresh == true, ct)));
 
-        group.MapPut("/settings", async (CodexStore store, CodexStatusService status, CodexSettingsRequest req, CancellationToken ct) =>
+        group.MapPut("/settings", async (CodexStore store, CodexStatusService status, CodexPaths paths, CodexSettingsRequest req, CancellationToken ct) =>
         {
             var model = req.Model?.Trim();
             if (model == CodexStatusService.DefaultModelLabel) model = null;
             if (!string.IsNullOrEmpty(model) && !ModelName().IsMatch(model))
                 return Results.BadRequest(new { error = "Enter a model name the Codex CLI accepts." });
             var effort = string.IsNullOrWhiteSpace(req.ReasoningEffort) ? null : req.ReasoningEffort.Trim().ToLowerInvariant();
-            if (effort is not null && !Efforts.Contains(effort))
-                return Results.BadRequest(new { error = "Reasoning effort is low, medium or high." });
+            if (effort is not null && !EffortAllowed(effort, model, paths))
+                return Results.BadRequest(new { error = "That reasoning level is not offered for this model." });
             store.Save(model, effort);
             return Results.Ok(await status.GetAsync(false, ct));
         }).RequireAuthorization(Admin);
@@ -59,6 +59,15 @@ public static partial class CodexEndpoints
             await status.SignOutAsync(ct);
             return Results.Ok(await status.GetAsync(true, ct));
         }).RequireAuthorization(Admin);
+    }
+
+    /// <summary>The plan's own catalog decides when it lists the model (its levels differ: some add "ultra"); otherwise
+    /// any level the CLI is known to name.</summary>
+    internal static bool EffortAllowed(string effort, string? model, CodexPaths paths)
+    {
+        var listed = model is null ? null : CodexModelCatalog.ReadCache(paths)
+            .FirstOrDefault(m => string.Equals(m.Id, model, StringComparison.OrdinalIgnoreCase));
+        return listed is { Efforts.Count: > 0 } ? listed.Efforts.Contains(effort) : Efforts.Contains(effort);
     }
 
     [GeneratedRegex(@"^[A-Za-z0-9._:\[\]-]{1,100}$")] private static partial Regex ModelName();

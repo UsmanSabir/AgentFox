@@ -43,8 +43,10 @@ public sealed class CodexChatClient : IChatClient, ISubscriptionProvider
     public bool IsInstalled => CliExecutable.IsInstalled(_options.ExecutablePath);
     public IChatClient Client => this;
 
-    /// <summary>The model the next call uses; null means the CLI's default for the account.</summary>
-    public string? CurrentModel => _store.Read().Model ?? (string.IsNullOrWhiteSpace(_options.DefaultModel) ? null : _options.DefaultModel);
+    /// <summary>The model the next call uses. Not chosen: the first model the plan's own catalog lists, because the
+    /// CLI's built-in default can be one the plan no longer offers (measured 2026-11-26). No catalog yet: null, the CLI's default.</summary>
+    public string? CurrentModel => _store.Read().Model
+        ?? (string.IsNullOrWhiteSpace(_options.DefaultModel) ? CodexModelCatalog.ReadCache(_paths).FirstOrDefault()?.Id : _options.DefaultModel);
 
     public async Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null,
         CancellationToken cancellationToken = default) =>

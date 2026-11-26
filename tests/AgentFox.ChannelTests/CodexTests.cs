@@ -117,6 +117,61 @@ public sealed class CodexTests
         Assert.AreEqual(!OperatingSystem.IsWindows(), withTmp.ContainsKey("TERM"));
     }
 
+    // ── The plan's own model list ────────────────────────────────────────────────────────────────
+
+    // Shape and slugs from the catalog `codex debug models` printed for a ChatGPT plan on 2026-11-26, cut down to the
+    // fields read. The CLI's built-in default (gpt-6.2-sol) was NOT in it, which is what broke every call.
+    private const string Catalog = """
+        {"models":[
+          {"slug":"gpt-reserve","display_name":"GPT-Reserve","visibility":"hide","priority":1,"default_reasoning_level":"medium","supported_reasoning_levels":[{"effort":"low"}]},
+          {"slug":"gpt-5.6-terra","display_name":"GPT-5.6-Terra","visibility":"list","priority":3,"default_reasoning_level":"medium","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"ultra"}]},
+          {"slug":"gpt-6-luna","display_name":"GPT-6-Luna","visibility":"list","priority":2,"default_reasoning_level":"medium","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"}]},
+          {"display_name":"No slug","visibility":"list","priority":9}
+        ]}
+        """;
+
+    [TestMethod]
+    public void The_catalog_offers_only_listed_models_in_the_plans_own_order()
+    {
+        var models = CodexModelCatalog.Parse(Catalog);
+        CollectionAssert.AreEqual(new[] { "gpt-6-luna", "gpt-5.6-terra" }, models.Select(m => m.Id).ToArray());
+        Assert.AreEqual("GPT-6-Luna", models[0].Name);
+        Assert.AreEqual("medium", models[0].DefaultEffort);
+        CollectionAssert.Contains(models[1].Efforts.ToList(), "ultra");
+        Assert.AreEqual(0, CodexModelCatalog.Parse("not json").Count);
+        Assert.AreEqual(0, CodexModelCatalog.Parse("""{"models":"x"}""").Count);
+        Assert.AreEqual(0, CodexModelCatalog.Parse(null).Count);
+    }
+
+    [TestMethod]
+    public async Task With_no_chosen_model_a_call_uses_the_first_model_the_plan_lists()
+    {
+        using var h = new Harness();
+        File.WriteAllText(Path.Combine(h.Paths.Home, CodexModelCatalog.CacheFileName), Catalog);
+        var runner = FakeRunner.Lines(ThreadStarted, Agent("ok"), TurnCompleted);
+        await h.Client(runner).GetResponseAsync(Hello);
+        var call = runner.Calls.Single();
+        Assert.AreEqual("gpt-6-luna", call.Arguments[call.Arguments.ToList().IndexOf("-m") + 1]);
+
+        // A model the owner chose always wins, even one the catalog does not list.
+        h.Store.Save("gpt-x", null);
+        var chosen = FakeRunner.Lines(ThreadStarted, Agent("ok"), TurnCompleted);
+        await h.Client(chosen).GetResponseAsync(Hello);
+        Assert.AreEqual("gpt-x", chosen.Calls.Single().Arguments[chosen.Calls.Single().Arguments.ToList().IndexOf("-m") + 1]);
+    }
+
+    [TestMethod]
+    public void A_reasoning_level_must_be_one_the_listed_model_accepts()
+    {
+        using var h = new Harness();
+        File.WriteAllText(Path.Combine(h.Paths.Home, CodexModelCatalog.CacheFileName), Catalog);
+        Assert.IsTrue(CodexEndpoints.EffortAllowed("ultra", "gpt-5.6-terra", h.Paths));
+        Assert.IsFalse(CodexEndpoints.EffortAllowed("ultra", "gpt-6-luna", h.Paths));
+        Assert.IsTrue(CodexEndpoints.EffortAllowed("xhigh", "gpt-6-luna", h.Paths));
+        Assert.IsTrue(CodexEndpoints.EffortAllowed("high", "not-listed", h.Paths), "an unlisted model falls back to the known levels");
+        Assert.IsFalse(CodexEndpoints.EffortAllowed("turbo", "not-listed", h.Paths));
+    }
+
     // ── Events ────────────────────────────────────────────────────────────────────────────────────
 
     [TestMethod]
