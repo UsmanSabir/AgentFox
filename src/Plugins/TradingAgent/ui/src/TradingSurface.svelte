@@ -722,7 +722,8 @@
       <!-- One panel for every order the app places on the person's behalf: triggers, repeat-until-filled
            and stop-loss. It replaced the separate Waiting orders and Persistent orders panels. -->
       <WorkspacePanel {workspace} id="persistent">
-      <AutoOrdersPanel bind:this={autoOrdersPanel} refreshTick={marketTick} keyboardMode={!!workspace}/>
+      <AutoOrdersPanel bind:this={autoOrdersPanel} refreshTick={marketTick} keyboardMode={!!workspace}
+        on:select={selectChartSymbol}/>
       </WorkspacePanel>
       <WorkspacePanel {workspace} id="alerts">
       <div class="price-alert-tabs">

@@ -293,6 +293,11 @@
   // be hovered themselves, so the card follows the crosshair's BAR rather than the marker's pixels.
   let markerDetails = new Map<number, MarkerDetailLine[]>();
   let detailCard: { left: number; top: number; lines: MarkerDetailLine[] } | null = null;
+  // The RSI pane's value readout. The crosshair's axis label reports where the POINTER is, not the
+  // line's value at that bar, so without this the pane had no number to read on hover. Follows the
+  // hovered bar, and the latest value otherwise; null while the pane is hidden or has no RSI yet.
+  let rsiReadout: { top: number; value: number | null } | null = null;
+  let rsiLatest: number | null = null;
   // Client-side annotations (see chartAnnotations.ts): a third artefact group, owned apart from server
   // overlays and level lines so each can be replaced without disturbing the others.
   // The layer owns every handle (price lines, the zone primitive, the markers plugin). It is idempotent
@@ -363,7 +368,10 @@
       width: el.clientWidth
     });
     // Released with the chart: remove() drops every subscription, so no teardown site needs it.
-    chart.subscribeCrosshairMove(showMarkerDetail);
+    chart.subscribeCrosshairMove(param => {
+      showMarkerDetail(param);
+      showRsiReadout(param);
+    });
     chart.timeScale().subscribeVisibleLogicalRangeChange(scheduleAnnotationRefresh);
 
     candleSeries = chart.addSeries(CandlestickSeries, {
@@ -420,6 +428,7 @@
       if (chart && el.clientWidth > 0) {
         chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
         applyPendingVisibleRange();
+        showRsiReadout();
       }
     });
     resizeObserver.observe(el);
@@ -466,8 +475,12 @@
       .map(c => ({ time: c.time as UTCTimestamp, value: c.sma20! })));
     sma50Series.setData(d.candles.filter(c => c.sma50 != null)
       .map(c => ({ time: c.time as UTCTimestamp, value: c.sma50! })));
-    rsiSeries?.setData(d.candles.filter(c => c.rsi14 != null)
-      .map(c => ({ time: c.time as UTCTimestamp, value: c.rsi14! })));
+    const rsiPoints = d.candles.filter(c => c.rsi14 != null)
+      .map(c => ({ time: c.time as UTCTimestamp, value: c.rsi14! }));
+    rsiSeries?.setData(rsiPoints);
+    rsiLatest = rsiPoints.at(-1)?.value ?? null;
+    // After a frame, so the pane heights the readout is positioned from have been laid out.
+    requestAnimationFrame(() => showRsiReadout());
 
     drawLevels(d);
     const projectedBars = drawOverlays(d);
@@ -656,6 +669,24 @@
       ...detailCardPosition(param.point, { width: container.clientWidth, height: container.clientHeight }),
       lines
     };
+  }
+
+  /**
+   * The RSI value at the hovered bar, or the latest one when the pointer is off the chart. A hovered
+   * bar with no RSI (the first 14 of a series) reads "—" rather than borrowing another bar's value.
+   */
+  function showRsiReadout(param?: MouseEventParams<Time>) {
+    if (!chart || !rsiSeries) { rsiReadout = null; return; }
+    const pricePane = chart.panes()[0];
+    if (!pricePane) { rsiReadout = null; return; }
+    const hovered = param?.time != null;
+    const point = hovered ? param!.seriesData.get(rsiSeries) : undefined;
+    const value: number | null = hovered
+      ? (point && 'value' in point && typeof point.value === 'number' ? point.value : null)
+      : rsiLatest;
+    if (!hovered && value == null) { rsiReadout = null; return; }
+    // The pane separator is 1px; the readout sits just inside the RSI pane's top-left corner.
+    rsiReadout = { top: pricePane.getHeight() + 1, value };
   }
 
   /**
@@ -859,7 +890,7 @@
     resizeObserver = null;
     chart?.remove();
     chart = null;
-    candleSeries = volumeSeries = sma20Series = sma50Series = rsiSeries = null;
+    candleSeries = volumeSeries = sma20Series = sma50Series = rsiSeries = null; rsiReadout = null;
     priceLines = [];
     forgetOverlayArtifacts();
     annotationLayer.forget();
@@ -919,7 +950,7 @@
       resizeObserver = null;
       chart?.remove();
       chart = null;
-      candleSeries = volumeSeries = sma20Series = sma50Series = rsiSeries = null;
+      candleSeries = volumeSeries = sma20Series = sma50Series = rsiSeries = null; rsiReadout = null;
       priceLines = [];
       forgetOverlayArtifacts();
       annotationLayer.forget();
@@ -1213,6 +1244,11 @@
   {:else}
     <div class="plot-frame">
       <div class="plot" class:loading class:tall={expanded} bind:this={container}></div>
+      {#if rsiReadout}
+        <div class="rsi-readout" style="top:{rsiReadout.top + 4}px" aria-live="off">
+          RSI(14) <b>{rsiReadout.value != null ? rsiReadout.value.toFixed(2) : '—'}</b>
+        </div>
+      {/if}
       {#if detailCard}
         <div class="marker-detail" role="tooltip" style="left:{detailCard.left}px; top:{detailCard.top}px">
           {#each detailCard.lines as line}
@@ -1421,6 +1457,10 @@
   .marker-detail { position:absolute; z-index:3; max-width:240px; pointer-events:none;
     padding:6px 8px; border-radius:6px; background:var(--surface-2); border:1px solid var(--border-high);
     color:var(--text); font-size:11px; line-height:1.4; box-shadow:0 4px 14px rgba(0,0,0,.25); }
+  /* Above the canvas but never in the pointer's way, so hovering through it still drives the crosshair. */
+  .rsi-readout { position:absolute; left:8px; z-index:2; pointer-events:none; font-size:11px;
+    color:var(--text-2); font-variant-numeric:tabular-nums; }
+  .rsi-readout b { color:var(--info); font-weight:600; margin-left:4px; }
   .marker-detail-line { display:flex; align-items:baseline; gap:6px; }
   .marker-detail-dot { width:7px; height:7px; border-radius:50%; flex-shrink:0; }
   /* A fixed height rather than a vh clamp: this renders inside an iframe whose viewport is shorter

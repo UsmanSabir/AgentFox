@@ -1,6 +1,6 @@
 <script lang="ts">
   import { describePsxDate } from './orderSchedule';
-  import { onMount } from 'svelte';
+  import { onMount, createEventDispatcher } from 'svelte';
   import { onAccountChanged } from './accountSignal';
   import { trading, type ArmedOrdersResponse, type ArmedOrder, type ProtectiveStop } from './api';
   import {
@@ -11,7 +11,7 @@
   import LivePriceInline from './LivePriceInline.svelte';
   import OrderActionReview from './OrderActionReview.svelte';
   import ApprovalStrip from './ApprovalStrip.svelte';
-  import { orderListNavigation, focusOrderControls } from './orderListNavigation';
+  import { orderListNavigation, focusOrderControls, isPointerClick, matchesSide, type OrderSideFilter } from './orderListNavigation';
 
   export let refreshTick = 0;
   export let keyboardMode = false;
@@ -22,6 +22,8 @@
   export let embedded = false;
   export let show: 'all' | 'triggers' | 'stops' | 'repeat' = 'all';
   export let query = '';
+  /** Buy / Sell view filter (Persistent orders). Like `query`, it changes what is SHOWN and counted, never what is selected. */
+  export let side: OrderSideFilter = 'all';
   export let showHistory = false;
   /** Fired triggers already shown as their keep-working order, so one order is one row. */
   export let hideArmedIds: ReadonlySet<string> = new Set();
@@ -30,6 +32,12 @@
   export let triggerCount = 0;
   export let stopCount = 0;
   export let loaded = false;
+  /** `select` names a stock the person clicked, so the page can select it as the watchlist does. */
+  const dispatch = createEventDispatcher<{ select: string }>();
+  function symbolClick(event: MouseEvent, symbol: string) {
+    if (keyboardMode && !isPointerClick(event)) focusOrderControls(event);
+    else dispatch('select', symbol);
+  }
   let review: OrderActionReview;
   let reviewing = false;
   let feedback: HTMLParagraphElement;
@@ -233,16 +241,17 @@
    * matter, the live ones.
    */
   // Embedded, the host's one search box covers stops too; standalone, protection is always shown.
-  $: stops = (data?.protectiveStops ?? []).filter(s => !embedded || !keyboardMode
-    || `${s.symbol} stop ${s.state} ${s.stopId}`.toLowerCase().includes(query.trim().toLowerCase()));
+  $: stops = (data?.protectiveStops ?? []).filter(s => matchesSide('SELL', side) && (!embedded || !keyboardMode
+    || `${s.symbol} stop sell ${s.state} ${s.stopId}`.toLowerCase().includes(query.trim().toLowerCase())));
 
   /** The local backstops are shown as part of their stop, not as loose triggers in the main list. */
   $: entries = (data?.orders ?? []).filter(o => !o.protectiveStopId && !hideArmedIds.has(o.armedId));
-  $: triggerCount = entries.length;
+  $: sideEntries = entries.filter(o => matchesSide(o.action, side));
+  $: triggerCount = sideEntries.length;
   $: stopCount = stops.length;
   $: showTriggers = show === 'all' || show === 'triggers';
   $: showStops = show === 'all' || show === 'stops';
-  $: visibleEntries = entries.filter(o => !keyboardMode || `${o.symbol} ${o.action} ${o.state} ${o.armedId}`.toLowerCase().includes(query.trim().toLowerCase()));
+  $: visibleEntries = sideEntries.filter(o => !keyboardMode || `${o.symbol} ${o.action} ${o.state} ${o.armedId}`.toLowerCase().includes(query.trim().toLowerCase()));
   $: selectableEntries = entries.filter(order => order.state === 'armed');
   $: selectedCount = selectableEntries.filter(order => selectedOrderIds.has(order.armedId)).length;
   $: allSelected = visibleEntries.some(o => o.state === 'armed') && visibleEntries.filter(o => o.state === 'armed').every(o => selectedOrderIds.has(o.armedId));
@@ -352,7 +361,7 @@
       For a price condition, choose a chart level or "sell if it drops"; alerts can create event conditions.
     </p>
     {/if}
-  {:else if showTriggers && entries.length}
+  {:else if showTriggers && sideEntries.length}
     {#if embedded && show === 'all'}<h3 class="group"><Crosshair size={13}/> On a trigger</h3>{/if}
     <ul class="list">
       {#each visibleEntries as order (order.armedId)}
@@ -372,7 +381,9 @@
                  when it goes in; this line is what goes in, and reading the card without it meant
                  sizing was invisible. -->
             <div class="row-1">
-              {#if keyboardMode}<button class="symbol row-focus" data-order-focus aria-label={`Controls for ${order.symbol} ${order.action} trigger ${order.armedId}, ${order.state}`} on:click={focusOrderControls}>{order.symbol}</button>{:else}<span class="symbol">{order.symbol}</span>{/if}
+              <button class="symbol row-focus" data-order-focus={keyboardMode ? '' : undefined} title={`Show ${order.symbol} on the chart`}
+                aria-label={keyboardMode ? `Controls for ${order.symbol} ${order.action} trigger ${order.armedId}, ${order.state}` : `Show ${order.symbol} on the chart`}
+                on:click={e => symbolClick(e, order.symbol)}>{order.symbol}</button>
               <LivePriceInline symbol={order.symbol} fallbackChange={null} />
               <span class="side {order.action.toLowerCase()}">{order.action}</span>
               <span class="qty">{order.quantity}</span>
@@ -437,7 +448,7 @@
         </li>
       {/each}
     </ul>
-    {#if entries.length && !visibleEntries.length}<p class="line">No triggers match this filter. Protection below is always shown.</p>{/if}
+    {#if sideEntries.length && !visibleEntries.length}<p class="line">No triggers match this filter.{#if side !== 'BUY'} Protection below is always shown.{/if}</p>{/if}
   {/if}
 
   <!-- Persistent orders puts its "Repeat until filled" list here, between the triggers that feed it and the
@@ -453,7 +464,9 @@
           <li class="row stop {cover.tone}" data-order-row>
             <div class="body">
               <div class="row-1">
-                {#if keyboardMode}<button class="symbol row-focus" data-order-focus aria-label={`Controls for ${stop.symbol} protective stop ${stop.stopId}`} on:click={focusOrderControls}>{stop.symbol}</button>{:else}<span class="symbol">{stop.symbol}</span>{/if}
+                <button class="symbol row-focus" data-order-focus={keyboardMode ? '' : undefined} title={`Show ${stop.symbol} on the chart`}
+                  aria-label={keyboardMode ? `Controls for ${stop.symbol} protective stop ${stop.stopId}` : `Show ${stop.symbol} on the chart`}
+                  on:click={e => symbolClick(e, stop.symbol)}>{stop.symbol}</button>
                 <LivePriceInline symbol={stop.symbol} fallbackChange={null} />
                 <span class="side sell">STOP</span>
                 {#if stop.desiredQuantity}<span class="qty">{stop.desiredQuantity}</span>{/if}
@@ -498,6 +511,7 @@
 
 <style>
   .row-focus { background:none; border:0; padding:0; cursor:pointer; font-size:inherit; }
+  .row-focus:hover { color:var(--primary); text-decoration:underline; }
   [data-order-row]:focus-visible, button:focus-visible, input:focus-visible { outline:2px solid var(--primary); outline-offset:-2px; }
   .order-filter { display:flex; align-items:center; gap:.5rem; font-size:.75rem; color:var(--text-2); }
   .order-filter input { min-width:0; padding:.35rem; border:1px solid var(--border-md); border-radius:4px; background:var(--surface-2); color:var(--text); }

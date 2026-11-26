@@ -22,6 +22,7 @@
   import ApprovalStrip from './ApprovalStrip.svelte';
   import HelpTip from './HelpTip.svelte';
   import type { ArmedOrdersResponse } from './api';
+  import type { OrderSideFilter } from './orderListNavigation';
 
   export let refreshTick = 0;
   export let keyboardMode = false;
@@ -30,6 +31,9 @@
   let chip: Chip = 'all';
   let query = '';
   let showHistory = false;
+  /** Buy / Sell view filter; the chip counts and the empty state follow it. */
+  let side: OrderSideFilter = 'all';
+  const sides: { id: OrderSideFilter; label: string }[] = [{ id: 'all', label: 'All' }, { id: 'BUY', label: 'Buy' }, { id: 'SELL', label: 'Sell' }];
 
   let triggersPanel: ArmedOrdersPanel;
   let repeatPanel: PersistentOrdersPanel;
@@ -74,7 +78,7 @@
     <div class="actions">
       <label class="toggle"><input type="checkbox" bind:checked={showHistory}
         on:change={() => setTimeout(load)}/> Show history</label>
-      <button class="btn btn-ghost" on:click={load}><RefreshCw size={13}/> Refresh</button>
+      <button class="btn btn-ghost icon-only" on:click={load} title="Refresh" aria-label="Refresh persistent orders"><RefreshCw size={13}/></button>
     </div>
   </header>
 
@@ -88,26 +92,33 @@
     {/each}
   </div>
 
-  {#if keyboardMode}
-    <label class="order-filter">Find persistent order <input type="search" bind:value={query}
-      aria-label="Find persistent order" placeholder="Symbol, side or state"/></label>
-  {/if}
+  <div class="filters">
+    {#if keyboardMode}
+      <input class="find" type="search" bind:value={query} aria-label="Find persistent order" placeholder="Find symbol or state"/>
+    {/if}
+    <div class="sides" role="group" aria-label="Show buy or sell orders">
+      {#each sides as s}
+        <button type="button" class={s.id.toLowerCase()} aria-pressed={side === s.id} on:click={() => side = s.id}>{s.label}</button>
+      {/each}
+    </div>
+  </div>
 
   {#if !loaded}<p class="empty">Loading…</p>{:else if empty}
     <p class="empty">
-      {#if chip === 'stops'}No stop-loss is set. Add one from New Order or a holding's plan.
+      {#if side !== 'all'}No {side === 'BUY' ? 'buy' : 'sell'} orders{chip === 'all' ? '' : ' here'}.{#if side === 'BUY' && chip === 'stops'} A stop-loss is always a sell.{/if}
+      {:else if chip === 'stops'}No stop-loss is set. Add one from New Order or a holding's plan.
       {:else if chip === 'repeat'}Nothing repeating. Tick “Keep the unfilled remainder working” when placing a limit or stop-loss order.
       {:else if chip === 'triggers'}Nothing waiting for a trigger. Use New Order to schedule a date, or a chart level for a price.
       {:else}No persistent orders. Schedule one from New Order, set a price level on the chart, or tick “Keep the unfilled remainder working”.{/if}
     </p>
   {/if}
 
-  <ArmedOrdersPanel bind:this={triggersPanel} embedded show={chip} {query} {showHistory} {refreshTick} {keyboardMode}
+  <ArmedOrdersPanel bind:this={triggersPanel} embedded show={chip} {query} {side} {showHistory} {refreshTick} {keyboardMode} on:select
     hideArmedIds={sourceArmedIds}
     bind:approval bind:triggerCount bind:stopCount bind:loaded={triggersLoaded}>
     <div slot="between" class="between" class:hidden={!showRepeat}>
       {#if chip === 'all' && repeatCount}<h3 class="group"><Repeat2 size={13}/> Repeat until filled</h3>{/if}
-      <PersistentOrdersPanel bind:this={repeatPanel} embedded hidden={!showRepeat} {query} {showHistory}
+      <PersistentOrdersPanel bind:this={repeatPanel} embedded hidden={!showRepeat} {query} {side} {showHistory} on:select
         {refreshTick} {keyboardMode}
         bind:orderCount={repeatCount} bind:loaded={repeatLoaded} bind:sourceArmedIds/>
     </div>
@@ -132,9 +143,18 @@
   .chip:focus-visible, input:focus-visible { outline:2px solid var(--primary); outline-offset:2px; }
   .n { font-size:.64rem; font-weight:700; color:var(--text-3); }
   .chip[aria-selected="true"] .n { color:var(--primary); }
-  .order-filter { display:flex; gap:.5rem; align-items:center; color:var(--text-2); font-size:.75rem; }
-  .order-filter input { min-width:0; padding:.35rem; border:1px solid var(--border-md); border-radius:4px;
-    background:var(--surface-2); color:var(--text); }
+  .actions .icon-only { padding:.35rem .45rem; }
+  /* Search and the Buy / Sell filter share one row, so adding the filter costs no height. */
+  .filters { display:flex; align-items:center; gap:.5rem; flex-wrap:wrap; }
+  .find { flex:1 1 9rem; min-width:0; padding:.35rem; border:1px solid var(--border-md); border-radius:4px;
+    background:var(--surface-2); color:var(--text); font-size:.75rem; }
+  .sides { display:inline-flex; margin-left:auto; padding:.15rem; gap:.15rem; border:1px solid var(--border); border-radius:999px; background:var(--surface-2); }
+  .sides button { border:0; background:transparent; color:var(--text-2); font-size:.72rem; padding:.2rem .6rem; border-radius:999px; cursor:pointer; }
+  .sides button:hover { color:var(--text); }
+  .sides button[aria-pressed="true"] { background:color-mix(in srgb, var(--primary) 18%, transparent); color:var(--text); }
+  .sides button.buy[aria-pressed="true"] { background:color-mix(in srgb, var(--success) 22%, transparent); color:var(--success); }
+  .sides button.sell[aria-pressed="true"] { background:color-mix(in srgb, var(--danger) 22%, transparent); color:var(--danger); }
+  .sides button:focus-visible { outline:2px solid var(--primary); outline-offset:2px; }
   .empty { margin:0; color:var(--text-3); font-size:.74rem; padding:.9rem 0; text-align:center; line-height:1.6; }
   .between { display:flex; flex-direction:column; gap:.4rem; }
   .between.hidden { display:none; }
