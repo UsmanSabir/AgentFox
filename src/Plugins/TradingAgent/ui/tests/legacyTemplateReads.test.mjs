@@ -67,3 +67,9 @@ test('a runes-mode component is skipped: it tracks reads at run time', () => {
 <p>{label(item)}</p>`;
   assert.deepEqual(scanSource(runes), []);
 });
+
+test('no trading UI component has a stale template call', () => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../src');
+  const results = scanTree(root);
+  assert.deepEqual(results.map(r => `${r.file}: ${r.findings.map(f => `${f.fn} reads ${f.reads.join(', ')}`).join('; ')}`), []);
+});

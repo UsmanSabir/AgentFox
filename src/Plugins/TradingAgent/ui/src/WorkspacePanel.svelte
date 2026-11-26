@@ -1,8 +1,14 @@
 <script lang="ts">
   import type { WorkspaceComposition } from './workspaceComposition';
-  export let workspace: WorkspaceComposition | null = null;
-  export let id: string;
-  let visible = workspace === null;
+  interface Props {
+    workspace?: WorkspaceComposition | null;
+    id: string;
+    children?: import('svelte').Snippet<[any]>;
+  }
+
+  let { workspace = null, id, children }: Props = $props();
+  // svelte-ignore state_referenced_locally -- a starting value from the workspace prop, which is fixed for the page (as before)
+  let visible = $state(workspace === null);
   function attach(node: HTMLElement) {
     let layoutVisible = true;
     let intersects = workspace === null;
@@ -18,7 +24,7 @@
     return { destroy: () => { observer?.disconnect(); detach?.(); } };
   }
 </script>
-<div use:attach class="workspace-surface" class:hosted={workspace !== null}><slot {visible}/></div>
+<div use:attach class="workspace-surface" class:hosted={workspace !== null}>{@render children?.({ visible, })}</div>
 <style>
   .workspace-surface { display:contents; }
   .workspace-surface.hosted { display:block; min-width:0; min-height:0; }
