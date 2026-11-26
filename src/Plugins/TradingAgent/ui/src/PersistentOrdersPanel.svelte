@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick, createEventDispatcher } from 'svelte';
+  import { onMount, tick, createEventDispatcher, untrack } from 'svelte';
   import { RefreshCw, Repeat2, Trash2, AlertTriangle, CheckCircle2, RotateCcw, ShieldQuestion, MoreHorizontal } from 'lucide-svelte';
   import { trading, type PersistentOrder, type BrokerOrdersView } from './api';
   import LivePriceInline from './LivePriceInline.svelte';
@@ -14,45 +14,60 @@
     type AttentionResolution,
     type PersistentActionId
   } from './persistentOrderUi';
-  export let keyboardMode = false;
-  /**
-   * Inside the merged Persistent orders panel (AutoOrdersPanel): the host owns the header, search box, history toggle and empty state. `hidden`
-   * keeps it mounted (so its counts stay current) while another chip is selected.
-   */
-  export let embedded = false;
-  export let hidden = false;
-  export let query = '';
-  export let showHistory = false;
+  
   // Read back by the host (bind:): the chip count, its empty state, and which fired triggers became
-  // one of these orders so they are not listed twice.
-  export let orderCount = 0;
-  export let loaded = false;
-  export let sourceArmedIds: ReadonlySet<string> = new Set();
-  /** Buy / Sell view filter (Persistent orders): changes what is shown and counted, as `query` does. */
-  export let side: OrderSideFilter = 'all';
+  
+  
   /** `select` names a stock the person clicked, so the page can select it as the watchlist does. */
   const dispatch = createEventDispatcher<{ select: string }>();
   function symbolClick(event: MouseEvent, symbol: string) {
     if (keyboardMode && !isPointerClick(event)) focusOrderControls(event);
     else dispatch('select', symbol);
   }
-  $: sideOrders = orders.filter(o => matchesSide(o.action, side));
-  $: orderCount = sideOrders.length;
-  $: visibleOrders = sideOrders.filter(o => !keyboardMode || `${o.symbol} ${o.action} ${o.state} ${o.intentId}`.toLowerCase().includes(query.trim().toLowerCase()));
 
-  export let refreshTick = 0;
+  interface Props {
+    keyboardMode?: boolean;
+    /**
+   * Inside the merged Persistent orders panel (AutoOrdersPanel): the host owns the header, search box, history toggle and empty state. `hidden`
+   * keeps it mounted (so its counts stay current) while another chip is selected.
+   */
+    embedded?: boolean;
+    hidden?: boolean;
+    query?: string;
+    showHistory?: boolean;
+    // one of these orders so they are not listed twice.
+    orderCount?: number;
+    loaded?: boolean;
+    sourceArmedIds?: ReadonlySet<string>;
+    /** Buy / Sell view filter (Persistent orders): changes what is shown and counted, as `query` does. */
+    side?: OrderSideFilter;
+    refreshTick?: number;
+  }
 
-  let orders: PersistentOrder[] = [];
-  let loading = true;
-  let busy: string | null = null;
-  let error: string | null = null;
-  let notice: string | null = null;
-  let reviewing = false;
-  let feedback: HTMLParagraphElement;
-  let review: OrderActionReview;
-  let actionSheet: OrderRowActions;
-  let resolutionSheet: PersistentOrderResolutionDialog;
-  let lastTick = 0;
+  let {
+    keyboardMode = false,
+    embedded = false,
+    hidden = false,
+    query = $bindable(''),
+    showHistory = $bindable(false),
+    orderCount = $bindable(0),
+    loaded = $bindable(false),
+    sourceArmedIds = $bindable(new Set()),
+    side = 'all',
+    refreshTick = 0
+  }: Props = $props();
+
+  let orders: PersistentOrder[] = $state([]);
+  let loading = $state(true);
+  let busy: string | null = $state<string | null>(null);
+  let error: string | null = $state<string | null>(null);
+  let notice: string | null = $state<string | null>(null);
+  let reviewing = $state(false);
+  let feedback: HTMLParagraphElement = $state()!;
+  let review: OrderActionReview = $state()!;
+  let actionSheet: OrderRowActions = $state()!;
+  let resolutionSheet: PersistentOrderResolutionDialog = $state()!;
+  let lastTick = $state(0);
   /**
    * The broker's own resting orders, per intent, once someone asks for them.
    *
@@ -62,9 +77,8 @@
    * refused for want of free shares. This is the way out: show what is actually there and let a person
    * cancel the right one by number.
    */
-  let brokerView: Record<string, BrokerOrdersView> = {};
-  let inspecting: string | null = null;
-
+  let brokerView: Record<string, BrokerOrdersView> = $state({});
+  let inspecting: string | null = $state<string | null>(null);
   async function confirmAction(message: string, label: string) {
     if (!keyboardMode) return confirm(message);
     reviewing = true;
@@ -286,8 +300,18 @@
   const terminal = (state: string) => ['fulfilled', 'expired', 'cancelled'].includes(state);
   const danger = (state: string) => ['attention', 'expiring', 'cancelling'].includes(state);
 
-  $: if (refreshTick !== lastTick) { lastTick = refreshTick; if (!loading) load(); }
   onMount(load);
+  let sideOrders = $derived(orders.filter(o => matchesSide(o.action, side)));
+  // Writes the bound prop, so it stays an effect rather than a derived value.
+  $effect.pre(() => {
+    orderCount = sideOrders.length;
+  });
+  let visibleOrders = $derived(sideOrders.filter(o => !keyboardMode || `${o.symbol} ${o.action} ${o.state} ${o.intentId}`.toLowerCase().includes(query.trim().toLowerCase())));
+  $effect.pre(() => {
+    // Reads only what the old `$:` named; the call is untracked so its own bookkeeping cannot re-trigger it.
+    const tick = refreshTick, seen = lastTick, busy = loading;
+    untrack(() => { if (tick !== seen) { lastTick = tick; if (!busy) load(); } });
+  });
 </script>
 
 <section class="persistent" class:embedded {hidden} aria-label="Repeat until filled orders"
@@ -299,8 +323,8 @@
       <div><b>Keep-working orders</b><span>DAY orders re-placed until filled or expired</span></div>
     </div>
     <div class="actions">
-      <label><input type="checkbox" bind:checked={showHistory} on:change={load} /> show history</label>
-      <button on:click={load} disabled={busy != null || reviewing}><RefreshCw size={12} /> Refresh</button>
+      <label><input type="checkbox" bind:checked={showHistory} onchange={load} /> show history</label>
+      <button onclick={load} disabled={busy != null || reviewing}><RefreshCw size={12} /> Refresh</button>
     </div>
   </header>
   {/if}
@@ -323,14 +347,14 @@
           <div class="top">
             <button class="symbol" data-order-focus={keyboardMode ? '' : undefined} title={`Show ${order.symbol} on the chart`}
               aria-label={keyboardMode ? `Controls for ${order.symbol} ${order.action} intent ${order.intentId}, ${order.state}` : `Show ${order.symbol} on the chart`}
-              on:click={e => symbolClick(e, order.symbol)}>{order.symbol}</button>
+              onclick={e => symbolClick(e, order.symbol)}>{order.symbol}</button>
             <LivePriceInline symbol={order.symbol} fallbackChange={null} />
             <span class="side {order.action.toLowerCase()}">{order.action}</span>
             <span class="state">{order.state}</span>
             {#if terminal(order.state)}<CheckCircle2 size={13} />{/if}
             {#if keyboardMode && persistentActions(order).length}
               <button class="row-menu" aria-label={`Actions for ${order.symbol} intent ${order.intentId}`}
-                      title="Order actions (Shift+F10)" on:click={() => openActions(order)}
+                      title="Order actions (Shift+F10)" onclick={() => openActions(order)}
                       disabled={busy != null || reviewing || inspecting != null}>
                 <MoreHorizontal size={14} />
               </button>
@@ -352,20 +376,20 @@
           {#if !terminal(order.state)}
             <div class="order-actions">
               {#if order.canRetry}
-                <button class="retry" on:click={() => retry(order)} disabled={busy != null || reviewing}
+                <button class="retry" onclick={() => retry(order)} disabled={busy != null || reviewing}
                         title={order.retryReason}>
                   <RotateCcw size={12} />
                   {busy === order.intentId ? 'Checking broker…' : 'Check broker & retry'}
                 </button>
               {/if}
               {#if order.state === 'attention'}
-                <button class="resolve" on:click={() => resolveAttention(order)} disabled={busy != null || reviewing}
+                <button class="resolve" onclick={() => resolveAttention(order)} disabled={busy != null || reviewing}
                         title="Only you can say what happened on a prior trading date — the broker's own history API only covers today.">
                   <ShieldQuestion size={12} />
                   {busy === order.intentId ? 'Resolving…' : 'Resolve from broker check'}
                 </button>
               {/if}
-              <button class="cancel" on:click={() => cancel(order)} disabled={busy != null || reviewing}>
+              <button class="cancel" onclick={() => cancel(order)} disabled={busy != null || reviewing}>
                 <Trash2 size={12} /> {busy === order.intentId ? 'Working…' : 'Stop & cancel remainder'}
               </button>
             </div>
@@ -381,7 +405,7 @@
           -->
           {#if order.state !== 'fulfilled'}
             <div class="order-actions">
-              <button class="inspect" on:click={() => inspectBroker(order)}
+              <button class="inspect" onclick={() => inspectBroker(order)}
                       disabled={inspecting != null || busy != null || reviewing}
                       title="Read the broker's own outstanding orders for this symbol. Use this when a cancel could not find the order it was looking for, or when an order was marked cancelled but you suspect something is still resting.">
                 <ShieldQuestion size={12} />
@@ -401,7 +425,7 @@
                       <code>#{resting.orderNo}</code>
                       <span>{describeOrder(resting)}</span>
                       <button class="cancel" disabled={busy != null || reviewing}
-                              on:click={() => cancelBrokerOrder(order, resting.orderNo)}>
+                              onclick={() => cancelBrokerOrder(order, resting.orderNo)}>
                         <Trash2 size={11} /> Cancel #{resting.orderNo}
                       </button>
                     </div>
@@ -418,7 +442,7 @@
                       <code>#{candidate.orderNo}</code>
                       <span>{describeOrder(candidate)}</span>
                       <button class="cancel" disabled={busy != null || reviewing}
-                              on:click={() => cancelBrokerOrder(order, candidate.orderNo)}>
+                              onclick={() => cancelBrokerOrder(order, candidate.orderNo)}>
                         <Trash2 size={11} /> Cancel #{candidate.orderNo}
                       </button>
                     </div>

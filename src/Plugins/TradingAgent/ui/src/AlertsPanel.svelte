@@ -11,9 +11,8 @@
   import AssessmentCard from './AssessmentCard.svelte';
 
   /** Verdicts fetched on demand, by alert id. Never fetched automatically — see api.assess. */
-  let assessments: Record<string, StockAssessment> = {};
-  let assessing: string | null = null;
-
+  let assessments: Record<string, StockAssessment> = $state({});
+  let assessing: string | null = $state<string | null>(null);
   /**
    * Selecting an alert drives the chart pane to that symbol. `alertsChanged` fires whenever the open
    * count could have moved (ack/dismiss, a manual pass, or a new alert over the live stream) — the
@@ -25,19 +24,19 @@
     alertsChanged: void;
   }>();
 
-  let alerts: TradingAlert[] = [];
-  let status: MonitorStatus | null = null;
-  let loading = true;
-  let busy = false;
+  let alerts: TradingAlert[] = $state([]);
+  let status: MonitorStatus | null = $state<MonitorStatus | null>(null);
+  let loading = $state(true);
+  let busy = $state(false);
   /** Alert ids with an ack/dismiss in flight — scoped per row so one slow request doesn't grey out the rest of the list. */
-  let busyAlertIds = new Set<string>();
-  let error: string | null = null;
-  let showDismissed = false;
-  let selectedAlertIds = new Set<string>();
-  let live = false;
+  let busyAlertIds = $state(new Set<string>());
+  let error: string | null = $state<string | null>(null);
+  let showDismissed = $state(false);
+  let selectedAlertIds = $state(new Set<string>());
+  let live = $state(false);
   // Component-local only: closing/reopening the page restores the explanation. A changed market
   // state also restores it, because the forming-candle explanation is different after the close.
-  let dismissedCandleContext: boolean | undefined;
+  let dismissedCandleContext: boolean | undefined = $state();
   let stopStream: (() => void) | null = null;
 
   /**
@@ -207,11 +206,11 @@
 
   onDestroy(() => stopStream?.());
 
-  $: visible = showDismissed ? alerts : alerts.filter(a => a.state !== 'dismissed');
-  $: openCount = alerts.filter(a => a.state === 'new').length;
-  $: liveBarCount = visible.filter(a => a.fromLiveBar).length;
-  $: selectedVisibleCount = visible.filter(alert => selectedAlertIds.has(alert.alertId)).length;
-  $: allVisibleSelected = visible.length > 0 && selectedVisibleCount === visible.length;
+  let visible = $derived(showDismissed ? alerts : alerts.filter(a => a.state !== 'dismissed'));
+  let openCount = $derived(alerts.filter(a => a.state === 'new').length);
+  let liveBarCount = $derived(visible.filter(a => a.fromLiveBar).length);
+  let selectedVisibleCount = $derived(visible.filter(alert => selectedAlertIds.has(alert.alertId)).length);
+  let allVisibleSelected = $derived(visible.length > 0 && selectedVisibleCount === visible.length);
 
   const when = (iso: string) => new Date(iso).toLocaleString();
   const label = (kind: string) => kind.replace(/([a-z])([A-Z])/g, '$1 $2');
@@ -238,7 +237,7 @@
       <label class="toggle">
         <input type="checkbox" bind:checked={showDismissed} /> show dismissed
       </label>
-      <button class="btn btn-ghost" on:click={runNow} disabled={busy || loading} title="Run a monitoring pass now">
+      <button class="btn btn-ghost" onclick={runNow} disabled={busy || loading} title="Run a monitoring pass now">
         <RefreshCw size={13} /> Check now
       </button>
     </div>
@@ -265,26 +264,26 @@
         <span><b>Some alerts were raised from a forming candle.</b> The market is now closed; these
         records keep their original context and the chart is showing settled prices.</span>
       {/if}
-      <button class="icon close-note" aria-label="Close candle notice" title="Close candle notice" on:click={() => dismissedCandleContext = !!status?.marketOpen}><X size={13}/></button>
+      <button class="icon close-note" aria-label="Close candle notice" title="Close candle notice" onclick={() => dismissedCandleContext = !!status?.marketOpen}><X size={13}/></button>
     </p>
   {/if}
 
   {#if !loading && visible.length}
     <div class="bulk-actions" aria-label="Bulk alert actions">
       <label class="select-all">
-        <input type="checkbox" checked={allVisibleSelected} on:change={toggleSelectAll} />
+        <input type="checkbox" checked={allVisibleSelected} onchange={toggleSelectAll} />
         {allVisibleSelected ? 'Clear selection' : 'Select all'}
       </label>
       {#if selectedVisibleCount}
       <span>{selectedVisibleCount} selected</span>
-      <button class="btn btn-ghost" on:click={() => bulkAction('acknowledge')} disabled={!selectedVisibleCount || busy}>
+      <button class="btn btn-ghost" onclick={() => bulkAction('acknowledge')} disabled={!selectedVisibleCount || busy}>
         <CheckCheck size={13} /> Mark read
       </button>
-      <button class="btn btn-ghost danger-action" on:click={() => bulkAction('dismiss')} disabled={!selectedVisibleCount || busy}>
+      <button class="btn btn-ghost danger-action" onclick={() => bulkAction('dismiss')} disabled={!selectedVisibleCount || busy}>
         <Trash2 size={13} /> Delete
       </button>
       {/if}
-      <button class="btn btn-ghost danger-action push" on:click={() => bulkAction('dismiss', true)} disabled={busy}>
+      <button class="btn btn-ghost danger-action push" onclick={() => bulkAction('dismiss', true)} disabled={busy}>
         <Trash2 size={13} /> Clear all
       </button>
     </div>
@@ -306,11 +305,11 @@
             <input
               type="checkbox"
               checked={selectedAlertIds.has(alert.alertId)}
-              on:change={() => toggleSelected(alert.alertId)}
+              onchange={() => toggleSelected(alert.alertId)}
               aria-label="Select {alert.symbol} alert"
             />
           </label>
-          <button class="body" on:click={() => dispatch('select', alert.symbol)}>
+          <button class="body" onclick={() => dispatch('select', alert.symbol)}>
             <div class="row-1">
               <span class="symbol">{alert.symbol}</span>
               <span class="kind">{label(alert.kind)}</span>
@@ -328,7 +327,7 @@
             <button
               class="icon"
               title="Ask the model how much confidence the evidence supports (one model call)"
-              on:click={() => assess(alert)}
+              onclick={() => assess(alert)}
               disabled={!!assessing}
             >
               <Brain size={13} />
@@ -336,17 +335,17 @@
             <button
               class="icon"
               title="Create an order that waits for this event to happen again on {alert.symbol}"
-              on:click={() => armFromAlert(alert)}
+              onclick={() => armFromAlert(alert)}
             >
               <Crosshair size={13} />
             </button>
             {#if alert.state === 'new'}
-              <button class="icon" title="Acknowledge" on:click={() => setState(alert, 'ack')} disabled={busyAlertIds.has(alert.alertId)}>
+              <button class="icon" title="Acknowledge" onclick={() => setState(alert, 'ack')} disabled={busyAlertIds.has(alert.alertId)}>
                 <Check size={13} />
               </button>
             {/if}
             {#if alert.state !== 'dismissed'}
-              <button class="icon" title="Dismiss" on:click={() => setState(alert, 'dismiss')} disabled={busyAlertIds.has(alert.alertId)}>
+              <button class="icon" title="Dismiss" onclick={() => setState(alert, 'dismiss')} disabled={busyAlertIds.has(alert.alertId)}>
                 <X size={13} />
               </button>
             {/if}

@@ -24,42 +24,46 @@
   import type { ArmedOrdersResponse } from './api';
   import type { OrderSideFilter } from './orderListNavigation';
 
-  export let refreshTick = 0;
-  export let keyboardMode = false;
+  interface Props {
+    refreshTick?: number;
+    keyboardMode?: boolean;
+  }
+
+  let { refreshTick = 0, keyboardMode = false }: Props = $props();
 
   type Chip = 'all' | 'triggers' | 'repeat' | 'stops';
-  let chip: Chip = 'all';
-  let query = '';
-  let showHistory = false;
+  let chip: Chip = $state('all');
+  let query = $state('');
+  let showHistory = $state(false);
   /** Buy / Sell view filter; the chip counts and the empty state follow it. */
-  let side: OrderSideFilter = 'all';
+  let side: OrderSideFilter = $state('all');
   const sides: { id: OrderSideFilter; label: string }[] = [{ id: 'all', label: 'All' }, { id: 'BUY', label: 'Buy' }, { id: 'SELL', label: 'Sell' }];
 
-  let triggersPanel: ArmedOrdersPanel;
-  let repeatPanel: PersistentOrdersPanel;
-  let approval: ArmedOrdersResponse['approval'] | null = null;
-  let triggerCount = 0;
-  let stopCount = 0;
-  let repeatCount = 0;
-  let triggersLoaded = false;
-  let repeatLoaded = false;
-  let sourceArmedIds: ReadonlySet<string> = new Set();
+  let triggersPanel: ArmedOrdersPanel = $state()!;
+  let repeatPanel: PersistentOrdersPanel = $state()!;
+  let approval: ArmedOrdersResponse['approval'] | null = $state<ArmedOrdersResponse['approval'] | null>(null);
+  let triggerCount = $state(0);
+  let stopCount = $state(0);
+  let repeatCount = $state(0);
+  let triggersLoaded = $state(false);
+  let repeatLoaded = $state(false);
+  let sourceArmedIds: ReadonlySet<string> = $state(new Set());
 
   /** Re-reads both lists. Called by the page after an order, a fill or a cancel elsewhere. */
   export async function load() {
     await Promise.all([triggersPanel?.load(), repeatPanel?.load()]);
   }
 
-  $: counts = { all: triggerCount + repeatCount + stopCount, triggers: triggerCount, repeat: repeatCount, stops: stopCount };
-  $: chips = [
+  let counts = $derived({ all: triggerCount + repeatCount + stopCount, triggers: triggerCount, repeat: repeatCount, stops: stopCount });
+  let chips = $derived([
     { id: 'all', label: 'All' },
     { id: 'triggers', label: 'On a trigger' },
     { id: 'repeat', label: 'Repeat until filled' },
     { id: 'stops', label: 'Stop-loss' }
-  ] as { id: Chip; label: string }[];
-  $: loaded = triggersLoaded && repeatLoaded;
-  $: showRepeat = chip === 'all' || chip === 'repeat';
-  $: empty = loaded && counts[chip] === 0;
+  ] as { id: Chip; label: string }[]);
+  let loaded = $derived(triggersLoaded && repeatLoaded);
+  let showRepeat = $derived(chip === 'all' || chip === 'repeat');
+  let empty = $derived(loaded && counts[chip] === 0);
 </script>
 
 <section class="auto-orders" aria-label="Persistent orders">
@@ -77,8 +81,8 @@
     </div>
     <div class="actions">
       <label class="toggle"><input type="checkbox" bind:checked={showHistory}
-        on:change={() => setTimeout(load)}/> Show history</label>
-      <button class="btn btn-ghost icon-only" on:click={load} title="Refresh" aria-label="Refresh persistent orders"><RefreshCw size={13}/></button>
+        onchange={() => setTimeout(load)}/> Show history</label>
+      <button class="btn btn-ghost icon-only" onclick={load} title="Refresh" aria-label="Refresh persistent orders"><RefreshCw size={13}/></button>
     </div>
   </header>
 
@@ -86,7 +90,7 @@
 
   <div class="chips" role="tablist" aria-label="Show persistent orders">
     {#each chips as c}
-      <button role="tab" class="chip" aria-selected={chip === c.id} on:click={() => chip = c.id}>
+      <button role="tab" class="chip" aria-selected={chip === c.id} onclick={() => chip = c.id}>
         {c.label}{#if loaded}<span class="n">{counts[c.id]}</span>{/if}
       </button>
     {/each}
@@ -98,7 +102,7 @@
     {/if}
     <div class="sides" role="group" aria-label="Show buy or sell orders">
       {#each sides as s}
-        <button type="button" class={s.id.toLowerCase()} aria-pressed={side === s.id} on:click={() => side = s.id}>{s.label}</button>
+        <button type="button" class={s.id.toLowerCase()} aria-pressed={side === s.id} onclick={() => side = s.id}>{s.label}</button>
       {/each}
     </div>
   </div>
@@ -116,12 +120,14 @@
   <ArmedOrdersPanel bind:this={triggersPanel} embedded show={chip} {query} {side} {showHistory} {refreshTick} {keyboardMode} on:select
     hideArmedIds={sourceArmedIds}
     bind:approval bind:triggerCount bind:stopCount bind:loaded={triggersLoaded}>
-    <div slot="between" class="between" class:hidden={!showRepeat}>
-      {#if chip === 'all' && repeatCount}<h3 class="group"><Repeat2 size={13}/> Repeat until filled</h3>{/if}
-      <PersistentOrdersPanel bind:this={repeatPanel} embedded hidden={!showRepeat} {query} {side} {showHistory} on:select
-        {refreshTick} {keyboardMode}
-        bind:orderCount={repeatCount} bind:loaded={repeatLoaded} bind:sourceArmedIds/>
-    </div>
+    {#snippet between()}
+        <div  class="between" class:hidden={!showRepeat}>
+        {#if chip === 'all' && repeatCount}<h3 class="group"><Repeat2 size={13}/> Repeat until filled</h3>{/if}
+        <PersistentOrdersPanel bind:this={repeatPanel} embedded hidden={!showRepeat} {query} {side} {showHistory} on:select
+          {refreshTick} {keyboardMode}
+          bind:orderCount={repeatCount} bind:loaded={repeatLoaded} bind:sourceArmedIds/>
+      </div>
+      {/snippet}
   </ArmedOrdersPanel>
 </section>
 

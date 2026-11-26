@@ -1,12 +1,15 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import { trading, type TradingActivity, type TradingActivityFeed } from './api';
   import { filterActivity, routineCandleUpdateCount } from './activityFeed';
   import {
     Activity, ChevronDown, ChevronRight, AlertTriangle, XCircle, Chrome, Loader, ListFilter
   } from 'lucide-svelte';
 
-  /**
+  
+
+  interface Props {
+    /**
    * What the trading agent is doing, and what it just did.
    *
    * <p>The classic dashboard starts collapsed. Workspace tabs already own visibility and show the
@@ -22,22 +25,24 @@
    * stay visible, while candle warnings and errors are never filtered. Source diagnostics remain one
    * click away without pushing order and protection activity out of the readable view.</p>
    */
+    embedded?: boolean;
+    active?: boolean;
+  }
 
-  export let embedded = false;
-  export let active = true;
-  let expanded = false;
-  $: open = embedded || expanded;
-  let mounted = false;
+  let { embedded = false, active = true }: Props = $props();
+  let expanded = $state(false);
+  let open = $derived(embedded || expanded);
+  let mounted = $state(false);
   let inFlight = false;
   type PollMode = 'off' | 'counts' | 'full';
   let pollMode: PollMode = 'off';
 
-  let feed: TradingActivityFeed | null = null;
-  let entries: TradingActivity[] = [];
-  let error: string | null = null;
+  let feed: TradingActivityFeed | null = $state<TradingActivityFeed | null>(null);
+  let entries: TradingActivity[] = $state([]);
+  let error: string | null = $state<string | null>(null);
   let timer: ReturnType<typeof setTimeout> | null = null;
-  let loading = true;
-  let showRoutineCandles = false;
+  let loading = $state(true);
+  let showRoutineCandles = $state(false);
 
   const OPEN_POLL_MS = 4_000;
   const CLOSED_POLL_MS = 30_000;
@@ -74,7 +79,11 @@
   }
 
   onMount(() => { mounted = true; });
-  $: if (mounted) setPollingMode(embedded && !active ? 'off' : open ? 'full' : 'counts');
+  $effect.pre(() => {
+    // Reads only what the old `$:` named; the call is untracked so its own bookkeeping cannot re-trigger it.
+    const m = mounted, mode = embedded && !active ? 'off' : open ? 'full' : 'counts';
+    untrack(() => { if (m) setPollingMode(mode); });
+  });
   onDestroy(() => { mounted = false; if (timer) clearTimeout(timer); });
 
   const time = (iso: string) =>
@@ -88,17 +97,17 @@
     return `${Math.round(seconds / 3600)}h ago`;
   }
 
-  $: issues = (feed?.warnings ?? 0) + (feed?.errors ?? 0);
-  $: feedDegraded = feed
+  let issues = $derived((feed?.warnings ?? 0) + (feed?.errors ?? 0));
+  let feedDegraded = $derived(feed
     ? (feed.now.feedDegraded ?? !feed.now.feedHealthy)
-    : false;
-  $: feedProvider = (feed?.now.feedProvider ?? 'live').toLowerCase();
-  $: feedLabel = feedProvider === 'ahl'
+    : false);
+  let feedProvider = $derived((feed?.now.feedProvider ?? 'live').toLowerCase());
+  let feedLabel = $derived(feedProvider === 'ahl'
     ? 'AHL push'
-    : `${feedProvider.toUpperCase()} feed`;
-  $: feedReason = feed?.now.feedReason ?? 'Live quotes are falling back to the PSX market watch.';
-  $: routineCandleUpdates = routineCandleUpdateCount(entries);
-  $: visibleEntries = filterActivity(entries, showRoutineCandles);
+    : `${feedProvider.toUpperCase()} feed`);
+  let feedReason = $derived(feed?.now.feedReason ?? 'Live quotes are falling back to the PSX market watch.');
+  let routineCandleUpdates = $derived(routineCandleUpdateCount(entries));
+  let visibleEntries = $derived(filterActivity(entries, showRoutineCandles));
 </script>
 
 {#snippet activityHeading()}
@@ -137,7 +146,7 @@
   {#if embedded}
     <div class="head static-head">{@render activityHeading()}</div>
   {:else}
-    <button class="head" on:click={() => expanded = !expanded} aria-expanded={open}>{@render activityHeading()}</button>
+    <button class="head" onclick={() => expanded = !expanded} aria-expanded={open}>{@render activityHeading()}</button>
   {/if}
 
   {#if open}
@@ -163,7 +172,7 @@
           type="button"
           class="filter"
           class:active={showRoutineCandles}
-          on:click={() => showRoutineCandles = !showRoutineCandles}
+          onclick={() => showRoutineCandles = !showRoutineCandles}
           aria-pressed={showRoutineCandles}
         >
           <ListFilter size={12} aria-hidden="true" />
