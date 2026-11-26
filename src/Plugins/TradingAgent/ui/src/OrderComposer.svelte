@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createEventDispatcher, onMount, onDestroy, tick } from 'svelte';
+  import { createEventDispatcher, onMount, onDestroy, tick, untrack } from 'svelte';
   import { psxDateInput, scheduleDateError } from './orderSchedule';
   import { trailBoundBlock } from './trailingBound';
   import { startingPriceDrift } from './startingPrice';
@@ -21,35 +21,50 @@
   import { composerStateFor, type CleanNewOrderPrefill } from './newOrderPrefill';
   import { portal } from './portal';
 
-  export let selectedSymbol: string | null = null;
-  /**
+  
+  
+  
+  
+  interface Props {
+    selectedSymbol?: string | null;
+    /**
    * Optional side requested by a nearby trading affordance, such as a portfolio-row Buy/Sell
    * button. The server-owned registry still decides which concrete instruction represents that
    * side; taking the first matching entry preserves its ordering as the source of truth.
    */
-  export let selectedAction: 'BUY' | 'SELL' | null = null;
-  /**
+    selectedAction?: 'BUY' | 'SELL' | null;
+    /**
    * A starting form handed in by a sibling (see `newOrderPrefill.ts`): the order shape, size and prices
    * a person would otherwise choose and type by hand. It fills the form and nothing more — the person
    * still reviews the summary and presses the button. Read once, when the composer opens.
    */
-  export let prefill: CleanNewOrderPrefill | null = null;
-  export let docked = false;
-  /** Compact, shares-only limit ticket. Validation, confirmation and submission stay shared. */
-  export let quick = false;
-  /**
+    prefill?: CleanNewOrderPrefill | null;
+    docked?: boolean;
+    /** Compact, shares-only limit ticket. Validation, confirmation and submission stay shared. */
+    quick?: boolean;
+    /**
    * Opens straight into the edition editor that owns this armed order's kind (orderTypeExtensions.ts),
    * to edit it. Back then closes rather than returning to a composer the person never opened.
    */
-  export let editArmedOrder: ArmedOrder | null = null;
+    editArmedOrder?: ArmedOrder | null;
+  }
+
+  let {
+    selectedSymbol = null,
+    selectedAction = null,
+    prefill = null,
+    docked = false,
+    quick = false,
+    editArmedOrder = null
+  }: Props = $props();
 
   const dispatch = createEventDispatcher<{ close: void; changed: void; attention: void }>();
-  let dialogElement: HTMLDivElement;
-  let reviewDialog: HTMLDialogElement;
-  let reviewText = '';
-  let reviewTitle = '';
-  let reviewAction = '';
-  let reviewing = false;
+  let dialogElement: HTMLDivElement = $state()!;
+  let reviewDialog: HTMLDialogElement = $state()!;
+  let reviewText = $state('');
+  let reviewTitle = $state('');
+  let reviewAction = $state('');
+  let reviewing = $state(false);
   let resolveReview: ((accepted:boolean) => void) | null = null;
   let reviewReturnFocus: HTMLElement | null = null;
   let mounted = true;
@@ -83,9 +98,9 @@
    * An edition's order type (orderTypeExtensions.ts) has the composer's body while it is open: one dialog,
    * one set of controls. The composer's own fields keep their values underneath for Back.
    */
-  let activeExtension: OrderTypeExtension | null = null;
+  let activeExtension: OrderTypeExtension | null = $state<OrderTypeExtension | null>(null);
   /** What a prefill handed the extension's editor (its condition document); pressing the tile yourself starts blank. */
-  let extensionPrefill: ExtensionPrefill | null = null;
+  let extensionPrefill: ExtensionPrefill | null = $state<ExtensionPrefill | null>(null);
   function openExtension(extension: OrderTypeExtension) {
     if (busy || releasing || reviewing) return;
     error = null; blockedSell = null; duplicateEntry = null;
@@ -126,16 +141,18 @@
     event.stopPropagation();
   }
   onDestroy(() => { mounted = false; resolveReview?.(false); resolveReview = null; });
-  let registry: OrderIntentRegistryResponse | null = null;
-  let symbols: WatchlistEntry[] = [];
-  let choice: OrderIntentDefinition | null = null;
-  let symbol = selectedSymbol ?? '';
+  let registry: OrderIntentRegistryResponse | null = $state<OrderIntentRegistryResponse | null>(null);
+  let symbols: WatchlistEntry[] = $state([]);
+  let choice: OrderIntentDefinition | null = $state<OrderIntentDefinition | null>(null);
+  // svelte-ignore state_referenced_locally -- the form's starting value, from the props it opens with (as before)
+  let symbol = $state(selectedSymbol ?? '');
+  // svelte-ignore state_referenced_locally -- the form's starting value, from the props it opens with (as before)
   let draftTicker = symbol.trim().toUpperCase();
-  let sizeMode: 'shares' | 'value' = 'shares';
-  let quantity: number | null = null;
-  let orderValue: number | null = null;
-  let currentPrice: number | null = null;
-  let triggerReferencePrice: number | null = null;
+  let sizeMode: 'shares' | 'value' = $state<'shares' | 'value'>('shares');
+  let quantity: number | null = $state<number | null>(null);
+  let orderValue: number | null = $state<number | null>(null);
+  let currentPrice: number | null = $state<number | null>(null);
+  let triggerReferencePrice: number | null = $state<number | null>(null);
   /**
    * The symbol the price fields were last seeded from.
    *
@@ -146,32 +163,31 @@
    * a SELL limit of 104 left over from another symbol, against a SYS market around 124.
    */
   let pricedSymbol: string | null = null;
-  let price: number | null = null;
-  let triggerPrice: number | null = null;
-  let limitPrice: number | null = null;
-  let triggerPercent: number | null = null;
-  let triggerWindowMinutes: number | null = null;
-  let activeFromDate = '';
-  let expiresInDays = 30;
-  let persistentUntilFilled = false;
+  let price: number | null = $state<number | null>(null);
+  let triggerPrice: number | null = $state<number | null>(null);
+  let limitPrice: number | null = $state<number | null>(null);
+  let triggerPercent: number | null = $state<number | null>(null);
+  let triggerWindowMinutes: number | null = $state<number | null>(null);
+  let activeFromDate = $state('');
+  let expiresInDays = $state(30);
+  let persistentUntilFilled = $state(false);
   /** A trailing order's optional worst price: the maximum for a BUY, the minimum for a SELL. */
-  let priceBound: number | null = null;
-  let loading = true;
-  let quoteBusy = false;
-  let holdingBusy = false;
-  let holdingLoaded = false;
-  let account: BrokerAccountSnapshot | null = null;
-  let holdingError: string | null = null;
-  let quantityWasEdited = false;
-  let attachStop = false;
-  let stopTrigger: number | null = null;
-  let stopLimit: number | null = null;
-  let stopRecurring = true;
-  let stopMarketIfMissed = false;
-  let busy = false;
-  let error: string | null = null;
-  let result: { ok: boolean; title: string; detail: string; executionId?: string } | null = null;
-
+  let priceBound: number | null = $state<number | null>(null);
+  let loading = $state(true);
+  let quoteBusy = $state(false);
+  let holdingBusy = $state(false);
+  let holdingLoaded = $state(false);
+  let account: BrokerAccountSnapshot | null = $state<BrokerAccountSnapshot | null>(null);
+  let holdingError: string | null = $state<string | null>(null);
+  let quantityWasEdited = $state(false);
+  let attachStop = $state(false);
+  let stopTrigger: number | null = $state<number | null>(null);
+  let stopLimit: number | null = $state<number | null>(null);
+  let stopRecurring = $state(true);
+  let stopMarketIfMissed = $state(false);
+  let busy = $state(false);
+  let error: string | null = $state<string | null>(null);
+  let result: { ok: boolean; title: string; detail: string; executionId?: string } | null = $state<{ ok: boolean; title: string; detail: string; executionId?: string } | null>(null);
   /**
    * Set when a SELL was refused because this system's OWN protective stop is holding the shares.
    *
@@ -183,8 +199,8 @@
    * courtesy: stand the stop down, place the sell, and let the recurring pass put the stop back over
    * whatever remains.
    */
-  let blockedSell: { symbol: string; quantity: number; stops: string[] } | null = null;
-  let releasing = false;
+  let blockedSell: { symbol: string; quantity: number; stops: string[] } | null = $state<{ symbol: string; quantity: number; stops: string[] } | null>(null);
+  let releasing = $state(false);
 
   /**
    * Set when the server found a keep-working instruction on this symbol and side that is still live.
@@ -198,30 +214,21 @@
    * It is a warning, never a gate — "Place both" sends the same request with the acknowledgement on.
    * A second entry on a name is an ordinary thing to want; the point is that a person saw this.
    */
-  let duplicateEntry: { message: string; entries: LiveEntryConflict[] } | null = null;
+  let duplicateEntry: { message: string; entries: LiveEntryConflict[] } | null = $state<{ message: string; entries: LiveEntryConflict[] } | null>(null);
   let clientRequestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
   const money = (value: number) => value.toLocaleString(undefined, { maximumFractionDigits: 2 });
   const when = (value: string) => new Date(value).toLocaleString();
   const livePrices = useLivePrices();
-  let livePriceStore = livePrices.quote(symbol);
-  $: livePriceStore = livePrices.quote(symbol);
-  $: livePriceView = $livePriceStore;
-  $: latestPrice = livePriceView.quote?.current ?? currentPrice;
-  $: latestPriceLabel = livePriceView.quote?.current != null
-    ? livePriceLabel(livePriceView)
-    : 'Latest available price';
+  let livePriceStore = $derived(livePrices.quote(symbol));
   type Side = OrderIntentDefinition['action'];
   const commonGroups = ['limit', 'market', 'trailing', 'price'];
   const groupLabels: Record<string, string> = {
     limit: 'At my price', market: 'At market', trailing: 'Trailing',
     price: 'Wait for a price', schedule: 'Schedule', recent: 'Recent % move'
   };
-  let side: Side = selectedAction ?? 'BUY';
-  $: sideIntents = (registry?.intents ?? []).filter(item => item.action === side && item.id !== 'profit-book');
-  $: groupKeys = [...new Set(sideIntents.map(intentGroup))];
-  $: selectedGroup = choice ? intentGroup(choice) : null;
-  $: variants = sideIntents.filter(item => intentGroup(item) === selectedGroup);
+  // svelte-ignore state_referenced_locally -- the form's starting value, from the props it opens with (as before)
+  let side: Side = $state(selectedAction ?? 'BUY');
 
   function intentGroup(intent: OrderIntentDefinition): string {
     if (intent.requiresActivationDate) return 'schedule';
@@ -443,12 +450,6 @@
     }
   }
 
-  // A live quote may arrive before the slower candle fallback. Seed only blank fields and freeze the
-  // reference used by percentage triggers; subsequent ticks update the readout, never the draft.
-  $: if (choice && triggerReferencePrice == null && latestPrice && latestPrice > 0) {
-    triggerReferencePrice = latestPrice;
-    applySuggestedPrices(false, latestPrice);
-  }
 
   const sameSymbol = (candidate: string | null | undefined, ticker: string) =>
     candidate?.trim().toUpperCase() === ticker;
@@ -520,205 +521,10 @@
     void scrollToOrderBottom();
   }
 
-  // A date can be the whole trigger, or it can postpone when a price trigger starts being watched.
-  // The registry says which intents need that date so the UI does not infer product semantics from an id.
-  $: scheduled = choice?.requiresActivationDate ?? choice?.triggerKind === 'Scheduled';
-  $: dateOnlySchedule = choice?.triggerKind === 'Scheduled';
-  $: activationError = scheduled && activeFromDate ? scheduleDateError(activeFromDate) : null;
-  $: exactPriceTrigger = choice?.submission === 'conditional'
-    && (choice.triggerKind === 'PriceBelow' || choice.triggerKind === 'PriceAbove');
-  $: windowed = choice?.defaultWindowMinutes != null;
-  $: conditionalLevel = exactPriceTrigger ? triggerPrice : choice?.submission === 'conditional' && choice.triggerKind
-    ? percentTriggerLevel(choice.triggerKind, triggerReferencePrice, triggerPercent)
-    : null;
-  $: marketDisabled = choice?.orderType === 'MARKET'
-    && registry != null && !registry.capabilities.marketOrdersEnabled;
-  $: persistable = choice != null && choice.orderType !== 'MARKET';
-  $: if (!persistable) persistentUntilFilled = false;
-  // A trailing buy or sell always keeps its remainder working: its limit is frozen at the price that
-  // triggered it, inside the optional bound, and carried across sessions. So it is not a choice there.
-  $: keepWorking = choice?.keepWorking === true;
-  $: if (keepWorking) persistentUntilFilled = true;
-  $: boundedTrail = choice?.priceField === 'trail-bound';
-  $: boundIsBuyMax = choice?.action === 'BUY';
-  // A bound on the wrong side of the trigger means no move can trade until the trail travels a long
-  // way — shown as a warning, never a refusal, because it can be what the operator wants.
-  $: trailBlock = boundedTrail
-    ? trailBoundBlock(choice?.action, conditionalLevel, priceBound, triggerPercent)
-    : null;
-  // The starting price is read once, when the order type is chosen. Compared only with a LIVE quote —
-  // never with the `currentPrice` prop the ticket fell back to, which can be older than the start.
-  $: startDrift = choice?.submission === 'conditional' && !scheduled && !windowed && !exactPriceTrigger
-    ? startingPriceDrift(choice.triggerKind, choice.trailing === true, triggerReferencePrice,
-        livePriceView.quote?.current, triggerPercent, conditionalLevel)
-    : null;
   function useLiveStartingPrice() {
     if (startDrift) triggerReferencePrice = startDrift.live;
   }
-  $: selectedTicker = symbol.trim().toUpperCase();
-  $: matchingHoldings = account?.holdings.filter(
-    holding => sameSymbol(holding.symbol ?? holding.instrumentId, selectedTicker)) ?? [];
-  $: holdingValues = matchingHoldings.map(holding => holdingValuation(holding, livePriceView.quote?.current));
-  $: holdingPnl = holdingValues.length && holdingValues.every(value => value.profitLoss != null && Number.isFinite(value.profitLoss))
-    ? holdingValues.reduce((sum, value) => sum + (value.profitLoss ?? 0), 0)
-    : null;
-  $: holdingPnlPercent = holdingValues.length === 1 ? holdingValues[0].profitLossPercent : null;
-  $: matchingSellOrders = account?.orders.filter(order =>
-    sameSymbol(order.symbol ?? order.instrumentId, selectedTicker)
-    && (order.side?.toUpperCase() === 'SELL' || order.side?.toUpperCase() === 'SEL')) ?? [];
-  $: heldQuantity = holdingLoaded && account?.holdingsAvailable
-    && matchingHoldings.every(holding => holding.quantity != null)
-      ? Math.floor(matchingHoldings.reduce((sum, holding) => sum + Math.max(0, holding.quantity ?? 0), 0))
-      : null;
-  $: committedSellQuantity = holdingLoaded && account?.ordersAvailable
-    && matchingSellOrders.every(order => order.remainingQuantity != null)
-      ? Math.floor(matchingSellOrders.reduce(
-          (sum, order) => sum + Math.max(0, order.remainingQuantity ?? 0), 0))
-      : null;
-  $: availableSellQuantity = heldQuantity != null && committedSellQuantity != null
-    ? Math.max(0, heldQuantity - committedSellQuantity)
-    : null;
-  // The BUY-side counterpart of availableSellQuantity. `available_cash` is the broker contract's
-  // stable key for "what this account may commit right now" (see IBrokerAccountReader) — deliberately
-  // not a cash balance, which can be a very different number when unsettled sale proceeds are spendable
-  // or resting orders have already committed part of it.
-  $: buyingPowerBalance = holdingLoaded && account?.balancesAvailable
-    ? account.balances.find(entry => entry.key === 'available_cash') ?? null
-    : null;
-  $: buyingPower = buyingPowerBalance?.value ?? null;
-  // Informational, never a block: the broker and the risk engine decide, and this snapshot can be
-  // seconds stale. Telling the operator early is worth much more than refusing here would be.
-  $: buyExceedsBuyingPower = choice?.action === 'BUY' && buyingPower != null
-    && estimatedValue != null && estimatedValue > buyingPower;
-  // An order that FITS the buying power can still be refused, because the broker adds its own charges
-  // on top of traded value and this figure is traded value alone. Core models no fee schedule at all
-  // and must not invent one, so it says what the number excludes rather than guessing a headroom --
-  // the exact charge is shown by whatever fills the order-detail slot, which reads the same cost
-  // projection the rest of the system uses.
-  //
-  // 99% rather than 100%: below that there is room for any plausible charge and a warning would be
-  // noise, which is the failure mode a caution about costs falls into fastest.
-  $: buyLeavesNoRoomForCharges = choice?.action === 'BUY' && buyingPower != null && buyingPower > 0
-    && estimatedValue != null && !buyExceedsBuyingPower
-    && estimatedValue > buyingPower * 0.99;
-  $: estimatedPrice = choice?.orderType === 'MARKET' ? latestPrice
-    : choice?.orderType === 'STOPLOSS' ? triggerPrice
-    : exactPriceTrigger || scheduled ? price
-    : choice?.submission === 'conditional' ? conditionalLevel : price;
-  $: availableSellValue = availableSellQuantity != null && estimatedPrice && estimatedPrice > 0
-    ? availableSellQuantity * estimatedPrice
-    : null;
-  // FLOOR, not round. A value is a budget, and Math.round could buy one share MORE than it covers --
-  // up to half a share's worth over, which on a 425 PKR share is over 200 PKR. Combined with "Use it
-  // all" spending the whole reported buying power on traded value, that is a broker refusal waiting to
-  // happen, and it happened (2026-09-09: an order sized to 100% of available balance was refused for
-  // insufficient balance).
-  $: valueSizedQuantity = sizeMode === 'value' && orderValue && orderValue > 0 && estimatedPrice && estimatedPrice > 0
-    ? Math.floor(orderValue / estimatedPrice)
-    : null;
-  $: effectiveQuantity = sizeMode === 'value' ? valueSizedQuantity : quantity;
-  $: estimatedValue = effectiveQuantity && estimatedPrice ? effectiveQuantity * estimatedPrice : null;
-  $: sellExceedsAvailable = choice?.action === 'SELL'
-    && effectiveQuantity != null && availableSellQuantity != null
-    && effectiveQuantity > availableSellQuantity;
-  $: sizingDifference = sizeMode === 'value' && orderValue && estimatedValue != null
-    ? estimatedValue - orderValue
-    : null;
-  // Any BUY, waiting or immediate. It was 'conditional' only, which meant the three most-used ways to
-  // buy -- "Buy at my price", "Buy now", "Buy if it rises to a price" -- offered no protection at all
-  // and said nothing about it. The server validates both paths through one shared rule.
-  // Not on a trailing buy: its entry price is unknown until it triggers, and it triggers after the low
-  // has moved, usually well below the level shown now. A stop checked against (and defaulted from) that
-  // level could sit above the real fill and sell as soon as it was placed. The server refuses it too.
-  $: canAttachStop = choice?.action === 'BUY' && !choice?.trailing;
-  $: if (!canAttachStop) attachStop = false;
-  $: if (attachStop && stopTrigger == null && estimatedPrice && estimatedPrice > 0)
-    stopTrigger = Number((estimatedPrice * .98).toFixed(2));
-  // Informational, never a block -- the same trade as buyExceedsBuyingPower just above. A market buy
-  // has no committed price, so nothing can prove this stop is below the entry; saying so beats either
-  // refusing on a number nobody has or staying silent about it.
-  $: marketEntryNote = !attachStop || choice?.orderType !== 'MARKET' ? null
-    : stopTrigger != null && latestPrice != null && stopTrigger >= latestPrice
-      ? `A market buy has no set entry price. This stop at ${money(stopTrigger)} is at or above the `
-        + `last trade (${money(latestPrice)}), so it would very likely fire as soon as it activates.`
-      : 'A market buy has no set entry price, so this stop cannot be checked against one. Choose a '
-        + 'level you would still accept if the fill comes in worse than the last trade.';
-  $: if (attachStop && stopTrigger != null && stopLimit == null)
-    stopLimit = Number((stopTrigger * .99).toFixed(2));
-  $: attachedStopRisk = attachStop && estimatedPrice && stopTrigger && effectiveQuantity
-    ? (estimatedPrice - stopTrigger) * effectiveQuantity
-    : null;
-  // The price the entry actually COMMITS to, which a market order has none of: estimatedPrice falls
-  // back to the last trade there, and that is not what the order will pay. The server makes the same
-  // distinction (entryPrice is null for MARKET, so AttachedStopRule skips its entry check), and the two
-  // must agree on what is refused -- a dialog stricter than the endpoint is a hurdle nobody chose.
-  $: committedEntryPrice = choice?.orderType === 'MARKET' ? null : estimatedPrice;
-  $: attachedStopError = !attachStop ? null
-    : stopTrigger == null || stopTrigger <= 0 ? 'Enter a protective stop trigger.'
-    : committedEntryPrice != null && stopTrigger >= committedEntryPrice
-      ? `The protective stop must be below the expected entry price (${money(committedEntryPrice)}).`
-    : stopLimit == null || stopLimit <= 0 ? 'Enter a protective stop limit.'
-    : stopLimit > stopTrigger ? 'The protective stop limit must be at or below its trigger.'
-    : null;
 
-  $: summary = (() => {
-    if (!choice || !symbol || !effectiveQuantity) return null;
-    const side = choice.action === 'BUY' ? 'Buy' : 'Sell';
-    if (scheduled && exactPriceTrigger && choice.orderType === 'MARKET') {
-      const comparison = choice.triggerKind === 'PriceBelow' ? 'at or below' : 'at or above';
-      return `Starting on ${activeFromDate || 'your chosen date'} (PKT), wait until ${symbol} is ${comparison} ${triggerPrice ?? '—'} PKR, then sell ${effectiveQuantity} shares at market. The trigger is not a price guarantee; the fill can be lower.`;
-    }
-    if (scheduled && choice.orderType === 'MARKET')
-      return `On or after ${activeFromDate || 'your chosen date'} (PKT), sell ${effectiveQuantity} ${symbol} at the best available price, at the first eligible market-open check. The final proceeds can move.`;
-    if (scheduled)
-      return `On or after ${activeFromDate || 'your chosen date'} (PKT), submit a limit ${side.toLowerCase()} for ${effectiveQuantity} ${symbol} at ${price ?? '—'} PKR or better, at the first eligible market-open check. Filling is not guaranteed.`;
-    if (exactPriceTrigger) {
-      const comparison = choice.triggerKind === 'PriceBelow' ? 'at or below' : 'at or above';
-      return choice.orderType === 'MARKET'
-        ? `Wait until ${symbol} is ${comparison} ${triggerPrice ?? '—'} PKR, then submit a market ${side.toLowerCase()} for ${effectiveQuantity} shares. The fill price can move.`
-        : `Wait until ${symbol} is ${comparison} ${triggerPrice ?? '—'} PKR, then submit a limit ${side.toLowerCase()} for ${effectiveQuantity} shares at ${price ?? '—'} PKR or better. Filling is not guaranteed.`;
-    }
-    if (boundedTrail && conditionalLevel != null) {
-      const buy = choice.action === 'BUY';
-      const extreme = buy ? 'lowest' : 'highest';
-      const bound = priceBound != null && priceBound > 0 ? priceBound : null;
-      // The level in brackets is the TRIGGER, and it must say so: "falls 3% from that high (75.36
-      // now…)" was read as a high of 75.36 when the high was 77.69.
-      const start = triggerReferencePrice != null && triggerReferencePrice > 0
-        ? ` (${money(triggerReferencePrice)} now)` : '';
-      return `Tracks the ${extreme} price of ${symbol} from now${start}. When it ${buy ? 'rises' : 'falls'} `
-        + `${triggerPercent}% from that ${buy ? 'low' : 'high'} — the trigger, ${money(conditionalLevel)} now, `
-        + `${buy ? 'falls with each new low' : 'rises with each new high'} — `
-        + `AgentFox places a limit ${buy ? 'buy' : 'sell'} for ${effectiveQuantity} shares at the price `
-        + `that triggered it`
-        + (bound == null ? '. '
-          : `, never ${buy ? 'above' : 'below'} ${money(bound)}. If it triggers ${buy ? 'above' : 'below'} `
-            + `${money(bound)}, that move is skipped and it waits for a new ${buy ? 'low' : 'high'}. `)
-        + `The unfilled remainder keeps working each trading day until filled, cancelled or `
-        + `${expiresInDays} day(s) pass. AgentFox must be running to watch prices.`;
-    }
-    if (choice.submission === 'conditional' && conditionalLevel != null) {
-      const move = choice.triggerKind === 'PercentDrop' ? 'falls' : 'rises';
-      if (windowed) {
-        const extreme = choice.triggerKind === 'PercentDrop' ? 'highest' : 'lowest';
-        const how = choice.orderType === 'LIMIT'
-          ? `place a limit ${side.toLowerCase()} for ${effectiveQuantity} ${symbol} at the level it reaches`
-          : `${side.toLowerCase()} ${effectiveQuantity} ${symbol} at market`;
-        return `When ${symbol} ${move} ${triggerPercent}% from its ${extreme} price of the last `
-          + `${triggerWindowMinutes ?? '—'} trading minutes, ${how} (${money(conditionalLevel)} measured `
-          + `from the price now; the level moves with that ${extreme} price, and counts across the close).`;
-      }
-      const trail = choice.trailing ? ' from the highest price seen after arming' : '';
-      return `${side} ${effectiveQuantity} ${symbol} if it ${move} ${triggerPercent}%${trail} `
-        + `(trigger ${money(conditionalLevel)} now).`;
-    }
-    if (choice.orderType === 'MARKET')
-      return `${side} ${effectiveQuantity} ${symbol} now at the best available price.`;
-    if (choice.orderType === 'STOPLOSS')
-      return `${side} ${effectiveQuantity} ${symbol} when it reaches ${triggerPrice ?? '—'}; `
-        + `once triggered, accept no worse than ${limitPrice ?? '—'}.`;
-    return `${side} ${effectiveQuantity} ${symbol} at ${price ?? '—'} or better.`;
-  })();
 
   /**
    * @param alreadyConfirmed Suppresses the "submit this order now?" prompt because the caller has
@@ -1001,6 +807,232 @@
       releasing = false;
     }
   }
+  let livePriceView = $derived($livePriceStore);
+  let latestPrice = $derived(livePriceView.quote?.current ?? currentPrice);
+  let latestPriceLabel = $derived(livePriceView.quote?.current != null
+    ? livePriceLabel(livePriceView)
+    : 'Latest available price');
+  let sideIntents = $derived((registry?.intents ?? []).filter(item => item.action === side && item.id !== 'profit-book'));
+  let groupKeys = $derived([...new Set(sideIntents.map(intentGroup))]);
+  let selectedGroup = $derived(choice ? intentGroup(choice) : null);
+  let variants = $derived(sideIntents.filter(item => intentGroup(item) === selectedGroup));
+  // A live quote may arrive before the slower candle fallback. Seed only blank fields and freeze the
+  // reference used by percentage triggers; subsequent ticks update the readout, never the draft.
+  $effect.pre(() => {
+    // Reads only what the old `$:` named; applySuggestedPrices writes the price fields, so it runs untracked.
+    const chosen = choice, reference = triggerReferencePrice, latest = latestPrice;
+    untrack(() => {
+      if (chosen && reference == null && latest && latest > 0) {
+        triggerReferencePrice = latest;
+        applySuggestedPrices(false, latest);
+      }
+    });
+  });
+  // A date can be the whole trigger, or it can postpone when a price trigger starts being watched.
+  // The registry says which intents need that date so the UI does not infer product semantics from an id.
+  let scheduled = $derived(choice?.requiresActivationDate ?? choice?.triggerKind === 'Scheduled');
+  let dateOnlySchedule = $derived(choice?.triggerKind === 'Scheduled');
+  let activationError = $derived(scheduled && activeFromDate ? scheduleDateError(activeFromDate) : null);
+  let exactPriceTrigger = $derived(choice?.submission === 'conditional'
+    && (choice.triggerKind === 'PriceBelow' || choice.triggerKind === 'PriceAbove'));
+  let windowed = $derived(choice?.defaultWindowMinutes != null);
+  let conditionalLevel = $derived(exactPriceTrigger ? triggerPrice : choice?.submission === 'conditional' && choice.triggerKind
+    ? percentTriggerLevel(choice.triggerKind, triggerReferencePrice, triggerPercent)
+    : null);
+  let marketDisabled = $derived(choice?.orderType === 'MARKET'
+    && registry != null && !registry.capabilities.marketOrdersEnabled);
+  let persistable = $derived(choice != null && choice.orderType !== 'MARKET');
+  $effect.pre(() => {
+    if (!persistable) persistentUntilFilled = false;
+  });
+  // A trailing buy or sell always keeps its remainder working: its limit is frozen at the price that
+  // triggered it, inside the optional bound, and carried across sessions. So it is not a choice there.
+  let keepWorking = $derived(choice?.keepWorking === true);
+  $effect.pre(() => {
+    if (keepWorking) persistentUntilFilled = true;
+  });
+  let boundedTrail = $derived(choice?.priceField === 'trail-bound');
+  let boundIsBuyMax = $derived(choice?.action === 'BUY');
+  // A bound on the wrong side of the trigger means no move can trade until the trail travels a long
+  // way — shown as a warning, never a refusal, because it can be what the operator wants.
+  let trailBlock = $derived(boundedTrail
+    ? trailBoundBlock(choice?.action, conditionalLevel, priceBound, triggerPercent)
+    : null);
+  // The starting price is read once, when the order type is chosen. Compared only with a LIVE quote —
+  // never with the `currentPrice` prop the ticket fell back to, which can be older than the start.
+  let startDrift = $derived(choice?.submission === 'conditional' && !scheduled && !windowed && !exactPriceTrigger
+    ? startingPriceDrift(choice.triggerKind, choice.trailing === true, triggerReferencePrice,
+        livePriceView.quote?.current, triggerPercent, conditionalLevel)
+    : null);
+  let selectedTicker = $derived(symbol.trim().toUpperCase());
+  let matchingHoldings = $derived(account?.holdings.filter(
+    holding => sameSymbol(holding.symbol ?? holding.instrumentId, selectedTicker)) ?? []);
+  let holdingValues = $derived(matchingHoldings.map(holding => holdingValuation(holding, livePriceView.quote?.current)));
+  let holdingPnl = $derived(holdingValues.length && holdingValues.every(value => value.profitLoss != null && Number.isFinite(value.profitLoss))
+    ? holdingValues.reduce((sum, value) => sum + (value.profitLoss ?? 0), 0)
+    : null);
+  let holdingPnlPercent = $derived(holdingValues.length === 1 ? holdingValues[0].profitLossPercent : null);
+  let matchingSellOrders = $derived(account?.orders.filter(order =>
+    sameSymbol(order.symbol ?? order.instrumentId, selectedTicker)
+    && (order.side?.toUpperCase() === 'SELL' || order.side?.toUpperCase() === 'SEL')) ?? []);
+  let heldQuantity = $derived(holdingLoaded && account?.holdingsAvailable
+    && matchingHoldings.every(holding => holding.quantity != null)
+      ? Math.floor(matchingHoldings.reduce((sum, holding) => sum + Math.max(0, holding.quantity ?? 0), 0))
+      : null);
+  let committedSellQuantity = $derived(holdingLoaded && account?.ordersAvailable
+    && matchingSellOrders.every(order => order.remainingQuantity != null)
+      ? Math.floor(matchingSellOrders.reduce(
+          (sum, order) => sum + Math.max(0, order.remainingQuantity ?? 0), 0))
+      : null);
+  let availableSellQuantity = $derived(heldQuantity != null && committedSellQuantity != null
+    ? Math.max(0, heldQuantity - committedSellQuantity)
+    : null);
+  // The BUY-side counterpart of availableSellQuantity. `available_cash` is the broker contract's
+  // stable key for "what this account may commit right now" (see IBrokerAccountReader) — deliberately
+  // not a cash balance, which can be a very different number when unsettled sale proceeds are spendable
+  // or resting orders have already committed part of it.
+  let buyingPowerBalance = $derived(holdingLoaded && account?.balancesAvailable
+    ? account.balances.find(entry => entry.key === 'available_cash') ?? null
+    : null);
+  let buyingPower = $derived(buyingPowerBalance?.value ?? null);
+  let estimatedPrice = $derived(choice?.orderType === 'MARKET' ? latestPrice
+    : choice?.orderType === 'STOPLOSS' ? triggerPrice
+    : exactPriceTrigger || scheduled ? price
+    : choice?.submission === 'conditional' ? conditionalLevel : price);
+  // FLOOR, not round. A value is a budget, and Math.round could buy one share MORE than it covers --
+  // up to half a share's worth over, which on a 425 PKR share is over 200 PKR. Combined with "Use it
+  // all" spending the whole reported buying power on traded value, that is a broker refusal waiting to
+  // happen, and it happened (2026-09-09: an order sized to 100% of available balance was refused for
+  // insufficient balance).
+  let valueSizedQuantity = $derived(sizeMode === 'value' && orderValue && orderValue > 0 && estimatedPrice && estimatedPrice > 0
+    ? Math.floor(orderValue / estimatedPrice)
+    : null);
+  let effectiveQuantity = $derived(sizeMode === 'value' ? valueSizedQuantity : quantity);
+  let estimatedValue = $derived(effectiveQuantity && estimatedPrice ? effectiveQuantity * estimatedPrice : null);
+  // Informational, never a block: the broker and the risk engine decide, and this snapshot can be
+  // seconds stale. Telling the operator early is worth much more than refusing here would be.
+  let buyExceedsBuyingPower = $derived(choice?.action === 'BUY' && buyingPower != null
+    && estimatedValue != null && estimatedValue > buyingPower);
+  // An order that FITS the buying power can still be refused, because the broker adds its own charges
+  // on top of traded value and this figure is traded value alone. Core models no fee schedule at all
+  // and must not invent one, so it says what the number excludes rather than guessing a headroom --
+  // the exact charge is shown by whatever fills the order-detail slot, which reads the same cost
+  // projection the rest of the system uses.
+  //
+  // 99% rather than 100%: below that there is room for any plausible charge and a warning would be
+  // noise, which is the failure mode a caution about costs falls into fastest.
+  let buyLeavesNoRoomForCharges = $derived(choice?.action === 'BUY' && buyingPower != null && buyingPower > 0
+    && estimatedValue != null && !buyExceedsBuyingPower
+    && estimatedValue > buyingPower * 0.99);
+  let availableSellValue = $derived(availableSellQuantity != null && estimatedPrice && estimatedPrice > 0
+    ? availableSellQuantity * estimatedPrice
+    : null);
+  let sellExceedsAvailable = $derived(choice?.action === 'SELL'
+    && effectiveQuantity != null && availableSellQuantity != null
+    && effectiveQuantity > availableSellQuantity);
+  let sizingDifference = $derived(sizeMode === 'value' && orderValue && estimatedValue != null
+    ? estimatedValue - orderValue
+    : null);
+  // Any BUY, waiting or immediate. It was 'conditional' only, which meant the three most-used ways to
+  // buy -- "Buy at my price", "Buy now", "Buy if it rises to a price" -- offered no protection at all
+  // and said nothing about it. The server validates both paths through one shared rule.
+  // Not on a trailing buy: its entry price is unknown until it triggers, and it triggers after the low
+  // has moved, usually well below the level shown now. A stop checked against (and defaulted from) that
+  // level could sit above the real fill and sell as soon as it was placed. The server refuses it too.
+  let canAttachStop = $derived(choice?.action === 'BUY' && !choice?.trailing);
+  $effect.pre(() => {
+    if (!canAttachStop) attachStop = false;
+  });
+  $effect.pre(() => {
+    if (attachStop && stopTrigger == null && estimatedPrice && estimatedPrice > 0)
+      stopTrigger = Number((estimatedPrice * .98).toFixed(2));
+  });
+  // Informational, never a block -- the same trade as buyExceedsBuyingPower just above. A market buy
+  // has no committed price, so nothing can prove this stop is below the entry; saying so beats either
+  // refusing on a number nobody has or staying silent about it.
+  let marketEntryNote = $derived(!attachStop || choice?.orderType !== 'MARKET' ? null
+    : stopTrigger != null && latestPrice != null && stopTrigger >= latestPrice
+      ? `A market buy has no set entry price. This stop at ${money(stopTrigger)} is at or above the `
+        + `last trade (${money(latestPrice)}), so it would very likely fire as soon as it activates.`
+      : 'A market buy has no set entry price, so this stop cannot be checked against one. Choose a '
+        + 'level you would still accept if the fill comes in worse than the last trade.');
+  $effect.pre(() => {
+    if (attachStop && stopTrigger != null && stopLimit == null)
+      stopLimit = Number((stopTrigger * .99).toFixed(2));
+  });
+  let attachedStopRisk = $derived(attachStop && estimatedPrice && stopTrigger && effectiveQuantity
+    ? (estimatedPrice - stopTrigger) * effectiveQuantity
+    : null);
+  // The price the entry actually COMMITS to, which a market order has none of: estimatedPrice falls
+  // back to the last trade there, and that is not what the order will pay. The server makes the same
+  // distinction (entryPrice is null for MARKET, so AttachedStopRule skips its entry check), and the two
+  // must agree on what is refused -- a dialog stricter than the endpoint is a hurdle nobody chose.
+  let committedEntryPrice = $derived(choice?.orderType === 'MARKET' ? null : estimatedPrice);
+  let attachedStopError = $derived(!attachStop ? null
+    : stopTrigger == null || stopTrigger <= 0 ? 'Enter a protective stop trigger.'
+    : committedEntryPrice != null && stopTrigger >= committedEntryPrice
+      ? `The protective stop must be below the expected entry price (${money(committedEntryPrice)}).`
+    : stopLimit == null || stopLimit <= 0 ? 'Enter a protective stop limit.'
+    : stopLimit > stopTrigger ? 'The protective stop limit must be at or below its trigger.'
+    : null);
+  let summary = $derived((() => {
+    if (!choice || !symbol || !effectiveQuantity) return null;
+    const side = choice.action === 'BUY' ? 'Buy' : 'Sell';
+    if (scheduled && exactPriceTrigger && choice.orderType === 'MARKET') {
+      const comparison = choice.triggerKind === 'PriceBelow' ? 'at or below' : 'at or above';
+      return `Starting on ${activeFromDate || 'your chosen date'} (PKT), wait until ${symbol} is ${comparison} ${triggerPrice ?? '—'} PKR, then sell ${effectiveQuantity} shares at market. The trigger is not a price guarantee; the fill can be lower.`;
+    }
+    if (scheduled && choice.orderType === 'MARKET')
+      return `On or after ${activeFromDate || 'your chosen date'} (PKT), sell ${effectiveQuantity} ${symbol} at the best available price, at the first eligible market-open check. The final proceeds can move.`;
+    if (scheduled)
+      return `On or after ${activeFromDate || 'your chosen date'} (PKT), submit a limit ${side.toLowerCase()} for ${effectiveQuantity} ${symbol} at ${price ?? '—'} PKR or better, at the first eligible market-open check. Filling is not guaranteed.`;
+    if (exactPriceTrigger) {
+      const comparison = choice.triggerKind === 'PriceBelow' ? 'at or below' : 'at or above';
+      return choice.orderType === 'MARKET'
+        ? `Wait until ${symbol} is ${comparison} ${triggerPrice ?? '—'} PKR, then submit a market ${side.toLowerCase()} for ${effectiveQuantity} shares. The fill price can move.`
+        : `Wait until ${symbol} is ${comparison} ${triggerPrice ?? '—'} PKR, then submit a limit ${side.toLowerCase()} for ${effectiveQuantity} shares at ${price ?? '—'} PKR or better. Filling is not guaranteed.`;
+    }
+    if (boundedTrail && conditionalLevel != null) {
+      const buy = choice.action === 'BUY';
+      const extreme = buy ? 'lowest' : 'highest';
+      const bound = priceBound != null && priceBound > 0 ? priceBound : null;
+      // The level in brackets is the TRIGGER, and it must say so: "falls 3% from that high (75.36
+      // now…)" was read as a high of 75.36 when the high was 77.69.
+      const start = triggerReferencePrice != null && triggerReferencePrice > 0
+        ? ` (${money(triggerReferencePrice)} now)` : '';
+      return `Tracks the ${extreme} price of ${symbol} from now${start}. When it ${buy ? 'rises' : 'falls'} `
+        + `${triggerPercent}% from that ${buy ? 'low' : 'high'} — the trigger, ${money(conditionalLevel)} now, `
+        + `${buy ? 'falls with each new low' : 'rises with each new high'} — `
+        + `AgentFox places a limit ${buy ? 'buy' : 'sell'} for ${effectiveQuantity} shares at the price `
+        + `that triggered it`
+        + (bound == null ? '. '
+          : `, never ${buy ? 'above' : 'below'} ${money(bound)}. If it triggers ${buy ? 'above' : 'below'} `
+            + `${money(bound)}, that move is skipped and it waits for a new ${buy ? 'low' : 'high'}. `)
+        + `The unfilled remainder keeps working each trading day until filled, cancelled or `
+        + `${expiresInDays} day(s) pass. AgentFox must be running to watch prices.`;
+    }
+    if (choice.submission === 'conditional' && conditionalLevel != null) {
+      const move = choice.triggerKind === 'PercentDrop' ? 'falls' : 'rises';
+      if (windowed) {
+        const extreme = choice.triggerKind === 'PercentDrop' ? 'highest' : 'lowest';
+        const how = choice.orderType === 'LIMIT'
+          ? `place a limit ${side.toLowerCase()} for ${effectiveQuantity} ${symbol} at the level it reaches`
+          : `${side.toLowerCase()} ${effectiveQuantity} ${symbol} at market`;
+        return `When ${symbol} ${move} ${triggerPercent}% from its ${extreme} price of the last `
+          + `${triggerWindowMinutes ?? '—'} trading minutes, ${how} (${money(conditionalLevel)} measured `
+          + `from the price now; the level moves with that ${extreme} price, and counts across the close).`;
+      }
+      const trail = choice.trailing ? ' from the highest price seen after arming' : '';
+      return `${side} ${effectiveQuantity} ${symbol} if it ${move} ${triggerPercent}%${trail} `
+        + `(trigger ${money(conditionalLevel)} now).`;
+    }
+    if (choice.orderType === 'MARKET')
+      return `${side} ${effectiveQuantity} ${symbol} now at the best available price.`;
+    if (choice.orderType === 'STOPLOSS')
+      return `${side} ${effectiveQuantity} ${symbol} when it reaches ${triggerPrice ?? '—'}; `
+        + `once triggered, accept no worse than ${limitPrice ?? '—'}.`;
+    return `${side} ${effectiveQuantity} ${symbol} at ${price ?? '—'} or better.`;
+  })());
 </script>
 
 <!-- Order intent must not disappear because of a stray backdrop click or Escape press. The visible
@@ -1011,12 +1043,12 @@
 <div class="composer-host">
 <div class="backdrop" class:embedded={docked} role="presentation" use:portal={!docked}>
   <div class="dialog" class:sell={side === 'SELL'} class:quick bind:this={dialogElement} role={docked ? 'region' : 'dialog'} aria-modal={docked ? undefined : true} aria-label={quick ? `Quick ${side.toLowerCase()}` : docked ? 'Order ticket draft' : 'New order'}
-       tabindex="-1" on:keydown={composerKey}>
+       tabindex="-1" onkeydown={composerKey}>
     <header>
       <div class="title"><ShoppingCart size={17} /><div><b>{quick ? `Quick ${side === 'BUY' ? 'Buy' : 'Sell'}` : activeExtension && editArmedOrder ? `Edit ${activeExtension.label.toLowerCase()} order` : docked ? `Order ticket · ${symbol || 'new'}` : 'New Order'}</b>{#if !quick}<span>{activeExtension ? `${activeExtension.label} · checked by the server when saved` : docked ? 'Ctrl Enter reviews · never submits directly' : 'Choose what you want to happen'}</span>{/if}</div></div>
       <div class="header-actions">
         {#if !quick}<span class="side-badge">{side} ORDER</span>{/if}
-        <button class="icon" on:click={closeComposer} aria-label={docked ? 'Close order draft' : 'Close'} disabled={busy || releasing || reviewing}><X size={15} /></button>
+        <button class="icon" onclick={closeComposer} aria-label={docked ? 'Close order draft' : 'Close'} disabled={busy || releasing || reviewing}><X size={15} /></button>
       </div>
     </header>
 
@@ -1027,25 +1059,25 @@
         {#if result.ok}<CheckCircle2 size={22} />{:else}<AlertTriangle size={22} />{/if}
         <div><b>{result.title}</b><p>{result.detail}</p>{#if result.executionId}<small>Execution {result.executionId}</small>{/if}</div>
       </div>
-      <div class="footer"><button class="btn btn-primary" on:click={() => dispatch('close')}>Done</button></div>
+      <div class="footer"><button class="btn btn-primary" onclick={() => dispatch('close')}>Done</button></div>
     {:else if activeExtension}
       <!-- An edition's order type: its editor has the body; Back returns here with the fields above intact. -->
-      <svelte:component this={activeExtension.editor}
+      <activeExtension.editor
         symbol={(symbol ?? '').trim().toUpperCase()} action={side} {quantity} {price} {docked}
         armedOrder={editArmedOrder} prefill={extensionPrefill}
         on:back={leaveExtension} on:done={extensionDone} on:changed={() => dispatch('changed')}
         on:side={(event: CustomEvent<'BUY' | 'SELL'>) => chooseSide(event.detail)} />
     {:else if editArmedOrder}
       {#if error}<p class="error" role="alert">{error}</p>{/if}
-      <div class="footer"><button class="btn btn-primary" on:click={() => dispatch('close')}>Close</button></div>
+      <div class="footer"><button class="btn btn-primary" onclick={() => dispatch('close')}>Close</button></div>
     {:else}
       {#if docked}<p class="draft-note">Draft for <b>{symbol || 'a new symbol'}</b>. Chart selection does not change this ticket. Hiding it preserves the draft; reload does not.</p>{/if}
-      <fieldset class="draft-fields" disabled={busy || releasing || reviewing} on:input={() => { blockedSell = null; duplicateEntry = null; }}>
+      <fieldset class="draft-fields" disabled={busy || releasing || reviewing} oninput={() => { blockedSell = null; duplicateEntry = null; }}>
       {#if quick}
         <div class="quick-fields">
           <div class="quick-stock"><span class="field-label">Stock</span><div><b>{symbol.trim().toUpperCase() || 'No stock selected'}</b><small>LIMIT ORDER</small></div></div>
           <label><span>Number of shares</span>
-            <div class="input-with-unit"><input type="number" min="1" step="1" bind:value={quantity} on:input={() => quantityWasEdited = true} /><span aria-hidden="true">shares</span></div>
+            <div class="input-with-unit"><input type="number" min="1" step="1" bind:value={quantity} oninput={() => quantityWasEdited = true} /><span aria-hidden="true">shares</span></div>
           </label>
           <label><span>Limit price per share (PKR)</span>
             <div class="input-with-unit"><input type="number" min="0.01" step="0.01" bind:value={price} /><span aria-hidden="true">PKR / share</span></div>
@@ -1059,20 +1091,20 @@
       <div class="side-control">
         <span class="field-label">Order side</span>
         <div class="side-picker" role="group" aria-label="Order side">
-          <button type="button" class:active={side === 'BUY'} aria-pressed={side === 'BUY'} on:click={() => chooseSide('BUY')}>
+          <button type="button" class:active={side === 'BUY'} aria-pressed={side === 'BUY'} onclick={() => chooseSide('BUY')}>
             <span class="selection-mark" aria-hidden="true">{#if side === 'BUY'}<Check size={18} />{/if}</span>Buy
           </button>
-          <button type="button" class:active={side === 'SELL'} aria-pressed={side === 'SELL'} on:click={() => chooseSide('SELL')}>
+          <button type="button" class:active={side === 'SELL'} aria-pressed={side === 'SELL'} onclick={() => chooseSide('SELL')}>
             <span class="selection-mark" aria-hidden="true">{#if side === 'SELL'}<Check size={18} />{/if}</span>Sell
           </button>
         </div>
       </div>
       <div class="symbol-row">
-        <label><span>Symbol</span><input list="new-order-symbols" bind:value={symbol} on:input={event => editSymbol(event.currentTarget.value)} on:change={event => {symbol = event.currentTarget.value; void refreshQuote();}} /></label>
+        <label><span>Symbol</span><input list="new-order-symbols" bind:value={symbol} oninput={event => editSymbol(event.currentTarget.value)} onchange={event => {symbol = event.currentTarget.value; void refreshQuote();}} /></label>
         <datalist id="new-order-symbols">{#each symbols as entry}<option value={entry.symbol}>{entry.companyName ?? ''}</option>{/each}</datalist>
         <div class="quote">
           <span>{latestPriceLabel}</span><b>{latestPrice != null ? money(latestPrice) : '—'}</b>
-          <button class="icon" on:click={refreshQuote} disabled={quoteBusy} title="Refresh latest price"><RefreshCw size={13} /></button>
+          <button class="icon" onclick={refreshQuote} disabled={quoteBusy} title="Refresh latest price"><RefreshCw size={13} /></button>
         </div>
       </div>
 
@@ -1081,11 +1113,11 @@
         <div class="choice-grid">
           {#each commonGroups.filter(group => groupKeys.includes(group)) as group}
             <button type="button" class="choice" class:selected={selectedGroup === group}
-              aria-pressed={selectedGroup === group} on:click={() => chooseGroup(group)}>{groupLabels[group]}</button>
+              aria-pressed={selectedGroup === group} onclick={() => chooseGroup(group)}>{groupLabels[group]}</button>
           {/each}
           {#each $orderTypeExtensions as extension (extension.id)}
             <button type="button" class="choice extension" aria-label={`${extension.label}: opens its own editor`}
-              on:click={() => openExtension(extension)}>{extension.label} <span aria-hidden="true">↗</span></button>
+              onclick={() => openExtension(extension)}>{extension.label} <span aria-hidden="true">↗</span></button>
           {/each}
         </div>
         {#if groupKeys.some(group => !commonGroups.includes(group))}
@@ -1094,7 +1126,7 @@
             <div class="choice-grid">
               {#each groupKeys.filter(group => !commonGroups.includes(group)) as group}
                 <button type="button" class="choice" class:selected={selectedGroup === group}
-                  aria-pressed={selectedGroup === group} on:click={() => chooseGroup(group)}>
+                  aria-pressed={selectedGroup === group} onclick={() => chooseGroup(group)}>
                   {groupLabels[group] ?? sideIntents.find(item => item.id === group)?.label}
                 </button>
               {/each}
@@ -1113,7 +1145,7 @@
           {#if variants.length > 1}
             <label class="intent-variant">
               <span>{selectedGroup === 'price' ? 'Trigger when the price is' : 'Order instruction'}</span>
-              <select value={choice.id} on:change={event => {
+              <select value={choice.id} onchange={event => {
                 const intent = variants.find(item => item.id === event.currentTarget.value);
                 if (intent) choose(intent);
               }}>
@@ -1135,7 +1167,7 @@
                     <small>{holdingLoaded && account ? `Updated ${when(account.retrievedAtUtc)}` : 'Read buying power from the broker'}</small>
                   </span>
                 </div>
-                <button type="button" class="holding-refresh" on:click={loadHolding} disabled={holdingBusy}>
+                <button type="button" class="holding-refresh" onclick={loadHolding} disabled={holdingBusy}>
                   <span class:spin={holdingBusy}><RefreshCw size={13} /></span>
                   {holdingBusy ? 'Checking…' : holdingLoaded ? 'Refresh' : 'Check buying power'}
                 </button>
@@ -1160,9 +1192,9 @@
                   {/each}
                 </div>
                 <div class="holding-actions" aria-label="Quick order sizes">
-                  <button type="button" on:click={() => buyFraction(.25)} disabled={Math.floor(buyingPower * .25) < 1}>25%</button>
-                  <button type="button" on:click={() => buyFraction(.5)} disabled={Math.floor(buyingPower * .5) < 1}>50%</button>
-                  <button type="button" on:click={() => buyFraction(1)} disabled={buyingPower < 1}>Use it all</button>
+                  <button type="button" onclick={() => buyFraction(.25)} disabled={Math.floor(buyingPower * .25) < 1}>25%</button>
+                  <button type="button" onclick={() => buyFraction(.5)} disabled={Math.floor(buyingPower * .5) < 1}>50%</button>
+                  <button type="button" onclick={() => buyFraction(1)} disabled={buyingPower < 1}>Use it all</button>
                 </div>
                 <p class="holding-note">
                   Buying power already accounts for what is committed to working orders. It is checked
@@ -1181,7 +1213,7 @@
                     <small>{holdingLoaded && account ? `Updated ${when(account.retrievedAtUtc)}` : 'Read holdings and working orders from the broker'}</small>
                   </span>
                 </div>
-                <button type="button" class="holding-refresh" on:click={loadHolding} disabled={holdingBusy}>
+                <button type="button" class="holding-refresh" onclick={loadHolding} disabled={holdingBusy}>
                   <span class:spin={holdingBusy}><RefreshCw size={13} /></span>
                   {holdingBusy ? 'Checking…' : holdingLoaded ? 'Refresh' : 'Check holding'}
                 </button>
@@ -1217,9 +1249,9 @@
                   <p class="holding-warning"><AlertTriangle size={13} /> A working SELL has an unknown remaining quantity, so available shares cannot be calculated safely.</p>
                 {:else if availableSellQuantity != null}
                   <div class="holding-actions" aria-label="Quick sell quantities">
-                    <button type="button" on:click={() => sellFraction(.25)} disabled={Math.floor(availableSellQuantity * .25) < 1}>25%</button>
-                    <button type="button" on:click={() => sellFraction(.5)} disabled={Math.floor(availableSellQuantity * .5) < 1}>50%</button>
-                    <button type="button" class="sell-all" on:click={() => sellFraction(1)} disabled={availableSellQuantity < 1}>Sell all available</button>
+                    <button type="button" onclick={() => sellFraction(.25)} disabled={Math.floor(availableSellQuantity * .25) < 1}>25%</button>
+                    <button type="button" onclick={() => sellFraction(.5)} disabled={Math.floor(availableSellQuantity * .5) < 1}>50%</button>
+                    <button type="button" class="sell-all" onclick={() => sellFraction(1)} disabled={availableSellQuantity < 1}>Sell all available</button>
                   </div>
                   <p class="holding-note">
                     {#if availableSellValue != null}Available value at this order price is about <b>{money(availableSellValue)} PKR</b>. {/if}
@@ -1234,11 +1266,11 @@
               <span class="field-label">Size order by</span>
               <div class="size-tabs" role="group" aria-label="Size order by">
                 <button type="button" class:active={sizeMode === 'shares'} aria-pressed={sizeMode === 'shares'}
-                        on:click={() => sizeMode = 'shares'}>
+                        onclick={() => sizeMode = 'shares'}>
                   <span class="selection-mark" aria-hidden="true">{#if sizeMode === 'shares'}<Check size={15} />{/if}</span>Number of shares
                 </button>
                 <button type="button" class:active={sizeMode === 'value'} aria-pressed={sizeMode === 'value'}
-                        on:click={() => sizeMode = 'value'}>
+                        onclick={() => sizeMode = 'value'}>
                   <span class="selection-mark" aria-hidden="true">{#if sizeMode === 'value'}<Check size={15} />{/if}</span>Total amount (PKR)
                 </button>
               </div>
@@ -1246,7 +1278,7 @@
               {#if sizeMode === 'shares'}
                 <label><span>Quantity to {side.toLowerCase()} (shares)</span>
                   <div class="input-with-unit"><input type="number" min="1" step="1" bind:value={quantity}
-                       on:input={() => quantityWasEdited = true} /><span aria-hidden="true">shares</span></div>
+                       oninput={() => quantityWasEdited = true} /><span aria-hidden="true">shares</span></div>
                 </label>
               {:else}
                 <label><span>Amount to {side.toLowerCase()} (PKR)</span>
@@ -1395,7 +1427,7 @@
                 {startDrift.triggersNow
                   ? `This order starts from ${money(startDrift.reference)}, but ${selectedTicker} now trades at ${money(startDrift.live)}, which already meets its trigger ${conditionalLevel != null ? money(conditionalLevel) : '—'}. Armed like this, it fires on the next check.`
                   : `This order starts from ${money(startDrift.reference)}, the price when this ticket opened; ${selectedTicker} now trades at ${money(startDrift.live)}, so its trigger ${conditionalLevel != null ? money(conditionalLevel) : '—'} is not where you would set it now.`}
-                <button type="button" class="start-from-live" on:click={useLiveStartingPrice}>Start from {money(startDrift.live)}</button>
+                <button type="button" class="start-from-live" onclick={useLiveStartingPrice}>Start from {money(startDrift.live)}</button>
               </span>
             </p>
           {/if}
@@ -1421,6 +1453,9 @@
             only judge `price` as if the order were placed now — which told a waiting trailing sell it
             "should fill now" at its trigger.
           -->
+          <!-- `order-detail` stays a slot: its name is the editions' contract (a snippet name cannot contain a hyphen).
+               migrate() refuses a file with it, so it was converted with the slot hidden and restored. -->
+          <!-- svelte-ignore slot_element_deprecated -->
           <slot name="order-detail"
                 symbol={selectedTicker}
                 action={choice.action}
@@ -1450,7 +1485,7 @@
             Your own protective stop is holding these shares. It can stand down for this sell and go
             back over whatever remains once the sell is done.
           </p>
-          <button class="btn btn-primary" on:click={releaseStopAndRetry} disabled={releasing || busy}>
+          <button class="btn btn-primary" onclick={releaseStopAndRetry} disabled={releasing || busy}>
             {releasing ? 'Standing the stop down…' : 'Stand the stop down and place this sell'}
           </button>
         </div>
@@ -1472,15 +1507,15 @@
               {#each duplicateEntry.entries as entry}<li>{entry.describe}</li>{/each}
             </ul>
           {/if}
-          <button class="btn btn-ghost" on:click={placeDespiteDuplicate} disabled={busy || releasing}>
+          <button class="btn btn-ghost" onclick={placeDespiteDuplicate} disabled={busy || releasing}>
             Place this as well
           </button>
         </div>
       {/if}
 
       <div class="footer">
-        <button class="btn btn-ghost" on:click={closeComposer} disabled={busy || releasing || reviewing}>{docked ? 'Discard draft' : 'Cancel'}</button>
-        <button class="btn btn-primary" on:click={reviewOrder} disabled={!choice || busy || releasing || reviewing || quoteBusy || marketDisabled}>
+        <button class="btn btn-ghost" onclick={closeComposer} disabled={busy || releasing || reviewing}>{docked ? 'Discard draft' : 'Cancel'}</button>
+        <button class="btn btn-primary" onclick={reviewOrder} disabled={!choice || busy || releasing || reviewing || quoteBusy || marketDisabled}>
           {busy ? 'Submitting…' : side}
         </button>
       </div>
@@ -1489,9 +1524,9 @@
 </div>
 
 {#if docked}
-  <dialog class="review-dialog" class:sell={side === 'SELL'} bind:this={reviewDialog} aria-label={reviewTitle} on:cancel|preventDefault={() => finishReview(false)} on:keydown={reviewKey}>
+  <dialog class="review-dialog" class:sell={side === 'SELL'} bind:this={reviewDialog} aria-label={reviewTitle} oncancel={(event) => { event.preventDefault(); finishReview(false); }} onkeydown={reviewKey}>
     <h2>{reviewTitle}</h2><p>{reviewText}</p>
-    <div class="footer"><button class="btn btn-ghost" on:click={() => finishReview(false)}>Back to ticket</button><button class="btn btn-primary" on:click={() => finishReview(true)}>{reviewAction}</button></div>
+    <div class="footer"><button class="btn btn-ghost" onclick={() => finishReview(false)}>Back to ticket</button><button class="btn btn-primary" onclick={() => finishReview(true)}>{reviewAction}</button></div>
   </dialog>
 {/if}
 </div>
