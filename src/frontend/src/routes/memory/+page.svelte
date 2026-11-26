@@ -1,20 +1,20 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { api } from '#lib/api.ts';
   import { Database, RefreshCw, Search, Filter, Brain, Power, Trash2 } from 'lucide-svelte';
   import type { MemoryEntry, MemorySettings, SpecialistMemoryMode } from '#lib/api.ts';
 
-  let entries: MemoryEntry[] = [];
-  let filtered: MemoryEntry[] = [];
-  let loading = true;
-  let error: string | null = null;
-  let search = '';
-  let typeFilter = 'all';
-  let settings: MemorySettings | null = null;
-  let savingGlobal = false;
-  let savingAgent: string | null = null;
-  let deletingId: string | null = null;
-  let clearing = false;
+  let entries: MemoryEntry[] = $state([]);
+  let filtered: MemoryEntry[] = $state([]);
+  let loading = $state(true);
+  let error: string | null = $state<string | null>(null);
+  let search = $state('');
+  let typeFilter = $state('all');
+  let settings: MemorySettings | null = $state<MemorySettings | null>(null);
+  let savingGlobal = $state(false);
+  let savingAgent: string | null = $state<string | null>(null);
+  let deletingId: string | null = $state<string | null>(null);
+  let clearing = $state(false);
 
   const types = ['all', 'Fact', 'UserPreference', 'Observation', 'Conversation', 'ToolExecution', 'SubAgentResult'];
 
@@ -104,7 +104,11 @@
     });
   }
 
-  $: { search; typeFilter; applyFilter(); }
+  $effect.pre(() => {
+    // Reads only what the old `$:` named; the call is untracked so its own bookkeeping cannot re-trigger it.
+    void search; void typeFilter;
+    untrack(() => applyFilter());
+  });
 
   onMount(load);
 
@@ -148,13 +152,13 @@
       </p>
     </div>
     <div class="header-actions">
-      <button class="btn btn-ghost" on:click={load} disabled={loading}>
+      <button class="btn btn-ghost" onclick={load} disabled={loading}>
         <RefreshCw size={14} />
         Refresh
       </button>
       <button
         class="btn btn-ghost btn-danger"
-        on:click={clearAll}
+        onclick={clearAll}
         disabled={loading || clearing || entries.length === 0}
         title="Delete all memories"
       >
@@ -177,7 +181,7 @@
         <button
           class="toggle-switch"
           class:on={settings.globalEnabled}
-          on:click={toggleGlobalMemory}
+          onclick={toggleGlobalMemory}
           disabled={savingGlobal}
           role="switch"
           aria-checked={settings.globalEnabled}
@@ -199,7 +203,7 @@
               <span>{agent.name}</span>
               <select
                 value={agent.mode}
-                on:change={(event) => changeAgentMemory(agent.id, event)}
+                onchange={(event) => changeAgentMemory(agent.id, event)}
                 disabled={!settings.globalEnabled || savingAgent === agent.id}
               >
                 <option value="Shared">Shared</option>
@@ -230,7 +234,7 @@
         <button
           class="type-chip"
           class:active={typeFilter === t}
-          on:click={() => typeFilter = t}
+          onclick={() => typeFilter = t}
         >{t === 'all' ? 'All' : t}</button>
       {/each}
     </div>
@@ -271,7 +275,7 @@
             </div>
             <button
               class="entry-delete"
-              on:click={() => deleteEntry(entry.id)}
+              onclick={() => deleteEntry(entry.id)}
               disabled={deletingId === entry.id}
               title="Delete this memory"
               aria-label="Delete this memory"

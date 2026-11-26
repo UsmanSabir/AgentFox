@@ -58,14 +58,14 @@
     'cpu':         Cpu
   };
 
-  let pluginItems: { href: string; label: string; icon: typeof IconType }[] = [];
+  let pluginItems: { href: string; label: string; icon: typeof IconType }[] = $state([]);
 
-  $: collapsed = $sidebarCollapsed;
-  let current = page.url.pathname;
+  let collapsed = $derived($sidebarCollapsed);
+  let current = $state(page.url.pathname);
   afterNavigate(() => { current = page.url.pathname; });
 
   // Live build version from the backend; falls back to the label below if unreachable.
-  let version = 'v1.0.0';
+  let version = $state('v1.0.0');
   onMount(async () => {
     try {
       const info = await api.version();
@@ -120,7 +120,7 @@
     <button
       class="collapse-btn"
       class:rotated={collapsed}
-      on:click={toggleCollapsed}
+      onclick={toggleCollapsed}
       aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
       aria-expanded={!collapsed}
       aria-controls="agentfox-sidebar-navigation"
@@ -139,7 +139,7 @@
         class:active={isActive(item.href, current)}
         title={collapsed ? item.label : undefined}
       >
-        <span class="nav-icon"><svelte:component this={item.icon} size={17} /></span>
+        <span class="nav-icon"><item.icon size={17} /></span>
         {#if !collapsed}
           <span class="nav-label">{item.label}</span>
         {/if}

@@ -3,18 +3,18 @@
   import { CalendarClock, Plus, Trash2, RefreshCw, Pencil } from 'lucide-svelte';
   import { api, type CronJobInfo } from '#lib/api.ts';
 
-  let jobs: CronJobInfo[] = [];
-  let loading = true;
-  let error = '';
+  let jobs: CronJobInfo[] = $state([]);
+  let loading = $state(true);
+  let error = $state('');
 
   // Add / edit modal — shared for both create and update.
-  let showForm = false;
-  let formMode: 'add' | 'edit' = 'add';
-  let formName = '';
-  let formCron = '';
-  let formTask = '';
-  let formError = '';
-  let saving = false;
+  let showForm = $state(false);
+  let formMode: 'add' | 'edit' = $state<'add' | 'edit'>('add');
+  let formName = $state('');
+  let formCron = $state('');
+  let formTask = $state('');
+  let formError = $state('');
+  let saving = $state(false);
 
   const PRESETS = [
     { label: 'Every minute',   value: '* * * * *' },
@@ -114,11 +114,11 @@
       <h1>Cron Jobs</h1>
     </div>
     <div class="page-actions">
-      <button class="btn" on:click={load}>
+      <button class="btn" onclick={load}>
         <RefreshCw size={14} />
         Refresh
       </button>
-      <button class="btn btn-primary" on:click={openAdd}>
+      <button class="btn btn-primary" onclick={openAdd}>
         <Plus size={14} />
         Add Job
       </button>
@@ -135,10 +135,10 @@
       class="modal-overlay"
       role="button"
       tabindex="0"
-      on:click={closeForm}
-      on:keydown={(e) => { if (e.key === 'Escape') closeForm(); }}
+      onclick={closeForm}
+      onkeydown={(e) => { if (e.key === 'Escape') closeForm(); }}
     >
-      <div class="modal card" role="dialog" aria-modal="true" tabindex="-1" on:click|stopPropagation on:keydown|stopPropagation>
+      <div class="modal card" role="dialog" aria-modal="true" tabindex="-1" onclick={(event) => event.stopPropagation()} onkeydown={(event) => event.stopPropagation()}>
         <h3 class="form-title">{formMode === 'edit' ? `Edit “${formName}”` : 'New Cron Job'}</h3>
         <div class="form-grid">
           <label>
@@ -160,7 +160,7 @@
         <div class="presets">
           <span class="presets-label">Presets:</span>
           {#each PRESETS as p}
-            <button class="preset-chip" on:click={() => (formCron = p.value)}>{p.label}</button>
+            <button class="preset-chip" onclick={() => (formCron = p.value)}>{p.label}</button>
           {/each}
         </div>
 
@@ -176,8 +176,8 @@
 
         {#if formError}<p class="field-error">{formError}</p>{/if}
         <div class="form-actions">
-          <button class="btn" on:click={closeForm}>Cancel</button>
-          <button class="btn btn-primary" on:click={save} disabled={saving}>
+          <button class="btn" onclick={closeForm}>Cancel</button>
+          <button class="btn btn-primary" onclick={save} disabled={saving}>
             {saving ? 'Saving…' : (formMode === 'edit' ? 'Save Changes' : 'Add Job')}
           </button>
         </div>
@@ -224,14 +224,14 @@
             <div class="job-badges">
               <span class="badge badge-blue">{job.cronExpression}</span>
             </div>
-            <button class="icon-btn" title="View / edit job" on:click={() => openEdit(job)}>
+            <button class="icon-btn" title="View / edit job" onclick={() => openEdit(job)}>
               <Pencil size={14} />
             </button>
-            <button class="icon-btn danger" title="Remove job" on:click={() => remove(job.name)}>
+            <button class="icon-btn danger" title="Remove job" onclick={() => remove(job.name)}>
               <Trash2 size={14} />
             </button>
           </div>
-          <button class="job-task" title="Click to view / edit full instructions" on:click={() => openEdit(job)}>
+          <button class="job-task" title="Click to view / edit full instructions" onclick={() => openEdit(job)}>
             {job.task}
           </button>
           <div class="job-meta">

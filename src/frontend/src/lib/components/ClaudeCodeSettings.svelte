@@ -6,22 +6,22 @@
 
   const dispatch = createEventDispatcher<{ changed: void }>();
 
-  let status: ClaudeCodeStatus | null = null;
-  let loading = true;
-  let busy = '';            // which action is running
-  let error = '';           // last action's error, shown until the next action
-  let notice = '';          // last action's result
+  let status: ClaudeCodeStatus | null = $state<ClaudeCodeStatus | null>(null);
+  let loading = $state(true);
+  let busy = $state('');            // which action is running
+  let error = $state('');           // last action's error, shown until the next action
+  let notice = $state('');          // last action's result
 
   // Sign-in relay
-  let signIn: SignInSnapshot | null = null;
-  let code = '';
+  let signIn: SignInSnapshot | null = $state<SignInSnapshot | null>(null);
+  let code = $state('');
 
   // Paste a token
-  let showPaste = false;
-  let token = '';
+  let showPaste = $state(false);
+  let token = $state('');
 
   // The model (edited locally, saved on change). Which purposes use Claude Code is the AI routing card's.
-  let model = '';
+  let model = $state('');
 
   const STATE_TEXT: Record<string, string> = {
     'ready': 'Ready',
@@ -134,11 +134,11 @@
     return utc ? new Date(utc).toLocaleDateString() : '—';
   }
 
-  $: awaitingCode = signIn?.state === 'AwaitingCode';
-  $: tone = !status ? 'muted'
+  let awaitingCode = $derived(signIn?.state === 'AwaitingCode');
+  let tone = $derived(!status ? 'muted'
     : status.state === 'ready' ? 'ok'
     : status.state === 'expiring-soon' || status.state === 'rate-limited' ? 'warn'
-    : status.state === 'not-signed-in' ? 'muted' : 'bad';
+    : status.state === 'not-signed-in' ? 'muted' : 'bad');
 
   onMount(() => load(true));
   onDestroy(() => {
@@ -155,7 +155,7 @@
     <span class="heading-help">
       <ChannelHelp label="Claude Code" text="Use your own Claude Pro or Max subscription for this agent's AI, through the official Claude Code program. Choose which parts use it under AI routing; everything else keeps the configured AI. Only you should sign in here: the subscription is yours alone and is not for sharing." />
     </span>
-    <button class="btn btn-ghost icon-btn" on:click={() => load(true)} disabled={!!busy} title="Refresh status" aria-label="Refresh Claude Code status">
+    <button class="btn btn-ghost icon-btn" onclick={() => load(true)} disabled={!!busy} title="Refresh status" aria-label="Refresh Claude Code status">
       <RefreshCw size={13} />
     </button>
   </h2>
@@ -203,8 +203,8 @@
           {#if status.lastError}<div><span class="label">Last error</span><span class="bad">{status.lastError}</span></div>{/if}
         </div>
         <div class="actions">
-          <button class="btn btn-primary" on:click={test} disabled={!!busy}>{busy === 'test' ? 'Testing…' : 'Test connection'}</button>
-          <button class="btn btn-ghost" on:click={removeToken} disabled={!!busy}>Remove sign-in</button>
+          <button class="btn btn-primary" onclick={test} disabled={!!busy}>{busy === 'test' ? 'Testing…' : 'Test connection'}</button>
+          <button class="btn btn-ghost" onclick={removeToken} disabled={!!busy}>Remove sign-in</button>
           <ChannelHelp label="testing the connection" text="Test sends Claude one tiny message, so it uses a sliver of your subscription. Refresh only checks the program and the sign-in, and uses none." />
         </div>
       {/if}
@@ -212,11 +212,11 @@
       {#if !awaitingCode}
         <div class="actions">
           {#if status.signInSupported}
-            <button class="btn" class:btn-primary={!status.signedIn} class:btn-ghost={status.signedIn} on:click={startSignIn} disabled={!!busy}>
+            <button class="btn" class:btn-primary={!status.signedIn} class:btn-ghost={status.signedIn} onclick={startSignIn} disabled={!!busy}>
               {busy === 'signin' ? 'Starting…' : status.signedIn ? 'Sign in again' : 'Sign in with Claude'}
             </button>
           {/if}
-          <button class="btn btn-ghost" on:click={() => (showPaste = !showPaste)} disabled={!!busy}>
+          <button class="btn btn-ghost" onclick={() => (showPaste = !showPaste)} disabled={!!busy}>
             {showPaste ? 'Hide token' : status.signInSupported ? 'Paste a token instead' : status.signedIn ? 'Replace token' : 'Paste a token'}
           </button>
           <ChannelHelp label="signing in" text={status.signInSupported
@@ -232,8 +232,8 @@
           </a>
           <div class="row">
             <input class="input" type="password" bind:value={code} placeholder="Code from Claude" autocomplete="off" aria-label="Code from Claude" />
-            <button class="btn btn-primary" on:click={submitCode} disabled={!code.trim() || !!busy}>{busy === 'code' ? 'Finishing…' : 'Finish sign-in'}</button>
-            <button class="btn btn-ghost" on:click={cancelSignIn} disabled={busy === 'code'}>Cancel</button>
+            <button class="btn btn-primary" onclick={submitCode} disabled={!code.trim() || !!busy}>{busy === 'code' ? 'Finishing…' : 'Finish sign-in'}</button>
+            <button class="btn btn-ghost" onclick={cancelSignIn} disabled={busy === 'code'}>Cancel</button>
           </div>
         </div>
       {/if}
@@ -241,7 +241,7 @@
       {#if showPaste && !awaitingCode}
         <div class="row">
           <input class="input" type="password" bind:value={token} placeholder="sk-ant-oat01-…" autocomplete="off" aria-label="Claude Code token" />
-          <button class="btn btn-primary" on:click={savePastedToken} disabled={!token.trim() || !!busy}>{busy === 'token' ? 'Checking…' : 'Save'}</button>
+          <button class="btn btn-primary" onclick={savePastedToken} disabled={!token.trim() || !!busy}>{busy === 'token' ? 'Checking…' : 'Save'}</button>
         </div>
       {/if}
 
@@ -250,7 +250,7 @@
         <div class="choices">
           <label class="choice">
             <span class="label">Model</span>
-            <select class="input select" bind:value={model} on:change={saveChoices} disabled={!!busy}>
+            <select class="input select" bind:value={model} onchange={saveChoices} disabled={!!busy}>
               {#each status.models as m}<option value={m}>{m}</option>{/each}
             </select>
             <ChannelHelp label="the model" text="Sonnet suits most work; Opus is stronger and uses more of your subscription; Haiku is fastest and lightest. Not every subscription offers every model: if one is refused, the last error says so." />

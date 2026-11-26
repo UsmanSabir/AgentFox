@@ -3,21 +3,20 @@
   import { api, type PluginSessionSummary, type PluginSessionStats, type PluginConfigResponse } from '#lib/api.ts';
   import { RefreshCw, Activity, Settings, Clock, CheckCircle, AlertCircle, Zap } from 'lucide-svelte';
 
-  let loading = true;
-  let error: string | null = null;
-  let activeTab: 'sessions' | 'config' = 'sessions';
+  let loading = $state(true);
+  let error: string | null = $state<string | null>(null);
+  let activeTab: 'sessions' | 'config' = $state<'sessions' | 'config'>('sessions');
+  let sessions: PluginSessionSummary[] = $state([]);
+  let stats: Record<string, PluginSessionStats> = $state({});
+  let configs: PluginConfigResponse[] = $state([]);
 
-  let sessions: PluginSessionSummary[] = [];
-  let stats: Record<string, PluginSessionStats> = {};
-  let configs: PluginConfigResponse[] = [];
+  let selectedSession: PluginSessionSummary | null = $state<PluginSessionSummary | null>(null);
+  let sessionDetail: any = $state(null);
+  let loadingDetail = $state(false);
 
-  let selectedSession: PluginSessionSummary | null = null;
-  let sessionDetail: any = null;
-  let loadingDetail = false;
-
-  let editingConfig: PluginConfigResponse | null = null;
-  let configJson = '';
-  let formValues: Record<string, unknown> = {};
+  let editingConfig: PluginConfigResponse | null = $state<PluginConfigResponse | null>(null);
+  let configJson = $state('');
+  let formValues: Record<string, unknown> = $state({});
 
   async function loadSessions() {
     try {
@@ -100,11 +99,11 @@
 
   onMount(load);
 
-  $: groupedSessions = sessions.reduce((acc, session) => {
+  let groupedSessions = $derived(sessions.reduce((acc, session) => {
     if (!acc[session.pluginName]) acc[session.pluginName] = [];
     acc[session.pluginName].push(session);
     return acc;
-  }, {} as Record<string, PluginSessionSummary[]>);
+  }, {} as Record<string, PluginSessionSummary[]>));
 </script>
 
 <div class="page-wrap fade-in">
@@ -115,7 +114,7 @@
         Monitor plugin execution, audit tool invocations, and manage configurations
       </p>
     </div>
-    <button class="btn btn-ghost" on:click={load} disabled={loading}>
+    <button class="btn btn-ghost" onclick={load} disabled={loading}>
       <RefreshCw size={14} />
       Refresh
     </button>
@@ -130,7 +129,7 @@
     <button
       class="tab"
       class:active={activeTab === 'sessions'}
-      on:click={() => activeTab = 'sessions'}
+      onclick={() => activeTab = 'sessions'}
     >
       <Activity size={14} />
       Sessions & Audit
@@ -138,7 +137,7 @@
     <button
       class="tab"
       class:active={activeTab === 'config'}
-      on:click={() => activeTab = 'config'}
+      onclick={() => activeTab = 'config'}
     >
       <Settings size={14} />
       Configuration
@@ -193,7 +192,7 @@
                 <button
                   class="session-card"
                   class:active={selectedSession?.sessionId === session.sessionId && selectedSession?.pluginName === session.pluginName}
-                  on:click={() => loadSessionDetail(session)}
+                  onclick={() => loadSessionDetail(session)}
                   disabled={loadingDetail}
                 >
                   <div class="session-info">
@@ -229,7 +228,7 @@
               <div class="detail-title">{selectedSession.pluginName} → {selectedSession.sessionId}</div>
               <div class="detail-subtitle">Execution Audit Trail</div>
             </div>
-            <button class="btn btn-ghost" on:click={() => selectedSession = null}>Close</button>
+            <button class="btn btn-ghost" onclick={() => selectedSession = null}>Close</button>
           </div>
 
           <div class="executions-table">
@@ -285,8 +284,8 @@
             <div class="editor-subtitle">Last updated: {formatDate(editingConfig.lastUpdatedAt)}</div>
           </div>
           <div class="editor-actions">
-            <button class="btn btn-ghost" on:click={() => editingConfig = null}>Cancel</button>
-            <button class="btn btn-primary" on:click={saveConfig}>Save</button>
+            <button class="btn btn-ghost" onclick={() => editingConfig = null}>Cancel</button>
+            <button class="btn btn-primary" onclick={saveConfig}>Save</button>
           </div>
         </div>
 
@@ -308,13 +307,13 @@
                     type="checkbox"
                     checked={Boolean(formValues[field.key])}
                     disabled={!field.runtimeEditable}
-                    on:change={(event) => setField(field.key, (event.currentTarget as HTMLInputElement).checked)}
+                    onchange={(event) => setField(field.key, (event.currentTarget as HTMLInputElement).checked)}
                   />
                 {:else if field.type === 'select'}
                   <select
                     value={String(formValues[field.key] ?? '')}
                     disabled={!field.runtimeEditable}
-                    on:change={(event) => setField(field.key, (event.currentTarget as HTMLSelectElement).value)}
+                    onchange={(event) => setField(field.key, (event.currentTarget as HTMLSelectElement).value)}
                   >
                     {#each field.options as option}<option value={option}>{option}</option>{/each}
                   </select>
@@ -323,7 +322,7 @@
                     type={field.type === 'number' ? 'number' : field.sensitive ? 'password' : 'text'}
                     value={String(formValues[field.key] ?? '')}
                     disabled={!field.runtimeEditable}
-                    on:input={(event) => setField(field.key, field.type === 'number'
+                    oninput={(event) => setField(field.key, field.type === 'number'
                       ? Number((event.currentTarget as HTMLInputElement).value)
                       : (event.currentTarget as HTMLInputElement).value)}
                   />
@@ -357,7 +356,7 @@
             </div>
             <div class="config-footer">
               <span class="config-date">Updated: {formatDate(config.lastUpdatedAt)}</span>
-              <button class="btn btn-sm" on:click={() => editConfig(config)}>Edit</button>
+              <button class="btn btn-sm" onclick={() => editConfig(config)}>Edit</button>
             </div>
           </div>
         {/each}

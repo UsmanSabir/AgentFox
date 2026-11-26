@@ -7,11 +7,10 @@
   import { goto } from '$app/navigation';
   import type { AgentInfo, SpecialistAgentInfo, CommandQueueStatus } from '#lib/api.ts';
 
-  let loading = true;
-  let error: string | null = null;
-  let specialists: SpecialistAgentInfo[] = [];
-  let queues: CommandQueueStatus | null = null;
-
+  let loading = $state(true);
+  let error: string | null = $state<string | null>(null);
+  let specialists: SpecialistAgentInfo[] = $state([]);
+  let queues: CommandQueueStatus | null = $state<CommandQueueStatus | null>(null);
   async function load() {
     loading = true;
     error = null;
@@ -36,9 +35,9 @@
     goto('/chat');
   }
 
-  $: agentList = $agents;
-  $: main  = agentList.find(a => a.role === 'main');
-  $: subs  = agentList.filter(a => a.role === 'sub');
+  let agentList = $derived($agents);
+  let main  = $derived(agentList.find(a => a.role === 'main'));
+  let subs  = $derived(agentList.filter(a => a.role === 'sub'));
 </script>
 
 <div class="page-wrap fade-in">
@@ -47,7 +46,7 @@
       <h1 class="page-title">Agents</h1>
       <p class="page-sub">Active agent hierarchy — main agent and spawned sub-agents</p>
     </div>
-    <button class="btn btn-ghost" on:click={load} disabled={loading}>
+    <button class="btn btn-ghost" onclick={load} disabled={loading}>
       <RefreshCw size={14} class={loading ? 'spin-icon' : ''} />
       Refresh
     </button>
@@ -123,7 +122,7 @@
               </div>
               <div class="specialist-meta">Routes: {specialist.channelTypes.join(', ') || 'main-agent delegation only'} · concurrency {specialist.maxConcurrentTurns}</div>
               {#if specialist.lastError}<div class="specialist-error">{specialist.lastError}</div>{/if}
-              <button class="btn btn-sm specialist-chat" on:click={() => chatWith(specialist.id)} disabled={!specialist.isActive}>
+              <button class="btn btn-sm specialist-chat" onclick={() => chatWith(specialist.id)} disabled={!specialist.isActive}>
                 <MessageSquare size={13} /> Chat
               </button>
             </div>
