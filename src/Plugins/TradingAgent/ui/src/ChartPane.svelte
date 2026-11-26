@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy, tick, createEventDispatcher } from 'svelte';
+  import { onMount, onDestroy, tick, createEventDispatcher, untrack } from 'svelte';
   import {
     createChart,
     CandlestickSeries,
@@ -39,42 +39,22 @@
   import { ZonePrimitive } from './chartZonePrimitive';
   import { AnnotationLayer, type LayerMarker, type LayerSeries } from './chartAnnotationLayer';
 
-  export let symbol: string | null = null;
-  export let companyName: string | null = null;
 
   /** Raised when the user clicks a level to arm an order at it; the dashboard opens the dialog. */
   const dispatch = createEventDispatcher<{ arm: ArmOrderDialogContext; priceAlert: { symbol: string; target?: number; direction?: 'above' | 'below' } }>();
 
-  /** Full-width mode: the chart takes the row and the watchlist stacks beneath it. Bound by the parent. */
-  export let expanded = false;
-  /** Dockview owns panel sizing on desktop, so the legacy full-width toggle is hidden there. */
-  export let allowExpand = true;
+  
+  
 
-  /**
-   * Incremented by the dashboard on its own timer. The parent owns the clock so there is ONE interval
-   * for the page rather than one per component, and so the market-open flag driving it stays fresh.
-   */
-  export let refreshTick = 0;
+  
 
-  /** Archive progress from the dashboard's existing poll — no second status request from this pane. */
-  export let archive: CandleArchiveStatus | null = null;
+  
 
-  /** Advances whenever that poll returns, allowing a chart to grow while a backfill is running. */
-  export let historyRefreshTick = 0;
+  
 
-  /** Whether the market is currently open — a closed market has nothing new to fetch. */
-  export let marketOpen = false;
+  
 
   const livePrices = useLivePrices();
-  let livePriceStore = livePrices.quote(symbol);
-  $: livePriceStore = livePrices.quote(symbol);
-  $: livePriceView = $livePriceStore;
-  $: displayedPrice = livePriceView.quote?.current ?? data?.snapshot.close ?? null;
-  $: displayedChange = livePriceView.quote?.changePercent ?? data?.snapshot.dayChangePercent ?? null;
-  // Session extremes come from the same quote as the headline price, regardless of chart interval.
-  // A historical or intraday candle's range would answer a different question; absent quotes stay unknown.
-  $: dayHigh = livePriceView.quote?.high ?? null;
-  $: dayLow = livePriceView.quote?.low ?? null;
 
   /**
    * How much level detail to draw. Six labelled price lines plus the axis chips is more than a small
@@ -84,26 +64,59 @@
    */
   // Clean price action is the default: every horizontal line, an edition's own levels included, is
   // one click away and the levels are always listed below, but none covers the candles on first render.
-  let levelMode: 'all' | 'key' | 'off' = 'off';
-
-  /**
+  let levelMode: 'all' | 'key' | 'off' = $state<'all' | 'key' | 'off'>('off');
+  interface Props {
+    symbol?: string | null;
+    companyName?: string | null;
+    /** Full-width mode: the chart takes the row and the watchlist stacks beneath it. Bound by the parent. */
+    expanded?: boolean;
+    /** Dockview owns panel sizing on desktop, so the legacy full-width toggle is hidden there. */
+    allowExpand?: boolean;
+    /**
+   * Incremented by the dashboard on its own timer. The parent owns the clock so there is ONE interval
+   * for the page rather than one per component, and so the market-open flag driving it stays fresh.
+   */
+    refreshTick?: number;
+    /** Archive progress from the dashboard's existing poll — no second status request from this pane. */
+    archive?: CandleArchiveStatus | null;
+    /** Advances whenever that poll returns, allowing a chart to grow while a backfill is running. */
+    historyRefreshTick?: number;
+    /** Whether the market is currently open — a closed market has nothing new to fetch. */
+    marketOpen?: boolean;
+    /**
    * An optional per-symbol detail from whoever is hosting this dashboard, rendered under the plot.
    * See `symbolExtensions.ts` for the contract; null in a community build, which then renders
    * nothing at all here.
    */
-  export let quoteDetail: SymbolExtensionComponent | null = null;
-  export let instrumentLinks: SymbolExtensionComponent | null = null;
+    quoteDetail?: SymbolExtensionComponent | null;
+    instrumentLinks?: SymbolExtensionComponent | null;
+  }
+
+  let {
+    symbol = null,
+    companyName = null,
+    expanded = $bindable(false),
+    allowExpand = true,
+    refreshTick = 0,
+    archive = null,
+    historyRefreshTick = 0,
+    marketOpen = false,
+    quoteDetail = null,
+    instrumentLinks = null
+  }: Props = $props();
+  // After the props: a legacy `export let` was hoisted, `$props()` is not.
+  let livePriceStore = $derived(livePrices.quote(symbol));
 
   /** RSI in its own pane costs ~90px of candles; worth reclaiming when the pane is small. */
-  let showRsi = true;
-  let showVolume = true;
+  let showRsi = $state(true);
+  let showVolume = $state(true);
 
   const LEVEL_MODES = ['all', 'key', 'off'] as const;
 
   /** On-demand verdict for the charted symbol. Cleared when the symbol or interval changes. */
-  let assessment: StockAssessment | null = null;
-  let assessing = false;
-  let assessmentError: string | null = null;
+  let assessment: StockAssessment | null = $state<StockAssessment | null>(null);
+  let assessing = $state(false);
+  let assessmentError: string | null = $state<string | null>(null);
   let assessmentGeneration = 0;
 
   /**
@@ -225,37 +238,16 @@
     }
   }
 
-  let interval: ChartInterval = '1D';
-  let data: ChartData | null = null;
-  let loading = false;
-  let chartError: string | null = null;
+  let interval: ChartInterval = $state('1D');
+  let data: ChartData | null = $state<ChartData | null>(null);
+  let loading = $state(false);
+  let chartError: string | null = $state<string | null>(null);
   let loadGeneration = 0;
-  let historyGap: CandleArchiveStatus['symbolsShortOfWeekly'][number] | null = null;
-  let historyCheckedSessions = 0;
-  let historyPercent = 0;
 
-  $: historyGap = symbol
-    ? archive?.symbolsShortOfWeekly.find(gap => gap.symbol === symbol) ?? null
-    : null;
-  $: historyCheckedSessions = historyGap && archive
-    ? Math.max(0, archive.targetTradingDays - historyGap.missingSessions)
-    : 0;
-  $: historyPercent = archive?.targetTradingDays
-    ? Math.min(100, Math.round(historyCheckedSessions / archive.targetTradingDays * 100))
-    : 0;
-  /**
-   * A ticker that listed last week is not waiting for a download — the sessions it is short of have
-   * not happened yet. It gets a plain statement of that instead of a progress bar, which in this
-   * state would tick along toward a completeness the symbol can never reach and read as stuck.
-   */
-  $: newListing = historyGap?.noEarlierHistory ?? false;
-  $: sessionsUntilWeekly = historyGap && archive?.dailyBarsForWeekly
-    ? Math.max(0, archive.dailyBarsForWeekly - historyGap.archivedBars)
-    : 0;
 
   /** Starts the targeted backfill from here, so a chart sitting on a stalled history is not a dead end. */
-  let fetchingHistory = false;
-  let fetchNotice: string | null = null;
+  let fetchingHistory = $state(false);
+  let fetchNotice: string | null = $state<string | null>(null);
   async function fetchHistory() {
     if (!symbol || fetchingHistory) return;
     fetchingHistory = true;
@@ -272,8 +264,8 @@
     }
   }
 
-  let container: HTMLDivElement | null = null;
-  let chart: IChartApi | null = null;
+  let container: HTMLDivElement | null = $state<HTMLDivElement | null>(null);
+  let chart: IChartApi | null = $state<IChartApi | null>(null);
   let candleSeries: ISeriesApi<'Candlestick'> | null = null;
   let volumeSeries: ISeriesApi<'Histogram'> | null = null;
   let sma20Series: ISeriesApi<'Line'> | null = null;
@@ -293,11 +285,11 @@
   // time, and the card showing them while the pointer is on such a bar. Markers on a canvas cannot
   // be hovered themselves, so the card follows the crosshair's BAR rather than the marker's pixels.
   let markerDetails = new Map<number, MarkerDetailLine[]>();
-  let detailCard: { left: number; top: number; lines: MarkerDetailLine[] } | null = null;
+  let detailCard: { left: number; top: number; lines: MarkerDetailLine[] } | null = $state<{ left: number; top: number; lines: MarkerDetailLine[] } | null>(null);
   // The RSI pane's value readout. The crosshair's axis label reports where the POINTER is, not the
   // line's value at that bar, so without this the pane had no number to read on hover. Follows the
   // hovered bar, and the latest value otherwise; null while the pane is hidden or has no RSI yet.
-  let rsiReadout: { top: number; value: number | null } | null = null;
+  let rsiReadout: { top: number; value: number | null } | null = $state<{ top: number; value: number | null } | null>(null);
   let rsiLatest: number | null = null;
   // While the pointer is in the RSI pane the value moves beside the line at the hovered bar (the
   // library's crosshair marker is the dot on the line), and the corner readout steps aside for it.
@@ -529,14 +521,7 @@
     }
   }
 
-  $: applyLiveQuote(livePriceView.quote);
 
-  // ── Client-side annotations ─────────────────────────────────────────────
-  // What a sibling component wrote to chartAnnotations.ts for THIS symbol. Always drawn (the Levels
-  // toggle does not hide it), never part of autoscale, redrawn here on every store change without
-  // touching the candles. Presentation only: nothing drawn from it is an execution input.
-  $: annotationSets = annotationsForSymbol($chartAnnotationOwners, symbol);
-  $: annotationSets, redrawAnnotations();
 
   /**
    * Redraws every annotation: idempotent, so it removes what the last call attached before attaching
@@ -1001,15 +986,7 @@
 
   // Reload whenever the watchlist selection changes. Guarded on `symbol` so the initial null does not
   // fire a request.
-  let lastLoaded: string | null = null;
-  $: if (symbol && symbol !== lastLoaded) {
-    lastLoaded = symbol;
-    // The backfill notice is about the symbol it was raised for; carrying it to the next one would
-    // report a fetch that was never started for it.
-    fetchNotice = null;
-    load();
-  }
-
+  let lastLoaded: string | null = $state<string | null>(null);
   /**
    * Follow the market while it is open.
    *
@@ -1017,13 +994,7 @@
    * costs a portal round-trip), while a load is already in flight, and while the market is closed —
    * settled candles do not change, so polling them is pure waste.
    */
-  let lastTick = 0;
-  $: if (refreshTick !== lastTick) {
-    lastTick = refreshTick;
-    if (symbol && marketOpen && !loading && typeof document !== 'undefined' && !document.hidden) {
-      load(true);
-    }
-  }
+  let lastTick = $state(0);
 
   /**
    * Grow a newly-added symbol in place as its archive fills. The dashboard already polls progress
@@ -1031,24 +1002,11 @@
    * download cannot turn into a chart-request storm. One final refresh runs when the pass ends.
    */
   const HISTORY_REFRESH_MS = 12_000;
-  let lastHistoryTick = historyRefreshTick;
-  let lastHistoryReloadAt = 0;
-  let historyWasRunning = false;
-  $: if (historyRefreshTick !== lastHistoryTick) {
-    lastHistoryTick = historyRefreshTick;
-    const runningForSymbol = Boolean(symbol && historyGap && archive?.progress.isRunning);
-    const justFinished = historyWasRunning && !runningForSymbol;
-    historyWasRunning = runningForSymbol;
-    const visible = typeof document === 'undefined' || !document.hidden;
-    const refreshDue = Date.now() - lastHistoryReloadAt >= HISTORY_REFRESH_MS;
-    if (symbol && !loading && visible && (justFinished || (runningForSymbol && refreshDue))) {
-      load(true);
-    }
-  }
+  // svelte-ignore state_referenced_locally -- the starting tick, so the first render is not taken as a new one
+  let lastHistoryTick = $state(historyRefreshTick);
+  let lastHistoryReloadAt = $state(0);
+  let historyWasRunning = $state(false);
 
-  // The container only exists once a symbol is selected, so rendering waits for the element rather
-  // than the fetch.
-  $: if (container && data && !chart) render(data);
 
   onMount(() => {
     // Most of the plugin follows CSS variables automatically. The canvas resolves those variables to
@@ -1070,6 +1028,92 @@
 
   const pct = (value: number | null | undefined) =>
     value == null ? '—' : `${value > 0 ? '+' : ''}${value}%`;
+  let livePriceView = $derived($livePriceStore);
+  let displayedPrice = $derived(livePriceView.quote?.current ?? data?.snapshot.close ?? null);
+  let displayedChange = $derived(livePriceView.quote?.changePercent ?? data?.snapshot.dayChangePercent ?? null);
+  // Session extremes come from the same quote as the headline price, regardless of chart interval.
+  // A historical or intraday candle's range would answer a different question; absent quotes stay unknown.
+  let dayHigh = $derived(livePriceView.quote?.high ?? null);
+  let dayLow = $derived(livePriceView.quote?.low ?? null);
+  let historyGap: CandleArchiveStatus['symbolsShortOfWeekly'][number] | null = $derived(symbol
+    ? archive?.symbolsShortOfWeekly.find(gap => gap.symbol === symbol) ?? null
+    : null);
+  let historyCheckedSessions = $derived(historyGap && archive
+    ? Math.max(0, archive.targetTradingDays - historyGap.missingSessions)
+    : 0);
+  let historyPercent = $derived(archive?.targetTradingDays
+    ? Math.min(100, Math.round(historyCheckedSessions / archive.targetTradingDays * 100))
+    : 0);
+  /**
+   * A ticker that listed last week is not waiting for a download — the sessions it is short of have
+   * not happened yet. It gets a plain statement of that instead of a progress bar, which in this
+   * state would tick along toward a completeness the symbol can never reach and read as stuck.
+   */
+  let newListing = $derived(historyGap?.noEarlierHistory ?? false);
+  let sessionsUntilWeekly = $derived(historyGap && archive?.dailyBarsForWeekly
+    ? Math.max(0, archive.dailyBarsForWeekly - historyGap.archivedBars)
+    : 0);
+  $effect.pre(() => {
+    // Reads only what the old `$:` named; the work is untracked so its own bookkeeping cannot re-trigger it.
+    const quote = livePriceView.quote;
+    untrack(() => applyLiveQuote(quote));
+  });
+  // ── Client-side annotations ─────────────────────────────────────────────
+  // What a sibling component wrote to chartAnnotations.ts for THIS symbol. Always drawn (the Levels
+  // toggle does not hide it), never part of autoscale, redrawn here on every store change without
+  // touching the candles. Presentation only: nothing drawn from it is an execution input.
+  let annotationSets = $derived(annotationsForSymbol($chartAnnotationOwners, symbol));
+  $effect.pre(() => {
+    // Reads only what the old `$:` named; the work is untracked so its own bookkeeping cannot re-trigger it.
+    void annotationSets;
+    untrack(() => redrawAnnotations());
+  });
+  $effect.pre(() => {
+    // Reads only what the old `$:` named; the work is untracked so its own bookkeeping cannot re-trigger it.
+    const s = symbol, seen = lastLoaded;
+    if (!s || s === seen) return;
+    untrack(() => {
+      lastLoaded = s;
+      // The backfill notice is about the symbol it was raised for; carrying it to the next one would
+      // report a fetch that was never started for it.
+      fetchNotice = null;
+      load();
+    });
+  });
+  $effect.pre(() => {
+    // Reads only what the old `$:` named; the work is untracked so its own bookkeeping cannot re-trigger it.
+    const tickNow = refreshTick, seen = lastTick, s = symbol, open = marketOpen, busy = loading;
+    untrack(() => {
+      if (tickNow !== seen) {
+        lastTick = tickNow;
+        if (s && open && !busy && typeof document !== 'undefined' && !document.hidden) load(true);
+      }
+    });
+  });
+  $effect.pre(() => {
+    // Acts only when the history clock ticks; everything it then reads is untracked, as in the old `$:`, which
+    // re-ran on those reads but did nothing unless the tick had moved.
+    const tickNow = historyRefreshTick, seen = lastHistoryTick;
+    if (tickNow === seen) return;
+    untrack(() => {
+      lastHistoryTick = tickNow;
+      const runningForSymbol = Boolean(symbol && historyGap && archive?.progress.isRunning);
+      const justFinished = historyWasRunning && !runningForSymbol;
+      historyWasRunning = runningForSymbol;
+      const visible = typeof document === 'undefined' || !document.hidden;
+      const refreshDue = Date.now() - lastHistoryReloadAt >= HISTORY_REFRESH_MS;
+      if (symbol && !loading && visible && (justFinished || (runningForSymbol && refreshDue))) {
+        load(true);
+      }
+    });
+  });
+  // The container only exists once a symbol is selected, so rendering waits for the element rather
+  // than the fetch.
+  $effect.pre(() => {
+    // Reads only what the old `$:` named; the work is untracked so its own bookkeeping cannot re-trigger it.
+    const host = container, d = data, existing = chart;
+    untrack(() => { if (host && d && !existing) render(d); });
+  });
 </script>
 
 <section class="chart-card">
@@ -1087,7 +1131,7 @@
                aria-label={`${symbol} on PSX (opens in a new tab)`}>
               PSX <ExternalLink size={12} aria-hidden="true" />
             </a>
-            {#if instrumentLinks}<svelte:component this={instrumentLinks} {symbol} />{/if}
+            {#if instrumentLinks}{@const SvelteComponent = instrumentLinks}<SvelteComponent {symbol} />{/if}
           {/if}
         </div>
         {#if data}
@@ -1119,7 +1163,7 @@
       {/if}
       <div class="intervals">
         {#each CHART_INTERVALS as option}
-          <button class:active={interval === option} on:click={() => pick(option)} disabled={loading || !symbol}>
+          <button class:active={interval === option} onclick={() => pick(option)} disabled={loading || !symbol}>
             {option}
           </button>
         {/each}
@@ -1130,17 +1174,17 @@
       <div class="view-controls">
         <button
           class:muted={levelMode === 'off'}
-          on:click={cycleLevels}
+          onclick={cycleLevels}
           disabled={!symbol}
           title={levelMode === 'all' ? 'Showing the nearest 3 levels each side — click for weekly-confirmed only'
                : levelMode === 'key' ? 'Showing weekly-confirmed levels only — click to hide all lines'
                : 'Level lines hidden — click to show all'}
         >Levels: {levelMode}</button>
-        <button class:muted={!showRsi} on:click={toggleRsi} disabled={!symbol}
+        <button class:muted={!showRsi} onclick={toggleRsi} disabled={!symbol}
           title={showRsi ? 'Hide the RSI pane and give the height back to the candles' : 'Show the RSI pane'}>
           <Activity size={11} /> RSI
         </button>
-        <button class:muted={!showVolume} on:click={toggleVolume} disabled={!symbol}
+        <button class:muted={!showVolume} onclick={toggleVolume} disabled={!symbol}
           title={showVolume ? 'Hide volume bars for a cleaner price chart' : 'Show volume bars'}>
           <BarChart3 size={11} /> Volume
         </button>
@@ -1149,19 +1193,19 @@
       <button
         class="btn btn-ghost assess-btn"
         title="Ask the model how much confidence the evidence supports (one model call)"
-        on:click={assess}
+        onclick={assess}
         disabled={assessing || loading || !symbol}
       ><Brain size={13} /> {assessing ? 'Assessing…' : 'Assess'}</button>
       <button class="icon" title="Set price alert" aria-label="Set price alert" disabled={!symbol}
-        on:click={() => { if (symbol) dispatch('priceAlert', { symbol }); }}><Bell size={15}/></button>
-      <button class="icon" title="Refresh" on:click={() => load()} disabled={loading || !symbol}>
+        onclick={() => { if (symbol) dispatch('priceAlert', { symbol }); }}><Bell size={15}/></button>
+      <button class="icon" title="Refresh" onclick={() => load()} disabled={loading || !symbol}>
         <RefreshCw size={13} />
       </button>
       {#if allowExpand}
         <button
           class="icon"
           title={expanded ? 'Collapse — put the watchlist back beside the chart' : 'Expand — full width, taller, watchlist moves below'}
-          on:click={toggleExpand}
+          onclick={toggleExpand}
           disabled={!symbol}
         >
           {#if expanded}<Minimize2 size={13} />{:else}<Maximize2 size={13} />{/if}
@@ -1220,7 +1264,7 @@
           {#if !archive.progress.isRunning}
             <!-- The bar stops moving when no pass is running, which is indistinguishable from stuck.
                  Offer the thing that would move it rather than leaving it to be watched. -->
-            <button class="fetch" type="button" on:click={fetchHistory} disabled={fetchingHistory}>
+            <button class="fetch" type="button" onclick={fetchHistory} disabled={fetchingHistory}>
               <Download size={12} aria-hidden="true" /> Fetch history
             </button>
           {/if}
@@ -1260,7 +1304,7 @@
       {:else}
         {chartError}
       {/if}
-      <button class="retry" on:click={() => load()}>Retry</button>
+      <button class="retry" onclick={() => load()}>Retry</button>
     </p>
   {:else}
     <div class="plot-frame">
@@ -1291,7 +1335,8 @@
   <!-- Keep live quote detail with the plot so a bounded workspace can reserve its actual height
        before sizing the canvas. Supporting metrics remain below this first viewport. -->
   {#if data && quoteDetail && symbol}
-    <div class="quote-detail"><svelte:component this={quoteDetail} {symbol} /></div>
+    {@const SvelteComponent_1 = quoteDetail}
+    <div class="quote-detail"><SvelteComponent_1 {symbol} /></div>
   {/if}
   </div>
 
@@ -1299,12 +1344,12 @@
       <div class="readout">
         {#if chartError}
           <p class="inline-error">Chart refresh failed; showing the last successful data. {chartError}
-            <button class="retry" on:click={() => load(true)}>Retry</button>
+            <button class="retry" onclick={() => load(true)}>Retry</button>
           </p>
         {/if}
         {#if assessmentError}
           <p class="inline-error">Assessment failed: {assessmentError}
-            <button class="retry" on:click={assess}>Retry</button>
+            <button class="retry" onclick={assess}>Retry</button>
           </p>
         {/if}
         {#if assessment}
@@ -1341,7 +1386,7 @@
             {/if}
             <button
               class="arm-plan"
-              on:click={armPlan}
+              onclick={armPlan}
               title="Arm the entry{data.plan.stop != null ? `, stop at ${data.plan.stop}` : ''}{data.plan.target != null
                 ? `, and take-profit at ${data.plan.target}`
                 : ''}"
@@ -1360,7 +1405,7 @@
           {#each [2, 3, 5, 10] as percent}
             <button
               class="drop-btn"
-              on:click={() => armPercentDrop(percent)}
+              onclick={() => armPercentDrop(percent)}
               title="Arm a trailing SELL that fires if {symbol} falls {percent}% from its highest point — at market, so it fills"
             >
               −{percent}%
@@ -1379,13 +1424,13 @@
               <button
                 class="level armable"
                 title="Arm a SELL when price rises to resistance at {level.price}"
-                on:click={() => armAtLevel(level, 'resistance')}
+                onclick={() => armAtLevel(level, 'resistance')}
               >
                 <span class="action sell">SELL</span> {level.price}
                 <em>{pct(level.distancePercent)} · ×{level.touches}{level.weeklyConfirmed ? ' · weekly ✓' : ''}</em>
               </button>
               <button class="level-alert" aria-label={`Set alert at ${level.price}`} title={`Set alert at ${level.price}`}
-                on:click={() => { if (symbol) dispatch('priceAlert', { symbol, target: level.price, direction: 'above' }); }}><Bell size={13}/></button>
+                onclick={() => { if (symbol) dispatch('priceAlert', { symbol, target: level.price, direction: 'above' }); }}><Bell size={13}/></button>
               </div>
             {:else}<span class="level muted">none above price</span>{/each}
           </div>
@@ -1396,13 +1441,13 @@
               <button
                 class="level armable"
                 title="Arm a BUY when price falls to support at {level.price}"
-                on:click={() => armAtLevel(level, 'support')}
+                onclick={() => armAtLevel(level, 'support')}
               >
                 <span class="action buy">BUY</span> {level.price}
                 <em>−{level.distancePercent ?? '—'}% · ×{level.touches}{level.weeklyConfirmed ? ' · weekly ✓' : ''}</em>
               </button>
               <button class="level-alert" aria-label={`Set alert at ${level.price}`} title={`Set alert at ${level.price}`}
-                on:click={() => { if (symbol) dispatch('priceAlert', { symbol, target: level.price, direction: 'below' }); }}><Bell size={13}/></button>
+                onclick={() => { if (symbol) dispatch('priceAlert', { symbol, target: level.price, direction: 'below' }); }}><Bell size={13}/></button>
               </div>
             {:else}<span class="level muted">none below price</span>{/each}
           </div>
