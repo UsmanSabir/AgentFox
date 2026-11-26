@@ -1,9 +1,9 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { Check, Filter, Plus, Trash2, X } from 'lucide-svelte';
+  import { Check, Filter, Plus, Search, Trash2, X } from 'lucide-svelte';
   import type { WatchlistEntry } from './api';
   import {
-    addWatchlistList, changeWatchlistMembership, listNameLimit, readWatchlistLists, watchlistListsKey,
+    addWatchlistList, changeWatchlistMembership, listNameLimit, matchingFilters, readWatchlistLists, watchlistListsKey,
     watchlistSectors, writeWatchlistLists, type WatchlistFilter, type WatchlistList
   } from './watchlistLists';
 
@@ -27,8 +27,16 @@
   let newName = '';
   let showName = false;
   let saving = false;
+  // The search box appears only when the menu is long enough to scroll; the query lives while the menu is open.
+  let searchable = false;
+  let query = '';
+  let searchRow: HTMLDivElement | undefined;
+  let searchInput: HTMLInputElement | undefined;
 
   $: sectors = watchlistSectors(entries);
+  $: shownSectors = matchingFilters(sectors, query);
+  $: shownGroups = matchingFilters(customGroups, query);
+  $: searching = query.trim() !== '';
   $: watched = new Set(entries.map(entry => entry.symbol));
   $: customGroups = lists.map(({ name, symbols }): WatchlistFilter => ({
     kind: 'list', name, symbols: new Set(symbols.filter(symbol => watched.has(symbol)))
@@ -76,15 +84,38 @@
     trigger.focus();
   }
 
-  function openMenu() {
+  async function openMenu() {
     menuError = '';
+    query = '';
     loadLists();
     const { left, bottom } = trigger.getBoundingClientRect();
     menu.style.setProperty('--filter-left', Math.max(8, Math.min(left, window.innerWidth - 248)) + 'px');
     menu.style.setProperty('--filter-top', Math.max(8, Math.min(bottom + 6, window.innerHeight - 164)) + 'px');
+    await tick();
     menu.showModal();
     menuOpen = true;
-    menu.querySelector<HTMLButtonElement>('.choice[aria-pressed="true"]')?.focus();
+    // Measured without the search row itself, so it never keeps itself on screen.
+    searchable = menu.scrollHeight - (searchRow?.offsetHeight ?? 0) > menu.clientHeight + 1;
+    await tick();
+    // A touch screen would pop its keyboard over the list, so only a pointer device starts typing at once.
+    if (searchable && matchMedia('(pointer: fine)').matches) searchInput?.focus();
+    else menu.querySelector<HTMLButtonElement>('.choice[aria-pressed="true"]')?.focus();
+  }
+
+  function searchKeys(event: KeyboardEvent) {
+    if (event.key === 'Escape' && query) {
+      // First Escape clears the search; the next closes the menu as before.
+      event.preventDefault();
+      event.stopPropagation();
+      query = '';
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      const first = [...shownSectors, ...shownGroups][0];
+      if (searching && first) choose(first);
+    } else if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      menu.querySelector<HTMLButtonElement>('.menu-content .choice')?.focus();
+    }
   }
 
   function choose(filter: WatchlistFilter | null) {
@@ -172,23 +203,37 @@
 
 <dialog class="filter-menu" bind:this={menu} aria-label="Filter watched stocks"
   on:close={() => menuOpen = false} on:click={event => { if (event.target === menu) menu.close(); }}>
+  {#if searchable}
+    <div class="search" bind:this={searchRow}>
+      <Search size={13} aria-hidden="true"/>
+      <input type="search" bind:this={searchInput} bind:value={query} on:keydown={searchKeys}
+        placeholder="Find sector or list…" aria-label="Find a sector or list" autocomplete="off" spellcheck="false"/>
+      {#if query}
+        <button type="button" class="clear" aria-label="Clear search"
+          on:click={() => { query = ''; searchInput?.focus(); }}><X size={13} aria-hidden="true"/></button>
+      {/if}
+    </div>
+  {/if}
   <div class="menu-content">
     <button type="button" class="choice" aria-pressed={!activeFilter} on:click={() => choose(null)}>
       <span>All stocks</span><small>{entries.length}</small>
       {#if !activeFilter}<Check size={14} aria-hidden="true"/>{/if}
     </button>
-    <h3>Sectors</h3>
-    {#each sectors as sector (sector.name)}
+    {#if searching && !shownSectors.length && !shownGroups.length}
+      <p class="hint" role="status">No sector or list matches “{query.trim()}”.</p>
+    {/if}
+    {#if !searching || shownSectors.length}<h3>Sectors</h3>{/if}
+    {#each shownSectors as sector (sector.name)}
       <button type="button" class="choice" aria-pressed={activeFilter?.kind === 'sector' && activeFilter.name === sector.name}
         on:click={() => choose(sector)}>
         <span>{sector.name}</span><small>{sector.symbols.size}</small>
         {#if activeFilter?.kind === 'sector' && activeFilter.name === sector.name}<Check size={14} aria-hidden="true"/>{/if}
       </button>
     {:else}
-      <p class="hint">{loadingSectors ? 'Loading sectors…' : 'No sector details available.'}</p>
+      {#if !searching}<p class="hint">{loadingSectors ? 'Loading sectors…' : 'No sector details available.'}</p>{/if}
     {/each}
-    <h3>Your lists</h3>
-    {#each customGroups as group (group.name)}
+    {#if !searching || shownGroups.length}<h3>Your lists</h3>{/if}
+    {#each shownGroups as group (group.name)}
       <div class="list-choice">
         <button type="button" class="choice" aria-pressed={activeFilter?.kind === 'list' && activeFilter.name === group.name}
           on:click={() => choose(group)}>
@@ -251,6 +296,15 @@
     overscroll-behavior:contain; }
   .filter-menu::backdrop { background:transparent; }
   .menu-content { padding:.45rem; }
+  .search { position:sticky; top:0; z-index:1; display:flex; align-items:center; gap:.3rem; margin:0;
+    padding:.45rem .55rem; border-bottom:1px solid var(--border); background:var(--surface-1, var(--surface));
+    color:var(--text-2); }
+  .search input { flex:1; min-width:0; padding:.3rem .35rem; border:1px solid var(--border-md); border-radius:4px;
+    background:var(--surface-2); color:var(--text); font:inherit; font-size:.78rem; }
+  .search input::-webkit-search-cancel-button { display:none; }
+  .search .clear { display:flex; align-items:center; justify-content:center; min-width:24px; min-height:24px;
+    padding:0; border:0; border-radius:4px; background:transparent; color:var(--text-2); }
+  .search .clear:hover { background:var(--surface-2); }
   h3 { padding:.55rem .4rem .25rem; margin:.3rem 0 0; border-top:1px solid var(--border);
     color:var(--text-2); font-size:.72rem; }
   .choice, .new-list, .delete { display:flex; align-items:center; gap:.35rem; min-height:29px; padding:.25rem .4rem;

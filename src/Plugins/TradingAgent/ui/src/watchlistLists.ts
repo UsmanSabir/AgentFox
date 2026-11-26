@@ -22,6 +22,12 @@ export function watchlistSectors(entries: readonly WatchlistEntry[]): WatchlistF
     .map(group => ({ kind: 'sector', ...group }));
 }
 
+/** Groups whose name contains the query, ignoring case and surrounding spaces; an empty query keeps every group. */
+export function matchingFilters<T extends { name: string }>(groups: readonly T[], query: string): T[] {
+  const needle = query.trim().toLocaleLowerCase();
+  return needle ? groups.filter(group => group.name.toLocaleLowerCase().includes(needle)) : [...groups];
+}
+
 function uniqueListName(lists: WatchlistList[], rawName: string): string {
   const name = rawName.trim();
   if (!name || name.length > listNameLimit) throw new Error(`Enter a name up to ${listNameLimit} characters.`);

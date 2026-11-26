@@ -86,9 +86,12 @@
     }
   });
 
-  function isActive(href: string) {
-    if (href === '/') return current === '/';
-    return current.startsWith(href);
+  // `path` is passed in rather than read from `current` inside the function: in this legacy-mode
+  // component a `let` becomes reactive only when the template or a `$:` statement references it, so
+  // reading it only in here left the highlight frozen on whichever page loaded first.
+  function isActive(href: string, path: string) {
+    if (href === '/') return path === '/';
+    return path === href || path.startsWith(`${href}/`);
   }
 
   function toggleCollapsed() {
@@ -133,7 +136,7 @@
       <a
         href={item.href}
         class="nav-item"
-        class:active={isActive(item.href)}
+        class:active={isActive(item.href, current)}
         title={collapsed ? item.label : undefined}
       >
         <span class="nav-icon"><svelte:component this={item.icon} size={17} /></span>

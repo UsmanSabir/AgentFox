@@ -1,9 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  addWatchlistList, changeWatchlistMembership, readWatchlistLists,
+  addWatchlistList, changeWatchlistMembership, matchingFilters, readWatchlistLists,
   watchlistListsKey, watchlistSectors, writeWatchlistLists
 } from '../src/watchlistLists.ts';
+
+test('filter search matches any part of a name, ignoring case and spaces', () => {
+  const groups = [{ name: 'Cement' }, { name: 'Oil & Gas Exploration Companies' }, { name: 'Oil & Gas Marketing Companies' }];
+  assert.deepEqual(matchingFilters(groups, ' gas ').map(group => group.name),
+    ['Oil & Gas Exploration Companies', 'Oil & Gas Marketing Companies']);
+  assert.deepEqual(matchingFilters(groups, 'MENT').map(group => group.name), ['Cement']);
+  assert.deepEqual(matchingFilters(groups, 'bank'), []);
+  assert.deepEqual(matchingFilters(groups, '   '), groups);
+});
 
 test('sector groups use the watched tickers with known sector metadata', () => {
   const groups = watchlistSectors([
