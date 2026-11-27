@@ -1,15 +1,20 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { Route } from 'lucide-svelte';
   import ChannelHelp from './ChannelHelp.svelte';
   import { aiRouting, type Routing } from '#lib/codex.ts';
 
-  /** Bumped by the provider cards after a sign-in changes, so "in use" re-reads. */
-  export let refreshKey = 0;
+  
+  interface Props {
+    /** Bumped by the provider cards after a sign-in changes, so "in use" re-reads. */
+    refreshKey?: number;
+  }
 
-  let routing: Routing | null = null;
-  let error = '';
-  let busy = false;
+  let { refreshKey = 0 }: Props = $props();
+
+  let routing: Routing | null = $state<Routing | null>(null);
+  let error = $state('');
+  let busy = $state(false);
 
   async function load() {
     try {
@@ -44,7 +49,11 @@
     return `${label(provider)} is not signed in; the configured AI answers until it is.`;
   }
 
-  $: refreshKey, load();
+  $effect.pre(() => {
+    // Reads only what the old `$:` named; the call is untracked so its own bookkeeping cannot re-trigger it.
+    void refreshKey;
+    untrack(() => load());
+  });
   onMount(load);
 </script>
 
@@ -62,7 +71,7 @@
       {#each routing.purposes as p (p.id)}
         <label class="row">
           <span class="label">{p.label}</span>
-          <select class="input" value={p.provider} disabled={busy} on:change={(e) => choose(p.id, e.currentTarget.value)}
+          <select class="input" value={p.provider} disabled={busy} onchange={(e) => choose(p.id, e.currentTarget.value)}
             aria-label={`AI for ${p.label}`}>
             {#each routing.providers as provider (provider.id)}
               <option value={provider.id}>{provider.label}</option>

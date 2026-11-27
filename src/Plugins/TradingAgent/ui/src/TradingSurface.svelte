@@ -16,14 +16,12 @@
   import type { WorkspaceComposition } from './workspaceComposition';
   import WatchlistPanel from './WatchlistPanel.svelte';
   import ChartPane from './ChartPane.svelte';
-  export let workspace: WorkspaceComposition | null = null;
-  export let compactToolbar = false;
-  let selectedCompany: string | null = null;
-  let workspaceWatchlist: WatchlistPanel | null = null;
+  let selectedCompany: string | null = $state<string | null>(null);
+  let workspaceWatchlist: WatchlistPanel | null = $state<WatchlistPanel | null>(null);
   import AlertsPanel from './AlertsPanel.svelte';
   import PriceAlertsPanel from './PriceAlertsPanel.svelte';
-  let showPriceAlerts = false;
-  let priceAlerts: PriceAlertsPanel;
+  let showPriceAlerts = $state(false);
+  let priceAlerts: PriceAlertsPanel = $state()!;
   export async function openPriceAlert(symbol: string, target = 0, direction: 'above' | 'below' = 'above') {
     workspace?.focusPanel('alerts');
     showPriceAlerts = true;
@@ -43,15 +41,8 @@
   import type { SectionNavigationItem } from './sectionNavigation';
   import type { SymbolExtension } from './symbolExtensions';
 
-  /**
-   * Optional per-symbol contributions from whatever is composing this dashboard. Null in a community
-   * build, which is why nothing below assumes any of the three components exists. See
-   * `symbolExtensions.ts` for the contract and the reasoning behind it.
-   */
-  export let symbolExtension: SymbolExtension | null = null;
-  /** Optional account-level card in Portfolio; absent in the community edition. */
-  export let portfolioExtraBalance: any | null = null;
-  export let portfolioHeaderAction: any | null = null;
+  
+  
 
   /**
    * The community page owns the default destinations. A composing edition may hide this rail and
@@ -66,9 +57,6 @@
     { id: 'trading-automation', label: 'Orders & signals', icon: BellRing },
     { id: 'trading-ledger', label: 'Decisions & ledger', icon: History }
   ];
-  export let showSideNavigation = true;
-  export let navigationItems: SectionNavigationItem[] = defaultNavigationItems;
-  export let archiveAvailable = false;
 
   const archiveNavigationItem: SectionNavigationItem = {
     id: 'trading-candle-archive', label: 'Candle archive', icon: Database
@@ -87,33 +75,61 @@
     ];
   }
 
-  $: resolvedNavigationItems = navigationWithArchive(navigationItems, archiveAvailable);
 
   /**
    * Non-null while the arming dialog is open. Both entry points — a chart level and an alert — raise the
    * same event with pre-filled context, so there is one dialog rather than one per origin.
    */
-  let armContext: ArmOrderDialogContext | null = null;
-  let autoOrdersPanel: AutoOrdersPanel | null = null;
-  let marketWorkspace: MarketWorkspace | null = null;
+  let armContext: ArmOrderDialogContext | null = $state<ArmOrderDialogContext | null>(null);
+  let autoOrdersPanel: AutoOrdersPanel | null = $state<AutoOrdersPanel | null>(null);
+  let marketWorkspace: MarketWorkspace | null = $state<MarketWorkspace | null>(null);
   // The workstation deliberately keeps both community-owned presentations. "New Order" is the
   // quick modal flow; the Order ticket panel remains available for traders who prefer a docked draft.
   // Separate state prevents the toolbar action from silently moving focus or replacing a panel draft.
-  let newOrderDialogOpen = false;
-  let selectedOrderAction: 'BUY' | 'SELL' | null = null;
-  let quickOrder = false;
+  let newOrderDialogOpen = $state(false);
+  let selectedOrderAction: 'BUY' | 'SELL' | null = $state<'BUY' | 'SELL' | null>(null);
+  let quickOrder = $state(false);
   /** Set by a `requestNewOrder`; the dialog is keyed on it, so a second request remounts it fresh. */
-  let newOrderPrefill: CleanNewOrderPrefill | null = null;
-  let quickMenuOpen = false;
-  let quickMenu: HTMLDetailsElement;
-  let quickMenuToggle: HTMLElement;
-  let ticketDraftOpen = false;
-  let ticket: OrderComposer;
+  let newOrderPrefill: CleanNewOrderPrefill | null = $state<CleanNewOrderPrefill | null>(null);
+  let quickMenuOpen = $state(false);
+  let quickMenu: HTMLDetailsElement = $state()!;
+  let quickMenuToggle: HTMLElement = $state()!;
+  let ticketDraftOpen = $state(false);
+  let ticket: OrderComposer = $state()!;
   let orderDialogReturnFocus: HTMLElement | null = null;
   let ticketReturnFocus: HTMLElement | null = null;
 
-  /** Selected stock; drives the chart pane. */
-  export let selectedSymbol: string | null = null;
+  
+  interface Props {
+    workspace?: WorkspaceComposition | null;
+    compactToolbar?: boolean;
+    /**
+   * Optional per-symbol contributions from whatever is composing this dashboard. Null in a community
+   * build, which is why nothing below assumes any of the three components exists. See
+   * `symbolExtensions.ts` for the contract and the reasoning behind it.
+   */
+    symbolExtension?: SymbolExtension | null;
+    /** Optional account-level card in Portfolio; absent in the community edition. */
+    portfolioExtraBalance?: any | null;
+    portfolioHeaderAction?: any | null;
+    showSideNavigation?: boolean;
+    navigationItems?: SectionNavigationItem[];
+    archiveAvailable?: boolean;
+    /** Selected stock; drives the chart pane. */
+    selectedSymbol?: string | null;
+  }
+
+  let {
+    workspace = null,
+    compactToolbar = false,
+    symbolExtension = null,
+    portfolioExtraBalance = null,
+    portfolioHeaderAction = null,
+    showSideNavigation = true,
+    navigationItems = defaultNavigationItems,
+    archiveAvailable = $bindable(false),
+    selectedSymbol = $bindable(null)
+  }: Props = $props();
 
   function selectChartSymbol(event: CustomEvent<string>) {
     selectedSymbol = event.detail;
@@ -121,10 +137,10 @@
   }
 
   /** Proposal inbox: open-only by default, since a decision queue should read as empty when it is. */
-  let showResolvedProposals = false;
-  let proposalBusy: string | null = null;
-  let reconciliationBusy = false;
-  let resolvingExecution: string | null = null;
+  let showResolvedProposals = $state(false);
+  let proposalBusy: string | null = $state<string | null>(null);
+  let reconciliationBusy = $state(false);
+  let resolvingExecution: string | null = $state<string | null>(null);
 
   async function loadProposals() {
     try {
@@ -175,30 +191,29 @@
     }
   }
 
-  let loading = true;
-  let killSwitchBusy = false;
-  let backfillBusy = false;
-  let error: string | null = null;
-  let status: TradingStatus | null = null;
-  let archive: CandleArchiveStatus | null = null;
-  let proposals: TradeProposal[] = [];
-  let executions: TradingExecution[] = [];
-  let events: TradingEvent[] = [];
-  let reconciliation: ReconciliationRun[] = [];
-  let tab: 'proposals' | 'executions' | 'reconciliation' | 'events' = 'proposals';
+  let loading = $state(true);
+  let killSwitchBusy = $state(false);
+  let backfillBusy = $state(false);
+  let error: string | null = $state<string | null>(null);
+  let status: TradingStatus | null = $state<TradingStatus | null>(null);
+  let archive: CandleArchiveStatus | null = $state<CandleArchiveStatus | null>(null);
+  let proposals: TradeProposal[] = $state([]);
+  let executions: TradingExecution[] = $state([]);
+  let events: TradingEvent[] = $state([]);
+  let reconciliation: ReconciliationRun[] = $state([]);
+  let tab: 'proposals' | 'executions' | 'reconciliation' | 'events' = $state<'proposals' | 'executions' | 'reconciliation' | 'events'>('proposals');
   let archivePoll: ReturnType<typeof setInterval> | null = null;
   /** Advances only when the archive poll returns fresh progress; the chart uses it to grow in place. */
-  let archiveTick = 0;
+  let archiveTick = $state(0);
 
-  // Keep the navigation contract as narrow as possible: composers only need to know whether the
-  // conditional panel exists, not receive or understand the community-owned archive payload.
-  $: archiveAvailable = archive != null;
 
   // Keep the decision surfaces open and tuck away dense operational detail. Every collapsed header
   // still carries its important state, so closing a panel never hides a warning or waiting work.
-  let statusOpen = workspace !== null;
-  let archiveOpen = workspace !== null;
-  let ledgerOpen = true;
+  // svelte-ignore state_referenced_locally -- a starting value from the workspace prop, which is fixed for the page (as before)
+  let statusOpen = $state(workspace !== null);
+  // svelte-ignore state_referenced_locally -- a starting value from the workspace prop, which is fixed for the page (as before)
+  let archiveOpen = $state(workspace !== null);
+  let ledgerOpen = $state(true);
 
   async function load() {
     loading = true;
@@ -265,7 +280,7 @@
    * a market that opens while the page is left open is noticed within a minute instead of never.
    */
   const MARKET_TICK_MS = 60_000;
-  let marketTick = 0;
+  let marketTick = $state(0);
   let marketTimer: ReturnType<typeof setInterval> | null = null;
 
   function startMarketClock() {
@@ -313,7 +328,6 @@
   const isCancellation = (item: TradingExecution) => !!item.request && typeof item.request === 'object'
     && 'operationKind' in item.request && item.request.operationKind === 'cancel';
 
-  $: unknownExecutions = executions.filter(item => item.state === 'unknown');
 
   async function reconcileNow() {
     if (reconciliationBusy) return;
@@ -473,9 +487,17 @@
     ];
     return () => { stopOrderRequests(); unregister.forEach(dispose => dispose?.()); };
   });
+  // Keep the navigation contract as narrow as possible: composers only need to know whether the
+  // conditional panel exists, not receive or understand the community-owned archive payload.
+  // Writes the bound prop, so it stays an effect rather than a derived value.
+  $effect.pre(() => {
+    archiveAvailable = archive != null;
+  });
+  let resolvedNavigationItems = $derived(navigationWithArchive(navigationItems, archiveAvailable));
+  let unknownExecutions = $derived(executions.filter(item => item.state === 'unknown'));
 </script>
 
-<svelte:window on:click={closeQuickMenu} on:keydown={quickMenuKey} />
+<svelte:window onclick={closeQuickMenu} onkeydown={quickMenuKey} />
 
 <WorkspacePanel {workspace} id="core-dialogs">
 {#if armContext}
@@ -503,7 +525,10 @@
     <!-- Every prop the composer offers, not the three that happened to be needed first. A
          half-forwarded slot is indistinguishable from a host that does not want the rest, so the
          next detail to need the symbol would look like a slot that cannot supply one. -->
-    <svelte:fragment slot="order-detail" let:symbol let:action let:orderType let:quantity let:price let:value let:conditional let:triggerLevel let:trailing let:triggerPercent>
+    <!-- `order-detail` stays a slot (the editions' contract; a snippet name cannot contain a hyphen). It is filled
+         from the composer's own `order-detail` slot here and re-exposed to the edition. -->
+  <svelte:fragment slot="order-detail" let:symbol let:action let:orderType let:quantity let:price let:value let:conditional let:triggerLevel let:trailing let:triggerPercent>
+      <!-- svelte-ignore slot_element_deprecated -->
       <slot name="order-detail" {symbol} {action} {orderType} {quantity} {price} {value} {conditional} {triggerLevel} {trailing} {triggerPercent}/>
     </svelte:fragment>
   </NewOrderDialog>
@@ -517,13 +542,16 @@
       <OrderComposer docked bind:this={ticket} {selectedSymbol}
         on:changed={() => { load(); autoOrdersPanel?.load(); }}
         on:attention={() => workspace?.focusPanel('ticket')} on:close={closeOrderTicket}>
-        <svelte:fragment slot="order-detail" let:symbol let:action let:orderType let:quantity let:price let:value let:conditional let:triggerLevel let:trailing let:triggerPercent>
+        <!-- `order-detail` stays a slot (the editions' contract; a snippet name cannot contain a hyphen). It is filled
+             from the composer's own `order-detail` slot here and re-exposed to the edition. -->
+  <svelte:fragment slot="order-detail" let:symbol let:action let:orderType let:quantity let:price let:value let:conditional let:triggerLevel let:trailing let:triggerPercent>
+          <!-- svelte-ignore slot_element_deprecated -->
           <slot name="order-detail" {symbol} {action} {orderType} {quantity} {price} {value} {conditional} {triggerLevel} {trailing} {triggerPercent}/>
         </svelte:fragment>
       </OrderComposer>
     {:else}
       <div class="ticket-empty"><h2>Order ticket</h2><p>Keep a draft beside the market for {selectedSymbol ?? 'a symbol'}, or use New Order in the toolbar for the modal flow. Nothing is sent until you review and confirm.</p>
-        <button class="btn btn-primary" on:click={openOrderTicket}>Start docked draft</button>
+        <button class="btn btn-primary" onclick={openOrderTicket}>Start docked draft</button>
         <p>Ctrl+Shift+4 focuses this panel. Ctrl+Enter inside a docked draft opens review. Closing a panel preserves the draft; reload clears it.</p>
       </div>
     {/if}
@@ -544,18 +572,18 @@
     <div><h1 class="page-title">Trading Manager</h1><p class="page-sub">Monitor PSX signals, prepare conditional orders, and review execution history</p></div>
     <div class="header-actions">
       <div class="new-order-split">
-        <button class="btn btn-primary new-order-btn" on:click={openNewOrderDialog}>
+        <button class="btn btn-primary new-order-btn" onclick={openNewOrderDialog}>
           <ShoppingCart size={14} /> New Order
         </button>
         <details class="quick-order-menu" bind:open={quickMenuOpen} bind:this={quickMenu}>
           <summary class="btn btn-primary" bind:this={quickMenuToggle} aria-label="Quick order actions" aria-expanded={quickMenuOpen}><ChevronDown size={14} aria-hidden="true" /></summary>
           <div class="quick-order-options" role="group" aria-label="Quick limit orders">
-            <button type="button" class="quick-buy" on:click={() => openQuickOrder('BUY')} disabled={!selectedSymbol?.trim()} title={selectedSymbol ? undefined : 'Select a stock first'}>Quick Buy <span>{selectedSymbol ?? 'Select a stock'}</span></button>
-            <button type="button" class="quick-sell" on:click={() => openQuickOrder('SELL')} disabled={!selectedSymbol?.trim()} title={selectedSymbol ? undefined : 'Select a stock first'}>Quick Sell <span>{selectedSymbol ?? 'Select a stock'}</span></button>
+            <button type="button" class="quick-buy" onclick={() => openQuickOrder('BUY')} disabled={!selectedSymbol?.trim()} title={selectedSymbol ? undefined : 'Select a stock first'}>Quick Buy <span>{selectedSymbol ?? 'Select a stock'}</span></button>
+            <button type="button" class="quick-sell" onclick={() => openQuickOrder('SELL')} disabled={!selectedSymbol?.trim()} title={selectedSymbol ? undefined : 'Select a stock first'}>Quick Sell <span>{selectedSymbol ?? 'Select a stock'}</span></button>
             <!-- An edition's own order windows (newOrderMenuExtensions.ts); none in a community build. -->
             {#each $newOrderMenuItems as item (item.id)}
               <button type="button" class="menu-extension" title={item.title ?? undefined}
-                on:click={() => { quickMenuOpen = false; item.run({ selectedSymbol: selectedSymbol?.trim() || null }); }}>
+                onclick={() => { quickMenuOpen = false; item.run({ selectedSymbol: selectedSymbol?.trim() || null }); }}>
                 {item.label}{#if item.detail}<span>{item.detail}</span>{/if}
               </button>
             {/each}
@@ -566,11 +594,11 @@
         <button
           class="btn kill-switch-btn"
           class:active={status.killSwitch}
-          on:click={toggleKillSwitch}
+          onclick={toggleKillSwitch}
           disabled={killSwitchBusy}
         ><Power size={14} /> {status.killSwitch ? 'Kill switch: ACTIVE — click to clear' : 'Kill switch: clear — click to stop trading'}</button>
       {/if}
-      <button class="btn btn-ghost" on:click={load} disabled={loading}><RefreshCw size={14} /> Refresh</button>
+      <button class="btn btn-ghost" onclick={load} disabled={loading}><RefreshCw size={14} /> Refresh</button>
     </div>
   </div>
 
@@ -590,8 +618,8 @@
         {#if compactToolbar && workspace}
           <button type="button" class="safety-reason-scroll"
             title={status.liveExecutionReady ? 'All reported live prerequisites are healthy.' : liveBlockReason(status)}
-            on:click={(event) => { const element = event.currentTarget; element.scrollLeft = element.scrollLeft + element.clientWidth >= element.scrollWidth - 2 ? 0 : element.scrollLeft + element.clientWidth * .8; }}
-            on:keydown={(event) => { if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return; event.preventDefault(); event.currentTarget.scrollLeft += event.key === 'ArrowRight' ? 80 : -80; }}
+            onclick={(event) => { const element = event.currentTarget; element.scrollLeft = element.scrollLeft + element.clientWidth >= element.scrollWidth - 2 ? 0 : element.scrollLeft + element.clientWidth * .8; }}
+            onkeydown={(event) => { if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return; event.preventDefault(); event.currentTarget.scrollLeft += event.key === 'ArrowRight' ? 80 : -80; }}
           >{status.liveExecutionReady ? 'All reported live prerequisites are healthy.' : liveBlockReason(status)}</button>
         {:else}<span>{status.liveExecutionReady ? 'All reported live prerequisites are healthy.' : liveBlockReason(status)}</span>{/if}
       </div>
@@ -606,7 +634,7 @@
     <section class="disclosure-card status-card" class:open={statusOpen}>
       <button
         class="disclosure-toggle"
-        on:click={() => statusOpen = !statusOpen}
+        onclick={() => statusOpen = !statusOpen}
         aria-expanded={statusOpen}
         aria-controls="system-status-content"
       >
@@ -628,7 +656,7 @@
         <div class="status-grid" id="system-status-content">
           <div class="metric"><span>Mode</span><b>{status.policy.executionMode}</b><small>Auto execute: {status.policy.autoExecute ? 'on' : 'off'} · kill switch: {status.killSwitch ? 'active' : 'clear'}</small></div>
           <div class="metric"><span>Market</span><b class:good={status.market.isOpen}>{status.market.isOpen ? 'Open' : 'Closed'}</b><small>{status.market.reason}</small></div>
-          <div class="metric"><span>Reconciliation</span><b class:good={status.reconciliation.healthy && status.reconciliationFresh}>{reconciliationLabel(status)}</b><small>{status.reconciliation.reason} · checked {date(status.reconciliation.checkedUtc)}</small><button class="metric-action" on:click={reconcileNow} disabled={reconciliationBusy}>{reconciliationBusy ? 'Checking broker…' : 'Check broker now'}</button></div>
+          <div class="metric"><span>Reconciliation</span><b class:good={status.reconciliation.healthy && status.reconciliationFresh}>{reconciliationLabel(status)}</b><small>{status.reconciliation.reason} · checked {date(status.reconciliation.checkedUtc)}</small><button class="metric-action" onclick={reconcileNow} disabled={reconciliationBusy}>{reconciliationBusy ? 'Checking broker…' : 'Check broker now'}</button></div>
           <div class="metric"><span>Pending proposals</span><b>{status.ledger.pendingProposals}</b><small>Policy {status.policy.version}</small></div>
           <div class="metric"><span>Accepted executions</span><b>{status.ledger.acceptedExecutions}</b><small>{status.ledger.submittingExecutions} submitting</small></div>
           <div class="metric"><span>Unknown broker outcomes</span><b class:danger={status.ledger.unknownExecutions > 0}>{status.ledger.unknownExecutions}</b><small>{status.ledger.unknownExecutions > 0 ? 'The broker handoff started, but its reply was lost. Check Executions before retrying.' : 'No unresolved broker handoffs.'}</small></div>
@@ -637,14 +665,16 @@
     </section>
 
     </WorkspacePanel>
-    <WorkspacePanel {workspace} id="portfolio" let:visible>
-    <div id="trading-portfolio" class="section-anchor">
-      <PortfolioPanel holdingStatus={symbolExtension?.holdingStatus ?? null} extraBalance={portfolioExtraBalance} headerAction={portfolioHeaderAction}
-        orderAction={symbolExtension?.orderAction ?? null} keyboardMode={!!workspace} embedded={!!workspace} active={visible}
-        on:order={event => beginOrder(event.detail.symbol, event.detail.action)}/>
-    </div>
+    <WorkspacePanel {workspace} id="portfolio" >
+    {#snippet children({ visible })}
+                <div id="trading-portfolio" class="section-anchor">
+        <PortfolioPanel holdingStatus={symbolExtension?.holdingStatus ?? null} extraBalance={portfolioExtraBalance} headerAction={portfolioHeaderAction}
+          orderAction={symbolExtension?.orderAction ?? null} keyboardMode={!!workspace} embedded={!!workspace} active={visible}
+          on:order={event => beginOrder(event.detail.symbol, event.detail.action)}/>
+      </div>
 
-    </WorkspacePanel>
+                    {/snippet}
+            </WorkspacePanel>
 
     {#if !workspace}
     <div class="section-heading section-anchor" id="trading-market">
@@ -685,7 +715,7 @@
       {#if symbolExtension?.plan}
         <WorkspacePanel {workspace} id="plan">
           {#if selectedSymbol}
-            <svelte:component this={symbolExtension.plan} symbol={selectedSymbol}
+            <symbolExtension.plan symbol={selectedSymbol}
               companyName={selectedCompany} allowCollapse={false}/>
           {:else}<p class="empty">Select a symbol in Watchlist or Movers to inspect its plan.</p>{/if}
         </WorkspacePanel>
@@ -693,12 +723,14 @@
     {/if}
 
     <!-- Classic keeps the compact disclosure; workspace tabs already control visibility. -->
-    <WorkspacePanel {workspace} id="activity" let:visible>
-    <div id="trading-activity" class="section-anchor">
-      <ActivityPanel embedded={!!workspace} active={visible}/>
-    </div>
+    <WorkspacePanel {workspace} id="activity" >
+    {#snippet children({ visible })}
+                <div id="trading-activity" class="section-anchor">
+        <ActivityPanel embedded={!!workspace} active={visible}/>
+      </div>
 
-    </WorkspacePanel>
+                    {/snippet}
+            </WorkspacePanel>
     <WorkspacePanel {workspace} id="movers">
     <div class="section-heading compact section-anchor" id="trading-movers">
       <div><span class="eyebrow">Market</span><h2>Today&#39;s movers</h2></div>
@@ -727,8 +759,8 @@
       </WorkspacePanel>
       <WorkspacePanel {workspace} id="alerts">
       <div class="price-alert-tabs">
-        <button class="btn" aria-pressed={!showPriceAlerts} on:click={() => showPriceAlerts = false}>Technical signals</button>
-        <button class="btn" aria-pressed={showPriceAlerts} on:click={() => showPriceAlerts = true}>Price alerts</button>
+        <button class="btn" aria-pressed={!showPriceAlerts} onclick={() => showPriceAlerts = false}>Technical signals</button>
+        <button class="btn" aria-pressed={showPriceAlerts} onclick={() => showPriceAlerts = true}>Price alerts</button>
       </div>
       {#if showPriceAlerts}
         <PriceAlertsPanel bind:this={priceAlerts}/>
@@ -752,7 +784,7 @@
         <div class="archive-head">
           <button
             class="disclosure-toggle archive-toggle"
-            on:click={() => archiveOpen = !archiveOpen}
+            onclick={() => archiveOpen = !archiveOpen}
             aria-expanded={archiveOpen}
             aria-controls="archive-content"
           >
@@ -772,7 +804,7 @@
           {#if archive.backfillEnabled}
             <button
               class="btn btn-ghost"
-              on:click={startBackfill}
+              onclick={startBackfill}
               disabled={backfillBusy || archive.progress.isRunning || archive.missingTradingDays === 0}
             ><Download size={14} />
               {#if archive.progress.isRunning}Backfilling…
@@ -841,7 +873,7 @@
     <section class="disclosure-card ledger-card section-anchor" class:open={ledgerOpen} id="trading-ledger">
       <button
         class="disclosure-toggle"
-        on:click={() => ledgerOpen = !ledgerOpen}
+        onclick={() => ledgerOpen = !ledgerOpen}
         aria-expanded={ledgerOpen}
         aria-controls="ledger-content"
       >
@@ -860,10 +892,10 @@
       {#if ledgerOpen}
         <div id="ledger-content" class="ledger-content">
           <div class="tabs">
-            <button class:active={tab === 'proposals'} on:click={() => tab = 'proposals'}><FileText size={14}/> Proposals ({proposals.length})</button>
-            <button class:active={tab === 'executions'} on:click={() => tab = 'executions'}><ListChecks size={14}/> Executions ({executions.length})</button>
-            <button class:active={tab === 'reconciliation'} on:click={() => tab = 'reconciliation'}><Scale size={14}/> Reconciliation ({reconciliation.length})</button>
-            <button class:active={tab === 'events'} on:click={() => tab = 'events'}><History size={14}/> Audit ({events.length})</button>
+            <button class:active={tab === 'proposals'} onclick={() => tab = 'proposals'}><FileText size={14}/> Proposals ({proposals.length})</button>
+            <button class:active={tab === 'executions'} onclick={() => tab = 'executions'}><ListChecks size={14}/> Executions ({executions.length})</button>
+            <button class:active={tab === 'reconciliation'} onclick={() => tab = 'reconciliation'}><Scale size={14}/> Reconciliation ({reconciliation.length})</button>
+            <button class:active={tab === 'events'} onclick={() => tab = 'events'}><History size={14}/> Audit ({events.length})</button>
           </div>
 
           {#if tab === 'proposals'}
@@ -875,7 +907,7 @@
             calendar and kill switch all still apply.
           </p>
           <label class="toggle">
-            <input type="checkbox" bind:checked={showResolvedProposals} on:change={loadProposals} />
+            <input type="checkbox" bind:checked={showResolvedProposals} onchange={loadProposals} />
             show resolved
           </label>
         </div>
@@ -899,10 +931,10 @@
 
             {#if item.status === 'proposed'}
               <div class="record-actions">
-                <button class="btn btn-primary" on:click={() => executeProposal(item)} disabled={proposalBusy !== null}>
+                <button class="btn btn-primary" onclick={() => executeProposal(item)} disabled={proposalBusy !== null}>
                   <Play size={13} /> {proposalBusy === item.proposalId ? 'Executing…' : 'Execute'}
                 </button>
-                <button class="btn btn-danger" on:click={() => rejectProposal(item)} disabled={proposalBusy !== null}>
+                <button class="btn btn-danger" onclick={() => rejectProposal(item)} disabled={proposalBusy !== null}>
                   <XCircle size={13} /> Reject
                 </button>
               </div>
@@ -920,7 +952,7 @@
               {#if unknownExecutions.length}
                 <div class="unknown-help"><AlertTriangle size={14} /><span><b>{unknownExecutions.length} outcome(s) need checking.</b> “Unknown” means submission began but no reliable broker reply came back. Do not repeat the order until the broker activity/order book confirms whether it exists.</span></div>
               {/if}
-              {#each executions as item}<article class="record" class:unknown={item.state === 'unknown'}><header><b>{item.executionId}</b><span class="state">{item.state.replaceAll('_', ' ')}</span></header><div class="meta">{date(item.createdUtc)} · policy {item.policyVersion}</div>{#if executionReason(item)}<p class="reason">{executionReason(item)}</p>{/if}<details class="record-details" open={item.state === 'unknown'}><summary>View execution data</summary><pre>{json(item.result ?? item.request)}</pre></details>{#if item.state === 'unknown'}<div class="record-actions">{#if isCancellation(item)}<button class="btn btn-primary" on:click={() => resolveUnknown(item, 'cancelled')} disabled={resolvingExecution !== null}>Broker confirms cancellation</button><button class="btn btn-ghost" on:click={() => resolveUnknown(item, 'not_cancelled')} disabled={resolvingExecution !== null}>Broker confirms not cancelled</button><button class="btn btn-ghost" on:click={() => resolveUnknown(item, 'filled')} disabled={resolvingExecution !== null}>Broker confirms order filled</button>{:else}<button class="btn btn-primary" on:click={() => resolveUnknown(item, 'placed')} disabled={resolvingExecution !== null}>Broker shows order/fill</button><button class="btn btn-ghost" on:click={() => resolveUnknown(item, 'not_placed')} disabled={resolvingExecution !== null}>Broker confirms not placed</button>{/if}</div>{/if}</article>{:else}<div class="empty">No executions recorded</div>{/each}
+              {#each executions as item}<article class="record" class:unknown={item.state === 'unknown'}><header><b>{item.executionId}</b><span class="state">{item.state.replaceAll('_', ' ')}</span></header><div class="meta">{date(item.createdUtc)} · policy {item.policyVersion}</div>{#if executionReason(item)}<p class="reason">{executionReason(item)}</p>{/if}<details class="record-details" open={item.state === 'unknown'}><summary>View execution data</summary><pre>{json(item.result ?? item.request)}</pre></details>{#if item.state === 'unknown'}<div class="record-actions">{#if isCancellation(item)}<button class="btn btn-primary" onclick={() => resolveUnknown(item, 'cancelled')} disabled={resolvingExecution !== null}>Broker confirms cancellation</button><button class="btn btn-ghost" onclick={() => resolveUnknown(item, 'not_cancelled')} disabled={resolvingExecution !== null}>Broker confirms not cancelled</button><button class="btn btn-ghost" onclick={() => resolveUnknown(item, 'filled')} disabled={resolvingExecution !== null}>Broker confirms order filled</button>{:else}<button class="btn btn-primary" onclick={() => resolveUnknown(item, 'placed')} disabled={resolvingExecution !== null}>Broker shows order/fill</button><button class="btn btn-ghost" onclick={() => resolveUnknown(item, 'not_placed')} disabled={resolvingExecution !== null}>Broker confirms not placed</button>{/if}</div>{/if}</article>{:else}<div class="empty">No executions recorded</div>{/each}
             </div>
           {:else if tab === 'reconciliation'}
             <div class="records">

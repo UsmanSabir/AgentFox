@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createEventDispatcher, onMount, onDestroy } from 'svelte';
+  import { createEventDispatcher, onMount, onDestroy, untrack } from 'svelte';
   import { onAccountChanged } from './accountSignal';
   import {
     trading,
@@ -17,54 +17,64 @@
   import PortfolioPnlSummary from './PortfolioPnlSummary.svelte';
   import WorkingOrderCancel from './WorkingOrderCancel.svelte';
   import { orderListNavigation } from './orderListNavigation';
-  export let keyboardMode = false;
-  /** Workspace tabs own visibility; classic keeps its disclosure and explicit first read. */
-  export let embedded = false;
-  export let active = true;
+  
   const dispatch = createEventDispatcher<{
     order: { symbol: string; action: 'BUY' | 'SELL' };
   }>();
-  let query = '';
-  let holdingQuery = '';
+  let query = $state('');
+  let holdingQuery = $state('');
   // Local view state only; released with the panel, never persisted or sent to the broker.
-  let holdingSector = '';
-  let otherSectors: string[] = [];
-  $: sectorOptions = holdingSectorOptions(account?.holdings ?? []);
-  $: if (holdingSector && holdingSector !== OTHER_SECTORS && !sectorOptions.some(label => sectorFilterKey(label) === holdingSector)) holdingSector = '';
-  $: if (holdingSector === OTHER_SECTORS && !otherSectors.length) holdingSector = '';
-  $: visibleHoldings = filterPortfolioHoldings(account?.holdings ?? [], holdingQuery, holdingSector, otherSectors);
-  $: visibleOrders = (account?.orders ?? []).filter(o => !keyboardMode || `${o.symbol ?? o.instrumentId} ${o.side} ${o.status}`.toLowerCase().includes(query.trim().toLowerCase()));
+  let holdingSector = $state('');
+  let otherSectors: string[] = $state([]);
 
-  /**
+  
+
+  
+  
+
+  
+  interface Props {
+    keyboardMode?: boolean;
+    /** Workspace tabs own visibility; classic keeps its disclosure and explicit first read. */
+    embedded?: boolean;
+    active?: boolean;
+    /**
    * Optional component rendered under each holding's instrument name. Null in a community build. It
    * receives only `symbol` and must render nothing when it has nothing to say — see
    * `symbolExtensions.ts`.
    */
-  export let holdingStatus: SymbolExtensionComponent | null = null;
-
-  /** Optional account-level card beside the broker balances. Receives showValues and refreshKey;
+    holdingStatus?: SymbolExtensionComponent | null;
+    /** Optional account-level card beside the broker balances. Receives showValues and refreshKey;
    * the latter changes whenever this panel starts a fresh account read. Renders
    * nothing when it has no current reading to show. Null in the community build. */
-  export let extraBalance: SymbolExtensionComponent | null = null;
-  /** Optional edition-owned heading action; receives the current privacy choice, renders nothing by default. */
-  export let headerAction: SymbolExtensionComponent | null = null;
-
-  /**
+    extraBalance?: SymbolExtensionComponent | null;
+    /** Optional edition-owned heading action; receives the current privacy choice, renders nothing by default. */
+    headerAction?: SymbolExtensionComponent | null;
+    /**
    * Replaces the Cancel control in each working-order row. Null means the community
    * `WorkingOrderCancel`. See `symbolExtensions.ts` for the props it receives.
    */
-  export let orderAction: SymbolExtensionComponent | null = null;
-  $: cancelControl = orderAction ?? WorkingOrderCancel;
+    orderAction?: SymbolExtensionComponent | null;
+  }
 
-  let expanded = false;
-  $: open = embedded || expanded;
-  let mounted = false;
-  let showValues = false;
-  let loading = false;
-  let loaded = false;
-  let error: string | null = null;
-  let account: BrokerAccountSnapshot | null = null;
-  let balanceRevision = 0;
+  let {
+    keyboardMode = false,
+    embedded = false,
+    active = true,
+    holdingStatus = null,
+    extraBalance = null,
+    headerAction = null,
+    orderAction = null
+  }: Props = $props();
+
+  let expanded = $state(false);
+  let mounted = $state(false);
+  let showValues = $state(false);
+  let loading = $state(false);
+  let loaded = $state(false);
+  let error: string | null = $state<string | null>(null);
+  let account: BrokerAccountSnapshot | null = $state<BrokerAccountSnapshot | null>(null);
+  let balanceRevision = $state(0);
 
   async function load() {
     if (loading) return;
@@ -87,9 +97,6 @@
   }
 
   onMount(() => { mounted = true; });
-  // Opening a workspace tab replaces the old disclosure click. Hidden mounted tabs do not read it.
-  // A failed read stays visible until Refresh rather than causing a reactive retry loop.
-  $: if (mounted && embedded && active && !loaded && !loading && !error) void load();
 
   // An order placed, filled, cancelled or refused anywhere on the page: re-read while visible, so a filled order
   // leaves Working orders and joins the holdings. Hidden/collapsed, mark stale for the next opening.
@@ -135,6 +142,25 @@
     const symbol = holdingSymbol(holding);
     if (symbol) dispatch('order', { symbol, action });
   };
+  let sectorOptions = $derived(holdingSectorOptions(account?.holdings ?? []));
+  // A sector filter that no longer matches anything is cleared.
+  $effect.pre(() => {
+    if (holdingSector && holdingSector !== OTHER_SECTORS && !sectorOptions.some(label => sectorFilterKey(label) === holdingSector)) holdingSector = '';
+  });
+  $effect.pre(() => {
+    if (holdingSector === OTHER_SECTORS && !otherSectors.length) holdingSector = '';
+  });
+  let visibleHoldings = $derived(filterPortfolioHoldings(account?.holdings ?? [], holdingQuery, holdingSector, otherSectors));
+  let visibleOrders = $derived((account?.orders ?? []).filter(o => !keyboardMode || `${o.symbol ?? o.instrumentId} ${o.side} ${o.status}`.toLowerCase().includes(query.trim().toLowerCase())));
+  let cancelControl = $derived(orderAction ?? WorkingOrderCancel);
+  let open = $derived(embedded || expanded);
+  // Opening a workspace tab replaces the old disclosure click. Hidden mounted tabs do not read it.
+  // A failed read stays visible until Refresh rather than causing a reactive retry loop.
+  $effect.pre(() => {
+    // Reads only what the old `$:` named; the call is untracked so its own bookkeeping cannot re-trigger it.
+    const ready = mounted && embedded && active && !loaded && !loading && !error;
+    untrack(() => { if (ready) void load(); });
+  });
 </script>
 
 {#snippet portfolioHeading()}
@@ -157,14 +183,14 @@
     {#if embedded}
       <div class="panel-heading">{@render portfolioHeading()}</div>
     {:else}
-      <button class="toggle" on:click={toggleOpen} aria-expanded={open} aria-controls="portfolio-content">{@render portfolioHeading()}</button>
+      <button class="toggle" onclick={toggleOpen} aria-expanded={open} aria-controls="portfolio-content">{@render portfolioHeading()}</button>
     {/if}
     <div class="header-actions">
-      {#if headerAction}<svelte:component this={headerAction} {showValues}/>{/if}
-      <button class="action" on:click={() => showValues = !showValues} aria-pressed={showValues} title={showValues ? 'Hide financial values' : 'Show financial values'}>
+      {#if headerAction}{@const SvelteComponent = headerAction}<SvelteComponent {showValues}/>{/if}
+      <button class="action" onclick={() => showValues = !showValues} aria-pressed={showValues} title={showValues ? 'Hide financial values' : 'Show financial values'}>
         {#if showValues}<EyeOff size={14}/> Hide values{:else}<Eye size={14}/> Show values{/if}
       </button>
-      <button class="action" on:click={load} disabled={loading} title="Read the latest account data from the broker">
+      <button class="action" onclick={load} disabled={loading} title="Read the latest account data from the broker">
         <span class:spin={loading}><RefreshCw size={14}/></span> {loading ? 'Refreshing…' : 'Refresh'}
       </button>
     </div>
@@ -202,7 +228,7 @@
           {#if account.holdingsAvailable && account.holdings.length}
             <PortfolioPnlSummary holdings={account.holdings} {showValues} />
           {/if}
-          {#if extraBalance}<svelte:component this={extraBalance} {showValues} refreshKey={balanceRevision}/>{/if}
+          {#if extraBalance}{@const SvelteComponent_1 = extraBalance}<SvelteComponent_1 {showValues} refreshKey={balanceRevision}/>{/if}
         </div>
 
         <section class="account-section">
@@ -222,7 +248,7 @@
                 {#each sectorOptions as label}<option value={sectorFilterKey(label)}>{label}</option>{/each}
               </select></label>
               {#if holdingSector || holdingQuery}
-                <button type="button" class="action" on:click={() => { holdingSector = ''; holdingQuery = ''; }}>Clear filters</button>
+                <button type="button" class="action" onclick={() => { holdingSector = ''; holdingQuery = ''; }}>Clear filters</button>
               {/if}
               <span class="filter-count" role="status" aria-atomic="true">Showing {visibleHoldings.length} of {account.holdings.length} holdings</span>
             </div>
@@ -233,7 +259,7 @@
               <thead><tr><th>Instrument</th><th>Quantity</th><th>Average cost</th><th>Market price</th><th>Market value</th><th>Unrealized P/L</th><th>Trade</th></tr></thead>
               <tbody>{#each visibleHoldings as holding}
                 <tr>
-                  <td><LiveHoldingName {holding} {showValues}/><small>{text(holding.exchange)} · {text(holding.assetType)}</small>{#if holdingStatus && holding.symbol}<div class="holding-extension"><svelte:component this={holdingStatus} symbol={holding.symbol} /></div>{/if}{#if extras(holding.attributes).length}<details class="broker-details"><summary>Details</summary><dl>{#each extras(holding.attributes) as [label, value]}<dt>{label}</dt><dd>{attributeValue(value, showValues)}</dd>{/each}</dl></details>{/if}</td>
+                  <td><LiveHoldingName {holding} {showValues}/><small>{text(holding.exchange)} · {text(holding.assetType)}</small>{#if holdingStatus && holding.symbol}{@const SvelteComponent_2 = holdingStatus}<div class="holding-extension"><SvelteComponent_2 symbol={holding.symbol} /></div>{/if}{#if extras(holding.attributes).length}<details class="broker-details"><summary>Details</summary><dl>{#each extras(holding.attributes) as [label, value]}<dt>{label}</dt><dd>{attributeValue(value, showValues)}</dd>{/each}</dl></details>{/if}</td>
                   <td>{quantity(holding.quantity, showValues)}</td>
                   <td>{money(holding.averageCost, holding.currency, showValues)}</td>
                   <LiveHoldingCells {holding} {showValues} />
@@ -241,13 +267,13 @@
                     <div class="holding-actions" aria-label={`Trade ${holdingSymbol(holding)}`}>
                       <button
                         class="trade buy-action"
-                        on:click={() => beginOrder(holding, 'BUY')}
+                        onclick={() => beginOrder(holding, 'BUY')}
                         disabled={!holdingSymbol(holding)}
                         aria-label={`Buy ${holdingSymbol(holding) || 'this holding'}`}
                       >Buy</button>
                       <button
                         class="trade sell-action"
-                        on:click={() => beginOrder(holding, 'SELL')}
+                        onclick={() => beginOrder(holding, 'SELL')}
                         disabled={!holdingSymbol(holding)}
                         aria-label={`Sell ${holdingSymbol(holding) || 'this holding'}`}
                       >Sell</button>
@@ -280,7 +306,7 @@
                   <td>{quantity(order.remainingQuantity ?? order.quantity, showValues)}</td>
                   <td>{money(order.price, order.currency, showValues)}{#if order.triggerPrice != null}<small>Trigger {money(order.triggerPrice, order.currency, showValues)}</small>{/if}</td>
                   <td>{text(order.placedAt)}</td>
-                  <td>{#if order.orderId && (order.symbol ?? order.instrumentId)}<svelte:component this={cancelControl}
+                  <td>{#if order.orderId && (order.symbol ?? order.instrumentId)}{@const SvelteComponent_3 = cancelControl}<SvelteComponent_3
                     symbol={(order.symbol ?? order.instrumentId).trim()} orderNo={order.orderId}
                     side={order.side} orderType={order.orderType} status={order.status}
                     remainingQuantity={order.remainingQuantity ?? order.quantity} price={order.price}

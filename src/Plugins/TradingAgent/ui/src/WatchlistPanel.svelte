@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createEventDispatcher, onMount } from 'svelte';
+  import { createEventDispatcher, onMount, untrack } from 'svelte';
   import {
     trading, type WatchlistEntry, type WatchlistResponse, type CandleArchiveStatus,
     type WatchlistPresetPreview
@@ -16,17 +16,12 @@
   import type { WatchlistFilter } from './watchlistLists';
   import { moveWatchlistRow, type WatchlistAction } from './watchlistNavigation';
 
-  /** Selected symbol, so the chart pane (Phase 2) can follow the list. */
-  export let selected: string | null = null;
-  /** Human issuer name for the selected ticker; bound to the chart heading by the dashboard. */
-  export let selectedCompany: string | null = null;
-  /** Collapses the panel horizontally so the chart receives most of the workspace width. */
-  export let compact = false;
-  /** The containing layout may disable the toggle when it cannot resize the panel. */
-  export let allowCompact = true;
-  /** Dense workstation presentation; classic retains its existing cards and controls. */
-  export let dense = false;
-  let managementOpen = false;
+  
+  
+  
+  
+  
+  let managementOpen = $state(false);
   const dispatch = createEventDispatcher<{ select:string; newOrder:{symbol:string}; priceAlert:{symbol:string}; compactChange:boolean }>();
   // Explicit picks also fire when reselecting the current stock. List refreshes only update binding.
   function selectSymbol(symbol: string) {
@@ -34,50 +29,76 @@
     if (dense) search = '';
     dispatch('select', symbol);
   }
-  let panelElement: HTMLElement;
-  /** Shared dashboard clock; used to refresh live session moves without adding another timer. */
-  export let refreshTick = 0;
-  /** Session gate supplied by the dashboard status endpoint. Closed-market moves do not change. */
-  export let marketOpen = false;
-  /**
+  let panelElement: HTMLElement = $state()!;
+  
+  
+  
+  interface Props {
+    /** Selected symbol, so the chart pane (Phase 2) can follow the list. */
+    selected?: string | null;
+    /** Human issuer name for the selected ticker; bound to the chart heading by the dashboard. */
+    selectedCompany?: string | null;
+    /** Collapses the panel horizontally so the chart receives most of the workspace width. */
+    compact?: boolean;
+    /** The containing layout may disable the toggle when it cannot resize the panel. */
+    allowCompact?: boolean;
+    /** Dense workstation presentation; classic retains its existing cards and controls. */
+    dense?: boolean;
+    /** Shared dashboard clock; used to refresh live session moves without adding another timer. */
+    refreshTick?: number;
+    /** Session gate supplied by the dashboard status endpoint. Closed-market moves do not change. */
+    marketOpen?: boolean;
+    /**
    * Optional component rendered in each row after the tags. Null in a community build. It receives
    * only `symbol` and must render nothing when it has nothing to say — see `symbolExtensions.ts`.
    */
-  export let rowStatus: SymbolExtensionComponent | null = null;
+    rowStatus?: SymbolExtensionComponent | null;
+  }
 
-  let data: WatchlistResponse | null = null;
+  let {
+    selected = $bindable(null),
+    selectedCompany = $bindable(null),
+    compact = $bindable(false),
+    allowCompact = true,
+    dense = false,
+    refreshTick = 0,
+    marketOpen = false,
+    rowStatus = null
+  }: Props = $props();
+
+  let data: WatchlistResponse | null = $state<WatchlistResponse | null>(null);
   /**
    * Archive coverage, for the "no weekly" rows only: it says how many sessions each starved symbol was
    * never requested for, which is what the targeted backfill below would fetch. Optional — the list
    * still works without it, the offer just loses its numbers.
    */
-  let archive: CandleArchiveStatus | null = null;
+  let archive: CandleArchiveStatus | null = $state<CandleArchiveStatus | null>(null);
   /** True only while the FIRST paint is waiting for the symbol list; see load(). */
-  let loading = true;
+  let loading = $state(true);
   /** True while the portal metadata pass (company names, live moves) is still in flight. */
-  let enriching = false;
-  let error: string | null = null;
-  let notice: string | null = null;
-  let input = '';
-  let busy = false;
+  let enriching = $state(false);
+  let error: string | null = $state<string | null>(null);
+  let notice: string | null = $state<string | null>(null);
+  let input = $state('');
+  let busy = $state(false);
   /** Narrows the rows below by symbol — separate from `input`, which is for adding a new ticker. */
-  let search = '';
-  let searchInput: HTMLInputElement;
-  let watchlistTable: WatchlistTable;
-  let filters: WatchlistFilters;
-  let activeFilter: WatchlistFilter | null = null;
-  let managementButton: HTMLButtonElement;
+  let search = $state('');
+  let searchInput: HTMLInputElement = $state()!;
+  let watchlistTable: WatchlistTable = $state()!;
+  let filters: WatchlistFilters = $state()!;
+  let activeFilter: WatchlistFilter | null = $state<WatchlistFilter | null>(null);
+  let managementButton: HTMLButtonElement = $state()!;
   /** When active, show only symbols that currently have one or more unacknowledged alerts. */
-  let alertsOnly = false;
+  let alertsOnly = $state(false);
   /** Narrows rows by the effective auto-trading state, including configuration-locked symbols. */
-  let autoTradeFilter: 'all' | 'enabled' | 'disabled' = 'all';
-  let draggedSymbol: string | null = null;
-  let dragOverSymbol: string | null = null;
-  let preset: WatchlistPresetPreview | null = null;
-  let presetLoading = false;
+  let autoTradeFilter: 'all' | 'enabled' | 'disabled' = $state<'all' | 'enabled' | 'disabled'>('all');
+  let draggedSymbol: string | null = $state<string | null>(null);
+  let dragOverSymbol: string | null = $state<string | null>(null);
+  let preset: WatchlistPresetPreview | null = $state<WatchlistPresetPreview | null>(null);
+  let presetLoading = $state(false);
   let refreshingEntries = false;
-  let configuredListNoteDismissed = false;
-  let executionSourceNoteDismissed = false;
+  let configuredListNoteDismissed = $state(false);
+  let executionSourceNoteDismissed = $state(false);
   const configuredListNoteStorageKey = 'trading-watchlist-configured-list-note-dismissed-v1';
   const executionSourceNoteStorageKey = 'trading-watchlist-execution-source-note-dismissed-v1';
 
@@ -566,37 +587,49 @@
 
   // Resetting adopts the configured list and clears the server flag. Clear the local dismissal at
   // the same point so a genuinely later configuration change is visible again.
-  $: if (data && !data.configuredListChanged && configuredListNoteDismissed) {
-    configuredListNoteDismissed = false;
-    localStorage.removeItem(configuredListNoteStorageKey);
-  }
+  $effect.pre(() => {
+    if (data && !data.configuredListChanged && configuredListNoteDismissed) {
+      configuredListNoteDismissed = false;
+      localStorage.removeItem(configuredListNoteStorageKey);
+    }
+  });
 
   // The parent does not advance this clock in a hidden tab. Keep the local visibility check as a
   // guard in case the component is reused under a different parent later.
-  let lastRefreshTick = refreshTick;
-  $: if (refreshTick !== lastRefreshTick) {
-    lastRefreshTick = refreshTick;
-    if (marketOpen && typeof document !== 'undefined' && !document.hidden) refreshEntries();
-  }
+  // svelte-ignore state_referenced_locally -- the starting tick, so the first render is not taken as a new one
+  let lastRefreshTick = $state(refreshTick);
+  $effect.pre(() => {
+    // Reads only what the old `$:` named; the refresh is untracked so its own bookkeeping cannot re-trigger it.
+    const tick = refreshTick, seen = lastRefreshTick, open = marketOpen;
+    untrack(() => {
+      if (tick !== seen) {
+        lastRefreshTick = tick;
+        if (open && typeof document !== 'undefined' && !document.hidden) refreshEntries();
+      }
+    });
+  });
 
-  $: gapBySymbol = new Map(
-    (archive?.symbolsShortOfWeekly ?? []).map(gap => [gap.symbol, gap]));
-  $: openAlertCount = (data?.entries ?? []).reduce((total, entry) => total + entry.openAlerts, 0);
+  let gapBySymbol = $derived(new Map(
+    (archive?.symbolsShortOfWeekly ?? []).map(gap => [gap.symbol, gap])));
+  let openAlertCount = $derived((data?.entries ?? []).reduce((total, entry) => total + entry.openAlerts, 0));
   // Counted against `manualOnly`, not the stored toggle: a symbol pinned in appsettings is just as
   // hand-managed as one switched off here, and the header is answering "how many do I place myself".
   // Restricted to tradable rows for the same reason the badge is — see the badge's comment.
-  $: manualOnlyCount = (data?.entries ?? []).filter(e => e.tradable && e.manualOnly).length;
-  $: watchlistControlsExecution = data?.executionUniverseSource === 'Watchlist';
-  $: selectedCompany = data?.entries.find(entry => entry.symbol === selected)?.companyName ?? null;
-  $: canReorder = !search.trim() && !activeFilter && !alertsOnly && autoTradeFilter === 'all';
-  $: filteredEntries = (data?.entries ?? []).filter(entry =>
+  let manualOnlyCount = $derived((data?.entries ?? []).filter(e => e.tradable && e.manualOnly).length);
+  let watchlistControlsExecution = $derived(data?.executionUniverseSource === 'Watchlist');
+  // Writes the bound prop, so it stays an effect rather than a derived value.
+  $effect.pre(() => {
+    selectedCompany = data?.entries.find(entry => entry.symbol === selected)?.companyName ?? null;
+  });
+  let canReorder = $derived(!search.trim() && !activeFilter && !alertsOnly && autoTradeFilter === 'all');
+  let filteredEntries = $derived((data?.entries ?? []).filter(entry =>
     (!activeFilter || activeFilter.symbols.has(entry.symbol)) &&
     (!alertsOnly || entry.openAlerts > 0) &&
     (autoTradeFilter === 'all' ||
       (autoTradeFilter === 'enabled' && !entry.manualOnly) ||
       (autoTradeFilter === 'disabled' && entry.manualOnly)) &&
     `${entry.symbol} ${entry.companyName ?? ''}`.toLowerCase().includes(search.trim().toLowerCase())
-  );
+  ));
 
 </script>
 
@@ -627,16 +660,16 @@
         <button
           class="icon density"
           class:active={compact}
-          on:click={toggleCompact}
+          onclick={toggleCompact}
           aria-pressed={compact}
           aria-label={compact ? 'Expand watchlist' : 'Collapse watchlist to a narrow rail'}
           title={compact ? 'Expand watchlist' : 'Collapse watchlist to give the chart more space'}
         >{#if compact}<PanelLeftOpen size={14} />{:else}<PanelLeftClose size={14} />{/if}</button>
       {/if}
       {#if dense}
-        <button bind:this={managementButton} class="btn btn-ghost" aria-expanded={managementOpen} aria-controls="watchlist-management" on:click={() => managementOpen = !managementOpen}>Manage</button>
+        <button bind:this={managementButton} class="btn btn-ghost" aria-expanded={managementOpen} aria-controls="watchlist-management" onclick={() => managementOpen = !managementOpen}>Manage</button>
       {:else}
-      <button class="btn btn-ghost" on:click={reset} disabled={busy || loading} title="Reset to the configured allowed-symbols list">
+      <button class="btn btn-ghost" onclick={reset} disabled={busy || loading} title="Reset to the configured allowed-symbols list">
         <RotateCcw size={13} /> Reset
       </button>
       {/if}
@@ -645,8 +678,8 @@
 
   {#if !dense || managementOpen}
   <div id="watchlist-management" class="management">
-  {#if dense}<button class="btn btn-ghost" on:click={reset} disabled={busy || loading} title="Reset symbols and settings to the configured list; this is not Reset view"><RotateCcw size={13}/> Reset list…</button>{/if}
-  <form class="add-row" on:submit|preventDefault={add}>
+  {#if dense}<button class="btn btn-ghost" onclick={reset} disabled={busy || loading} title="Reset symbols and settings to the configured list; this is not Reset view"><RotateCcw size={13}/> Reset list…</button>{/if}
+  <form class="add-row" onsubmit={(event) => { event.preventDefault(); void add(); }}>
     <input
       class="symbol-input"
       placeholder="Add ticker (e.g. OGDC)"
@@ -663,10 +696,10 @@
 
   <div class="preset-row" aria-label="Index watchlist presets">
     <span><ListPlus size={13} /> Index lists</span>
-    <button type="button" on:click={() => previewPreset('KSE100')} disabled={busy || presetLoading}>
+    <button type="button" onclick={() => previewPreset('KSE100')} disabled={busy || presetLoading}>
       KSE 100
     </button>
-    <button type="button" on:click={() => previewPreset('KSE30')} disabled={busy || presetLoading}>
+    <button type="button" onclick={() => previewPreset('KSE30')} disabled={busy || presetLoading}>
       KSE 30
     </button>
   </div>
@@ -678,20 +711,20 @@
           <b>{preset.label}</b>
           <span>{preset.count} members · {preset.missing} missing · {preset.alreadyWatched} already watched</span>
         </div>
-        <button class="icon close" type="button" on:click={() => preset = null}
+        <button class="icon close" type="button" onclick={() => preset = null}
           aria-label="Close index list options" title="Close"><X size={13} /></button>
       </div>
       <div class="preset-actions">
         <button
           class="btn btn-primary"
           type="button"
-          on:click={() => applyPreset('merge')}
+          onclick={() => applyPreset('merge')}
           disabled={busy || preset.missing === 0 || preset.projectedMergeCount > preset.maxSymbols}
           title={preset.projectedMergeCount > preset.maxSymbols
             ? `Adding would exceed the ${preset.maxSymbols}-symbol limit`
             : 'Keep the current watchlist and add only missing index members'}
         >Add {preset.missing} missing</button>
-        <button class="btn btn-ghost replace" type="button" on:click={() => applyPreset('replace')} disabled={busy}>
+        <button class="btn btn-ghost replace" type="button" onclick={() => applyPreset('replace')} disabled={busy}>
           Replace list
         </button>
       </div>
@@ -719,7 +752,7 @@
       <button
         class="note-close"
         type="button"
-        on:click={dismissConfiguredListNote}
+        onclick={dismissConfiguredListNote}
         aria-label="Dismiss configured symbols note"
         title="Dismiss this note"
       ><X size={13} /></button>
@@ -735,7 +768,7 @@
       <button
         class="note-close"
         type="button"
-        on:click={dismissExecutionSourceNote}
+        onclick={dismissExecutionSourceNote}
         aria-label="Dismiss trading eligibility note"
         title="Dismiss this note"
       ><X size={13} /></button>
@@ -751,7 +784,7 @@
       <button
         class="note-close"
         type="button"
-        on:click={() => (notice = null)}
+        onclick={() => (notice = null)}
         aria-label="Dismiss message"
         title="Dismiss this message"
       ><X size={13} /></button>
@@ -771,14 +804,14 @@
           aria-label="Search watched symbols"
           aria-keyshortcuts={dense ? 'Control+Shift+1 Meta+Shift+1' : undefined}
           title={dense ? 'Focus watchlist search (Ctrl+Shift+1)' : undefined}
-          on:keydown={searchKey}
+          onkeydown={searchKey}
         />
         {#if search}
           <button
             class="search-clear"
             type="button"
-            on:click={clearSearch}
-            on:keydown={clearSearchOnEscape}
+            onclick={clearSearch}
+            onkeydown={clearSearchOnEscape}
             aria-label="Clear watchlist search"
             title="Clear search"
           ><X size={13} /></button>
@@ -799,7 +832,7 @@
         type="button"
         aria-pressed={alertsOnly}
         title={alertsOnly ? 'Show all watched symbols' : 'Show only symbols with unacknowledged alerts'}
-        on:click={() => alertsOnly = !alertsOnly}
+        onclick={() => alertsOnly = !alertsOnly}
       >
         <Bell size={13} /> Alerts only
       </button>
@@ -809,7 +842,7 @@
   {#if activeFilter}
     <div class="active-group">
       <button type="button" aria-label={`Clear ${activeFilter.name} filter`} title={`Clear ${activeFilter.name} filter`}
-        on:click={() => filters?.clear()}><span>{activeFilter.name}</span><X size={12} aria-hidden="true"/></button>
+        onclick={() => filters?.clear()}><span>{activeFilter.name}</span><X size={12} aria-hidden="true"/></button>
       <span role="status">{filteredEntries.length} of {data?.entries.length ?? 0}</span>
     </div>
   {/if}
@@ -830,20 +863,20 @@
     </p>
   {:else}
     {#if dense && compact && (autoTradeFilter !== 'all' || alertsOnly)}
-      <button class="compact-filters" on:click={() => { autoTradeFilter = 'all'; alertsOnly = false; }}>Clear active filters</button>
+      <button class="compact-filters" onclick={() => { autoTradeFilter = 'all'; alertsOnly = false; }}>Clear active filters</button>
     {/if}
     {#if !dense || managementOpen}
     <div class="automation-actions" aria-label="Bulk auto-trading actions">
       <span><Bot size={13} aria-hidden="true" /> Auto trading</span>
       <button
         type="button"
-        on:click={() => setAllAutoTrading(true)}
+        onclick={() => setAllAutoTrading(true)}
         disabled={busy || data.entries.every(entry => entry.autoTradeEnabled)}
         title="Allow automation for every watched symbol"
       ><Bot size={13} aria-hidden="true" /> Allow all</button>
       <button
         type="button"
-        on:click={() => setAllAutoTrading(false)}
+        onclick={() => setAllAutoTrading(false)}
         disabled={busy || data.entries.every(entry => !entry.autoTradeEnabled)}
         title="Set every watched symbol to manual-only"
       ><Hand size={13} aria-hidden="true" /> Manual-only all</button>
@@ -884,10 +917,10 @@
           class:dragging={draggedSymbol === entry.symbol}
           class:auto-trading={entry.tradable && entry.autoTradeEnabled}
           draggable={!search.trim() && !alertsOnly && autoTradeFilter === 'all'}
-          on:dragstart={(event) => startDrag(event, entry)}
-          on:dragover={(event) => dragOver(event, entry)}
-          on:drop={(event) => dropOn(event, entry)}
-          on:dragend={() => { draggedSymbol = null; dragOverSymbol = null; }}
+          ondragstart={(event) => startDrag(event, entry)}
+          ondragover={(event) => dragOver(event, entry)}
+          ondrop={(event) => dropOn(event, entry)}
+          ondragend={() => { draggedSymbol = null; dragOverSymbol = null; }}
         >
           <span class="drag-handle" title={search.trim() || alertsOnly || autoTradeFilter !== 'all' ? 'Clear filters to reorder' : 'Drag to reorder'}>
             <GripVertical size={13} />
@@ -895,7 +928,7 @@
           <button
             class="pick"
             title={entry.companyName ? `${entry.symbol} — ${entry.companyName}` : entry.symbol}
-            on:click={() => selectSymbol(entry.symbol)}
+            onclick={() => selectSymbol(entry.symbol)}
           >
             <span class="identity">
               <span class="symbol-line">
@@ -952,8 +985,9 @@
           <!-- Outside the picker button on purpose: an extension may render its own controls, and
                nesting an interactive element inside a button is invalid and breaks keyboard use. -->
           {#if rowStatus}
+            {@const SvelteComponent = rowStatus}
             <span class="row-extension">
-              <svelte:component this={rowStatus} symbol={entry.symbol} />
+              <SvelteComponent symbol={entry.symbol} />
             </span>
           {/if}
           <div class="row-actions">
@@ -963,7 +997,7 @@
               title={entry.pinned ? 'Unpin from the top' : 'Pin to the top'}
               data-tooltip={entry.pinned ? 'Unpin' : 'Pin to top'}
               aria-label={entry.pinned ? `Unpin ${entry.symbol}` : `Pin ${entry.symbol}`}
-              on:click={() => togglePin(entry)}
+              onclick={() => togglePin(entry)}
               disabled={busy}
             >
               {#if entry.pinned}<PinOff size={13} />{:else}<Pin size={13} />{/if}
@@ -976,20 +1010,20 @@
                 title="Fetch the daily sessions this symbol was never requested for, so weekly levels can be computed"
                 data-tooltip="Fetch history"
                 aria-label={`Fetch missing price history for ${entry.symbol}`}
-                on:click={() => fillHistory(entry)}
+                onclick={() => fillHistory(entry)}
                 disabled={busy || archive?.progress.isRunning}
               >
                 <Download size={13} />
               </button>
             {/if}
             <button class="icon" title="Set price alert" aria-label={`Set price alert for ${entry.symbol}`}
-              on:click={() => dispatch('priceAlert', {symbol: entry.symbol})}><Bell size={13}/></button>
+              onclick={() => dispatch('priceAlert', {symbol: entry.symbol})}><Bell size={13}/></button>
             <button
               class="icon"
               title={entry.alertsEnabled ? 'Mute alerts for this symbol' : 'Unmute alerts'}
               data-tooltip={entry.alertsEnabled ? 'Mute alerts' : 'Enable alerts'}
               aria-label={entry.alertsEnabled ? `Mute alerts for ${entry.symbol}` : `Enable alerts for ${entry.symbol}`}
-              on:click={() => toggleAlerts(entry)}
+              onclick={() => toggleAlerts(entry)}
               disabled={busy}
             >
               {#if entry.alertsEnabled}<Bell size={13} />{:else}<BellOff size={13} />{/if}
@@ -1009,7 +1043,7 @@
                 aria-label={entry.autoTradeEnabled
                   ? `Set ${entry.symbol} to manual-only`
                   : `Allow automation for ${entry.symbol}`}
-                on:click={() => toggleAutoTrade(entry)}
+                onclick={() => toggleAutoTrade(entry)}
                 disabled={busy || entry.manualOnlyLocked}
               >
                 {#if entry.manualOnlyLocked}
@@ -1022,7 +1056,7 @@
               </button>
             {/if}
             <button class="icon danger" title="Remove from watchlist" data-tooltip="Remove"
-              aria-label={`Remove ${entry.symbol} from watchlist`} on:click={() => remove(entry)} disabled={busy}>
+              aria-label={`Remove ${entry.symbol} from watchlist`} onclick={() => remove(entry)} disabled={busy}>
               <Trash2 size={13} />
             </button>
           </div>

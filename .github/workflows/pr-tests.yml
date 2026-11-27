@@ -42,6 +42,7 @@ jobs:
           npm ci
           npm run check
           npm run build
+          node --test "tests/*.test.mjs"
       - name: Core and channel tests
         run: |
           dotnet build tests/AgentFox.ChannelTests -nologo -v q

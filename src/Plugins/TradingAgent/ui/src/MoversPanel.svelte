@@ -9,18 +9,23 @@
   } from 'lucide-svelte';
   import LivePriceInline from './LivePriceInline.svelte';
 
-  /** Clicking a row selects that symbol, so the chart pane follows the screen. */
-  export let selected: string | null = null;
+  
+  interface Props {
+    /** Clicking a row selects that symbol, so the chart pane follows the screen. */
+    selected?: string | null;
+  }
 
-  let screen: MoverScreen = 'gainers';
+  let { selected = $bindable(null) }: Props = $props();
+
+  let screen: MoverScreen = $state('gainers');
   /**
    * Defaults to KSE100 rather than the whole market on purpose. The unrestricted universe is 857
    * symbols, hundreds of which are effectively untradable, and an unfiltered gainers list is
    * dominated by names nobody can get size in. A trader wanting the long tail can widen it.
    */
-  let index = 'KSE100';
-  let limit = 15;
-  let showSectors = false;
+  let index = $state('KSE100');
+  let limit = $state(15);
+  let showSectors = $state(false);
 
   /**
    * Collapsed until asked for.
@@ -33,13 +38,13 @@
    * refresh (movers plus sectors), both of which reach the analytics portal. Keeping that running for a
    * panel nobody is looking at spends the broker's session on nothing.
    */
-  let open = false;
+  let open = $state(false);
   let loadedOnce = false;
 
-  let data: MoversResponse | null = null;
-  let sectors: SectorsResponse | null = null;
-  let loading = false;
-  let error: string | null = null;
+  let data: MoversResponse | null = $state<MoversResponse | null>(null);
+  let sectors: SectorsResponse | null = $state<SectorsResponse | null>(null);
+  let loading = $state(false);
+  let error: string | null = $state<string | null>(null);
   let timer: ReturnType<typeof setTimeout> | null = null;
   let requestInFlight = false;
   let reloadRequested = false;
@@ -198,13 +203,13 @@
     return out;
   }
 
-  $: breadth = data?.breadth ?? null;
-  $: isClosed = data?.marketState != null && data.marketState !== 'OPN';
+  let breadth = $derived(data?.breadth ?? null);
+  let isClosed = $derived(data?.marketState != null && data.marketState !== 'OPN');
 </script>
 
 <div class="panel" class:collapsed={!open}>
   <header>
-    <button class="disclose" on:click={toggle} aria-expanded={open}
+    <button class="disclose" onclick={toggle} aria-expanded={open}
             title={open ? 'Collapse Market Movers' : 'Expand Market Movers'}>
       <ChevronRight size={14} class={open ? 'turned' : ''} />
       <h3><Activity size={16} /> Market Movers</h3>
@@ -217,7 +222,7 @@
       {/if}
       {#if open && data?.asOf}<span class="as-of">as of {data.asOf}</span>{/if}
       {#if open}
-        <button class="icon" title="Refresh" on:click={load} disabled={loading}>
+        <button class="icon" title="Refresh" onclick={load} disabled={loading}>
           <RefreshCw size={14} class={loading ? 'spin' : ''} />
         </button>
       {/if}
@@ -254,22 +259,22 @@
     <div class="controls">
       <div class="screens">
         {#each MOVER_SCREENS as s}
-          <button class:active={screen === s} on:click={() => pick(s)}>
+          <button class:active={screen === s} onclick={() => pick(s)}>
             {MOVER_SCREEN_LABELS[s]}
           </button>
         {/each}
       </div>
       <div class="filters">
-        <select bind:value={index} on:change={() => { loading = true; load(); }}>
+        <select bind:value={index} onchange={() => { loading = true; load(); }}>
           {#each INDEX_OPTIONS as opt}
             <option value={opt.value}>{opt.label}</option>
           {/each}
         </select>
-        <select bind:value={limit} on:change={() => { loading = true; load(); }}>
+        <select bind:value={limit} onchange={() => { loading = true; load(); }}>
           {#each [10, 15, 25, 50] as n}<option value={n}>Top {n}</option>{/each}
         </select>
         <label class="toggle">
-          <input type="checkbox" bind:checked={showSectors} on:change={load} />
+          <input type="checkbox" bind:checked={showSectors} onchange={load} />
           <Layers size={13} /> Sectors
         </label>
       </div>
@@ -325,7 +330,7 @@
         <tbody>
           {#each data.rows as row}
             {@const flags = caveats(row)}
-            <tr class:selected={selected === row.symbol} on:click={() => selected = row.symbol}>
+            <tr class:selected={selected === row.symbol} onclick={() => selected = row.symbol}>
               <td>
                 <span class="sym">{row.symbol}</span>
                 <span class="name">{row.name ?? ''}</span>

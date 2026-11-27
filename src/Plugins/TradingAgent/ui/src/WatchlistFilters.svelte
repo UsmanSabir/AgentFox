@@ -7,44 +7,41 @@
     watchlistSectors, writeWatchlistLists, type WatchlistFilter, type WatchlistList
   } from './watchlistLists';
 
-  export let entries: WatchlistEntry[];
-  export let loadingSectors: boolean;
-  export let activeFilter: WatchlistFilter | null = null;
-  export let restoreRowFocus: (symbol: string) => void;
+  interface Props {
+    entries: WatchlistEntry[];
+    loadingSectors: boolean;
+    activeFilter?: WatchlistFilter | null;
+    restoreRowFocus: (symbol: string) => void;
+  }
 
-  let lists: WatchlistList[] = [];
-  let selection: Pick<WatchlistFilter, 'kind' | 'name'> | null = null;
-  let trigger: HTMLButtonElement;
-  let menu: HTMLDialogElement;
-  let editor: HTMLDialogElement;
-  let nameInput: HTMLInputElement;
-  let menuOpen = false;
-  let menuError = '';
-  let editorError = '';
-  let editSymbol: string | null = null;
+  let {
+    entries,
+    loadingSectors,
+    activeFilter = $bindable(null),
+    restoreRowFocus
+  }: Props = $props();
+
+  let lists: WatchlistList[] = $state([]);
+  let selection: Pick<WatchlistFilter, 'kind' | 'name'> | null = $state<Pick<WatchlistFilter, 'kind' | 'name'> | null>(null);
+  let trigger: HTMLButtonElement = $state()!;
+  let menu: HTMLDialogElement = $state()!;
+  let editor: HTMLDialogElement = $state()!;
+  let nameInput: HTMLInputElement = $state()!;
+  let menuOpen = $state(false);
+  let menuError = $state('');
+  let editorError = $state('');
+  let editSymbol: string | null = $state<string | null>(null);
   let before: string[] = [];
-  let checked: string[] = [];
-  let newName = '';
-  let showName = false;
-  let saving = false;
+  let checked: string[] = $state([]);
+  let newName = $state('');
+  let showName = $state(false);
+  let saving = $state(false);
   // The search box appears only when the menu is long enough to scroll; the query lives while the menu is open.
-  let searchable = false;
-  let query = '';
-  let searchRow: HTMLDivElement | undefined;
-  let searchInput: HTMLInputElement | undefined;
+  let searchable = $state(false);
+  let query = $state('');
+  let searchRow: HTMLDivElement | undefined = $state();
+  let searchInput: HTMLInputElement | undefined = $state();
 
-  $: sectors = watchlistSectors(entries);
-  $: shownSectors = matchingFilters(sectors, query);
-  $: shownGroups = matchingFilters(customGroups, query);
-  $: searching = query.trim() !== '';
-  $: watched = new Set(entries.map(entry => entry.symbol));
-  $: customGroups = lists.map(({ name, symbols }): WatchlistFilter => ({
-    kind: 'list', name, symbols: new Set(symbols.filter(symbol => watched.has(symbol)))
-  }));
-  $: activeFilter = selection
-    ? [...sectors, ...customGroups].find(group => group.kind === selection?.kind && group.name === selection.name)
-      ?? (selection.kind === 'sector' ? { ...selection, symbols: new Set<string>() } : null)
-    : null;
 
   function loadLists() {
     try {
@@ -194,28 +191,43 @@
     } catch (error) { menuError = errorMessage(error); }
     finally { saving = false; }
   }
+  let sectors = $derived(watchlistSectors(entries));
+  let shownSectors = $derived(matchingFilters(sectors, query));
+  let watched = $derived(new Set(entries.map(entry => entry.symbol)));
+  let customGroups = $derived(lists.map(({ name, symbols }): WatchlistFilter => ({
+    kind: 'list', name, symbols: new Set(symbols.filter(symbol => watched.has(symbol)))
+  })));
+  let shownGroups = $derived(matchingFilters(customGroups, query));
+  let searching = $derived(query.trim() !== '');
+  // Writes the bound prop, so it stays an effect rather than a derived value.
+  $effect.pre(() => {
+    activeFilter = selection
+      ? [...sectors, ...customGroups].find(group => group.kind === selection?.kind && group.name === selection.name)
+        ?? (selection.kind === 'sector' ? { ...selection, symbols: new Set<string>() } : null)
+      : null;
+  });
 </script>
 
 <button class="trigger" class:active={activeFilter !== null} type="button" bind:this={trigger}
-  aria-haspopup="dialog" aria-expanded={menuOpen} aria-label="Filter watched stocks" on:click={openMenu}>
+  aria-haspopup="dialog" aria-expanded={menuOpen} aria-label="Filter watched stocks" onclick={openMenu}>
   <Filter size={13} aria-hidden="true"/> Filter
 </button>
 
 <dialog class="filter-menu" bind:this={menu} aria-label="Filter watched stocks"
-  on:close={() => menuOpen = false} on:click={event => { if (event.target === menu) menu.close(); }}>
+  onclose={() => menuOpen = false} onclick={event => { if (event.target === menu) menu.close(); }}>
   {#if searchable}
     <div class="search" bind:this={searchRow}>
       <Search size={13} aria-hidden="true"/>
-      <input type="search" bind:this={searchInput} bind:value={query} on:keydown={searchKeys}
+      <input type="search" bind:this={searchInput} bind:value={query} onkeydown={searchKeys}
         placeholder="Find sector or list…" aria-label="Find a sector or list" autocomplete="off" spellcheck="false"/>
       {#if query}
         <button type="button" class="clear" aria-label="Clear search"
-          on:click={() => { query = ''; searchInput?.focus(); }}><X size={13} aria-hidden="true"/></button>
+          onclick={() => { query = ''; searchInput?.focus(); }}><X size={13} aria-hidden="true"/></button>
       {/if}
     </div>
   {/if}
   <div class="menu-content">
-    <button type="button" class="choice" aria-pressed={!activeFilter} on:click={() => choose(null)}>
+    <button type="button" class="choice" aria-pressed={!activeFilter} onclick={() => choose(null)}>
       <span>All stocks</span><small>{entries.length}</small>
       {#if !activeFilter}<Check size={14} aria-hidden="true"/>{/if}
     </button>
@@ -225,7 +237,7 @@
     {#if !searching || shownSectors.length}<h3>Sectors</h3>{/if}
     {#each shownSectors as sector (sector.name)}
       <button type="button" class="choice" aria-pressed={activeFilter?.kind === 'sector' && activeFilter.name === sector.name}
-        on:click={() => choose(sector)}>
+        onclick={() => choose(sector)}>
         <span>{sector.name}</span><small>{sector.symbols.size}</small>
         {#if activeFilter?.kind === 'sector' && activeFilter.name === sector.name}<Check size={14} aria-hidden="true"/>{/if}
       </button>
@@ -236,24 +248,24 @@
     {#each shownGroups as group (group.name)}
       <div class="list-choice">
         <button type="button" class="choice" aria-pressed={activeFilter?.kind === 'list' && activeFilter.name === group.name}
-          on:click={() => choose(group)}>
+          onclick={() => choose(group)}>
           <span>{group.name}</span><small>{group.symbols.size}</small>
           {#if activeFilter?.kind === 'list' && activeFilter.name === group.name}<Check size={14} aria-hidden="true"/>{/if}
         </button>
         <button type="button" class="delete" disabled={saving} aria-label={`Delete list ${group.name}`}
-          on:click={() => deleteList(group.name)}><Trash2 size={13} aria-hidden="true"/></button>
+          onclick={() => deleteList(group.name)}><Trash2 size={13} aria-hidden="true"/></button>
       </div>
     {/each}
-    <button type="button" class="new-list" on:click={() => openEditor(null)}><Plus size={14} aria-hidden="true"/> New list</button>
+    <button type="button" class="new-list" onclick={() => openEditor(null)}><Plus size={14} aria-hidden="true"/> New list</button>
     {#if menuError}<p class="error" role="alert">{menuError}</p>{/if}
   </div>
 </dialog>
 
 <dialog class="list-editor" bind:this={editor} aria-label={editSymbol ? `Lists for ${editSymbol}` : 'New list'}
-  on:close={closeEditor} on:cancel={event => { if (saving) event.preventDefault(); }}>
-  <form on:submit|preventDefault={submit}>
+  onclose={closeEditor} oncancel={event => { if (saving) event.preventDefault(); }}>
+  <form onsubmit={(event) => { event.preventDefault(); void submit(); }}>
     <header><strong>{editSymbol ? `Lists for ${editSymbol}` : 'New list'}</strong>
-      <button type="button" class="delete" aria-label="Close list editor" disabled={saving} on:click={() => editor.close()}>
+      <button type="button" class="delete" aria-label="Close list editor" disabled={saving} onclick={() => editor.close()}>
         <X size={15} aria-hidden="true"/>
       </button>
     </header>
@@ -264,7 +276,7 @@
         {/each}
       </div>
       {#if !showName}
-        <button type="button" class="new-list" on:click={showNewName}><Plus size={14} aria-hidden="true"/> New list</button>
+        <button type="button" class="new-list" onclick={showNewName}><Plus size={14} aria-hidden="true"/> New list</button>
       {/if}
     {/if}
     {#if showName}
@@ -275,7 +287,7 @@
     {/if}
     {#if editorError}<p class="error" role="alert">{editorError}</p>{/if}
     <footer>
-      <button type="button" class="cancel" disabled={saving} on:click={() => editor.close()}>Cancel</button>
+      <button type="button" class="cancel" disabled={saving} onclick={() => editor.close()}>Cancel</button>
       <button type="submit" class="done" disabled={saving}>{editSymbol ? 'Done' : 'Create list'}</button>
     </footer>
   </form>

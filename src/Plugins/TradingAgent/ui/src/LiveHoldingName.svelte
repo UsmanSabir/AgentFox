@@ -2,18 +2,21 @@
   import type { BrokerAccountHolding } from './api';
   import { useLivePrices } from './livePrices';
   import { holdingValuation, psxHoldingUrl } from './holdingValuation';
-  export let holding: BrokerAccountHolding;
-  export let showValues = false;
+  interface Props {
+    holding: BrokerAccountHolding;
+    showValues?: boolean;
+  }
+
+  let { holding, showValues = false }: Props = $props();
   const livePrices = useLivePrices();
-  $: symbol = holding.symbol?.trim() || holding.instrumentId?.trim() || '—';
-  let priceStore = livePrices.quote(symbol);
-  $: priceStore = livePrices.quote(symbol);
-  $: valuation = holdingValuation(holding, $priceStore.quote?.current);
-  $: percent = valuation.profitLossPercent;
-  $: known = showValues && percent != null && Number.isFinite(percent);
-  $: tone = !known ? '' : percent! > 0 ? 'gain' : percent! < 0 ? 'loss' : 'flat';
-  $: url = psxHoldingUrl(holding);
-  $: description = known ? `Unrealized ${percent! > 0 ? 'gain' : percent! < 0 ? 'loss' : 'P/L'} ${Math.abs(percent!).toFixed(2)}% · ${valuation.hasLiveMark ? 'estimated from live mark and broker average cost' : 'broker account snapshot'}` : '';
+  let symbol = $derived(holding.symbol?.trim() || holding.instrumentId?.trim() || '—');
+  let priceStore = $derived(livePrices.quote(symbol));
+  let valuation = $derived(holdingValuation(holding, $priceStore.quote?.current));
+  let percent = $derived(valuation.profitLossPercent);
+  let known = $derived(showValues && percent != null && Number.isFinite(percent));
+  let tone = $derived(!known ? '' : percent! > 0 ? 'gain' : percent! < 0 ? 'loss' : 'flat');
+  let url = $derived(psxHoldingUrl(holding));
+  let description = $derived(known ? `Unrealized ${percent! > 0 ? 'gain' : percent! < 0 ? 'loss' : 'P/L'} ${Math.abs(percent!).toFixed(2)}% · ${valuation.hasLiveMark ? 'estimated from live mark and broker average cost' : 'broker account snapshot'}` : '');
 </script>
 
 <span class="holding-name">

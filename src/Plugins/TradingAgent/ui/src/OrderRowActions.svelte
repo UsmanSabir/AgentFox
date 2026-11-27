@@ -1,10 +1,10 @@
 <script lang="ts">
   import { onDestroy, tick } from 'svelte';
   import type { PersistentActionChoice, PersistentActionId } from './persistentOrderUi';
-  let dialog: HTMLDialogElement;
-  let actionList: HTMLDivElement;
-  let title = '';
-  let actions: PersistentActionChoice[] = [];
+  let dialog: HTMLDialogElement | undefined = $state();
+  let actionList: HTMLDivElement | undefined = $state();
+  let title = $state('');
+  let actions: PersistentActionChoice[] = $state([]);
   let resolve: ((choice: PersistentActionId | null) => void) | null = null;
   let previous: HTMLElement | null = null;
 
@@ -13,19 +13,19 @@
     title = nextTitle; actions = nextActions;
     previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const answer = new Promise<PersistentActionId | null>(done => resolve = done);
-    dialog.showModal(); await tick();
-    actionList.querySelector<HTMLButtonElement>('button[data-menu-action]')?.focus();
+    dialog!.showModal(); await tick();
+    actionList!.querySelector<HTMLButtonElement>('button[data-menu-action]')?.focus();
     return answer;
   }
   function finish(choice: PersistentActionId | null) {
-    const done = resolve; resolve = null; dialog.close();
+    const done = resolve; resolve = null; dialog!.close();
     if (previous?.isConnected) previous.focus();
     done?.(choice);
   }
   function key(event: KeyboardEvent) {
     if (event.repeat || event.isComposing) { event.preventDefault(); return; }
     if (!['ArrowDown','ArrowUp','Home','End'].includes(event.key)) return;
-    const buttons = [...actionList.querySelectorAll<HTMLButtonElement>('button[data-menu-action]')];
+    const buttons = [...actionList!.querySelectorAll<HTMLButtonElement>('button[data-menu-action]')];
     const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
     const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1
       : event.key === 'ArrowDown' ? Math.min(buttons.length - 1,index + 1) : Math.max(0,index - 1);
@@ -34,12 +34,12 @@
   onDestroy(() => resolve?.(null));
 </script>
 
-<dialog bind:this={dialog} aria-label={title} on:cancel={event => {event.preventDefault();finish(null);}} on:keydown={key}>
-  <header><h2>{title}</h2><button on:click={() => finish(null)}>Close actions</button></header>
+<dialog bind:this={dialog} aria-label={title} oncancel={event => {event.preventDefault();finish(null);}} onkeydown={key}>
+  <header><h2>{title}</h2><button onclick={() => finish(null)}>Close actions</button></header>
   <p>Selecting an action opens its existing workflow. It does not execute an order-management action directly.</p>
   <div class="action-list" bind:this={actionList} role="menu">
     {#each actions as action}
-      <button data-menu-action role="menuitem" class:danger={action.danger} on:click={() => finish(action.id)}>
+      <button data-menu-action role="menuitem" class:danger={action.danger} onclick={() => finish(action.id)}>
         <b>{action.label}</b><span>{action.description}</span>
       </button>
     {/each}

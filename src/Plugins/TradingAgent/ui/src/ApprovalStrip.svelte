@@ -13,17 +13,21 @@
   import { trading, type ArmedOrdersResponse } from './api';
   import HelpTip from './HelpTip.svelte';
 
-  export let approval: ArmedOrdersResponse['approval'];
+  interface Props {
+    approval: ArmedOrdersResponse['approval'];
+  }
+
+  let { approval }: Props = $props();
   const dispatch = createEventDispatcher<{ changed: void }>();
-  let busy = false;
-  let message: string | null = null;
-  let failed = false;
+  let busy = $state(false);
+  let message: string | null = $state(null);
+  let failed = $state(false);
 
   // An older server sends neither field: keep the button rather than hide a control that may work.
-  $: windowApplies = approval.windowApplies ?? true;
-  $: open = !!approval.armedUntilUtc;
-  $: unattended = approval.willFireUnattended;
-  $: until = approval.armedUntilUtc ? new Date(approval.armedUntilUtc).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+  let windowApplies = $derived(approval.windowApplies ?? true);
+  let open = $derived(!!approval.armedUntilUtc);
+  let unattended = $derived(approval.willFireUnattended);
+  let until = $derived(approval.armedUntilUtc ? new Date(approval.armedUntilUtc).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '');
 
   async function openWindow() {
     if (busy) return;
@@ -75,9 +79,9 @@
     {#if approval.explanation}<br/><br/>{approval.explanation}{/if}
   </HelpTip>
   {#if open}
-    <button class="btn btn-danger" on:click={closeWindow} disabled={busy}>Ask me again</button>
+    <button class="btn btn-danger" onclick={closeWindow} disabled={busy}>Ask me again</button>
   {:else if windowApplies}
-    <button class="btn btn-ghost" on:click={openWindow} disabled={busy}><Clock size={13}/> Send without asking</button>
+    <button class="btn btn-ghost" onclick={openWindow} disabled={busy}><Clock size={13}/> Send without asking</button>
   {/if}
 </div>
 

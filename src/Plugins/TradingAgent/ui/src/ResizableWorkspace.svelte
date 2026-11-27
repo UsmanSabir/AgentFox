@@ -1,27 +1,46 @@
 <script lang="ts">
   import { onMount } from 'svelte';
 
-  export let label = 'Resizable workspace';
-  export let leftLabel = 'Left panel';
-  export let rightLabel = 'Right panel';
-  export let storageKey = 'trading.workspace.split.v1';
-  export let defaultLeft = 30;
-  export let minLeft = 18;
-  export let maxLeft = 48;
-  export let compactLeft = false;
-  export let expanded = false;
+  interface Props {
+    label?: string;
+    leftLabel?: string;
+    rightLabel?: string;
+    storageKey?: string;
+    defaultLeft?: number;
+    minLeft?: number;
+    maxLeft?: number;
+    compactLeft?: boolean;
+    expanded?: boolean;
+    left?: import('svelte').Snippet;
+    right?: import('svelte').Snippet;
+  }
+
+  let {
+    label = 'Resizable workspace',
+    leftLabel = 'Left panel',
+    rightLabel = 'Right panel',
+    storageKey = 'trading.workspace.split.v1',
+    defaultLeft = 30,
+    minLeft = 18,
+    maxLeft = 48,
+    compactLeft = false,
+    expanded = false,
+    left,
+    right
+  }: Props = $props();
 
   const RETENTION_MS = 180 * 24 * 60 * 60 * 1000;
 
-  let root: HTMLElement;
-  let leftPercent = defaultLeft;
-  let resizing = false;
+  let root: HTMLElement = $state()!;
+  // svelte-ignore state_referenced_locally -- the starting width; a saved layout or the splitter sets it from then on
+  let leftPercent = $state(defaultLeft);
+  let resizing = $state(false);
 
-  $: presets = [
+  let presets = $derived([
     { label: 'Chart focus', value: Math.min(maxLeft, minLeft + 4) },
     { label: 'Balanced', value: Math.min(maxLeft, Math.max(minLeft, defaultLeft)) },
     { label: 'List focus', value: Math.max(minLeft, maxLeft - 4) }
-  ];
+  ]);
 
   function clamp(value: number) {
     return Math.min(maxLeft, Math.max(minLeft, value));
@@ -122,21 +141,21 @@
           type="button"
           class:active={Math.abs(leftPercent - preset.value) < 0.5}
           aria-pressed={Math.abs(leftPercent - preset.value) < 0.5}
-          on:click={() => setLeft(preset.value)}
+          onclick={() => setLeft(preset.value)}
         >{preset.label}</button>
       {/each}
-      <button type="button" class="reset" on:click={reset}>Reset</button>
+      <button type="button" class="reset" onclick={reset}>Reset</button>
     </div>
   </div>
 
   <div class="workspace-grid">
     <div class="pane left-pane" aria-label={leftLabel}>
-      <slot name="left"></slot>
+      {@render left?.()}
     </div>
 
     <!-- An adjustable ARIA separator is keyboard-focusable by definition; Svelte's static checker
          does not distinguish it from a passive separator. -->
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex a11y_no_noninteractive_element_interactions -->
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
     <div
       class="splitter"
       role="separator"
@@ -148,15 +167,15 @@
       aria-valuetext={`${Math.round(leftPercent)} percent for ${leftLabel}`}
       tabindex="0"
       title="Drag to resize. Arrow keys resize by 2%; hold Shift for 5%."
-      on:pointerdown={startResize}
-      on:pointermove={resize}
-      on:pointerup={finishResize}
-      on:pointercancel={finishResize}
-      on:keydown={resizeWithKeyboard}
+      onpointerdown={startResize}
+      onpointermove={resize}
+      onpointerup={finishResize}
+      onpointercancel={finishResize}
+      onkeydown={resizeWithKeyboard}
     ></div>
 
     <div class="pane right-pane" aria-label={rightLabel}>
-      <slot name="right"></slot>
+      {@render right?.()}
     </div>
   </div>
 </section>

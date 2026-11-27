@@ -17,13 +17,25 @@
   import type { SymbolExtension } from './symbolExtensions';
   import WatchlistPanel from './WatchlistPanel.svelte';
 
-  export let selectedSymbol: string | null = null;
-  export let selectedCompany: string | null = null;
-  export let refreshTick = 0;
-  export let historyRefreshTick = 0;
-  export let archive: CandleArchiveStatus | null = null;
-  export let marketOpen = false;
-  export let symbolExtension: SymbolExtension | null = null;
+  interface Props {
+    selectedSymbol?: string | null;
+    selectedCompany?: string | null;
+    refreshTick?: number;
+    historyRefreshTick?: number;
+    archive?: CandleArchiveStatus | null;
+    marketOpen?: boolean;
+    symbolExtension?: SymbolExtension | null;
+  }
+
+  let {
+    selectedSymbol = $bindable(null),
+    selectedCompany = $bindable(null),
+    refreshTick = 0,
+    historyRefreshTick = 0,
+    archive = null,
+    marketOpen = false,
+    symbolExtension = null
+  }: Props = $props();
 
   const dispatch = createEventDispatcher<{ arm: ArmOrderDialogContext; priceAlert: {symbol: string; target?: number; direction?: 'above' | 'below'} }>();
   const STORAGE_KEY = 'trading.market-workstation.layout.v1';
@@ -39,22 +51,22 @@
     layout: SerializedDockview;
   };
 
-  let dockRoot: HTMLDivElement;
-  let depot: HTMLDivElement;
-  let watchlistHost: HTMLDivElement;
-  let chartHost: HTMLDivElement;
-  let planHost: HTMLDivElement;
-  let watchlistPanel: WatchlistPanel | null = null;
+  let dockRoot: HTMLDivElement = $state()!;
+  let depot: HTMLDivElement = $state()!;
+  let watchlistHost: HTMLDivElement = $state()!;
+  let chartHost: HTMLDivElement = $state()!;
+  let planHost: HTMLDivElement = $state()!;
+  let watchlistPanel: WatchlistPanel | null = $state<WatchlistPanel | null>(null);
   let api: DockviewApi | null = null;
   let defaultLayout: SerializedDockview | null = null;
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   let suppressPersistence = false;
   let layoutDirty = false;
-  let notice = '';
+  let notice = $state('');
 
-  $: panelIds = (symbolExtension?.plan
+  let panelIds = $derived((symbolExtension?.plan
     ? ['watchlist', 'chart', 'plan']
-    : ['watchlist', 'chart']) as PanelId[];
+    : ['watchlist', 'chart']) as PanelId[]);
 
   function currentTheme() {
     return document.documentElement.dataset.theme === 'light' ? themeLight : themeDark;
@@ -323,7 +335,7 @@
           <span><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>0</kbd> reset view</span>
         </div>
       </details>
-      <button class="reset-view" type="button" on:click={resetView} title="Restore the default panel arrangement">
+      <button class="reset-view" type="button" onclick={resetView} title="Restore the default panel arrangement">
         <RotateCcw size={13} aria-hidden="true" /> Reset view
       </button>
     </div>
@@ -367,8 +379,7 @@
     {#if symbolExtension?.plan}
       <div id="trading-stock-plan" class="panel-host plan-host section-anchor" data-panel="plan" tabindex="-1" bind:this={planHost}>
         {#if selectedSymbol}
-          <svelte:component
-            this={symbolExtension.plan}
+          <symbolExtension.plan
             symbol={selectedSymbol}
             companyName={selectedCompany}
             allowCollapse={false}

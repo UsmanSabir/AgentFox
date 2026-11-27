@@ -1,6 +1,6 @@
 <script lang="ts">
   import { describePsxDate } from './orderSchedule';
-  import { onMount, createEventDispatcher } from 'svelte';
+  import { onMount, createEventDispatcher, untrack } from 'svelte';
   import { onAccountChanged } from './accountSignal';
   import { trading, type ArmedOrdersResponse, type ArmedOrder, type ProtectiveStop } from './api';
   import {
@@ -13,46 +13,69 @@
   import ApprovalStrip from './ApprovalStrip.svelte';
   import { orderListNavigation, focusOrderControls, isPointerClick, matchesSide, type OrderSideFilter } from './orderListNavigation';
 
-  export let refreshTick = 0;
-  export let keyboardMode = false;
-  /**
+  
+  
+  
+  
+  interface Props {
+    refreshTick?: number;
+    keyboardMode?: boolean;
+    /**
    * Inside Persistent orders (AutoOrdersPanel): the host owns the header, approval strip, search box, history toggle and the
    * empty state, and `show` picks which of this panel's two lists the selected chip asks for.
    */
-  export let embedded = false;
-  export let show: 'all' | 'triggers' | 'stops' | 'repeat' = 'all';
-  export let query = '';
-  /** Buy / Sell view filter (Persistent orders). Like `query`, it changes what is SHOWN and counted, never what is selected. */
-  export let side: OrderSideFilter = 'all';
-  export let showHistory = false;
-  /** Fired triggers already shown as their keep-working order, so one order is one row. */
-  export let hideArmedIds: ReadonlySet<string> = new Set();
-  // Read back by the host (bind:) for its strip, chip counts and single empty state.
-  export let approval: ArmedOrdersResponse['approval'] | null = null;
-  export let triggerCount = 0;
-  export let stopCount = 0;
-  export let loaded = false;
+    embedded?: boolean;
+    show?: 'all' | 'triggers' | 'stops' | 'repeat';
+    query?: string;
+    /** Buy / Sell view filter (Persistent orders). Like `query`, it changes what is SHOWN and counted, never what is selected. */
+    side?: OrderSideFilter;
+    showHistory?: boolean;
+    /** Fired triggers already shown as their keep-working order, so one order is one row. */
+    hideArmedIds?: ReadonlySet<string>;
+    // Read back by the host (bind:) for its strip, chip counts and single empty state.
+    approval?: ArmedOrdersResponse['approval'] | null;
+    triggerCount?: number;
+    stopCount?: number;
+    loaded?: boolean;
+    between?: import('svelte').Snippet;
+  }
+
+  let {
+    refreshTick = 0,
+    keyboardMode = false,
+    embedded = false,
+    show = 'all',
+    query = $bindable(''),
+    side = 'all',
+    showHistory = $bindable(false),
+    hideArmedIds = new Set(),
+    approval = $bindable(null),
+    triggerCount = $bindable(0),
+    stopCount = $bindable(0),
+    loaded = $bindable(false),
+    between
+  }: Props = $props();
   /** `select` names a stock the person clicked, so the page can select it as the watchlist does. */
   const dispatch = createEventDispatcher<{ select: string }>();
   function symbolClick(event: MouseEvent, symbol: string) {
     if (keyboardMode && !isPointerClick(event)) focusOrderControls(event);
     else dispatch('select', symbol);
   }
-  let review: OrderActionReview;
-  let reviewing = false;
-  let feedback: HTMLParagraphElement;
+  let review: OrderActionReview = $state()!;
+  let reviewing = $state(false);
+  let feedback: HTMLParagraphElement = $state()!;
   async function confirmAction(message: string) {
     if (!keyboardMode) return confirm(message);
     reviewing = true;
     try { return await review.ask(message); } finally { reviewing = false; }
   }
 
-  let data: ArmedOrdersResponse | null = null;
-  let loading = true;
-  let busy = false;
-  let error: string | null = null;
-  let notice: string | null = null;
-  let selectedOrderIds = new Set<string>();
+  let data: ArmedOrdersResponse | null = $state<ArmedOrdersResponse | null>(null);
+  let loading = $state(true);
+  let busy = $state(false);
+  let error: string | null = $state<string | null>(null);
+  let notice: string | null = $state<string | null>(null);
+  let selectedOrderIds = $state(new Set<string>());
 
   export async function load() {
     try {
@@ -201,9 +224,9 @@
    * An order whose kind an edition owns (orderTypeExtensions.ts): it can be edited there, and the edition
    * may add a status line under it. Null for every ordinary order and in a community build.
    */
-  $: extensionFor = (o: ArmedOrder) => extensionForTriggerKind($orderTypeExtensions, o.triggerKind);
+  let extensionFor = $derived((o: ArmedOrder) => extensionForTriggerKind($orderTypeExtensions, o.triggerKind));
   /** The armed order being edited, in the composer opened straight into its edition's editor. */
-  let editing: ArmedOrder | null = null;
+  let editing: ArmedOrder | null = $state<ArmedOrder | null>(null);
 
   const describeFill = (o: ArmedOrder) =>
     o.orderType === 'MARKET' ? 'at market'
@@ -241,20 +264,25 @@
    * matter, the live ones.
    */
   // Embedded, the host's one search box covers stops too; standalone, protection is always shown.
-  $: stops = (data?.protectiveStops ?? []).filter(s => matchesSide('SELL', side) && (!embedded || !keyboardMode
-    || `${s.symbol} stop sell ${s.state} ${s.stopId}`.toLowerCase().includes(query.trim().toLowerCase())));
+  let stops = $derived((data?.protectiveStops ?? []).filter(s => matchesSide('SELL', side) && (!embedded || !keyboardMode
+    || `${s.symbol} stop sell ${s.state} ${s.stopId}`.toLowerCase().includes(query.trim().toLowerCase()))));
 
   /** The local backstops are shown as part of their stop, not as loose triggers in the main list. */
-  $: entries = (data?.orders ?? []).filter(o => !o.protectiveStopId && !hideArmedIds.has(o.armedId));
-  $: sideEntries = entries.filter(o => matchesSide(o.action, side));
-  $: triggerCount = sideEntries.length;
-  $: stopCount = stops.length;
-  $: showTriggers = show === 'all' || show === 'triggers';
-  $: showStops = show === 'all' || show === 'stops';
-  $: visibleEntries = sideEntries.filter(o => !keyboardMode || `${o.symbol} ${o.action} ${o.state} ${o.armedId}`.toLowerCase().includes(query.trim().toLowerCase()));
-  $: selectableEntries = entries.filter(order => order.state === 'armed');
-  $: selectedCount = selectableEntries.filter(order => selectedOrderIds.has(order.armedId)).length;
-  $: allSelected = visibleEntries.some(o => o.state === 'armed') && visibleEntries.filter(o => o.state === 'armed').every(o => selectedOrderIds.has(o.armedId));
+  let entries = $derived((data?.orders ?? []).filter(o => !o.protectiveStopId && !hideArmedIds.has(o.armedId)));
+  let sideEntries = $derived(entries.filter(o => matchesSide(o.action, side)));
+  // Writes the bound prop, so it stays an effect rather than a derived value.
+  $effect.pre(() => {
+    triggerCount = sideEntries.length;
+  });
+  $effect.pre(() => {
+    stopCount = stops.length;
+  });
+  let showTriggers = $derived(show === 'all' || show === 'triggers');
+  let showStops = $derived(show === 'all' || show === 'stops');
+  let visibleEntries = $derived(sideEntries.filter(o => !keyboardMode || `${o.symbol} ${o.action} ${o.state} ${o.armedId}`.toLowerCase().includes(query.trim().toLowerCase())));
+  let selectableEntries = $derived(entries.filter(order => order.state === 'armed'));
+  let selectedCount = $derived(selectableEntries.filter(order => selectedOrderIds.has(order.armedId)).length);
+  let allSelected = $derived(visibleEntries.some(o => o.state === 'armed') && visibleEntries.filter(o => o.state === 'armed').every(o => selectedOrderIds.has(o.armedId)));
 
   /**
    * Where the protection actually IS, which is the only thing worth reading on this row. "Armed" is
@@ -295,8 +323,12 @@
     }
   }
 
-  let lastTick = 0;
-  $: if (refreshTick !== lastTick) { lastTick = refreshTick; if (!loading) load(); }
+  let lastTick = $state(0);
+  $effect.pre(() => {
+    // Reads only what the old `$:` named; the call is untracked so its own bookkeeping cannot re-trigger it.
+    const tick = refreshTick, seen = lastTick, busy = loading;
+    untrack(() => { if (tick !== seen) { lastTick = tick; if (!busy) load(); } });
+  });
 
   // A fired order, a filled entry or a cancelled stop changes this list too: re-read with the portfolio.
   onMount(() => { load(); return onAccountChanged(load); });
@@ -320,9 +352,9 @@
     </div>
     <div class="head-actions">
       <label class="toggle">
-        <input type="checkbox" bind:checked={showHistory} on:change={load} /> show history
+        <input type="checkbox" bind:checked={showHistory} onchange={load} /> show history
       </label>
-      <button class="btn btn-ghost" on:click={load} disabled={busy}><RefreshCw size={13} /> Refresh</button>
+      <button class="btn btn-ghost" onclick={load} disabled={busy}><RefreshCw size={13} /> Refresh</button>
     </div>
   </header>
 
@@ -342,11 +374,11 @@
   {#if showTriggers && !loading && selectableEntries.length}
     <div class="bulk-actions">
       <label>
-        <input type="checkbox" checked={allSelected} on:change={toggleSelectAll} />
+        <input type="checkbox" checked={allSelected} onchange={toggleSelectAll} />
         <ListChecks size={12} /> {allSelected ? 'Clear selection' : keyboardMode ? 'Select visible waiting' : 'Select all waiting'}
       </label>
       <span>{selectedCount} selected</span>
-      <button class="btn btn-danger" on:click={disarmSelected} disabled={!selectedCount || busy}>
+      <button class="btn btn-danger" onclick={disarmSelected} disabled={!selectedCount || busy}>
         <Trash2 size={13} /> Cancel selected
       </button>
     </div>
@@ -371,7 +403,7 @@
               <input
                 type="checkbox"
                 checked={selectedOrderIds.has(order.armedId)}
-                on:change={() => toggleSelected(order.armedId)}
+                onchange={() => toggleSelected(order.armedId)}
                 aria-label="Select {order.symbol} trigger"
               />
             </label>
@@ -383,7 +415,7 @@
             <div class="row-1">
               <button class="symbol row-focus" data-order-focus={keyboardMode ? '' : undefined} title={`Show ${order.symbol} on the chart`}
                 aria-label={keyboardMode ? `Controls for ${order.symbol} ${order.action} trigger ${order.armedId}, ${order.state}` : `Show ${order.symbol} on the chart`}
-                on:click={e => symbolClick(e, order.symbol)}>{order.symbol}</button>
+                onclick={e => symbolClick(e, order.symbol)}>{order.symbol}</button>
               <LivePriceInline symbol={order.symbol} fallbackChange={null} />
               <span class="side {order.action.toLowerCase()}">{order.action}</span>
               <span class="qty">{order.quantity}</span>
@@ -431,17 +463,18 @@
             </div>
             {#if order.note}<p class="note">{order.note}</p>{/if}
             {#if order.state === 'armed' && extensionFor(order)?.armedRowDetail}
-              <svelte:component this={extensionFor(order)?.armedRowDetail} {order} />
+              {@const SvelteComponent = extensionFor(order)?.armedRowDetail}
+              <SvelteComponent {order} />
             {/if}
             {#if order.stateReason}<p class="reason">{order.stateReason}</p>{/if}
           </div>
           {#if order.state === 'armed' && extensionFor(order)}
-            <button class="icon" title="Edit this order" aria-label={`Edit ${order.symbol} waiting order ${order.armedId}`} on:click={() => editing = order} disabled={busy || reviewing}>
+            <button class="icon" title="Edit this order" aria-label={`Edit ${order.symbol} waiting order ${order.armedId}`} onclick={() => editing = order} disabled={busy || reviewing}>
               <Pencil size={13} />
             </button>
           {/if}
           {#if order.state === 'armed'}
-            <button class="icon danger" title="Cancel waiting order" aria-label={`Cancel ${order.symbol} waiting order ${order.armedId}`} on:click={() => disarm(order)} disabled={busy || reviewing}>
+            <button class="icon danger" title="Cancel waiting order" aria-label={`Cancel ${order.symbol} waiting order ${order.armedId}`} onclick={() => disarm(order)} disabled={busy || reviewing}>
               <Trash2 size={13} />
             </button>
           {/if}
@@ -453,7 +486,7 @@
 
   <!-- Persistent orders puts its "Repeat until filled" list here, between the triggers that feed it and the
        stop-loss that protects what it buys. -->
-  <slot name="between"/>
+  {@render between?.()}
 
   {#if showStops && stops.length}
     <div class="stops">
@@ -466,7 +499,7 @@
               <div class="row-1">
                 <button class="symbol row-focus" data-order-focus={keyboardMode ? '' : undefined} title={`Show ${stop.symbol} on the chart`}
                   aria-label={keyboardMode ? `Controls for ${stop.symbol} protective stop ${stop.stopId}` : `Show ${stop.symbol} on the chart`}
-                  on:click={e => symbolClick(e, stop.symbol)}>{stop.symbol}</button>
+                  onclick={e => symbolClick(e, stop.symbol)}>{stop.symbol}</button>
                 <LivePriceInline symbol={stop.symbol} fallbackChange={null} />
                 <span class="side sell">STOP</span>
                 {#if stop.desiredQuantity}<span class="qty">{stop.desiredQuantity}</span>{/if}
@@ -490,7 +523,7 @@
             </div>
             {#if stop.state !== 'closed'}
               <button class="icon danger" title="Disarm this stop" aria-label={`Disarm ${stop.symbol} protective stop ${stop.stopId}`}
-                      on:click={() => disarmStop(stop)} disabled={busy}>
+                      onclick={() => disarmStop(stop)} disabled={busy}>
                 <Trash2 size={13} />
               </button>
             {/if}

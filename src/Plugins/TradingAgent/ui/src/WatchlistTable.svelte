@@ -1,40 +1,61 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { Bell, BellOff, Pin, Lock, MoreHorizontal, X } from 'lucide-svelte';
   import type { WatchlistEntry, CandleArchiveStatus } from './api';
   import type { SymbolExtensionComponent } from './symbolExtensions';
   import LivePriceInline from './LivePriceInline.svelte';
   import { retainedWatchlistFocus, watchlistGridTarget, type WatchlistAction } from './watchlistNavigation';
 
-  // Presentation only: no requests, timers, order types or mutation logic live in this component.
-  export let entries: WatchlistEntry[];
-  export let selected: string | null;
-  export let archive: CandleArchiveStatus | null;
-  export let rowStatus: SymbolExtensionComponent | null = null;
-  export let busy = false;
-  /** Narrow workspace rail: symbol, price and daily move; details remain in row actions. */
-  export let compact = false;
-  export let canReorder = false;
-  export let onSelect: (symbol:string) => void;
-  export let onAction: (action:WatchlistAction, symbol:string) => Promise<void>;
-  export let onSearch: () => void;
-  export let onSearchEscape: (event:KeyboardEvent) => void;
-  export let onDragStart: (event:DragEvent, entry:WatchlistEntry) => void;
-  export let onDragOver: (event:DragEvent, entry:WatchlistEntry) => void;
-  export let onDrop: (event:DragEvent, entry:WatchlistEntry) => void;
-  export let onDragEnd: () => void;
-  export let dragOverSymbol: string | null = null;
+  
+  
+  interface Props {
+    // Presentation only: no requests, timers, order types or mutation logic live in this component.
+    entries: WatchlistEntry[];
+    selected: string | null;
+    archive: CandleArchiveStatus | null;
+    rowStatus?: SymbolExtensionComponent | null;
+    busy?: boolean;
+    /** Narrow workspace rail: symbol, price and daily move; details remain in row actions. */
+    compact?: boolean;
+    canReorder?: boolean;
+    onSelect: (symbol:string) => void;
+    onAction: (action:WatchlistAction, symbol:string) => Promise<void>;
+    onSearch: () => void;
+    onSearchEscape: (event:KeyboardEvent) => void;
+    onDragStart: (event:DragEvent, entry:WatchlistEntry) => void;
+    onDragOver: (event:DragEvent, entry:WatchlistEntry) => void;
+    onDrop: (event:DragEvent, entry:WatchlistEntry) => void;
+    onDragEnd: () => void;
+    dragOverSymbol?: string | null;
+  }
 
-  let grid: HTMLDivElement;
-  let menu: HTMLDialogElement;
-  let focused: string | null = null;
-  let column = 0;
-  let menuSymbol: string | null = null;
-  let actionBusy = false;
-  let actionError = '';
+  let {
+    entries,
+    selected,
+    archive,
+    rowStatus = null,
+    busy = false,
+    compact = false,
+    canReorder = false,
+    onSelect,
+    onAction,
+    onSearch,
+    onSearchEscape,
+    onDragStart,
+    onDragOver,
+    onDrop,
+    onDragEnd,
+    dragOverSymbol = null
+  }: Props = $props();
+
+  let grid: HTMLDivElement = $state()!;
+  let menu: HTMLDialogElement = $state()!;
+  let focused: string | null = $state<string | null>(null);
+  let column = $state(0);
+  let menuSymbol: string | null = $state<string | null>(null);
+  let actionBusy = $state(false);
+  let actionError = $state('');
   let returnColumn = 0;
-  $: gaps = new Map((archive?.symbolsShortOfWeekly ?? []).map(g => [g.symbol,g]));
-  $: reconcileFocus(entries, selected);
   function reconcileFocus(next:WatchlistEntry[], picked:string | null) {
     const retained = retainedWatchlistFocus(next.map(e => e.symbol), focused, picked);
     if (retained !== focused) {
@@ -43,21 +64,6 @@
       if (restore && focused) void focusCell(focused, column);
     }
   }
-  $: menuEntry = entries.find(e => e.symbol === menuSymbol);
-  $: detail = entries.find(e => e.symbol === focused);
-  $: menuIndex = entries.findIndex(e => e.symbol === menuSymbol);
-  $: actions = menuEntry ? [
-    { id:'order' as const, label:'New Order…', reason:'' },
-    { id:'lists' as const, label:'Add to lists…', reason:'' },
-    { id:'pin' as const, label:menuEntry.pinned ? 'Unpin from top' : 'Pin to top', reason:'' },
-    { id:'priceAlert' as const, label:'Set price alert', reason:'' },
-    { id:'alerts' as const, label:menuEntry.alertsEnabled ? 'Mute alerts' : 'Enable alerts', reason:'' },
-    ...(menuEntry.tradable ? [{ id:'automation' as const, label:menuEntry.autoTradeEnabled ? 'Set manual-only' : 'Allow automation', reason:menuEntry.manualOnlyLocked ? 'Locked by ManualOnlySymbols configuration' : '' }] : []),
-    ...(!menuEntry.hasWeeklyHistory ? [{ id:'history' as const, label:'Fetch missing history', reason:gaps.get(menuEntry.symbol)?.noEarlierHistory ? 'New listing — no earlier sessions exist' : archive?.progress.isRunning ? 'Backfill already running' : '' }] : []),
-    { id:'up' as const, label:'Move up', reason:!canReorder ? 'Clear filters to reorder' : menuIndex <= 0 || entries[menuIndex - 1]?.pinned !== menuEntry.pinned ? 'First symbol in this pin group' : '' },
-    { id:'down' as const, label:'Move down', reason:!canReorder ? 'Clear filters to reorder' : menuIndex >= entries.length - 1 || entries[menuIndex + 1]?.pinned !== menuEntry.pinned ? 'Last symbol in this pin group' : '' },
-    { id:'remove' as const, label:'Remove from watchlist…', reason:'' }
-  ] : [];
 
   async function focusCell(symbol:string, nextColumn:number) {
     focused = symbol; column = nextColumn;
@@ -128,10 +134,31 @@
     const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
     buttons[next]?.focus();
   }
+  let gaps = $derived(new Map((archive?.symbolsShortOfWeekly ?? []).map(g => [g.symbol,g])));
+  $effect.pre(() => {
+    // Reads only what the old `$:` named; the call is untracked so its own bookkeeping cannot re-trigger it.
+    const e = entries, s = selected;
+    untrack(() => reconcileFocus(e, s));
+  });
+  let menuEntry = $derived(entries.find(e => e.symbol === menuSymbol));
+  let detail = $derived(entries.find(e => e.symbol === focused));
+  let menuIndex = $derived(entries.findIndex(e => e.symbol === menuSymbol));
+  let actions = $derived(menuEntry ? [
+    { id:'order' as const, label:'New Order…', reason:'' },
+    { id:'lists' as const, label:'Add to lists…', reason:'' },
+    { id:'pin' as const, label:menuEntry.pinned ? 'Unpin from top' : 'Pin to top', reason:'' },
+    { id:'priceAlert' as const, label:'Set price alert', reason:'' },
+    { id:'alerts' as const, label:menuEntry.alertsEnabled ? 'Mute alerts' : 'Enable alerts', reason:'' },
+    ...(menuEntry.tradable ? [{ id:'automation' as const, label:menuEntry.autoTradeEnabled ? 'Set manual-only' : 'Allow automation', reason:menuEntry.manualOnlyLocked ? 'Locked by ManualOnlySymbols configuration' : '' }] : []),
+    ...(!menuEntry.hasWeeklyHistory ? [{ id:'history' as const, label:'Fetch missing history', reason:gaps.get(menuEntry.symbol)?.noEarlierHistory ? 'New listing — no earlier sessions exist' : archive?.progress.isRunning ? 'Backfill already running' : '' }] : []),
+    { id:'up' as const, label:'Move up', reason:!canReorder ? 'Clear filters to reorder' : menuIndex <= 0 || entries[menuIndex - 1]?.pinned !== menuEntry.pinned ? 'First symbol in this pin group' : '' },
+    { id:'down' as const, label:'Move down', reason:!canReorder ? 'Clear filters to reorder' : menuIndex >= entries.length - 1 || entries[menuIndex + 1]?.pinned !== menuEntry.pinned ? 'Last symbol in this pin group' : '' },
+    { id:'remove' as const, label:'Remove from watchlist…', reason:'' }
+  ] : []);
 </script>
 
 <div class="table-shell" class:compact>
-  <div class="grid" role="grid" tabindex="-1" aria-label="Watched symbols" aria-colcount="3" aria-rowcount={entries.length + 1} aria-describedby="watchlist-key-help" bind:this={grid} on:keydown={gridKey}>
+  <div class="grid" role="grid" tabindex="-1" aria-label="Watched symbols" aria-colcount="3" aria-rowcount={entries.length + 1} aria-describedby="watchlist-key-help" bind:this={grid} onkeydown={gridKey}>
     <div class="grid-head" role="row" aria-rowindex="1">
       <span role="columnheader">{compact ? 'Stock' : 'Symbol / status'}</span><span role="columnheader">{compact ? 'Price / %' : 'Price / change'}</span><span role="columnheader" class="sr-only">Actions</span>
     </div>
@@ -139,12 +166,12 @@
       <div class="grid-row" role="row" tabindex="-1" data-symbol={entry.symbol} aria-rowindex={index + 2} aria-selected={selected === entry.symbol}
         class:selected={selected === entry.symbol} class:drop-target={dragOverSymbol === entry.symbol}
         class:auto-trading={entry.tradable && entry.autoTradeEnabled}
-        draggable={canReorder && !busy} on:dragstart={e => onDragStart(e,entry)} on:dragover={e => onDragOver(e,entry)} on:drop={e => onDrop(e,entry)} on:dragend={onDragEnd}>
+        draggable={canReorder && !busy} ondragstart={e => onDragStart(e,entry)} ondragover={e => onDragOver(e,entry)} ondrop={e => onDrop(e,entry)} ondragend={onDragEnd}>
         <div role="gridcell" class="identity" data-col="0" tabindex={focused === entry.symbol && column === 0 ? 0 : -1}
           aria-describedby={rowStatus ? 'watchlist-status-' + entry.symbol : undefined}
-          on:focus={() => {focused = entry.symbol; column = 0;}} on:keydown={gridKey}
-          on:click={event => {if (!(event.target as HTMLElement).closest('button,a,input,select,textarea')) onSelect(entry.symbol);}}
-          on:contextmenu|preventDefault={() => openActions(entry.symbol,0)}
+          onfocus={() => {focused = entry.symbol; column = 0;}} onkeydown={gridKey}
+          onclick={event => {if (!(event.target as HTMLElement).closest('button,a,input,select,textarea')) onSelect(entry.symbol);}}
+          oncontextmenu={(event) => { event.preventDefault(); void openActions(entry.symbol,0); }}
           aria-label={`${entry.symbol}, ${entry.companyName ?? 'company name unavailable'}, ${!entry.tradable ? 'monitor only' : entry.manualOnly ? 'manual only' : 'automation allowed'}${entry.manualOnlyLocked ? ', configuration locked' : ''}, ${entry.openAlerts} alerts${!entry.alertsEnabled ? ', alerts muted' : ''}`}>
           <span class="symbol" title={`${entry.symbol} · ${entry.companyName ?? 'Name unavailable'} · ${!entry.tradable ? 'Monitor only' : entry.manualOnly ? 'Manual only' : 'Automation allowed'}`}>{#if entry.pinned}<Pin size={10}/>{/if}{entry.symbol}{#if entry.manualOnlyLocked}<Lock size={10}/>{/if}</span>
           <span class="company" title={entry.companyName ?? ''}>{entry.companyName ?? 'Name unavailable'}</span>
@@ -153,17 +180,17 @@
             {#if !entry.alertsEnabled}<BellOff size={10} aria-label="Alerts muted"/>{/if}
             {#if !entry.hasWeeklyHistory}<span class="history">{gaps.get(entry.symbol)?.noEarlierHistory ? 'New listing' : 'No weekly'}</span>{/if}
           </span>
-          {#if rowStatus}<span class="extension" id={'watchlist-status-' + entry.symbol}><svelte:component this={rowStatus} symbol={entry.symbol}/></span>{/if}
+          {#if rowStatus}{@const SvelteComponent = rowStatus}<span class="extension" id={'watchlist-status-' + entry.symbol}><SvelteComponent symbol={entry.symbol}/></span>{/if}
         </div>
         <div role="gridcell" class="quote" data-col="1" tabindex={focused === entry.symbol && column === 1 ? 0 : -1}
-          on:focus={() => {focused = entry.symbol; column = 1;}} on:keydown={gridKey}
-          on:click={() => onSelect(entry.symbol)}>
+          onfocus={() => {focused = entry.symbol; column = 1;}} onkeydown={gridKey}
+          onclick={() => onSelect(entry.symbol)}>
           <LivePriceInline symbol={entry.symbol} fallbackPrice={entry.lastPrice}
             fallbackChange={entry.dayChangePercent} showUnavailable/>
         </div>
         <button type="button" role="gridcell" class="actions-toggle" data-col="2" aria-label={`Actions for ${entry.symbol}`} aria-haspopup="dialog"
-          tabindex={focused === entry.symbol && column === 2 ? 0 : -1} on:focus={() => {focused = entry.symbol; column = 2;}}
-          on:click={() => openActions(entry.symbol,2)}><MoreHorizontal size={16}/></button>
+          tabindex={focused === entry.symbol && column === 2 ? 0 : -1} onfocus={() => {focused = entry.symbol; column = 2;}}
+          onclick={() => openActions(entry.symbol,2)}><MoreHorizontal size={16}/></button>
       </div>
     {/each}
   </div>
@@ -173,17 +200,17 @@
   </div>
 </div>
 
-<dialog bind:this={menu} class="row-menu" aria-label={`Watchlist actions for ${menuSymbol ?? 'symbol'}`} on:keydown={menuKey}
-  on:cancel|preventDefault={closeActions}>
+<dialog bind:this={menu} class="row-menu" aria-label={`Watchlist actions for ${menuSymbol ?? 'symbol'}`} onkeydown={menuKey}
+  oncancel={(event) => { event.preventDefault(); closeActions(); }}>
   <header><div><strong>{menuSymbol}</strong><small>{menuEntry?.companyName ?? 'Symbol is no longer in this view'}</small></div>
-    <button type="button" class="close" aria-label="Close watchlist actions" on:click={closeActions}><X size={16}/></button></header>
+    <button type="button" class="close" aria-label="Close watchlist actions" onclick={closeActions}><X size={16}/></button></header>
   {#if menuEntry}
     <p>{!menuEntry.tradable ? 'Monitor-only — not permitted by the execution universe.' : menuEntry.manualOnly ? 'Manual-only — your own orders still work; strategy entries and exits are disabled.' : 'Automation allowed, subject to all existing policy and risk controls.'}</p>
     {#if !menuEntry.hasWeeklyHistory}<p>{menuEntry.archivedBars} daily bars archived{archive ? ` / ${archive.dailyBarsForWeekly} needed for weekly levels` : ''}. {gaps.get(menuEntry.symbol)?.noEarlierHistory ? 'Earlier history does not exist for this new listing.' : `${gaps.get(menuEntry.symbol)?.missingSessions ?? 'Unknown'} sessions not yet requested.`}</p>{/if}
   {/if}
   {#if actionError}<p role="alert">{actionError}</p>{/if}
   {#each actions as action (action.id)}
-    <button type="button" class="action" class:danger={action.id === 'remove'} disabled={busy || actionBusy || !!action.reason} on:click={() => execute(action.id)}>
+    <button type="button" class="action" class:danger={action.id === 'remove'} disabled={busy || actionBusy || !!action.reason} onclick={() => execute(action.id)}>
       <span>{action.label}</span>{#if action.reason}<small>{action.reason}</small>{/if}
     </button>
   {/each}

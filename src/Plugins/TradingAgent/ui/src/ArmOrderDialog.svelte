@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createEventDispatcher, onMount } from 'svelte';
+  import { createEventDispatcher, onMount, untrack } from 'svelte';
   import AmountInWords from './AmountInWords.svelte';
   import {
     trading, TRIGGER_KINDS, ALERT_KINDS, PERCENT_PRESETS,
@@ -11,71 +11,31 @@
   import { validArmQuantity } from './orderRequests';
   import { armOrderSummary, armLevelLine } from './armSummary';
 
-  /**
-   * Pre-filled context from wherever the user clicked — a chart level or an alert. Everything stays
-   * editable: the point of pre-filling is to save typing, not to hide what is being armed.
-   */
-  export let symbol: string;
-  export let triggerKind: Exclude<TriggerKind, 'Scheduled'> = 'PriceBelow';
-  export let triggerPrice: number | null = null;
-  export let triggerAlertKind: string | null = null;
-  export let action: 'BUY' | 'SELL' = 'SELL';
+  
 
   // ── Percent trigger ("fire if it drops 3%") ──────────────────────────────
   // The move, and the price it is measured from. `referencePrice` is pre-filled by the caller with
-  // whatever price it was showing, so the level quoted below is the level actually armed.
-  export let triggerPercent: number | null = null;
-  export let referencePrice: number | null = null;
-  /**
-   * Off by default, so the plain reading of "if it drops 3%" — 3% from today's price — is what an
-   * unattended default does. Callers that mean a trailing stop say so, and the checkbox explains the
-   * difference rather than assuming which one was wanted.
-   */
-  export let trailing = false;
-  /** Live price, for the already-passed warning only. Never submitted. */
-  export let currentPrice: number | null = null;
-  /**
-   * Limit for both sides by default. A pre-filled STOPLOSS made the type depend on where the dialog
-   * was opened from, so the same click produced a different order kind on a chart level than on an
-   * alert — and the stop variant needs a second price that is easy to leave at its guessed default.
-   * Limit is the type that carries exactly what the user typed.
-   */
-  export let orderType = 'LIMIT';
-  export let price: number | null = null;
-  export let limitPrice: number | null = null;
-  export let sourceAlertId: string | null = null;
-  /** Shown so the user can see what the level actually is before committing size to it. */
-  export let context: string | null = null;
+  
+  
+  
+  
+  
 
   const dispatch = createEventDispatcher<{ armed: void; close: void }>();
 
-  /**
-   * Optional starting share count from the caller (ArmOrderDialogContext.quantity). Whole shares above
-   * zero only; anything else is ignored and the dialog keeps its own default. Still editable, and
-   * nothing is sent until the dialog's own button.
-   */
-  export let quantity: number | null = null;
-  const initialQuantity = validArmQuantity(quantity);
-  quantity = initialQuantity;
-  let sizeMode: 'shares' | 'value' = 'shares';
-  let orderValue: number | null = null;
+  
+  let sizeMode: 'shares' | 'value' = $state<'shares' | 'value'>('shares');
+  let orderValue: number | null = $state<number | null>(null);
   // Pre-fillable like the rest (see ArmOrderDialogContext): all stay editable below, none is sent unless
-  // the user presses the dialog's own button.
-  export let expiresInDays = 30;
-  export let persistentUntilFilled = false;
-  export let note = '';
-  /**
-   * Trailing LIMIT only: a BUY's maximum or a SELL's minimum price. The server requires trailing and
-   * persistentUntilFilled with it, so it is shown and sent only while those hold.
-   */
-  export let priceBound: number | null = null;
-  let busy = false;
-  let error: string | null = null;
-  let holdingBusy = false;
-  let holdingError: string | null = null;
-  let availableShares: number | null = null;
-  let quantityWasEdited = false;
-  let autoSizeKey: string | null = null;
+  
+  
+  let busy = $state(false);
+  let error: string | null = $state<string | null>(null);
+  let holdingBusy = $state(false);
+  let holdingError: string | null = $state<string | null>(null);
+  let availableShares: number | null = $state<number | null>(null);
+  let quantityWasEdited = $state(false);
+  let autoSizeKey: string | null = $state<string | null>(null);
   let result: {
     willFireUnattended: boolean;
     note: string;
@@ -87,145 +47,118 @@
       takeProfitArmedId: string | null;
       note: string;
     } | null;
-  } | null = null;
-  let dialogElement: HTMLDivElement;
+  } | null = $state(null);
+  let dialogElement: HTMLDivElement = $state()!;
   const livePrices = useLivePrices();
-  let livePriceStore = livePrices.quote(symbol);
-  $: livePriceStore = livePrices.quote(symbol);
-  $: livePriceView = $livePriceStore;
-  $: displayedCurrentPrice = livePriceView.quote?.current ?? currentPrice;
 
   // ── Attached protective stop (BUY only) ──────────────────────────────────
   // Exported so a caller with a stop already in hand — the chart's plan gives an entry AND the level
   // that invalidates it — can arm both in one click instead of leaving the user to retype a number
-  // that was already on screen. Left at these defaults, the dialog behaves exactly as before.
-  export let attachStop = false;
-  export let stopTrigger: number | null = null;
-  export let stopLimit: number | null = null;
-  export let stopRecurring = true;
-  export let attachTakeProfit = false;
-  export let takeProfitPrice: number | null = null;
+  
+  interface Props {
+    /**
+   * Pre-filled context from wherever the user clicked — a chart level or an alert. Everything stays
+   * editable: the point of pre-filling is to save typing, not to hide what is being armed.
+   */
+    symbol: string;
+    triggerKind?: Exclude<TriggerKind, 'Scheduled'>;
+    triggerPrice?: number | null;
+    triggerAlertKind?: string | null;
+    action?: 'BUY' | 'SELL';
+    // whatever price it was showing, so the level quoted below is the level actually armed.
+    triggerPercent?: number | null;
+    referencePrice?: number | null;
+    /**
+   * Off by default, so the plain reading of "if it drops 3%" — 3% from today's price — is what an
+   * unattended default does. Callers that mean a trailing stop say so, and the checkbox explains the
+   * difference rather than assuming which one was wanted.
+   */
+    trailing?: boolean;
+    /** Live price, for the already-passed warning only. Never submitted. */
+    currentPrice?: number | null;
+    /**
+   * Limit for both sides by default. A pre-filled STOPLOSS made the type depend on where the dialog
+   * was opened from, so the same click produced a different order kind on a chart level than on an
+   * alert — and the stop variant needs a second price that is easy to leave at its guessed default.
+   * Limit is the type that carries exactly what the user typed.
+   */
+    orderType?: string;
+    price?: number | null;
+    limitPrice?: number | null;
+    sourceAlertId?: string | null;
+    /** Shown so the user can see what the level actually is before committing size to it. */
+    context?: string | null;
+    /**
+   * Optional starting share count from the caller (ArmOrderDialogContext.quantity). Whole shares above
+   * zero only; anything else is ignored and the dialog keeps its own default. Still editable, and
+   * nothing is sent until the dialog's own button.
+   */
+    quantity?: number | null;
+    // the user presses the dialog's own button.
+    expiresInDays?: number;
+    persistentUntilFilled?: boolean;
+    note?: string;
+    /**
+   * Trailing LIMIT only: a BUY's maximum or a SELL's minimum price. The server requires trailing and
+   * persistentUntilFilled with it, so it is shown and sent only while those hold.
+   */
+    priceBound?: number | null;
+    // that was already on screen. Left at these defaults, the dialog behaves exactly as before.
+    attachStop?: boolean;
+    stopTrigger?: number | null;
+    stopLimit?: number | null;
+    stopRecurring?: boolean;
+    attachTakeProfit?: boolean;
+    takeProfitPrice?: number | null;
+  }
+
+  let {
+    symbol,
+    triggerKind = $bindable('PriceBelow'),
+    triggerPrice = $bindable(null),
+    triggerAlertKind = $bindable(null),
+    action = $bindable('SELL'),
+    triggerPercent = $bindable(null),
+    referencePrice = $bindable(null),
+    trailing = $bindable(false),
+    currentPrice = null,
+    orderType = $bindable('LIMIT'),
+    price = $bindable(null),
+    limitPrice = $bindable(null),
+    sourceAlertId = null,
+    context = null,
+    quantity = $bindable(null),
+    expiresInDays = $bindable(30),
+    persistentUntilFilled = $bindable(false),
+    note = $bindable(''),
+    priceBound = $bindable(null),
+    attachStop = $bindable(false),
+    stopTrigger = $bindable(null),
+    stopLimit = $bindable(null),
+    stopRecurring = $bindable(true),
+    attachTakeProfit = $bindable(false),
+    takeProfitPrice = $bindable(null)
+  }: Props = $props();
+  // Read from the props, so after them (a legacy `export let` was hoisted; `$props()` is not).
+  const initialQuantity = validArmQuantity(quantity);
+  quantity = initialQuantity;
+  let livePriceStore = $derived(livePrices.quote(symbol));
 
   onMount(() => dialogElement.focus());
 
-  $: isEvent = triggerKind === 'Event';
-  $: isPercent = isPercentTrigger(triggerKind);
-  $: isStop = orderType === 'STOPLOSS';
-  $: persistable = orderType !== 'MARKET';
-  $: if (!persistable) persistentUntilFilled = false;
-  $: boundedTrail = isPercent && trailing && orderType === 'LIMIT' && persistentUntilFilled;
-  $: fallsToTrigger = triggerKind === 'PriceBelow' || triggerKind === 'PercentDrop';
 
-  // A protective SELL normally means "cover what I can sell". Read both custody and the working
-  // order book so the default excludes shares already committed elsewhere. Unknown stays unknown.
-  $: requestedAutoSizeKey = action === 'SELL' && isStop
-    ? symbol.trim().toUpperCase()
-    : null;
-  $: if (requestedAutoSizeKey !== autoSizeKey) {
-    autoSizeKey = requestedAutoSizeKey;
-    if (requestedAutoSizeKey) {
-      sizeMode = 'shares';
-      // A caller-supplied size outranks the custody default, which would otherwise overwrite it.
-      quantity = initialQuantity;
-      quantityWasEdited = initialQuantity != null;
-      void loadAvailableShares(requestedAutoSizeKey);
-    } else {
-      availableShares = null;
-      holdingError = null;
-    }
-  }
 
-  // Picking the percent kind without a size of move would leave the level blank; 3% is a starting
-  // point to change, not a recommendation.
-  $: if (isPercent && triggerPercent == null) triggerPercent = 3;
 
-  /**
-   * The level the order fires at, whichever way it was specified. Everything downstream — the
-   * sentence, the estimate, the stop defaults, the already-passed check — reads this rather than
-   * branching on the trigger kind again.
-   */
-  $: level = isPercent
-    ? percentTriggerLevel(triggerKind, referencePrice, triggerPercent)
-    : triggerPrice;
 
-  /**
-   * The trigger has already been passed, so this would fire on the next monitoring pass rather than
-   * wait for anything. Worth saying out loud: it is occasionally what someone wants ("get me out, it
-   * is already falling") and much more often a number typed on the wrong side of the price.
-   */
-  $: alreadyPassed = !isEvent && level != null && displayedCurrentPrice != null && displayedCurrentPrice > 0
-    && (fallsToTrigger ? displayedCurrentPrice <= level : displayedCurrentPrice >= level);
 
-  // A stop's limit defaults just past its trigger, mirroring the broker-side default: a stop limit set
-  // exactly AT the trigger often misses the move that triggered it.
-  $: if (isStop && price != null && limitPrice == null) {
-    limitPrice = Number((action === 'SELL' ? price * 0.99 : price * 1.01).toFixed(2));
-  }
 
-  // A percent trigger has no level to type, so a LIMIT would otherwise go in with no price at all.
-  // Defaulted to the level, which is where the order was meant to sit. It does NOT follow a trailing
-  // reference afterwards — see the note the template shows when both are on.
-  $: if (isPercent && !isEvent && orderType !== 'MARKET' && price == null && level != null) {
-    price = level;
-  }
 
-  $: sizingPrice = price ?? level ?? null;
-  $: valueSizedQuantity = sizeMode === 'value' && orderValue != null && orderValue > 0
-    && sizingPrice != null && sizingPrice > 0
-    ? Math.floor(orderValue / sizingPrice)
-    : null;
-  $: effectiveQuantity = sizeMode === 'value' ? valueSizedQuantity : quantity;
-  $: estimatedValue = (effectiveQuantity ?? 0) * (sizingPrice ?? 0);
-  $: unallocatedValue = sizeMode === 'value' && orderValue != null && estimatedValue > 0
-    ? Math.max(0, orderValue - estimatedValue)
-    : 0;
-  $: sellExceedsAvailable = requestedAutoSizeKey != null && availableShares != null
-    && effectiveQuantity != null && effectiveQuantity > availableShares;
 
-  // A stop only makes sense on a BUY — it protects the position this entry creates.
-  $: canAttachStop = action === 'BUY';
-  $: if (!canAttachStop) {
-    attachStop = false;
-    attachTakeProfit = false;
-  }
-  $: if (!attachStop) attachTakeProfit = false;
 
-  $: entryPrice = price ?? level ?? null;
-  // A chart plan remains in its compact layout even if one exit is switched off while editing.
-  $: isTradePlan = action === 'BUY' && triggerKind === 'PriceBelow'
-    && stopTrigger != null && takeProfitPrice != null;
 
-  // Default the stop 2% under the entry, and its limit 1% under the trigger. Both are starting
-  // points to edit, not recommendations — the level worth stopping at is a judgement about the
-  // chart, which this dialog does not have.
-  $: if (attachStop && stopTrigger == null && entryPrice != null) {
-    stopTrigger = Number((entryPrice * 0.98).toFixed(2));
-  }
-  $: if (attachStop && stopTrigger != null && stopLimit == null) {
-    stopLimit = Number((stopTrigger * 0.99).toFixed(2));
-  }
 
-  $: stopRisk = attachStop && entryPrice != null && stopTrigger != null && effectiveQuantity
-    ? (entryPrice - stopTrigger) * effectiveQuantity
-    : null;
 
-  $: stopError =
-    !attachStop ? null
-    : stopTrigger == null || stopTrigger <= 0 ? 'Enter a stop trigger price.'
-    : entryPrice != null && stopTrigger >= entryPrice
-      ? `A stop at ${stopTrigger} sits at or above the entry (${entryPrice}), so it would trigger `
-        + 'immediately rather than protect anything.'
-    : stopLimit != null && stopLimit > stopTrigger
-      ? `The stop limit (${stopLimit}) must be at or below the trigger (${stopTrigger}), or it `
-        + 'cannot fill once triggered.'
-    : null;
 
-  $: takeProfitError =
-    !attachTakeProfit ? null
-    : takeProfitPrice == null || takeProfitPrice <= 0 ? 'Enter a take-profit sell price.'
-    : entryPrice != null && takeProfitPrice <= entryPrice
-      ? `The take-profit (${takeProfitPrice}) must be above the entry (${entryPrice}).`
-    : null;
 
   const money = (v: number) => v.toLocaleString(undefined, { maximumFractionDigits: 2 });
 
@@ -272,20 +205,6 @@
     }
   }
 
-  /**
-   * The whole order as one sentence, rebuilt as the form is edited.
-   *
-   * This is the part that makes the dialog usable without knowing the vocabulary. Every field above
-   * is a number in a box; this says what those numbers will actually do, in the order it happens —
-   * and it is the thing to read back before committing size to a level.
-   */
-  $: summaryInput = {
-    action, quantity: effectiveQuantity, symbol, orderType, price, isEvent, triggerAlertKind,
-    isPercent, fallsToTrigger, level, triggerPercent, referencePrice, trailing,
-    priceBound: boundedTrail ? priceBound : null
-  };
-  $: summary = armOrderSummary(summaryInput);
-  $: levelLine = armLevelLine(summaryInput);
 
   async function submit() {
     if (busy) return;
@@ -359,6 +278,148 @@
       busy = false;
     }
   }
+  let livePriceView = $derived($livePriceStore);
+  let displayedCurrentPrice = $derived(livePriceView.quote?.current ?? currentPrice);
+  let isEvent = $derived(triggerKind === 'Event');
+  let isPercent = $derived(isPercentTrigger(triggerKind));
+  let isStop = $derived(orderType === 'STOPLOSS');
+  let persistable = $derived(orderType !== 'MARKET');
+  $effect.pre(() => {
+    if (!persistable) persistentUntilFilled = false;
+  });
+  let boundedTrail = $derived(isPercent && trailing && orderType === 'LIMIT' && persistentUntilFilled);
+  let fallsToTrigger = $derived(triggerKind === 'PriceBelow' || triggerKind === 'PercentDrop');
+  // A protective SELL normally means "cover what I can sell". Read both custody and the working
+  // order book so the default excludes shares already committed elsewhere. Unknown stays unknown.
+  let requestedAutoSizeKey = $derived(action === 'SELL' && isStop
+    ? symbol.trim().toUpperCase()
+    : null);
+  $effect.pre(() => {
+    // Reacts to the size request only; the reset and the custody read inside are untracked.
+    const requested = requestedAutoSizeKey, current = autoSizeKey;
+    if (requested === current) return;
+    untrack(() => {
+      autoSizeKey = requested;
+      if (requested) {
+        sizeMode = 'shares';
+        // A caller-supplied size outranks the custody default, which would otherwise overwrite it.
+        quantity = initialQuantity;
+        quantityWasEdited = initialQuantity != null;
+        void loadAvailableShares(requested);
+      } else {
+        availableShares = null;
+        holdingError = null;
+      }
+    });
+  });
+  // Picking the percent kind without a size of move would leave the level blank; 3% is a starting
+  // point to change, not a recommendation.
+  $effect.pre(() => {
+    if (isPercent && triggerPercent == null) triggerPercent = 3;
+  });
+  /**
+   * The level the order fires at, whichever way it was specified. Everything downstream — the
+   * sentence, the estimate, the stop defaults, the already-passed check — reads this rather than
+   * branching on the trigger kind again.
+   */
+  let level = $derived(isPercent
+    ? percentTriggerLevel(triggerKind, referencePrice, triggerPercent)
+    : triggerPrice);
+  /**
+   * The trigger has already been passed, so this would fire on the next monitoring pass rather than
+   * wait for anything. Worth saying out loud: it is occasionally what someone wants ("get me out, it
+   * is already falling") and much more often a number typed on the wrong side of the price.
+   */
+  let alreadyPassed = $derived(!isEvent && level != null && displayedCurrentPrice != null && displayedCurrentPrice > 0
+    && (fallsToTrigger ? displayedCurrentPrice <= level : displayedCurrentPrice >= level));
+  // A percent trigger has no level to type, so a LIMIT would otherwise go in with no price at all.
+  // Defaulted to the level, which is where the order was meant to sit. It does NOT follow a trailing
+  // reference afterwards — see the note the template shows when both are on.
+  $effect.pre(() => {
+    if (isPercent && !isEvent && orderType !== 'MARKET' && price == null && level != null) {
+      price = level;
+    }
+  });
+  // A stop's limit defaults just past its trigger, mirroring the broker-side default: a stop limit set
+  // exactly AT the trigger often misses the move that triggered it.
+  $effect.pre(() => {
+    if (isStop && price != null && limitPrice == null) {
+      limitPrice = Number((action === 'SELL' ? price * 0.99 : price * 1.01).toFixed(2));
+    }
+  });
+  let sizingPrice = $derived(price ?? level ?? null);
+  let valueSizedQuantity = $derived(sizeMode === 'value' && orderValue != null && orderValue > 0
+    && sizingPrice != null && sizingPrice > 0
+    ? Math.floor(orderValue / sizingPrice)
+    : null);
+  let effectiveQuantity = $derived(sizeMode === 'value' ? valueSizedQuantity : quantity);
+  let estimatedValue = $derived((effectiveQuantity ?? 0) * (sizingPrice ?? 0));
+  let unallocatedValue = $derived(sizeMode === 'value' && orderValue != null && estimatedValue > 0
+    ? Math.max(0, orderValue - estimatedValue)
+    : 0);
+  let sellExceedsAvailable = $derived(requestedAutoSizeKey != null && availableShares != null
+    && effectiveQuantity != null && effectiveQuantity > availableShares);
+  // A stop only makes sense on a BUY — it protects the position this entry creates.
+  let canAttachStop = $derived(action === 'BUY');
+  $effect.pre(() => {
+    if (!canAttachStop) {
+      attachStop = false;
+      attachTakeProfit = false;
+    }
+  });
+  $effect.pre(() => {
+    if (!attachStop) attachTakeProfit = false;
+  });
+  let entryPrice = $derived(price ?? level ?? null);
+  // Default the stop 2% under the entry, and its limit 1% under the trigger. Both are starting
+  // points to edit, not recommendations — the level worth stopping at is a judgement about the
+  // chart, which this dialog does not have.
+  $effect.pre(() => {
+    if (attachStop && stopTrigger == null && entryPrice != null) {
+      stopTrigger = Number((entryPrice * 0.98).toFixed(2));
+    }
+  });
+  // A chart plan remains in its compact layout even if one exit is switched off while editing.
+  let isTradePlan = $derived(action === 'BUY' && triggerKind === 'PriceBelow'
+    && stopTrigger != null && takeProfitPrice != null);
+  $effect.pre(() => {
+    if (attachStop && stopTrigger != null && stopLimit == null) {
+      stopLimit = Number((stopTrigger * 0.99).toFixed(2));
+    }
+  });
+  let stopRisk = $derived(attachStop && entryPrice != null && stopTrigger != null && effectiveQuantity
+    ? (entryPrice - stopTrigger) * effectiveQuantity
+    : null);
+  let stopError =
+    $derived(!attachStop ? null
+    : stopTrigger == null || stopTrigger <= 0 ? 'Enter a stop trigger price.'
+    : entryPrice != null && stopTrigger >= entryPrice
+      ? `A stop at ${stopTrigger} sits at or above the entry (${entryPrice}), so it would trigger `
+        + 'immediately rather than protect anything.'
+    : stopLimit != null && stopLimit > stopTrigger
+      ? `The stop limit (${stopLimit}) must be at or below the trigger (${stopTrigger}), or it `
+        + 'cannot fill once triggered.'
+    : null);
+  let takeProfitError =
+    $derived(!attachTakeProfit ? null
+    : takeProfitPrice == null || takeProfitPrice <= 0 ? 'Enter a take-profit sell price.'
+    : entryPrice != null && takeProfitPrice <= entryPrice
+      ? `The take-profit (${takeProfitPrice}) must be above the entry (${entryPrice}).`
+    : null);
+  /**
+   * The whole order as one sentence, rebuilt as the form is edited.
+   *
+   * This is the part that makes the dialog usable without knowing the vocabulary. Every field above
+   * is a number in a box; this says what those numbers will actually do, in the order it happens —
+   * and it is the thing to read back before committing size to a level.
+   */
+  let summaryInput = $derived({
+    action, quantity: effectiveQuantity, symbol, orderType, price, isEvent, triggerAlertKind,
+    isPercent, fallsToTrigger, level, triggerPercent, referencePrice, trailing,
+    priceBound: boundedTrail ? priceBound : null
+  });
+  let summary = $derived(armOrderSummary(summaryInput));
+  let levelLine = $derived(armLevelLine(summaryInput));
 </script>
 
 <!-- An order draft must survive stray backdrop clicks and Escape presses. Close, Cancel and Done are
@@ -376,7 +437,7 @@
       <div class="title">
         <Crosshair size={15} /> <b>{isTradePlan ? 'Create trade plan' : 'Create conditional order'}</b> <span>{symbol}</span>
       </div>
-      <button class="icon" on:click={() => dispatch('close')} aria-label="Close" disabled={busy}><X size={14} /></button>
+      <button class="icon" onclick={() => dispatch('close')} aria-label="Close" disabled={busy}><X size={14} /></button>
     </header>
 
     {#if context}<p class="context">{context}</p>{/if}
@@ -401,7 +462,7 @@
         </div>
       {/if}
       <div class="actions">
-        <button class="btn btn-primary" on:click={() => dispatch('close')}>Done</button>
+        <button class="btn btn-primary" onclick={() => dispatch('close')}>Done</button>
       </div>
     {:else}
       {#if isTradePlan}
@@ -412,7 +473,7 @@
               type="number"
               step="0.01"
               bind:value={triggerPrice}
-              on:input={() => price = triggerPrice}
+              oninput={() => price = triggerPrice}
             />
           </label>
           <p>
@@ -458,7 +519,7 @@
                   type="button"
                   class="chip-btn"
                   class:on={triggerPercent === preset}
-                  on:click={() => triggerPercent = preset}
+                  onclick={() => triggerPercent = preset}
                 >{fallsToTrigger ? '−' : '+'}{preset}%</button>
               {/each}
             </div>
@@ -531,10 +592,10 @@
         <div class="sizing-head">
           <span id="sizing-title">Order size</span>
           <div class="size-tabs" role="group" aria-label="Size order by">
-            <button type="button" class:on={sizeMode === 'shares'} on:click={() => sizeMode = 'shares'}>
+            <button type="button" class:on={sizeMode === 'shares'} onclick={() => sizeMode = 'shares'}>
               Shares
             </button>
-            <button type="button" class:on={sizeMode === 'value'} on:click={() => sizeMode = 'value'}>
+            <button type="button" class:on={sizeMode === 'value'} onclick={() => sizeMode = 'value'}>
               Value (PKR)
             </button>
           </div>
@@ -544,7 +605,7 @@
           <label>
             <span>Number of shares</span>
             <input type="number" min="1" step="1" bind:value={quantity} placeholder="shares"
-                   on:input={() => quantityWasEdited = true} />
+                   oninput={() => quantityWasEdited = true} />
           </label>
         {:else}
           <label>
@@ -776,8 +837,8 @@
       {#if error}<p class="error">{error}</p>{/if}
 
       <div class="actions">
-        <button class="btn btn-ghost" on:click={() => dispatch('close')} disabled={busy}>Cancel</button>
-        <button class="btn btn-primary" on:click={submit} disabled={busy}>
+        <button class="btn btn-ghost" onclick={() => dispatch('close')} disabled={busy}>Cancel</button>
+        <button class="btn btn-primary" onclick={submit} disabled={busy}>
           {busy ? 'Saving…' : 'Create waiting order'}
         </button>
       </div>

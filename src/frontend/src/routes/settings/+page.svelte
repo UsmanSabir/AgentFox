@@ -6,18 +6,18 @@
   import CodexSettings from '#lib/components/CodexSettings.svelte';
   import AiRoutingSettings from '#lib/components/AiRoutingSettings.svelte';
 
-  let routingKey = 0;
+  let routingKey = $state(0);
   import {
     Settings, Server, Cpu, Key, Globe, Database,
     RefreshCw, CheckCircle, XCircle, Zap
   } from 'lucide-svelte';
 
-  let status: Awaited<ReturnType<typeof api.status>> | null = null;
-  let health: { status: string; timestamp: string } | null = null;
-  let loading = true;
-  let healthLoading = true;
-  let managementApiKey = '';
-  let apiKeySaved = false;
+  let status: Awaited<ReturnType<typeof api.status>> | null = $state<Awaited<ReturnType<typeof api.status>> | null>(null);
+  let health: { status: string; timestamp: string } | null = $state<{ status: string; timestamp: string } | null>(null);
+  let loading = $state(true);
+  let healthLoading = $state(true);
+  let managementApiKey = $state('');
+  let apiKeySaved = $state(false);
 
   function saveManagementKey() {
     setManagementApiKey(managementApiKey);
@@ -76,7 +76,7 @@
         <button
           class="btn btn-ghost"
           style="margin-left: auto; padding: 0.25rem 0.5rem"
-          on:click={checkHealth}
+          onclick={checkHealth}
           disabled={healthLoading}
           title="Refresh"
         >
@@ -113,7 +113,7 @@
         <button
           class="btn btn-ghost"
           style="margin-left: auto; padding: 0.25rem 0.5rem"
-          on:click={load}
+          onclick={load}
           disabled={loading}
           title="Refresh"
         >
@@ -156,8 +156,8 @@
       <p class="auth-copy">When management authentication is enabled on the server, enter an API key for this browser session. The key is kept in session storage and cleared when the browser session ends.</p>
       <div class="auth-row">
         <input class="auth-input" type="password" bind:value={managementApiKey} placeholder="X-AgentFox-Api-Key" autocomplete="off" />
-        <button class="btn btn-primary" on:click={saveManagementKey}>{apiKeySaved ? 'Saved' : 'Save for session'}</button>
-        <button class="btn btn-ghost" on:click={() => { managementApiKey = ''; saveManagementKey(); }}>Clear</button>
+        <button class="btn btn-primary" onclick={saveManagementKey}>{apiKeySaved ? 'Saved' : 'Save for session'}</button>
+        <button class="btn btn-ghost" onclick={() => { managementApiKey = ''; saveManagementKey(); }}>Clear</button>
       </div>
     </section>
 

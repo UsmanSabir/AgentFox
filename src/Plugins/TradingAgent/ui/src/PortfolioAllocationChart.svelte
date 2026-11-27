@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createEventDispatcher, onMount, onDestroy } from 'svelte';
+  import { createEventDispatcher, onMount, onDestroy, untrack } from 'svelte';
   import { Filter } from 'lucide-svelte';
   import { OTHER_SECTORS, otherSectorLabels, sectorFilterKey } from './portfolioSectorFilter';
   import type { BrokerAccountHolding } from './api';
@@ -12,22 +12,31 @@
     type PortfolioCosts
   } from './portfolioAllocation';
 
-  export let holdings: BrokerAccountHolding[] = [];
-  export let showValues = false;
-  export let selectedSector = '';
-  export let otherSectors: string[] = [];
+  interface Props {
+    holdings?: BrokerAccountHolding[];
+    showValues?: boolean;
+    selectedSector?: string;
+    otherSectors?: string[];
+  }
+
+  let {
+    holdings = [],
+    showValues = false,
+    selectedSector = '',
+    otherSectors = $bindable([])
+  }: Props = $props();
   const dispatch = createEventDispatcher<{ sectorSelect: string }>();
 
-  let dimension: AllocationDimension = 'stock';
-  let basis: AllocationBasis = 'market';
-  let costs: PortfolioCosts = {};
-  let loadingCosts = false;
-  let mounted = false;
+  let dimension: AllocationDimension = $state('stock');
+  let basis: AllocationBasis = $state<AllocationBasis>('market');
+  let costs: PortfolioCosts = $state({});
+  let loadingCosts = $state(false);
+  let mounted = $state(false);
   let request = 0;
-  let helpOpen = false;
-  let helpPinned = false;
-  let helpHovering = false;
-  let helpFocused = false;
+  let helpOpen = $state(false);
+  let helpPinned = $state(false);
+  let helpHovering = $state(false);
+  let helpFocused = $state(false);
   function closeHelp() { helpOpen = false; helpPinned = false; }
   const readCosts = usePortfolioCosts();
   onMount(() => { mounted = true; });
@@ -46,33 +55,10 @@
     } catch { /* The broker-average fallback remains explicitly estimated. */ }
     finally { if (current === request) loadingCosts = false; }
   }
-  $: void refreshCosts(holdings, showValues, mounted);
   const colors = [
     'var(--allocation-1)', 'var(--allocation-2)', 'var(--allocation-3)',
     'var(--allocation-4)', 'var(--allocation-5)', 'var(--allocation-other)'
   ];
-  $: market = buildPortfolioAllocation(holdings, dimension);
-  $: invested = buildPortfolioAllocation(holdings, dimension, 6, { basis: 'invested', costs });
-  $: allocation = basis === 'market' ? market : invested;
-  // The filter uses this same basis even in Stocks view; the chart always keeps the full portfolio.
-  $: sectorAllocation = buildPortfolioAllocation(holdings, 'sector', 6, { basis, costs });
-  // Do not drop the user's selection while an invested-cost refresh has only temporary fallback data.
-  $: if (!loadingCosts) otherSectors = otherSectorLabels(sectorAllocation);
-  $: sliceSectorKeys = allocation.slices.map((slice, index) =>
-    allocation.rows.length > allocation.slices.length && index === allocation.slices.length - 1
-      ? OTHER_SECTORS : sectorFilterKey(slice.label));
-  $: valueLabel = basis === 'market' ? 'Market value' : 'Invested amount';
-  $: totalLabel = allocation.unavailableCount > 0
-    ? basis === 'market' ? 'Known market value' : 'Known invested'
-    : basis === 'market' ? 'Market value' : 'Total invested';
-  $: investmentLabel = invested.unavailableCount > 0 ? 'Known invested' : 'Invested';
-  $: investmentTotal = invested.mixedCurrencies || invested.unavailableCount === holdings.length
-    ? 'Unavailable' : money(invested.total, invested.currency);
-  $: chartStyle = `background:${allocationGradient(allocation.slices, colors, 'var(--allocation-gap)')}`;
-  $: largest = allocation.rows[0] ?? null;
-  $: chartSummary = largest
-    ? `${dimension === 'stock' ? 'Stock' : 'Sector'} allocation by ${valueLabel.toLowerCase()}. ${totalLabel}: ${money(allocation.total, allocation.currency)}.${basis === 'invested' && allocation.estimatedCount ? ' Estimated.' : ''} ${basis === 'market' ? `${investmentLabel}: ${loadingCosts ? 'Reading costs' : investmentTotal}.${invested.estimatedCount && !loadingCosts ? ' Estimated.' : ''}` : ''} ${largest.label} is the largest allocation at ${largest.percent.toFixed(1)} percent. ${allocation.rows.length} categories total.`
-    : `No ${dimension} allocation is available.`;
 
   const money = (value: number, currency: string | null) => {
     if (!currency)
@@ -86,6 +72,36 @@
     }
   };
   const percent = (value: number) => `${value.toFixed(1)}%`;
+  $effect.pre(() => {
+    // Reads only what the old `$:` named; the call is untracked so its own bookkeeping cannot re-trigger it.
+    const h = holdings, show = showValues, m = mounted;
+    untrack(() => void refreshCosts(h, show, m));
+  });
+  let market = $derived(buildPortfolioAllocation(holdings, dimension));
+  let invested = $derived(buildPortfolioAllocation(holdings, dimension, 6, { basis: 'invested', costs }));
+  let allocation = $derived(basis === 'market' ? market : invested);
+  // The filter uses this same basis even in Stocks view; the chart always keeps the full portfolio.
+  let sectorAllocation = $derived(buildPortfolioAllocation(holdings, 'sector', 6, { basis, costs }));
+  // Do not drop the user's selection while an invested-cost refresh has only temporary fallback data.
+  // Writes the bound prop, so it stays an effect rather than a derived value.
+  $effect.pre(() => {
+    if (!loadingCosts) otherSectors = otherSectorLabels(sectorAllocation);
+  });
+  let sliceSectorKeys = $derived(allocation.slices.map((slice, index) =>
+    allocation.rows.length > allocation.slices.length && index === allocation.slices.length - 1
+      ? OTHER_SECTORS : sectorFilterKey(slice.label)));
+  let valueLabel = $derived(basis === 'market' ? 'Market value' : 'Invested amount');
+  let totalLabel = $derived(allocation.unavailableCount > 0
+    ? basis === 'market' ? 'Known market value' : 'Known invested'
+    : basis === 'market' ? 'Market value' : 'Total invested');
+  let investmentLabel = $derived(invested.unavailableCount > 0 ? 'Known invested' : 'Invested');
+  let investmentTotal = $derived(invested.mixedCurrencies || invested.unavailableCount === holdings.length
+    ? 'Unavailable' : money(invested.total, invested.currency));
+  let chartStyle = $derived(`background:${allocationGradient(allocation.slices, colors, 'var(--allocation-gap)')}`);
+  let largest = $derived(allocation.rows[0] ?? null);
+  let chartSummary = $derived(largest
+    ? `${dimension === 'stock' ? 'Stock' : 'Sector'} allocation by ${valueLabel.toLowerCase()}. ${totalLabel}: ${money(allocation.total, allocation.currency)}.${basis === 'invested' && allocation.estimatedCount ? ' Estimated.' : ''} ${basis === 'market' ? `${investmentLabel}: ${loadingCosts ? 'Reading costs' : investmentTotal}.${invested.estimatedCount && !loadingCosts ? ' Estimated.' : ''}` : ''} ${largest.label} is the largest allocation at ${largest.percent.toFixed(1)} percent. ${allocation.rows.length} categories total.`
+    : `No ${dimension} allocation is available.`);
 </script>
 
 <section class="allocation" aria-labelledby="allocation-heading">
@@ -93,13 +109,13 @@
     <div>
       <div class="heading"><h4 id="allocation-heading">Holding allocation</h4>
         <div class="help" class:help-open={helpOpen} role="group"
-          on:pointerenter={() => { helpHovering = true; helpOpen = true; }}
-          on:pointerleave={() => { helpHovering = false; if (!helpPinned && !helpFocused) closeHelp(); }}>
+          onpointerenter={() => { helpHovering = true; helpOpen = true; }}
+          onpointerleave={() => { helpHovering = false; if (!helpPinned && !helpFocused) closeHelp(); }}>
           <button type="button" class="help-button" aria-label="Help about holding allocation and invested amount" aria-expanded={helpOpen} aria-controls="allocation-help" aria-describedby={helpOpen ? 'allocation-help' : undefined}
-            on:focus={() => { helpFocused = true; helpOpen = true; }}
-            on:blur={() => { helpFocused = false; helpPinned = false; if (!helpHovering) closeHelp(); }}
-            on:click={() => { if (helpPinned) closeHelp(); else { helpPinned = true; helpOpen = true; } }}
-            on:keydown={(event) => { if (event.key === 'Escape' && helpOpen) { event.preventDefault(); event.stopPropagation(); closeHelp(); } }}>?</button>
+            onfocus={() => { helpFocused = true; helpOpen = true; }}
+            onblur={() => { helpFocused = false; helpPinned = false; if (!helpHovering) closeHelp(); }}
+            onclick={() => { if (helpPinned) closeHelp(); else { helpPinned = true; helpOpen = true; } }}
+            onkeydown={(event) => { if (event.key === 'Escape' && helpOpen) { event.preventDefault(); event.stopPropagation(); closeHelp(); } }}>?</button>
           <div id="allocation-help" class="help-popup" role="tooltip">Market value shows what your holdings are worth in the broker account snapshot. Invested shows the purchase cost of the shares you still hold, including known purchase charges. Where supplied, costs use the remaining purchase lots after selling the oldest shares first. Estimated marks costs with incomplete records, pending charges, or a broker-average fallback. Missing amounts are excluded; “Known” totals and percentages cover only holdings with an available amount. Select a sector name to filter holdings below; select it again to clear. Other groups the smaller sectors for the selected value basis. Unclassified means sector metadata is missing. The chart always shows the whole portfolio.</div>
         </div>
       </div>
@@ -107,12 +123,12 @@
     </div>
     <div class="allocation-controls">
     <div class="dimension" role="group" aria-label="Value holding allocation by">
-      <button type="button" class:active={basis === 'market'} aria-pressed={basis === 'market'} on:click={() => basis = 'market'}>Market value</button>
-      <button type="button" class:active={basis === 'invested'} aria-pressed={basis === 'invested'} on:click={() => basis = 'invested'}>Invested</button>
+      <button type="button" class:active={basis === 'market'} aria-pressed={basis === 'market'} onclick={() => basis = 'market'}>Market value</button>
+      <button type="button" class:active={basis === 'invested'} aria-pressed={basis === 'invested'} onclick={() => basis = 'invested'}>Invested</button>
     </div>
     <div class="dimension" role="group" aria-label="Group holding allocation">
-      <button type="button" class:active={dimension === 'stock'} aria-pressed={dimension === 'stock'} on:click={() => dimension = 'stock'}>Stocks</button>
-      <button type="button" class:active={dimension === 'sector'} aria-pressed={dimension === 'sector'} on:click={() => dimension = 'sector'}>Sectors</button>
+      <button type="button" class:active={dimension === 'stock'} aria-pressed={dimension === 'stock'} onclick={() => dimension = 'stock'}>Stocks</button>
+      <button type="button" class:active={dimension === 'sector'} aria-pressed={dimension === 'sector'} onclick={() => dimension = 'sector'}>Sectors</button>
     </div>
     </div>
   </div>
@@ -153,7 +169,7 @@
               {#if dimension === 'sector'}
                 <button type="button" class="legend-key sector-choice" aria-pressed={selectedSector === sliceSectorKeys[index]}
                   aria-label={`Filter holdings: ${sliceSectorKeys[index] === OTHER_SECTORS ? 'Other (chart group)' : slice.label}`}
-                  on:click={() => dispatch('sectorSelect', sliceSectorKeys[index])}>
+                  onclick={() => dispatch('sectorSelect', sliceSectorKeys[index])}>
                   <span class="swatch" aria-hidden="true"></span><span class="sector-name">{sliceSectorKeys[index] === OTHER_SECTORS && allocation.rows.some(row => row.label === 'Other') ? 'Other (chart group)' : slice.label}</span>
                   <span class="filter-icon" aria-hidden="true"><Filter size={12}/></span>
                 </button>
@@ -176,7 +192,7 @@
           <thead><tr><th>{dimension === 'stock' ? 'Stock' : 'Sector'}</th><th>Share</th><th>{valueLabel}</th></tr></thead>
           <tbody>
             {#each allocation.rows as row}
-              <tr><td>{#if dimension === 'sector'}<button type="button" class="sector-choice" aria-label={`Filter holdings: ${row.label}`} aria-pressed={selectedSector === sectorFilterKey(row.label)} on:click={() => dispatch('sectorSelect', sectorFilterKey(row.label))}><span class="sector-name">{row.label}</span><span class="filter-icon" aria-hidden="true"><Filter size={12}/></span></button>{:else}{row.label}{/if}</td><td>{percent(row.percent)}</td><td>{money(row.value, allocation.currency)}{#if row.estimated}<small class="estimate">Estimated</small>{/if}</td></tr>
+              <tr><td>{#if dimension === 'sector'}<button type="button" class="sector-choice" aria-label={`Filter holdings: ${row.label}`} aria-pressed={selectedSector === sectorFilterKey(row.label)} onclick={() => dispatch('sectorSelect', sectorFilterKey(row.label))}><span class="sector-name">{row.label}</span><span class="filter-icon" aria-hidden="true"><Filter size={12}/></span></button>{:else}{row.label}{/if}</td><td>{percent(row.percent)}</td><td>{money(row.value, allocation.currency)}{#if row.estimated}<small class="estimate">Estimated</small>{/if}</td></tr>
             {/each}
           </tbody>
         </table>

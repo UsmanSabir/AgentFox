@@ -3,36 +3,34 @@
   import { Bell, Plus } from 'lucide-svelte';
   import { trading, type PriceAlert, type PriceAlertInput, type PriceAlertObservation, type PriceAlertsPage, type WatchlistEntry } from './api';
 
-  let page: PriceAlertsPage | null = null;
-  let dialog: HTMLDialogElement;
-  let draft: PriceAlertInput = { symbol: '', direction: 'above', target: 0 };
-  let current: PriceAlertObservation | null = null;
-  let editing: string | null = null;
-  let history = false;
-  let limit = 25;
-  let busy = false;
-  let loading = false;
+  let page: PriceAlertsPage | null = $state<PriceAlertsPage | null>(null);
+  let dialog: HTMLDialogElement = $state()!;
+  let draft: PriceAlertInput = $state({ symbol: '', direction: 'above', target: 0 });
+  let editing: string | null = $state<string | null>(null);
+  let history = $state(false);
+  let limit = $state(25);
+  let busy = $state(false);
+  let loading = $state(false);
   let loadVersion = 0;
-  let error = '';
-  let formError = '';
-  let notice = '';
-  let symbols: WatchlistEntry[] = [];
+  let error = $state('');
+  let formError = $state('');
+  let notice = $state('');
+  let symbols: WatchlistEntry[] = $state([]);
   let instrumentRequest = 0;
-  let showInstruments = false;
-  let highlighted = -1;
-  let helpOpen = false;
-  let visible: PriceAlertsPage['rules'] = [];
-  $: visible = (page?.rules ?? []).filter(({rule}) => (rule.state !== 'watching') === history);
-  $: index = /^KSE[ -]?100$/i.test(draft.symbol.trim());
-  $: current = page?.rules.find(row => row.rule.symbol === (index ? 'KSE100' : draft.symbol.trim().toUpperCase()) && row.latest)?.latest ?? null;
+  let showInstruments = $state(false);
+  let highlighted = $state(-1);
+  let helpOpen = $state(false);
+  let visible: PriceAlertsPage['rules'] = $derived((page?.rules ?? []).filter(({rule}) => (rule.state !== 'watching') === history));
+  let index = $derived(/^KSE[ -]?100$/i.test(draft.symbol.trim()));
+  let current: PriceAlertObservation | null = $derived(page?.rules.find(row => row.rule.symbol === (index ? 'KSE100' : draft.symbol.trim().toUpperCase()) && row.latest)?.latest ?? null);
   const stamp = (at: string) => new Date(at).toLocaleTimeString('en-GB', { timeZone: 'Asia/Karachi', hour: '2-digit', minute: '2-digit' }) + ' PKT';
   const instrument = (symbol: string) => symbol === 'KSE100' ? 'KSE 100' : symbol;
-  $: instrumentQuery = draft.symbol.trim().toUpperCase();
-  $: instrumentOptions = [{ symbol: 'KSE100', companyName: 'KSE 100' }, ...symbols.filter(entry => entry.symbol !== 'KSE100')]
+  let instrumentQuery = $derived(draft.symbol.trim().toUpperCase());
+  let instrumentOptions = $derived([{ symbol: 'KSE100', companyName: 'KSE 100' }, ...symbols.filter(entry => entry.symbol !== 'KSE100')]
     .filter(entry => entry.symbol.toUpperCase().includes(instrumentQuery)
       || entry.companyName?.toUpperCase().includes(instrumentQuery))
-    .slice(0, 8);
-  $: instrumentsExpanded = showInstruments && instrumentOptions.length > 0;
+    .slice(0, 8));
+  let instrumentsExpanded = $derived(showInstruments && instrumentOptions.length > 0);
   const value = (symbol: string, price: number) => {
     const formatted = price.toLocaleString('en-PK', { minimumFractionDigits: 2, maximumFractionDigits: 4 });
     return symbol === 'KSE100' ? formatted + ' points' : 'PKR ' + formatted;
@@ -154,13 +152,13 @@
 <section aria-label="Price alerts">
   <header>
     <div class="actions" aria-label="Price alert views">
-      <button type="button" aria-pressed={!history} on:click={() => { history = false; limit = 25; }}>Active</button>
-      <button type="button" aria-pressed={history} on:click={() => { history = true; limit = 25; }}>History</button>
+      <button type="button" aria-pressed={!history} onclick={() => { history = false; limit = 25; }}>Active</button>
+      <button type="button" aria-pressed={history} onclick={() => { history = true; limit = 25; }}>History</button>
     </div>
-    <button type="button" class="primary" on:click={() => open()}><Plus size={15}/> Set alert</button>
+    <button type="button" class="primary" onclick={() => open()}><Plus size={15}/> Set alert</button>
   </header>
   <div role="status">{notice}</div>
-  {#if error}<p role="alert">{error} <button on:click={() => load()}>Retry</button></p>{/if}
+  {#if error}<p role="alert">{error} <button onclick={() => load()}>Retry</button></p>{/if}
   {#if !page && loading}
     <p>Loading price alerts…</p>
   {:else if page && visible.length === 0}
@@ -179,30 +177,30 @@
         </div>
         {#if rule.state === 'watching'}
           <div class="actions">
-            <button disabled={busy} on:click={() => open(rule.symbol, rule.target, rule)}>Edit</button>
-            <button disabled={busy} on:click={() => cancel(rule)}>Cancel alert</button>
+            <button disabled={busy} onclick={() => open(rule.symbol, rule.target, rule)}>Edit</button>
+            <button disabled={busy} onclick={() => cancel(rule)}>Cancel alert</button>
           </div>
         {/if}
       </li>
     {/each}
   </ul>
-  {#if visible.length > limit}<button type="button" on:click={() => limit += 25}>Show more</button>{/if}
+  {#if visible.length > limit}<button type="button" onclick={() => limit += 25}>Show more</button>{/if}
 </section>
 
-<dialog bind:this={dialog} aria-labelledby="price-alert-title" on:close={clearInstrumentSuggestions} on:cancel={event => { if (busy) event.preventDefault(); }}>
-  <form on:submit|preventDefault={save}>
+<dialog bind:this={dialog} aria-labelledby="price-alert-title" onclose={clearInstrumentSuggestions} oncancel={event => { if (busy) event.preventDefault(); }}>
+  <form onsubmit={(event) => { event.preventDefault(); void save(); }}>
     <h3 id="price-alert-title"><Bell size={18}/> {editing ? 'Edit price alert' : 'Set price alert'}</h3>
     <div class="instrument-picker">
       <label for="price-alert-instrument">Instrument</label>
       <input id="price-alert-instrument" role="combobox" aria-autocomplete="list" aria-expanded={instrumentsExpanded}
         aria-controls="price-alert-instruments" aria-activedescendant={instrumentsExpanded && highlighted >= 0 ? 'price-alert-option-' + highlighted : undefined}
         bind:value={draft.symbol} placeholder="Stock symbol or KSE 100" required autocomplete="off"
-        on:input={() => { showInstruments = true; highlighted = -1; }}
-        on:click={() => showInstruments = true} on:blur={hideInstruments} on:keydown={instrumentKeydown}/>
+        oninput={() => { showInstruments = true; highlighted = -1; }}
+        onclick={() => showInstruments = true} onblur={hideInstruments} onkeydown={instrumentKeydown}/>
       <div id="price-alert-instruments" class="instrument-options" role="listbox" aria-label="Matching instruments" hidden={!instrumentsExpanded}>
         {#each instrumentOptions as entry, i (entry.symbol)}
           <button type="button" role="option" id={'price-alert-option-' + i} tabindex="-1" aria-selected={highlighted === i}
-            on:mousedown|preventDefault on:click={() => selectInstrument(entry.symbol)}>
+            onmousedown={(event) => event.preventDefault()} onclick={() => selectInstrument(entry.symbol)}>
             <strong>{instrument(entry.symbol)}</strong>
             {#if entry.companyName && entry.symbol !== 'KSE100'}<span>{entry.companyName}</span>{/if}
           </button>
@@ -223,7 +221,7 @@
       <a href="/channels" target="_top">Manage channels</a>
       <div class="alert-help">
         <button type="button" aria-label="Help about price alerts" aria-controls="price-alert-help" aria-expanded={helpOpen}
-          on:click={() => helpOpen = !helpOpen}>?</button>
+          onclick={() => helpOpen = !helpOpen}>?</button>
         <div id="price-alert-help" class="help-popup" class:helpOpen>
           Alerts fire once on the first fresh reading that meets the target. An already-met target can send immediately.
           Active alerts expire after 30 days. Messages go to configured channels subscribed to price alerts.
@@ -231,7 +229,7 @@
       </div>
     </div>
     {#if formError}<p role="alert">{formError}</p>{/if}
-    <footer><button type="button" disabled={busy} on:click={() => dialog.close()}>Close</button><button class="primary" type="submit" disabled={busy}>{busy ? 'Saving…' : editing ? 'Save changes' : 'Set alert'}</button></footer>
+    <footer><button type="button" disabled={busy} onclick={() => dialog.close()}>Close</button><button class="primary" type="submit" disabled={busy}>{busy ? 'Saving…' : editing ? 'Save changes' : 'Set alert'}</button></footer>
   </form>
 </dialog>
 
