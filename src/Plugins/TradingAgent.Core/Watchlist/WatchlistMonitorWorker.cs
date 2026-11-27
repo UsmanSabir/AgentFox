@@ -411,7 +411,8 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
 
             analyzed++;
             var lookback = candles.TakeLast(_options.Value.Scan.LookbackDays).ToList();
-            var snapshot = TechnicalAnalyzer.Analyze(symbol, lookback, technicalOptions);
+            // RSI warmed up from the whole series read above, so an alert's RSI matches the chart's and a rule order's.
+            var snapshot = TechnicalAnalyzer.Analyze(symbol, lookback, technicalOptions, rsiHistory: candles);
             // Kept for a rule condition that reads SMA or RSI between passes; the same reading the alerts
             // below are judged on, so the two cannot disagree. See MonitorTechnicalReadings.
             _technicals?.Record(snapshot, DateTime.UtcNow);

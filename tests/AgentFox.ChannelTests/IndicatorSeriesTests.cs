@@ -62,6 +62,49 @@ public sealed class IndicatorSeriesTests
     }
 
     [TestMethod]
+    public void RsiWithHistory_IsTheFullSeriesSlicedToTheBarsShown()
+    {
+        var bars = Series(300);
+        var full = IndicatorSeries.Rsi(IndicatorSeries.Closes(bars), 14);
+        var shown = IndicatorSeries.RsiWithHistory(bars, 60, 14);
+
+        Assert.AreEqual(60, shown.Length);
+        CollectionAssert.AreEqual(full[^60..], shown);
+        Assert.IsTrue(shown.All(v => v is not null), "warmed up by the history, the line starts at the first bar shown");
+
+        // A 200-bar history agrees with a 300-bar one to the cent; the 60-bar window alone need not.
+        var from200 = IndicatorSeries.RsiWithHistory(bars.TakeLast(200).ToList(), 60, 14);
+        CollectionAssert.AreEqual(shown, from200);
+
+        // Asking for more bars than exist returns what exists, aligned.
+        Assert.AreEqual(10, IndicatorSeries.RsiWithHistory(bars.Take(10).ToList(), 60, 14).Length);
+    }
+
+    [TestMethod]
+    public void RsiTraded_ANoVolumeBarIsNotASession()
+    {
+        var bars = Series(80);
+        // Day 50 carried forward with no trades, at a price that would move the RSI if it counted.
+        var carried = bars[50] with { Close = bars[50].Close + 9m, Volume = 0 };
+        var withGap = bars.Take(50).Append(carried).Concat(bars.Skip(51)).ToList();
+
+        var rsi = IndicatorSeries.RsiTraded(withGap, 14);
+        var traded = IndicatorSeries.Rsi(IndicatorSeries.Closes(withGap.Where(b => b.Volume > 0)), 14);
+
+        Assert.AreEqual(withGap.Count, rsi.Length, "aligned bar for bar");
+        Assert.AreEqual(rsi[49], rsi[50], "the no-trade day repeats the value before it");
+        Assert.AreEqual(traded[^1], rsi[^1], "and the line is the traded days' RSI");
+    }
+
+    [TestMethod]
+    public void RsiTraded_ASeriesWithNoVolumeAtAllUsesEveryBar()
+    {
+        // A feed that dropped its volume column reads 0 everywhere: unknown, so nothing is skipped rather than everything.
+        var bars = Series(40).Select(b => b with { Volume = 0 }).ToList();
+        CollectionAssert.AreEqual(IndicatorSeries.Rsi(IndicatorSeries.Closes(bars), 14), IndicatorSeries.RsiTraded(bars, 14));
+    }
+
+    [TestMethod]
     public void EmptyOrShortInput_ProducesNoValuesRatherThanThrowing()
     {
         Assert.AreEqual(0, IndicatorSeries.Sma([], 20).Length);

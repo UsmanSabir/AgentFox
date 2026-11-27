@@ -3,17 +3,20 @@
   import { livePriceLabel, useLivePrices } from './livePrices';
   import { holdingValuation } from './holdingValuation';
 
-  export let holding: BrokerAccountHolding;
-  export let showValues = false;
+  interface Props {
+    holding: BrokerAccountHolding;
+    showValues?: boolean;
+  }
+
+  let { holding, showValues = false }: Props = $props();
 
   const hidden = '••••••';
   const livePrices = useLivePrices();
-  $: symbol = holding.symbol ?? holding.instrumentId;
-  let priceStore = livePrices.quote(symbol);
-  $: priceStore = livePrices.quote(symbol);
-  $: view = $priceStore;
-  $: ({ hasLiveMark, mark, marketValue, profitLoss, profitLossPercent } = holdingValuation(holding, view.quote?.current));
-  $: tone = !showValues || profitLoss == null ? '' : profitLoss > 0 ? 'positive' : profitLoss < 0 ? 'negative' : '';
+  let symbol = $derived(holding.symbol ?? holding.instrumentId);
+  let priceStore = $derived(livePrices.quote(symbol));
+  let view = $derived($priceStore);
+  let { hasLiveMark, mark, marketValue, profitLoss, profitLossPercent } = $derived(holdingValuation(holding, view.quote?.current));
+  let tone = $derived(!showValues || profitLoss == null ? '' : profitLoss > 0 ? 'positive' : profitLoss < 0 ? 'negative' : '');
 
   // Visibility and currency are explicit arguments rather than closures over the props, for the
   // reason PortfolioPanel's own formatters give: Svelte compiles a template expression's

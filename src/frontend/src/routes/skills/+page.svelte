@@ -4,9 +4,9 @@
   import { skills } from '#lib/stores.ts';
   import { Puzzle, RefreshCw, Search, Wrench } from 'lucide-svelte';
 
-  let loading = true;
-  let error: string | null = null;
-  let search = '';
+  let loading = $state(true);
+  let error: string | null = $state<string | null>(null);
+  let search = $state('');
 
   async function load() {
     loading = true;
@@ -22,15 +22,15 @@
 
   onMount(load);
 
-  $: skillList = $skills;
-  $: filtered = skillList.filter(s =>
+  let skillList = $derived($skills);
+  let filtered = $derived(skillList.filter(s =>
     !search ||
     s.name.toLowerCase().includes(search.toLowerCase()) ||
     s.description.toLowerCase().includes(search.toLowerCase())
-  );
+  ));
 
-  $: composioCount = filtered.filter(s => s.skillType === 'composio').length;
-  $: localCount    = filtered.filter(s => s.skillType === 'local').length;
+  let composioCount = $derived(filtered.filter(s => s.skillType === 'composio').length);
+  let localCount    = $derived(filtered.filter(s => s.skillType === 'local').length);
 </script>
 
 <div class="page-wrap fade-in">
@@ -42,7 +42,7 @@
         {#if !loading}<span class="count-pill">{filtered.length} skills</span>{/if}
       </p>
     </div>
-    <button class="btn btn-ghost" on:click={load} disabled={loading}>
+    <button class="btn btn-ghost" onclick={load} disabled={loading}>
       <RefreshCw size={14} />
       Refresh
     </button>

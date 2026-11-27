@@ -9,9 +9,9 @@
   } from 'lucide-svelte';
   import type { MemoryEntry, SessionInfo } from '#lib/api.ts';
 
-  let recentMemory: MemoryEntry[] = [];
-  let sessions: SessionInfo[] = [];
-  let loading = true;
+  let recentMemory: MemoryEntry[] = $state([]);
+  let sessions: SessionInfo[] = $state([]);
+  let loading = $state(true);
 
   onMount(async () => {
     try {
@@ -33,10 +33,10 @@
     }
   });
 
-  $: status   = $agentStatus;
-  $: toolList = $tools;
-  $: skillList = $skills;
-  $: agentList = $agents;
+  let status   = $derived($agentStatus);
+  let toolList = $derived($tools);
+  let skillList = $derived($skills);
+  let agentList = $derived($agents);
 
   function timeAgo(ts: string) {
     const diff = Date.now() - new Date(ts).getTime();
@@ -223,7 +223,7 @@
       ] as action}
         <a href={action.href} class="action-card card card-hover">
           <div class="action-icon" style="background:{action.bg}; color:{action.color}">
-            <svelte:component this={action.icon} size={18} />
+            <action.icon size={18} />
           </div>
           <div>
             <div class="action-label">{action.label}</div>

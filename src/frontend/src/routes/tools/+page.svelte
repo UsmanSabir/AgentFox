@@ -4,9 +4,9 @@
   import { tools } from '#lib/stores.ts';
   import { Wrench, RefreshCw, Search, Terminal, Globe, FolderOpen, Brain, Calculator, Clock, Hash, Info } from 'lucide-svelte';
 
-  let loading = true;
-  let error: string | null = null;
-  let search = '';
+  let loading = $state(true);
+  let error: string | null = $state<string | null>(null);
+  let search = $state('');
 
   const categoryMap: Record<string, { icon: typeof Wrench; color: string; bg: string }> = {
     shell:       { icon: Terminal,   color: 'var(--warning)',  bg: 'rgba(251,191,36,0.12)'  },
@@ -45,15 +45,14 @@
 
   onMount(load);
 
-  $: toolList = $tools;
-  $: filtered = toolList.filter(t =>
+  let toolList = $derived($tools);
+  let filtered = $derived(toolList.filter(t =>
     !search ||
     t.name.toLowerCase().includes(search.toLowerCase()) ||
     t.description.toLowerCase().includes(search.toLowerCase())
-  );
+  ));
 
-  let selected: typeof toolList[0] | null = null;
-</script>
+  let selected: typeof toolList[0] | null = $state<typeof toolList[0] | null>(null);</script>
 
 <div class="page-wrap fade-in">
   <div class="page-header-row">
@@ -64,7 +63,7 @@
         {#if !loading}<span class="count-pill">{toolList.length} tools</span>{/if}
       </p>
     </div>
-    <button class="btn btn-ghost" on:click={load} disabled={loading}>
+    <button class="btn btn-ghost" onclick={load} disabled={loading}>
       <RefreshCw size={14} />
       Refresh
     </button>
@@ -102,10 +101,10 @@
         <button
           class="tool-card card card-hover"
           class:active={selected?.name === tool.name}
-          on:click={() => selected = selected?.name === tool.name ? null : tool}
+          onclick={() => selected = selected?.name === tool.name ? null : tool}
         >
           <div class="tool-icon" style="background:{cat.bg}; color:{cat.color}">
-            <svelte:component this={cat.icon} size={16} />
+            <cat.icon size={16} />
           </div>
           <div class="tool-info">
             <span class="tool-name">{tool.name}</span>
@@ -122,13 +121,13 @@
       <div class="detail-panel fade-in">
         <div class="detail-header">
           <div class="tool-icon" style="background:{cat.bg}; color:{cat.color}">
-            <svelte:component this={cat.icon} size={18} />
+            <cat.icon size={18} />
           </div>
           <div>
             <div class="detail-name">{selected.name}</div>
             <div class="detail-category">{getCategory(selected.name)}</div>
           </div>
-          <button class="btn btn-ghost" style="margin-left:auto" on:click={() => selected = null}>Close</button>
+          <button class="btn btn-ghost" style="margin-left:auto" onclick={() => selected = null}>Close</button>
         </div>
         <div class="detail-body">
           <p class="detail-desc">{selected.description}</p>

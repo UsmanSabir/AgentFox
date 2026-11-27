@@ -1,13 +1,13 @@
 <script lang="ts">
   import { tick } from 'svelte';
-  let dialog: HTMLDialogElement;
-  let back: HTMLButtonElement;
+  let dialog: HTMLDialogElement | undefined = $state();
+  let back: HTMLButtonElement | undefined = $state();
   let previous: HTMLElement | null = null;
   export async function open() {
     previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    dialog.showModal(); await tick(); back.focus();
+    dialog!.showModal(); await tick(); back!.focus();
   }
-  function close() { dialog.close(); if (previous?.isConnected) previous.focus(); }
+  function close() { dialog!.close(); if (previous?.isConnected) previous.focus(); }
   const shortcuts = [
     ['Ctrl+Shift+K','Find and focus or open a panel by name or purpose (also from inputs)'],
     ['Ctrl+K','Search commands and open any panel (also from inputs)'],
@@ -33,8 +33,8 @@
     ['Order review: Tab → Confirm','Explicit confirmation; Escape returns without submitting']
   ];
 </script>
-<dialog bind:this={dialog} aria-label="Keyboard shortcuts" on:cancel={event => {event.preventDefault();close();}}>
-  <header><h2>Keyboard shortcuts</h2><button bind:this={back} on:click={close}>Close shortcuts</button></header>
+<dialog bind:this={dialog} aria-label="Keyboard shortcuts" oncancel={event => {event.preventDefault();close();}}>
+  <header><h2>Keyboard shortcuts</h2><button bind:this={back} onclick={close}>Close shortcuts</button></header>
   <p>Layout shortcuts do not place orders. Watchlist search, panel search, Commands and F6 work from inputs. On Mac, Cmd also works for watchlist search, panel search, Ctrl+K, number and maximize shortcuts.</p>
   <table><caption>Workstation keyboard reference</caption><tbody>{#each shortcuts as [keys,description]}<tr><th scope="row"><kbd>{keys}</kbd></th><td>{description}</td></tr>{/each}</tbody></table>
   <p>Use <b>Commands</b> for pin/unpin, resizing and moving panels. The workstation follows the AgentFox theme. Browser/OS shortcuts may take priority; every action also has an on-screen control. Native order controls retain explicit confirmation.</p>

@@ -188,6 +188,46 @@ public class ChartOverlayTests
     }
 
     [TestMethod]
+    public void SessionsOn_AppliesOverrideThenHolidayThenTheWeeklyShape_AndAgreesWithIsTradingDay()
+    {
+        var options = Options.Create(new TradingAgentOptions
+        {
+            MarketHolidays = ["2026-08-24"],
+            MarketSessionOverrides =
+            [
+                new MarketSessionOverride { Date = "2026-08-26", Sessions = ["10:00-13:00"] },
+                new MarketSessionOverride { Date = "2026-08-27", Closed = true }
+            ]
+        });
+        var calendar = new PsxMarketCalendar(options, NullLogger<PsxMarketCalendar>.Instance);
+
+        CollectionAssert.AreEqual(new[] { (new TimeOnly(9, 17), new TimeOnly(12, 0)), (new TimeOnly(14, 32), new TimeOnly(16, 30)) },
+            calendar.SessionsOn(new DateOnly(2026, 8, 21)).ToArray());   // Friday's two sessions
+        CollectionAssert.AreEqual(new[] { (new TimeOnly(9, 32), new TimeOnly(15, 30)) },
+            calendar.SessionsOn(new DateOnly(2026, 8, 25)).ToArray());   // an ordinary Tuesday
+        CollectionAssert.AreEqual(new[] { (new TimeOnly(10, 0), new TimeOnly(13, 0)) },
+            calendar.SessionsOn(new DateOnly(2026, 8, 26)).ToArray());   // an override's own hours
+        Assert.AreEqual(0, calendar.SessionsOn(new DateOnly(2026, 8, 22)).Count);   // Saturday
+        Assert.AreEqual(0, calendar.SessionsOn(new DateOnly(2026, 8, 24)).Count);   // configured holiday
+        Assert.AreEqual(0, calendar.SessionsOn(new DateOnly(2026, 8, 27)).Count);   // closed by override
+
+        for (var d = new DateOnly(2026, 8, 20); d <= new DateOnly(2026, 8, 31); d = d.AddDays(1))
+            Assert.AreEqual(calendar.IsTradingDay(d), calendar.SessionsOn(d).Count > 0, $"{d}: a trading day is exactly a day with a session");
+    }
+
+    [TestMethod]
+    public void SessionsOn_IsUnknownOnACalendarThatNeverDeclaredItsHours()
+    {
+        IMarketCalendar bare = new HoursFreeCalendar();
+        Assert.IsNull(bare.SessionsOn(new DateOnly(2026, 8, 25)), "a test double's silence is not 'no session'");
+    }
+
+    private sealed class HoursFreeCalendar : IMarketCalendar
+    {
+        public MarketStatus GetStatus(DateTime? utcNow = null) => new(false, DateTime.Now, "stub");
+    }
+
+    [TestMethod]
     public void TheSerializedShape_MatchesWhatTheClientTypeExpects()
     {
         // The endpoint serializes with ASP.NET's web defaults (camelCase). ChartPane reads

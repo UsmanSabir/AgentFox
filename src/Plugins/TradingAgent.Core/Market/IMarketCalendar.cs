@@ -31,4 +31,16 @@ public interface IMarketCalendar
     /// </summary>
     bool IsTradingDay(DateOnly date) =>
         date.DayOfWeek is not (DayOfWeek.Saturday or DayOfWeek.Sunday);
+
+    /// <summary>
+    /// The PKT sessions (start, end) the calendar holds the market open for on <paramref name="date"/>, in order, with the same
+    /// precedence <see cref="GetStatus"/> applies: an override, then a holiday (no sessions), then the regular weekly shape. An
+    /// empty list means no session that day.
+    ///
+    /// <para>
+    /// The default answers <c>null</c>, "not known", rather than inventing hours: a test double that never declared its hours must
+    /// not be read as one that has none. A real calendar overrides it, as <see cref="PsxMarketCalendar"/> does.
+    /// </para>
+    /// </summary>
+    IReadOnlyList<(TimeOnly Start, TimeOnly End)>? SessionsOn(DateOnly date) => null;
 }

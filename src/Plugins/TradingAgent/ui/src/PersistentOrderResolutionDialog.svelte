@@ -2,14 +2,14 @@
   import { onDestroy, tick } from 'svelte';
   import { validateAttentionResolution, type AttentionResolution } from './persistentOrderUi';
   interface ResolutionTarget { intentId:string; symbol:string; action:string; quantity:number; lastAttemptSessionDate:string|null }
-  let dialog: HTMLDialogElement;
-  let back: HTMLButtonElement;
-  let confirm: HTMLButtonElement;
-  let target: ResolutionTarget = {intentId:'',symbol:'',action:'',quantity:0,lastAttemptSessionDate:null};
-  let resolution = '';
-  let quantityText: string | number = '';
-  let note = '';
-  let error = '';
+  let dialog: HTMLDialogElement | undefined = $state();
+  let back: HTMLButtonElement | undefined = $state();
+  let confirm: HTMLButtonElement | undefined = $state();
+  let target: ResolutionTarget = $state({intentId:'',symbol:'',action:'',quantity:0,lastAttemptSessionDate:null});
+  let resolution = $state('');
+  let quantityText: string | number = $state('');
+  let note = $state('');
+  let error = $state('');
   let resolve: ((value: AttentionResolution | null) => void) | null = null;
   let previous: HTMLElement | null = null;
 
@@ -18,10 +18,10 @@
     target = {...next}; resolution = ''; quantityText = ''; note = ''; error = '';
     previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const answer = new Promise<AttentionResolution | null>(done => resolve = done);
-    dialog.showModal(); await tick(); back.focus(); return answer;
+    dialog!.showModal(); await tick(); back!.focus(); return answer;
   }
   function finish(value: AttentionResolution | null) {
-    const done = resolve; resolve = null; dialog.close();
+    const done = resolve; resolve = null; dialog!.close();
     if (previous?.isConnected) previous.focus(); done?.(value);
   }
   function submit() {
@@ -29,8 +29,8 @@
     error = result.error ?? '';
     if (result.value) finish(result.value);
     else void tick().then(() => {
-      const invalid = dialog.querySelector<HTMLElement>('[aria-invalid="true"]');
-      const firstChoice = dialog.querySelector<HTMLInputElement>('input[type="radio"]');
+      const invalid = dialog!.querySelector<HTMLElement>('[aria-invalid="true"]');
+      const firstChoice = dialog!.querySelector<HTMLInputElement>('input[type="radio"]');
       (invalid ?? firstChoice)?.focus();
     });
   }
@@ -41,7 +41,7 @@
 </script>
 
 <dialog bind:this={dialog} aria-label="Resolve persistent order from broker check"
-  on:cancel={event => {event.preventDefault();finish(null);}} on:keydown={key}>
+  oncancel={event => {event.preventDefault();finish(null);}} onkeydown={key}>
   <h2>Resolve from broker check</h2>
   <p><b>{target.symbol} {target.action}</b> · intent <code>{target.intentId}</code></p>
   <p class="explain">AgentFox cannot retrieve prior-day broker history. Check the broker order book, activity, or statement for {target.lastAttemptSessionDate ?? 'the prior attempt date'}, then record exactly what it shows.</p>
@@ -57,7 +57,7 @@
   <label class="field">Evidence checked <textarea rows="3" bind:value={note} aria-invalid={!!error && error.startsWith('Describe')} placeholder="For example: broker activity statement for 2026-09-02"></textarea><small>Required. This note becomes part of the audit record.</small></label>
   {#if error}<p class="validation" role="alert">{error}</p>{/if}
   <p class="warning">This records your broker-side finding. Review the intent ID and evidence before confirming.</p>
-  <footer><button bind:this={back} on:click={() => finish(null)}>Back — no change</button><button class="confirm" bind:this={confirm} on:click={submit}>Confirm resolution</button></footer>
+  <footer><button bind:this={back} onclick={() => finish(null)}>Back — no change</button><button class="confirm" bind:this={confirm} onclick={submit}>Confirm resolution</button></footer>
 </dialog>
 
 <style>

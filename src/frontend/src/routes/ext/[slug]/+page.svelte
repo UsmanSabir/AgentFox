@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { page } from '$app/state';
   import { afterNavigate } from '$app/navigation';
   import { sidebarCollapsed, uiTheme, type UiTheme } from '#lib/stores.ts';
@@ -15,9 +15,9 @@
   // read the management API key exactly as $lib/api does. We also post it (with the theme) on load,
   // so a plugin page can take either route and does not have to know our storage key.
 
-  let pages: PluginUiPageInfo[] | null = null;
-  let error: string | null = null;
-  let frame: HTMLIFrameElement | null = null;
+  let pages: PluginUiPageInfo[] | null = $state<PluginUiPageInfo[] | null>(null);
+  let error: string | null = $state<string | null>(null);
+  let frame: HTMLIFrameElement | null = $state<HTMLIFrameElement | null>(null);
   let previousSidebar: boolean | null = null;
   function restoreSidebar() {
     if (previousSidebar === null) return;
@@ -25,11 +25,15 @@
     previousSidebar = null;
   }
 
-  let slug = page.params.slug;
+  let slug = $state(page.params.slug);
   afterNavigate(() => { slug = page.params.slug; });
-  $: current = pages?.find((p) => p.slug === slug) ?? null;
+  let current = $derived(pages?.find((p) => p.slug === slug) ?? null);
   // Svelte may reuse this route component for another plugin slug.
-  $: { slug; restoreSidebar(); }
+  $effect.pre(() => {
+    // Reads only what the old `$:` named; the call is untracked so its own bookkeeping cannot re-trigger it.
+    void slug;
+    untrack(() => restoreSidebar());
+  });
 
   onMount(() => {
     const receive = (event: MessageEvent) => {
@@ -65,7 +69,11 @@
 
   // The frame may already be open when the header toggle changes. Re-send the host context so plugin
   // pages switch in place instead of waiting for their next navigation or reload.
-  $: if (frame) handoff($uiTheme);
+  $effect.pre(() => {
+    // Reads only what the old `$:` named; the call is untracked so its own bookkeeping cannot re-trigger it.
+    const target = frame, theme = $uiTheme;
+    untrack(() => { if (target) handoff(theme); });
+  });
 </script>
 
 <svelte:head><title>{current?.title ?? 'Plugin'} · AgentFox</title></svelte:head>
@@ -86,7 +94,7 @@
     title={current.title}
     allow="fullscreen"
     allowfullscreen
-    on:load={() => handoff()}
+    onload={() => handoff()}
   ></iframe>
 {/if}
 

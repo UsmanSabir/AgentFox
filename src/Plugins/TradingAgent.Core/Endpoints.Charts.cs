@@ -112,8 +112,11 @@ public sealed partial class TradingCoreEndpoints
                 var closes = IndicatorSeries.Closes(candles);
                 var sma20 = IndicatorSeries.Sma(closes, 20);
                 var sma50 = IndicatorSeries.Sma(closes, 50);
-                var rsi14 = IndicatorSeries.Rsi(closes, TechnicalOptions.From(
-                    options.Value.Scan).RsiPeriod);
+                // RSI from the interval's whole series, sliced to the bars shown: from the window alone its line starts 14 bars in
+                // and stays a point or so off a value computed with history (a rule order's, TradingView's) for its first ~100 bars.
+                // Traded bars only: a no-volume day is not a session (IndicatorSeries.RsiTraded), as a rule order counts them.
+                var rsi14 = IndicatorSeries.RsiWithHistory(result.History ?? candles, candles.Count,
+                    TechnicalOptions.From(options.Value.Scan).RsiPeriod);
 
                 // Weekly-confirmed levels are the structural ones. Matching by price (within the
                 // configured confluence tolerance) rather than by identity, because the weekly analysis
@@ -228,7 +231,8 @@ public sealed partial class TradingCoreEndpoints
                         zone = snapshot.Zone.ToString(),
                         setup = snapshot.Setup.ToString(),
                         trend = snapshot.Trend,
-                        rsi14 = snapshot.Rsi14,
+                        // The line's own latest value, so the metrics row and the RSI pane never show two numbers.
+                        rsi14 = rsi14.Length > 0 && rsi14[^1] is { } lastRsi ? lastRsi : snapshot.Rsi14,
                         atr14 = snapshot.Atr14,
                         atrPercent = snapshot.AtrPercent,
                         sma20 = snapshot.Sma20,

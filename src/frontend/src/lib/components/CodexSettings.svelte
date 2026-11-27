@@ -6,15 +6,15 @@
 
   const dispatch = createEventDispatcher<{ changed: void }>();
 
-  let status: CodexStatus | null = null;
-  let loading = true;
-  let busy = '';
-  let error = '';
-  let notice = '';
-  let signIn: CodexSignIn | null = null;
+  let status: CodexStatus | null = $state<CodexStatus | null>(null);
+  let loading = $state(true);
+  let busy = $state('');
+  let error = $state('');
+  let notice = $state('');
+  let signIn: CodexSignIn | null = $state<CodexSignIn | null>(null);
   let poll: ReturnType<typeof setInterval> | null = null;
-  let model = '';
-  let effort = '';
+  let model = $state('');
+  let effort = $state('');
 
   const STATE_TEXT: Record<string, string> = {
     'ready': 'Ready',
@@ -134,11 +134,11 @@
     return utc ? new Date(utc).toLocaleString() : '—';
   }
 
-  $: selected = status?.models.find((m) => m.id === model) ?? null;
-  $: efforts = selected && selected.efforts.length > 0 ? selected.efforts : ['low', 'medium', 'high'];
+  let selected = $derived(status?.models.find((m) => m.id === model) ?? null);
+  let efforts = $derived(selected && selected.efforts.length > 0 ? selected.efforts : ['low', 'medium', 'high']);
 
-  $: tone = !status ? 'muted' : status.state === 'ready' ? 'ok' : status.state === 'rate-limited' ? 'warn'
-    : status.state === 'not-signed-in' ? 'muted' : 'bad';
+  let tone = $derived(!status ? 'muted' : status.state === 'ready' ? 'ok' : status.state === 'rate-limited' ? 'warn'
+    : status.state === 'not-signed-in' ? 'muted' : 'bad');
 
   onMount(() => load(true));
   onDestroy(stopPolling); // an unfinished sign-in ends on its own deadline on the server
@@ -151,7 +151,7 @@
     <span class="heading-help">
       <ChannelHelp label="Codex" text="Use your own ChatGPT plan for this agent's AI, through OpenAI's official Codex program. Choose which parts use it under AI routing. Codex answers in text only here; all of its tools are switched off. Only you should sign in: your plan is yours alone and is not for sharing." />
     </span>
-    <button class="btn btn-ghost icon-btn" on:click={() => load(true)} disabled={!!busy} title="Refresh status" aria-label="Refresh Codex status">
+    <button class="btn btn-ghost icon-btn" onclick={() => load(true)} disabled={!!busy} title="Refresh status" aria-label="Refresh Codex status">
       <RefreshCw size={13} />
     </button>
   </h2>
@@ -181,8 +181,8 @@
           {#if status.lastError}<div><span class="label">Last error</span><span class="bad">{status.lastError}</span></div>{/if}
         </div>
         <div class="actions">
-          <button class="btn btn-primary" on:click={test} disabled={!!busy}>{busy === 'test' ? 'Testing…' : 'Test connection'}</button>
-          <button class="btn btn-ghost" on:click={signOut} disabled={!!busy}>Sign out</button>
+          <button class="btn btn-primary" onclick={test} disabled={!!busy}>{busy === 'test' ? 'Testing…' : 'Test connection'}</button>
+          <button class="btn btn-ghost" onclick={signOut} disabled={!!busy}>Sign out</button>
           <ChannelHelp label="testing Codex" text="Test sends one tiny message, which uses a little of your ChatGPT plan (Codex adds its own instructions to every call). Refresh only checks the program and the sign-in." />
         </div>
       {/if}
@@ -195,14 +195,14 @@
           <div class="code-row">
             <span class="label">Enter this code</span>
             <code class="code">{signIn.code}</code>
-            <button class="btn btn-ghost icon-btn" on:click={copyCode} title="Copy the code" aria-label="Copy the code"><Copy size={13} /></button>
+            <button class="btn btn-ghost icon-btn" onclick={copyCode} title="Copy the code" aria-label="Copy the code"><Copy size={13} /></button>
             <ChannelHelp label="the device code" text="The code only lets you approve this waiting sign-in in your own ChatGPT account; it expires in 15 minutes. If ChatGPT says device sign-in is off, turn it on in ChatGPT's security settings and start again." />
           </div>
-          <div class="row"><span class="muted">Waiting for your approval…</span><button class="btn btn-ghost" on:click={cancelSignIn}>Cancel</button></div>
+          <div class="row"><span class="muted">Waiting for your approval…</span><button class="btn btn-ghost" onclick={cancelSignIn}>Cancel</button></div>
         </div>
       {:else}
         <div class="actions">
-          <button class="btn" class:btn-primary={!status.signedIn} class:btn-ghost={status.signedIn} on:click={startSignIn} disabled={!!busy}>
+          <button class="btn" class:btn-primary={!status.signedIn} class:btn-ghost={status.signedIn} onclick={startSignIn} disabled={!!busy}>
             {busy === 'signin' ? 'Starting…' : status.signedIn ? 'Sign in again' : 'Sign in with ChatGPT'}
           </button>
         </div>
@@ -213,11 +213,11 @@
           <label class="choice">
             <span class="label">Model</span>
             {#if status.models.length > 0}
-              <select class="input select wide" bind:value={model} on:change={onModelChange} disabled={!!busy} aria-label="Codex model">
+              <select class="input select wide" bind:value={model} onchange={onModelChange} disabled={!!busy} aria-label="Codex model">
                 {#each status.models as m}<option value={m.id}>{m.name}{m.name === m.id ? '' : ` (${m.id})`}</option>{/each}
               </select>
             {:else}
-              <input class="input" bind:value={model} on:change={save} disabled={!!busy} aria-label="Codex model" />
+              <input class="input" bind:value={model} onchange={save} disabled={!!busy} aria-label="Codex model" />
             {/if}
             <ChannelHelp label="the Codex model" text={status.models.length > 0
               ? 'These are the models your ChatGPT plan offers right now, as Codex reports them. If your plan changes, press Refresh to update the list.'
@@ -225,7 +225,7 @@
           </label>
           <label class="choice">
             <span class="label">Reasoning</span>
-            <select class="input select" bind:value={effort} on:change={save} disabled={!!busy} aria-label="Codex reasoning effort">
+            <select class="input select" bind:value={effort} onchange={save} disabled={!!busy} aria-label="Codex reasoning effort">
               <option value="">{selected?.defaultEffort ? `Default (${selected.defaultEffort})` : 'Default'}</option>
               {#each efforts as e}<option value={e}>{effortLabel(e)}</option>{/each}
             </select>

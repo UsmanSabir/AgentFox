@@ -25,34 +25,34 @@
     type ChannelOutboxEntry,
   } from '#lib/api.ts';
 
-  let status: ChannelsStatus | null = null;
-  let providers: ChannelProviderInfo[] = [];
-  let providersLoaded = false,
-    loading = true,
-    busy = false,
-    adding = false,
+  let status: ChannelsStatus | null = $state<ChannelsStatus | null>(null);
+  let providers: ChannelProviderInfo[] = $state([]);
+  let providersLoaded = $state(false),
+    loading = $state(true),
+    busy = $state(false),
+    adding = $state(false),
     disposed = false;
-  let error = '',
-    loadError = '',
-    note = '',
-    warning = '',
-    channelType = '',
-    name = '',
-    subscribe = '>',
-    draft = '';
-  let config: Record<string, string> = {};
-  let nameInput: HTMLInputElement, addButton: HTMLButtonElement, topicInput: HTMLInputElement;
-  let editingId: string | null = null;
-  let removing: ChannelInfo | null = null;
-  let outboxId: string | null = null;
-  let outbox: ChannelOutboxEntry[] = [];
+  let error = $state(''),
+    loadError = $state(''),
+    note = $state(''),
+    warning = $state(''),
+    channelType = $state(''),
+    name = $state(''),
+    subscribe = $state('>'),
+    draft = $state('');
+  let config: Record<string, string> = $state({});
+  let nameInput: HTMLInputElement = $state()!, addButton: HTMLButtonElement = $state()!, topicInput: HTMLInputElement = $state()!;
+  let editingId: string | null = $state<string | null>(null);
+  let removing: ChannelInfo | null = $state<ChannelInfo | null>(null);
+  let outboxId: string | null = $state<string | null>(null);
+  let outbox: ChannelOutboxEntry[] = $state([]);
   let readVersion = 0;
   let readController: AbortController | null = null;
   const requests = new Set<AbortController>();
   let interval: ReturnType<typeof setInterval>;
   let draftExpiry: ReturnType<typeof setTimeout>;
-  $: provider = providers.find((p) => p.type === channelType);
-  $: enabledCount = status?.channels.filter((c) => c.enabled).length ?? 0;
+  let provider = $derived(providers.find((p) => p.type === channelType));
+  let enabledCount = $derived(status?.channels.filter((c) => c.enabled).length ?? 0);
 
   async function request<T>(
     action: (signal: AbortSignal) => Promise<T>,
@@ -299,14 +299,14 @@
     <div class="actions">
       <button
         class="btn btn-ghost"
-        on:click={() => load()}
+        onclick={() => load()}
         disabled={busy || adding || editingId !== null || removing !== null}
         ><RefreshCw size={14} />Refresh</button
       >
       <button
         class="btn btn-primary"
         bind:this={addButton}
-        on:click={openAdd}
+        onclick={openAdd}
         disabled={busy || adding || !providersLoaded || !status?.ready}
         ><Plus size={15} />Add channel</button
       >
@@ -317,12 +317,12 @@
   {#if warning}<p class="warn-banner" role="status"><AlertTriangle size={16} />{warning}</p>{/if}
   {#if note}<p class="result" role="status">{note}</p>{/if}
   {#if adding}
-    <form class="card add-form" on:submit|preventDefault={add}>
+    <form class="card add-form" onsubmit={(event) => { event.preventDefault(); void add(); }}>
       <h2>Add channel</h2>
       <fieldset disabled={busy}>
         <div class="form-grid">
           <label
-            >Channel type<select bind:value={channelType} on:change={() => (config = {})}
+            >Channel type<select bind:value={channelType} onchange={() => (config = {})}
               >{#each providers as p}<option value={p.type}>{p.name}</option>{/each}</select
             ></label
           >
@@ -375,7 +375,7 @@
         <div class="actions form-actions">
           <button class="btn btn-primary" type="submit"
             >{busy ? 'Adding…' : 'Add & activate'}</button
-          ><button class="btn btn-ghost" type="button" on:click={cancelAdd}>Cancel</button>
+          ><button class="btn btn-ghost" type="button" onclick={cancelAdd}>Cancel</button>
         </div>
       </fieldset>
     </form>
@@ -392,11 +392,12 @@
       </div>{/if}
     <div class="grid">
       {#each status.channels as ch (ch.id)}
+        {@const SvelteComponent = icons[ch.type] ?? Bot}
         <article class="card channel-card" aria-label={ch.id}>
           <div class="card-header">
             <div class="identity">
               <span class="type-icon"
-                ><svelte:component this={icons[ch.type] ?? Bot} size={19} /></span
+                ><SvelteComponent size={19} /></span
               >
               <div>
                 <h2>{ch.name}</h2>
@@ -426,7 +427,7 @@
           </div>
           {#if editingId === ch.id}<form
               class="topic-editor"
-              on:submit|preventDefault={() => saveTopics(ch)}
+              onsubmit={(event) => { event.preventDefault(); void saveTopics(ch); }}
             >
               <label
                 ><span class="field-label"
@@ -441,7 +442,7 @@
                 /></label
               >
               <div class="picker">
-                <button class="pick" type="button" disabled={busy} on:click={() => pick('>')}
+                <button class="pick" type="button" disabled={busy} onclick={() => pick('>')}
                   >Everything</button
                 >{#each status.topics ?? [] as topic}<button
                     class="pick"
@@ -451,7 +452,7 @@
                       .split(',')
                       .map((p) => p.trim())
                       .includes(topic.name)}
-                    on:click={() => pick(topic.name)}>{topic.name}</button
+                    onclick={() => pick(topic.name)}>{topic.name}</button
                   >{/each}
               </div>
               <div class="actions">
@@ -460,7 +461,7 @@
                   class="btn btn-ghost"
                   disabled={busy}
                   type="button"
-                  on:click={() => {
+                  onclick={() => {
                     editingId = null;
                     draft = '';
                   }}>Cancel</button
@@ -474,9 +475,9 @@
             >
               <p>Remove <strong>{ch.id}</strong> and delete its saved configuration?</p>
               <div class="actions">
-                <button class="btn btn-danger" disabled={busy} on:click={() => remove(ch)}
+                <button class="btn btn-danger" disabled={busy} onclick={() => remove(ch)}
                   >Remove channel</button
-                ><button class="btn btn-ghost" disabled={busy} on:click={() => (removing = null)}
+                ><button class="btn btn-ghost" disabled={busy} onclick={() => (removing = null)}
                   >Cancel</button
                 >
               </div>
@@ -486,7 +487,7 @@
                 class="btn btn-ghost"
                 disabled={busy || (!ch.providerAvailable && !ch.enabled)}
                 aria-label={`${ch.enabled && ch.isConnected ? 'Deactivate' : 'Activate'} ${ch.id}`}
-                on:click={() =>
+                onclick={() =>
                   run((signal) =>
                     api.setChannelEnabled(ch.id, !(ch.enabled && ch.isConnected), signal),
                   )}
@@ -497,17 +498,17 @@
               {#if ch.enabled && !ch.isConnected}<button
                   class="btn btn-ghost"
                   disabled={busy}
-                  on:click={() => run((signal) => api.setChannelEnabled(ch.id, false, signal))}
+                  onclick={() => run((signal) => api.setChannelEnabled(ch.id, false, signal))}
                   >Deactivate</button
                 >{/if}
-              <button class="btn btn-ghost" disabled={busy} on:click={() => beginEdit(ch)}
+              <button class="btn btn-ghost" disabled={busy} onclick={() => beginEdit(ch)}
                 ><Pencil size={13} />Edit topics</button
               >
               <button
                 class="btn btn-danger remove"
                 disabled={busy}
                 aria-label={`Remove ${ch.id}`}
-                on:click={() => {
+                onclick={() => {
                   stopRead();
                   clearAdd();
                   editingId = null;
@@ -517,13 +518,13 @@
             </div>{/if}
           {#if ch.recordsMessages}<div class="outbox">
               <div class="actions">
-                <button class="btn btn-ghost" disabled={busy} on:click={() => toggleOutbox(ch)}
+                <button class="btn btn-ghost" disabled={busy} onclick={() => toggleOutbox(ch)}
                   >{outboxId === ch.id ? 'Hide' : 'Show'} received ({ch.receivedCount})</button
                 >{#if outboxId === ch.id}<button
                     class="btn btn-ghost"
                     disabled={busy}
-                    on:click={() => loadOutbox(ch)}>Refresh</button
-                  ><button class="btn btn-ghost" disabled={busy} on:click={() => clearOutbox(ch)}
+                    onclick={() => loadOutbox(ch)}>Refresh</button
+                  ><button class="btn btn-ghost" disabled={busy} onclick={() => clearOutbox(ch)}
                     >Clear</button
                   >{/if}
               </div>

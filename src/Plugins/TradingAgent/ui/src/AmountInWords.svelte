@@ -1,7 +1,11 @@
 <script lang="ts">
   import { amountInWords } from './amountInWords';
-  export let value: number | null | undefined;
-  $: words = amountInWords(value);
+  interface Props {
+    value: number | null | undefined;
+  }
+
+  let { value }: Props = $props();
+  let words = $derived(amountInWords(value));
 </script>
 
 {#if words}<small class="amount-words">{words}</small>{/if}

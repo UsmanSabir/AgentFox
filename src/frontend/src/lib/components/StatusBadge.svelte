@@ -1,5 +1,9 @@
 <script lang="ts">
-  export let status: string = 'unknown';
+  interface Props {
+    status?: string;
+  }
+
+  let { status = 'unknown' }: Props = $props();
 
   const map: Record<string, string> = {
     idle:         'badge-success',
@@ -12,7 +16,7 @@
     unknown:      'badge-neutral',
   };
 
-  $: cls = map[status.toLowerCase()] ?? 'badge-neutral';
+  let cls = $derived(map[status.toLowerCase()] ?? 'badge-neutral');
 
   const dotColor: Record<string, string> = {
     'badge-success': 'var(--success)',
@@ -21,7 +25,7 @@
     'badge-danger':  'var(--danger)',
     'badge-neutral': 'var(--text-3)',
   };
-  $: dot = dotColor[cls] ?? 'var(--text-3)';
+  let dot = $derived(dotColor[cls] ?? 'var(--text-3)');
 </script>
 
 <span class="badge {cls}">

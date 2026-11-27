@@ -7,21 +7,32 @@
   import type { SymbolExtension } from './symbolExtensions';
   import WatchlistPanel from './WatchlistPanel.svelte';
 
-  export let selectedSymbol: string | null = null;
-  export let refreshTick = 0;
-  export let historyRefreshTick = 0;
-  export let archive: CandleArchiveStatus | null = null;
-  export let marketOpen = false;
-  export let symbolExtension: SymbolExtension | null = null;
+  interface Props {
+    selectedSymbol?: string | null;
+    refreshTick?: number;
+    historyRefreshTick?: number;
+    archive?: CandleArchiveStatus | null;
+    marketOpen?: boolean;
+    symbolExtension?: SymbolExtension | null;
+  }
+
+  let {
+    selectedSymbol = $bindable(null),
+    refreshTick = 0,
+    historyRefreshTick = 0,
+    archive = null,
+    marketOpen = false,
+    symbolExtension = null
+  }: Props = $props();
 
   const dispatch = createEventDispatcher<{ arm: ArmOrderDialogContext; priceAlert: {symbol: string; target?: number; direction?: 'above' | 'below'} }>();
   const DESKTOP_QUERY = '(min-width: 901px)';
-  let desktop = typeof window !== 'undefined' && window.matchMedia(DESKTOP_QUERY).matches;
-  let selectedCompany: string | null = null;
-  let watchlistPanel: WatchlistPanel | null = null;
-  let dockedWorkspace: DockedMarketWorkspace | null = null;
-  let watchlistCompact = false;
-  let chartExpanded = false;
+  let desktop = $state(typeof window !== 'undefined' && window.matchMedia(DESKTOP_QUERY).matches);
+  let selectedCompany: string | null = $state<string | null>(null);
+  let watchlistPanel: WatchlistPanel | null = $state<WatchlistPanel | null>(null);
+  let dockedWorkspace: DockedMarketWorkspace | null = $state<DockedMarketWorkspace | null>(null);
+  let watchlistCompact = $state(false);
+  let chartExpanded = $state(false);
 
   export async function refresh() {
     if (desktop) await dockedWorkspace?.refresh();
@@ -64,39 +75,42 @@
     compactLeft={watchlistCompact}
     expanded={chartExpanded}
   >
-    <svelte:fragment slot="left">
-      <WatchlistPanel
-        bind:this={watchlistPanel}
-        bind:selected={selectedSymbol}
-        bind:selectedCompany
-        bind:compact={watchlistCompact}
-        {refreshTick}
-        {marketOpen}
-        on:priceAlert={(event) => dispatch('priceAlert', event.detail)}
-        rowStatus={symbolExtension?.rowStatus ?? null}
-      />
-    </svelte:fragment>
-    <svelte:fragment slot="right">
-      <ChartPane
-        symbol={selectedSymbol}
-        companyName={selectedCompany}
-        bind:expanded={chartExpanded}
-        quoteDetail={symbolExtension?.quoteDetail ?? null}
-        instrumentLinks={symbolExtension?.instrumentLinks ?? null}
-        {refreshTick}
-        {historyRefreshTick}
-        {archive}
-        {marketOpen}
-        on:priceAlert={(event) => dispatch('priceAlert', event.detail)}
-        on:arm={(event) => dispatch('arm', event.detail)}
-      />
-    </svelte:fragment>
+    {#snippet left()}
+      
+        <WatchlistPanel
+          bind:this={watchlistPanel}
+          bind:selected={selectedSymbol}
+          bind:selectedCompany
+          bind:compact={watchlistCompact}
+          {refreshTick}
+          {marketOpen}
+          on:priceAlert={(event) => dispatch('priceAlert', event.detail)}
+          rowStatus={symbolExtension?.rowStatus ?? null}
+        />
+      
+      {/snippet}
+    {#snippet right()}
+      
+        <ChartPane
+          symbol={selectedSymbol}
+          companyName={selectedCompany}
+          bind:expanded={chartExpanded}
+          quoteDetail={symbolExtension?.quoteDetail ?? null}
+          instrumentLinks={symbolExtension?.instrumentLinks ?? null}
+          {refreshTick}
+          {historyRefreshTick}
+          {archive}
+          {marketOpen}
+          on:priceAlert={(event) => dispatch('priceAlert', event.detail)}
+          on:arm={(event) => dispatch('arm', event.detail)}
+        />
+      
+      {/snippet}
   </ResizableWorkspace>
 
   {#if symbolExtension?.plan && selectedSymbol}
     <div id="trading-stock-plan" class="section-anchor">
-      <svelte:component
-        this={symbolExtension.plan}
+      <symbolExtension.plan
         symbol={selectedSymbol}
         companyName={selectedCompany}
       />

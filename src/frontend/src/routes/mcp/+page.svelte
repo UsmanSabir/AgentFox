@@ -7,10 +7,10 @@
     ChevronDown, ChevronRight, Plug, AlertTriangle, Info
   } from 'lucide-svelte';
 
-  let data: McpStatus | null = null;
-  let loading = true;
-  let error: string | null = null;
-  let expanded: Set<string> = new Set();
+  let data: McpStatus | null = $state<McpStatus | null>(null);
+  let loading = $state(true);
+  let error: string | null = $state<string | null>(null);
+  let expanded: Set<string> = $state(new Set());
 
   async function load() {
     loading = true;
@@ -32,9 +32,9 @@
     expanded = next;
   }
 
-  $: servers    = (data?.servers ?? []) as McpServerInfo[];
-  $: connected  = servers.filter(s => s.status === 'connected');
-  $: failed     = servers.filter(s => s.status === 'failed');
+  let servers    = $derived((data?.servers ?? []) as McpServerInfo[]);
+  let connected  = $derived(servers.filter(s => s.status === 'connected'));
+  let failed     = $derived(servers.filter(s => s.status === 'failed'));
 </script>
 
 <div class="page-wrap fade-in">
@@ -45,7 +45,7 @@
         Model Context Protocol server connections and their exposed tools
       </p>
     </div>
-    <button class="btn btn-ghost" on:click={load} disabled={loading}>
+    <button class="btn btn-ghost" onclick={load} disabled={loading}>
       <RefreshCw size={14} />
       Refresh
     </button>
@@ -105,7 +105,7 @@
             <div class="server-card fade-in">
               <button
                 class="server-header"
-                on:click={() => toggle(server.name)}
+                onclick={() => toggle(server.name)}
                 aria-expanded={expanded.has(server.name)}
               >
                 <div class="server-icon connected">
@@ -163,7 +163,7 @@
             <div class="server-card failure-card fade-in">
               <button
                 class="server-header"
-                on:click={() => toggle(server.name)}
+                onclick={() => toggle(server.name)}
                 aria-expanded={expanded.has(server.name)}
               >
                 <div class="server-icon failed">

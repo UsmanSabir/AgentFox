@@ -3,25 +3,25 @@
   import { Heart, Plus, Trash2, Pause, Play, RefreshCw, Pencil, X, Check } from 'lucide-svelte';
   import { api, type HeartbeatInfo, type HeartbeatRequest } from '#lib/api.ts';
 
-  let beats: HeartbeatInfo[] = [];
-  let loading = true;
-  let error = '';
+  let beats: HeartbeatInfo[] = $state([]);
+  let loading = $state(true);
+  let error = $state('');
 
   // Add form
-  let showAddForm = false;
-  let addName = '';
-  let addTask = '';
-  let addInterval = 60;
-  let addMaxMissed = 3;
-  let addError = '';
-  let adding = false;
+  let showAddForm = $state(false);
+  let addName = $state('');
+  let addTask = $state('');
+  let addInterval = $state(60);
+  let addMaxMissed = $state(3);
+  let addError = $state('');
+  let adding = $state(false);
 
   // Edit modal
-  let editTarget: HeartbeatInfo | null = null;
-  let editTask = '';
-  let editInterval = 60;
-  let editMaxMissed = 3;
-  let saving = false;
+  let editTarget: HeartbeatInfo | null = $state<HeartbeatInfo | null>(null);
+  let editTask = $state('');
+  let editInterval = $state(60);
+  let editMaxMissed = $state(3);
+  let saving = $state(false);
 
   async function load() {
     loading = true; error = '';
@@ -91,11 +91,11 @@
       <h1>Heartbeats</h1>
     </div>
     <div class="page-actions">
-      <button class="btn" on:click={load} title="Refresh">
+      <button class="btn" onclick={load} title="Refresh">
         <RefreshCw size={14} />
         Refresh
       </button>
-      <button class="btn btn-primary" on:click={() => { showAddForm = !showAddForm; addError = ''; }}>
+      <button class="btn btn-primary" onclick={() => { showAddForm = !showAddForm; addError = ''; }}>
         <Plus size={14} />
         Add Heartbeat
       </button>
@@ -130,8 +130,8 @@
       </div>
       {#if addError}<p class="field-error">{addError}</p>{/if}
       <div class="form-actions">
-        <button class="btn" on:click={() => { showAddForm = false; addError = ''; }}>Cancel</button>
-        <button class="btn btn-primary" on:click={addHeartbeat} disabled={adding}>
+        <button class="btn" onclick={() => { showAddForm = false; addError = ''; }}>Cancel</button>
+        <button class="btn btn-primary" onclick={addHeartbeat} disabled={adding}>
           {adding ? 'Adding…' : 'Add Heartbeat'}
         </button>
       </div>
@@ -179,13 +179,13 @@
                 </span>
               </td>
               <td class="actions-cell">
-                <button class="icon-btn" title={beat.isPaused ? 'Resume' : 'Pause'} on:click={() => toggle(beat)}>
+                <button class="icon-btn" title={beat.isPaused ? 'Resume' : 'Pause'} onclick={() => toggle(beat)}>
                   {#if beat.isPaused}<Play size={14} />{:else}<Pause size={14} />{/if}
                 </button>
-                <button class="icon-btn" title="Edit" on:click={() => openEdit(beat)}>
+                <button class="icon-btn" title="Edit" onclick={() => openEdit(beat)}>
                   <Pencil size={14} />
                 </button>
-                <button class="icon-btn danger" title="Remove" on:click={() => remove(beat.name)}>
+                <button class="icon-btn danger" title="Remove" onclick={() => remove(beat.name)}>
                   <Trash2 size={14} />
                 </button>
               </td>
@@ -199,11 +199,11 @@
 
 <!-- Edit modal -->
 {#if editTarget}
-  <div class="modal-backdrop" on:click|self={() => (editTarget = null)}>
+  <div class="modal-backdrop" onclick={(event) => { if (event.target === event.currentTarget) editTarget = null; }}>
     <div class="modal card">
       <div class="modal-header">
         <h3>Edit — {editTarget.name}</h3>
-        <button class="icon-btn" on:click={() => (editTarget = null)}><X size={16} /></button>
+        <button class="icon-btn" onclick={() => (editTarget = null)}><X size={16} /></button>
       </div>
       <div class="form-grid">
         <label class="full">
@@ -220,8 +220,8 @@
         </label>
       </div>
       <div class="form-actions">
-        <button class="btn" on:click={() => (editTarget = null)}>Cancel</button>
-        <button class="btn btn-primary" on:click={saveEdit} disabled={saving}>
+        <button class="btn" onclick={() => (editTarget = null)}>Cancel</button>
+        <button class="btn btn-primary" onclick={saveEdit} disabled={saving}>
           {#if saving}<RefreshCw size={13} class="spin" />{:else}<Check size={13} />{/if}
           {saving ? 'Saving…' : 'Save'}
         </button>

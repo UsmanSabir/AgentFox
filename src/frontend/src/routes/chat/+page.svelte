@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy, tick } from 'svelte';
+  import { onMount, onDestroy, tick, untrack } from 'svelte';
 import { streamChat, streamConversationEvents, api, type SessionInfo,
   type SpecialistAgentInfo, type TodoSnapshot, type ConversationStreamEvent,
   type ToolActivity, type ToolActivityDetails, type ChatAttachment,
@@ -19,21 +19,20 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
     Download, Upload, Trash2, Pencil, Brain, GitFork, ChevronDown, Paperclip, FileText
   } from 'lucide-svelte';
 
-  let inputEl: HTMLTextAreaElement;
-  let scrollEl: HTMLDivElement;
-  let message = '';
-  let isStreaming = false;
-  let pendingRuns = 0;
-  let steeringRunId: string | null = null;
-  let copiedId: string | null = null;
-  let forkingMessageId: string | null = null;
-  let pollTimer: ReturnType<typeof setInterval> | null = null;
-  let sessions: SessionInfo[] = [];
-  let runtimeModel: RuntimeModel | null = null;
-  let modelInput = '';
-  let modelSaving = false;
-  let modelError = '';
-  let modelNotice = '';
+  let inputEl: HTMLTextAreaElement = $state()!;
+  let scrollEl: HTMLDivElement = $state()!;
+  let message = $state('');
+  let pendingRuns = $state(0);
+  let steeringRunId: string | null = $state<string | null>(null);
+  let copiedId: string | null = $state<string | null>(null);
+  let forkingMessageId: string | null = $state<string | null>(null);
+  let pollTimer: ReturnType<typeof setInterval> | null = $state<ReturnType<typeof setInterval> | null>(null);
+  let sessions: SessionInfo[] = $state([]);
+  let runtimeModel: RuntimeModel | null = $state<RuntimeModel | null>(null);
+  let modelInput = $state('');
+  let modelSaving = $state(false);
+  let modelError = $state('');
+  let modelNotice = $state('');
 
   async function loadRuntimeModel() {
     try {
@@ -75,16 +74,16 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
   const liveRendered = new Map<string, number>();
   const LIVE_RENDER_TTL_MS = 5 * 60 * 1000;
 
-  let specialists: SpecialistAgentInfo[] = [];
-  let showSessions = false;
-  let loadingSession = false;
-  let importInput: HTMLInputElement;
-  let globalMemoryEnabled = true;
-  let todoSnapshot: TodoSnapshot | null = null;
-  let sessionActivities: ToolActivity[] = [];
-  let activityDetails: Record<string, ToolActivityDetails> = {};
-  let showActivity = false;
-  let loadingActivity = false;
+  let specialists: SpecialistAgentInfo[] = $state([]);
+  let showSessions = $state(false);
+  let loadingSession = $state(false);
+  let importInput: HTMLInputElement = $state()!;
+  let globalMemoryEnabled = $state(true);
+  let todoSnapshot: TodoSnapshot | null = $state<TodoSnapshot | null>(null);
+  let sessionActivities: ToolActivity[] = $state([]);
+  let activityDetails: Record<string, ToolActivityDetails> = $state({});
+  let showActivity = $state(false);
+  let loadingActivity = $state(false);
 
   // ── Attachments ─────────────────────────────────────────────────────────
   // A pending attachment holds both the base64 payload we will POST and the view
@@ -98,22 +97,12 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
   /** Images at or below this size get an inline thumbnail; larger ones show a chip. */
   const PREVIEW_MAX_BYTES = 2 * 1024 * 1024;
 
-  let attachCaps: AttachmentCapabilities | null = null;
-  let pendingAttachments: PendingAttachment[] = [];
-  let attachInput: HTMLInputElement;
-  let attachError = '';
-  let dragDepth = 0;   // nested dragenter/dragleave pairs; only 0 means truly outside
+  let attachCaps: AttachmentCapabilities | null = $state<AttachmentCapabilities | null>(null);
+  let pendingAttachments: PendingAttachment[] = $state([]);
+  let attachInput: HTMLInputElement = $state()!;
+  let attachError = $state('');
+  let dragDepth = $state(0);   // nested dragenter/dragleave pairs; only 0 means truly outside
 
-  // Only the main agent's endpoints carry attachments; the specialist chat route is
-  // text-only, so the paperclip disappears rather than silently dropping files.
-  $: attachEnabled  = attachCaps?.enabled === true && selectedAgentId === 'main';
-  $: if (!attachEnabled && pendingAttachments.length > 0) clearAttachments();
-  $: isDraggingFile = dragDepth > 0;
-  $: attachAccept   = attachCaps?.acceptedMediaTypes.join(',') ?? '';
-  $: attachTitle    = attachCaps
-    ? `Attach files — ${describeAccepted(attachCaps)} (max ${formatBytes(attachCaps.maxFileSizeBytes)} each, ` +
-      `${attachCaps.maxFilesPerMessage} per message)`
-    : 'Attach files';
 
   function describeAccepted(caps: AttachmentCapabilities): string {
     const kinds: string[] = [];
@@ -247,35 +236,8 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
     await addFiles(event.dataTransfer.files);
   }
 
-  $: messages     = $chatMessages;
-  $: simpleMode   = $uiMode === 'simple';
-  $: visibleMessages = simpleMode
-    ? messages.filter(msg =>
-        !msg.isBackgroundResult &&
-        !msg.pendingApproval &&
-        (msg.role === 'user' || msg.streaming || !!msg.content || !!msg.error))
-    : messages;
-  $: convId       = $activeConversationId;
-  $: agentIsReady = $agentReady;
-  $: selectedAgentId = $activeAgentId;
-  $: selectedAgentName = selectedAgentId === 'main'
-    ? 'AgentFox'
-    : specialists.find(agent => agent.id === selectedAgentId)?.name ?? selectedAgentId;
 
-  $: isStreaming = pendingRuns > 0;
 
-  // Start / restart polling whenever the conversation ID changes.
-  // Polling is intentionally keyed to the conversation, not to isStreaming,
-  // so background results arrive even while the user is mid-conversation.
-  $: {
-    const cid = $activeConversationId;
-    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-    closeEventStream();
-    if (cid) {
-      pollTimer = setInterval(() => pollPending(cid), 3000);
-      openEventStream(cid);
-    }
-  }
 
   onMount(async () => {
     inputEl?.focus();
@@ -473,8 +435,8 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
     }
   }
 
-  let respondingApprovalId: string | null = null;
-  let approvalFeedback: Record<string, string> = {};
+  let respondingApprovalId: string | null = $state<string | null>(null);
+  let approvalFeedback: Record<string, string> = $state({});
 
   async function respondToApproval(approvalId: string, approved: boolean) {
     respondingApprovalId = approvalId;
@@ -867,16 +829,60 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
       preparing_response: 'Preparing response…'
     } as Record<string, string>)[status ?? ''] ?? '';
   }
+  let selectedAgentId = $derived($activeAgentId);
+  // Only the main agent's endpoints carry attachments; the specialist chat route is
+  // text-only, so the paperclip disappears rather than silently dropping files.
+  let attachEnabled  = $derived(attachCaps?.enabled === true && selectedAgentId === 'main');
+  $effect.pre(() => {
+    // Reads only what the old `$:` named; the call is untracked so its own bookkeeping cannot re-trigger it.
+    const clear = !attachEnabled && pendingAttachments.length > 0;
+    untrack(() => { if (clear) clearAttachments(); });
+  });
+  let isDraggingFile = $derived(dragDepth > 0);
+  let attachAccept   = $derived(attachCaps?.acceptedMediaTypes.join(',') ?? '');
+  let attachTitle    = $derived(attachCaps
+    ? `Attach files — ${describeAccepted(attachCaps)} (max ${formatBytes(attachCaps.maxFileSizeBytes)} each, ` +
+      `${attachCaps.maxFilesPerMessage} per message)`
+    : 'Attach files');
+  let messages     = $derived($chatMessages);
+  let simpleMode   = $derived($uiMode === 'simple');
+  let visibleMessages = $derived(simpleMode
+    ? messages.filter(msg =>
+        !msg.isBackgroundResult &&
+        !msg.pendingApproval &&
+        (msg.role === 'user' || msg.streaming || !!msg.content || !!msg.error))
+    : messages);
+  let convId       = $derived($activeConversationId);
+  let agentIsReady = $derived($agentReady);
+  let selectedAgentName = $derived(selectedAgentId === 'main'
+    ? 'AgentFox'
+    : specialists.find(agent => agent.id === selectedAgentId)?.name ?? selectedAgentId);
+  let isStreaming = $derived(pendingRuns > 0);
+  // Start / restart polling whenever the conversation ID changes.
+  // Polling is intentionally keyed to the conversation, not to isStreaming,
+  // so background results arrive even while the user is mid-conversation.
+  $effect.pre(() => {
+    // Restarts polling and the event stream when the conversation changes, and only then.
+    const cid = $activeConversationId;
+    untrack(() => {
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+      closeEventStream();
+      if (cid) {
+        pollTimer = setInterval(() => pollPending(cid), 3000);
+        openEventStream(cid);
+      }
+    });
+  });
 </script>
 
 <div class="chat-shell" class:simple={simpleMode}>
   <div class="chat-toolbar">
-    <button class="toolbar-btn" on:click={() => showSessions = !showSessions} title="Browse sessions">
+    <button class="toolbar-btn" onclick={() => showSessions = !showSessions} title="Browse sessions">
       <History size={14} /> Sessions
     </button>
     <label class="agent-picker">
       <span>Agent</span>
-      <select value={selectedAgentId} on:change={changeAgent} disabled={isStreaming}>
+      <select value={selectedAgentId} onchange={changeAgent} disabled={isStreaming}>
         <option value="main">AgentFox</option>
         {#each specialists as specialist}
           <option value={specialist.id}>{specialist.name}</option>
@@ -884,7 +890,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
       </select>
     </label>
     {#if selectedAgentId === 'main' && runtimeModel}
-      <form class="model-picker" on:submit|preventDefault={applyModel} title="Model for future agent calls until restart">
+      <form class="model-picker" onsubmit={(event) => { event.preventDefault(); void applyModel(); }} title="Model for future agent calls until restart">
         <label for="runtime-model">Model</label>
         {#if runtimeModel.canSwitch}
           {#if runtimeModel.allowedModels}
@@ -912,7 +918,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
       <span class="conv-label">Session:</span>
       <code class="conv-id">{convId}</code>
     {/if}
-    <button class="toolbar-btn new-chat-btn" on:click={clearChat} disabled={isStreaming} title="Start a new chat">
+    <button class="toolbar-btn new-chat-btn" onclick={clearChat} disabled={isStreaming} title="Start a new chat">
       <Plus size={14} /> New chat
     </button>
   </div>
@@ -923,17 +929,17 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
         <div class="session-panel-head">
           <div><strong>Sessions</strong><span>{sessions.length}</span></div>
           <div class="session-head-actions">
-            <button class="toolbar-btn" on:click={triggerImport} title="Import a session from a file">
+            <button class="toolbar-btn" onclick={triggerImport} title="Import a session from a file">
               <Upload size={13} /> Import
             </button>
-            <button class="icon-btn" on:click={() => showSessions = false} title="Close"><X size={15} /></button>
+            <button class="icon-btn" onclick={() => showSessions = false} title="Close"><X size={15} /></button>
           </div>
         </div>
         <input
           type="file"
           accept="application/json,.json"
           bind:this={importInput}
-          on:change={handleImportFile}
+          onchange={handleImportFile}
           hidden
         />
         <div class="session-list">
@@ -944,7 +950,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
               <div class="session-row" class:active={session.id === convId}>
                 <button
                   class="session-item"
-                  on:click={() => openSession(session)}
+                  onclick={() => openSession(session)}
                   disabled={loadingSession || isStreaming}
                 >
                   <span class="session-item-title">{session.title ?? session.id}</span>
@@ -955,7 +961,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
                   <button
                     class="icon-btn"
                     class:memory-on={session.memoryEnabled}
-                    on:click={(e) => toggleSessionMemory(session, e)}
+                    onclick={(e) => toggleSessionMemory(session, e)}
                     disabled={!globalMemoryEnabled || isStreaming || loadingSession}
                     aria-pressed={session.memoryEnabled}
                     title={!globalMemoryEnabled
@@ -968,7 +974,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
                   </button>
                   <button
                     class="icon-btn"
-                    on:click={(e) => renameSession(session, e)}
+                    onclick={(e) => renameSession(session, e)}
                     disabled={isStreaming || loadingSession}
                     title="Rename session"
                   >
@@ -976,14 +982,14 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
                   </button>
                   <button
                     class="icon-btn"
-                    on:click={(e) => exportSession(session, e)}
+                    onclick={(e) => exportSession(session, e)}
                     title="Export session to file"
                   >
                     <Download size={14} />
                   </button>
                   <button
                     class="icon-btn danger"
-                    on:click={(e) => deleteSession(session, e)}
+                    onclick={(e) => deleteSession(session, e)}
                     disabled={isStreaming || loadingSession}
                     title="Delete session"
                   >
@@ -998,7 +1004,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
     {/if}
 
     <!-- Messages -->
-    <div class="messages-wrap" bind:this={scrollEl} on:scroll={onScroll}>
+    <div class="messages-wrap" bind:this={scrollEl} onscroll={onScroll}>
     {#if visibleMessages.length === 0}
       <div class="intro fade-in">
         <div class="intro-icon">
@@ -1017,7 +1023,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
           ] as s}
             <button
               class="suggestion"
-              on:click={() => { message = s; send(); }}
+              onclick={() => { message = s; send(); }}
               disabled={isStreaming}
             >{s}</button>
           {/each}
@@ -1054,7 +1060,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
 	                  <input
 	                    class="approval-feedback"
 	                    value={approvalFeedback[msg.pendingApproval.approvalId] ?? ''}
-	                    on:input={(event) => {
+	                    oninput={(event) => {
 	                      approvalFeedback = {
 	                        ...approvalFeedback,
 	                        [msg.pendingApproval!.approvalId]: (event.currentTarget as HTMLInputElement).value
@@ -1066,12 +1072,12 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
                     <button
                       class="approval-btn approve"
                       disabled={respondingApprovalId === msg.pendingApproval.approvalId}
-                      on:click={() => msg.pendingApproval && respondToApproval(msg.pendingApproval.approvalId, true)}
+                      onclick={() => msg.pendingApproval && respondToApproval(msg.pendingApproval.approvalId, true)}
                     >✅ Approve</button>
                     <button
                       class="approval-btn reject"
                       disabled={respondingApprovalId === msg.pendingApproval.approvalId}
-                      on:click={() => msg.pendingApproval && respondToApproval(msg.pendingApproval.approvalId, false)}
+                      onclick={() => msg.pendingApproval && respondToApproval(msg.pendingApproval.approvalId, false)}
                     >❌ Reject</button>
                   </div>
                 </div>
@@ -1130,7 +1136,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
 	                <div class="turn-actions">
 	                  <button
 	                    class="message-action-btn steer"
-	                    on:click={() => steer(msg)}
+	                    onclick={() => steer(msg)}
 	                    disabled={steeringRunId !== null}
 	                    title="Stop the active turn and run this message next"
 	                  >
@@ -1177,7 +1183,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
                   {#if msg.role === 'assistant' && !msg.error && msg.assistantIndex !== undefined && convId}
                     <button
                       class="message-action-btn"
-                      on:click={() => forkFromMessage(msg)}
+                      onclick={() => forkFromMessage(msg)}
                       disabled={isStreaming || loadingSession || forkingMessageId !== null}
                       title="Start a new session from this response"
                     >
@@ -1188,7 +1194,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
                   {#if msg.role === 'assistant' && msg.error && msg.retryContent}
                     <button
                       class="message-action-btn retry"
-                      on:click={() => retryMessage(msg)}
+                      onclick={() => retryMessage(msg)}
                       disabled={isStreaming || !agentIsReady}
                       title="Retry this message"
                     >
@@ -1198,7 +1204,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
                   {:else}
                     <button
                       class="message-action-btn"
-                      on:click={() => copyContent(msg.id, msg.content)}
+                      onclick={() => copyContent(msg.id, msg.content)}
                       title={msg.role === 'user' ? 'Copy message' : 'Copy response'}
                     >
                       {#if copiedId === msg.id}
@@ -1242,7 +1248,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
 	    {/if}
 
 	    {#if !simpleMode && sessionActivities.length > 0}
-	      <details class="progress-panel activity-panel" bind:open={showActivity} on:toggle={() => {
+	      <details class="progress-panel activity-panel" bind:open={showActivity} ontoggle={() => {
 	        if (showActivity && !loadingActivity) {
 	          loadingActivity = true;
 	          Promise.all(sessionActivities.map(loadActivityDetails)).finally(() => loadingActivity = false);
@@ -1279,7 +1285,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
 	    {#if attachError}
 	      <div class="attach-error" role="alert">
 	        <span>{attachError}</span>
-	        <button class="attach-error-dismiss" on:click={() => attachError = ''} title="Dismiss">
+	        <button class="attach-error-dismiss" onclick={() => attachError = ''} title="Dismiss">
 	          <X size={12} />
 	        </button>
 	      </div>
@@ -1298,7 +1304,7 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
 	            <span class="attach-size">{formatBytes(item.view.size)}</span>
 	            <button
 	              class="attach-remove"
-	              on:click={() => removeAttachment(item.id)}
+	              onclick={() => removeAttachment(item.id)}
 	              disabled={isStreaming}
 	              title="Remove {item.view.name}"
 	            >
@@ -1313,10 +1319,10 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
 	      class="input-wrap"
 	      class:drop-active={isDraggingFile}
 	      role="presentation"
-	      on:dragenter={handleDragEnter}
-	      on:dragleave={handleDragLeave}
-	      on:dragover|preventDefault
-	      on:drop|preventDefault={handleDrop}
+	      ondragenter={handleDragEnter}
+	      ondragleave={handleDragLeave}
+	      ondragover={(event) => event.preventDefault()}
+	      ondrop={(event) => { event.preventDefault(); void handleDrop(event); }}
 	    >
       {#if isDraggingFile}
         <div class="drop-overlay">Drop files to attach</div>
@@ -1326,8 +1332,8 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
         bind:this={inputEl}
         bind:value={message}
         use:autoResize={message}
-        on:keydown={handleKeyDown}
-        on:paste={handlePaste}
+        onkeydown={handleKeyDown}
+        onpaste={handlePaste}
         placeholder={agentIsReady ? 'Message AgentFox… (Enter to send, Shift+Enter for newline)' : 'Waiting for agent…'}
         disabled={!agentIsReady}
         rows="1"
@@ -1341,12 +1347,12 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
             multiple
             accept={attachAccept}
             bind:this={attachInput}
-            on:change={handleAttachInput}
+            onchange={handleAttachInput}
             class="hidden-input"
           />
           <button
             class="icon-btn"
-            on:click={() => attachInput?.click()}
+            onclick={() => attachInput?.click()}
             title={attachTitle}
             disabled={isStreaming || !agentIsReady}
           >
@@ -1355,20 +1361,20 @@ import { streamChat, streamConversationEvents, api, type SessionInfo,
         {/if}
 
         {#if messages.length > 0}
-          <button class="icon-btn" on:click={clearChat} title="Clear chat" disabled={isStreaming}>
+          <button class="icon-btn" onclick={clearChat} title="Clear chat" disabled={isStreaming}>
             <RotateCcw size={15} />
           </button>
         {/if}
 
         {#if isStreaming}
-          <button class="stop-btn" on:click={stop} title="Stop generation">
+          <button class="stop-btn" onclick={stop} title="Stop generation">
             <StopCircle size={15} />
             <span>Stop</span>
           </button>
         {:else}
           <button
             class="send-btn"
-            on:click={send}
+            onclick={send}
             disabled={(!message.trim() && pendingAttachments.length === 0) || !agentIsReady}
             title="Send message"
           >

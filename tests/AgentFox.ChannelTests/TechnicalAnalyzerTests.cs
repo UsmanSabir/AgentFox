@@ -234,4 +234,33 @@ public sealed class TechnicalAnalyzerTests
         Assert.IsTrue(snapshot.Supports.Any(s => s.Origin.Contains("52-week", StringComparison.Ordinal)),
             "The 52-week low should appear among the support levels.");
     }
+
+    [TestMethod]
+    public void Analyze_RsiHistory_WarmsUpRsiOnly()
+    {
+        // A drifting zig-zag, long enough that the 60-bar window's RSI differs from the full series'.
+        var full = Enumerable.Range(0, 300)
+            .Select(i => Bar(i, 100m + i * 0.05m + (i % 7 - 3) * 1.3m + (i % 13 == 0 ? -4m : 0m))).ToList();
+        var window = full.TakeLast(60).ToList();
+
+        var plain = TechnicalAnalyzer.Analyze("TEST", window, Options);
+        var warmed = TechnicalAnalyzer.Analyze("TEST", window, Options, rsiHistory: full);
+
+        Assert.AreEqual(IndicatorSeries.Rsi(IndicatorSeries.Closes(full), 14)[^1], warmed.Rsi14,
+            "RSI is the full series' last value, as the chart's line and a rule order compute it");
+        Assert.AreEqual(IndicatorSeries.Rsi(IndicatorSeries.Closes(window), 14)[^1], plain.Rsi14);
+        Assert.AreEqual(plain.Sma20, warmed.Sma20);
+        Assert.AreEqual(plain.Atr14, warmed.Atr14);
+        CollectionAssert.AreEqual(plain.Supports.Select(s => s.Price).ToList(), warmed.Supports.Select(s => s.Price).ToList(),
+            "no level moves");
+
+        // A no-trade day in the history takes no step, exactly as the chart's line does.
+        var gapped = full.Select((b, i) => i == 270 ? b with { Close = b.Close + 6m, Volume = 0 } : b).ToList();
+        Assert.AreEqual(IndicatorSeries.RsiTraded(gapped, 14)[^1],
+            TechnicalAnalyzer.Analyze("TEST", gapped.TakeLast(60).ToList(), Options, rsiHistory: gapped).Rsi14);
+
+        // A history that does not end on the analysed bar is another series: ignored.
+        var stale = full.Take(250).ToList();
+        Assert.AreEqual(plain.Rsi14, TechnicalAnalyzer.Analyze("TEST", window, Options, rsiHistory: stale).Rsi14);
+    }
 }

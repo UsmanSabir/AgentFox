@@ -1,18 +1,24 @@
 <script lang="ts">
-  /**
+  
+  interface Props {
+    /**
    * The "?" beside a control or section (CLAUDE.md §0.3 in the premium repo: help lives behind a "?",
    * never as inline text between controls). Opens on hover (after 400 ms), keyboard focus and click/tap.
    */
-  export let label: string;
-  export let align: 'start' | 'end' = 'start';
-  let open = false;
+    label: string;
+    align?: 'start' | 'end';
+    children?: import('svelte').Snippet;
+  }
+
+  let { label, align = 'start', children }: Props = $props();
+  let open = $state(false);
   const id = `help-${Math.random().toString(36).slice(2, 9)}`;
 </script>
 
 <span class="help" class:end={align === 'end'}>
   <button type="button" aria-label={label} aria-controls={id} aria-expanded={open}
-          on:click={() => open = !open} on:blur={() => open = false}>?</button>
-  <span {id} role="tooltip" class="popup" class:open><slot/></span>
+          onclick={() => open = !open} onblur={() => open = false}>?</button>
+  <span {id} role="tooltip" class="popup" class:open>{@render children?.()}</span>
 </span>
 
 <style>

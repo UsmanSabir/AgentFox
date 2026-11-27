@@ -11,6 +11,11 @@
   import { MessageSquare, Zap, Sun, Moon } from 'lucide-svelte';
   import { afterNavigate, goto } from '$app/navigation';
   import { parseSidebarCollapsed, SIDEBAR_COLLAPSED_KEY } from '#lib/sidebarPreference.ts';
+  interface Props {
+    children?: import('svelte').Snippet;
+  }
+
+  let { children }: Props = $props();
 
   function startNewChat(event: MouseEvent) {
     event.preventDefault();
@@ -71,9 +76,9 @@
     return () => clearInterval(id);
   });
 
-  $: collapsed = $sidebarCollapsed;
-  $: status    = $agentStatus;
-  $: simpleMode = $uiMode === 'simple';
+  let collapsed = $derived($sidebarCollapsed);
+  let status    = $derived($agentStatus);
+  let simpleMode = $derived($uiMode === 'simple');
 
   const pageTitles: Record<string, string> = {
     '/':        'Dashboard',
@@ -86,9 +91,9 @@
     '/settings':'Settings',
   };
 
-  let pathname = page.url.pathname;
+  let pathname = $state(page.url.pathname);
   afterNavigate(() => { pathname = page.url.pathname; });
-  $: title = (() => {
+  let title = $derived((() => {
     const p = pathname;
     // Plugin-supplied pages (/ext/{slug}) are not in the static map — title them from the slug so a
     // plugin page doesn't have to register anything host-side just to name its own header.
@@ -103,7 +108,7 @@
       if (p === '/' ? p === k : p.startsWith(k) && k !== '/') return v;
     }
     return pageTitles[p] ?? 'AgentFox';
-  })();
+  })());
 </script>
 
 <div
@@ -128,7 +133,7 @@
       <div class="header-right">
         <button
           class="theme-toggle"
-          on:click={toggleTheme}
+          onclick={toggleTheme}
           aria-label={$uiTheme === 'light' ? 'Use dark theme' : 'Use light theme'}
           title={$uiTheme === 'light' ? 'Use dark theme' : 'Use light theme'}
         >
@@ -136,7 +141,7 @@
         </button>
 
         <!-- Quick chat shortcut -->
-        <a href="/chat" class="chat-shortcut" title="Start a new chat" on:click={startNewChat}>
+        <a href="/chat" class="chat-shortcut" title="Start a new chat" onclick={startNewChat}>
           <MessageSquare size={16} />
           <span>New chat</span>
         </a>
@@ -145,12 +150,12 @@
           <button
             class:active={simpleMode}
             aria-pressed={simpleMode}
-            on:click={() => selectMode('simple')}
+            onclick={() => selectMode('simple')}
           >Simple</button>
           <button
             class:active={!simpleMode}
             aria-pressed={!simpleMode}
-            on:click={() => selectMode('advanced')}
+            onclick={() => selectMode('advanced')}
           >Advanced</button>
         </div>
 
@@ -170,7 +175,7 @@
     </header>
 
     <!-- Page content -->
-    <main class="content"><slot></slot></main>
+    <main class="content">{@render children?.()}</main>
   </div>
 </div>
 
