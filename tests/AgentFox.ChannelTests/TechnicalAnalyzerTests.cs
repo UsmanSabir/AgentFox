@@ -254,6 +254,11 @@ public sealed class TechnicalAnalyzerTests
         CollectionAssert.AreEqual(plain.Supports.Select(s => s.Price).ToList(), warmed.Supports.Select(s => s.Price).ToList(),
             "no level moves");
 
+        // A no-trade day in the history takes no step, exactly as the chart's line does.
+        var gapped = full.Select((b, i) => i == 270 ? b with { Close = b.Close + 6m, Volume = 0 } : b).ToList();
+        Assert.AreEqual(IndicatorSeries.RsiTraded(gapped, 14)[^1],
+            TechnicalAnalyzer.Analyze("TEST", gapped.TakeLast(60).ToList(), Options, rsiHistory: gapped).Rsi14);
+
         // A history that does not end on the analysed bar is another series: ignored.
         var stale = full.Take(250).ToList();
         Assert.AreEqual(plain.Rsi14, TechnicalAnalyzer.Analyze("TEST", window, Options, rsiHistory: stale).Rsi14);

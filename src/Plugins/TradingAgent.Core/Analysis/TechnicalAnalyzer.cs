@@ -376,8 +376,9 @@ public static class TechnicalAnalyzer
         var sorted = history.OrderBy(c => c.SortKeyUtc).ToList();
         var last = bars[^1];
         // A history that does not end on the analysed bar (another interval, a stale read) is not this series: use the window.
+        // Traded bars only, as the chart and a rule order count sessions (IndicatorSeries.RsiTraded).
         return sorted[^1].SortKeyUtc == last.SortKeyUtc && sorted[^1].Close == last.Close
-            ? sorted.Select(c => c.Close).ToList()
+            ? IndicatorSeries.TradedCloses(sorted)
             : closes;
     }
 

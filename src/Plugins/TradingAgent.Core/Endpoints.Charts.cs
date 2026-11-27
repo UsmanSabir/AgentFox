@@ -114,7 +114,8 @@ public sealed partial class TradingCoreEndpoints
                 var sma50 = IndicatorSeries.Sma(closes, 50);
                 // RSI from the interval's whole series, sliced to the bars shown: from the window alone its line starts 14 bars in
                 // and stays a point or so off a value computed with history (a rule order's, TradingView's) for its first ~100 bars.
-                var rsi14 = IndicatorSeries.RsiWithHistory(IndicatorSeries.Closes(result.History ?? candles), candles.Count,
+                // Traded bars only: a no-volume day is not a session (IndicatorSeries.RsiTraded), as a rule order counts them.
+                var rsi14 = IndicatorSeries.RsiWithHistory(result.History ?? candles, candles.Count,
                     TechnicalOptions.From(options.Value.Scan).RsiPeriod);
 
                 // Weekly-confirmed levels are the structural ones. Matching by price (within the
