@@ -55,6 +55,24 @@ public sealed class PsxMarketCalendar : IMarketCalendar
         return RegularSessions(date.DayOfWeek).Count > 0;
     }
 
+    /// <summary>
+    /// The sessions on <paramref name="date"/>, by the precedence <see cref="IsTradingDay"/> uses, so the two always agree (a day
+    /// is a trading day exactly when it has a session). A malformed config line falls back to the regular weekly shape, as there.
+    /// </summary>
+    public IReadOnlyList<(TimeOnly Start, TimeOnly End)> SessionsOn(DateOnly date)
+    {
+        var opts = _options.Value;
+        try
+        {
+            return SessionsFor(date, ParseHolidays(opts.MarketHolidays), ParseOverrides(opts.MarketSessionOverrides));
+        }
+        catch (InvalidOperationException)
+        {
+            // GetStatus surfaces the config error; a read of the hours must not throw over it.
+            return RegularSessions(date.DayOfWeek);
+        }
+    }
+
     public MarketStatus GetStatus(DateTime? utcNow = null)
     {
         var utc = DateTime.SpecifyKind(utcNow ?? DateTime.UtcNow, DateTimeKind.Utc);
