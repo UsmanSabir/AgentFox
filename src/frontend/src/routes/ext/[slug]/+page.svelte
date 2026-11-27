@@ -4,7 +4,7 @@
   import { afterNavigate } from '$app/navigation';
   import { sidebarCollapsed, uiTheme, type UiTheme } from '#lib/stores.ts';
   import { get } from 'svelte/store';
-  import { pluginSidebarRequest } from '#lib/pluginLayout.ts';
+  import { pluginSidebarRequest, pluginTitleRequest, pluginPageTitle } from '#lib/pluginLayout.ts';
   import { api, getManagementApiKey, type PluginUiPageInfo } from '#lib/api.ts';
 
   // Generic host for a plugin-supplied UI. This file is the ONLY thing the host app knows about
@@ -19,6 +19,9 @@
   let error: string | null = $state<string | null>(null);
   let frame: HTMLIFrameElement | null = $state<HTMLIFrameElement | null>(null);
   let previousSidebar: boolean | null = null;
+  // A short live reading the mounted frame asked to lead the tab title with (agentfox:title). Memory only; cleared
+  // when the slug changes and when the frame loads a new document, which re-asks after the context handoff.
+  let titlePrefix: string | null = $state<string | null>(null);
   function restoreSidebar() {
     if (previousSidebar === null) return;
     sidebarCollapsed.set(previousSidebar);
@@ -32,7 +35,7 @@
   $effect.pre(() => {
     // Reads only what the old `$:` named; the call is untracked so its own bookkeeping cannot re-trigger it.
     void slug;
-    untrack(() => restoreSidebar());
+    untrack(() => { restoreSidebar(); titlePrefix = null; });
   });
 
   onMount(() => {
@@ -42,6 +45,8 @@
         previousSidebar ??= get(sidebarCollapsed);
         sidebarCollapsed.set(true);
       } else if (request === 'default') restoreSidebar();
+      const title = pluginTitleRequest(event.origin, window.location.origin, event.source, frame?.contentWindow, event.data);
+      if (title !== undefined) titlePrefix = title;
     };
     window.addEventListener('message', receive);
     return () => { window.removeEventListener('message', receive); restoreSidebar(); };
@@ -76,7 +81,7 @@
   });
 </script>
 
-<svelte:head><title>{current?.title ?? 'Plugin'} · AgentFox</title></svelte:head>
+<svelte:head><title>{pluginPageTitle(current?.title, titlePrefix)}</title></svelte:head>
 
 {#if error}
   <div class="ext-msg error">Could not load plugin pages: {error}</div>
@@ -94,7 +99,7 @@
     title={current.title}
     allow="fullscreen"
     allowfullscreen
-    onload={() => handoff()}
+    onload={() => { titlePrefix = null; handoff(); }}
   ></iframe>
 {/if}
 
