@@ -32,7 +32,8 @@ public static class TechnicalAnalyzer
         IReadOnlyList<PsxCandle> candles,
         TechnicalOptions options,
         decimal? high52Week = null,
-        decimal? low52Week = null)
+        decimal? low52Week = null,
+        IReadOnlyList<PsxCandle>? rsiHistory = null)
     {
         symbol = symbol.Trim().ToUpperInvariant();
 
@@ -65,7 +66,7 @@ public static class TechnicalAnalyzer
         var rangeLow  = window.Min(b => b.Low);
 
         var atr = Atr(bars, options.AtrPeriod);
-        var rsi = Rsi(closes, options.RsiPeriod);
+        var rsi = Rsi(RsiCloses(bars, closes, rsiHistory), options.RsiPeriod);
         var sma20 = Sma(closes, 20);
         var sma50 = Sma(closes, 50);
         var avgVolume = AverageVolume(bars, 30);
@@ -361,6 +362,24 @@ public static class TechnicalAnalyzer
 
     private static decimal? Sma(IReadOnlyList<decimal> closes, int period) =>
         closes.Count < period ? null : Round(closes.TakeLast(period).Average());
+
+    /// <summary>
+    /// The closes RSI is computed from: <paramref name="history"/>'s when it is the same series reaching further back and ending on
+    /// the same bar, else the analysed window's own. Wilder's smoothing remembers where it started (~3% after 60 bars), so a value
+    /// from the window alone sits a point or so off one computed with history (the chart's, a rule order's, TradingView's). RSI
+    /// ONLY: every other measure keeps the analysed window, so warming RSI up moves no level, average or range.
+    /// </summary>
+    private static IReadOnlyList<decimal> RsiCloses(
+        IReadOnlyList<PsxCandle> bars, IReadOnlyList<decimal> closes, IReadOnlyList<PsxCandle>? history)
+    {
+        if (history is null || history.Count <= bars.Count) return closes;
+        var sorted = history.OrderBy(c => c.SortKeyUtc).ToList();
+        var last = bars[^1];
+        // A history that does not end on the analysed bar (another interval, a stale read) is not this series: use the window.
+        return sorted[^1].SortKeyUtc == last.SortKeyUtc && sorted[^1].Close == last.Close
+            ? sorted.Select(c => c.Close).ToList()
+            : closes;
+    }
 
     /// <summary>Wilder's RSI. Needs <paramref name="period"/> + 1 closes.</summary>
     private static decimal? Rsi(IReadOnlyList<decimal> closes, int period)
