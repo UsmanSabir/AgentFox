@@ -62,6 +62,25 @@ public sealed class IndicatorSeriesTests
     }
 
     [TestMethod]
+    public void RsiWithHistory_IsTheFullSeriesSlicedToTheBarsShown()
+    {
+        var closes = IndicatorSeries.Closes(Series(300)).ToArray();
+        var full = IndicatorSeries.Rsi(closes, 14);
+        var shown = IndicatorSeries.RsiWithHistory(closes, 60, 14);
+
+        Assert.AreEqual(60, shown.Length);
+        CollectionAssert.AreEqual(full[^60..], shown);
+        Assert.IsTrue(shown.All(v => v is not null), "warmed up by the history, the line starts at the first bar shown");
+
+        // A 200-bar history agrees with a 300-bar one to the cent; the 60-bar window alone need not.
+        var from200 = IndicatorSeries.RsiWithHistory(closes[^200..], 60, 14);
+        CollectionAssert.AreEqual(shown, from200);
+
+        // Asking for more bars than exist returns what exists, aligned.
+        Assert.AreEqual(10, IndicatorSeries.RsiWithHistory(closes[..10], 60, 14).Length);
+    }
+
+    [TestMethod]
     public void EmptyOrShortInput_ProducesNoValuesRatherThanThrowing()
     {
         Assert.AreEqual(0, IndicatorSeries.Sma([], 20).Length);

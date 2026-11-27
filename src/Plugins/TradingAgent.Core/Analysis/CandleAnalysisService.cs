@@ -135,10 +135,15 @@ public sealed class CandleAnalysisService
 
         if (intervalMinutes >= PsxCandle.DailyIntervalMinutes)
         {
+            IReadOnlyList<PsxCandle> fullSeries = intervalMinutes switch
+            {
+                >= CandleInterval.Monthly => CandleResampler.ToMonthly(fullDaily),
+                >= CandleInterval.Weekly => weeklyCandles,
+                _ => fullDaily
+            };
             var requestedCandles = intervalMinutes switch
             {
-                >= CandleInterval.Monthly => CandleResampler.ToMonthly(fullDaily).TakeLast(lookback).ToList(),
-                >= CandleInterval.Weekly => weeklyCandles.TakeLast(lookback).ToList(),
+                >= CandleInterval.Monthly or >= CandleInterval.Weekly => fullSeries.TakeLast(lookback).ToList(),
                 _ => dailyCandles
             };
             var snapshot = intervalMinutes == PsxCandle.DailyIntervalMinutes
@@ -151,6 +156,7 @@ public sealed class CandleAnalysisService
                 Symbol            = symbol,
                 IntervalMinutes   = intervalMinutes,
                 Candles           = requestedCandles,
+                History           = fullSeries,
                 Snapshot          = snapshot,
                 Daily             = daily,
                 Multi             = multi,
@@ -339,6 +345,14 @@ public sealed record CandleAnalysis
 
     /// <summary>The bars the snapshot was computed from, oldest first.</summary>
     public required IReadOnlyList<PsxCandle> Candles { get; init; }
+
+    /// <summary>
+    /// The same interval's full series, ending with <see cref="Candles"/> (which is its tail), for an indicator that needs warming
+    /// up: Wilder's RSI still carries ~3% of where it started after 60 bars, so a chart computing it from the visible window alone
+    /// shows a value a point or so off one computed with history (a rule order's, TradingView's). Null means
+    /// <see cref="Candles"/> is all there is (intraday).
+    /// </summary>
+    public IReadOnlyList<PsxCandle>? History { get; init; }
 
     /// <summary>Technical read of <see cref="Candles"/> — the requested interval.</summary>
     public required TechnicalSnapshot Snapshot { get; init; }

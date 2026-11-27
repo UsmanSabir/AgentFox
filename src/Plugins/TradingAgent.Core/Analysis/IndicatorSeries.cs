@@ -15,6 +15,13 @@ namespace TradingAgent.Analysis;
 /// </para>
 ///
 /// <para>
+/// The chart's RSI is the one exception, and on purpose: <c>/candles</c> computes it with <see cref="RsiWithHistory"/> over the
+/// interval's whole archived series, because Wilder's smoothing remembers where it started and the analysis window (60 sessions)
+/// leaves it about a point off a value computed with history. The response's <c>snapshot.rsi14</c> is the line's last value, so
+/// the chart shows one number.
+/// </para>
+///
+/// <para>
 /// Entries are null until enough bars exist to compute the value, so index <c>i</c> of a returned
 /// series always belongs to bar <c>i</c> and a caller can zip them without offset arithmetic.
 /// </para>
@@ -69,6 +76,17 @@ public static class IndicatorSeries
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Wilder's RSI over <paramref name="historyCloses"/>, returning only its last <paramref name="shown"/> values: the bars a chart
+    /// shows, warmed up by everything before them. With no earlier history this is <see cref="Rsi"/> of the shown closes.
+    /// </summary>
+    public static decimal?[] RsiWithHistory(IReadOnlyList<decimal> historyCloses, int shown, int period)
+    {
+        var full = Rsi(historyCloses, period);
+        var count = Math.Clamp(shown, 0, full.Length);
+        return full[(full.Length - count)..];
     }
 
     /// <summary>Closes of <paramref name="bars"/>, in the order given.</summary>
