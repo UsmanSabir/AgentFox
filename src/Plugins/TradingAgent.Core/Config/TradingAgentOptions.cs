@@ -140,6 +140,16 @@ public class TradingAgentOptions
     /// <summary>Seconds between market-state evaluations inside a session. Default 15.</summary>
     public int MarketStatePollSeconds { get; set; } = 15;
 
+    /// <summary>
+    /// The day's mark-to-market loss, as a percent of the start-of-day value, at which new BUYS are switched off until
+    /// the next session (DailyLossGuard). Stops and sells keep working. Default 3 (owner, 2026-11-28); 0 = off. The
+    /// Settings value <c>dailyLossLimitPct</c> overrides it.
+    /// </summary>
+    public decimal DailyLossLimitPct { get; set; } = 3m;
+
+    /// <summary>The same in PKR; whichever limit is reached first trips. Default 0 = off.</summary>
+    public decimal DailyLossLimitPkr { get; set; }
+
     /// <summary>The dead-man's heartbeat to the fleet watchdog (plan step 7). Off unless a URL is set.</summary>
     public WatchdogOptions Watchdog { get; set; } = new();
 

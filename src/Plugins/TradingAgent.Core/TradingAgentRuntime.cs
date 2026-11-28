@@ -274,6 +274,8 @@ public sealed class TradingAgentRuntime
         // to the fleet watchdog (off unless Watchdog.HeartbeatUrl is set).
         services.AddSingleton<TradingAgent.Observability.TradingHealthReporter>();
         services.AddHostedService<TradingAgent.Observability.TradingHeartbeatSender>();
+        // Daily loss limit (plan step 8): switches entries off past the limit, back on at the next session.
+        services.AddHostedService<TradingAgent.Risk.DailyLossGuard>();
 
         // Halt detection (plan step 5). One instance, read by the stop worker and the armed-order monitor through
         // IMarketPhase; Shadow by default (TradingAgentOptions.MarketHaltHandling).

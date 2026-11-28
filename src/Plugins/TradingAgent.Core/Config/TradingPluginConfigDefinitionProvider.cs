@@ -86,6 +86,23 @@ public sealed class TradingPluginConfigDefinitionProvider : IPluginConfigDefinit
                 },
                 new PluginConfigFieldDefinition
                 {
+                    Key = "dailyLossLimitPct",
+                    Label = "Daily loss limit (%)",
+                    Description = "When the day's loss reaches this percent of the start-of-day value, new buys switch off " +
+                                  "until the next session. Protective stops and sells keep working. 0 turns it off.",
+                    Type = "number",
+                    DefaultValue = options.DailyLossLimitPct
+                },
+                new PluginConfigFieldDefinition
+                {
+                    Key = "dailyLossLimitPkr",
+                    Label = "Daily loss limit (PKR)",
+                    Description = "The same as an amount; whichever limit is reached first applies. 0 turns it off.",
+                    Type = "number",
+                    DefaultValue = options.DailyLossLimitPkr
+                },
+                new PluginConfigFieldDefinition
+                {
                     Key = "killSwitch",
                     Label = "Kill switch (FullStop)",
                     Description = "Legacy emergency stop. On is FullStop and overrides Trading stop; to resume, turn " +
