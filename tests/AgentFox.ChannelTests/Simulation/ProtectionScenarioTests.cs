@@ -160,6 +160,53 @@ public sealed class ProtectionScenarioTests
         Assert.AreEqual(1, h.Broker.PlacementCalls);
     }
 
+    /// <summary>
+    /// The rollout's Shadow: the halt-cancelled stop is NOT re-placed (the old rule still acts), the owner is NOT
+    /// alerted, and the decision log records that live coverage would have placed it — the evidence the owner reviews
+    /// before switching it On.
+    /// </summary>
+    [TestMethod]
+    public async Task InShadow_TheOldRuleActs_AndTheDecisionLogRecordsWhatLiveCoverageWouldHaveDone()
+    {
+        using var h = new ProtectionHarness(0m, Symbol);
+        h.Options.ProtectiveStopLiveCoverage = TradingAgent.Config.RuleRollout.Shadow;
+        await h.ProtectHoldingAsync(Symbol, 100, 230m, trigger: 220m, limit: 217.80m);
+        await h.RunPassAsync();
+
+        h.Broker.Halt();
+        h.Broker.Reopen();
+        await h.RunPassAsync();
+
+        Assert.AreEqual(0, h.Broker.RestingSells(Symbol).Count, "Shadow acts on nothing");
+        Assert.IsFalse(h.Notifier.Sent.Any(s => s.Topic?.EndsWith("left-book") == true), "and alerts nobody");
+        var log = await h.Repository.GetRuleShadowDecisionsAsync(DateTime.UtcNow.AddHours(-1));
+        var row = log.Single();
+        Assert.AreEqual("protective-stop.live-coverage", row.Rule);
+        Assert.AreEqual("Skip", row.CurrentDecision);
+        Assert.AreEqual("Place 100", row.ShadowDecision);
+        StringAssert.Contains(row.Detail, "left the book");
+    }
+
+    [TestMethod]
+    public async Task InShadow_AgreementIsNotLogged()
+    {
+        using var h = new ProtectionHarness(0m, Symbol);
+        h.Options.ProtectiveStopLiveCoverage = TradingAgent.Config.RuleRollout.Shadow;
+        await h.ProtectHoldingAsync(Symbol, 100, 230m, trigger: 220m, limit: 217.80m);
+
+        await h.RunPassAsync();
+        await h.RunPassAsync();
+
+        Assert.AreEqual(0, (await h.Repository.GetRuleShadowDecisionsAsync(DateTime.UtcNow.AddHours(-1))).Count);
+    }
+
+    [TestMethod]
+    public void TheProductDefaultIsShadowUntilTheOwnerSwitchesItOn()
+    {
+        Assert.AreEqual(TradingAgent.Config.RuleRollout.Shadow,
+            new TradingAgent.Config.TradingAgentOptions().ProtectiveStopLiveCoverage);
+    }
+
     [TestMethod]
     public async Task AStopCancelledAtTheBrokersOwnAppIsPlacedAgain()
     {

@@ -4,9 +4,66 @@ using TradingAgent.Watchlist;
 
 namespace TradingAgent.Persistence;
 
-/// <summary>The per-order ledger behind live stop coverage. See <see cref="IProtectiveStopOrderLedger"/>.</summary>
-public sealed partial class SqliteTradingRepository : IProtectiveStopOrderLedger
+/// <summary>
+/// The per-order ledger behind live stop coverage (<see cref="IProtectiveStopOrderLedger"/>) and the decision log for
+/// rules running in Shadow (<see cref="IRuleShadowLog"/>).
+/// </summary>
+public sealed partial class SqliteTradingRepository : IProtectiveStopOrderLedger, IRuleShadowLog
 {
+    public async Task RecordRuleShadowDecisionAsync(RuleShadowDecision decision, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO rule_shadow_decisions
+                (recorded_utc, rule, symbol, subject_id, current_decision, shadow_decision, detail)
+            VALUES ($at, $rule, $symbol, $subject, $current, $shadow, $detail)
+            """;
+        command.Parameters.AddWithValue("$at", decision.RecordedUtc.ToString("O", CultureInfo.InvariantCulture));
+        command.Parameters.AddWithValue("$rule", decision.Rule);
+        command.Parameters.AddWithValue("$symbol", (object?)decision.Symbol ?? DBNull.Value);
+        command.Parameters.AddWithValue("$subject", (object?)decision.SubjectId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$current", decision.CurrentDecision);
+        command.Parameters.AddWithValue("$shadow", decision.ShadowDecision);
+        command.Parameters.AddWithValue("$detail", decision.Detail);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<IReadOnlyList<RuleShadowDecision>> GetRuleShadowDecisionsAsync(
+        DateTime sinceUtc, string? rule = null, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT recorded_utc, rule, symbol, subject_id, current_decision, shadow_decision, detail
+              FROM rule_shadow_decisions
+             WHERE recorded_utc >= $since AND ($rule IS NULL OR rule = $rule)
+             ORDER BY recorded_utc, id
+            """;
+        command.Parameters.AddWithValue("$since", sinceUtc.ToString("O", CultureInfo.InvariantCulture));
+        command.Parameters.AddWithValue("$rule", (object?)rule ?? DBNull.Value);
+        var rows = new List<RuleShadowDecision>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            rows.Add(new RuleShadowDecision(
+                ParseUtc(reader.GetString(0)), reader.GetString(1),
+                reader.IsDBNull(2) ? null : reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetString(3),
+                reader.GetString(4), reader.GetString(5), reader.GetString(6)));
+        return rows;
+    }
+
+    public async Task<int> PruneRuleShadowDecisionsAsync(DateTime before, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM rule_shadow_decisions WHERE recorded_utc < $before";
+        command.Parameters.AddWithValue("$before", before.ToString("O", CultureInfo.InvariantCulture));
+        return await command.ExecuteNonQueryAsync(ct);
+    }
+
     public async Task<IReadOnlyList<ProtectiveStopOrder>> GetProtectiveStopOrdersAsync(
         DateOnly sessionDate, CancellationToken ct = default)
     {

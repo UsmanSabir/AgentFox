@@ -111,6 +111,19 @@ public sealed partial class TradingCoreEndpoints
             return Results.Ok(new { sessionEstablished, reconciliation = snapshot });
         }).RequireAuthorization("TradingTrader");
 
+        // The decision log for rules running in Shadow (RuleRollout): every pass where a shadow rule would have
+        // decided differently from the acting one. Read-only; this is what the owner reviews before switching a
+        // rule On.
+        trading.MapGet("/shadow-decisions", async (
+            ITradingRepository repository, int? days, string? rule, CancellationToken ct) =>
+        {
+            if (repository is not IRuleShadowLog log)
+                return Results.Ok(new { supported = false, decisions = Array.Empty<RuleShadowDecision>() });
+            var since = DateTime.UtcNow.AddDays(-Math.Clamp(days ?? 7, 1, 90));
+            var decisions = await log.GetRuleShadowDecisionsAsync(since, string.IsNullOrWhiteSpace(rule) ? null : rule, ct);
+            return Results.Ok(new { supported = true, sinceUtc = since, count = decisions.Count, decisions });
+        });
+
         // Dedicated, no-restart kill switch: flips the runtime policy overlay (same store the
         // generic /plugin-config/trading-agent editor writes to) so TradingRiskEngine picks it up
         // on the very next order via TradingPolicyProvider — nothing to restart.

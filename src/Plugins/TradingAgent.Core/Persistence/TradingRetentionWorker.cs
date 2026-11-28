@@ -103,6 +103,14 @@ public sealed class TradingRetentionWorker : BackgroundService
                         removed, ledgerDays);
             }
 
+            if (ledgerDays > 0 && _repository is IRuleShadowLog shadowLog)
+            {
+                var removed = await shadowLog.PruneRuleShadowDecisionsAsync(DateTime.UtcNow.AddDays(-ledgerDays), ct);
+                if (removed > 0)
+                    _logger.LogInformation(
+                        "[Retention] Pruned {Count} shadow decision(s) older than {Days} days.", removed, ledgerDays);
+            }
+
             var reconciliationDays = _options.Value.ReconciliationRetentionDays;
             if (reconciliationDays > 0)
             {

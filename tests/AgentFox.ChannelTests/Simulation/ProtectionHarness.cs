@@ -59,7 +59,9 @@ internal sealed class ProtectionHarness : IDisposable
             ExecutionMode = "BoundedAuto",
             RequireReconciliationHealthy = false,
             DatabasePath = Path.Combine(_root, "trading.db"),
-            AllowedSymbols = symbols.ToList()
+            AllowedSymbols = symbols.ToList(),
+            // The target behaviour. A scenario about the rollout itself sets Shadow or Off explicitly.
+            ProtectiveStopLiveCoverage = RuleRollout.On
         };
         Ahk = new AhkConfig { MaxOrderValuePkr = maxOrderValuePkr };
         _liveAhk = new FixedAhk(Ahk);

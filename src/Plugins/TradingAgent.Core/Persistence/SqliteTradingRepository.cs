@@ -2123,6 +2123,20 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                 );
                 CREATE INDEX IF NOT EXISTS ix_protective_stop_orders_session
                     ON protective_stop_orders(session_date, stop_id);
+                -- The decision log for rules running in Shadow (IRuleShadowLog): one row per pass where the shadow
+                -- rule would have decided differently from the acting one.
+                CREATE TABLE IF NOT EXISTS rule_shadow_decisions (
+                    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                    recorded_utc      TEXT NOT NULL,
+                    rule              TEXT NOT NULL,
+                    symbol            TEXT NULL,
+                    subject_id        TEXT NULL,
+                    current_decision  TEXT NOT NULL,
+                    shadow_decision   TEXT NOT NULL,
+                    detail            TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS ix_rule_shadow_decisions_time
+                    ON rule_shadow_decisions(recorded_utc, rule);
                 -- Edition-neutral strategy lifecycle state. Profile JSON is opaque to core: a plugin
                 -- owns its rules while core supplies one durable, auditable storage seam.
                 CREATE TABLE IF NOT EXISTS automation_strategy_assignments (

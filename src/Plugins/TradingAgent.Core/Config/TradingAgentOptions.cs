@@ -96,6 +96,15 @@ public class TradingAgentOptions
     public int ProtectiveStopPropagationSeconds { get; set; } = 60;
 
     /// <summary>
+    /// Whether a stop's coverage is read from the book order by order (and a stop whose order left the book
+    /// mid-session — a halt, a cancel at the broker's own app — is re-placed the same session), or from the ledger's
+    /// "placed today" as before. <see cref="RuleRollout.Shadow"/> by default: the old rule acts, the new one is
+    /// evaluated beside it and every disagreement is logged, until the owner has reviewed several live sessions and
+    /// switches it On (owner, 2026-11-28). See <see cref="RuleRollout"/>.
+    /// </summary>
+    public RuleRollout ProtectiveStopLiveCoverage { get; set; } = RuleRollout.Shadow;
+
+    /// <summary>
     /// Seconds between the first snapshot that misses a stop's order with no recorded reason (no cancel, no trade)
     /// and the later one that may conclude it is gone and re-place it. An order the activity log records as
     /// cancelled needs no wait. Default 60.

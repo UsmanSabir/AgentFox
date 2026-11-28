@@ -1030,10 +1030,21 @@ public sealed class ProtectiveStopWorker
             }
         }
 
-        var liveCovered = await ReadLiveCoverageAsync(stop, resting, today, coverage, ct);
+        // Live coverage acts only when On. In Shadow it is still read — against the real book, every pass — and any
+        // pass where it would have decided differently is written to the decision log, alerting nobody.
+        var rollout = _options.Value.ProtectiveStopLiveCoverage;
+        var liveCovered = rollout == RuleRollout.Off
+            ? null
+            : await ReadLiveCoverageAsync(stop, resting, today, coverage, acting: rollout == RuleRollout.On, ct);
 
         var decision = ProtectiveStopDecisions.DecidePlacement(
-            stop, held, today, resting ?? [], excluded, cancelled, liveCovered);
+            stop, held, today, resting ?? [], excluded, cancelled,
+            rollout == RuleRollout.On ? liveCovered : null);
+
+        if (rollout == RuleRollout.Shadow && liveCovered is not null)
+            await LogShadowDisagreementAsync(repository, stop, decision,
+                ProtectiveStopDecisions.DecidePlacement(
+                    stop, held, today, resting ?? [], excluded, cancelled, liveCovered), ct);
 
         switch (decision.Action)
         {
@@ -1062,7 +1073,10 @@ public sealed class ProtectiveStopWorker
                 return;
         }
 
-        var coveredBefore = stop.LastPlacedSessionDate == today ? liveCovered ?? stop.PlacedQuantity : 0;
+        // Only an ACTING live reading may replace the ledger total; in Off and Shadow the total moves exactly as it did.
+        var coveredBefore = stop.LastPlacedSessionDate != today ? 0
+            : rollout == RuleRollout.On ? liveCovered ?? stop.PlacedQuantity
+            : stop.PlacedQuantity;
         await PlaceNativeStopAsync(repository, stop, decision, today, allStops, resting, retiredThisPass, ct,
             coveredBefore, coverage?.Ledger);
     }
@@ -1131,9 +1145,45 @@ public sealed class ProtectiveStopWorker
     /// read, or when the stop placed today before the order ledger existed (no rows for it), where counting zero
     /// would re-place a stop that may well still be resting.
     /// </summary>
+    /// <summary>The rule name the decision log files live-coverage disagreements under.</summary>
+    internal const string LiveCoverageRule = "protective-stop.live-coverage";
+
+    /// <summary>
+    /// Writes one decision-log row when live coverage (in Shadow) would have decided differently from the rule that
+    /// acted. Agreement is not logged: the log is read to find the passes where switching the rule On changes
+    /// something, and every quiet pass would bury them.
+    /// </summary>
+    private async Task LogShadowDisagreementAsync(
+        ITradingRepository repository, ProtectiveStop stop, PlacementDecision acted, PlacementDecision shadow,
+        CancellationToken ct)
+    {
+        if (acted.Action == shadow.Action && acted.Quantity == shadow.Quantity) return;
+
+        static string Words(PlacementDecision d) => d.Action == PlacementAction.Place ? $"Place {d.Quantity}" : d.Action.ToString();
+
+        _logger.LogWarning(
+            "[ProtectiveStops][Shadow] {StopId} ({Symbol}): live coverage would {Shadow} where the current rule decided "
+            + "{Acted}. {Why}", stop.StopId, stop.Symbol, Words(shadow), Words(acted), shadow.Reason);
+
+        if (repository is not IRuleShadowLog log) return;
+        try
+        {
+            await log.RecordRuleShadowDecisionAsync(new RuleShadowDecision(
+                DateTime.UtcNow, LiveCoverageRule, stop.Symbol, stop.StopId, Words(acted), Words(shadow),
+                $"Live coverage: {shadow.Reason} Current rule: {acted.Reason}"), ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "[ProtectiveStops][Shadow] The decision log could not be written.");
+        }
+    }
+
+    /// <param name="acting">False in Shadow: the reading is computed and its order sightings kept (the two-snapshot
+    /// rule needs them), but nobody is alerted and the activity feed is not told a stop is being re-placed — it is
+    /// not.</param>
     private async Task<int?> ReadLiveCoverageAsync(
         ProtectiveStop stop, IReadOnlyList<RestingOrder>? resting, DateOnly today,
-        CoverageInputs? coverage, CancellationToken ct)
+        CoverageInputs? coverage, bool acting, CancellationToken ct)
     {
         if (coverage is null || resting is null || stop.LastPlacedSessionDate != today) return null;
         var mine = coverage.Orders.Where(o => o.StopId == stop.StopId && o.SessionDate == today).ToList();
@@ -1166,6 +1216,14 @@ public sealed class ProtectiveStopWorker
 
         foreach (var departed in reading.Departed)
         {
+            if (!acting)
+            {
+                _logger.LogWarning(
+                    "[ProtectiveStops][Shadow] {StopId} ({Symbol}): its order {OrderNo} left the book — {Why}",
+                    stop.StopId, stop.Symbol, departed.Order.OrderNo, departed.Reason);
+                continue;
+            }
+
             _logger.LogWarning(
                 "[ProtectiveStops] {StopId} ({Symbol}): its order {OrderNo} for {Qty} share(s) LEFT THE BOOK mid-session "
                 + "— {Why} It no longer protects anything, so the stop is re-placed for what it covered.",
