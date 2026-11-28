@@ -283,7 +283,7 @@ public sealed class AhkBrowserBrokerAdapter :
             {
                 _logger.LogWarning("[BrokerAdapter] The portal refused {Action} {Symbol}: {Message}",
                     signal.Action, symbol, api.Message);
-                _activity?.Warn("Orders", $"The broker refused {signal.Action} {symbol}", api.Message);
+                _activity?.Warn("Orders", $"The broker refused {signal.Action} {symbol}", api.Message, symbol: symbol);
 
                 return new OrderResult
                 {
@@ -302,7 +302,7 @@ public sealed class AhkBrowserBrokerAdapter :
                 "[BrokerAdapter] The JSON API would not accept the fields for {Action} {Symbol}: {Message} "
                 + "Falling back to the browser.", signal.Action, symbol, api.Message);
             _activity?.Warn("Orders",
-                $"Direct API refused {signal.Action} {symbol}; retrying through the browser", api.Message);
+                $"Direct API refused {signal.Action} {symbol}; retrying through the browser", api.Message, symbol: symbol);
             return await PlaceViaBrowserAsync(signal);
         }
 

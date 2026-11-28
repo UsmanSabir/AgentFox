@@ -403,7 +403,7 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
             intent.IntentId, settled.FilledQuantity, state, message, ct);
         _logger.LogWarning("[PersistentOrders] {IntentId} ({Symbol}): {Message}",
             intent.IntentId, intent.Symbol, message);
-        _activity?.Warn("Orders", $"{intent.Symbol}: cancel found a fill, not a resting order", message);
+        _activity?.Warn("Orders", $"{intent.Symbol}: cancel found a fill, not a resting order", message, symbol: intent.Symbol);
 
         return (true, state, message);
     }
@@ -455,7 +455,7 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
 
                 await _repository.SetPersistentOrderProgressAsync(
                     intentId, intent.FilledQuantity, "attention", prep.Reason!, ct);
-                _activity?.Warn("Orders", $"{intent.Symbol}: retry stopped by broker evidence", prep.Reason!);
+                _activity?.Warn("Orders", $"{intent.Symbol}: retry stopped by broker evidence", prep.Reason!, symbol: intent.Symbol);
                 return new(true, false, "attention", prep.Reason!);
             }
 
@@ -547,7 +547,7 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
                 $"Outcome resolved by {approvedBy} from a broker check: {resolution}.", ct);
 
             _activity?.Info("Orders",
-                $"{intent.Symbol}: attention resolved by {approvedBy} ({resolution})", reason);
+                $"{intent.Symbol}: attention resolved by {approvedBy} ({resolution})", reason, symbol: intent.Symbol);
             return new(true, true, newState, reason);
         }
         finally
@@ -592,7 +592,7 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
             if (await _repository.SetPersistentOrderProgressAsync(
                     intent.IntentId, intent.FilledQuantity, "active", unchanged, ct))
                 await SettleUnobservedPlacementAsync(latestPlacement, unchanged, ct);
-            _activity?.Info("Orders", $"{intent.Symbol}: attention auto-resolved (holdings unchanged)", unchanged);
+            _activity?.Info("Orders", $"{intent.Symbol}: attention auto-resolved (holdings unchanged)", unchanged, symbol: intent.Symbol);
             return true;
         }
 
@@ -605,7 +605,7 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
         if (await _repository.SetPersistentOrderProgressAsync(intent.IntentId, newFilled, newState, moved, ct))
             await SettleUnobservedPlacementAsync(latestPlacement, moved, ct);
         _activity?.Warn("Orders",
-            $"{intent.Symbol}: attention auto-resolved from holdings evidence ({filled} filled)", moved);
+            $"{intent.Symbol}: attention auto-resolved from holdings evidence ({filled} filled)", moved, symbol: intent.Symbol);
         return true;
     }
 
@@ -668,7 +668,7 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
                 + "matched on the new number from now on.";
             _logger.LogWarning("[PersistentOrders] {IntentId} ({Symbol}): {Detail}",
                 intent.IntentId, intent.Symbol, detail);
-            _activity?.Info("Orders", $"{intent.Symbol}: keep-working order #{from} is now #{to}", detail);
+            _activity?.Info("Orders", $"{intent.Symbol}: keep-working order #{from} is now #{to}", detail, symbol: intent.Symbol);
         }
         return moved;
     }
@@ -716,7 +716,7 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
             intent.IntentId, intent.FilledQuantity, "attention", reason, ct);
         _logger.LogWarning("[PersistentOrders] {IntentId} ({Symbol}): {Reason}",
             intent.IntentId, intent.Symbol, reason);
-        _activity?.Warn("Orders", $"{intent.Symbol}: keep-working order held — a fill could not be linked", reason);
+        _activity?.Warn("Orders", $"{intent.Symbol}: keep-working order held — a fill could not be linked", reason, symbol: intent.Symbol);
         return true;
     }
 
@@ -883,7 +883,7 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
                 // stopped retry is precisely the case where silence reads as the system still working
                 // on it. Warn rather than Info: this needs a decision from somebody.
                 _activity?.Warn("Orders",
-                    $"{intent.Symbol}: {OrderRejectionOutlook.Label(outlook)}", explanation);
+                    $"{intent.Symbol}: {OrderRejectionOutlook.Label(outlook)}", explanation, symbol: intent.Symbol);
                 _logger.LogWarning(
                     "[PersistentOrders] {Symbol} ({IntentId}): {Label}. Broker said: {Reason}",
                     intent.Symbol, intent.IntentId, OrderRejectionOutlook.Label(outlook),
@@ -916,7 +916,7 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
 
             await _repository.SetPersistentOrderProgressAsync(
                 intent.IntentId, intent.FilledQuantity, "attention", prep.Reason!, ct);
-            _activity?.Warn("Orders", $"{intent.Symbol}: retry stopped by broker evidence", prep.Reason!);
+            _activity?.Warn("Orders", $"{intent.Symbol}: retry stopped by broker evidence", prep.Reason!, symbol: intent.Symbol);
             return true;
         }
 
@@ -964,7 +964,7 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
 
         _activity?.Warn("Orders", $"{expired.Symbol}: persistent order expired",
             $"{expired.Action} {expired.FilledQuantity:N0}/{expired.Quantity:N0} share(s) filled; "
-            + $"{expired.RemainingQuantity:N0} unfilled. {reason}");
+            + $"{expired.RemainingQuantity:N0} unfilled. {reason}", symbol: expired.Symbol);
 
         foreach (var observer in _observers)
         {
@@ -1034,7 +1034,7 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
                 intent.FilledQuantity, "fulfilled",
                 $"Fully filled: {intent.FilledQuantity}/{intent.Quantity} share(s).", ct);
             _activity?.Info("Orders", $"{intent.Symbol}: persistent order fulfilled",
-                $"{intent.FilledQuantity:N0}/{intent.Quantity:N0} share(s) filled.");
+                $"{intent.FilledQuantity:N0}/{intent.Quantity:N0} share(s) filled.", symbol: intent.Symbol);
             return;
         }
 
@@ -1400,7 +1400,7 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
         await _repository.RecordPersistentOrderPlacementAsync(
             adoption.Placement, "resting", adoption.Reason, ct);
 
-        _activity?.Warn("Orders", $"{intent.Symbol}: adopted unrecorded broker order", adoption.Reason);
+        _activity?.Warn("Orders", $"{intent.Symbol}: adopted unrecorded broker order", adoption.Reason, symbol: intent.Symbol);
         return true;
     }
 
@@ -1570,7 +1570,7 @@ public sealed class PersistentOrderWorker : BackgroundService, IMarketSessionOpe
             }
 
             _activity?.Info("Orders", $"{intent.Symbol}: broker order #{orderNo} cancelled by operator",
-                reason);
+                reason, symbol: intent.Symbol);
             var saved = await _repository.GetPersistentOrderAsync(intentId, ct) ?? intent;
             return (true, saved.State, reason);
         }

@@ -245,6 +245,8 @@ public sealed class TradingAgentRuntime
         // What the agent has been DOING, for the dashboard's activity panel. A live view only — it
         // self-prunes and is deliberately not persisted; the ledger is the durable record.
         services.AddSingleton<TradingActivityLog>();
+        // Every message sent to the person's channels also lands in today's Activity as "Notified" (owner, 2026-11-28).
+        ActivityRecordingNotifier.Decorate(services);
         // Registered as a singleton AND as the hosted service, so the API can read its live status and
         // trigger a pass on the same instance the timer drives.
         services.AddSingleton<RecentPriceWindow>();

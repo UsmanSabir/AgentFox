@@ -304,7 +304,7 @@ public sealed class ProtectiveStopWorker
                     stopId, stop.Symbol, (int)Math.Floor(quantity));
                 _activity?.Info("Stops",
                     $"{stop.Symbol}: pre-entry holding recorded as {(int)Math.Floor(quantity)}",
-                    "This is what the fill will be measured against.");
+                    "This is what the fill will be measured against.", symbol: stop.Symbol);
             }
         }
         finally
@@ -604,7 +604,7 @@ public sealed class ProtectiveStopWorker
                 "[ProtectiveStops] {StopId} ({Symbol}) ACTIVE on an immediate entry's confirmed fill "
                 + "of {Qty}. {Why}", stop.StopId, stop.Symbol, filled, reason);
             _activity?.Info("Stops",
-                $"{stop.Symbol}: entry filled ({filled}) — the stop is now active", reason);
+                $"{stop.Symbol}: entry filled ({filled}) — the stop is now active", reason, symbol: stop.Symbol);
             await ArmBackstopAsync(repository, stop with
             {
                 State = "active",
@@ -736,7 +736,7 @@ public sealed class ProtectiveStopWorker
                 DesiredQuantity = Math.Max(stop.DesiredQuantity, confirmed)
             }, confirmed, ct);
             _activity?.Info("Stops",
-                $"{stop.Symbol}: exact entry fill activated protection ({confirmed})", reason);
+                $"{stop.Symbol}: exact entry fill activated protection ({confirmed})", reason, symbol: stop.Symbol);
             return;
         }
 
@@ -760,7 +760,7 @@ public sealed class ProtectiveStopWorker
                     stop.StopId, stop.Symbol, verdict.Quantity, verdict.Reason);
                 _activity?.Info("Stops",
                     $"{stop.Symbol}: entry filled ({verdict.Quantity}) — the stop is now active",
-                    verdict.Reason);
+                    verdict.Reason, symbol: stop.Symbol);
                 await ArmBackstopAsync(repository, stop with
                 {
                     State = "active",
@@ -971,7 +971,7 @@ public sealed class ProtectiveStopWorker
                     if (MarkAlerted(stop, "supersede-pending", today))
                         _activity?.Warn("Stops",
                             $"{stop.Symbol}: the stop raise to {stop.StopTrigger:0.##} has NOT reached "
-                            + "the broker yet", supersede.Reason);
+                            + "the broker yet", supersede.Reason, symbol: stop.Symbol);
                     return;
 
                 case SupersedeAction.RetirePredecessorFirst when predecessor is not null:
@@ -1122,7 +1122,7 @@ public sealed class ProtectiveStopWorker
         {
             _activity?.Info("Stops",
                 $"{successor.Symbol}: room made for the stop raise to {successor.StopTrigger:0.##}",
-                result.Reason);
+                result.Reason, symbol: successor.Symbol);
             return true;
         }
 
@@ -1136,7 +1136,7 @@ public sealed class ProtectiveStopWorker
         if (MarkAlerted(successor, key, today))
             _activity?.Warn("Stops",
                 $"{successor.Symbol}: the stop raise to {successor.StopTrigger:0.##} has not reached the "
-                + "broker", result.Reason);
+                + "broker", result.Reason, symbol: successor.Symbol);
 
         return false;
     }
@@ -1211,7 +1211,7 @@ public sealed class ProtectiveStopWorker
                     "The broker refused the last placement on timing rather than on the order itself — "
                     + "usually a board that is not accepting orders. Retrying now would collect the same "
                     + "refusal, so the worker backs off. The position is covered by the local backstop "
-                    + "meanwhile.");
+                    + "meanwhile.", symbol: stop.Symbol);
             return;
         }
 
@@ -1260,7 +1260,7 @@ public sealed class ProtectiveStopWorker
                 stop.StopId, stop.Symbol, approval.Reason);
             _activity?.Error("Stops",
                 $"{stop.Symbol}: stop not authorised, so nothing is resting at the broker",
-                approval.Reason);
+                approval.Reason, symbol: stop.Symbol);
 
             await AlertOnceAsync(stop, "unauthorised", today,
                 $"🛡️ **Stop NOT placed — {stop.Symbol} is unprotected**\n"
@@ -1322,7 +1322,7 @@ public sealed class ProtectiveStopWorker
                 submissionClock.ElapsedMilliseconds, decision.Reason);
             _activity?.Info("Stops",
                 $"{stop.Symbol}: stop placed at the broker — SELL {actuallyPlaced:N0} "
-                + $"trigger {stop.StopTrigger:0.##} limit {stop.StopLimit:0.##}");
+                + $"trigger {stop.StopTrigger:0.##} limit {stop.StopLimit:0.##}", symbol: stop.Symbol);
 
             // This row supersedes an earlier stop (a break-even lift, an ATR trail) — and this is the
             // exact moment its replacement was confirmed live. Only NOW does the predecessor move
@@ -1417,7 +1417,7 @@ public sealed class ProtectiveStopWorker
                 stop.StopId, stop.Symbol, order?.Message ?? result.Reason);
             _activity?.Error("Stops",
                 $"{stop.Symbol}: the stop was NOT placed — the position is unprotected at the broker",
-                order?.Message ?? result.Reason);
+                order?.Message ?? result.Reason, symbol: stop.Symbol);
         }
 
         await AlertOnceAsync(stop, "placement-failed", today,
@@ -1511,7 +1511,7 @@ public sealed class ProtectiveStopWorker
             _logger.LogInformation(
                 "[ProtectiveStops] {StopId} ({Symbol}): superseded order {OrderNo} cancelled and " +
                 "confirmed gone.", stop.StopId, stop.Symbol, orderNo);
-            _activity?.Info("Stops", $"{stop.Symbol}: superseded stop {orderNo} cancelled", result.Message);
+            _activity?.Info("Stops", $"{stop.Symbol}: superseded stop {orderNo} cancelled", result.Message, symbol: stop.Symbol);
             return;
         }
 
@@ -1522,7 +1522,7 @@ public sealed class ProtectiveStopWorker
             "{Message}. Left resting; the position is covered by both the old and new stop meanwhile.",
             stop.StopId, stop.Symbol, orderNo, result.Message);
         _activity?.Warn("Stops",
-            $"{stop.Symbol}: could not confirm cancellation of superseded stop {orderNo}", result.Message);
+            $"{stop.Symbol}: could not confirm cancellation of superseded stop {orderNo}", result.Message, symbol: stop.Symbol);
 
         await AlertOnceAsync(stop, "cancel-unconfirmed", DateOnly.FromDateTime(_calendar.GetStatus().PktNow),
             $"⚠️ **Superseded stop could not be cancelled — {stop.Symbol}**\n"
@@ -1640,7 +1640,7 @@ public sealed class ProtectiveStopWorker
         _activity?.Warn("Stops",
             $"{symbol}: protective stop stood down so a reducing SELL could go through",
             $"Order {orderNo} cancelled. The stop is re-placed over what remains once the sell is "
-            + "through; until then that slice is covered only by the local backstop.");
+            + "through; until then that slice is covered only by the local backstop.", symbol: symbol);
 
         return new(true,
             $"Stop order {orderNo} is confirmed cancelled, freeing shares for the sell. The stop is "
@@ -1734,7 +1734,7 @@ public sealed class ProtectiveStopWorker
             _activity?.Info("Stops",
                 $"{stop.Symbol}: take-profit armed at {stop.TakeProfitPrice} for {quantity}",
                 "It was created only after the entry fill was confirmed and will stand the protective "
-                + "stop down if it needs the same shares when it fires.");
+                + "stop down if it needs the same shares when it fires.", symbol: stop.Symbol);
         }
         else if (existing.State == "armed" && quantity > existing.Quantity)
         {
@@ -1777,7 +1777,7 @@ public sealed class ProtectiveStopWorker
 
         _logger.LogWarning("[ProtectiveStops] {StopId} ({Symbol}) closed: {Reason}",
             stop.StopId, stop.Symbol, reason);
-        _activity?.Warn("Stops", $"{stop.Symbol}: protection ended", reason);
+        _activity?.Warn("Stops", $"{stop.Symbol}: protection ended", reason, symbol: stop.Symbol);
     }
 
     /// <summary>
@@ -1895,7 +1895,7 @@ public sealed class ProtectiveStopWorker
                 + "_Sell by hand, or turn on \"sell at market if missed\" for this stop next time._");
             _activity?.Error("Stops",
                 $"{stop.Symbol}: stop triggered but did NOT fill — its limit {limit:0.##} is above the market",
-                "The position is unprotected while that order rests. Sell by hand if you want out.");
+                "The position is unprotected while that order rests. Sell by hand if you want out.", symbol: stop.Symbol);
             return true;
         }
 
@@ -1911,7 +1911,7 @@ public sealed class ProtectiveStopWorker
                 + "_Sell by hand, or enable market orders._");
             _activity?.Error("Stops",
                 $"{stop.Symbol}: stop missed, and market orders are disabled — nothing was sold",
-                $"The limit at {limit:0.##} is still resting above the market.");
+                $"The limit at {limit:0.##} is still resting above the market.", symbol: stop.Symbol);
             return true;
         }
 
@@ -1987,7 +1987,7 @@ public sealed class ProtectiveStopWorker
                 + "_Nothing is resting now. Sell by hand._");
             _activity?.Error("Stops",
                 $"{stop.Symbol}: stop missed and cancelled, but the market sale was not authorised",
-                approval.Reason);
+                approval.Reason, symbol: stop.Symbol);
             return true;
         }
 
@@ -2004,7 +2004,7 @@ public sealed class ProtectiveStopWorker
             _activity?.Warn("Stops",
                 $"{stop.Symbol}: stop missed — sold {quantity:N0} at market",
                 $"Its limit at {limit:0.##} was above the market, so it was cancelled and replaced "
-                + "with a market sale, as this stop was set to do.");
+                + "with a market sale, as this stop was set to do.", symbol: stop.Symbol);
             await AlertOnceAsync(stop, "stranded-sold", today,
                 $"🛡️ **Stop missed, sold at market — {stop.Symbol}**\n"
                 + $"• The stop triggered but its limit at {limit:0.##} was never reached\n"
@@ -2019,7 +2019,7 @@ public sealed class ProtectiveStopWorker
             + "sale FAILED: {Why}. Nothing is resting now.", stop.StopId, stop.Symbol, why);
         _activity?.Error("Stops",
             $"{stop.Symbol}: stop missed and cancelled, but the market sale failed — nothing is resting",
-            why);
+            why, symbol: stop.Symbol);
         await AlertOnceAsync(stop, "stranded-sale-failed", today,
             $"⚠️ **Stop missed, market sale FAILED — {stop.Symbol} is not protected**\n"
             + $"• The stranded limit at {limit:0.##} was cancelled\n"

@@ -199,7 +199,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                     order.ArmedId, order.Symbol, order.Action);
                 _activity?.Error("Armed",
                     $"{order.Symbol}: armed {order.Action} was interrupted mid-submission — check the broker",
-                    reason);
+                    reason, symbol: order.Symbol);
             }
         }
         finally { _runGate.Release(); }
@@ -660,7 +660,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                 _logger.LogInformation(
                     "[ArmedOrders] {ArmedId} ({Symbol}) met its trigger but stood down: {Why}",
                     order.ArmedId, order.Symbol, standDown);
-                _activity?.Info("Armed", $"{order.Symbol}: local backstop stood down", standDown);
+                _activity?.Info("Armed", $"{order.Symbol}: local backstop stood down", standDown, symbol: order.Symbol);
                 continue;
             }
 
@@ -688,7 +688,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                     var retry = NoteRefusal(order);
                     _logger.LogWarning("[ArmedOrders] {ArmedId} ({Symbol}) met its rule but was held: {Reason} {Retry}",
                         order.ArmedId, order.Symbol, holdReason, retry);
-                    _activity?.Warn("Armed", $"{order.Symbol}: rule order met but held", $"{holdReason} {retry}");
+                    _activity?.Warn("Armed", $"{order.Symbol}: rule order met but held", $"{holdReason} {retry}", symbol: order.Symbol);
                     continue;
                 }
             }
@@ -700,7 +700,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
 
             _logger.LogWarning("[ArmedOrders] {ArmedId} ({Symbol}) triggered: {Why}",
                 order.ArmedId, order.Symbol, why);
-            _activity?.Info("Armed", $"{order.Symbol}: armed {order.Action} triggered", why);
+            _activity?.Info("Armed", $"{order.Symbol}: armed {order.Action} triggered", why, symbol: order.Symbol);
 
             // A windowed LIMIT is priced at the level it just fired at, and a trailing LIMIT at the
             // price that met its trigger, inside its bound — see ArmedOrder.PriceAtFire. Frozen from
@@ -750,7 +750,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                             outlook.Reason);
                         _activity?.Warn("Armed",
                             $"{order.Symbol}: armed {order.Action} retired — the position is gone",
-                            outlook.Reason);
+                            outlook.Reason, symbol: order.Symbol);
                         continue;
                     }
                 }
@@ -949,7 +949,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                         "[ArmedOrders] {ArmedId} met its trigger but was NOT sent: {Reason} "
                         + "(it remains armed).", order.ArmedId, approvalReason);
                     _activity?.Warn("Armed",
-                        $"{order.Symbol}: triggered but not sent — it stays armed", approvalReason);
+                        $"{order.Symbol}: triggered but not sent — it stays armed", approvalReason, symbol: order.Symbol);
                     continue;
                 }
 
@@ -960,7 +960,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                     {
                         _activity?.Warn("Armed",
                             $"{order.Symbol}: a protective stop stood down so this sell could go through",
-                            releaseNote);
+                            releaseNote, symbol: order.Symbol);
                     }
                     else if (persistent is not null)
                     {
@@ -1016,7 +1016,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                             order.ArmedId, "firing", "fired", $"{why} {approvalReason}", executionId, ct);
                         _logger.LogWarning("[ArmedOrders] {ArmedId} FIRED: {Reason}",
                             order.ArmedId, result.Reason);
-                        _activity?.Info("Armed", $"{order.Symbol}: armed {order.Action} fired", result.Reason);
+                        _activity?.Info("Armed", $"{order.Symbol}: armed {order.Action} fired", result.Reason, symbol: order.Symbol);
                         break;
 
                     case ArmedFireDisposition.Rearm:
@@ -1031,7 +1031,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                         _logger.LogWarning("[ArmedOrders] {ArmedId} refused: {Reason}",
                             order.ArmedId, outcome2);
                         _activity?.Warn("Armed",
-                            $"{order.Symbol}: armed {order.Action} refused — it stays armed", outcome2);
+                            $"{order.Symbol}: armed {order.Action} refused — it stays armed", outcome2, symbol: order.Symbol);
                         break;
 
                     default:
@@ -1043,7 +1043,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                         _logger.LogError("[ArmedOrders] {ArmedId} stopped: {Reason}",
                             order.ArmedId, outcome2);
                         _activity?.Error("Armed",
-                            $"{order.Symbol}: armed {order.Action} stopped — check the broker", outcome2);
+                            $"{order.Symbol}: armed {order.Action} stopped — check the broker", outcome2, symbol: order.Symbol);
                         break;
                 }
             }
@@ -1057,7 +1057,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                 _logger.LogError(ex, "[ArmedOrders] {ArmedId} submission failed.", order.ArmedId);
                 _activity?.Error("Armed",
                     $"{order.Symbol}: submission threw — verify at the broker before re-arming",
-                    ex.Message);
+                    ex.Message, symbol: order.Symbol);
             }
         }
     }
@@ -1183,7 +1183,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
         _logger.LogWarning(
             "[ArmedOrders] {ArmedId} ({Symbol}) pulling back its working SELL: {Why}",
             order.ArmedId, order.Symbol, why);
-        _activity?.Warn("Armed", $"{order.Symbol}: take-profit pulled back — the price turned", why);
+        _activity?.Warn("Armed", $"{order.Symbol}: take-profit pulled back — the price turned", why, symbol: order.Symbol);
 
         var (completed, state, message) = await _persistentOrders.CancelAsync(
             intent.IntentId, ct, requestedBy: "a take-profit pull-back");
@@ -1213,7 +1213,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                     : "the cancel left an outcome a person has to settle";
             await _repository.TryEndArmedOrderPullbackAsync(order.ArmedId, $"Not re-armed: {why}.", ct);
             if (intent?.State == "attention")
-                _activity?.Warn("Armed", $"{order.Symbol}: take-profit pull-back needs checking", why);
+                _activity?.Warn("Armed", $"{order.Symbol}: take-profit pull-back needs checking", why, symbol: order.Symbol);
             return;
         }
 
@@ -1231,7 +1231,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
         _logger.LogWarning(
             "[ArmedOrders] {ArmedId} ({Symbol}) re-armed: SELL {Qty} fires at {Trigger}. {Reason}",
             order.ArmedId, order.Symbol, rearm.Quantity, rearm.TriggerPrice, rearm.Reason);
-        _activity?.Info("Armed", $"{order.Symbol}: take-profit re-armed", rearm.Reason);
+        _activity?.Info("Armed", $"{order.Symbol}: take-profit re-armed", rearm.Reason, symbol: order.Symbol);
 
         // The shares the sell was holding are free again: put the stop back over them now. Only in
         // session — the stop worker places nothing while the venue is shut, and the next open re-places
@@ -1332,7 +1332,7 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
 
             _logger.LogWarning("[ArmedOrders] {ArmedId} ({Symbol}) skipped a move: {Why}",
                 order.ArmedId, order.Symbol, why);
-            _activity?.Info("Armed", $"{order.Symbol}: trailing {order.Action} skipped a move", why);
+            _activity?.Info("Armed", $"{order.Symbol}: trailing {order.Action} skipped a move", why, symbol: order.Symbol);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
