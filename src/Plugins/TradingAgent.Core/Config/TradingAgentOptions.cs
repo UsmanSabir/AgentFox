@@ -352,8 +352,14 @@ public class TradingAgentOptions
     /// than documenting it, and errs the safe way: retention takes longer to bite, never that data
     /// goes missing.
     /// </para>
+    ///
+    /// <para>
+    /// 400 since 2026-11-28 (was 14; owner's R6: a full audit log of at least a year). The ledger and its order events are
+    /// the durable record of every request, its reason and the broker's answer; they grow with trading, not with time,
+    /// so a year of them is small. The protective-stop order rows and the shadow decision log follow this retention.
+    /// </para>
     /// </summary>
-    public int LedgerRetentionDays { get; set; } = 14;
+    public int LedgerRetentionDays { get; set; } = 400;
 
     /// <summary>
     /// Days to keep reconciliation snapshots. 0 disables the sweep.
@@ -361,10 +367,11 @@ public class TradingAgentOptions
     /// <para>
     /// The only table here that grows independently of trading: one row per
     /// <see cref="ReconciliationIntervalSeconds"/>, so 1,440 a day at the default, of which only
-    /// the newest is ever read.
+    /// the newest is ever read. 30 since 2026-11-28 (was 14), so a month of "what did the broker show" survives an
+    /// audit of a disputed day; it is the one table where a longer window costs real space.
     /// </para>
     /// </summary>
-    public int ReconciliationRetentionDays { get; set; } = 14;
+    public int ReconciliationRetentionDays { get; set; } = 30;
 
     /// <summary>
     /// Days to keep armed orders that have reached a terminal state — fired, cancelled, expired or

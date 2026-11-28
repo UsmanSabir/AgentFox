@@ -52,6 +52,13 @@ Where a Settings key is listed, the value saved in Settings overrides the startu
 | `ReconciliationMaxAgeSeconds` | `180` | seconds | — | How old an account read may be for an entry. |
 | `ReduceOnlyBookMaxAgeSeconds` | `60` | seconds | — | How old the book read behind a sell may be. |
 
+## Audit
+
+| Parameter | Default | Unit | Settings key | Meaning |
+|---|---|---|---|---|
+| `LedgerRetentionDays` | `400` | days | — | How long orders, their order events and broker answers, stop order rows and shadow decisions are kept. 0 = forever. |
+| `ReconciliationRetentionDays` | `30` | days | — | How long account snapshots are kept. 0 = forever. |
+
 ## Dead-man
 
 | Parameter | Default | Unit | Settings key | Meaning |

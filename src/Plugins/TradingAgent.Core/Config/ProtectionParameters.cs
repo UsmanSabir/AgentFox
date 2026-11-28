@@ -58,6 +58,10 @@ public static class ProtectionParameters
         new("Reconciliation", "ReconciliationMaxAgeSeconds", "seconds", "How old an account read may be for an entry."),
         new("Reconciliation", "ReduceOnlyBookMaxAgeSeconds", "seconds", "How old the book read behind a sell may be."),
 
+        new("Audit", "LedgerRetentionDays", "days",
+            "How long orders, their order events and broker answers, stop order rows and shadow decisions are kept. 0 = forever."),
+        new("Audit", "ReconciliationRetentionDays", "days", "How long account snapshots are kept. 0 = forever."),
+
         new("Dead-man", "Watchdog.HeartbeatUrl", "URL", "Where heartbeats go. Empty = off."),
         new("Dead-man", "Watchdog.IntervalSeconds", "seconds", "Time between heartbeats inside a session."),
         new("Dead-man", "Watchdog.FeedSilentSeconds", "seconds", "No price from any source for this long counts as feed-silent."),

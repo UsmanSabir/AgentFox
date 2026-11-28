@@ -307,7 +307,8 @@ public sealed class LedgerRetentionTests
     {
         var options = new TradingAgentOptions();
 
-        Assert.AreEqual(14, options.LedgerRetentionDays);
-        Assert.AreEqual(14, options.ReconciliationRetentionDays);
+        // 400 / 30 since 2026-11-28 (owner's R6: a full audit log of at least a year); were 14 / 14.
+        Assert.AreEqual(400, options.LedgerRetentionDays);
+        Assert.AreEqual(30, options.ReconciliationRetentionDays);
     }
 }
