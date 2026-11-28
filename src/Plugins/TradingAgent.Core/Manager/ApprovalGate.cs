@@ -203,6 +203,12 @@ public sealed class ApprovalGate
     /// question this class exists to answer.
     /// </para>
     /// </summary>
+    /// <summary>
+    /// The approval source for the protection path: the stop worker's native stops and missed-stop sales, and the
+    /// monitor's local backstops. Authorised as a standing instruction in ApprovalRequired; see <see cref="Evaluate"/>.
+    /// </summary>
+    public const string ProtectionSource = "protective-stop";
+
     public ApprovalDecision Decide(
         IReadOnlyList<IReadOnlyList<TradingSignal>> groups,
         string? sourceMessage,
@@ -278,6 +284,22 @@ public sealed class ApprovalGate
             return ApprovalDecision.NotRequired(
                 "Execution mode is BoundedAuto: unattended execution is authorised by the mode itself, "
                 + "within the risk engine's limits.");
+        }
+
+        // Protection is a standing instruction, not a new trade (plan step 6, 2026-11-28). PSX clears every resting order
+        // at the close, so a protective stop is re-placed every session; asking a person to approve each re-placement
+        // means a position is unprotected every morning until somebody clicks — which is what "Always" did, for every
+        // stop and every local backstop, the moment an account was in ApprovalRequired. Only the protection path is
+        // authorised here, and only for orders that SELL (on the cash market a sell can only reduce a position); the
+        // kill switch, entries-off and manual-only checks above still apply, and entries, take-profits and other exits
+        // still wait for a person. A real intent is minted, as a clicked approval would, because the execution
+        // boundary accepts nothing else in this mode.
+        if (string.Equals(context.Source, ProtectionSource, StringComparison.OrdinalIgnoreCase)
+            && groups.SelectMany(g => g).All(o => string.Equals(o.Action?.Trim(), "SELL", StringComparison.OrdinalIgnoreCase)))
+        {
+            return ApprovalDecision.Authorized(
+                Mint(groups, sourceMessage, policy.Version, ProtectionSource),
+                "A protective stop is the owner's standing instruction; it is placed without asking each time.");
         }
 
         var mode = (approval.Mode ?? "Always").Trim();

@@ -111,6 +111,65 @@ public sealed partial class TradingCoreEndpoints
             return Results.Ok(new { sessionEstablished, reconciliation = snapshot });
         }).RequireAuthorization("TradingTrader");
 
+        // How this account trades, and whether its owner has confirmed it (plan step 6, owner 2026-11-28). New hosted
+        // tenants are provisioned in ApprovalRequired; nobody is switched silently — every account shows a notice until
+        // its owner confirms a mode here, and keeping the current one is a valid confirmation.
+        trading.MapGet("/mode", (TradingPolicyProvider policy, PluginConfigManager configs) =>
+        {
+            var current = policy.Current();
+            var runtime = configs.GetConfig("trading-agent");
+            var confirmedAt = runtime.TryGetValue("modeConfirmedAtUtc", out var at) ? at?.ToString() : null;
+            return Results.Ok(new
+            {
+                executionMode = current.ExecutionMode,
+                autoExecute = current.AutoExecute,
+                confirmed = !string.IsNullOrWhiteSpace(confirmedAt),
+                confirmedAtUtc = confirmedAt,
+                recommended = "ApprovalRequired",
+                choices = TradingModeChoices.All
+            });
+        });
+
+        trading.MapPost("/mode", async (
+            TradingModeRequest body,
+            PluginConfigManager configs,
+            IConfiguration configuration,
+            ILogger<TradingCoreEndpoints> logger) =>
+        {
+            var choice = TradingModeChoices.All.FirstOrDefault(c =>
+                string.Equals(c.Mode, body.Mode?.Trim(), StringComparison.OrdinalIgnoreCase));
+            if (choice is null)
+                return Results.BadRequest(new { error = "invalid_mode", message = "Choose ApprovalRequired, BoundedAuto or Paper." });
+
+            // ApprovalRequired with no approval gate configured is refused at STARTUP (TradingSafetyStartupValidator), so
+            // accepting it here would leave an agent that does not come back after its next restart.
+            if (choice.Mode == "ApprovalRequired")
+            {
+                var watched = configuration.GetSection("Hitl:RequireApprovalForTools").Get<string[]>() ?? [];
+                if (!configuration.GetValue<bool>("Hitl:Enabled")
+                    || !new[] { "place_order", "place_orders" }.All(t => watched.Contains(t, StringComparer.OrdinalIgnoreCase)))
+                    return Results.BadRequest(new
+                    {
+                        error = "approvals_not_configured",
+                        message = "Approval for each order needs the approval gate switched on for place_order and "
+                                  + "place_orders. Ask your administrator, or choose another mode."
+                    });
+            }
+
+            var saved = await configs.MergeConfigAsync("trading-agent", new Dictionary<string, object?>
+            {
+                ["executionMode"] = choice.Mode,
+                ["autoExecute"] = true,
+                ["modeConfirmedAtUtc"] = DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture)
+            });
+            if (!saved)
+                return Results.Json(new { error = "not_saved", message = "The choice could not be saved. Try again." },
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+
+            logger.LogWarning("[TradingAgent] Trading mode confirmed as {Mode} via web API.", choice.Mode);
+            return Results.Ok(new { executionMode = choice.Mode, confirmed = true });
+        }).RequireAuthorization("TradingRiskManager");
+
         // The decision log for rules running in Shadow (RuleRollout): every pass where a shadow rule would have
         // decided differently from the acting one. Read-only; this is what the owner reviews before switching a
         // rule On.

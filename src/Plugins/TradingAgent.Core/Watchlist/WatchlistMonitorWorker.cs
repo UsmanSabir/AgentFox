@@ -116,9 +116,11 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
         IArmedOrderConditionEvaluator? conditions = null,
         MonitorTechnicalReadings? technicals = null,
         IArmedOrderFireCheck? fireCheck = null,
-        TradingAgent.Market.IMarketPhase? marketPhase = null)
+        TradingAgent.Market.IMarketPhase? marketPhase = null,
+        TradingAgent.Reconciliation.TradingReconciliationState? reconciliation = null)
     {
         _marketPhase = marketPhase;
+        _reconciliation = reconciliation;
         _recentPrices = recentPrices ?? new RecentPriceWindow();
         _conditions = conditions;
         _fireCheck = fireCheck;
@@ -657,6 +659,20 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
             // level (owner, 2026-11-28). Shadow records what would have been held and fires as before.
             if (await HaltHoldAsync(order, price, ct)) continue;
 
+            // Reconcile first, act second (plan step 6): nothing fires before this process has read the account once.
+            // A restart mid-session otherwise judged armed orders against a position nobody had looked at yet.
+            if (_reconciliation is { HasBeenHealthy: false })
+            {
+                if (!_notReadyReported)
+                {
+                    _notReadyReported = true;
+                    _logger.LogWarning(
+                        "[ArmedOrders] {ArmedId} ({Symbol}) met its trigger, but the broker account has not been read "
+                        + "successfully since start; nothing fires until it is.", order.ArmedId, order.Symbol);
+                }
+                continue;
+            }
+
             // A backstop is not an ordinary armed order: it exists to cover the window where the
             // native stop does not, and must stand down the moment that stop is resting. Skipping
             // this check is exactly how "native plus a local backstop" becomes two orders selling
@@ -935,7 +951,11 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                     groups, source,
                     // An order the operator armed by hand still fires on a manual-only symbol; one a
                     // strategy armed does not. Everything else the gate weighs is unaffected.
-                    new ApprovalContext(severity, "armed-order", order.OperatorOriginated));
+                    // A local backstop IS a protective stop, expressed locally: it shares the protection path's
+                    // standing authorisation (ApprovalGate.ProtectionSource) rather than an armed order's.
+                    new ApprovalContext(severity,
+                        order.ProtectiveStopId is not null ? ApprovalGate.ProtectionSource : "armed-order",
+                        order.OperatorOriginated));
                 var approvalReason = decision.Reason;
 
                 if (!decision.MayProceed)
@@ -1447,6 +1467,8 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
     }
 
     private readonly TradingAgent.Market.IMarketPhase? _marketPhase;
+    private readonly TradingAgent.Reconciliation.TradingReconciliationState? _reconciliation;
+    private bool _notReadyReported;
 
     /// <summary>
     /// Why this armed order must not fire in this market phase, or null. Halted holds everything. Just after a reopen

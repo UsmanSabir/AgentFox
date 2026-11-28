@@ -36,6 +36,9 @@ public static class TradingTopics
         $"{OrderPrefix}.{Segment(state, "other")}";
 
     /// <summary>The subject for a position left without a working stop, keyed by why.</summary>
+    /// <summary>The agent has not read the broker account since it started, so it places nothing.</summary>
+    public const string Readiness = "trading.readiness";
+
     /// <summary>A market-wide halt began (MarketStateService, when its handling is On).</summary>
     public const string MarketHalt = "trading.market.halt";
 
@@ -66,6 +69,7 @@ public static class TradingTopics
         NotificationTopics.Register(Stop("unauthorised"), "A protective stop is blocked by policy or the kill switch.");
         NotificationTopics.Register(Stop("placement-failed"), "A protective stop failed to reach the broker.");
         NotificationTopics.Register(Stop("left-book"), "A protective stop's order left the broker's book mid-session and is being re-placed.");
+        NotificationTopics.Register(Readiness, "The broker account has not been read since start, so nothing is placed.");
         NotificationTopics.Register(MarketHalt, "The market halted: nothing is sent until it reopens.");
         NotificationTopics.Register(MarketReopen, "The market reopened after a halt; stops are being re-placed.");
         NotificationTopics.Register(MarketUnknown, "A halt was not confirmed ending, or market-state sources disagree.");

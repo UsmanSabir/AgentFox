@@ -168,6 +168,22 @@ public sealed class TradingReconciliationState
 
     public void Update(BrokerReconciliationSnapshot snapshot)
     {
-        lock (_gate) _current = snapshot;
+        lock (_gate)
+        {
+            _current = snapshot;
+            if (snapshot.Supported && snapshot.Healthy) _hasBeenHealthy = true;
+        }
+    }
+
+    private bool _hasBeenHealthy;
+
+    /// <summary>
+    /// Whether the broker has been read healthily at least once since this process started — the readiness gate
+    /// (plan step 6, "reconcile first, act second"). Until then nothing that originates an order fires: an armed
+    /// order judged before the account was ever read is acting on a position nobody has seen.
+    /// </summary>
+    public bool HasBeenHealthy
+    {
+        get { lock (_gate) return _hasBeenHealthy; }
     }
 }

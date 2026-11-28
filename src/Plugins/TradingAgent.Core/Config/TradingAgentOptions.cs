@@ -289,6 +289,12 @@ public class TradingAgentOptions
     public int ReconciliationIntervalSeconds { get; set; } = 60;
     public int ReconciliationMaxAgeSeconds { get; set; } = 180;
 
+    /// <summary>
+    /// With <see cref="RequireReconciliationHealthy"/> on, how old the broker book read behind a sell-only order may
+    /// be. Sells are not held to the full reconciliation gate (owner Q4, 2026-11-28) — only to a fresh book. Default 60.
+    /// </summary>
+    public int ReduceOnlyBookMaxAgeSeconds { get; set; } = 60;
+
     // ── Ledger retention ──────────────────────────────────────────────────────
     // Until 2026-09-06 neither of these tables had a retention rule or anything that swept them.
     // trade_proposals and watchlist_alerts did; trading_executions, trading_order_events,

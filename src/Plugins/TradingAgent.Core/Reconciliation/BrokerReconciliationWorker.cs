@@ -26,14 +26,23 @@ public sealed class BrokerReconciliationWorker : BackgroundService, IMarketSessi
     private readonly ILogger<BrokerReconciliationWorker> _logger;
     private readonly SemaphoreSlim _runGate = new(1, 1);
 
+    private readonly AgentFox.Plugins.Interfaces.IUserNotifier? _notifier;
+    private readonly DateTime _startedUtc = DateTime.UtcNow;
+    private bool _notReadyAlerted;
+
+    /// <summary>How long into a session an agent that has never read the account may go before the owner is told.</summary>
+    internal static readonly TimeSpan NotReadyAlertAfter = TimeSpan.FromMinutes(5);
+
     public BrokerReconciliationWorker(
         IBrokerStateReader reader,
         TradingReconciliationState state,
         ITradingRepository repository,
         IMarketCalendar calendar,
         IOptions<TradingAgentOptions> options,
-        ILogger<BrokerReconciliationWorker> logger)
+        ILogger<BrokerReconciliationWorker> logger,
+        AgentFox.Plugins.Interfaces.IUserNotifier? notifier = null)
     {
+        _notifier = notifier;
         _reader = reader;
         _state = state;
         _repository = repository;
@@ -143,6 +152,8 @@ public sealed class BrokerReconciliationWorker : BackgroundService, IMarketSessi
             if (!snapshot.Healthy)
                 _logger.LogWarning("[Reconciliation] Unhealthy: {Reason}", snapshot.Reason);
 
+            await AlertIfNeverReadyAsync(snapshot);
+
             span?.SetTag("agentfox.reconciliation.healthy", snapshot.Healthy);
             span?.SetTag("agentfox.reconciliation.fill_count", snapshot.Fills.Count);
             // An unhealthy snapshot is a refusal, not an exception: the read failed and was
@@ -160,6 +171,35 @@ public sealed class BrokerReconciliationWorker : BackgroundService, IMarketSessi
 
     public async Task RunAtMarketOpenAsync(MarketSessionOpenContext context, CancellationToken ct) =>
         await RunNowAsync(ct);
+
+    /// <summary>
+    /// "If state is unclear, alert and do nothing" (plan step 6). Order-originating workers hold until the account has
+    /// been read once (<see cref="TradingReconciliationState.HasBeenHealthy"/>); this tells the owner, once per process,
+    /// when that has not happened five minutes into a session — the moment silence stops meaning "starting up".
+    /// </summary>
+    private async Task AlertIfNeverReadyAsync(BrokerReconciliationSnapshot latest)
+    {
+        if (_notReadyAlerted || _state.HasBeenHealthy || _notifier is null) return;
+        var status = _calendar.GetStatus();
+        if (!status.IsOpen || DateTime.UtcNow - _startedUtc < NotReadyAlertAfter) return;
+        if (status.SessionOpenPkt is { } opened && status.PktNow - opened < NotReadyAlertAfter) return;
+
+        _notReadyAlerted = true;
+        try
+        {
+            await _notifier.NotifyAsync(
+                "⚠️ **Trading is waiting on the broker**\n"
+                + "• The broker account has not been read successfully since the agent started, so nothing is placed: "
+                + "no armed order fires and no new stop goes in\n"
+                + $"• Last attempt: {latest.Reason}\n"
+                + "_Check the broker connection. Orders already resting at the broker are unaffected._",
+                TradingTopics.Readiness);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[Reconciliation] Could not deliver the not-ready alert.");
+        }
+    }
 
     /// <summary>
     /// How long a refresh request waits for a burst to settle before reading the account.

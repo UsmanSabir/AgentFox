@@ -210,6 +210,7 @@ public sealed partial class TradingManager
         // submitted, while the immutable approval above remains bound to the requested maximum.
         IReadOnlyList<SellQuantityAdjustment> sellAdjustments = [];
         IReadOnlyCollection<string> liquidationUniverse = [];
+        BrokerReconciliationSnapshot? sizingRead = null;
         if (mode is not ("PAPER" or "SHADOW"))
         {
             var maxAge = TimeSpan.FromSeconds(
@@ -228,6 +229,7 @@ public sealed partial class TradingManager
                         "SELL availability check failed while refreshing the broker book: " + ex.Message);
                 }
             }
+            sizingRead = brokerState;
             var sizing = SellQuantityRule.SizeIndependentSells(
                 groups, brokerState, DateTime.UtcNow, maxAge);
             if (sizing.Problem is { } sellProblem)
@@ -300,15 +302,48 @@ public sealed partial class TradingManager
             }
         }
 
+        // The reconciliation gate (owner Q4, 2026-11-28): it blocks ENTRIES only. A group that buys needs a healthy,
+        // recent account read — and gets one on demand rather than being refused for a stale cache, which is what made
+        // a pre-open buy fail on yesterday's reconciliation. A group that only sells needs just a fresh BOOK read, the
+        // one its own sizing took above: an emergency exit is never blocked by a stale health flag.
         if (mode is "APPROVALREQUIRED" or "BOUNDEDAUTO"
             && _options.Value.RequireReconciliationHealthy)
         {
-            var reconciliation = _reconciliation.Current;
             var maxAge = TimeSpan.FromSeconds(Math.Max(10, _options.Value.ReconciliationMaxAgeSeconds));
-            if (!reconciliation.Supported || !reconciliation.Healthy
-                || DateTime.UtcNow - reconciliation.CheckedUtc > maxAge)
-                return Reject(policy.Version,
-                    "Broker reconciliation is not healthy: " + reconciliation.Reason);
+            static bool Fresh(BrokerReconciliationSnapshot s, TimeSpan age) =>
+                s.Supported && s.Healthy && DateTime.UtcNow - s.CheckedUtc <= age;
+
+            var buys = groups.SelectMany(g => g)
+                .Any(o => string.Equals(o.Action?.Trim(), "BUY", StringComparison.OrdinalIgnoreCase));
+            if (buys)
+            {
+                var reconciliation = _reconciliation.Current;
+                if (!Fresh(reconciliation, maxAge) && _brokerStateReader is not null)
+                {
+                    try
+                    {
+                        reconciliation = await _brokerStateReader.ReadSnapshotAsync(ct);
+                        _reconciliation.Update(reconciliation);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        return Reject(policy.Version, "Broker reconciliation could not be refreshed: " + ex.Message);
+                    }
+                }
+                if (!Fresh(reconciliation, maxAge))
+                    return Reject(policy.Version,
+                        "Broker reconciliation is not healthy: " + reconciliation.Reason
+                        + " A buy needs a healthy, recent read of the account.");
+            }
+            else
+            {
+                var bookAge = TimeSpan.FromSeconds(Math.Max(5, _options.Value.ReduceOnlyBookMaxAgeSeconds));
+                var read = sizingRead ?? _reconciliation.Current;
+                if (!Fresh(read, bookAge))
+                    return Reject(policy.Version,
+                        $"A sell needs a broker book read no older than {bookAge.TotalSeconds:0} s, and the latest was "
+                        + (read.Healthy ? $"{(DateTime.UtcNow - read.CheckedUtc).TotalSeconds:0} s old." : $"unhealthy: {read.Reason}"));
+            }
         }
 
         // Whether the VENUE is accepting orders — not merely whether the regular matching session is

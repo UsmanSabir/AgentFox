@@ -79,6 +79,26 @@ public sealed partial class TradingCoreEndpoints
 /// <paramref name="Active"/> when given; an unrecognised value is refused rather than guessed.</param>
 public sealed record KillSwitchRequest(bool Active, string? Reason = null, string? Mode = null);
 
+/// <summary>The owner's confirmed trading mode (plan step 6).</summary>
+public sealed record TradingModeRequest(string? Mode);
+
+/// <summary>One mode the owner may confirm, in words a non-specialist can choose between.</summary>
+public sealed record TradingModeChoice(string Mode, string Label, string Description);
+
+public static class TradingModeChoices
+{
+    public static readonly IReadOnlyList<TradingModeChoice> All =
+    [
+        new("ApprovalRequired", "Ask me before each order",
+            "Nothing is sent until you approve it — except protective stops, which are placed and re-placed each "
+            + "session without asking, so your positions stay protected."),
+        new("BoundedAuto", "Trade automatically within my limits",
+            "Orders go to your broker without asking, within the limits in Settings."),
+        new("Paper", "Practice only",
+            "Everything is simulated. Nothing is sent to your broker — not even protective stops.")
+    ];
+}
+
 /// <summary>A ticker to add to the monitoring watchlist.</summary>
 public sealed record WatchlistSymbolRequest(string? Symbol);
 

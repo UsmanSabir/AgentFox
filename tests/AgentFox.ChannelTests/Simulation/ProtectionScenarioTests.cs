@@ -265,6 +265,77 @@ public sealed class ProtectionScenarioTests
             new TradingAgent.Config.TradingAgentOptions().ProtectiveStopLiveCoverage);
     }
 
+    // ── Step 6: new accounts trade in ApprovalRequired ─────────────────────────
+
+    /// <summary>
+    /// Found while building step 6: in ApprovalRequired with the default approval mode ("Always"), every unattended
+    /// order was denied — including the daily re-placement of every protective stop — so an account in that mode had
+    /// no protection at all. Protection is now the owner's standing instruction and is placed without asking.
+    /// </summary>
+    [TestMethod]
+    public async Task InApprovalRequired_ProtectiveStopsAreStillPlaced_ButABuyStillWaitsForAPerson()
+    {
+        using var h = new ProtectionHarness(0m, Symbol);
+        h.Options.ExecutionMode = "ApprovalRequired";
+        await h.ProtectHoldingAsync(Symbol, 100, 230m, trigger: 220m, limit: 217.80m);
+
+        await h.RunPassAsync();
+        var buy = await h.Manager.ExecuteGroupsAsync([[Buy()]], "unapproved-entry");
+
+        Assert.AreEqual(100, h.Broker.RestingSells(Symbol).Single().Remaining, "the stop is placed");
+        Assert.IsFalse(h.Notifier.Sent.Any(s => s.Topic?.EndsWith("unauthorised") == true));
+        Assert.IsFalse(buy.Executed, "an entry with no approval is refused");
+        Assert.AreEqual(1, h.Broker.PlacementCalls);
+    }
+
+    /// <summary>Owner Q4: with the reconciliation gate on, a sell needs only a fresh book read, a buy a fresh account read.</summary>
+    [TestMethod]
+    public async Task WithTheReconciliationGateOn_AStopIsPlacedOnItsOwnFreshBookRead_AndABuyReadsTheAccountOnDemand()
+    {
+        using var h = new ProtectionHarness(0m, Symbol);
+        h.Options.RequireReconciliationHealthy = true;   // nothing has reconciled yet: the cached state is "not run"
+        await h.ProtectHoldingAsync(Symbol, 100, 230m, trigger: 220m, limit: 217.80m);
+
+        await h.RunPassAsync();
+        var buy = await h.Manager.ExecuteGroupsAsync([[Buy()]], "entry");
+
+        Assert.AreEqual(1, h.Broker.RestingSells(Symbol).Count, "the sell used the read its own sizing took");
+        Assert.IsTrue(buy.Executed, buy.Reason);
+    }
+
+    [TestMethod]
+    public async Task WithTheReconciliationGateOn_ABuyIsRefusedWhenTheAccountCannotBeRead()
+    {
+        using var h = new ProtectionHarness(0m, Symbol);
+        h.Options.RequireReconciliationHealthy = true;
+        h.Broker.FailNextRead();
+
+        var buy = await h.Manager.ExecuteGroupsAsync([[Buy()]], "entry");
+
+        Assert.IsFalse(buy.Executed);
+        StringAssert.Contains(buy.Reason, "A buy needs a healthy, recent read");
+    }
+
+    [TestMethod]
+    public void ReadinessIsReachedOnTheFirstHealthyReadAndNotLostAfterwards()
+    {
+        var state = new TradingAgent.Reconciliation.TradingReconciliationState();
+        Assert.IsFalse(state.HasBeenHealthy);
+
+        state.Update(new(true, false, "down", DateTime.UtcNow));
+        Assert.IsFalse(state.HasBeenHealthy);
+        state.Update(new(true, true, "ok", DateTime.UtcNow));
+        state.Update(new(true, false, "down again", DateTime.UtcNow));
+        Assert.IsTrue(state.HasBeenHealthy, "reconciled once since start; later health is the gate's own business");
+    }
+
+    [TestMethod]
+    public void TheApprovalRequiredChoiceSaysProtectiveStopsAreTheException()
+    {
+        var choice = TradingAgent.TradingModeChoices.All.Single(c => c.Mode == "ApprovalRequired");
+        StringAssert.Contains(choice.Description, "except protective stops");
+    }
+
     [TestMethod]
     public async Task AStopCancelledAtTheBrokersOwnAppIsPlacedAgain()
     {
