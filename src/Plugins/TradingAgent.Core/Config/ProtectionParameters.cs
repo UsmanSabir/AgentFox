@@ -41,6 +41,9 @@ public static class ProtectionParameters
         new("Protective stops", "StopLimitOffsetPct", "% below the trigger",
             "Default distance of a stop-limit's limit below its trigger; a position plan may set its own."),
 
+        new("Exit rules", "ExitRulesAction", "Off / Propose / Act",
+            "What a position plan's exit rules do when they fire: propose a sale you approve, or arm it.", "exitRulesAction"),
+
         new("Halts", "MarketHaltHandling", "Off / Shadow / On", "Gate the workers on a detected market halt and its reopen."),
         new("Halts", "HaltIndexSymbol", "index symbol", "The index whose move starts a halt."),
         new("Halts", "HaltIndexMovePercent", "% from previous close", "The index move, either way, that starts a halt."),

@@ -52,8 +52,14 @@ public sealed record PositionPlan
 
     public bool TimeStopExits { get; init; }
 
-    /// <summary>Relative-strength exit against the KSE-100. Off by default; inactive until step 10.</summary>
+    /// <summary>Relative-strength exit against the KSE-100. Off by default.</summary>
     public bool RelativeStrengthExit { get; init; }
+
+    /// <summary>When the position was opened, for the time stop. Null = the time stop has nothing to count from.</summary>
+    public DateOnly? OpenedOn { get; init; }
+
+    /// <summary>Opens below the hard stop's trigger → propose (or, opted in, arm) an exit. Off by default.</summary>
+    public bool GapExit { get; init; }
 
     /// <summary>Queue a sell at the lower circuit when the stock locks. Off, and behind its global flag, until the broker
     /// confirms such a sell is accepted.</summary>

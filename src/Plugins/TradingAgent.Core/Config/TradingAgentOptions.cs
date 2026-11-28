@@ -143,6 +143,13 @@ public class TradingAgentOptions
     /// </summary>
     public decimal StopLimitOffsetPct { get; set; } = 1m;
 
+    /// <summary>
+    /// What a position plan's exit rules (closing price, gap, time stop, relative strength) do when they fire: Off,
+    /// Propose (a trade proposal a person approves) or Act (an armed SELL). Propose by default for every account (owner,
+    /// 2026-11-28); the Settings value <c>exitRulesAction</c> opts a user in to Act.
+    /// </summary>
+    public TradingAgent.Watchlist.ExitRuleAction ExitRulesAction { get; set; } = TradingAgent.Watchlist.ExitRuleAction.Propose;
+
     /// <summary>Seconds between market-state evaluations inside a session. Default 15.</summary>
     public int MarketStatePollSeconds { get; set; } = 15;
 

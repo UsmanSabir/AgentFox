@@ -26,6 +26,12 @@ Where a Settings key is listed, the value saved in Settings overrides the startu
 | `ProtectiveStopCatastrophicPercent` | `5` | % below the trigger | — | Default catastrophic level; a position plan may set its own. |
 | `StopLimitOffsetPct` | `1` | % below the trigger | — | Default distance of a stop-limit's limit below its trigger; a position plan may set its own. |
 
+## Exit rules
+
+| Parameter | Default | Unit | Settings key | Meaning |
+|---|---|---|---|---|
+| `ExitRulesAction` | `Propose` | Off / Propose / Act | `exitRulesAction` | What a position plan's exit rules do when they fire: propose a sale you approve, or arm it. |
+
 ## Halts
 
 | Parameter | Default | Unit | Settings key | Meaning |

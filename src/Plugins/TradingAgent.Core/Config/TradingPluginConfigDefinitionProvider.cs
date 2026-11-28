@@ -86,6 +86,16 @@ public sealed class TradingPluginConfigDefinitionProvider : IPluginConfigDefinit
                 },
                 new PluginConfigFieldDefinition
                 {
+                    Key = "exitRulesAction",
+                    Label = "Exit rules",
+                    Description = "What a position plan's exit rules do when they fire. Propose: a trade proposal you " +
+                                  "approve (the default). Act: the sale is armed (in ApprovalRequired it still asks). Off.",
+                    Type = "select",
+                    DefaultValue = options.ExitRulesAction.ToString(),
+                    Options = ["Off", "Propose", "Act"]
+                },
+                new PluginConfigFieldDefinition
+                {
                     Key = "dailyLossLimitPct",
                     Label = "Daily loss limit (%)",
                     Description = "When the day's loss reaches this percent of the start-of-day value, new buys switch off " +

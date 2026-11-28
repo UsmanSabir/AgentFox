@@ -402,6 +402,22 @@ public sealed class ApprovalGate
             + $"(severity {context.AlertSeverity ?? "n/a"}, {orders.Count} order(s)).");
     }
 
+    /// <summary>
+    /// The approval a person gives by clicking "execute" on exact orders shown to them — a proposal, today. In
+    /// ApprovalRequired that click IS the asking the mode exists for, so it gets the same single-use intent the host's
+    /// approval prompt produces (plan step 10: without it, every exit proposal was unexecutable in ApprovalRequired, the
+    /// mode new accounts start in). The kill switch, entries-off and the risk engine still apply at the boundary.
+    /// </summary>
+    public ExecutionAuthorization AuthorizeAttended(
+        IReadOnlyList<IReadOnlyList<TradingSignal>> groups, string sourceMessage, string actor)
+    {
+        var intent = ApprovalIntent.Create(groups, sourceMessage, _policy.Current().Version,
+            TimeSpan.FromSeconds(Math.Max(10, _options.Value.ApprovalIntentTtlSeconds)));
+        _intents.Register(intent);
+        _logger.LogWarning("[Approval] Approved by {Actor} on the orders shown: intent {IntentId}.", actor, intent.IntentId);
+        return ExecutionAuthorization.HostToolGate(actor, intent);
+    }
+
     /// <summary>Auto-approvals used this session, for the status endpoint.</summary>
     public int AutoApprovedThisSession
     {

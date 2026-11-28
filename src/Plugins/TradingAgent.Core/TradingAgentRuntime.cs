@@ -276,6 +276,9 @@ public sealed class TradingAgentRuntime
         services.AddHostedService<TradingAgent.Observability.TradingHeartbeatSender>();
         // Daily loss limit (plan step 8): switches entries off past the limit, back on at the next session.
         services.AddHostedService<TradingAgent.Risk.DailyLossGuard>();
+        // Position-plan exit rules (plan step 10): proposal-only unless the user opts in to Act.
+        services.AddSingleton<TradingAgent.Watchlist.ExitRuleWorker>();
+        services.AddHostedService(sp => sp.GetRequiredService<TradingAgent.Watchlist.ExitRuleWorker>());
 
         // Halt detection (plan step 5). One instance, read by the stop worker and the armed-order monitor through
         // IMarketPhase; Shadow by default (TradingAgentOptions.MarketHaltHandling).

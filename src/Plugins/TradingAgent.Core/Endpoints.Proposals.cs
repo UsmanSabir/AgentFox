@@ -125,15 +125,30 @@ public sealed partial class TradingCoreEndpoints
                 // Each order as its own group: they are independent, so one failing must not skip the
                 // rest (grouping means "stop at the first failure", which is for a buy→sell pair).
                 var groups = orders.Select(o => (IReadOnlyList<TradingSignal>)[o]).ToList();
-                // Attendant, not HostToolGate: it records that a person clicked — which is what a
-                // manual-only symbol needs to know — without minting the approval intent that
-                // ApprovalRequired mode demands. That mode still refuses this endpoint exactly as it
-                // did before; claiming the stronger authorization here would have quietly changed it.
-                var result = await manager.ExecuteGroupsAsync(
-                    groups, $"proposal:{proposalId}",
-                    ExecutionAuthorization.Attendant(
-                        http.User.Identity?.Name ?? "trading-dashboard"),
-                    ct);
+
+                // A protective stop holding the shares would size an approved SELL to nothing (the broker sizes every
+                // sell against custody minus resting sells). Stand it down first, as an armed take-profit does; it is
+                // re-placed over what remains (plan step 10, found when exit rules began proposing sales).
+                var releaser = http.RequestServices.GetService<IProtectiveStopReleaser>();
+                var released = false;
+                if (releaser is not null)
+                    foreach (var sell in orders.Where(o => o.Action == "SELL" && o.Quantity is > 0))
+                        released |= (await releaser.ReleaseForSellAsync(sell.Symbol, sell.Quantity!.Value, ct)).Released;
+
+                // The person clicking "execute" on these exact orders IS an approval. Until 2026-11-28 this passed only
+                // Attendant, which ApprovalRequired refuses, so no proposal could ever execute in the mode new accounts
+                // start in. In ApprovalRequired it now gets the same single-use intent the host's approval prompt mints;
+                // in every other mode nothing changes.
+                var actor = http.User.Identity?.Name ?? "trading-dashboard";
+                var approvalRequired = http.RequestServices.GetRequiredService<TradingPolicyProvider>().Current()
+                    .ExecutionMode.Trim().Equals("ApprovalRequired", StringComparison.OrdinalIgnoreCase);
+                var authorization = approvalRequired
+                    ? http.RequestServices.GetRequiredService<ApprovalGate>()
+                        .AuthorizeAttended(groups, $"proposal:{proposalId}", actor)
+                    : ExecutionAuthorization.Attendant(actor);
+
+                var result = await manager.ExecuteGroupsAsync(groups, $"proposal:{proposalId}", authorization, ct);
+                if (released && !result.Executed) releaser!.RestoreSoon();
 
                 await repository.TrySetProposalStateAsync(
                     proposalId, "executing",

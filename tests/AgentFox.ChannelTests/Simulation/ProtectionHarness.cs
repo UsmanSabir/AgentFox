@@ -99,6 +99,7 @@ internal sealed class ProtectionHarness : IDisposable
     }
 
     public MarketStateService MarketState { get; }
+    public ApprovalGate Approvals => _approvals;
     private readonly CompositeLiveQuoteSource _quotes;
 
     public DateOnly Today => DateOnly.FromDateTime(Calendar.GetStatus().PktNow);
