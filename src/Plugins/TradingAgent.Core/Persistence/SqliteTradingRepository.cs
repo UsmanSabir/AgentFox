@@ -2100,7 +2100,9 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                     -- market. Opt-in per stop; defaults to 0 so no existing stop changes behaviour.
                     sell_at_market_if_missed INTEGER NOT NULL DEFAULT 0,
                     -- NULL = stays where it was set; N = an edition raises it after each close to close − N × ATR14.
-                    trail_atr_multiple TEXT NULL
+                    trail_atr_multiple TEXT NULL,
+                    -- Who authorised this stop to sit below the one it replaces; NULL for every raise (the audit row).
+                    lowering_authorized_by TEXT NULL
                 );
                 CREATE INDEX IF NOT EXISTS ix_protective_stops_state
                     ON protective_stops(state, symbol);
@@ -2369,6 +2371,9 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
             // NULL for every existing row: none of them trails.
             await AddColumnIfMissingAsync(
                 connection, "protective_stops", "trail_atr_multiple", "TEXT NULL", ct);
+            // NULL for every existing row: none was a lowering anybody authorised.
+            await AddColumnIfMissingAsync(
+                connection, "protective_stops", "lowering_authorized_by", "TEXT NULL", ct);
             await AddColumnIfMissingAsync(
                 connection, "persistent_order_intents", "operator_originated",
                 "INTEGER NOT NULL DEFAULT 0", ct);
@@ -3354,19 +3359,29 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
     {
         await EnsureInitializedAsync(ct);
         await using var connection = await OpenAsync(ct);
+        // A write transaction from the first statement (Microsoft.Data.Sqlite's default is not deferred), so the
+        // guard below reads the predecessor under the same lock the insert takes: two writers racing to replace one
+        // stop are serialised here and the second one sees the first's successor.
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(ct);
+
+        if (stop.SupersedesStopId is { Length: > 0 } predecessorId)
+            await GuardSupersedeAsync(connection, transaction, stop, predecessorId, ct);
+
         var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             INSERT INTO protective_stops
                 (stop_id, symbol, parent_armed_id, parent_execution_id, parent_persistent_id,
                  stop_trigger, stop_limit, desired_qty, recurring,
                  state, baseline_qty, placed_qty, backstop_armed_id, created_utc, state_reason, note,
                  supersedes_stop_id, operator_originated, take_profit_price, take_profit_armed_id,
-                 sell_at_market_if_missed, trail_atr_multiple)
+                 sell_at_market_if_missed, trail_atr_multiple, lowering_authorized_by)
             VALUES ($id, $symbol, $parent, $parentExec, $parentIntent,
                     $trigger, $limit, $desired, $recurring,
                     $state, $baseline, $placed, $backstop, $created, $reason, $note, $supersedes,
-                    $operator, $targetPrice, $targetArmed, $marketIfMissed, $trailAtr)
+                    $operator, $targetPrice, $targetArmed, $marketIfMissed, $trailAtr, $loweredBy)
             """;
+        command.Parameters.AddWithValue("$loweredBy", (object?)stop.LoweringAuthorizedBy ?? DBNull.Value);
         command.Parameters.AddWithValue("$id", stop.StopId);
         command.Parameters.AddWithValue("$symbol", stop.Symbol);
         command.Parameters.AddWithValue("$parent", stop.ParentArmedId ?? (object)DBNull.Value);
@@ -3395,7 +3410,58 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         command.Parameters.AddWithValue("$trailAtr", stop.TrailAtrMultiple is { } trail
             ? trail.ToString(CultureInfo.InvariantCulture) : DBNull.Value);
         await command.ExecuteNonQueryAsync(ct);
+        await transaction.CommitAsync(ct);
+
+        if (stop.LoweringAuthorizedBy is { Length: > 0 } by && stop.SupersedesStopId is not null)
+            _logger.LogWarning(
+                "[ProtectiveStops] {StopId} ({Symbol}) saved at {Trigger}, replacing {Predecessor}; a lower trigger, if "
+                + "it is one, was authorised by {By}.", stop.StopId, stop.Symbol, stop.StopTrigger, stop.SupersedesStopId, by);
         return stop.StopId;
+    }
+
+    /// <summary>
+    /// The two rules every replacement stop must keep, checked inside the save's transaction: it may not sit below
+    /// its open predecessor unless someone authorised that (<see cref="ProtectiveStop.LoweringAuthorizedBy"/>), and a
+    /// stop may have only one open successor at a time. A closed or missing predecessor imposes neither — there is
+    /// nothing left for the new stop to be lower than, or to race.
+    /// </summary>
+    private static async Task GuardSupersedeAsync(
+        SqliteConnection connection, SqliteTransaction transaction, ProtectiveStop successor, string predecessorId,
+        CancellationToken ct)
+    {
+        var read = connection.CreateCommand();
+        read.Transaction = transaction;
+        read.CommandText = "SELECT stop_trigger, state FROM protective_stops WHERE stop_id = $id";
+        read.Parameters.AddWithValue("$id", predecessorId);
+        decimal? predecessorTrigger = null;
+        await using (var reader = await read.ExecuteReaderAsync(ct))
+        {
+            if (await reader.ReadAsync(ct) && reader.GetString(1) != "closed"
+                && decimal.TryParse(reader.GetString(0), NumberStyles.Number, CultureInfo.InvariantCulture, out var t))
+                predecessorTrigger = t;
+        }
+        if (predecessorTrigger is not { } floor) return;
+
+        if (successor.StopTrigger < floor && string.IsNullOrWhiteSpace(successor.LoweringAuthorizedBy))
+            throw new ProtectiveStopLoweringRefusedException(
+                $"A replacement {successor.Symbol} stop at {successor.StopTrigger} would sit BELOW the {floor} stop it "
+                + "replaces, and nobody authorised lowering it. Stops only move up automatically; the existing stop "
+                + "stays in place.");
+
+        var rival = connection.CreateCommand();
+        rival.Transaction = transaction;
+        rival.CommandText = """
+            SELECT stop_id, stop_trigger FROM protective_stops
+             WHERE supersedes_stop_id = $id AND state <> 'closed' AND stop_id <> $self
+             LIMIT 1
+            """;
+        rival.Parameters.AddWithValue("$id", predecessorId);
+        rival.Parameters.AddWithValue("$self", successor.StopId);
+        await using var rivals = await rival.ExecuteReaderAsync(ct);
+        if (await rivals.ReadAsync(ct))
+            throw new ProtectiveStopSupersedeConflictException(
+                $"The {successor.Symbol} stop {predecessorId} is already being replaced, by stop {rivals.GetString(0)} at "
+                + $"{rivals.GetString(1)}. Only one replacement may be open at a time; that one stands.");
     }
 
     /// <summary>
@@ -3442,7 +3508,8 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                    state, baseline_qty, placed_qty, last_placed_date, last_order_no, backstop_armed_id,
                    created_utc, fill_confirmed_utc, closed_utc, state_reason, note, supersedes_stop_id,
                    operator_originated, parent_execution_id, parent_persistent_id,
-                   take_profit_price, take_profit_armed_id, sell_at_market_if_missed, trail_atr_multiple
+                   take_profit_price, take_profit_armed_id, sell_at_market_if_missed, trail_atr_multiple,
+                   lowering_authorized_by
             FROM protective_stops
             {(openOnly ? "WHERE state <> 'closed'" : "")}
             ORDER BY created_utc DESC
@@ -3640,7 +3707,8 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
         TakeProfitPrice      = ParseDecimal(reader, 22),
         TakeProfitArmedId    = reader.IsDBNull(23) ? null : reader.GetString(23),
         SellAtMarketIfMissed = !reader.IsDBNull(24) && reader.GetInt64(24) != 0,
-        TrailAtrMultiple     = reader.FieldCount > 25 ? ParseDecimal(reader, 25) : null
+        TrailAtrMultiple     = reader.FieldCount > 25 ? ParseDecimal(reader, 25) : null,
+        LoweringAuthorizedBy = reader.FieldCount > 26 && !reader.IsDBNull(26) ? reader.GetString(26) : null
     };
 
     private static object Money(decimal? value) => value is null

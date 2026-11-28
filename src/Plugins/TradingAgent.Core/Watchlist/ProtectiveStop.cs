@@ -220,7 +220,35 @@ public sealed record ProtectiveStop
     /// that stays where it was set. Core never reads it except to CARRY it: a stop it resizes keeps trailing.
     /// </summary>
     public decimal? TrailAtrMultiple { get; init; }
+
+    /// <summary>
+    /// Who authorised this stop to sit LOWER than the one it replaces, when it does — and the audit record that
+    /// they did.
+    ///
+    /// <para>
+    /// <b>Stops only ever move up unless someone with the authority says otherwise.</b> Since 2026-11-28 the
+    /// repository refuses to save a successor (<see cref="SupersedesStopId"/>) whose trigger is below its open
+    /// predecessor's unless this names who allowed it: a person's explicit confirmation (owner's decision: an
+    /// operator may lower a stop with an explicit confirm and an audit row), or a corporate-action adjustment. It
+    /// is checked inside the save's own transaction rather than by each caller, because two writers that each
+    /// checked a level read a moment earlier — the overnight ATR trail and a strategy's raise — could otherwise
+    /// lower a stop between them. Automation never sets it.
+    /// </para>
+    /// </summary>
+    public string? LoweringAuthorizedBy { get; init; }
 }
+
+/// <summary>
+/// A successor stop was refused because it would sit below the open stop it replaces and nobody authorised that
+/// (<see cref="ProtectiveStop.LoweringAuthorizedBy"/>). The predecessor is untouched and still protects.
+/// </summary>
+public sealed class ProtectiveStopLoweringRefusedException(string message) : InvalidOperationException(message);
+
+/// <summary>
+/// A successor stop was refused because the stop it replaces already has an open successor: two writers raced to
+/// replace the same stop, and only the first may. The earlier successor stands.
+/// </summary>
+public sealed class ProtectiveStopSupersedeConflictException(string message) : InvalidOperationException(message);
 
 /// <summary>One row read from the broker's outstanding (resting) order book.</summary>
 /// <param name="Quantity">Remaining quantity, when the grid exposed it.</param>
