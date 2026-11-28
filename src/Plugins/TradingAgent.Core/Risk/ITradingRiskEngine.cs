@@ -23,9 +23,15 @@ public interface ITradingRiskEngine
     /// when the symbol is outside the entry universe; BUYs remain restricted to the selected universe.
     /// Null means no extra liquidation symbols are known.
     /// </param>
+    /// <param name="tradingStopOverride">
+    /// The current runtime trading stop (from <see cref="TradingAgent.Config.TradingPolicySnapshot.TradingStop"/>).
+    /// Omit to fall back to the static appsettings value. A true <paramref name="killSwitchOverride"/> is a
+    /// FullStop whatever this says.
+    /// </param>
     RiskValidationResult Validate(
         IReadOnlyList<IReadOnlyList<TradingSignal>> groups,
         bool? killSwitchOverride = null,
         IReadOnlyCollection<string>? executionUniverseOverride = null,
-        IReadOnlyCollection<string>? liquidationUniverseOverride = null);
+        IReadOnlyCollection<string>? liquidationUniverseOverride = null,
+        TradingAgent.Config.TradingStopMode? tradingStopOverride = null);
 }

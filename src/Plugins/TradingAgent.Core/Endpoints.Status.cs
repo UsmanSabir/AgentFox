@@ -79,6 +79,8 @@ public sealed partial class TradingCoreEndpoints
                 market,
                 reconciliation = brokerState,
                 killSwitch = policy.KillSwitch,
+                tradingStop = policy.TradingStop.ToWire(),
+                entriesBlocked = policy.EntriesBlocked,
                 reconciliationFresh,
                 liveExecutionReady = liveMode
                     && policy.AutoExecute
@@ -118,13 +120,37 @@ public sealed partial class TradingCoreEndpoints
             ILogger<TradingCoreEndpoints> logger,
             CancellationToken ct) =>
         {
+            TradingStopMode mode;
+            if (body.Mode is { Length: > 0 } requested)
+            {
+                if (TradingStopModes.Parse(requested) is not { } parsed)
+                    return Results.BadRequest(new
+                    {
+                        error = "invalid_mode",
+                        message = "Mode must be Off, EntriesOff or FullStop."
+                    });
+                mode = parsed;
+            }
+            else
+            {
+                // An older caller that knows only the switch keeps exactly the behaviour it always had.
+                mode = body.Active ? TradingStopMode.FullStop : TradingStopMode.Off;
+            }
+
+            // Both keys, always together: tradingStop is authoritative, and killSwitch is kept equal to
+            // "FullStop" so anything that still reads the legacy key reads the same stop.
             await configManager.MergeConfigAsync("trading-agent", new Dictionary<string, object?>
             {
-                ["killSwitch"] = body.Active
+                ["tradingStop"] = mode.ToWire(),
+                ["killSwitch"] = mode == TradingStopMode.FullStop
             });
-            logger.LogWarning("[TradingAgent] Kill switch {State} via web API. Reason: {Reason}",
-                body.Active ? "ACTIVATED" : "cleared", body.Reason ?? "(none given)");
-            return Results.Ok(new { killSwitch = body.Active });
+            logger.LogWarning("[TradingAgent] Trading stop set to {Mode} via web API. Reason: {Reason}",
+                mode.ToWire(), body.Reason ?? "(none given)");
+            return Results.Ok(new
+            {
+                killSwitch = mode == TradingStopMode.FullStop,
+                tradingStop = mode.ToWire()
+            });
         }).RequireAuthorization("ManagementAdministrator");
 
         // The dashboard speaks in outcomes ("book profit", "sell if it drops") rather than leaking

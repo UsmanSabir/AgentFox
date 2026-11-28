@@ -74,7 +74,10 @@ public sealed partial class TradingCoreEndpoints
 }
 
 
-public sealed record KillSwitchRequest(bool Active, string? Reason = null);
+/// <param name="Active">Legacy switch: true with no <paramref name="Mode"/> is FullStop, false is Off.</param>
+/// <param name="Mode"><c>Off</c>, <c>EntriesOff</c> or <c>FullStop</c> (snake_case accepted). Wins over
+/// <paramref name="Active"/> when given; an unrecognised value is refused rather than guessed.</param>
+public sealed record KillSwitchRequest(bool Active, string? Reason = null, string? Mode = null);
 
 /// <summary>A ticker to add to the monitoring watchlist.</summary>
 public sealed record WatchlistSymbolRequest(string? Symbol);

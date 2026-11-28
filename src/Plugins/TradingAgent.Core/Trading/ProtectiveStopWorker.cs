@@ -1248,7 +1248,7 @@ public sealed class ProtectiveStopWorker
         };
 
         var groups = new[] { (IReadOnlyList<TradingSignal>)[signal] };
-        var key    = $"protective-stop:{stop.StopId}:{today:yyyyMMdd}:{decision.Quantity}";
+        var key    = PlacementSourceKey(stop, today, decision.Quantity);
 
         var approval = _approvals.Decide(
             groups, key, new ApprovalContext(null, "protective-stop", stop.OperatorOriginated));
@@ -1427,6 +1427,25 @@ public sealed class ProtectiveStopWorker
             + "_Retrying on a widening delay. Until it succeeds the position is covered only by the "
             + "local backstop, which needs AgentFox running._");
     }
+
+    /// <summary>
+    /// The execution boundary's source key for one native placement.
+    ///
+    /// <para>
+    /// <b>It names the order this one follows.</b> The boundary deduplicates on source + request, so a key
+    /// of stop, session and quantity alone would treat a second placement of the same size on the same day
+    /// as the first one asked again, and replay it. That second placement is real whenever the first left
+    /// the book mid-session — a halt that cancels everything is the case it exists for. Naming the last
+    /// order placed TODAY makes each successive placement its own instruction, while the same pass asked
+    /// twice (nothing new placed in between) still produces the same key and is still deduplicated. A
+    /// refusal needs no part in this: the boundary retries a refused key as a numbered attempt.
+    /// </para>
+    /// </summary>
+    internal static string PlacementSourceKey(ProtectiveStop stop, DateOnly today, int quantity) =>
+        $"protective-stop:{stop.StopId}:{today:yyyyMMdd}:{quantity}:"
+        + (stop.LastPlacedSessionDate == today && stop.LastOrderNo is { Length: > 0 } previous
+            ? $"after:{previous.Trim()}"
+            : "first");
 
     // ── Supersession ────────────────────────────────────────────────────────────
 

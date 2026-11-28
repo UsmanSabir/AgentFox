@@ -79,10 +79,27 @@ public sealed class StopLossOrderTests
             "A stop order is still an order: it cannot bypass the tradable universe.");
     }
 
+    /// <summary>
+    /// Was <c>StopLoss_StillObeysTheOrderValueCap</c>, asserting the opposite. Flipped 2026-11-28 (owner): the
+    /// value caps bound NEW exposure, and a protective SELL only shrinks a position — refusing it left a
+    /// holding worth more than the cap with no native stop at all.
+    /// </summary>
     [TestMethod]
-    public void StopLoss_StillObeysTheOrderValueCap()
+    public void StopLoss_ASellIsExemptFromTheOrderValueCap()
     {
         var order = Stop("SELL", trigger: 300m, limit: 297m);
+        order.Quantity = 100_000;
+
+        var result = Validate(order);
+
+        Assert.IsFalse(result.Violations.Any(v => v.Contains("MaxOrderValuePkr", StringComparison.Ordinal)),
+            string.Join(" ", result.Violations));
+    }
+
+    [TestMethod]
+    public void StopLoss_ABuyStopStillObeysTheOrderValueCap()
+    {
+        var order = Stop("BUY", trigger: 300m, limit: 303m);
         order.Quantity = 100_000;
 
         var result = Validate(order);

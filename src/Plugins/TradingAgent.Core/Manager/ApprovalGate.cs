@@ -143,9 +143,22 @@ public sealed class ApprovalGate
     public (bool WillFireUnattended, string Explanation) DescribeUnattendedPolicy()
     {
         var policy = _policy.Current();
+        var (fires, explanation) = DescribeUnattendedPolicy(policy);
 
+        // Entries off does not change whether a SELL fires, and this answer covers orders of either side,
+        // so it qualifies the answer rather than replacing it: "will NOT send" would be false for every
+        // protective stop and take-profit, which are exactly what the mode keeps working.
+        return policy.TradingStop == TradingAgent.Config.TradingStopMode.EntriesOff
+            ? (fires, explanation + " Entries are switched off, so a BUY will be refused; sells that reduce a "
+                                  + "position still go.")
+            : (fires, explanation);
+    }
+
+    private (bool WillFireUnattended, string Explanation) DescribeUnattendedPolicy(
+        TradingAgent.Config.TradingPolicySnapshot policy)
+    {
         if (policy.KillSwitch)
-            return (false, "The kill switch is active: nothing will be sent.");
+            return (false, "The kill switch is active (FullStop): nothing will be sent, protective stops included.");
 
         if (!policy.AutoExecute)
             return (false, "AutoExecute is off, so no order will be submitted regardless of approval mode.");
@@ -223,8 +236,16 @@ public sealed class ApprovalGate
         if (policy.KillSwitch)
         {
             Disarm("kill-switch");
-            return ApprovalDecision.Denied("The kill switch is active.");
+            return ApprovalDecision.Denied("The kill switch is active (FullStop).");
         }
+
+        // Entries off refuses a group that BUYS and nothing else: protective stops, take-profits and exits
+        // keep their authorisation, which is the whole point of the mode. The approval window is left
+        // armed, since a SELL may still need it.
+        if (policy.TradingStop == TradingAgent.Config.TradingStopMode.EntriesOff
+            && groups.SelectMany(g => g).Any(o => string.Equals(o.Action?.Trim(), "BUY", StringComparison.OrdinalIgnoreCase)))
+            return ApprovalDecision.Denied(
+                "Entries are switched off (EntriesOff): no BUY is sent; sells that reduce a position still are.");
 
         // A manual-only symbol outranks the execution mode, and is therefore checked BEFORE the
         // BoundedAuto exit below — which returns "no approval needed" and would otherwise wave through

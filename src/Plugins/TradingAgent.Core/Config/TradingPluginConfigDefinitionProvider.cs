@@ -74,10 +74,22 @@ public sealed class TradingPluginConfigDefinitionProvider : IPluginConfigDefinit
                 },
                 new PluginConfigFieldDefinition
                 {
+                    Key = "tradingStop",
+                    Label = "Trading stop",
+                    Description = "EntriesOff: no new buys; protective stops, take-profits and exits keep working. " +
+                                  "FullStop: nothing is sent, protective stops included — PSX clears every resting " +
+                                  "order at the close, so positions are unprotected from the next session on. " +
+                                  "Takes effect on the next order without a restart.",
+                    Type = "select",
+                    DefaultValue = options.TradingStop.ToWire(),
+                    Options = ["Off", "EntriesOff", "FullStop"]
+                },
+                new PluginConfigFieldDefinition
+                {
                     Key = "killSwitch",
-                    Label = "Kill switch",
-                    Description = "Emergency stop — blocks every order immediately, independent of AutoExecute, " +
-                                  "execution mode, and the LLM. Takes effect on the next order without a restart.",
+                    Label = "Kill switch (FullStop)",
+                    Description = "Legacy emergency stop. On is FullStop and overrides Trading stop; to resume, turn " +
+                                  "this off AND set Trading stop to Off.",
                     Type = "boolean",
                     DefaultValue = options.KillSwitch
                 }

@@ -136,7 +136,8 @@ internal sealed class ProtectionHarness : IDisposable
     /// <summary>
     /// Submits a protective stop's native order the way the worker does — same signal, same idempotency
     /// key, same approval — so a test can see what the execution boundary does with a same-day re-place.
-    /// Mirrors <c>ProtectiveStopWorker.PlaceNativeStopAsync</c>; keep the two in step.
+    /// Mirrors <c>ProtectiveStopWorker.PlaceNativeStopAsync</c>; keep the two in step. Pass the stop as the
+    /// ledger holds it NOW (see <see cref="ReloadAsync"/>): the key names the last order placed today.
     /// </summary>
     public Task<TradingExecutionResult> SubmitAsWorkerWouldAsync(ProtectiveStop stop, int quantity)
     {
@@ -153,7 +154,7 @@ internal sealed class ProtectionHarness : IDisposable
             RawMessage = $"protective-stop:{stop.StopId}"
         };
         var groups = new[] { (IReadOnlyList<TradingSignal>)[signal] };
-        var key = $"protective-stop:{stop.StopId}:{Today:yyyyMMdd}:{quantity}";
+        var key = ProtectiveStopWorker.PlacementSourceKey(stop, Today, quantity);
         var approval = _approvals.Decide(groups, key,
             new ApprovalContext(null, "protective-stop", stop.OperatorOriginated));
         return Manager.ExecuteGroupsAsync(groups, key, approval.Authorization);

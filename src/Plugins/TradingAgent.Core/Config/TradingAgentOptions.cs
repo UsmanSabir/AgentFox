@@ -141,8 +141,18 @@ public class TradingAgentOptions
     /// <summary>Require signed WhatsApp bridge webhooks by default.</summary>
     public bool RequireSignedWebhooks { get; set; } = true;
 
-    /// <summary>Emergency execution stop independent of AutoExecute and the LLM.</summary>
+    /// <summary>
+    /// Legacy emergency stop: true means <see cref="TradingStopMode.FullStop"/>. Kept so every saved
+    /// configuration keeps its meaning; new code reads <see cref="TradingPolicySnapshot.TradingStop"/>.
+    /// </summary>
     public bool KillSwitch { get; set; }
+
+    /// <summary>
+    /// The startup trading stop. <see cref="TradingStopMode.EntriesOff"/> refuses BUYs and keeps every
+    /// position-reducing SELL — protective stops included — working. The runtime <c>tradingStop</c> key
+    /// overrides it without a restart. See <see cref="TradingStopMode"/>.
+    /// </summary>
+    public TradingStopMode TradingStop { get; set; } = TradingStopMode.Off;
 
     /// <summary>Configured execution universe when <see cref="ExecutionUniverseSource"/> is AllowedSymbols.</summary>
     public List<string> AllowedSymbols { get; set; } = [];

@@ -281,23 +281,39 @@ public class ChannelManager
                 var stateWord = (spaceIdx < 0 ? rest : rest[..spaceIdx]).ToLowerInvariant();
                 var reason = spaceIdx < 0 ? null : rest[(spaceIdx + 1)..].Trim();
 
-                if (stateWord is "on" or "off")
+                // Both keys, always: "tradingStop" (Off | EntriesOff | FullStop) and the legacy "killSwitch",
+                // kept equal to FullStop. The trading plugin takes the MOST restrictive of the two, so a
+                // writer that set only one could not clear a stop the other still holds.
+                var mode = stateWord switch
                 {
-                    var active = stateWord == "on";
+                    "on" => "FullStop",
+                    "entries" => "EntriesOff",
+                    "off" => "Off",
+                    _ => null
+                };
+                if (mode is not null)
+                {
                     await _pluginConfigManager.MergeConfigAsync("trading-agent", new Dictionary<string, object?>
                     {
-                        ["killSwitch"] = active
+                        ["tradingStop"] = mode,
+                        ["killSwitch"] = mode == "FullStop"
                     });
                     _logger?.LogWarning(
-                        "[ChannelManager] Trading kill switch {State} via channel command. Reason: {Reason}",
-                        active ? "ACTIVATED" : "cleared", reason ?? "(none given)");
-                    await channel.SendReplyAsync(message, active
-                        ? "🛑 Kill switch ACTIVATED — all trading orders blocked."
-                        : "✅ Kill switch cleared — trading resumes per normal policy.");
+                        "[ChannelManager] Trading stop set to {Mode} via channel command. Reason: {Reason}",
+                        mode, reason ?? "(none given)");
+                    await channel.SendReplyAsync(message, mode switch
+                    {
+                        "FullStop" => "🛑 Kill switch ACTIVATED — all trading orders blocked, protective stops included. "
+                                      + "Use `/killswitch entries` to block only new buys.",
+                        "EntriesOff" => "⏸️ Entries OFF — no new buys. Protective stops, take-profits and exits keep working.",
+                        _ => "✅ Trading stop cleared — trading resumes per normal policy."
+                    });
                     return;
                 }
 
-                await channel.SendReplyAsync(message, "Usage: `/killswitch on [reason]` or `/killswitch off [reason]`");
+                await channel.SendReplyAsync(message,
+                    "Usage: `/killswitch entries [reason]` (no new buys; stops keep working), "
+                    + "`/killswitch on [reason]` (block everything, stops included) or `/killswitch off [reason]`");
                 return;
             }
         }

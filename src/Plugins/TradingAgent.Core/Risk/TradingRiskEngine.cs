@@ -60,15 +60,21 @@ public sealed partial class TradingRiskEngine : ITradingRiskEngine
         IReadOnlyList<IReadOnlyList<TradingSignal>> groups,
         bool? killSwitchOverride = null,
         IReadOnlyCollection<string>? executionUniverseOverride = null,
-        IReadOnlyCollection<string>? liquidationUniverseOverride = null)
+        IReadOnlyCollection<string>? liquidationUniverseOverride = null,
+        TradingStopMode? tradingStopOverride = null)
     {
         var cfg = _liveBroker?.Current ?? _options.Value;
         var agent = _agentOptions.Value;
         var maxBatch = MaxBatchValue(agent);
         var violations = new List<string>();
         var orderCount = groups.Sum(group => group.Count);
-        if (killSwitchOverride ?? agent.KillSwitch)
-            violations.Add("The global trading kill switch is active.");
+
+        var stop = (killSwitchOverride ?? agent.KillSwitch)
+            ? TradingStopMode.FullStop
+            : tradingStopOverride ?? agent.TradingStop;
+        if (stop == TradingStopMode.FullStop)
+            violations.Add("The global trading kill switch is active (FullStop): nothing is sent, "
+                           + "protective stops included.");
         if (orderCount > Math.Max(1, agent.MaxOrdersPerBatch))
             violations.Add($"Batch has {orderCount} orders; maximum is {agent.MaxOrdersPerBatch}.");
 
@@ -113,6 +119,15 @@ public sealed partial class TradingRiskEngine : ITradingRiskEngine
                 violations.Add($"{label}: symbol '{symbol}' is not in the selected execution universe.");
             if (order.Quantity is not > 0)
                 violations.Add($"{label}: quantity must be a positive integer.");
+
+            // ENTRIES_OFF refuses what ADDS exposure and nothing else. On the PSX cash market a SELL can
+            // only reduce a position (short selling is futures-only), and the execution boundary has
+            // already sized every live SELL down to custody before this runs, so letting SELLs through is
+            // what keeps protective stops, take-profits and exits working while entries are off.
+            var reducesOnly = action == "SELL";
+            if (stop == TradingStopMode.EntriesOff && action == "BUY")
+                violations.Add($"{label}: entries are switched off (EntriesOff); only sells that reduce a "
+                               + "position are sent.");
             if (orderType is not ("LIMIT" or "MARKET" or "STOPLOSS"))
                 violations.Add($"{label}: order type must be LIMIT, MARKET, or STOPLOSS.");
 
@@ -138,20 +153,25 @@ public sealed partial class TradingRiskEngine : ITradingRiskEngine
                 violations.Add($"{label}: a positive limit price is required.");
             }
             // 0 (or less) means no cap: a hosted user sets it in Settings, and "unlimited" is a value they can type.
-            else if (order.Quantity is > 0 && cfg.MaxOrderValuePkr > 0
+            //
+            // BUYs only (owner, 2026-11-28). The caps bound NEW exposure; applied to a SELL they refused the
+            // one order that shrinks it, so a holding worth more than the cap at its stop price could get no
+            // native stop at all — and its local backstop, being a STOPLOSS too, was refused the same way.
+            else if (!reducesOnly && order.Quantity is > 0 && cfg.MaxOrderValuePkr > 0
                      && order.Quantity.Value * order.EntryPrice.Value > cfg.MaxOrderValuePkr)
             {
                 violations.Add(
                     $"{label}: value exceeds MaxOrderValuePkr ({cfg.MaxOrderValuePkr:N0} PKR).");
             }
 
-            if (order.Quantity is > 0 && order.EntryPrice is > 0)
+            if (!reducesOnly && order.Quantity is > 0 && order.EntryPrice is > 0)
                 batchValue += order.Quantity.Value * order.EntryPrice.Value;
         }
 
+        // The batch figure counts BUYs only, for the reason the per-order cap does.
         if (maxBatch > 0 && batchValue > maxBatch)
             violations.Add(
-                $"Batch value {batchValue:N0} PKR exceeds MaxBatchValuePkr ({maxBatch:N0} PKR).");
+                $"Batch BUY value {batchValue:N0} PKR exceeds MaxBatchValuePkr ({maxBatch:N0} PKR).");
 
         return violations.Count == 0
             ? RiskValidationResult.Allow()

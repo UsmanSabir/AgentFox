@@ -250,7 +250,7 @@ public sealed partial class TradingManager
             executionUniverse = await _universe.ForExecutionAsync(ct);
 
         var risk = _riskEngine.Validate(
-            groups, policy.KillSwitch, executionUniverse, liquidationUniverse);
+            groups, policy.KillSwitch, executionUniverse, liquidationUniverse, policy.TradingStop);
         if (!risk.Allowed)
             return Reject(policy.Version,
                 "Pre-trade risk validation failed: " + string.Join(" ", risk.Violations));
@@ -328,7 +328,7 @@ public sealed partial class TradingManager
         if (clientOrder is null)
         {
             var idempotencyKey = BuildIdempotencyKey(sourceMessage, requestJson, policy.Version);
-            claim = await _repository.TryBeginExecutionAsync(idempotencyKey, requestJson, policy.Version, ct);
+            claim = await ClaimExecutionAsync(idempotencyKey, requestJson, policy.Version, ct);
         }
         else
         {
@@ -653,12 +653,100 @@ public sealed partial class TradingManager
         return null;
     }
 
-    private static string BuildIdempotencyKey(string? sourceMessage, string requestJson, string policyVersion)
+    /// <summary>
+    /// The idempotency key: the caller's source, the ORDER it asked for, and the policy it was asked under.
+    ///
+    /// <para>
+    /// <b>Not when the signal object happened to be built.</b> <see cref="TradingSignal.Timestamp"/> defaults
+    /// to the moment of construction and used to be hashed with the rest of the request, so two signals built
+    /// separately for the same order never shared a key and nothing was ever deduplicated — every caller's
+    /// "the same attempt asked twice replays" (armed orders, copy trading, persistent orders) was false for
+    /// any caller that rebuilt its signal per pass. Measured 2026-11-28 by the protection harness
+    /// (<c>Finding_*</c> in ProtectionScenarioTests). The ledger still stores the full request, timestamp
+    /// included; only the key ignores it.
+    /// </para>
+    /// </summary>
+    internal static string BuildIdempotencyKey(string? sourceMessage, string requestJson, string policyVersion)
     {
         var source = string.IsNullOrWhiteSpace(sourceMessage)
             ? $"manual:{Guid.NewGuid():N}"
             : sourceMessage.Trim().ToLowerInvariant();
-        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes($"{source}|{requestJson}|{policyVersion}"));
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(
+            $"{source}|{WithoutConstructionTime(requestJson)}|{policyVersion}"));
         return Convert.ToHexString(bytes);
+    }
+
+    /// <summary>The request with every signal's <c>timestamp</c> removed; anything unparseable is used as is.</summary>
+    private static string WithoutConstructionTime(string requestJson)
+    {
+        try
+        {
+            if (System.Text.Json.Nodes.JsonNode.Parse(requestJson) is not System.Text.Json.Nodes.JsonArray groups)
+                return requestJson;
+            foreach (var group in groups.OfType<System.Text.Json.Nodes.JsonArray>())
+                foreach (var signal in group.OfType<System.Text.Json.Nodes.JsonObject>())
+                    foreach (var name in signal.Select(p => p.Key)
+                                 .Where(k => k.Equals("timestamp", StringComparison.OrdinalIgnoreCase)).ToList())
+                        signal.Remove(name);
+            return groups.ToJsonString();
+        }
+        catch (JsonException)
+        {
+            return requestJson;
+        }
+    }
+
+    /// <summary>
+    /// The most numbered attempts one key may take. Every attempt beyond the first follows a DEFINITE
+    /// refusal, and a caller that has been refused a hundred times for the same order in one keyed scope
+    /// is not going to be served by a hundred-and-first.
+    /// </summary>
+    private const int MaxNumberedAttempts = 100;
+
+    /// <summary>
+    /// Claims the key, or the next numbered ATTEMPT of it when the key's earlier outcome was a definite
+    /// refusal.
+    ///
+    /// <para>
+    /// <b>Why attempts exist at all.</b> With the construction time out of the key, a caller whose key does
+    /// not change between retries — a protective stop's is its stop, session and quantity — would be
+    /// answered with a replay of its own refusal for ever, and a stop the broker refused once on timing
+    /// would never be placed. An attempt number is the honest fix, and here, rather than in each caller,
+    /// so the rule is one rule: a key whose stored outcome is a refusal of EVERY order in it is retried
+    /// as <c>{key}#a2</c>, <c>#a3</c>, ...
+    /// </para>
+    ///
+    /// <para>
+    /// <b>What is never retried.</b> An accepted execution, one still submitting, and an UNKNOWN one (the
+    /// broker may hold it) are answered exactly as before: replay, or "already exists". So is a group in
+    /// which ANY order succeeded — retrying it would send the successful ones again. Callers that already
+    /// number their own retries (armed orders, persistent intents, take-profits, copy trading) are
+    /// unaffected: their keys differ, and the first claim of each is acquired outright.
+    /// </para>
+    /// </summary>
+    private async Task<ExecutionClaim> ClaimExecutionAsync(
+        string idempotencyKey, string requestJson, string policyVersion, CancellationToken ct)
+    {
+        var claim = await _repository.TryBeginExecutionAsync(idempotencyKey, requestJson, policyVersion, ct);
+        for (var attempt = 2; !claim.Acquired && IsDefiniteRefusal(claim) && attempt <= MaxNumberedAttempts; attempt++)
+            claim = await _repository.TryBeginExecutionAsync(
+                $"{idempotencyKey}#a{attempt}", requestJson, policyVersion, ct);
+        return claim;
+    }
+
+    /// <summary>A stored outcome in which the broker answered and refused every order. Anything less is not.</summary>
+    internal static bool IsDefiniteRefusal(ExecutionClaim claim)
+    {
+        if (claim.State != "failed" || string.IsNullOrWhiteSpace(claim.ResultJson)) return false;
+        try
+        {
+            var stored = JsonSerializer.Deserialize<TradingExecutionResult>(claim.ResultJson, Json);
+            var orders = stored?.Groups.SelectMany(g => g).ToList();
+            return orders is { Count: > 0 } && orders.All(o => !o.Success);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
     }
 }

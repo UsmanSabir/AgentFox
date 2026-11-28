@@ -149,7 +149,9 @@ public sealed class ProtectionScenarioTests
         h.Broker.Halt();
         h.Broker.Reopen();
 
-        var again = await h.SubmitAsWorkerWouldAsync(stop, 100);
+        // As the worker would see it: the ledger now names this morning's order, so the key differs from
+        // the morning's and the boundary treats this as a new instruction, not the first one asked again.
+        var again = await h.SubmitAsWorkerWouldAsync(await h.ReloadAsync(stop.StopId), 100);
 
         Assert.IsFalse(again.IsReplay, again.Reason);
         Assert.AreEqual(2, h.Broker.PlacementCalls);
@@ -192,30 +194,69 @@ public sealed class ProtectionScenarioTests
     }
 
     /// <summary>
-    /// FINDING (2026-11-28), pinned so a change to it is deliberate. <c>TradingSignal.Timestamp</c> defaults
-    /// to the moment of construction and is serialised into the hashed request, so two signals built
-    /// separately for the same order get DIFFERENT idempotency keys even under the same source key. A
-    /// caller that rebuilds its signal per attempt therefore gets no replay protection from the key —
-    /// for a BUY nothing else at the boundary stops the second. Protective stops are covered by the SELL
-    /// sizing above; plan step 3 settles the key for the re-place path (hash without the timestamp, plus
-    /// an attempt number from the stop's own order ledger).
+    /// Was <c>Finding_TwoSeparatelyBuiltIdenticalBuysUnderOneKeyBothReachTheBroker</c>, asserting that BOTH were
+    /// sent: <c>TradingSignal.Timestamp</c> was hashed into the idempotency key, so a signal rebuilt for the
+    /// same order never matched. Flipped by plan step 2 (2026-11-28): the key ignores the construction time.
     /// </summary>
     [TestMethod]
-    public async Task Finding_TwoSeparatelyBuiltIdenticalBuysUnderOneKeyBothReachTheBroker()
+    public async Task Idempotency_ARebuiltDuplicateBuyIsNotSentTwice()
     {
         using var h = new ProtectionHarness(0m, Symbol);
         var built = new DateTime(2026, 11, 30, 5, 0, 0, DateTimeKind.Utc);
 
         var first = await h.Manager.ExecuteGroupsAsync([[Buy(built)]], "same-key");
-        // Built a millisecond later, as the next pass would build it. Nothing else differs.
+        // Rebuilt a millisecond later, as the next pass would build it. Nothing else differs.
         var second = await h.Manager.ExecuteGroupsAsync([[Buy(built.AddMilliseconds(1))]], "same-key");
 
         Assert.IsTrue(first.Executed, first.Reason);
-        Assert.IsFalse(second.IsReplay, second.Reason);
-        Assert.AreEqual(2, h.Broker.PlacementCalls);
+        Assert.IsTrue(second.IsReplay, second.Reason);
+        Assert.AreEqual(1, h.Broker.PlacementCalls);
     }
 
-    /// <summary>The control for the finding above: the construction time is the ONLY thing that differed.</summary>
+    /// <summary>
+    /// What makes ignoring the construction time safe for retries: a key whose stored outcome is a refusal
+    /// of every order is retried as a numbered attempt rather than answered with that refusal for ever. And
+    /// once an attempt is ACCEPTED, asking again replays it.
+    /// </summary>
+    [TestMethod]
+    public async Task Idempotency_ARefusedBuyAskedAgainIsANewAttempt_AndAnAcceptedOneIsNot()
+    {
+        using var h = new ProtectionHarness(0m, Symbol);
+        h.Broker.RejectNext(1, "Order Rejected! Chances of Wash Trade against this Order");
+
+        var refused = await h.Manager.ExecuteGroupsAsync([[Buy()]], "same-key");
+        var retried = await h.Manager.ExecuteGroupsAsync([[Buy()]], "same-key");
+        var askedAgain = await h.Manager.ExecuteGroupsAsync([[Buy()]], "same-key");
+
+        Assert.IsFalse(refused.Groups.Single().Single().Success);
+        Assert.IsFalse(retried.IsReplay, retried.Reason);
+        Assert.IsTrue(retried.Groups.Single().Single().Success, retried.Reason);
+        Assert.IsTrue(askedAgain.IsReplay, askedAgain.Reason);
+        Assert.AreEqual(2, h.Broker.PlacementCalls, "the refusal and the retry; never a third");
+    }
+
+    /// <summary>
+    /// The worker's own retry path. Its key does not change between passes, so without numbered attempts the
+    /// boundary would replay the first refusal on every retry and the stop would never be placed.
+    /// </summary>
+    [TestMethod]
+    public async Task ARefusedStopIsPlacedOnALaterPass_NotReplayedAsARefusal()
+    {
+        using var h = new ProtectionHarness(0m, Symbol);
+        await h.ProtectHoldingAsync(Symbol, 100, 230m, trigger: 220m, limit: 217.80m);
+        h.Broker.RejectNext(1, "Order Rejected! Chances of Wash Trade against this Order");
+
+        await h.RunPassAsync();
+        Assert.AreEqual(0, h.Broker.RestingSells(Symbol).Count);
+
+        h.Restart();   // skips the worker's in-memory backoff, which is not what is under test here
+        await h.RunPassAsync();
+
+        Assert.AreEqual(2, h.Broker.PlacementCalls);
+        Assert.AreEqual(100, h.Broker.RestingSells(Symbol).Single().Remaining);
+    }
+
+    /// <summary>The control for the key: separately built signals with the same timestamp were always replayed.</summary>
     [TestMethod]
     public async Task Finding_SeparatelyBuiltBuysWithTheSameTimestampAreReplayed()
     {
@@ -272,23 +313,71 @@ public sealed class ProtectionScenarioTests
     // ── Scenario 9: the order-value cap meets a protective stop ────────────────
 
     /// <summary>
-    /// KNOWN GAP (audit correction, 2026-11-28). The value cap is meant to bound new exposure, yet it
-    /// refuses a SELL that only reduces a position, so a holding worth more than the cap at its stop price
-    /// gets no native stop at all. Hosted tenants run with the cap at 0 and do not hit this; the shipped
-    /// default of 50,000 PKR does. Inverted by plan step 2 (reduce-only sells exempt).
+    /// Was <c>KnownGap_TheOrderValueCapRefusesAProtectiveStopAboveIt</c>, asserting the stop was refused
+    /// before reaching the broker (audit correction, 2026-11-28). Flipped by plan step 2: the value caps
+    /// bound BUYs only, so a protective SELL above the cap is placed.
     /// </summary>
     [TestMethod]
-    public async Task KnownGap_TheOrderValueCapRefusesAProtectiveStopAboveIt()
+    public async Task TheOrderValueCapNoLongerBlocksAProtectiveStopAboveIt()
     {
         using var h = new ProtectionHarness(50_000m, Symbol);
         await h.ProtectHoldingAsync(Symbol, 1_000, 105m, trigger: 100m, limit: 99m);   // 100,000 PKR
 
         await h.RunPassAsync();
 
-        Assert.AreEqual(0, h.Broker.PlacementCalls, "GAP: refused before it reached the broker");
-        Assert.AreEqual(0, h.Broker.RestingSells(Symbol).Count);
-        Assert.IsTrue(h.Notifier.Sent.Any(s => s.Topic?.EndsWith("placement-failed") == true),
-            "the owner is at least told");
+        Assert.AreEqual(1_000, h.Broker.RestingSells(Symbol).Single().Remaining);
+        Assert.IsFalse(h.Notifier.Sent.Any(s => s.Topic?.EndsWith("placement-failed") == true));
+    }
+
+    [TestMethod]
+    public async Task TheOrderValueCapStillRefusesABuyAboveIt()
+    {
+        using var h = new ProtectionHarness(50_000m, Symbol);
+
+        var buy = await h.Manager.ExecuteGroupsAsync([[Buy()]], "small-buy");   // 2,250 PKR
+        var big = await h.Manager.ExecuteGroupsAsync(
+            [[new TradingAgent.Models.TradingSignal
+            {
+                IsSignal = true, Action = "BUY", Symbol = Symbol, Quantity = 1_000,
+                OrderType = "LIMIT", EntryPrice = 100m, Confidence = "HIGH"
+            }]], "bigger-buy");
+
+        Assert.IsTrue(buy.Executed, buy.Reason);
+        Assert.IsFalse(big.Executed);
+        StringAssert.Contains(big.Reason, "MaxOrderValuePkr");
+    }
+
+    // ── Scenario 8: the trading stop's two levels ───────────────────────────────
+
+    [TestMethod]
+    public async Task EntriesOff_ProtectiveStopsKeepBeingPlaced_AndABuyIsRefused()
+    {
+        using var h = new ProtectionHarness(0m, Symbol);
+        h.Options.TradingStop = TradingAgent.Config.TradingStopMode.EntriesOff;
+        await h.ProtectHoldingAsync(Symbol, 100, 230m, trigger: 220m, limit: 217.80m);
+
+        await h.RunPassAsync();
+        var buy = await h.Manager.ExecuteGroupsAsync([[Buy()]], "entry");
+
+        Assert.AreEqual(100, h.Broker.RestingSells(Symbol).Single().Remaining);
+        Assert.IsFalse(buy.Executed);
+        StringAssert.Contains(buy.Reason, "entries are switched off");
+        Assert.AreEqual(1, h.Broker.PlacementCalls);
+    }
+
+    [TestMethod]
+    public async Task FullStop_NothingIsSent_AndTheOwnerIsToldTheStopIsNotPlaced()
+    {
+        using var h = new ProtectionHarness(0m, Symbol);
+        h.Options.KillSwitch = true;
+        await h.ProtectHoldingAsync(Symbol, 100, 230m, trigger: 220m, limit: 217.80m);
+
+        await h.RunPassAsync();
+        var buy = await h.Manager.ExecuteGroupsAsync([[Buy()]], "entry");
+
+        Assert.AreEqual(0, h.Broker.PlacementCalls);
+        Assert.IsFalse(buy.Executed);
+        Assert.IsTrue(h.Notifier.Sent.Any(s => s.Topic?.EndsWith("unauthorised") == true));
     }
 
     [TestMethod]
