@@ -11,6 +11,7 @@ using TradingAgent.Market;
 using TradingAgent.Models;
 using TradingAgent.Persistence;
 using TradingAgent.Reconciliation;
+using TradingAgent.Research;
 using TradingAgent.Risk;
 using TradingAgent.Trading;
 using TradingAgent.Watchlist;
@@ -61,7 +62,8 @@ internal sealed class ProtectionHarness : IDisposable
             DatabasePath = Path.Combine(_root, "trading.db"),
             AllowedSymbols = symbols.ToList(),
             // The target behaviour. A scenario about the rollout itself sets Shadow or Off explicitly.
-            ProtectiveStopLiveCoverage = RuleRollout.On
+            ProtectiveStopLiveCoverage = RuleRollout.On,
+            MarketHaltHandling = RuleRollout.On
         };
         Ahk = new AhkConfig { MaxOrderValuePkr = maxOrderValuePkr };
         _liveAhk = new FixedAhk(Ahk);
@@ -88,13 +90,28 @@ internal sealed class ProtectionHarness : IDisposable
             new TradingReconciliationState(), intents, options, NullLogger<TradingManager>.Instance,
             brokerStateReader: Broker);
 
+        _quotes = new CompositeLiveQuoteSource([Broker], NullLogger<CompositeLiveQuoteSource>.Instance);
+        // The real market-state service, reading the simulated venue's own state (no index or analytics source).
+        MarketState = new MarketStateService(Calendar, Broker, options, NullLogger<MarketStateService>.Instance,
+            scopes: _scopes, notifier: Notifier);
+
         Worker = NewWorker();
     }
 
+    public MarketStateService MarketState { get; }
+    private readonly CompositeLiveQuoteSource _quotes;
+
     public DateOnly Today => DateOnly.FromDateTime(Calendar.GetStatus().PktNow);
 
-    /// <summary>One periodic pass, exactly as the hosted worker's timer runs it.</summary>
-    public Task RunPassAsync() => Worker.RunNowAsync();
+    /// <summary>
+    /// One periodic pass, exactly as the hosted worker's timer runs it — after the market-state service has read the
+    /// venue, as its own loop would have done in the seconds before.
+    /// </summary>
+    public async Task RunPassAsync()
+    {
+        await MarketState.EvaluateNowAsync();
+        await Worker.RunNowAsync();
+    }
 
     /// <summary>
     /// A process restart: a fresh worker over the same ledger and broker. Everything the worker keeps in
@@ -165,7 +182,8 @@ internal sealed class ProtectionHarness : IDisposable
     private ProtectiveStopWorker NewWorker() => new(
         _scopes, Broker, Broker, Manager, _approvals, Calendar, _window, _policy,
         Microsoft.Extensions.Options.Options.Create(Options), Log,
-        activity: null, notifier: Notifier, replacementObservers: null, brokerConfig: _liveAhk);
+        activity: null, notifier: Notifier, replacementObservers: null, brokerConfig: _liveAhk,
+        marketPhase: MarketState, quotes: _quotes);
 
     public void Dispose()
     {
@@ -194,8 +212,10 @@ internal sealed class SimCalendar : IMarketCalendar
     public MarketStatus GetStatus(DateTime? utcNow = null)
     {
         var pktNow = (utcNow ?? DateTime.UtcNow).AddHours(5).AddDays(DayOffset);
+        // The session opened an hour ago, whatever the real clock says, so a scenario is never inside the opening
+        // grace in which a broker "Break" is read as the scheduled break running late rather than a halt.
         return new MarketStatus(IsOpen, pktNow, IsOpen ? "simulated session" : "simulated close",
-            SessionOpenPkt: IsOpen ? pktNow.Date.AddHours(9).AddMinutes(32) : null);
+            SessionOpenPkt: IsOpen ? pktNow.AddHours(-1) : null);
     }
 
     public bool IsTradingDay(DateOnly date) => true;

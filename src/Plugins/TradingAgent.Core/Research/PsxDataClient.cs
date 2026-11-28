@@ -29,6 +29,10 @@ public sealed record PsxQuoteSummary
     public decimal? Low52Week { get; init; }
     public long? LastVolume { get; init; }
     public long? AverageDailyVolume30D { get; init; }
+
+    /// <summary>When the newest price in the series was printed (UTC); null when no series answered.</summary>
+    public DateTime? LastTickUtc { get; init; }
+
     public string? Error { get; init; }
 }
 
@@ -279,7 +283,8 @@ public sealed partial class PsxDataClient
                 High52Week            = yearSeries.Count > 0 ? yearSeries.Max(p => p.Price) : null,
                 Low52Week             = yearSeries.Count > 0 ? yearSeries.Min(p => p.Price) : null,
                 LastVolume            = eod.FirstOrDefault()?.Volume,
-                AverageDailyVolume30D = AverageVolume(eod, 30)
+                AverageDailyVolume30D = AverageVolume(eod, 30),
+                LastTickUtc           = DateTimeOffset.FromUnixTimeSeconds(lastTick.Ts).UtcDateTime
             };
         }
         catch (PsxPortalUnavailableException ex)

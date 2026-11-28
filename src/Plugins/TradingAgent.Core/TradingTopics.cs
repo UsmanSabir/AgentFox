@@ -36,6 +36,15 @@ public static class TradingTopics
         $"{OrderPrefix}.{Segment(state, "other")}";
 
     /// <summary>The subject for a position left without a working stop, keyed by why.</summary>
+    /// <summary>A market-wide halt began (MarketStateService, when its handling is On).</summary>
+    public const string MarketHalt = "trading.market.halt";
+
+    /// <summary>Trading resumed after a halt.</summary>
+    public const string MarketReopen = "trading.market.reopen";
+
+    /// <summary>A halt nothing confirmed ending, or market-state sources that disagree.</summary>
+    public const string MarketUnknown = "trading.market.unknown";
+
     public static string Stop(string reasonKey) =>
         $"{StopPrefix}.{Segment(reasonKey, "other")}";
 
@@ -56,6 +65,10 @@ public static class TradingTopics
         NotificationTopics.Register(Stop("closed"), "A protective stop could not be placed while the market is closed.");
         NotificationTopics.Register(Stop("unauthorised"), "A protective stop is blocked by policy or the kill switch.");
         NotificationTopics.Register(Stop("placement-failed"), "A protective stop failed to reach the broker.");
+        NotificationTopics.Register(Stop("left-book"), "A protective stop's order left the broker's book mid-session and is being re-placed.");
+        NotificationTopics.Register(MarketHalt, "The market halted: nothing is sent until it reopens.");
+        NotificationTopics.Register(MarketReopen, "The market reopened after a halt; stops are being re-placed.");
+        NotificationTopics.Register(MarketUnknown, "A halt was not confirmed ending, or market-state sources disagree.");
     }
 
     /// <summary>

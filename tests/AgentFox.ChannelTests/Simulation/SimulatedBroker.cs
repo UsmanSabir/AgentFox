@@ -31,8 +31,28 @@ namespace AgentFox.ChannelTests.Simulation;
 /// </para>
 /// </summary>
 internal sealed class SimulatedBroker
-    : IBrokerAdapter, IBrokerStateReader, IBrokerOrderCanceller, IBrokerMarketState
+    : IBrokerAdapter, IBrokerStateReader, IBrokerOrderCanceller, IBrokerMarketState, TradingAgent.Research.ILiveQuoteSource
 {
+    // ── ILiveQuoteSource: the venue's own last prices ─────────────────────────
+
+    public string Name => "simulated";
+    public bool IsEnabled => true;
+
+    public Task<TradingAgent.Research.LiveQuoteSnapshot> GetQuotesAsync(CancellationToken ct = default)
+    {
+        lock (_gate)
+            return Task.FromResult(new TradingAgent.Research.LiveQuoteSnapshot
+            {
+                Source = Name,
+                Quotes = _prices.ToDictionary(p => p.Key,
+                    p => new TradingAgent.Research.PsxLiveQuote { Symbol = p.Key, Current = p.Value },
+                    StringComparer.OrdinalIgnoreCase)
+            });
+    }
+
+    /// <summary>Moves the last price without trading anything (no stop triggers), as a quote update would.</summary>
+    public void Quote(string symbol, decimal price) { lock (_gate) _prices[symbol] = price; }
+
     private static readonly string[] AcceptingStates = ["OPN", "OPEN", "OHO", "PRE"];
 
     private readonly object _gate = new();

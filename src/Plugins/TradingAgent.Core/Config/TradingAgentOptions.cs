@@ -105,6 +105,42 @@ public class TradingAgentOptions
     public RuleRollout ProtectiveStopLiveCoverage { get; set; } = RuleRollout.Shadow;
 
     /// <summary>
+    /// Whether a detected market-wide halt gates the order-sending workers: nothing is attempted while halted (so no
+    /// refusal backoff is spent), stops are re-placed on the reopen where the price is still above them, and local
+    /// backstops wait <see cref="ReopenBackstopHoldMinutes"/> unless the price is below the catastrophic level.
+    /// <see cref="RuleRollout.Shadow"/> by default: halts are detected and logged, nothing is gated, nobody is
+    /// alerted, until the owner has reviewed several live sessions (owner, 2026-11-28).
+    /// </summary>
+    public RuleRollout MarketHaltHandling { get; set; } = RuleRollout.Shadow;
+
+    /// <summary>The index whose move starts a halt. PSX halts on the KSE-30 (owner, 2026-11-28). Default KSE30.</summary>
+    public string HaltIndexSymbol { get; set; } = "KSE30";
+
+    /// <summary>The move from yesterday's close, in percent either way, that starts a halt. Default 5.</summary>
+    public decimal HaltIndexMovePercent { get; set; } = 5m;
+
+    /// <summary>
+    /// Minutes a halt may go unconfirmed-ended before the phase becomes Unknown and the workers act normally, with an
+    /// alert. Default 90 (PSX resumes after about an hour, owner 2026-11-28).
+    /// </summary>
+    public int HaltMaxMinutes { get; set; } = 90;
+
+    /// <summary>
+    /// Minutes after a reopen during which local backstops hold fire unless the price is below the catastrophic
+    /// level, and native stops already breached are not re-armed (owner Q2a). Default 10.
+    /// </summary>
+    public int ReopenBackstopHoldMinutes { get; set; } = 10;
+
+    /// <summary>
+    /// How far below a stop's trigger its catastrophic level sits, in percent: the price at which the reopen hold no
+    /// longer applies. Default 5 — the owner's "trigger × 0.95" (2026-11-28). Per position once position plans exist.
+    /// </summary>
+    public decimal ProtectiveStopCatastrophicPercent { get; set; } = 5m;
+
+    /// <summary>Seconds between market-state evaluations inside a session. Default 15.</summary>
+    public int MarketStatePollSeconds { get; set; } = 15;
+
+    /// <summary>
     /// Seconds between the first snapshot that misses a stop's order with no recorded reason (no cancel, no trade)
     /// and the later one that may conclude it is gone and re-place it. An order the activity log records as
     /// cancelled needs no wait. Default 60.

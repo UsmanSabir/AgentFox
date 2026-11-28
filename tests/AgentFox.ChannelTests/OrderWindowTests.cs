@@ -30,6 +30,18 @@ public sealed class OrderWindowTests
         Assert.AreEqual("broker", decision.Source);
     }
 
+    /// <summary>
+    /// The TradeCast reader accepts these as open (premium TradeCastMarketStateReader); the gate must too, or a house
+    /// that sent either would have every order refused (2026-11-28 audit).
+    /// </summary>
+    [TestMethod]
+    [DataRow("Normal")]
+    [DataRow("Continuous")]
+    public void EveryTokenTheBrokerReaderCallsOpenIsAllowed(string state)
+    {
+        Assert.IsTrue(Build(state, calendarOpen: true).Evaluate().Allowed, state);
+    }
+
     [TestMethod]
     [DataRow("PRE")]
     [DataRow("Pre-Open")]

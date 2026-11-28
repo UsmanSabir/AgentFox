@@ -1,3 +1,4 @@
+using TradingAgent.Market;
 namespace AgentFox.ChannelTests.Simulation;
 
 /// <summary>
@@ -139,25 +140,82 @@ public sealed class ProtectionScenarioTests
     }
 
     /// <summary>
-    /// KNOWN GAP, inverted by plan step 5. A placement attempted DURING the halt is refused by the order window, and
-    /// that refusal starts the stop's own backoff, so the first pass after the reopen does not place it — the
-    /// position waits up to a minute longer than it must. Step 5 gates the worker on the detected market state, so
-    /// nothing is attempted during a halt and no backoff is spent.
+    /// Was <c>KnownGap_ARefusalDuringTheHaltDelaysTheRePlaceAfterTheReopen</c>, asserting that a placement refused during
+    /// the halt started a backoff that held the re-place back after the reopen. Flipped by plan step 5: the worker
+    /// follows the detected market phase, attempts nothing while halted, and the first pass after the reopen places.
     /// </summary>
     [TestMethod]
-    public async Task KnownGap_ARefusalDuringTheHaltDelaysTheRePlaceAfterTheReopen()
+    public async Task AStopIsRePlacedOnTheFirstPassAfterTheReopen_TheHaltSpentNoBackoff()
     {
         using var h = new ProtectionHarness(0m, Symbol);
         await h.ProtectHoldingAsync(Symbol, 100, 230m, trigger: 220m, limit: 217.80m);
         await h.RunPassAsync();
 
         h.Broker.Halt();
-        await h.RunPassAsync();   // tries, is refused by the order window, backs off
+        await h.RunPassAsync();
+        Assert.AreEqual(MarketPhase.Halted, h.MarketState.Current.Phase);
+        Assert.AreEqual(1, h.Broker.PlacementCalls, "nothing attempted while halted");
+
         h.Broker.Reopen();
         await h.RunPassAsync();
 
-        Assert.AreEqual(0, h.Broker.RestingSells(Symbol).Count, "GAP: held back by a backoff the halt caused");
+        Assert.AreEqual(MarketPhase.ReopenSettling, h.MarketState.Current.Phase);
+        Assert.AreEqual(100, h.Broker.RestingSells(Symbol).Single().Remaining);
+        Assert.IsTrue(h.Notifier.Sent.Any(s => s.Topic == "trading.market.halt"));
+        Assert.IsTrue(h.Notifier.Sent.Any(s => s.Topic == "trading.market.reopen"));
+    }
+
+    /// <summary>Owner Q2a: a stop the price already fell through would trigger the instant it rested; it waits.</summary>
+    [TestMethod]
+    public async Task AfterTheReopenAStopThePriceAlreadyFellThroughWaitsOutTheSettlingMinutes()
+    {
+        using var h = new ProtectionHarness(0m, Symbol);
+        await h.ProtectHoldingAsync(Symbol, 100, 230m, trigger: 220m, limit: 217.80m);
+        await h.RunPassAsync();
+
+        h.Broker.Halt();
+        await h.RunPassAsync();
+        h.Broker.Quote(Symbol, 215m);   // reopens below the 220 trigger, above the 209 catastrophic level
+        h.Broker.Reopen();
+        await h.RunPassAsync();
+
+        Assert.AreEqual(0, h.Broker.RestingSells(Symbol).Count);
         Assert.AreEqual(1, h.Broker.PlacementCalls);
+    }
+
+    [TestMethod]
+    public async Task AfterTheReopenAStopBelowTheCatastrophicLevelIsPlacedAtOnce()
+    {
+        using var h = new ProtectionHarness(0m, Symbol);
+        await h.ProtectHoldingAsync(Symbol, 100, 230m, trigger: 220m, limit: 217.80m);
+        await h.RunPassAsync();
+
+        h.Broker.Halt();
+        await h.RunPassAsync();
+        h.Broker.Quote(Symbol, 205m);   // below 220 × 0.95 = 209
+        h.Broker.Reopen();
+        await h.RunPassAsync();
+
+        Assert.AreEqual(2, h.Broker.PlacementCalls, "the catastrophic level overrides the settling hold");
+    }
+
+    /// <summary>The rollout's Shadow for halts: the worker keeps trying as before, and the log records it would not have.</summary>
+    [TestMethod]
+    public async Task InShadow_HaltsAreDetectedAndLogged_ButNothingIsGatedOrAlerted()
+    {
+        using var h = new ProtectionHarness(0m, Symbol);
+        h.Options.MarketHaltHandling = TradingAgent.Config.RuleRollout.Shadow;
+        await h.ProtectHoldingAsync(Symbol, 100, 230m, trigger: 220m, limit: 217.80m);
+        await h.RunPassAsync();
+
+        h.Broker.Halt();
+        await h.RunPassAsync();
+
+        Assert.AreEqual(MarketPhase.Halted, h.MarketState.Current.Phase, "detected");
+        Assert.IsFalse(h.Notifier.Sent.Any(s => s.Topic?.StartsWith("trading.market") == true), "nobody alerted");
+        var log = await h.Repository.GetRuleShadowDecisionsAsync(DateTime.UtcNow.AddHours(-1), "market.halt-handling");
+        Assert.IsTrue(log.Any(r => r.ShadowDecision == "Halted"), "the transition is in the decision log");
+        Assert.IsTrue(log.Any(r => r.ShadowDecision == "Skip passes until the reopen"), "and what the worker would not have done");
     }
 
     /// <summary>

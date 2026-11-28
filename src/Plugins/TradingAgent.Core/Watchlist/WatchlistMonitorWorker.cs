@@ -115,8 +115,10 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
         RecentPriceWindow? recentPrices = null,
         IArmedOrderConditionEvaluator? conditions = null,
         MonitorTechnicalReadings? technicals = null,
-        IArmedOrderFireCheck? fireCheck = null)
+        IArmedOrderFireCheck? fireCheck = null,
+        TradingAgent.Market.IMarketPhase? marketPhase = null)
     {
+        _marketPhase = marketPhase;
         _recentPrices = recentPrices ?? new RecentPriceWindow();
         _conditions = conditions;
         _fireCheck = fireCheck;
@@ -649,6 +651,11 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
                     await TrailAsync(order, price, ct);
                 continue;
             }
+
+            // A halt, or the minutes just after one (plan step 5). Nothing fires into a halted venue; after the
+            // reopen a local backstop waits out the settling minutes unless the price is below its catastrophic
+            // level (owner, 2026-11-28). Shadow records what would have been held and fires as before.
+            if (await HaltHoldAsync(order, price, ct)) continue;
 
             // A backstop is not an ordinary armed order: it exists to cover the window where the
             // native stop does not, and must stand down the moment that stop is resting. Skipping
@@ -1437,6 +1444,69 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
             order.ArmedId, order.Symbol, release.Released, release.Reason);
 
         return release.Released ? release.Reason : null;
+    }
+
+    private readonly TradingAgent.Market.IMarketPhase? _marketPhase;
+
+    /// <summary>
+    /// Why this armed order must not fire in this market phase, or null. Halted holds everything. Just after a reopen
+    /// only a protective stop's local backstop holds, and only while the price is not below its catastrophic level
+    /// (trigger × (1 − <paramref name="catastrophicPercent"/> / 100)) — an unknown price holds, since it cannot be
+    /// shown to be below. Pure, for tests.
+    /// </summary>
+    internal static string? HaltHoldReason(
+        TradingAgent.Market.MarketPhaseReading phase, ArmedOrder order, decimal? price,
+        decimal catastrophicPercent, int holdMinutes) => phase.Phase switch
+    {
+        TradingAgent.Market.MarketPhase.Halted =>
+            $"The market is halted ({phase.Reason}); nothing fires until it reopens.",
+        TradingAgent.Market.MarketPhase.ReopenSettling when order.ProtectiveStopId is not null
+            && !(price is { } p && order.TriggerPrice is { } trigger && p < trigger * (1m - catastrophicPercent / 100m)) =>
+            $"The market reopened at {phase.SinceUtc:HH:mm} UTC; this local backstop waits {holdMinutes} minutes unless "
+            + "the price falls below its catastrophic level.",
+        _ => null
+    };
+
+    /// <summary>Orders already reported held for a given halt or reopen, so a long one is written once per order.</summary>
+    private readonly HashSet<string> _haltHoldReported = [];
+
+    /// <summary>
+    /// True when this armed order must not fire because of a halt: anything while the market is halted, and a local
+    /// backstop during the settling minutes after the reopen unless the price is below its catastrophic level
+    /// (trigger × (1 − <c>ProtectiveStopCatastrophicPercent</c>)). Acts only with halt handling On; in Shadow it writes
+    /// what it would have held to the decision log, once per order per halt, and returns false.
+    /// </summary>
+    internal async Task<bool> HaltHoldAsync(ArmedOrder order, decimal? price, CancellationToken ct)
+    {
+        if (_marketPhase?.Current is not { } phase) return false;
+
+        var why = HaltHoldReason(phase, order, price,
+            _options.Value.ProtectiveStopCatastrophicPercent, _options.Value.ReopenBackstopHoldMinutes);
+        if (why is null) return false;
+
+        var first = _haltHoldReported.Add($"{order.ArmedId}:{phase.Phase}:{phase.SinceUtc:O}");
+        if (_marketPhase.Rollout != RuleRollout.On)
+        {
+            if (first && _repository is TradingAgent.Persistence.IRuleShadowLog log)
+            {
+                try
+                {
+                    await log.RecordRuleShadowDecisionAsync(new TradingAgent.Persistence.RuleShadowDecision(
+                        DateTime.UtcNow, TradingAgent.Market.MarketStateService.Rule, order.Symbol, order.ArmedId,
+                        "Fire", "Hold", why), ct);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(ex, "[ArmedOrders][Shadow] The decision log could not be written.");
+                }
+            }
+            return false;
+        }
+
+        if (first)
+            _logger.LogWarning("[ArmedOrders] {ArmedId} ({Symbol}) met its trigger but is held: {Why}",
+                order.ArmedId, order.Symbol, why);
+        return true;
     }
 
     /// <summary>

@@ -270,6 +270,14 @@ public sealed class TradingAgentRuntime
         services.AddSingleton<PriceAlertWorker>();
         services.AddHostedService(sp => sp.GetRequiredService<PriceAlertWorker>());
         services.AddHostedService<TakeProfitRetryWorker>();
+        // Halt detection (plan step 5). One instance, read by the stop worker and the armed-order monitor through
+        // IMarketPhase; Shadow by default (TradingAgentOptions.MarketHaltHandling).
+        services.AddSingleton<IIndexMoveSource, PsxIndexMoveSource>();
+        services.AddSingleton<IAnalyticsMarketState, AhlAnalyticsMarketState>();
+        services.AddSingleton<MarketStateService>();
+        services.AddSingleton<IMarketPhase>(sp => sp.GetRequiredService<MarketStateService>());
+        services.AddHostedService(sp => sp.GetRequiredService<MarketStateService>());
+
         // Singleton AND hosted service, so the arm endpoint can kick an immediate baseline capture on
         // the same instance the timer drives.
         services.AddSingleton<ProtectiveStopWorker>();

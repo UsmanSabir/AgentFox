@@ -65,8 +65,14 @@ public sealed class OrderWindow
     /// pre-open window refuse rather than fall through.
     /// </para>
     /// </summary>
+    ///
+    /// <para>
+    /// <b>NORMAL and CONTINUOUS (2026-11-28)</b> were accepted by premium's TradeCast reader but missing here, which
+    /// is exactly the mismatch described above: had a house ever sent either, every order would have been refused.
+    /// Neither has been observed; both are added so the two lists agree.
+    /// </para>
     public static readonly IReadOnlyList<string> DefaultAcceptingStates =
-        ["OPEN", "OPN", "OHO", "PRE", "PRE-OPEN", "PREOPEN"];
+        ["OPEN", "OPN", "OHO", "PRE", "PRE-OPEN", "PREOPEN", "NORMAL", "CONTINUOUS"];
 
     private readonly IMarketCalendar _calendar;
     private readonly IBrokerMarketState _portal;

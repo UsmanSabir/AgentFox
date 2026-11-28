@@ -13,6 +13,7 @@ using TradingAgent.Models;
 using TradingAgent.Observability;
 using TradingAgent.Persistence;
 using TradingAgent.Reconciliation;
+using TradingAgent.Research;
 using TradingAgent.Watchlist;
 
 namespace TradingAgent.Trading;
@@ -88,6 +89,36 @@ public sealed class ProtectiveStopWorker
         new(StringComparer.Ordinal);
 
     private readonly IRuntimePluginOptions<AhkConfig>? _brokerConfig;
+    private readonly IMarketPhase? _marketPhase;
+    private readonly CompositeLiveQuoteSource? _quotes;
+
+    /// <summary>The halt a "skipped while halted" line was last written for, so a long halt logs it once.</summary>
+    private DateTime? _haltSkipLoggedFor;
+
+    /// <summary>
+    /// On the reopen after a halt: forget every backoff the halt caused and ask for a pass at once (plan step 5).
+    ///
+    /// <para>
+    /// Every refusal during the halt was the venue's, not the order's, so a backoff earned then says nothing about an
+    /// order placed now — keeping it is exactly what held a re-placement back after trading resumed (the KnownGap the
+    /// step-1 harness pinned). The pass reads a fresh account snapshot, which is the reconcile; live coverage then sees
+    /// which stop orders the halt cancelled and re-places them. In Shadow nothing is cleared; the decision log says it
+    /// would have been.
+    /// </para>
+    /// </summary>
+    private void OnMarketPhaseChanged(MarketPhaseReading previous, MarketPhaseReading next)
+    {
+        if (next.Phase != MarketPhase.ReopenSettling || previous.Phase != MarketPhase.Halted) return;
+        if (_marketPhase?.Rollout != RuleRollout.On) return;
+
+        // Raised on the market-state service's thread, so it only sets a flag; the pass clears the backoffs under its
+        // own gate, where every other access to them happens.
+        Interlocked.Exchange(ref _clearBackoffsOnNextPass, 1);
+        _logger.LogWarning("[ProtectiveStops] Market reopened after a halt: clearing refusal backoffs and reconciling now.");
+        TriggerSoon();
+    }
+
+    private int _clearBackoffsOnNextPass;
 
     private DateTime _placementsBlockedUntilUtc = DateTime.MinValue;
     private TimeSpan _transientBackoff = TimeSpan.Zero;
@@ -191,8 +222,13 @@ public sealed class ProtectiveStopWorker
         TradingActivityLog? activity = null,
         IUserNotifier? notifier = null,
         IEnumerable<IStopReplacementObserver>? replacementObservers = null,
-        IRuntimePluginOptions<AhkConfig>? brokerConfig = null)
+        IRuntimePluginOptions<AhkConfig>? brokerConfig = null,
+        IMarketPhase? marketPhase = null,
+        CompositeLiveQuoteSource? quotes = null)
     {
+        _marketPhase = marketPhase;
+        _quotes = quotes;
+        if (marketPhase is not null) marketPhase.Changed += OnMarketPhaseChanged;
         _brokerConfig = brokerConfig;
         _activity    = activity;
         _notifier    = notifier;
@@ -406,6 +442,13 @@ public sealed class ProtectiveStopWorker
 
     private async Task RunPassCoreAsync(CancellationToken ct, bool allowRecentSnapshotReuse = false)
     {
+        if (Interlocked.Exchange(ref _clearBackoffsOnNextPass, 0) == 1)
+        {
+            _placementsBlockedUntilUtc = DateTime.MinValue;
+            _transientBackoff = TimeSpan.Zero;
+            _rejectedStopBackoff.Clear();
+        }
+
         using var scope = _scopes.CreateScope();
         var repository = scope.ServiceProvider.GetRequiredService<ITradingRepository>();
 
@@ -437,6 +480,25 @@ public sealed class ProtectiveStopWorker
         // anyone trying to find where a stop's trigger is actually judged.
         var market = _calendar.GetStatus();
         if (!market.IsOpen) return;
+
+        // A halt is inside the calendar's session, so the calendar alone kept this worker trying: every attempt was
+        // refused and every refusal started a backoff that outlived the halt. With halt handling On, nothing is
+        // attempted until the reopen; in Shadow the pass runs as before and the decision log notes it would not have.
+        if (_marketPhase?.Current is { Phase: MarketPhase.Halted } halt)
+        {
+            var first = _haltSkipLoggedFor != halt.SinceUtc;
+            _haltSkipLoggedFor = halt.SinceUtc;
+            if (_marketPhase.Rollout == RuleRollout.On)
+            {
+                if (first)
+                    _logger.LogWarning("[ProtectiveStops] Market halted ({Reason}); no stop is placed until it reopens.",
+                        halt.Reason);
+                return;
+            }
+            if (first)
+                await RecordShadowAsync(repository, MarketStateService.Rule, null, null, "Run the pass",
+                    "Skip passes until the reopen", $"Market halted: {halt.Reason}", ct);
+        }
 
         _activity?.Info("Stops", $"Checking {stops.Count} protective stop(s)");
 
@@ -1073,12 +1135,85 @@ public sealed class ProtectiveStopWorker
                 return;
         }
 
+        // Just after a reopen (owner Q2a): a native stop whose trigger the price has already fallen to or through would
+        // trigger the instant it rests — a sale in the first minutes, which the owner does not want unless the fall
+        // reaches the catastrophic level. So it waits out the settling minutes; one still above the price goes in now.
+        if (await HoldBreachedStopAfterReopenAsync(repository, stop, ct)) return;
+
         // Only an ACTING live reading may replace the ledger total; in Off and Shadow the total moves exactly as it did.
         var coveredBefore = stop.LastPlacedSessionDate != today ? 0
             : rollout == RuleRollout.On ? liveCovered ?? stop.PlacedQuantity
             : stop.PlacedQuantity;
         await PlaceNativeStopAsync(repository, stop, decision, today, allStops, resting, retiredThisPass, ct,
             coveredBefore, coverage?.Ledger);
+    }
+
+    /// <summary>
+    /// True when this stop's native placement must wait out the reopen's settling minutes: the price is at or below its
+    /// trigger but not below the catastrophic level, or the price is unknown (the rule re-arms at once only where it is
+    /// PROVEN the stop is still above the market). Acts only with halt handling On; in Shadow it records what it would
+    /// have held and lets the placement proceed.
+    /// </summary>
+    private async Task<bool> HoldBreachedStopAfterReopenAsync(
+        ITradingRepository repository, ProtectiveStop stop, CancellationToken ct)
+    {
+        if (_marketPhase?.Current is not { Phase: MarketPhase.ReopenSettling } settling) return false;
+
+        decimal? price = null;
+        if (_quotes is not null)
+        {
+            try
+            {
+                var quotes = await _quotes.GetQuotesAsync(ct);
+                price = quotes.Quotes.TryGetValue(stop.Symbol, out var q) ? q.Current : null;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogDebug(ex, "[ProtectiveStops] Live prices unavailable for the reopen check.");
+            }
+        }
+
+        var catastrophic = stop.StopTrigger * (1m - _options.Value.ProtectiveStopCatastrophicPercent / 100m);
+        if (price is { } p && (p > stop.StopTrigger || p < catastrophic)) return false;
+
+        var why = price is { } known
+            ? $"{stop.Symbol} trades at {known:0.##}, at or below the {stop.StopTrigger:0.##} trigger but above the "
+              + $"{catastrophic:0.##} catastrophic level; a stop placed now would trigger at once, so it waits for the "
+              + "settling minutes after the reopen."
+            : $"{stop.Symbol}'s price is not known, so it cannot be shown to be above the stop; it waits for the "
+              + "settling minutes after the reopen.";
+
+        var firstForThisReopen = MarkAlerted(stop, $"reopen-hold:{settling.SinceUtc:O}",
+            DateOnly.FromDateTime(_calendar.GetStatus().PktNow));
+
+        if (_marketPhase.Rollout != RuleRollout.On)
+        {
+            if (firstForThisReopen)
+                await RecordShadowAsync(repository, MarketStateService.Rule, stop.Symbol, stop.StopId,
+                    "Place the native stop", "Hold it until the reopen settles", why, ct);
+            return false;
+        }
+
+        if (firstForThisReopen) _logger.LogWarning("[ProtectiveStops] {StopId}: {Why}", stop.StopId, why);
+        return true;
+    }
+
+    /// <summary>One decision-log row for a rule running in Shadow; failures are logged and never block a pass.</summary>
+    private async Task RecordShadowAsync(ITradingRepository repository, string rule, string? symbol, string? subject,
+        string current, string shadow, string detail, CancellationToken ct)
+    {
+        _logger.LogWarning("[ProtectiveStops][Shadow] {Rule}: would {Shadow} where the current rule does {Current}. {Detail}",
+            rule, shadow, current, detail);
+        if (repository is not IRuleShadowLog log) return;
+        try
+        {
+            await log.RecordRuleShadowDecisionAsync(
+                new RuleShadowDecision(DateTime.UtcNow, rule, symbol, subject, current, shadow, detail), ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "[ProtectiveStops][Shadow] The decision log could not be written.");
+        }
     }
 
     /// <summary>
