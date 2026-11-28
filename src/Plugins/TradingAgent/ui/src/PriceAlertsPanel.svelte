@@ -3,6 +3,15 @@
   import { Bell, Plus } from 'lucide-svelte';
   import { trading, type PriceAlert, type PriceAlertInput, type PriceAlertObservation, type PriceAlertsPage, type WatchlistEntry } from './api';
 
+  interface Props {
+    /**
+     * True for a host that supplies its own header: no Active/History switch (active alerts only) and no "Set alert"
+     * button. The host calls `open()` for the form.
+     */
+    embedded?: boolean;
+  }
+  let { embedded = false }: Props = $props();
+
   let page: PriceAlertsPage | null = $state<PriceAlertsPage | null>(null);
   let dialog: HTMLDialogElement = $state()!;
   let draft: PriceAlertInput = $state({ symbol: '', direction: 'above', target: 0 });
@@ -150,6 +159,7 @@
 </script>
 
 <section aria-label="Price alerts">
+  {#if !embedded}
   <header>
     <div class="actions" aria-label="Price alert views">
       <button type="button" aria-pressed={!history} onclick={() => { history = false; limit = 25; }}>Active</button>
@@ -157,6 +167,7 @@
     </div>
     <button type="button" class="primary" onclick={() => open()}><Plus size={15}/> Set alert</button>
   </header>
+  {/if}
   <div role="status">{notice}</div>
   {#if error}<p role="alert">{error} <button onclick={() => load()}>Retry</button></p>{/if}
   {#if !page && loading}

@@ -1078,6 +1078,12 @@ export interface TradingActivity {
   level: 'info' | 'warn' | 'error';
   message: string;
   detail: string | null;
+  /** The stock it is about, when it is about one. Absent on older hosts. */
+  symbol?: string | null;
+  /** Who it is for: the trader's view of the day, or the diagnostics behind it. Absent on older hosts. */
+  audience?: 'trades' | 'system';
+  /** Bumped when the row is added or a repeat folds into it; see `TradingActivityFeed.version`. */
+  version?: number;
 }
 
 /**
@@ -1086,9 +1092,17 @@ export interface TradingActivity {
  */
 export interface TradingActivityFeed {
   lastSeq: number;
+  /** The newest change; send it back as `afterVersion` to get only rows added or repeated since. */
+  version?: number;
+  /** The oldest row still kept; null when the day holds none. Rows older than it have been dropped. */
+  oldestSeq?: number | null;
+  /** Midnight PKT of the day the rows belong to. */
+  keptSinceUtc?: string;
+  capacity?: number;
   warnings: number;
   errors: number;
-  retentionMinutes: number;
+  /** Older hosts only: they kept a rolling window rather than the day. */
+  retentionMinutes?: number;
   now: {
     browserBusy: boolean;
     marketOpen: boolean;
@@ -1485,15 +1499,14 @@ export const trading = {
   },
 
   /**
-   * Recent activity, newest first.
-   *
-   * Always the whole retained window rather than an incremental fetch: the server collapses a
-   * repeated activity into the existing entry, so a client holding its own copy would go on showing
-   * a count that had since moved. The window is small and self-pruning, which is what makes reading
-   * all of it the cheaper option.
+   * Today's activity, newest first. With `afterVersion`, only the rows added or repeated since that version: a repeat
+   * changes a row in place and bumps its version, so a reader merging by `seq` (activityFeed.ts `mergeActivity`) stays
+   * exact. The day holds up to a thousand rows, which is why the panel no longer re-reads all of them every few seconds.
    */
-  activity: (limit?: number) =>
-    get<TradingActivityFeed>('/trading/activity' + (limit ? `?limit=${limit}` : '')),
+  activity: (limit?: number, afterVersion?: number) =>
+    get<TradingActivityFeed>('/trading/activity?' + new URLSearchParams({
+      ...(limit ? { limit: String(limit) } : {}), ...(afterVersion ? { afterVersion: String(afterVersion) } : {})
+    })),
 
   armed: {
     list: (all = false) => get<ArmedOrdersResponse>(`/trading/armed-orders?all=${all}`),

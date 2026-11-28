@@ -244,10 +244,9 @@ public sealed partial class TradingCoreEndpoints
         // form that says whether the thing that just happened on screen (a browser window opening,
         // an order not appearing) was this system's doing and why.
         //
-        // The counts always describe the whole retained window regardless of `limit`, so a collapsed
-        // panel can show an issue badge while asking for a single entry. `afterSeq` is offered for a
-        // caller that only wants what is new — but note the log folds a repeated activity into its
-        // existing entry, so a live view should read the whole window rather than merge deltas.
+        // The counts always describe the whole day regardless of `limit`, so a collapsed panel can show
+        // an issue badge while asking for a single entry. A live view sends `afterVersion`: a repeat
+        // changes an entry in place and bumps its version, so merging by `seq` stays exact.
         trading.MapGet("/activity", (
             TradingActivityLog activity,
             AhkBroker broker,
@@ -256,6 +255,7 @@ public sealed partial class TradingCoreEndpoints
             WatchlistMonitorWorker monitor,
             IMarketCalendar calendar,
             long? afterSeq,
+            long? afterVersion,
             int? limit) =>
         {
             var (warnings, errors) = activity.IssueCounts();
@@ -265,9 +265,14 @@ public sealed partial class TradingCoreEndpoints
             return Results.Ok(new
             {
                 lastSeq = activity.LastSeq,
+                // A reader that sends `afterVersion` gets only what was added or repeated since, then merges by `seq`
+                // and drops anything older than `oldestSeq` (capacity, or a new PKT day).
+                version = activity.Version,
+                oldestSeq = activity.OldestSeq,
+                keptSinceUtc = activity.KeptSinceUtc,
+                capacity = TradingActivityLog.Capacity,
                 warnings,
                 errors,
-                retentionMinutes = (int)TradingActivityLog.Retention.TotalMinutes,
                 now = new
                 {
                     // The single most useful "right now" fact: whether a browser window on screen is
@@ -282,7 +287,7 @@ public sealed partial class TradingCoreEndpoints
                     feedReason   = feed.Reason,
                     monitorLastPassUtc = monitor.Status.LastPassUtc
                 },
-                activities = activity.Snapshot(afterSeq ?? 0, limit ?? TradingActivityLog.Capacity)
+                activities = activity.Snapshot(afterSeq ?? 0, limit ?? TradingActivityLog.Capacity, afterVersion ?? 0)
             });
         });
 

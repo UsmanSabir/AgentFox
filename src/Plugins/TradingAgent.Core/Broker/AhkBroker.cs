@@ -412,7 +412,7 @@ public sealed class AhkBroker : IAsyncDisposable
                     _activity?.Info("Orders",
                         $"Submitting {signal.Action} {signal.Quantity?.ToString() ?? "default qty"} "
                         + $"{signal.Symbol} ({signal.OrderType})",
-                        signal.EntryPrice is { } entry ? $"At {entry:0.##}." : null);
+                        signal.EntryPrice is { } entry ? $"At {entry:0.##}." : null, symbol: signal.Symbol);
 
                     var result = await DispatchOrderAsync(signal);
                     groupResults.Add(result);

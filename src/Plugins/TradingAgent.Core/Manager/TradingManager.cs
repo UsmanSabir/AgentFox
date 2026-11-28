@@ -296,7 +296,7 @@ public sealed partial class TradingManager
                     authorization.Attended
                         ? $"Manual-only {manualSymbol} traded by hand"
                         : $"Manual-only {manualSymbol} traded on a standing instruction",
-                    $"Authorized by {authorization.Actor} via {authorization.Method}.");
+                    $"Authorized by {authorization.Actor} via {authorization.Method}.", symbol: manualSymbol);
             }
         }
 

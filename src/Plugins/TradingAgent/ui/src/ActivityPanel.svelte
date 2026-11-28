@@ -1,35 +1,37 @@
 <script lang="ts">
   import { onMount, onDestroy, untrack } from 'svelte';
   import { trading, type TradingActivity, type TradingActivityFeed } from './api';
-  import { filterActivity, routineCandleUpdateCount } from './activityFeed';
   import {
-    Activity, ChevronDown, ChevronRight, AlertTriangle, XCircle, Chrome, Loader, ListFilter
+    displayMessage, filterActivity, kindLabel, kindOf, mergeActivity, routineCandleUpdateCount, tradeKindFilters, viewCounts,
+    type ActivityKindFilter, type ActivityView
+  } from './activityFeed';
+  import {
+    Activity, ChevronDown, ChevronRight, AlertTriangle, XCircle, Chrome, Loader, ListFilter, Mail
   } from 'lucide-svelte';
-
-  
 
   interface Props {
     /**
-   * What the trading agent is doing, and what it just did.
+   * What the trading agent did TODAY (PKT), for the trader, with the diagnostics one click away.
    *
    * <p>The classic dashboard starts collapsed. Workspace tabs already own visibility and show the
    * content directly, polling only while the panel is on screen. The classic header carries browser
    * ownership and issue counts without needing to expand its list.</p>
    *
-   * <p>Polling follows the same logic: every 4s while open, every 30s while closed and then only for
-   * the counts behind the header chips. The list is always taken whole from the server rather than
-   * merged locally — the server folds a repeated activity into its existing entry, and a client
-   * keeping its own copy would go on showing a count that had since moved.</p>
+   * <p>Polling: every 4s while open, every 30s while closed and then only for the counts behind the
+   * header chips. While open it asks only for what changed since the version it last saw, and merges
+   * by `seq` — a repeat changes a row in place and bumps its version, so the count it shows is the
+   * server's. A server that went backwards (a restart) or moved to a new day is read whole again.</p>
    *
-   * <p>Routine candle-source announcements are hidden by default. Their count and an explicit toggle
-   * stay visible, while candle warnings and errors are never filtered. Source diagnostics remain one
-   * click away without pushing order and protection activity out of the readable view.</p>
+   * <p>Two views. Trades: orders, stops, triggers, strategy actions, copies and every message sent to
+   * the person. System: reads, connections, candle sources. Warnings and errors appear in both.</p>
    */
     embedded?: boolean;
     active?: boolean;
+    /** Opens a stock's chart; a host that has a chart passes it. */
+    onSelect?: ((symbol: string) => void) | null;
   }
 
-  let { embedded = false, active = true }: Props = $props();
+  let { embedded = false, active = true, onSelect = null }: Props = $props();
   let expanded = $state(false);
   let open = $derived(embedded || expanded);
   let mounted = $state(false);
@@ -39,13 +41,37 @@
 
   let feed: TradingActivityFeed | null = $state<TradingActivityFeed | null>(null);
   let entries: TradingActivity[] = $state([]);
+  let heldVersion = 0;
+  let heldDay: string | undefined;
   let error: string | null = $state<string | null>(null);
   let timer: ReturnType<typeof setTimeout> | null = null;
   let loading = $state(true);
+
+  let view: ActivityView = $state('trades');
+  let kind: ActivityKindFilter = $state('all');
+  let stock = $state('');
   let showRoutineCandles = $state(false);
 
   const OPEN_POLL_MS = 4_000;
   const CLOSED_POLL_MS = 30_000;
+
+  /** Today's rows: only the change since the last read when the server can say what changed, otherwise all of them. */
+  async function readEntries(): Promise<TradingActivityFeed> {
+    if (heldVersion > 0) {
+      const changed = await trading.activity(undefined, heldVersion);
+      const sameDay = changed.keptSinceUtc === heldDay;
+      if (sameDay && (changed.version ?? 0) >= heldVersion) {
+        entries = mergeActivity(entries, changed.activities, changed.oldestSeq);
+        heldVersion = changed.version ?? heldVersion;
+        return changed;
+      }
+    }
+    const whole = await trading.activity();
+    entries = whole.activities;
+    heldVersion = whole.version ?? 0;
+    heldDay = whole.keptSinceUtc;
+    return whole;
+  }
 
   async function poll() {
     if (!mounted || pollMode === 'off' || inFlight) return;
@@ -53,10 +79,9 @@
     inFlight = true;
     try {
       // A collapsed panel asks for the counts only; the entry list behind them is not on screen.
-      const next = await trading.activity(requestedMode === 'full' ? undefined : 1);
+      const next = requestedMode === 'full' ? await readEntries() : await trading.activity(1);
       if (!mounted) return;
       error = null;
-      if (requestedMode === 'full') entries = next.activities;
       feed = next;
     } catch (e) {
       if (mounted) error = e instanceof Error ? e.message : String(e);
@@ -106,8 +131,12 @@
     ? 'AHL push'
     : `${feedProvider.toUpperCase()} feed`);
   let feedReason = $derived(feed?.now.feedReason ?? 'Live quotes are falling back to the PSX market watch.');
+  let counts = $derived(viewCounts(entries));
   let routineCandleUpdates = $derived(routineCandleUpdateCount(entries));
-  let visibleEntries = $derived(filterActivity(entries, showRoutineCandles));
+  let visibleEntries = $derived(filterActivity(entries, { view, kind: view === 'trades' ? kind : 'all', stock, showRoutineCandles }));
+  let filtered = $derived(stock.trim() !== '' || (view === 'trades' && kind !== 'all'));
+  // An older host keeps a rolling window rather than the day; say what it actually kept.
+  let windowWords = $derived(feed?.keptSinceUtc ? 'today' : `in the last ${feed?.retentionMinutes ?? 120} minutes`);
 </script>
 
 {#snippet activityHeading()}
@@ -115,7 +144,7 @@
       {#if !embedded}{#if open}<ChevronDown size={14} />{:else}<ChevronRight size={14} />{/if}{/if}
       <Activity size={15} />
       <b>Activity</b>
-      <span class="sub">What the trading agent is doing</span>
+      <span class="sub">{feed?.keptSinceUtc ? 'Today' : 'What the trading agent is doing'}</span>
     </span>
 
     <span class="head-state">
@@ -130,10 +159,10 @@
         </span>
       {/if}
       {#if feed?.errors}
-        <span class="chip danger"><XCircle size={11} /> {feed.errors}</span>
+        <span class="chip danger" title="Errors today"><XCircle size={11} /> {feed.errors}</span>
       {/if}
       {#if feed?.warnings}
-        <span class="chip warn"><AlertTriangle size={11} /> {feed.warnings}</span>
+        <span class="chip warn" title="Warnings today"><AlertTriangle size={11} /> {feed.warnings}</span>
       {/if}
       {#if feed && issues === 0 && !feedDegraded && !loading}
         <span class="chip ok">no issues</span>
@@ -166,8 +195,16 @@
       </p>
     {/if}
 
-    {#if routineCandleUpdates > 0}
-      <div class="filters">
+    <div class="controls">
+      <div class="segments" role="group" aria-label="Activity view">
+        <button type="button" aria-pressed={view === 'trades'} onclick={() => view = 'trades'}>Trades <span>{counts.trades}</span></button>
+        <button type="button" aria-pressed={view === 'system'} onclick={() => view = 'system'}>System <span>{counts.system}</span></button>
+      </div>
+      {#if view === 'trades'}
+        <select bind:value={kind} aria-label="Show activity of kind">
+          {#each tradeKindFilters as f (f.id)}<option value={f.id}>{f.label}</option>{/each}
+        </select>
+      {:else if routineCandleUpdates > 0}
         <button
           type="button"
           class="filter"
@@ -179,29 +216,41 @@
           {showRoutineCandles ? 'Hide' : 'Show'} routine candles
           <span>{routineCandleUpdates} {showRoutineCandles ? 'shown' : 'hidden'}</span>
         </button>
-      </div>
-    {/if}
+      {/if}
+      <input class="stock" type="search" bind:value={stock} placeholder="Stock" aria-label="Show activity for one stock"
+        maxlength="16" autocomplete="off"/>
+    </div>
 
     {#if loading && !feed}
       <p class="empty" role="status">Loading activity…</p>
     {:else if !error && visibleEntries.length === 0}
       <p class="empty">
-        {#if routineCandleUpdates > 0 && !showRoutineCandles}
-          No other activity recorded in the last {feed?.retentionMinutes ?? 120} minutes.
+        {#if filtered}
+          Nothing matches these filters {windowWords}.
+        {:else if view === 'trades'}
+          No orders, stops, triggers or messages to you {windowWords}.
+          <small>System shows what the agent read and connected to.</small>
+        {:else if routineCandleUpdates > 0 && !showRoutineCandles}
+          No other system activity {windowWords}.
           <small>Routine candle diagnostics are hidden by the filter above.</small>
         {:else}
-          Nothing recorded in the last {feed?.retentionMinutes ?? 120} minutes.
-          <small>Activity appears when the agent reads the portal, places an order, or manages a stop.</small>
+          Nothing recorded {windowWords}.
         {/if}
       </p>
     {:else if visibleEntries.length}
       <ul class="list">
         {#each visibleEntries as item (item.seq)}
+          {@const k = kindOf(item)}
           <li class="row {item.level}">
             <span class="when" title={new Date(item.lastUtc).toLocaleString()}>{time(item.lastUtc)}</span>
-            <span class="source">{item.source}</span>
+            <span class="stock-cell">
+              {#if item.symbol && onSelect}
+                <button type="button" class="symbol" onclick={() => onSelect?.(item.symbol!)} title={`Open the ${item.symbol} chart`}>{item.symbol}</button>
+              {:else if item.symbol}<b>{item.symbol}</b>{/if}
+            </span>
+            <span class="kind" data-kind={k}>{#if k === 'notified'}<Mail size={10} aria-hidden="true" />{/if}{view === 'system' && k === 'system' ? item.source : kindLabel[k]}</span>
             <span class="msg">
-              {item.message}
+              {displayMessage(item)}
               {#if item.repeats > 0}
                 <!-- The count IS the information for a recurring line: "it opened the browser again"
                      is noise, "it opened the browser 14 times in the last hour" is a finding. -->
@@ -216,8 +265,12 @@
         {/each}
       </ul>
       <p class="foot">
-        Newest first · repeats collapse into a count · kept for {feed?.retentionMinutes ?? 120}
-        minutes, then dropped. The ledger and the log file are the durable records.
+        {#if feed?.keptSinceUtc}
+          Today since midnight PKT · newest first · repeats fold into a count · cleared on restart. The ledger and the log
+          file are the durable records.
+        {:else}
+          Newest first · repeats collapse into a count · kept for {feed?.retentionMinutes ?? 120} minutes, then dropped.
+        {/if}
       </p>
     {/if}
   {/if}
@@ -226,7 +279,7 @@
 <style>
   .activity {
     background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
-    margin-bottom: 1.25rem; overflow: hidden;
+    margin-bottom: 1.25rem; overflow: hidden; container-type: inline-size;
   }
   .activity.embedded { border:0; border-radius:0; margin-bottom:0; }
   .head {
@@ -259,9 +312,23 @@
   .empty small { color: var(--text-3); opacity: .8; font-size: .68rem; }
   .foot { color: var(--text-3); font-size: .65rem; padding: .5rem 1rem .8rem; }
 
-  .filters { display: flex; padding: 0 1rem .55rem; }
+  .controls { display: flex; align-items: center; flex-wrap: wrap; gap: .4rem; padding: 0 1rem .55rem; }
+  .segments { display: inline-flex; border: 1px solid var(--border-md); border-radius: .45rem; overflow: hidden; }
+  .segments button {
+    min-height: 28px; padding: .2rem .6rem; border: 0; background: transparent; color: var(--text-2);
+    font: inherit; font-size: .72rem; cursor: pointer; display: inline-flex; align-items: center; gap: .3rem;
+  }
+  .segments button + button { border-left: 1px solid var(--border-md); }
+  .segments button[aria-pressed="true"] { background: var(--surface-2); color: var(--text); }
+  .segments button span { color: var(--text-3); font-size: .65rem; font-variant-numeric: tabular-nums; }
+  .segments button:focus-visible, select:focus-visible, .stock:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+  select, .stock {
+    min-height: 28px; padding: .15rem .4rem; border: 1px solid var(--border-md); border-radius: .4rem;
+    background: var(--surface-2); color: var(--text); font: inherit; font-size: .72rem;
+  }
+  .stock { width: 6.5rem; margin-left: auto; text-transform: uppercase; }
   .filter {
-    min-height: 30px; padding: .25rem .5rem; cursor: pointer; font: inherit;
+    min-height: 28px; padding: .25rem .5rem; cursor: pointer; font: inherit;
     display: inline-flex; align-items: center; gap: .35rem;
     border: 1px solid var(--border-md); border-radius: 999px;
     background: var(--surface-2); color: var(--text-2); font-size: .68rem;
@@ -279,8 +346,9 @@
     display: flex; flex-direction: column; gap: .15rem;
     max-height: 300px; overflow-y: auto;
   }
+  .activity.embedded .list { max-height: none; }
   .row {
-    display: grid; grid-template-columns: auto auto 1fr auto; gap: .5rem; align-items: baseline;
+    display: grid; grid-template-columns: auto 4.2rem auto 1fr auto; gap: .5rem; align-items: baseline;
     padding: .3rem .5rem; border-radius: var(--radius-sm);
     background: var(--surface-2); border-left: 3px solid transparent;
   }
@@ -289,19 +357,34 @@
   .row.error { border-left-color: var(--danger); }
 
   .when   { font-family: ui-monospace, monospace; font-size: .65rem; color: var(--text-3); }
-  .source { font-size: .6rem; color: var(--text-3); text-transform: uppercase; letter-spacing: .04em; min-width: 3.6rem; }
+  .stock-cell { font-size: .7rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .stock-cell b { color: var(--text); }
+  .symbol {
+    padding: 0; border: 0; background: none; font: inherit; font-weight: 700; color: var(--primary);
+    cursor: pointer; text-decoration: underline; text-underline-offset: 2px;
+  }
+  .symbol:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+  .kind {
+    font-size: .58rem; color: var(--text-3); text-transform: uppercase; letter-spacing: .04em; white-space: nowrap;
+    display: inline-flex; align-items: center; gap: .2rem;
+  }
+  .kind[data-kind="notified"] { color: var(--info); }
   .msg    { font-size: .73rem; color: var(--text-2); min-width: 0; }
   .row.warn .msg  { color: var(--text); }
   .row.error .msg { color: var(--text); }
-  .msg em { display: block; color: var(--text-3); font-style: normal; font-size: .68rem; line-height: 1.5; }
+  .msg em { display: block; color: var(--text-3); font-style: normal; font-size: .68rem; line-height: 1.5; overflow-wrap: anywhere; }
   .repeat {
     font-size: .6rem; color: var(--text-3); border: 1px solid var(--border-md);
     border-radius: 999px; padding: 0 .3rem; margin-left: .25rem; white-space: nowrap;
   }
   .age    { font-size: .62rem; color: var(--text-3); white-space: nowrap; }
 
-  @media (max-width: 720px) {
-    .row { grid-template-columns: auto 1fr; }
-    .source, .age { display: none; }
+  /* A docked panel is usually narrow, so the layout follows the panel, not the window. */
+  @container (max-width: 520px) {
+    .row { grid-template-columns: auto auto 1fr; row-gap: .1rem; }
+    .msg { grid-column: 1 / -1; }
+    .age { display: none; }
+    .stock { margin-left: 0; }
   }
+  @media (pointer: coarse) { .segments button, select, .stock, .filter { min-height: 44px; } }
 </style>
