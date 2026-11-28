@@ -270,6 +270,11 @@ public sealed class TradingAgentRuntime
         services.AddSingleton<PriceAlertWorker>();
         services.AddHostedService(sp => sp.GetRequiredService<PriceAlertWorker>());
         services.AddHostedService<TakeProfitRetryWorker>();
+        // The dead-man (plan step 7): the health report behind GET /api/trading/health, and the heartbeat that pushes it
+        // to the fleet watchdog (off unless Watchdog.HeartbeatUrl is set).
+        services.AddSingleton<TradingAgent.Observability.TradingHealthReporter>();
+        services.AddHostedService<TradingAgent.Observability.TradingHeartbeatSender>();
+
         // Halt detection (plan step 5). One instance, read by the stop worker and the armed-order monitor through
         // IMarketPhase; Shadow by default (TradingAgentOptions.MarketHaltHandling).
         services.AddSingleton<IIndexMoveSource, PsxIndexMoveSource>();

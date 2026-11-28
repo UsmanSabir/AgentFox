@@ -108,6 +108,10 @@ public sealed class CompositeLiveQuoteSource : ILiveQuoteSource
         if (merged.Count == 0 && warnings.Count == 0)
             warnings.Add("No quote source returned any prices.");
 
+        if (merged.Count > 0)
+            Interlocked.Exchange(ref _lastPricedTicks,
+                (retrievedAt == DateTime.MinValue ? DateTime.UtcNow : retrievedAt).Ticks);
+
         return new LiveQuoteSnapshot
         {
             Quotes         = merged,
@@ -115,5 +119,20 @@ public sealed class CompositeLiveQuoteSource : ILiveQuoteSource
             RetrievedAtUtc = retrievedAt == DateTime.MinValue ? DateTime.UtcNow : retrievedAt,
             Warnings       = warnings
         };
+    }
+
+    private long _lastPricedTicks;
+
+    /// <summary>
+    /// When any source last returned prices (UTC), or null if none has since start — the dead-man's "is the price feed
+    /// alive" reading (plan step 7). Updated by whoever reads quotes; it costs nothing extra to keep.
+    /// </summary>
+    public DateTime? LastPricedUtc
+    {
+        get
+        {
+            var ticks = Interlocked.Read(ref _lastPricedTicks);
+            return ticks == 0 ? null : new DateTime(ticks, DateTimeKind.Utc);
+        }
     }
 }

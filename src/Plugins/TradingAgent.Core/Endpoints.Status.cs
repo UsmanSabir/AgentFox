@@ -111,6 +111,10 @@ public sealed partial class TradingCoreEndpoints
             return Results.Ok(new { sessionEstablished, reconciliation = snapshot });
         }).RequireAuthorization("TradingTrader");
 
+        // The dead-man's report (plan step 7): alive, reading the broker, priced, stops placed. The same body the
+        // heartbeat pushes to the fleet watchdog.
+        trading.MapGet("/health", (TradingHealthReporter reporter) => Results.Ok(reporter.Report()));
+
         // How this account trades, and whether its owner has confirmed it (plan step 6, owner 2026-11-28). New hosted
         // tenants are provisioned in ApprovalRequired; nobody is switched silently — every account shows a notice until
         // its owner confirms a mode here, and keeping the current one is a valid confirmation.

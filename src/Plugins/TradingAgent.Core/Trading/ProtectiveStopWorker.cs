@@ -120,6 +120,33 @@ public sealed class ProtectiveStopWorker
 
     private int _clearBackoffsOnNextPass;
 
+    // ── What the dead-man reports (plan step 7) ──────────────────────────────
+
+    private DateTime? _lastPassUtc;
+    private int _openStops;
+
+    /// <summary>
+    /// Stops this worker KNOWS are not protected at the broker right now, with since when and why: a refusal, a missing
+    /// authorisation, a backoff, a reopen hold. Cleared as soon as the stop is placed or found covered. Memory only — a
+    /// restart forgets it and the next pass rebuilds it, which can under-report for one pass and never over-report.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, (string Symbol, DateTime SinceUtc, string Why)> _unprotected =
+        new(StringComparer.Ordinal);
+
+    public sealed record UnprotectedStop(string StopId, string Symbol, DateTime SinceUtc, string Why);
+
+    /// <param name="LastPassUtc">When a pass last ran inside a session; null if none has since start.</param>
+    public sealed record ProtectionHealth(DateTime? LastPassUtc, int OpenStops, IReadOnlyList<UnprotectedStop> Unprotected);
+
+    public ProtectionHealth Health => new(_lastPassUtc, Volatile.Read(ref _openStops),
+        _unprotected.Select(kv => new UnprotectedStop(kv.Key, kv.Value.Symbol, kv.Value.SinceUtc, kv.Value.Why))
+            .OrderBy(u => u.SinceUtc).ToList());
+
+    private void MarkUnprotected(ProtectiveStop stop, string why) =>
+        _unprotected.AddOrUpdate(stop.StopId, _ => (stop.Symbol, DateTime.UtcNow, why), (_, prior) => prior with { Why = why });
+
+    private void MarkProtected(ProtectiveStop stop) => _unprotected.TryRemove(stop.StopId, out _);
+
     private DateTime _placementsBlockedUntilUtc = DateTime.MinValue;
     private TimeSpan _transientBackoff = TimeSpan.Zero;
 
@@ -459,6 +486,10 @@ public sealed class ProtectiveStopWorker
         foreach (var key in _strandedSince.Keys)
             if (!stops.Any(s => s.StopId == key))
                 _strandedSince.TryRemove(key, out _);
+        foreach (var key in _unprotected.Keys)
+            if (!stops.Any(s => s.StopId == key && s.State == "active"))
+                _unprotected.TryRemove(key, out _);
+        Volatile.Write(ref _openStops, stops.Count(s => s.State == "active"));
 
         if (stops.Count == 0) return;
 
@@ -480,6 +511,7 @@ public sealed class ProtectiveStopWorker
         // anyone trying to find where a stop's trigger is actually judged.
         var market = _calendar.GetStatus();
         if (!market.IsOpen) return;
+        _lastPassUtc = DateTime.UtcNow;
 
         // A halt is inside the calendar's session, so the calendar alone kept this worker trying: every attempt was
         // refused and every refusal started a backoff that outlived the halt. With halt handling On, nothing is
@@ -1120,6 +1152,7 @@ public sealed class ProtectiveStopWorker
                         ct: ct);
                 }
                 await CloseAsync(repository, stop, decision.Reason, ct);
+                MarkProtected(stop);   // nothing left to protect
                 // The position going to zero usually means the stop fired — an exit the operator did
                 // not initiate, and the single most important thing on this worker to hear about.
                 await AlertOnceAsync(stop, "closed", today,
@@ -1132,13 +1165,22 @@ public sealed class ProtectiveStopWorker
             case PlacementAction.Skip:
                 _logger.LogDebug("[ProtectiveStops] {StopId} ({Symbol}): {Why}",
                     stop.StopId, stop.Symbol, decision.Reason);
+                // Covered (by this stop's own order, or one resting at its level) clears an earlier "unprotected";
+                // a skip for any other reason — unreadable, ambiguous, no free shares — leaves it as it was.
+                if (decision.Reason.StartsWith("Already placed", StringComparison.Ordinal)
+                    || decision.Reason.StartsWith($"A stop for {stop.Symbol} is already resting", StringComparison.Ordinal))
+                    MarkProtected(stop);
                 return;
         }
 
         // Just after a reopen (owner Q2a): a native stop whose trigger the price has already fallen to or through would
         // trigger the instant it rests — a sale in the first minutes, which the owner does not want unless the fall
         // reaches the catastrophic level. So it waits out the settling minutes; one still above the price goes in now.
-        if (await HoldBreachedStopAfterReopenAsync(repository, stop, ct)) return;
+        if (await HoldBreachedStopAfterReopenAsync(repository, stop, ct))
+        {
+            MarkUnprotected(stop, "held after the reopen: the price is at or below the trigger");
+            return;
+        }
 
         // Only an ACTING live reading may replace the ledger total; in Off and Shadow the total moves exactly as it did.
         var coveredBefore = stop.LastPlacedSessionDate != today ? 0
@@ -1552,6 +1594,7 @@ public sealed class ProtectiveStopWorker
         // with a broker that has already said "not yet".
         if (DateTime.UtcNow < _placementsBlockedUntilUtc)
         {
+            MarkUnprotected(stop, "waiting out the broker's refusal on timing");
             var waitFor = _placementsBlockedUntilUtc - DateTime.UtcNow;
             _logger.LogInformation(
                 "[ProtectiveStops] {StopId} ({Symbol}): holding off — the broker refused the last "
@@ -1578,6 +1621,7 @@ public sealed class ProtectiveStopWorker
         if (_rejectedStopBackoff.TryGetValue(placementKey, out var rejected)
             && DateTime.UtcNow < rejected.UntilUtc)
         {
+            MarkUnprotected(stop, "waiting out the broker's refusal of this stop");
             var waitFor = rejected.UntilUtc - DateTime.UtcNow;
             _logger.LogInformation(
                 "[ProtectiveStops] {StopId} ({Symbol}): holding off — the broker refused this exact "
@@ -1607,6 +1651,7 @@ public sealed class ProtectiveStopWorker
             groups, key, new ApprovalContext(null, "protective-stop", stop.OperatorOriginated));
         if (!approval.MayProceed)
         {
+            MarkUnprotected(stop, "not authorised: " + approval.Reason);
             _logger.LogWarning(
                 "[ProtectiveStops] {StopId} ({Symbol}) needs a stop placed but was NOT authorised: "
                 + "{Reason}. The position is UNPROTECTED at the broker.",
@@ -1667,6 +1712,7 @@ public sealed class ProtectiveStopWorker
                 await repository.RecordProtectiveStopPlacementAsync(
                     stop.StopId, today, actuallyPlaced, order.OrderId, ct);
             _realerted.Remove(stop.StopId);
+            MarkProtected(stop);
             // The ORDER NUMBER belongs in this line. At AHL a stop is assigned a short
             // connection-scoped number whose whole uniqueness is a sequence read at login, and a
             // sequence read pre-open is not the account's — so a reused number is a real event, and
@@ -1784,6 +1830,7 @@ public sealed class ProtectiveStopWorker
                 order?.Message ?? result.Reason, symbol: stop.Symbol);
         }
 
+        MarkUnprotected(stop, "refused by the broker: " + (order?.Message ?? result.Reason));
         await AlertWhileUnprotectedAsync(stop, "placement-failed", today,
             $"🛡️ **Stop rejected by the broker — {stop.Symbol}**\n"
             + $"• SELL {decision.Quantity:N0} {stop.Symbol} at {stop.StopTrigger:0.##} was refused\n"

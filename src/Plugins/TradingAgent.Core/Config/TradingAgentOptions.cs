@@ -140,6 +140,9 @@ public class TradingAgentOptions
     /// <summary>Seconds between market-state evaluations inside a session. Default 15.</summary>
     public int MarketStatePollSeconds { get; set; } = 15;
 
+    /// <summary>The dead-man's heartbeat to the fleet watchdog (plan step 7). Off unless a URL is set.</summary>
+    public WatchdogOptions Watchdog { get; set; } = new();
+
     /// <summary>
     /// Seconds between the first snapshot that misses a stop's order with no recorded reason (no cancel, no trade)
     /// and the later one that may conclude it is gone and re-place it. An order the activity log records as
@@ -803,4 +806,26 @@ public sealed class MarketSessionOverride
     public string Date { get; set; } = "";
     public bool Closed { get; set; }
     public List<string> Sessions { get; set; } = [];
+}
+
+/// <summary>
+/// Where this agent sends its heartbeat (<see cref="TradingAgent.Observability.TradingHeartbeatSender"/>), and what it
+/// calls itself there. Hosted agents get these from provisioning; a self-hosted agent leaves them empty and sends nothing.
+/// </summary>
+public sealed class WatchdogOptions
+{
+    /// <summary>The watchdog's heartbeat endpoint. Empty = heartbeats off (the default).</summary>
+    public string? HeartbeatUrl { get; set; }
+
+    /// <summary>Sent as a bearer token, so the watchdog can tell one tenant's heartbeat from a forged one.</summary>
+    public string? Token { get; set; }
+
+    /// <summary>The tenant name the watchdog files this agent under.</summary>
+    public string? Tenant { get; set; }
+
+    /// <summary>Seconds between heartbeats inside a session. Default 60; the watchdog alerts after two minutes of silence.</summary>
+    public int IntervalSeconds { get; set; } = 60;
+
+    /// <summary>Seconds without any price from any source, inside a session, before the feed counts as silent. Default 120.</summary>
+    public int FeedSilentSeconds { get; set; } = 120;
 }
