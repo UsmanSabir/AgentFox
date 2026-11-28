@@ -364,17 +364,39 @@ public sealed class ProtectiveStopWorker
     /// reasoning. Not awaited by design: the caller (e.g. a strategy's exit evaluation) must not be
     /// blocked on a broker round trip, and the periodic pass remains the durable fallback if this one
     /// is skipped, races another, or fails outright.
+    ///
+    /// <para>
+    /// <b>Coalesced.</b> A halt cancels every resting order at once and the venue pushes one event per order, so
+    /// eighteen positions would ask for eighteen back-to-back passes — eighteen account snapshots describing the
+    /// same account. Requests inside <see cref="TriggerBurstWindow"/> of each other share one pass, which starts
+    /// after the burst settles and therefore reads the account as the burst left it.
+    /// </para>
     /// </summary>
-    public void TriggerSoon() =>
+    public void TriggerSoon()
+    {
+        if (Interlocked.Exchange(ref _triggerPending, 1) == 1) return;
+
         _ = Task.Run(async () =>
         {
-            try { await RunNowAsync(); }
+            try
+            {
+                await Task.Delay(TriggerBurstWindow);
+                Interlocked.Exchange(ref _triggerPending, 0);
+                await RunNowAsync();
+            }
             catch (Exception ex)
             {
+                Interlocked.Exchange(ref _triggerPending, 0);
                 _logger.LogWarning(ex,
                     "[ProtectiveStops] On-demand pass failed; the periodic pass will try again.");
             }
         });
+    }
+
+    /// <summary>How long a triggered pass waits for a burst of requests to settle. See <see cref="TriggerSoon"/>.</summary>
+    internal static readonly TimeSpan TriggerBurstWindow = TimeSpan.FromSeconds(2);
+
+    private int _triggerPending;
 
     /// <inheritdoc cref="IProtectiveStopReleaser.RestoreSoon"/>
     public void RestoreSoon() => TriggerSoon();
@@ -488,6 +510,12 @@ public sealed class ProtectiveStopWorker
             }
         }
 
+        // Each stop's own orders, read once per pass, so coverage is judged against the book order by order
+        // (ProtectiveStopDecisions.LiveCoverage) rather than from the ledger's running total. Absent when the
+        // repository keeps no order history or the snapshot is not healthy; each stop then falls back to the
+        // ledger total exactly as before.
+        var coverage = await ReadCoverageInputsAsync(repository, snapshot, today, ct);
+
         // A predecessor superseded mid-loop (see the hook in PlaceNativeStopAsync) is transitioned in
         // the DATABASE immediately, but the in-memory `stops` snapshot taken at the top of this pass
         // still shows it "active" — the newest-first ordering means the new stop it lost its place to
@@ -505,7 +533,7 @@ public sealed class ProtectiveStopWorker
                 if (stop.State == "pending_fill")
                     await WatchForFillAsync(repository, stop, holdings, resting, ct);
                 else
-                    await MaintainAsync(repository, stop, holdings, resting, today, stops, retiredThisPass, ct);
+                    await MaintainAsync(repository, stop, holdings, resting, today, stops, retiredThisPass, ct, coverage);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -809,7 +837,8 @@ public sealed class ProtectiveStopWorker
         DateOnly today,
         IReadOnlyList<ProtectiveStop> allStops,
         HashSet<string> retiredThisPass,
-        CancellationToken ct)
+        CancellationToken ct,
+        CoverageInputs? coverage = null)
     {
         if (stop.ParentArmedId is { } parentId)
         {
@@ -1001,8 +1030,10 @@ public sealed class ProtectiveStopWorker
             }
         }
 
+        var liveCovered = await ReadLiveCoverageAsync(stop, resting, today, coverage, ct);
+
         var decision = ProtectiveStopDecisions.DecidePlacement(
-            stop, held, today, resting ?? [], excluded, cancelled);
+            stop, held, today, resting ?? [], excluded, cancelled, liveCovered);
 
         switch (decision.Action)
         {
@@ -1031,7 +1062,134 @@ public sealed class ProtectiveStopWorker
                 return;
         }
 
-        await PlaceNativeStopAsync(repository, stop, decision, today, allStops, resting, retiredThisPass, ct);
+        var coveredBefore = stop.LastPlacedSessionDate == today ? liveCovered ?? stop.PlacedQuantity : 0;
+        await PlaceNativeStopAsync(repository, stop, decision, today, allStops, resting, retiredThisPass, ct,
+            coveredBefore, coverage?.Ledger);
+    }
+
+    /// <summary>
+    /// Records that THIS system cancelled one of a stop's orders, so live coverage does not mistake it for an order
+    /// that left the book on its own. <c>released</c>: stood down for a reducing sale, and re-placed over what
+    /// remains. <c>stranded</c>: cancelled after the price fell through its limit; it keeps counting for the rest
+    /// of the session, because re-placing at a trigger the market is already below would trigger, strand and be
+    /// cancelled again on every pass — the operator has been told to act instead.
+    /// </summary>
+    private async Task MarkOwnCancelAsync(
+        ITradingRepository repository, string stopId, string? orderNo, string state, CancellationToken ct)
+    {
+        if (repository is not IProtectiveStopOrderLedger ledger || orderNo is not { Length: > 0 } number) return;
+        try
+        {
+            var today = DateOnly.FromDateTime(_calendar.GetStatus().PktNow);
+            var ours = (await ledger.GetProtectiveStopOrdersAsync(today, ct))
+                .Where(o => o.StopId == stopId && o.IsOpen
+                         && TradingAgent.Reconciliation.OrderIdentity.Matches(o.OrderNo, null, number))
+                .Select(o => o with { State = state })
+                .ToList();
+            await ledger.UpdateProtectiveStopOrdersAsync(ours, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "[ProtectiveStops] {StopId}: could not record cancelling order {OrderNo}.", stopId, number);
+        }
+    }
+
+    /// <summary>
+    /// What one pass needs to judge every stop's orders against the book. Null when there is no order history to
+    /// read (a repository without the ledger) or nothing trustworthy to read it against (an unhealthy snapshot).
+    /// </summary>
+    internal sealed record CoverageInputs(
+        IProtectiveStopOrderLedger Ledger,
+        IReadOnlyList<ProtectiveStopOrder> Orders,
+        IReadOnlyList<BrokerOrderEvent> Events,
+        IReadOnlyDictionary<string, string> Renumbered,
+        DateTime SnapshotUtc);
+
+    private async Task<CoverageInputs?> ReadCoverageInputsAsync(
+        ITradingRepository repository, BrokerReconciliationSnapshot? snapshot, DateOnly today, CancellationToken ct)
+    {
+        if (repository is not IProtectiveStopOrderLedger ledger || snapshot is not { Healthy: true }) return null;
+        try
+        {
+            var orders = await ledger.GetProtectiveStopOrdersAsync(today, ct);
+            var renumbered = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var r in snapshot.OrderRenumberings)
+                if (!string.IsNullOrWhiteSpace(r.From) && !string.IsNullOrWhiteSpace(r.To))
+                    renumbered[r.From.Trim()] = r.To.Trim();
+            return new CoverageInputs(ledger, orders, snapshot.OrderEvents, renumbered, snapshot.CheckedUtc);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Not fatal: every stop falls back to the ledger total, which is what ran before this existed.
+            _logger.LogWarning(ex, "[ProtectiveStops] The stop order ledger could not be read; using placed totals.");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// This stop's live coverage for today, or null to keep the ledger's running total — when there is nothing to
+    /// read, or when the stop placed today before the order ledger existed (no rows for it), where counting zero
+    /// would re-place a stop that may well still be resting.
+    /// </summary>
+    private async Task<int?> ReadLiveCoverageAsync(
+        ProtectiveStop stop, IReadOnlyList<RestingOrder>? resting, DateOnly today,
+        CoverageInputs? coverage, CancellationToken ct)
+    {
+        if (coverage is null || resting is null || stop.LastPlacedSessionDate != today) return null;
+        var mine = coverage.Orders.Where(o => o.StopId == stop.StopId && o.SessionDate == today).ToList();
+        if (mine.Count == 0) return null;
+
+        var options = _options.Value;
+        var reading = ProtectiveStopDecisions.LiveCoverage(
+            stop, mine, resting, coverage.Events, coverage.SnapshotUtc, today,
+            TimeSpan.FromSeconds(Math.Max(0, options.ProtectiveStopPropagationSeconds)),
+            TimeSpan.FromSeconds(Math.Max(0, options.ProtectiveStopAbsenceConfirmSeconds)),
+            coverage.Renumbered);
+
+        // Write back only what changed: an order first missed, seen again, or now known gone.
+        var changed = new List<ProtectiveStopOrder>();
+        foreach (var s in reading.Sightings)
+        {
+            // A row already settled (released, cancelled, gone) keeps its state unless the book shows it again.
+            if (!s.Order.IsOpen && s.Presence != OrderPresence.Resting) continue;
+            var updated = s.Presence switch
+            {
+                OrderPresence.Resting => s.Order with { State = "resting", FirstAbsentUtc = null, LastSeenUtc = coverage.SnapshotUtc },
+                OrderPresence.AbsentOnce => s.Order with { FirstAbsentUtc = s.Order.FirstAbsentUtc ?? coverage.SnapshotUtc },
+                OrderPresence.Cancelled => s.Order with { State = "cancelled" },
+                OrderPresence.Filled => s.Order with { State = "filled" },
+                OrderPresence.Gone => s.Order with { State = "gone" },
+                _ => s.Order
+            };
+            if (updated != s.Order) changed.Add(updated);
+        }
+
+        foreach (var departed in reading.Departed)
+        {
+            _logger.LogWarning(
+                "[ProtectiveStops] {StopId} ({Symbol}): its order {OrderNo} for {Qty} share(s) LEFT THE BOOK mid-session "
+                + "— {Why} It no longer protects anything, so the stop is re-placed for what it covered.",
+                stop.StopId, stop.Symbol, departed.Order.OrderNo, departed.Order.Quantity, departed.Reason);
+            _activity?.Warn("Stops",
+                $"{stop.Symbol}: the stop order {departed.Order.OrderNo} left the book — re-placing it",
+                departed.Reason, symbol: stop.Symbol);
+            await AlertOnceAsync(stop, "left-book", today,
+                $"🛡️ **Stop order gone — {stop.Symbol}**\n"
+                + $"• Order {departed.Order.OrderNo} for {departed.Order.Quantity:N0} share(s) at "
+                + $"{stop.StopTrigger:0.##} is no longer at the broker\n"
+                + $"• {departed.Reason}\n"
+                + "_It is being placed again; you will hear if that fails._");
+        }
+
+        try { await coverage.Ledger.UpdateProtectiveStopOrdersAsync(changed, ct); }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // The reading is still right for this pass; only the "first missed" time is lost, which can delay a
+            // re-place by one confirmation period and never cause one.
+            _logger.LogWarning(ex, "[ProtectiveStops] {StopId}: order sightings could not be saved.", stop.StopId);
+        }
+
+        return reading.Covered;
     }
 
     /// <summary>
@@ -1191,7 +1349,9 @@ public sealed class ProtectiveStopWorker
         IReadOnlyList<ProtectiveStop> allStops,
         IReadOnlyList<RestingOrder>? resting,
         HashSet<string> retiredThisPass,
-        CancellationToken ct)
+        CancellationToken ct,
+        int coveredBefore = 0,
+        IProtectiveStopOrderLedger? ledger = null)
     {
         // The broker last refused on TIMING — typically a board that is not accepting orders — so
         // attempting now would collect the identical refusal. The stop's intent is untouched and the
@@ -1301,8 +1461,19 @@ public sealed class ProtectiveStopWorker
                     + "were submitted — the rest of the position is not covered by this order.",
                     stop.StopId, stop.Symbol, decision.Quantity, actuallyPlaced);
 
-            await repository.RecordProtectiveStopPlacementAsync(
-                stop.StopId, today, actuallyPlaced, order.OrderId, ct);
+            // With the order ledger, coverage becomes what still covered before this order plus what it placed —
+            // never the old running total plus it, which would count an order that already left the book (the
+            // reason for this placement) alongside the one replacing it. Without the ledger, as before.
+            if (ledger is not null)
+                await ledger.RecordProtectiveStopOrderAsync(
+                    new ProtectiveStopOrder(stop.StopId, today,
+                        string.IsNullOrWhiteSpace(order.OrderId) ? null : order.OrderId.Trim(),
+                        actuallyPlaced, DateTime.UtcNow),
+                    coveredBefore + actuallyPlaced, ct);
+            else
+                await repository.RecordProtectiveStopPlacementAsync(
+                    stop.StopId, today, actuallyPlaced, order.OrderId, ct);
+            _realerted.Remove(stop.StopId);
             // The ORDER NUMBER belongs in this line. At AHL a stop is assigned a short
             // connection-scoped number whose whole uniqueness is a sequence read at login, and a
             // sequence read pre-open is not the account's — so a reused number is a real event, and
@@ -1420,7 +1591,7 @@ public sealed class ProtectiveStopWorker
                 order?.Message ?? result.Reason, symbol: stop.Symbol);
         }
 
-        await AlertOnceAsync(stop, "placement-failed", today,
+        await AlertWhileUnprotectedAsync(stop, "placement-failed", today,
             $"🛡️ **Stop rejected by the broker — {stop.Symbol}**\n"
             + $"• SELL {decision.Quantity:N0} {stop.Symbol} at {stop.StopTrigger:0.##} was refused\n"
             + $"• {order?.Message ?? result.Reason}\n"
@@ -1655,6 +1826,7 @@ public sealed class ProtectiveStopWorker
         // The order is gone, so the record of it must go too — otherwise the recurring pass believes
         // the position is still covered this session and never re-places.
         await repository.ClearProtectiveStopPlacementAsync(decision.StopId!, ct);
+        await MarkOwnCancelAsync(repository, decision.StopId!, orderNo, "released", ct);
 
         _activity?.Warn("Stops",
             $"{symbol}: protective stop stood down so a reducing SELL could go through",
@@ -1976,6 +2148,10 @@ public sealed class ProtectiveStopWorker
             return true;
         }
 
+        // Ours, and deliberate: recorded so live coverage neither reports it as a stop that "left the book" nor
+        // re-places a stop over a price it has already fallen through. See ProtectiveStopOrder.State "stranded".
+        await MarkOwnCancelAsync(repository, stop.StopId, orderNo, "stranded", ct);
+
         // What the stranded order still had to sell, never more than is held: a part-filled stop has
         // already sold some, and the book reports what REMAINS.
         var quantity = (int)Math.Min(holding, remaining is > 0 ? remaining.Value : holding);
@@ -2076,6 +2252,41 @@ public sealed class ProtectiveStopWorker
         }
 
         return _alerted.Add($"{stop.StopId}:{reasonKey}");
+    }
+
+    /// <summary>When each stop was last told "still not placed", for <see cref="AlertWhileUnprotectedAsync"/>.</summary>
+    private readonly Dictionary<string, DateTime> _realerted = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// An alert that repeats while the condition lasts: at once, then every
+    /// <see cref="TradingAgentOptions.ProtectiveStopRealertMinutes"/> until the stop is placed (which clears it).
+    ///
+    /// <para>
+    /// Once a session was the rule for every stop alert, so that a channel does not become noise. For "the broker
+    /// refused this stop" that was the wrong trade: one message at 09:40 and silence for six hours reads as "it
+    /// sorted itself out", while the position stayed bare. A refusal that persists is news again, at a pace a
+    /// person can act on. 0 restores once a session.
+    /// </para>
+    /// </summary>
+    private async Task AlertWhileUnprotectedAsync(ProtectiveStop stop, string reasonKey, DateOnly today, string message)
+    {
+        var minutes = _options.Value.ProtectiveStopRealertMinutes;
+        if (minutes <= 0 || _notifier is null)
+        {
+            await AlertOnceAsync(stop, reasonKey, today, message);
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        if (_realerted.TryGetValue(stop.StopId, out var last) && now - last < TimeSpan.FromMinutes(minutes)) return;
+        _realerted[stop.StopId] = now;
+        MarkAlerted(stop, reasonKey, today);
+
+        try { await _notifier.NotifyAsync(message, TradingTopics.Stop(reasonKey)); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[ProtectiveStops] Could not deliver the alert for {StopId}.", stop.StopId);
+        }
     }
 
     private async Task AlertOnceAsync(ProtectiveStop stop, string reasonKey, DateOnly today, string message)

@@ -2106,6 +2106,23 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                     ON protective_stops(state, symbol);
                 CREATE INDEX IF NOT EXISTS ix_protective_stops_parent
                     ON protective_stops(parent_armed_id);
+                -- One row per native order a protective stop placed (IProtectiveStopOrderLedger), so coverage is
+                -- judged order by order against the book rather than from placed_qty, which cannot tell
+                -- "placed today" from "still resting" once a halt or a manual cancel takes the order away.
+                CREATE TABLE IF NOT EXISTS protective_stop_orders (
+                    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                    stop_id           TEXT NOT NULL,
+                    session_date      TEXT NOT NULL,
+                    -- NULL when the broker gave no number: such an order is never assumed gone.
+                    order_no          TEXT NULL,
+                    qty               INTEGER NOT NULL,
+                    placed_utc        TEXT NOT NULL,
+                    state             TEXT NOT NULL DEFAULT 'resting',
+                    first_absent_utc  TEXT NULL,
+                    last_seen_utc     TEXT NULL
+                );
+                CREATE INDEX IF NOT EXISTS ix_protective_stop_orders_session
+                    ON protective_stop_orders(session_date, stop_id);
                 -- Edition-neutral strategy lifecycle state. Profile JSON is opaque to core: a plugin
                 -- owns its rules while core supplies one durable, auditable storage seam.
                 CREATE TABLE IF NOT EXISTS automation_strategy_assignments (

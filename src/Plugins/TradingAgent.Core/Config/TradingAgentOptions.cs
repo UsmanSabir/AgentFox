@@ -72,15 +72,41 @@ public class TradingAgentOptions
 
     /// <summary>
     /// Minutes between protective-stop passes — confirming entry fills and re-placing native stops
-    /// (only while the market is open, and only while a stop is open). Default 3, clamped to 1..60.
+    /// (only while the market is open, and only while a stop is open). Default 1, clamped to 1..60.
     ///
     /// <para>
-    /// Each pass reads holdings and the outstanding book, both of which drive the real browser and
-    /// serialise against order submission, so this is deliberately slower than the monitor's cadence.
-    /// Lowering it makes fills confirm sooner at the cost of delaying orders behind page scrapes.
+    /// Each pass reads holdings and the outstanding book. On the browser-driven adapter those reads drive the
+    /// real browser and serialise against order submission, so a slower cadence there trades confirmation
+    /// speed for fewer page scrapes.
+    /// </para>
+    ///
+    /// <para>
+    /// One minute since 2026-11-28 (was three), because the pass is now also what notices a stop that left the
+    /// book mid-session — a halt cancels every resting order — and re-places it. One pass is one account snapshot
+    /// (five broker reads on TradeCast), so this roughly triples the stop worker's reads while a stop is open;
+    /// it reads nothing at all when none is, or outside a session.
     /// </para>
     /// </summary>
-    public int ProtectiveStopPollMinutes { get; set; } = 3;
+    public int ProtectiveStopPollMinutes { get; set; } = 1;
+
+    /// <summary>
+    /// Seconds after a placement during which a stop's order counts as covering even though the book does not
+    /// list it yet — the book lags the activity log. Default 60.
+    /// </summary>
+    public int ProtectiveStopPropagationSeconds { get; set; } = 60;
+
+    /// <summary>
+    /// Seconds between the first snapshot that misses a stop's order with no recorded reason (no cancel, no trade)
+    /// and the later one that may conclude it is gone and re-place it. An order the activity log records as
+    /// cancelled needs no wait. Default 60.
+    /// </summary>
+    public int ProtectiveStopAbsenceConfirmSeconds { get; set; } = 60;
+
+    /// <summary>
+    /// Minutes between repeat alerts while a protective stop the broker refused is still not placed. The first
+    /// refusal alerts at once. Default 15. 0 means alert once per session, the behaviour before 2026-11-28.
+    /// </summary>
+    public int ProtectiveStopRealertMinutes { get; set; } = 15;
 
     /// <summary>How often active good-until-expiry order intents reconcile their DAY orders.</summary>
     public int PersistentOrderPollSeconds { get; set; } = 60;

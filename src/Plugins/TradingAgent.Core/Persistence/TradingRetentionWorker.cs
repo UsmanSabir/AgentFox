@@ -91,6 +91,18 @@ public sealed class TradingRetentionWorker : BackgroundService
                         ledgerDays, result.EffectiveCutoff);
             }
 
+            // A stop's order rows are read for the current session only (the venue clears its book at the close), so
+            // they follow the ledger's own retention: long enough to audit, never needed to decide.
+            if (ledgerDays > 0 && _repository is IProtectiveStopOrderLedger stopOrders)
+            {
+                var removed = await stopOrders.PruneProtectiveStopOrdersAsync(
+                    DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-ledgerDays)), ct);
+                if (removed > 0)
+                    _logger.LogInformation(
+                        "[Retention] Pruned {Count} protective-stop order row(s) older than {Days} days.",
+                        removed, ledgerDays);
+            }
+
             var reconciliationDays = _options.Value.ReconciliationRetentionDays;
             if (reconciliationDays > 0)
             {

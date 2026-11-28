@@ -265,6 +265,69 @@ public sealed record RestingOrder(
         TradingAgent.Reconciliation.OrderIdentity.MatchesAny(OrderNo, AlternateOrderNo, orderNumbers);
 }
 
+/// <summary>
+/// One native order a protective stop placed, as this system recorded it — the ledger behind
+/// <see cref="ProtectiveStopDecisions.LiveCoverage"/>. A stop can place several in one session (a top-up, a
+/// re-place after the first left the book), and each is followed here on its own.
+/// </summary>
+/// <param name="OrderNo">The number the broker gave, or null when it gave none — an order whose absence can then
+/// never be proved, and is therefore never assumed gone.</param>
+/// <param name="State"><c>resting</c> while it may still be live; <c>cancelled</c>, <c>filled</c> or
+/// <c>gone</c> once known to have left the book.</param>
+/// <param name="FirstAbsentUtc">The snapshot that first failed to list an order with no recorded reason to be
+/// gone; cleared whenever the book shows it again.</param>
+public sealed record ProtectiveStopOrder(
+    string StopId,
+    DateOnly SessionDate,
+    string? OrderNo,
+    int Quantity,
+    DateTime PlacedUtc,
+    string State = "resting",
+    DateTime? FirstAbsentUtc = null,
+    DateTime? LastSeenUtc = null)
+{
+    public bool IsOpen => State == "resting";
+}
+
+/// <summary>Where one of a stop's orders stands against one account snapshot.</summary>
+public enum OrderPresence
+{
+    /// <summary>Listed in the outstanding book. Covers what the book says remains.</summary>
+    Resting,
+
+    /// <summary>Placed too recently for the book to be expected to show it. Covers what was placed.</summary>
+    Propagating,
+
+    /// <summary>The broker gave no number, so absence proves nothing. Covers what was placed.</summary>
+    Unidentifiable,
+
+    /// <summary>Today's activity log says it was cancelled, rejected or expired. Covers nothing.</summary>
+    Cancelled,
+
+    /// <summary>Today's activity log says it traded and not that it was cancelled. Covers what was placed
+    /// until custody catches up — re-placing over shares just sold is the mistake this avoids.</summary>
+    Filled,
+
+    /// <summary>Missing with no recorded reason, for the first time. Covers what was placed: one read is not
+    /// proof.</summary>
+    AbsentOnce,
+
+    /// <summary>Missing with no recorded reason across snapshots at least the confirmation time apart. Covers
+    /// nothing.</summary>
+    Gone
+}
+
+/// <param name="Covered">The shares this order can be relied on to protect right now.</param>
+public sealed record OrderSighting(ProtectiveStopOrder Order, OrderPresence Presence, int Covered, string Reason);
+
+/// <param name="Covered">The sum over every order the stop placed today.</param>
+public sealed record CoverageReading(int Covered, IReadOnlyList<OrderSighting> Sightings)
+{
+    /// <summary>Orders that have left the book this reading, for the log and the operator.</summary>
+    public IEnumerable<OrderSighting> Departed =>
+        Sightings.Where(s => s.Presence is OrderPresence.Cancelled or OrderPresence.Gone && s.Order.IsOpen);
+}
+
 /// <summary>What the holdings say about an entry that was submitted.</summary>
 public enum FillOutcome
 {
@@ -461,13 +524,21 @@ public static class ProtectiveStopDecisions
     /// only those shares are free again. Conflating the two would size against a book with a sibling's
     /// committed shares silently added back, which is how an order that cannot fit gets sent anyway.
     /// </param>
+    /// <param name="liveCovered">
+    /// What this stop's own orders cover right now, from <see cref="LiveCoverage"/>. When given it REPLACES the
+    /// ledger's running <see cref="ProtectiveStop.PlacedQuantity"/> as this session's coverage, which is the fix
+    /// for a stop cancelled mid-session (a halt, a manual cancel): the ledger still says "placed today", the book
+    /// says nothing is there, and the book is the side that is right. Null keeps the ledger's figure, for a stop
+    /// with no order history to read — one placed before that history existed.
+    /// </param>
     public static PlacementDecision DecidePlacement(
         ProtectiveStop stop,
         decimal? heldQuantity,
         DateOnly today,
         IReadOnlyList<RestingOrder> resting,
         IReadOnlySet<string>? excludedOrderNumbers = null,
-        IReadOnlySet<string>? cancelledOrderNumbers = null)
+        IReadOnlySet<string>? cancelledOrderNumbers = null,
+        int? liveCovered = null)
     {
         if (stop.State != "active")
             return new PlacementDecision(PlacementAction.Skip, 0, $"Not active (state: {stop.State}).");
@@ -487,8 +558,10 @@ public static class ProtectiveStopDecisions
                 "Nothing confirmed to protect yet.");
 
         // Coverage only carries within a session: the venue clears outstanding orders overnight, so
-        // yesterday's placement protects nothing today.
-        var coveredThisSession = stop.LastPlacedSessionDate == today ? stop.PlacedQuantity : 0;
+        // yesterday's placement protects nothing today. Within the session the BOOK decides when it can be
+        // read order by order (liveCovered); the ledger's running total is the fallback.
+        var placedToday = stop.LastPlacedSessionDate == today;
+        var coveredThisSession = !placedToday ? 0 : liveCovered ?? stop.PlacedQuantity;
         var shortfall = quantity - coveredThisSession;
 
         if (shortfall <= 0)
@@ -557,12 +630,149 @@ public static class ProtectiveStopDecisions
                   + $"{coveredThisSession} already resting."
                 : stop.LastPlacedSessionDate is null
                     ? $"No stop is resting for {stop.Symbol}; placing for {placeable} share(s)."
-                    : $"Session rolled over (last placed {stop.LastPlacedSessionDate:yyyy-MM-dd}); "
-                      + $"re-placing for {placeable} share(s).")
+                    : placedToday
+                        ? $"Today's stop order left the book; re-placing for {placeable} share(s)."
+                        : $"Session rolled over (last placed {stop.LastPlacedSessionDate:yyyy-MM-dd}); "
+                          + $"re-placing for {placeable} share(s).")
             + (placeable < shortfall
                 ? $" Capped at the {placeable} share(s) free of resting SELLs; the remaining "
                   + $"{shortfall - placeable} is topped up once they clear."
                 : ""));
+    }
+
+    /// <summary>Activity-log statuses meaning an order left the book without trading: cancelled, rejected, expired.</summary>
+    private static readonly HashSet<string> GoneStatuses = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CLX", "CXL", "CAN", "CANCEL", "CANCELLED", "CANCELED",
+        "REJ", "REJECTED", "EXP", "EXPIRED"
+    };
+
+    /// <summary>How much earlier than our own placement record a venue activity stamp may be and still be this order's.</summary>
+    private static readonly TimeSpan ActivityClockAllowance = TimeSpan.FromMinutes(5);
+
+    /// <summary>Activity-log statuses meaning an order traded (all or part).</summary>
+    private static readonly HashSet<string> TradedStatuses = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "TRD", "EXE", "FILLED", "EXECUTED"
+    };
+
+    /// <summary>
+    /// What a stop's own orders cover right now, read order by order against one account snapshot.
+    ///
+    /// <para>
+    /// <b>The problem this solves.</b> The ledger's "placed today" used to stand for "protected today", and the
+    /// two part company the moment an order leaves the book mid-session: a market halt that cancels everything,
+    /// a cancel at the broker's own client, a rejection after acceptance. The position was then reported
+    /// protected and nothing re-placed the stop until the next session. Each order is now judged by what the
+    /// broker shows, with the asymmetry that runs through this class kept intact: an order is only counted gone
+    /// on POSITIVE evidence, because believing a live order gone places a second one.
+    /// </para>
+    ///
+    /// <list type="bullet">
+    /// <item>In the book (either identifier, or the number the broker renumbered it to): it covers what the book
+    /// says REMAINS, or what was placed when the book gives no quantity.</item>
+    /// <item>Placed within <paramref name="propagation"/> of the snapshot, or after it: covered as placed — the book
+    /// lags the activity log, and an order that has not appeared yet has not left.</item>
+    /// <item>No number from the broker: covered as placed, for ever — its absence can never be proved.</item>
+    /// <item>Cancelled, rejected or expired in today's activity log: covers nothing.</item>
+    /// <item>Traded and not cancelled: covered as placed until custody reflects the sale, so the stop is not
+    /// re-placed over shares that have just been sold. Custody then closes or shrinks the stop as it always did.</item>
+    /// <item>Missing with no recorded reason: covered on the first such snapshot; counted gone only when a later
+    /// snapshot, at least <paramref name="absenceConfirmation"/> after the first, still does not list it.</item>
+    /// </list>
+    ///
+    /// <para>
+    /// The venue's own rule is the net under any mistake here: it refuses a SELL above custody minus resting
+    /// SELLs (2026-08-27), so a re-place over an order that is in fact still live is refused rather than doubled.
+    /// </para>
+    /// </summary>
+    /// <param name="orders">The orders THIS stop placed today; other stops' and other days' are ignored.</param>
+    /// <param name="renumbered">Order numbers the broker now reports under a new number (from → to).</param>
+    public static CoverageReading LiveCoverage(
+        ProtectiveStop stop,
+        IReadOnlyList<ProtectiveStopOrder> orders,
+        IReadOnlyList<RestingOrder> resting,
+        IReadOnlyList<TradingAgent.Reconciliation.BrokerOrderEvent> events,
+        DateTime snapshotUtc,
+        DateOnly today,
+        TimeSpan propagation,
+        TimeSpan absenceConfirmation,
+        IReadOnlyDictionary<string, string>? renumbered = null)
+    {
+        var sightings = new List<OrderSighting>();
+
+        foreach (var order in orders.Where(o => o.StopId == stop.StopId && o.SessionDate == today))
+        {
+            sightings.Add(Sight(order));
+        }
+
+        return new CoverageReading(sightings.Sum(s => s.Covered), sightings);
+
+        OrderSighting Sight(ProtectiveStopOrder order)
+        {
+            if (order.OrderNo is not { Length: > 0 } number)
+                return new(order, OrderPresence.Unidentifiable, order.Quantity,
+                    "The broker gave this order no number, so its absence from the book proves nothing.");
+
+            var numbers = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { number.Trim() };
+            if (renumbered is not null && renumbered.TryGetValue(number.Trim(), out var renamed)
+                && !string.IsNullOrWhiteSpace(renamed))
+                numbers.Add(renamed.Trim());
+
+            var row = resting.FirstOrDefault(r =>
+                r.Symbol.Equals(stop.Symbol, StringComparison.OrdinalIgnoreCase) && r.IsAnyOf(numbers));
+            if (row is not null)
+                return new(order, OrderPresence.Resting, row.Quantity ?? order.Quantity,
+                    $"Order {number} is resting in the book.");
+
+            // Cancelled by this system after it stranded: deliberately still counted for the rest of the session, so
+            // the stop is not re-placed at a trigger the market has already fallen through (it would trigger, strand
+            // and be cancelled again on every pass). The operator was told to act; the next session starts clean.
+            if (order.State == "stranded")
+                return new(order, OrderPresence.Cancelled, order.Quantity,
+                    $"Order {number} was cancelled here after it stranded; not re-placed this session.");
+
+            // Already known to have left — cancelled by this system to make room for a sale, or concluded gone on
+            // an earlier pass. It covers nothing and is not news a second time.
+            if (!order.IsOpen)
+                return new(order, order.State == "gone" ? OrderPresence.Gone : OrderPresence.Cancelled, 0,
+                    $"Order {number} already left the book ({order.State}).");
+
+            // This order's own activity rows: its number and symbol, and observed no earlier than shortly before it
+            // was placed. Numbers are unique only within a connection and restart on a new one (CLAUDE.md §6a), so
+            // an older order's CLX under the same number must not be read as this one's. The allowance covers the
+            // gap between the venue's stamp and this system's own record of the placement (measured ~78 s).
+            var statuses = events
+                .Where(e => numbers.Contains(e.OrderNo.Trim())
+                         && e.Symbol.Equals(stop.Symbol, StringComparison.OrdinalIgnoreCase)
+                         && e.ObservedUtc >= order.PlacedUtc - ActivityClockAllowance)
+                .Select(e => e.Action?.Trim() ?? "")
+                .ToList();
+
+            // A recorded cancellation is positive evidence and outranks "too recent to be listed": a halt can take
+            // an order away seconds after it went in.
+            if (statuses.Any(GoneStatuses.Contains))
+                return new(order, OrderPresence.Cancelled, 0,
+                    $"Order {number} left the book: today's activity log records it as "
+                    + $"{statuses.First(GoneStatuses.Contains)}.");
+
+            if (order.PlacedUtc >= snapshotUtc - propagation)
+                return new(order, OrderPresence.Propagating, order.Quantity,
+                    $"Order {number} was placed too recently for the book to be expected to list it.");
+
+            if (statuses.Any(TradedStatuses.Contains))
+                return new(order, OrderPresence.Filled, order.Quantity,
+                    $"Order {number} traded and is no longer resting; custody will show the sale.");
+
+            if (order.FirstAbsentUtc is { } firstAbsent && snapshotUtc - firstAbsent >= absenceConfirmation)
+                return new(order, OrderPresence.Gone, 0,
+                    $"Order {number} has been missing from the book since {firstAbsent:HH:mm:ss} UTC with no "
+                    + "record of why; counted as gone.");
+
+            return new(order, OrderPresence.AbsentOnce, order.Quantity,
+                $"Order {number} is missing from the book with no record of why; one read is not proof, "
+                + "so it still counts until a later snapshot confirms it.");
+        }
     }
 
     /// <summary>

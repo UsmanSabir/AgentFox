@@ -111,28 +111,89 @@ public sealed class ProtectionScenarioTests
     }
 
     /// <summary>
-    /// KNOWN GAP (audit B6). Inverted by plan step 3: coverage must come from the live book, so the
-    /// reopen pass sees the cancelled stop and places it again.
+    /// Was <c>KnownGap_AStopCancelledByAHaltIsNotPlacedAgainTheSameSession</c> (audit B6), asserting the position had
+    /// no native stop after the reopen because the ledger said "already placed today". Flipped by plan step 3:
+    /// coverage is read from the book order by order, so the cancelled stop is placed again — once, and counted once.
     /// </summary>
     [TestMethod]
-    public async Task KnownGap_AStopCancelledByAHaltIsNotPlacedAgainTheSameSession()
+    public async Task AStopCancelledByAHaltIsPlacedAgainAfterTheReopen()
     {
         using var h = new ProtectionHarness(0m, Symbol);
         var stop = await h.ProtectHoldingAsync(Symbol, 100, 230m, trigger: 220m, limit: 217.80m);
         await h.RunPassAsync();
-        Assert.AreEqual(1, h.Broker.RestingSells(Symbol).Count);
+        var morning = h.Broker.RestingSells(Symbol).Single();
 
         h.Broker.Halt();
         h.Broker.Reopen();
         await h.RunPassAsync();
+        await h.RunPassAsync();   // and a later pass does not add a second
 
-        Assert.AreEqual(0, h.Broker.RestingSells(Symbol).Count,
-            "GAP: the position has no native stop after the reopen");
+        var resting = h.Broker.RestingSells(Symbol).Single();
+        Assert.AreNotEqual(morning.OrderNo, resting.OrderNo);
+        Assert.AreEqual(100, resting.Remaining);
+        Assert.AreEqual(2, h.Broker.PlacementCalls);
+        Assert.AreEqual(100, (await h.ReloadAsync(stop.StopId)).PlacedQuantity,
+            "the cancelled order no longer counts; only the replacement does");
+        Assert.IsTrue(h.Notifier.Sent.Any(s => s.Topic?.EndsWith("left-book") == true),
+            "the owner hears that the stop order disappeared");
+    }
+
+    /// <summary>
+    /// KNOWN GAP, inverted by plan step 5. A placement attempted DURING the halt is refused by the order window, and
+    /// that refusal starts the stop's own backoff, so the first pass after the reopen does not place it — the
+    /// position waits up to a minute longer than it must. Step 5 gates the worker on the detected market state, so
+    /// nothing is attempted during a halt and no backoff is spent.
+    /// </summary>
+    [TestMethod]
+    public async Task KnownGap_ARefusalDuringTheHaltDelaysTheRePlaceAfterTheReopen()
+    {
+        using var h = new ProtectionHarness(0m, Symbol);
+        await h.ProtectHoldingAsync(Symbol, 100, 230m, trigger: 220m, limit: 217.80m);
+        await h.RunPassAsync();
+
+        h.Broker.Halt();
+        await h.RunPassAsync();   // tries, is refused by the order window, backs off
+        h.Broker.Reopen();
+        await h.RunPassAsync();
+
+        Assert.AreEqual(0, h.Broker.RestingSells(Symbol).Count, "GAP: held back by a backoff the halt caused");
         Assert.AreEqual(1, h.Broker.PlacementCalls);
-        Assert.AreEqual(h.Today, (await h.ReloadAsync(stop.StopId)).LastPlacedSessionDate,
-            "the ledger still says today's stop is placed");
-        Assert.IsTrue(h.Log.Lines.Any(l => l.Contains("Already placed for")),
-            "skipped on the ledger's word, not the book's");
+    }
+
+    [TestMethod]
+    public async Task AStopCancelledAtTheBrokersOwnAppIsPlacedAgain()
+    {
+        using var h = new ProtectionHarness(0m, Symbol);
+        await h.ProtectHoldingAsync(Symbol, 100, 230m, trigger: 220m, limit: 217.80m);
+        await h.RunPassAsync();
+
+        await h.Broker.CancelOrderAsync(h.Broker.RestingSells(Symbol).Single().OrderNo);
+        await h.RunPassAsync();
+
+        Assert.AreEqual(1, h.Broker.RestingSells(Symbol).Count);
+        Assert.AreEqual(2, h.Broker.PlacementCalls);
+    }
+
+    /// <summary>
+    /// An order that is simply not listed — no cancel, no trade on record — is not believed gone on one read: a book
+    /// read that omitted a live order looks exactly like this, and believing it places a second stop.
+    /// </summary>
+    [TestMethod]
+    public async Task AnOrderMissingWithNoRecordIsReplacedOnlyWhenALaterSnapshotConfirmsIt()
+    {
+        using var h = new ProtectionHarness(0m, Symbol);
+        h.Options.ProtectiveStopPropagationSeconds = 0;
+        h.Options.ProtectiveStopAbsenceConfirmSeconds = 0;
+        await h.ProtectHoldingAsync(Symbol, 100, 230m, trigger: 220m, limit: 217.80m);
+        await h.RunPassAsync();
+        h.Broker.VanishWithoutTrace(h.Broker.RestingSells(Symbol).Single().OrderNo);
+
+        await h.RunPassAsync();
+        Assert.AreEqual(1, h.Broker.PlacementCalls, "one read is not proof");
+
+        await h.RunPassAsync();
+        Assert.AreEqual(2, h.Broker.PlacementCalls, "a second snapshot confirms it");
+        Assert.AreEqual(1, h.Broker.RestingSells(Symbol).Count);
     }
 
     /// <summary>

@@ -169,6 +169,20 @@ internal sealed class SimulatedBroker
         }
     }
 
+    /// <summary>
+    /// The order leaves the book and NOTHING records why — no activity row. Not a measured venue behaviour; it is the
+    /// case the stop worker must treat with the most suspicion, since a book read that merely omitted a live order
+    /// looks exactly like this.
+    /// </summary>
+    public void VanishWithoutTrace(string orderNo)
+    {
+        lock (_gate)
+        {
+            var order = FindLocked(orderNo) ?? throw new InvalidOperationException($"No order {orderNo}.");
+            order.Status = "CLX";
+        }
+    }
+
     /// <summary>Fills part of a resting order at its own price, as a thin book would.</summary>
     public void PartialFill(string orderNo, int quantity)
     {
