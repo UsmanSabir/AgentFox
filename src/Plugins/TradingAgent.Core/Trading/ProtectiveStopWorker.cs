@@ -1215,7 +1215,17 @@ public sealed class ProtectiveStopWorker
             }
         }
 
-        var catastrophic = stop.StopTrigger * (1m - _options.Value.ProtectiveStopCatastrophicPercent / 100m);
+        // The position's own catastrophic level when its plan sets one (step 9), else trigger × (1 − default %).
+        PositionPlan? plan = null;
+        if (repository is IPositionPlanStore plans)
+        {
+            try { plan = await plans.GetPositionPlanAsync(stop.Symbol, ct); }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogDebug(ex, "[ProtectiveStops] The position plan for {Symbol} could not be read.", stop.Symbol);
+            }
+        }
+        var catastrophic = PositionPlans.CatastrophicFor(stop.StopTrigger, plan, _options.Value.ProtectiveStopCatastrophicPercent);
         if (price is { } p && (p > stop.StopTrigger || p < catastrophic)) return false;
 
         var why = price is { } known

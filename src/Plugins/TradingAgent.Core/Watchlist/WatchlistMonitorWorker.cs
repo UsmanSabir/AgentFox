@@ -1478,12 +1478,13 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
     /// </summary>
     internal static string? HaltHoldReason(
         TradingAgent.Market.MarketPhaseReading phase, ArmedOrder order, decimal? price,
-        decimal catastrophicPercent, int holdMinutes) => phase.Phase switch
+        decimal catastrophicPercent, int holdMinutes, PositionPlan? plan = null) => phase.Phase switch
     {
         TradingAgent.Market.MarketPhase.Halted =>
             $"The market is halted ({phase.Reason}); nothing fires until it reopens.",
         TradingAgent.Market.MarketPhase.ReopenSettling when order.ProtectiveStopId is not null
-            && !(price is { } p && order.TriggerPrice is { } trigger && p < trigger * (1m - catastrophicPercent / 100m)) =>
+            && !(price is { } p && order.TriggerPrice is { } trigger
+                 && p < PositionPlans.CatastrophicFor(trigger, plan, catastrophicPercent)) =>
             $"The market reopened at {phase.SinceUtc:HH:mm} UTC; this local backstop waits {holdMinutes} minutes unless "
             + "the price falls below its catastrophic level.",
         _ => null
@@ -1502,8 +1503,19 @@ public sealed class WatchlistMonitorWorker : BackgroundService, IMarketSessionOp
     {
         if (_marketPhase?.Current is not { } phase) return false;
 
+        // The position's own catastrophic level (step 9), read only in the rare case it can matter.
+        PositionPlan? plan = null;
+        if (phase.Phase == TradingAgent.Market.MarketPhase.ReopenSettling && order.ProtectiveStopId is not null
+            && _repository is TradingAgent.Persistence.IPositionPlanStore plans)
+        {
+            try { plan = await plans.GetPositionPlanAsync(order.Symbol, ct); }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogDebug(ex, "[ArmedOrders] The position plan for {Symbol} could not be read.", order.Symbol);
+            }
+        }
         var why = HaltHoldReason(phase, order, price,
-            _options.Value.ProtectiveStopCatastrophicPercent, _options.Value.ReopenBackstopHoldMinutes);
+            _options.Value.ProtectiveStopCatastrophicPercent, _options.Value.ReopenBackstopHoldMinutes, plan);
         if (why is null) return false;
 
         var first = _haltHoldReported.Add($"{order.ArmedId}:{phase.Phase}:{phase.SinceUtc:O}");

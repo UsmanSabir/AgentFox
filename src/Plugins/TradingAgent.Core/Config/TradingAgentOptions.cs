@@ -137,6 +137,12 @@ public class TradingAgentOptions
     /// </summary>
     public decimal ProtectiveStopCatastrophicPercent { get; set; } = 5m;
 
+    /// <summary>
+    /// How far below its trigger a protective stop's limit sits, in percent, when a position plan does not say. Default
+    /// 1 — the 0.99 that was hard-coded before. Read by the stop-raising rules in step 10.
+    /// </summary>
+    public decimal StopLimitOffsetPct { get; set; } = 1m;
+
     /// <summary>Seconds between market-state evaluations inside a session. Default 15.</summary>
     public int MarketStatePollSeconds { get; set; } = 15;
 

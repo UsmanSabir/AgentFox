@@ -111,6 +111,35 @@ public sealed partial class TradingCoreEndpoints
             return Results.Ok(new { sessionEstablished, reconciliation = snapshot });
         }).RequireAuthorization("TradingTrader");
 
+        // Position plans (plan step 9): the owner's protection plan per held position. Writes name the version they read.
+        trading.MapGet("/position-plans", async (ITradingRepository repository, CancellationToken ct) =>
+            repository is IPositionPlanStore store
+                ? Results.Ok(new { supported = true, plans = await store.GetPositionPlansAsync(ct) })
+                : Results.Ok(new { supported = false, plans = Array.Empty<PositionPlan>() }));
+
+        trading.MapPut("/position-plans/{symbol}", async (
+            string symbol, PositionPlanRequest body, ITradingRepository repository, HttpContext http, CancellationToken ct) =>
+        {
+            if (repository is not IPositionPlanStore store)
+                return Results.Json(new { error = "unsupported", message = "This agent keeps no position plans." }, statusCode: 501);
+            var plan = body.Plan with
+            {
+                Symbol = symbol.Trim().ToUpperInvariant(),
+                Mode = (body.Plan.Mode ?? "TRADE").Trim().ToUpperInvariant(),
+                UpdatedBy = http.User.Identity?.Name ?? "trading-dashboard"
+            };
+            if (PositionPlans.Validate(plan) is { Count: > 0 } problems)
+                return Results.BadRequest(new { error = "invalid_plan", message = string.Join(" ", problems), problems });
+            return await store.TrySavePositionPlanAsync(plan, body.ExpectedVersion, ct) is { } saved
+                ? Results.Ok(saved)
+                : Results.Conflict(new { error = "version_conflict", message = "The plan changed since it was read. Reload it and try again." });
+        }).RequireAuthorization("TradingRiskManager");
+
+        trading.MapDelete("/position-plans/{symbol}", async (string symbol, ITradingRepository repository, CancellationToken ct) =>
+            repository is IPositionPlanStore store && await store.DeletePositionPlanAsync(symbol, ct)
+                ? Results.NoContent()
+                : Results.NotFound()).RequireAuthorization("TradingRiskManager");
+
         // The dead-man's report (plan step 7): alive, reading the broker, priced, stops placed. The same body the
         // heartbeat pushes to the fleet watchdog.
         trading.MapGet("/health", (TradingHealthReporter reporter) => Results.Ok(reporter.Report()));

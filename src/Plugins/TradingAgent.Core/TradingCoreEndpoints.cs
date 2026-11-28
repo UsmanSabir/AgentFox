@@ -79,6 +79,9 @@ public sealed partial class TradingCoreEndpoints
 /// <paramref name="Active"/> when given; an unrecognised value is refused rather than guessed.</param>
 public sealed record KillSwitchRequest(bool Active, string? Reason = null, string? Mode = null);
 
+/// <summary>A position plan to save, and the version it was read at (0 for a new plan).</summary>
+public sealed record PositionPlanRequest(TradingAgent.Watchlist.PositionPlan Plan, int ExpectedVersion);
+
 /// <summary>The owner's confirmed trading mode (plan step 6).</summary>
 public sealed record TradingModeRequest(string? Mode);
 

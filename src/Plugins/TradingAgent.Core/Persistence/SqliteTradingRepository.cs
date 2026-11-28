@@ -2125,6 +2125,15 @@ public sealed partial class SqliteTradingRepository : ITradingRepository, IAutom
                 );
                 CREATE INDEX IF NOT EXISTS ix_protective_stop_orders_session
                     ON protective_stop_orders(session_date, stop_id);
+                -- The owner's protection plan per held position (IPositionPlanStore, plan step 9). The plan is JSON so the
+                -- step-10 rules can add fields without a migration; the version is optimistic concurrency.
+                CREATE TABLE IF NOT EXISTS position_plans (
+                    symbol      TEXT PRIMARY KEY,
+                    plan_json   TEXT NOT NULL,
+                    version     INTEGER NOT NULL,
+                    updated_utc TEXT NOT NULL,
+                    updated_by  TEXT NULL
+                );
                 -- The decision log for rules running in Shadow (IRuleShadowLog): one row per pass where the shadow
                 -- rule would have decided differently from the acting one.
                 CREATE TABLE IF NOT EXISTS rule_shadow_decisions (
