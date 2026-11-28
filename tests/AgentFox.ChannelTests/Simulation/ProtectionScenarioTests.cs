@@ -265,6 +265,51 @@ public sealed class ProtectionScenarioTests
             new TradingAgent.Config.TradingAgentOptions().ProtectiveStopLiveCoverage);
     }
 
+    // ── Scenario 4 and 5 (plan step 10): part fills and outside sales ───────────
+
+    /// <summary>
+    /// A stop that triggered and part-filled is still working on its remainder. Custody alone cannot tell it from an
+    /// outside sale; the book's remaining quantity can, and nothing may cancel the remainder of a stop that is selling.
+    /// </summary>
+    [TestMethod]
+    public async Task AStopThatPartFilledKeepsItsRemainderWorking()
+    {
+        using var h = new ProtectionHarness(0m, Symbol);
+        h.Options.ProtectiveStopMissedGraceSeconds = 3600;   // not under test: the stranded-limit market sale
+        await h.ProtectHoldingAsync(Symbol, 100, 230m, trigger: 220m, limit: 217.80m);
+        await h.RunPassAsync();
+
+        h.Broker.Trade(Symbol, 217m);                                   // triggers; the 217.80 limit rests above 217
+        h.Broker.PartialFill(h.Broker.RestingSells(Symbol).Single().OrderNo, 60);
+        await h.RunPassAsync();
+        await h.RunPassAsync();
+
+        var remainder = h.Broker.RestingSells(Symbol).Single();
+        Assert.AreEqual(40, remainder.Remaining);
+        Assert.AreEqual(40, h.Broker.Custody(Symbol));
+        Assert.AreEqual(1, h.Broker.PlacementCalls, "nothing cancelled, nothing re-placed");
+    }
+
+    /// <summary>
+    /// The owner cancels the stop in the broker's own app and sells 60 of 100 there. The stop comes back for the 40
+    /// still held — never for the 100 it used to cover.
+    /// </summary>
+    [TestMethod]
+    public async Task AfterAnOutsideSaleTheStopComesBackForWhatIsLeft_NeverMore()
+    {
+        using var h = new ProtectionHarness(0m, Symbol);
+        await h.ProtectHoldingAsync(Symbol, 100, 230m, trigger: 220m, limit: 217.80m);
+        await h.RunPassAsync();
+
+        await h.Broker.CancelOrderAsync(h.Broker.RestingSells(Symbol).Single().OrderNo);
+        h.Broker.SetHolding(Symbol, 40, 230m);
+        await h.RunPassAsync();
+
+        var resting = h.Broker.RestingSells(Symbol).Single();
+        Assert.AreEqual(40, resting.Remaining);
+        Assert.IsTrue(h.Broker.RestingSells(Symbol).Sum(o => o.Remaining) <= h.Broker.Custody(Symbol));
+    }
+
     // ── Step 6: new accounts trade in ApprovalRequired ─────────────────────────
 
     /// <summary>

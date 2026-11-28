@@ -994,9 +994,17 @@ public sealed class ProtectiveStopWorker
         var supersedeInFlight = stop.SupersedesStopId is { Length: > 0 } pendingPredecessorId
                              && allStops.Any(s => s.StopId == pendingPredecessorId);
 
+        // Live coverage is read before the shrink, so an order that already left the book is not shrunk in two passes
+        // when it can be re-placed in one. In Shadow it is still read here but never handed to a decision.
+        var rollout = _options.Value.ProtectiveStopLiveCoverage;
+        var liveCovered = rollout == RuleRollout.Off
+            ? null
+            : await ReadLiveCoverageAsync(stop, resting, today, coverage, acting: rollout == RuleRollout.On, ct);
+        var actingCoverage = rollout == RuleRollout.On ? liveCovered : null;
+
         if (held is { } heldForShrink
             && ProtectiveStopDecisions.ShrinkTo(
-                   stop, heldForShrink, resting, supersedeInFlight, today, siblings) is { } ceiling
+                   stop, heldForShrink, resting, supersedeInFlight, today, siblings, actingCoverage) is { } ceiling
             && !allStops.Any(s => s.SupersedesStopId == stop.StopId))
         {
             var successor = new ProtectiveStop
@@ -1126,11 +1134,6 @@ public sealed class ProtectiveStopWorker
 
         // Live coverage acts only when On. In Shadow it is still read — against the real book, every pass — and any
         // pass where it would have decided differently is written to the decision log, alerting nobody.
-        var rollout = _options.Value.ProtectiveStopLiveCoverage;
-        var liveCovered = rollout == RuleRollout.Off
-            ? null
-            : await ReadLiveCoverageAsync(stop, resting, today, coverage, acting: rollout == RuleRollout.On, ct);
-
         var decision = ProtectiveStopDecisions.DecidePlacement(
             stop, held, today, resting ?? [], excluded, cancelled,
             rollout == RuleRollout.On ? liveCovered : null);

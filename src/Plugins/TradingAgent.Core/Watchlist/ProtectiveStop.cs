@@ -874,9 +874,15 @@ public static class ProtectiveStopDecisions
         IReadOnlyList<RestingOrder>? resting,
         bool supersedeInFlight,
         DateOnly today,
-        IReadOnlySet<string>? excludedOrderNumbers = null)
+        IReadOnlySet<string>? excludedOrderNumbers = null,
+        int? liveCovered = null)
     {
         if (stop.State != "active" || supersedeInFlight) return null;
+
+        // With live coverage acting (step 3), what this stop's own orders still hold is KNOWN, order by order; when it
+        // is nothing, nothing is oversized — the order already left the book and the ordinary placement re-places for
+        // what is held, in this pass rather than after a shrink-then-supersede round trip.
+        if (liveCovered is 0) return null;
 
         // Nothing resting for today means there is nothing sized wrong to correct — the ordinary
         // DecidePlacement path handles a fresh placement or a session rollover on its own.
@@ -896,7 +902,7 @@ public static class ProtectiveStopDecisions
         // What the venue currently holds against this stop. Its own row when the book lists it, and
         // otherwise what we placed — a stop the book does not show has not been reduced by anything we
         // can see, so the placed quantity is the only figure available.
-        var committed = mine.Order?.Quantity ?? stop.PlacedQuantity;
+        var committed = mine.Order?.Quantity ?? liveCovered ?? stop.PlacedQuantity;
         if (committed <= 0) return null;
 
         // ── Custody this stop can actually claim ────────────────────────────────────────────────
