@@ -23,6 +23,7 @@
   let showPriceAlerts = $state(false);
   let priceAlerts: PriceAlertsPanel = $state()!;
   export async function openPriceAlert(symbol: string, target = 0, direction: 'above' | 'below' = 'above') {
+    if (priceAlertsHost) return priceAlertsHost.open(symbol, target, direction);
     workspace?.focusPanel('alerts');
     showPriceAlerts = true;
     await tick();
@@ -112,6 +113,12 @@
     /** Optional account-level card in Portfolio; absent in the community edition. */
     portfolioExtraBalance?: any | null;
     portfolioHeaderAction?: any | null;
+    /**
+     * Optional: price alerts are shown somewhere else (an edition's own panel), absent in the community edition. When
+     * set, the Alerts panel shows technical signals only, and every "Set alert" path (chart, watchlist, alerts) calls
+     * `open` instead of this surface's own price-alert form.
+     */
+    priceAlertsHost?: { open: (symbol: string, target: number, direction: 'above' | 'below') => void | Promise<void> } | null;
     showSideNavigation?: boolean;
     navigationItems?: SectionNavigationItem[];
     archiveAvailable?: boolean;
@@ -125,6 +132,7 @@
     symbolExtension = null,
     portfolioExtraBalance = null,
     portfolioHeaderAction = null,
+    priceAlertsHost = null,
     showSideNavigation = true,
     navigationItems = defaultNavigationItems,
     archiveAvailable = $bindable(false),
@@ -135,6 +143,9 @@
     selectedSymbol = event.detail;
     workspace?.focusPanel('chart');
   }
+
+  /** Brings a workspace panel forward (opening it if the layout lacks it), for an edition's toolbar controls. */
+  export function focusPanel(id: string) { workspace?.focusPanel(id); }
 
   /** Proposal inbox: open-only by default, since a decision queue should read as empty when it is. */
   let showResolvedProposals = $state(false);
@@ -758,11 +769,13 @@
         on:select={selectChartSymbol}/>
       </WorkspacePanel>
       <WorkspacePanel {workspace} id="alerts">
+      {#if !priceAlertsHost}
       <div class="price-alert-tabs">
         <button class="btn" aria-pressed={!showPriceAlerts} onclick={() => showPriceAlerts = false}>Technical signals</button>
         <button class="btn" aria-pressed={showPriceAlerts} onclick={() => showPriceAlerts = true}>Price alerts</button>
       </div>
-      {#if showPriceAlerts}
+      {/if}
+      {#if showPriceAlerts && !priceAlertsHost}
         <PriceAlertsPanel bind:this={priceAlerts}/>
       {:else}
       <AlertsPanel
