@@ -737,7 +737,7 @@
     <WorkspacePanel {workspace} id="activity" >
     {#snippet children({ visible })}
                 <div id="trading-activity" class="section-anchor">
-        <ActivityPanel embedded={!!workspace} active={visible}/>
+        <ActivityPanel embedded={!!workspace} active={visible} onSelect={(symbol: string) => selectChartSymbol(new CustomEvent('select', { detail: symbol }))}/>
       </div>
 
                     {/snippet}

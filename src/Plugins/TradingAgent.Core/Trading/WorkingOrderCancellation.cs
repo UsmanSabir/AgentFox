@@ -266,9 +266,9 @@ public sealed class WorkingOrderCancellationService
             + "{Outcome}. {Message}", actor, target.OrderNo, target.Side, target.Symbol, result.Outcome,
             result.Message);
         if (result.Gone)
-            _activity?.Info("Orders", $"{target.Symbol}: order #{target.OrderNo} cancelled by {actor}", result.Message);
+            _activity?.Info("Orders", $"{target.Symbol}: order #{target.OrderNo} cancelled by {actor}", result.Message, symbol: target.Symbol);
         else
-            _activity?.Warn("Orders", $"{target.Symbol}: cancel of order #{target.OrderNo} not confirmed", result.Message);
+            _activity?.Warn("Orders", $"{target.Symbol}: cancel of order #{target.OrderNo} not confirmed", result.Message, symbol: target.Symbol);
 
         return result;
     }
